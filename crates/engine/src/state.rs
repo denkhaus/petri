@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ir::{
-    CancelScopeId, EdgeId, EvalError, FiringId, Generation, Graph, NodeId, Outcome, RunStatus,
-    ScopeId, Status, Token, Value,
+    Attempt, CancelScopeId, EdgeId, EvalError, FiringId, Generation, Graph, NodeId, NodeRecord,
+    Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -17,6 +17,9 @@ pub struct Firing {
     pub id: FiringId,
     pub node: NodeId,
     pub generation: Generation,
+    /// Which try is running, 1-based. A retry advances this and never touches
+    /// `generation`.
+    pub attempt: Attempt,
     /// Resource scope: where the step runs.
     pub scope: ScopeId,
     /// Innermost cancel scope the firing belongs to.
@@ -24,6 +27,9 @@ pub struct Firing {
     pub inputs: Vec<Token>,
     /// The host reported `StepStarted`.
     pub started: bool,
+    /// A `ScheduleRetry` is out; the firing stays live until `RetryElapsed` arrives,
+    /// which is what keeps its scope held and the run non-quiescent.
+    pub awaiting_retry: bool,
     /// A `Control::Cancel` has been delivered; the outcome will not be routed.
     pub cancelling: bool,
 }
@@ -35,6 +41,8 @@ pub struct FiringRecord {
     pub node: NodeId,
     pub name: SmolStr,
     pub generation: Generation,
+    /// The attempt this outcome came from. Only final attempts are recorded here.
+    pub attempt: Attempt,
     pub outcome: Outcome,
 }
 
@@ -78,6 +86,14 @@ pub enum RunError {
     ItemsNotArray { node: NodeId, got: SmolStr },
     #[error("node {node:?}: step config still holds an unresolved expression at `{path}`")]
     UnresolvedConfig { node: NodeId, path: String },
+    #[error("firing {firing:?} is not waiting for a retry")]
+    UnexpectedRetry { firing: FiringId },
+    #[error("firing {firing:?} reported attempt {reported:?} while running {running:?}")]
+    AttemptMismatch {
+        firing: FiringId,
+        reported: Attempt,
+        running: Attempt,
+    },
     #[error("node {node:?}: expansion subgraph entry must be the expanding node")]
     ExpansionEntryMismatch { node: NodeId },
     #[error("token refers to unknown edge {0:?}")]
@@ -113,8 +129,11 @@ pub struct EngineState {
     live: BTreeMap<FiringId, Firing>,
     firing_counts: BTreeMap<NodeId, u32>,
     history: Vec<FiringRecord>,
-    /// Latest output per node name, exposed to expressions as `outputs`.
-    outputs: BTreeMap<SmolStr, Value>,
+    /// Run-scoped state expressions read as `nodes.*` and `kv.*`.
+    ///
+    /// Derived: every write happens in `apply`, in event order, so replaying the log
+    /// rebuilds it exactly. It is never checkpointed as a separate artifact.
+    run: RunContext,
 
     cancel_scopes: BTreeMap<CancelScopeId, CancelScope>,
     /// Innermost cancel scope per node; anything unlisted belongs to the root.
@@ -172,7 +191,7 @@ impl EngineState {
             live: BTreeMap::new(),
             firing_counts: BTreeMap::new(),
             history: Vec::new(),
-            outputs: BTreeMap::new(),
+            run: RunContext::new(),
             cancel_scopes,
             node_cancel_scope: BTreeMap::new(),
             splices: Vec::new(),
@@ -221,9 +240,14 @@ impl EngineState {
         self.live.get(&id)
     }
 
-    /// Latest output of a node, by name.
+    /// Run-scoped state as expressions see it.
+    pub fn run_context(&self) -> &RunContext {
+        &self.run
+    }
+
+    /// Latest output of a node instance, by name.
     pub fn output(&self, name: &str) -> Option<&Value> {
-        self.outputs.get(name)
+        self.run.node(name).map(|record| &record.output)
     }
 
     /// How many times a node has fired, across generations.
@@ -276,9 +300,16 @@ impl EngineState {
     /// Nothing is running and nothing more can start.
     ///
     /// Joins are checked on every token arrival, so once no firing is live and
-    /// nothing is deferred, no pending token can ever satisfy a join.
+    /// nothing is deferred, no pending token can ever satisfy a join. A firing
+    /// waiting out a retry backoff is still live, so a run mid-backoff is not
+    /// quiescent.
     pub fn is_quiescent(&self) -> bool {
         self.live.is_empty() && self.deferred.is_empty()
+    }
+
+    /// Firings waiting out a retry backoff.
+    pub fn awaiting_retry(&self) -> impl Iterator<Item = &Firing> {
+        self.live.values().filter(|f| f.awaiting_retry)
     }
 
     /// The run status folded from node outcomes, as it stands right now.
@@ -427,16 +458,23 @@ impl EngineState {
         self.live.remove(&id)
     }
 
+    /// Record a firing's final outcome: history, the node's run-context record, and
+    /// the `kv` merge, in that order.
+    ///
+    /// This is the only write path into [`RunContext`], and it runs inside `apply`,
+    /// in event order. Intermediate retry attempts never reach it.
     pub(crate) fn record_outcome(&mut self, record: FiringRecord) {
-        if record.outcome.status.is_success() {
-            self.outputs
-                .insert(record.name.clone(), record.outcome.output.clone());
-        }
+        self.run.record(
+            record.name.clone(),
+            NodeRecord {
+                status: record.outcome.status.clone(),
+                output: record.outcome.output.clone(),
+                generation: record.generation,
+                attempts: record.attempt.raw(),
+            },
+        );
+        self.run.merge(&record.outcome.context_updates);
         self.history.push(record);
-    }
-
-    pub(crate) fn outputs(&self) -> &BTreeMap<SmolStr, Value> {
-        &self.outputs
     }
 
     pub(crate) fn clone_bindings_for(&self, node: NodeId) -> Option<&BTreeMap<SmolStr, Value>> {

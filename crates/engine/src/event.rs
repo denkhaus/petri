@@ -3,9 +3,11 @@
 //! The core is sans-IO. It never runs a step, never reads a clock and never blocks.
 //! A host turns commands into effects and feeds the results back as events.
 
+use std::time::Duration;
+
 use ir::{
-    CancelScopeId, Control, EdgeId, FiringId, Generation, Node, NodeId, Outcome, RunStatus,
-    ScopeId, StepEvent, Token, Value,
+    Attempt, CancelScopeId, Control, EdgeId, FiringId, Generation, Node, NodeId, Outcome,
+    RunStatus, ScopeId, StepEvent, Token, Value,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +20,7 @@ pub enum Event {
     TokenEmitted(Token),
     StepStarted {
         firing: FiringId,
+        attempt: Attempt,
     },
     /// Logs, artifacts and step-defined progress. Carries no coordination meaning.
     StepProgress {
@@ -26,7 +29,14 @@ pub enum Event {
     },
     StepFinished {
         firing: FiringId,
+        attempt: Attempt,
         outcome: Outcome,
+    },
+    /// The driver waited out a retry's backoff. It applies jitter and does the
+    /// sleeping; the core never sees a clock or an RNG.
+    RetryElapsed {
+        firing: FiringId,
+        next_attempt: Attempt,
     },
     /// The result of a `for_each` expansion: clones spliced into the live graph.
     NodeExpanded {
@@ -53,6 +63,7 @@ pub struct ResolvedFiring {
     id: FiringId,
     node: NodeId,
     generation: Generation,
+    attempt: Attempt,
     scope: ScopeId,
     inputs: Vec<Token>,
     config: Value,
@@ -64,6 +75,7 @@ impl ResolvedFiring {
         id: FiringId,
         node: NodeId,
         generation: Generation,
+        attempt: Attempt,
         scope: ScopeId,
         inputs: Vec<Token>,
         config: Value,
@@ -74,6 +86,7 @@ impl ResolvedFiring {
                 id,
                 node,
                 generation,
+                attempt,
                 scope,
                 inputs,
                 config,
@@ -91,6 +104,12 @@ impl ResolvedFiring {
 
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+
+    /// Which try this is, 1-based. The full identity of an attempt is
+    /// `(node, generation, attempt)`.
+    pub fn attempt(&self) -> Attempt {
+        self.attempt
     }
 
     /// The resource scope the step runs in.
@@ -128,6 +147,7 @@ struct ResolvedFiringRepr {
     id: FiringId,
     node: NodeId,
     generation: Generation,
+    attempt: Attempt,
     scope: ScopeId,
     inputs: Vec<Token>,
     config: Value,
@@ -139,6 +159,7 @@ impl From<ResolvedFiring> for ResolvedFiringRepr {
             id: f.id,
             node: f.node,
             generation: f.generation,
+            attempt: f.attempt,
             scope: f.scope,
             inputs: f.inputs,
             config: f.config,
@@ -150,7 +171,15 @@ impl TryFrom<ResolvedFiringRepr> for ResolvedFiring {
     type Error = UnresolvedConfig;
 
     fn try_from(r: ResolvedFiringRepr) -> Result<Self, Self::Error> {
-        ResolvedFiring::new(r.id, r.node, r.generation, r.scope, r.inputs, r.config)
+        ResolvedFiring::new(
+            r.id,
+            r.node,
+            r.generation,
+            r.attempt,
+            r.scope,
+            r.inputs,
+            r.config,
+        )
     }
 }
 
@@ -163,6 +192,15 @@ pub enum Command {
     DeliverControl {
         firing: FiringId,
         ctl: Control,
+    },
+    /// Wait out `base_delay`, then feed back [`Event::RetryElapsed`].
+    ///
+    /// The delay is computed deterministically from the node's [`ir::Backoff`]. The
+    /// driver adds jitter, which is why jitter lives there and not here.
+    ScheduleRetry {
+        firing: FiringId,
+        next_attempt: Attempt,
+        base_delay: Duration,
     },
     // reserved: external expansion. The core resolves `items` itself and splices in
     // the same `apply` call, so it never emits this. The variant is the seam for a

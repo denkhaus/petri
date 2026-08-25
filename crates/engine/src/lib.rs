@@ -19,9 +19,11 @@ pub mod apply;
 pub mod context;
 pub mod event;
 pub mod log;
+pub mod replay;
 pub mod state;
 
 pub use apply::apply;
 pub use event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice, UnresolvedConfig};
-pub use log::{EventLog, EventRecord, LOG_VERSION};
+pub use log::{EventLog, EventRecord, EventSource, LOG_VERSION, UnsupportedLogVersion};
+pub use replay::{ReplayMismatch, replay, verify_replay};
 pub use state::{CancelScope, EngineState, Firing, FiringRecord, RunError, Splice};

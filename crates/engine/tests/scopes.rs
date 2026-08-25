@@ -51,10 +51,7 @@ fn independent_jobs_get_independent_scopes() {
     let build = b.add_scope(Scope::new(ScopeId::new(0)));
     let deploy = b.add_scope(
         Scope::new(ScopeId::new(0))
-            .with_runtime(RuntimeSpec::Docker {
-                image: "deployer:1".into(),
-                args: vec![],
-            })
+            .with_runtime(RuntimeSpec::docker("deployer:1").requiring(&["linux", "amd64"]))
             .with_workspace(WorkspacePolicy::PerNode),
     );
     let compile = b.add_step("compile", build, NOOP);

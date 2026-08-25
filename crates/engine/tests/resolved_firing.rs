@@ -6,7 +6,8 @@ mod support;
 use engine::{Command, EngineState, Event, ResolvedFiring, RunError, apply};
 use ir::validate::EXPR_PLACEHOLDER_KEY;
 use ir::{
-    FiringId, Generation, GraphBuilder, NodeId, RunStatus, ScopeId, StepRef, Value, validate,
+    Attempt, FiringId, Generation, GraphBuilder, NodeId, RunStatus, ScopeId, StepRef, Value,
+    validate,
 };
 use serde_json::json;
 use support::{Harness, NOOP};
@@ -16,6 +17,7 @@ fn firing(config: Value) -> Result<ResolvedFiring, engine::UnresolvedConfig> {
         FiringId::new(1),
         NodeId::new(0),
         Generation::ZERO,
+        Attempt::FIRST,
         ScopeId::new(0),
         vec![],
         config,
@@ -142,6 +144,7 @@ fn the_payload_identifies_the_firing() {
     };
     assert_eq!(resolved.node(), NodeId::new(0));
     assert_eq!(resolved.generation(), Generation::ZERO);
+    assert_eq!(resolved.attempt(), Attempt::FIRST);
     assert_eq!(resolved.scope(), ScopeId::new(0));
     assert_eq!(resolved.inputs().len(), 1, "the seed token");
     assert!(state.firing(resolved.id()).is_some());

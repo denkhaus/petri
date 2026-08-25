@@ -8,13 +8,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ir::{
-    CancelScopeId, Control, ExpandTarget, Expansion, FiringId, Generation, Guard, JoinPolicy, Node,
-    NodeId, Outcome, Status, Token, Value, eval, eval_bool,
+    Attempt, CancelScopeId, Control, EvalEnv, Exhaustion, ExpandTarget, Expansion, FiringId,
+    Generation, Guard, JoinPolicy, Node, NodeId, Outcome, Status, Token, Value, eval, eval_bool,
 };
 use smol_str::SmolStr;
 
-use crate::context::{clone_bindings, firing_context, outcome_context, resolve_config};
+use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};
 use crate::event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice};
+use crate::log::EventSource;
 use crate::state::{EngineState, Firing, FiringRecord, RunError, Splice, synthetic};
 
 /// Apply one event and return the commands it produced.
@@ -25,9 +26,12 @@ use crate::state::{EngineState, Firing, FiringRecord, RunError, Splice, syntheti
 pub fn apply(mut state: EngineState, ev: Event) -> (EngineState, Vec<Command>) {
     let mut commands = Vec::new();
     let mut queue: VecDeque<Event> = VecDeque::from([ev]);
+    // The first event came from outside; everything the drain adds is the core's own.
+    let mut source = EventSource::External;
 
     while let Some(event) = queue.pop_front() {
-        state.log.append(event.clone());
+        state.log.append(source, event.clone());
+        source = EventSource::Core;
         step(&mut state, event, &mut commands, &mut queue);
         admit_deferred(&mut state, &mut commands, &mut queue);
     }
@@ -57,17 +61,30 @@ fn step(
     match event {
         Event::RunStarted => on_run_started(state, queue),
         Event::TokenEmitted(token) => on_token(state, token, cmds, queue),
-        Event::StepStarted { firing } => {
-            if let Some(f) = state.firing_mut(firing) {
-                f.started = true;
-            } else {
-                state.push_error(RunError::UnknownFiring(firing));
+        Event::StepStarted { firing, attempt } => match state.firing_mut(firing) {
+            Some(f) if f.attempt == attempt => f.started = true,
+            Some(f) => {
+                let running = f.attempt;
+                state.push_error(RunError::AttemptMismatch {
+                    firing,
+                    reported: attempt,
+                    running,
+                });
             }
-        }
+            None => state.push_error(RunError::UnknownFiring(firing)),
+        },
         // Progress is observation only: logs and artifacts carry no coordination
         // meaning, so the core records them and changes nothing.
         Event::StepProgress { .. } => {}
-        Event::StepFinished { firing, outcome } => on_step_finished(state, firing, outcome, queue),
+        Event::StepFinished {
+            firing,
+            attempt,
+            outcome,
+        } => on_step_finished(state, firing, attempt, outcome, cmds, queue),
+        Event::RetryElapsed {
+            firing,
+            next_attempt,
+        } => on_retry_elapsed(state, firing, next_attempt, cmds, queue),
         Event::NodeExpanded { node, splice } => on_node_expanded(state, node, splice, queue),
         Event::CancelRequested { scope } => on_cancel(state, scope, cmds),
     }
@@ -173,8 +190,8 @@ fn try_fire(
         return;
     }
 
-    let ctx = match firing_context(state, node_id, &inputs, generation) {
-        Ok(ctx) => ctx,
+    let statics = match firing_statics(state, node_id, &inputs, generation, Attempt::FIRST) {
+        Ok(statics) => statics,
         Err(error) => {
             state.push_error(error);
             complete_without_running(
@@ -182,17 +199,19 @@ fn try_fire(
                 &node,
                 generation,
                 &inputs,
-                Outcome::failure("could not build the firing context"),
+                Outcome::failure("could not build the firing environment"),
                 queue,
             );
             return;
         }
     };
+    let token = primary_token(&inputs);
 
     // A precondition that is false skips the node, but routing still runs, so
     // `always()` and `failure()` guards downstream still see it.
     if let Some(precondition) = node.precondition {
-        match eval_bool(&state.graph.exprs, precondition, &ctx) {
+        let env = EvalEnv::new(&token, state.run_context(), &statics);
+        match eval_bool(&state.graph.exprs, precondition, &env) {
             Ok(true) => {}
             Ok(false) => {
                 complete_without_running(
@@ -224,7 +243,11 @@ fn try_fire(
         }
     }
 
-    let config = match resolve_config(&node.step.config, &state.graph.exprs, &ctx) {
+    let config = match resolve_config(
+        &node.step.config,
+        &state.graph.exprs,
+        &EvalEnv::new(&token, state.run_context(), &statics),
+    ) {
         Ok(config) => config,
         Err(error) => {
             state.push_error(RunError::Eval {
@@ -252,6 +275,7 @@ fn try_fire(
         firing_id,
         node_id,
         generation,
+        Attempt::FIRST,
         node.scope,
         inputs.clone(),
         config,
@@ -278,11 +302,13 @@ fn try_fire(
         id: firing_id,
         node: node_id,
         generation,
+        attempt: Attempt::FIRST,
         scope: node.scope,
         cancel_scope: state.cancel_scope_of(node_id),
         inputs,
         started: false,
         cancelling: false,
+        awaiting_retry: false,
     };
     if state.acquire_scope(node.scope) {
         cmds.push(Command::AcquireScope { scope: node.scope });
@@ -322,9 +348,19 @@ fn complete_without_running(
         node: node.id,
         name: node.name.clone(),
         generation,
+        attempt: Attempt::FIRST,
         outcome: outcome.clone(),
     });
-    route(state, node, firing, generation, inputs, &outcome, queue);
+    route(
+        state,
+        node,
+        firing,
+        generation,
+        Attempt::FIRST,
+        inputs,
+        &outcome,
+        queue,
+    );
 }
 
 // ── Step completion ───────────────────────────────────────────────────────
@@ -332,27 +368,66 @@ fn complete_without_running(
 fn on_step_finished(
     state: &mut EngineState,
     firing_id: FiringId,
+    attempt: Attempt,
     outcome: Outcome,
+    cmds: &mut Vec<Command>,
     queue: &mut VecDeque<Event>,
 ) {
-    let Some(firing) = state.remove_firing(firing_id) else {
+    let Some(firing) = state.firing(firing_id).cloned() else {
         state.push_error(RunError::UnknownFiring(firing_id));
         return;
     };
+    if firing.attempt != attempt {
+        state.push_error(RunError::AttemptMismatch {
+            firing: firing_id,
+            reported: attempt,
+            running: firing.attempt,
+        });
+        return;
+    }
     let Some(node) = state.graph.node(firing.node).cloned() else {
         state.push_error(RunError::UnknownNode(firing.node));
         return;
     };
+
+    let cancelled = firing.cancelling || state.is_node_cancelled(firing.node);
+
+    // Retry decision. A cancelled firing is never retried: the point of cancelling
+    // is to stop the work, not to start it again.
+    if !cancelled
+        && node.retry.should_retry(&outcome.status)
+        && node.retry.has_attempt_after(attempt)
+    {
+        // The firing stays live, so its scope stays held and the run stays
+        // non-quiescent while the driver waits out the backoff. Nothing is recorded
+        // and nothing is routed: only the final attempt is visible downstream.
+        if let Some(f) = state.firing_mut(firing_id) {
+            f.awaiting_retry = true;
+            f.started = false;
+        }
+        cmds.push(Command::ScheduleRetry {
+            firing: firing_id,
+            next_attempt: attempt.next(),
+            base_delay: node.retry.base_delay(attempt),
+        });
+        return;
+    }
+
+    // This attempt is final.
+    state.remove_firing(firing_id);
+    let outcome = accept_partial_on_exhaustion(&node, attempt, outcome);
+
     state.record_outcome(FiringRecord {
         firing: firing_id,
         node: firing.node,
         name: node.name.clone(),
         generation: firing.generation,
+        attempt,
         outcome: outcome.clone(),
     });
 
     // fail_fast: the first clone failure cancels its siblings through the splice's
-    // own cancel scope.
+    // own cancel scope. Keyed off the final attempt, like everything else.
     if outcome.status.is_failure()
         && let Some(splice) = state.splice_for_node(firing.node)
         && splice.fail_fast
@@ -364,7 +439,7 @@ fn on_step_finished(
 
     // A cancelled firing does not route: its tokens would restart work the cancel
     // was meant to stop.
-    if firing.cancelling || state.is_node_cancelled(firing.node) {
+    if cancelled {
         return;
     }
     route(
@@ -372,6 +447,144 @@ fn on_step_finished(
         &node,
         firing_id,
         firing.generation,
+        attempt,
+        &firing.inputs,
+        &outcome,
+        queue,
+    );
+}
+
+/// Turn an exhausted retry's failure into a `PartialSuccess`, keeping the real
+/// failure in `underlying` so the log never records a clean success for something
+/// that failed.
+fn accept_partial_on_exhaustion(node: &Node, attempt: Attempt, outcome: Outcome) -> Outcome {
+    let exhausted =
+        node.retry.should_retry(&outcome.status) && !node.retry.has_attempt_after(attempt);
+    if node.retry.on_exhaustion != Exhaustion::AcceptPartial || !exhausted {
+        return outcome;
+    }
+    let underlying = outcome.status.failure_info().cloned();
+    Outcome {
+        status: Status::PartialSuccess { underlying },
+        ..outcome
+    }
+}
+
+/// The backoff elapsed: start the next attempt.
+///
+/// The config is resolved again, so a retry sees the run context as it stands now
+/// rather than as it stood before the first attempt.
+fn on_retry_elapsed(
+    state: &mut EngineState,
+    firing_id: FiringId,
+    next_attempt: Attempt,
+    cmds: &mut Vec<Command>,
+    queue: &mut VecDeque<Event>,
+) {
+    let Some(firing) = state.firing(firing_id).cloned() else {
+        state.push_error(RunError::UnknownFiring(firing_id));
+        return;
+    };
+    if !firing.awaiting_retry {
+        state.push_error(RunError::UnexpectedRetry { firing: firing_id });
+        return;
+    }
+    let Some(node) = state.graph.node(firing.node).cloned() else {
+        state.push_error(RunError::UnknownNode(firing.node));
+        return;
+    };
+
+    // A cancel arrived while the backoff was running: give up rather than start
+    // another attempt.
+    if firing.cancelling || state.is_node_cancelled(firing.node) {
+        state.remove_firing(firing_id);
+        return;
+    }
+
+    let statics = match firing_statics(
+        state,
+        firing.node,
+        &firing.inputs,
+        firing.generation,
+        next_attempt,
+    ) {
+        Ok(statics) => statics,
+        Err(error) => {
+            state.push_error(error);
+            fail_live_firing(state, firing_id, &node, &firing, next_attempt, queue);
+            return;
+        }
+    };
+    let token = primary_token(&firing.inputs);
+    let config = match resolve_config(
+        &node.step.config,
+        &state.graph.exprs,
+        &EvalEnv::new(&token, state.run_context(), &statics),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            state.push_error(RunError::Eval {
+                node: firing.node,
+                site: SmolStr::new("step config"),
+                error,
+            });
+            fail_live_firing(state, firing_id, &node, &firing, next_attempt, queue);
+            return;
+        }
+    };
+    let resolved = match ResolvedFiring::new(
+        firing_id,
+        firing.node,
+        firing.generation,
+        next_attempt,
+        firing.scope,
+        firing.inputs.clone(),
+        config,
+    ) {
+        Ok(resolved) => resolved,
+        Err(unresolved) => {
+            state.push_error(RunError::UnresolvedConfig {
+                node: firing.node,
+                path: unresolved.path,
+            });
+            fail_live_firing(state, firing_id, &node, &firing, next_attempt, queue);
+            return;
+        }
+    };
+
+    if let Some(f) = state.firing_mut(firing_id) {
+        f.attempt = next_attempt;
+        f.awaiting_retry = false;
+    }
+    cmds.push(Command::StartStep(resolved));
+}
+
+/// End a live firing that could not be restarted, recording the failure and routing
+/// it like any other final outcome.
+fn fail_live_firing(
+    state: &mut EngineState,
+    firing_id: FiringId,
+    node: &Node,
+    firing: &Firing,
+    attempt: Attempt,
+    queue: &mut VecDeque<Event>,
+) {
+    state.remove_firing(firing_id);
+    let outcome = Outcome::failure("the retry could not be prepared");
+    state.record_outcome(FiringRecord {
+        firing: firing_id,
+        node: firing.node,
+        name: node.name.clone(),
+        generation: firing.generation,
+        attempt,
+        outcome: outcome.clone(),
+    });
+    route(
+        state,
+        node,
+        firing_id,
+        firing.generation,
+        attempt,
         &firing.inputs,
         &outcome,
         queue,
@@ -382,11 +595,13 @@ fn on_step_finished(
 
 /// Evaluate a node's routing: each group emits at most one token, and groups emit
 /// concurrently.
+#[allow(clippy::too_many_arguments)]
 fn route(
     state: &mut EngineState,
     node: &Node,
     firing: FiringId,
     generation: Generation,
+    attempt: Attempt,
     inputs: &[Token],
     outcome: &Outcome,
     queue: &mut VecDeque<Event>,
@@ -394,21 +609,26 @@ fn route(
     if node.routing.groups.is_empty() {
         return;
     }
-    let base = match firing_context(state, node.id, inputs, generation) {
-        Ok(ctx) => ctx,
+    let base = match firing_statics(state, node.id, inputs, generation, attempt) {
+        Ok(statics) => statics,
         Err(error) => {
             state.push_error(error);
             return;
         }
     };
-    let ctx = outcome_context(&base, outcome);
+    let statics = with_outcome(&base, outcome);
+    let token = primary_token(inputs);
 
     for (group_index, group) in node.routing.groups.iter().enumerate() {
         let mut matched = false;
         for arm in &group.arms {
             let passes = match arm.guard {
                 Guard::Always => true,
-                Guard::Expr(id) => match eval_bool(&state.graph.exprs, id, &ctx) {
+                Guard::Expr(id) => match eval_bool(
+                    &state.graph.exprs,
+                    id,
+                    &EvalEnv::new(&token, state.run_context(), &statics),
+                ) {
                     Ok(value) => value,
                     Err(error) => {
                         state.push_error(RunError::Eval {
@@ -425,7 +645,11 @@ fn route(
             }
             let payload = match arm.map {
                 None => outcome.output.clone(),
-                Some(map) => match eval(&state.graph.exprs, map, &ctx) {
+                Some(map) => match eval(
+                    &state.graph.exprs,
+                    map,
+                    &EvalEnv::new(&token, state.run_context(), &statics),
+                ) {
                     Ok(value) => value,
                     Err(error) => {
                         state.push_error(RunError::Eval {
@@ -482,14 +706,19 @@ fn expand(
         return;
     };
 
-    let ctx = match firing_context(state, node.id, inputs, generation) {
-        Ok(ctx) => ctx,
+    let statics = match firing_statics(state, node.id, inputs, generation, Attempt::FIRST) {
+        Ok(statics) => statics,
         Err(error) => {
             state.push_error(error);
             return;
         }
     };
-    let items = match eval(&state.graph.exprs, items, &ctx) {
+    let token = primary_token(inputs);
+    let items = match eval(
+        &state.graph.exprs,
+        items,
+        &EvalEnv::new(&token, state.run_context(), &statics),
+    ) {
         Ok(value) => value,
         Err(error) => {
             state.push_error(RunError::Eval {

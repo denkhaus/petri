@@ -74,6 +74,12 @@ id_newtype!(
     StepKindId, u32
 );
 id_newtype!(
+    /// Which try this is, 1-based. A retry is **not** a loop iteration: it never
+    /// touches [`Generation`]. The full identity of an execution attempt is
+    /// `(NodeId, Generation, Attempt)`.
+    Attempt, u32
+);
+id_newtype!(
     /// A dynamic set of firings that can be cancelled as a unit.
     CancelScopeId, u32
 );
@@ -84,6 +90,16 @@ impl Generation {
     /// Generation carried across a `back` edge.
     pub const fn next(self) -> Generation {
         Generation(self.0 + 1)
+    }
+}
+
+impl Attempt {
+    /// Every firing starts here. Counters never carry across firings, so a later
+    /// generation retries from scratch.
+    pub const FIRST: Attempt = Attempt(1);
+
+    pub const fn next(self) -> Attempt {
+        Attempt(self.0 + 1)
     }
 }
 

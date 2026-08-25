@@ -481,6 +481,7 @@ fn re_entering_a_scope_is_a_warning() {
         report.warnings,
         vec![ValidationWarning::ScopeReentry {
             scope: job,
+            at: back,
             via: away
         }]
     );
@@ -495,6 +496,98 @@ fn re_entering_a_scope_is_a_warning() {
     b.link(first, second);
     b.link(second, after);
     assert!(ir::check(&b.build()).warnings.is_empty());
+}
+
+/// The diamond is suppressed: an `All` re-entry node with an incoming forward edge
+/// from inside the scope cannot fire before the scope would be released.
+///
+/// Either the inside token is emitted while the scope is still held — and then it is
+/// a pending token pinning the scope until the join resolves — or the inside arm
+/// never emits, in which case the `All` join is unsatisfiable and the node never
+/// fires at all.
+#[test]
+fn a_diamond_back_into_its_own_scope_is_not_a_re_entry() {
+    let mut b = GraphBuilder::bare();
+    let main = b.add_scope(Scope::new(ScopeId::new(0)));
+    let other = b.add_scope(Scope::new(ScopeId::new(0)));
+    let start = b.add_step("start", main, NOOP);
+    let inside = b.add_step("inside", main, NOOP);
+    let outside = b.add_step("outside", other, NOOP);
+    let join = b.add_step("join", main, NOOP);
+    b.fan_out(start, &[inside, outside]);
+    b.link(inside, join);
+    b.link(outside, join);
+    b.set_join(join, JoinPolicy::All);
+    let graph = b.build();
+
+    let report = ir::check(&graph);
+    assert!(report.is_ok());
+    assert!(
+        report.warnings.is_empty(),
+        "the All join on an inside edge makes re-entry impossible: {:?}",
+        report.warnings
+    );
+}
+
+/// `Any` and `Quorum` re-entry nodes keep the warning: they can fire on the outside
+/// token alone, after the scope has been released.
+#[test]
+fn a_permissive_join_does_not_suppress_the_re_entry_warning() {
+    for join in [JoinPolicy::Any, JoinPolicy::Quorum { n: 1 }] {
+        let mut b = GraphBuilder::bare();
+        let main = b.add_scope(Scope::new(ScopeId::new(0)));
+        let other = b.add_scope(Scope::new(ScopeId::new(0)));
+        let start = b.add_step("start", main, NOOP);
+        let inside = b.add_step("inside", main, NOOP);
+        let outside = b.add_step("outside", other, NOOP);
+        let land = b.add_step("land", main, NOOP);
+        b.fan_out(start, &[inside, outside]);
+        b.link(inside, land);
+        b.link(outside, land);
+        b.set_join(land, join);
+        let report = ir::check(&b.build());
+        assert_eq!(
+            report.warnings.len(),
+            1,
+            "{join:?} can fire from outside after release"
+        );
+    }
+}
+
+/// A loop head that is also a re-entry point always warns. Suppression needs an
+/// `All` join, and invariant 8 forces `Any` on anything with an incoming back edge,
+/// so the two can never both hold. The `!back` filter in the suppression test is
+/// therefore defensive: a back edge carries only later generations and could not pin
+/// the scope for the generation arriving from outside anyway.
+#[test]
+fn a_loop_head_can_never_suppress_the_re_entry_warning() {
+    let mut b = GraphBuilder::bare();
+    let main = b.add_scope(Scope::new(ScopeId::new(0)));
+    let other = b.add_scope(Scope::new(ScopeId::new(0)));
+    let start = b.add_step("start", main, NOOP);
+    let away = b.add_step("away", other, NOOP);
+    let head = b.add_step("head", main, NOOP);
+    let tail = b.add_step("tail", main, NOOP);
+    b.link(start, away);
+    b.link(away, head);
+    b.set_join(head, JoinPolicy::Any);
+    b.link(head, tail);
+    b.select(tail, vec![Arm::always(head).as_back()]);
+    b.set_budget(head, Budget::looped(5));
+    b.set_budget(tail, Budget::looped(5));
+    b.mark_entry(start);
+    let graph = b.build();
+
+    let report = ir::check(&graph);
+    assert!(report.is_ok(), "{:?}", report.errors);
+    assert_eq!(
+        report.warnings,
+        vec![ValidationWarning::ScopeReentry {
+            scope: main,
+            at: head,
+            via: away
+        }]
+    );
 }
 
 /// `check` reports errors and warnings together; `validate` is the errors-only view.
@@ -530,4 +623,35 @@ fn placeholder_paths_point_at_the_offending_field() {
     assert_eq!(placeholder_path(&in_array).as_deref(), Some("args[1]"));
 
     assert_eq!(placeholder_path(&json!({ "plain": 1 })), None);
+}
+
+/// A frontend that produces `Quorum { n: 1 }` on a loop head normalizes it to `Any`
+/// rather than the invariant being relaxed.
+#[test]
+fn loop_head_normalization_rewrites_quorum_one_to_any() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let head = b.add_step("head", scope, NOOP);
+    let tail = b.add_step("tail", scope, NOOP);
+    b.set_join(head, JoinPolicy::Quorum { n: 1 });
+    b.link(head, tail);
+    b.select(tail, vec![Arm::always(head).as_back()]);
+    b.set_budget(head, Budget::looped(5));
+    b.set_budget(tail, Budget::looped(5));
+    b.mark_entry(head);
+    let mut graph = b.build();
+
+    assert!(
+        errors(&graph)
+            .iter()
+            .any(|e| matches!(e, ValidationError::LoopHeadMustJoinAny(_))),
+        "the invariant stays strict"
+    );
+
+    assert_eq!(ir::normalize_loop_heads(&mut graph), 1);
+    assert_eq!(graph.node(head).unwrap().join, JoinPolicy::Any);
+    validate(&graph).expect("valid after normalization");
+
+    // It only touches loop heads, and only `Quorum { n: 1 }`.
+    assert_eq!(ir::normalize_loop_heads(&mut graph), 0);
 }

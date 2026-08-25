@@ -2,7 +2,7 @@
 //!
 //! Expressions are stored flat in an [`ExprTable`] and referenced by [`ExprId`], so a
 //! [`Graph`](crate::Graph) stays a plain tree of `Copy` ids with no interior pointers.
-//! Evaluation has no IO, no clocks and no randomness: the same [`Context`] always
+//! Evaluation has no IO, no clocks and no randomness: the same [`StaticCtx`] always
 //! produces the same [`Value`].
 //!
 //! Evaluation is **total**: a missing field is `null` rather than an error, so a
@@ -18,13 +18,14 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::ids::ExprId;
+use crate::runtime::RunContext;
 
 /// One expression node. Sub-expressions are referenced by [`ExprId`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     /// A literal JSON value.
     Lit(Value),
-    /// A binding looked up in the [`Context`] (`outcome`, `output`, `item`, `env`, ...).
+    /// A binding looked up in the [`StaticCtx`] (`outcome`, `output`, `item`, `env`, ...).
     Var(SmolStr),
     /// Field access. Missing fields evaluate to `null` rather than erroring.
     Field(ExprId, SmolStr),
@@ -167,17 +168,54 @@ impl ExprTable {
     }
 }
 
-/// Bindings an expression is evaluated against.
+/// Per-firing bindings that are neither the token payload nor run-scoped state.
 ///
-/// The core builds one of these per evaluation site: routing guards and `map`
-/// expressions see the completing node's outcome, preconditions see the node's own
-/// context, and expansion clones additionally see `item` and `index`.
+/// Scope `env`, the node's identity and generation, the firing's own outcome where
+/// there is one, and `item` / `index` inside an expansion clone.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Context {
+pub struct StaticCtx {
     vars: BTreeMap<SmolStr, Value>,
 }
 
-impl Context {
+/// Everything an expression may read.
+///
+/// One environment for guards, `map`, preconditions and `Expansion.items` alike, so
+/// there is a single way for an expression to see upstream state.
+///
+/// Name resolution runs in this order, and the first three shadow `statics`:
+///
+/// | Name | Resolves to |
+/// |---|---|
+/// | `nodes` | [`RunContext::nodes`] — every completed node instance by name |
+/// | `kv` | [`RunContext::kv`] — run-scoped key/value state |
+/// | `token`, `input` | the token payload |
+/// | anything else | [`StaticCtx`] |
+pub struct EvalEnv<'a> {
+    pub token: &'a Value,
+    pub run: &'a RunContext,
+    pub statics: &'a StaticCtx,
+}
+
+impl<'a> EvalEnv<'a> {
+    pub fn new(token: &'a Value, run: &'a RunContext, statics: &'a StaticCtx) -> Self {
+        Self {
+            token,
+            run,
+            statics,
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<Value> {
+        match name {
+            "nodes" => Some(self.run.nodes_value()),
+            "kv" => Some(self.run.kv_value()),
+            "token" | "input" => Some(self.token.clone()),
+            other => self.statics.get(other).cloned(),
+        }
+    }
+}
+
+impl StaticCtx {
     pub fn new() -> Self {
         Self::default()
     }
@@ -228,14 +266,14 @@ pub enum EvalError {
 
 const MAX_DEPTH: u32 = 256;
 
-/// Evaluate `id` against `ctx`.
-pub fn eval(table: &ExprTable, id: ExprId, ctx: &Context) -> Result<Value, EvalError> {
-    eval_at(table, id, ctx, 0)
+/// Evaluate `id` against `env`.
+pub fn eval(table: &ExprTable, id: ExprId, env: &EvalEnv<'_>) -> Result<Value, EvalError> {
+    eval_at(table, id, env, 0)
 }
 
 /// Evaluate `id` and read the result as a boolean, using [`truthy`].
-pub fn eval_bool(table: &ExprTable, id: ExprId, ctx: &Context) -> Result<bool, EvalError> {
-    Ok(truthy(&eval(table, id, ctx)?))
+pub fn eval_bool(table: &ExprTable, id: ExprId, env: &EvalEnv<'_>) -> Result<bool, EvalError> {
+    Ok(truthy(&eval(table, id, env)?))
 }
 
 /// JSON truthiness: `null`, `false`, `0`, `""` and empty containers are false.
@@ -250,7 +288,12 @@ pub fn truthy(v: &Value) -> bool {
     }
 }
 
-fn eval_at(table: &ExprTable, id: ExprId, ctx: &Context, depth: u32) -> Result<Value, EvalError> {
+fn eval_at(
+    table: &ExprTable,
+    id: ExprId,
+    env: &EvalEnv<'_>,
+    depth: u32,
+) -> Result<Value, EvalError> {
     if depth > MAX_DEPTH {
         return Err(EvalError::RecursionLimit);
     }
@@ -258,51 +301,50 @@ fn eval_at(table: &ExprTable, id: ExprId, ctx: &Context, depth: u32) -> Result<V
     let d = depth + 1;
     match expr {
         Expr::Lit(v) => Ok(v.clone()),
-        Expr::Var(name) => ctx
-            .get(name)
-            .cloned()
+        Expr::Var(name) => env
+            .lookup(name)
             .ok_or_else(|| EvalError::UnboundVar(name.clone())),
         Expr::Field(base, name) => {
-            let base = eval_at(table, *base, ctx, d)?;
+            let base = eval_at(table, *base, env, d)?;
             Ok(base.get(name.as_str()).cloned().unwrap_or(Value::Null))
         }
         Expr::Index(base, idx) => {
-            let base = eval_at(table, *base, ctx, d)?;
-            let idx = eval_at(table, *idx, ctx, d)?;
+            let base = eval_at(table, *base, env, d)?;
+            let idx = eval_at(table, *idx, env, d)?;
             Ok(index_into(&base, &idx))
         }
         Expr::Unary(op, arg) => {
-            let v = eval_at(table, *arg, ctx, d)?;
+            let v = eval_at(table, *arg, env, d)?;
             match op {
                 UnOp::Not => Ok(Value::Bool(!truthy(&v))),
                 UnOp::Neg => as_f64("-", &v).map(|n| num(-n)),
             }
         }
-        Expr::Binary(op, lhs, rhs) => eval_binary(table, *op, *lhs, *rhs, ctx, d),
+        Expr::Binary(op, lhs, rhs) => eval_binary(table, *op, *lhs, *rhs, env, d),
         Expr::Cond {
             cond,
             then,
             otherwise,
         } => {
-            if truthy(&eval_at(table, *cond, ctx, d)?) {
-                eval_at(table, *then, ctx, d)
+            if truthy(&eval_at(table, *cond, env, d)?) {
+                eval_at(table, *then, env, d)
             } else {
-                eval_at(table, *otherwise, ctx, d)
+                eval_at(table, *otherwise, env, d)
             }
         }
         Expr::Array(items) => items
             .iter()
-            .map(|i| eval_at(table, *i, ctx, d))
+            .map(|i| eval_at(table, *i, env, d))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         Expr::Object(fields) => {
             let mut map = serde_json::Map::with_capacity(fields.len());
             for (k, v) in fields {
-                map.insert(k.to_string(), eval_at(table, *v, ctx, d)?);
+                map.insert(k.to_string(), eval_at(table, *v, env, d)?);
             }
             Ok(Value::Object(map))
         }
-        Expr::Call(name, args) => eval_call(table, name, args, ctx, d),
+        Expr::Call(name, args) => eval_call(table, name, args, env, d),
     }
 }
 
@@ -311,32 +353,32 @@ fn eval_binary(
     op: BinOp,
     lhs: ExprId,
     rhs: ExprId,
-    ctx: &Context,
+    env: &EvalEnv<'_>,
     depth: u32,
 ) -> Result<Value, EvalError> {
     // `and`/`or` short-circuit, so the right side is only evaluated when needed.
     match op {
         BinOp::And => {
-            let l = eval_at(table, lhs, ctx, depth)?;
+            let l = eval_at(table, lhs, env, depth)?;
             return if truthy(&l) {
-                Ok(Value::Bool(truthy(&eval_at(table, rhs, ctx, depth)?)))
+                Ok(Value::Bool(truthy(&eval_at(table, rhs, env, depth)?)))
             } else {
                 Ok(Value::Bool(false))
             };
         }
         BinOp::Or => {
-            let l = eval_at(table, lhs, ctx, depth)?;
+            let l = eval_at(table, lhs, env, depth)?;
             return if truthy(&l) {
                 Ok(Value::Bool(true))
             } else {
-                Ok(Value::Bool(truthy(&eval_at(table, rhs, ctx, depth)?)))
+                Ok(Value::Bool(truthy(&eval_at(table, rhs, env, depth)?)))
             };
         }
         _ => {}
     }
 
-    let l = eval_at(table, lhs, ctx, depth)?;
-    let r = eval_at(table, rhs, ctx, depth)?;
+    let l = eval_at(table, lhs, env, depth)?;
+    let r = eval_at(table, rhs, env, depth)?;
     match op {
         BinOp::Eq => Ok(Value::Bool(l == r)),
         BinOp::Ne => Ok(Value::Bool(l != r)),
@@ -387,7 +429,7 @@ fn eval_call(
     table: &ExprTable,
     name: &SmolStr,
     args: &[ExprId],
-    ctx: &Context,
+    env: &EvalEnv<'_>,
     depth: u32,
 ) -> Result<Value, EvalError> {
     let arity = |expected: usize| -> Result<(), EvalError> {
@@ -401,10 +443,10 @@ fn eval_call(
             })
         }
     };
-    let arg = |i: usize| eval_at(table, args[i], ctx, depth);
+    let arg = |i: usize| eval_at(table, args[i], env, depth);
     // `status` is bound by the core wherever an outcome is in scope.
     let status_is = |want: &str| -> Result<Value, EvalError> {
-        let s = ctx.get("status").cloned().unwrap_or(Value::Null);
+        let s = env.lookup("status").unwrap_or(Value::Null);
         Ok(Value::Bool(s.as_str() == Some(want)))
     };
 
@@ -418,7 +460,21 @@ fn eval_call(
             arity(0)?;
             Ok(Value::Bool(false))
         }
+        // `success()` is success-like, per Status::is_success_like: it is the default
+        // success guard, and it must not open-code the classification.
         "success" => {
+            arity(0)?;
+            let tag = env.lookup("status").unwrap_or(Value::Null);
+            let tag = tag.as_str().unwrap_or_default();
+            Ok(Value::Bool(tag == "success" || tag == "partial_success"))
+        }
+        // Exactly `PartialSuccess`, for a guard that needs to tell the two apart.
+        "partial_success" => {
+            arity(0)?;
+            status_is("partial_success")
+        }
+        // Strictly `Success`, excluding `PartialSuccess`.
+        "full_success" => {
             arity(0)?;
             status_is("success")
         }

@@ -157,5 +157,5 @@ fn every_iteration_appears_in_the_event_log() {
         .filter(|e| matches!(e, engine::Event::StepFinished { .. }))
         .count();
     assert_eq!(finished, 4, "plan, work, work, done");
-    assert_eq!(h.state.log.version, engine::LOG_VERSION);
+    assert_eq!(h.state.log.version(), engine::LOG_VERSION);
 }

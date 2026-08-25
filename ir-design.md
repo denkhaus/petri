@@ -1,6 +1,7 @@
 # Engine IR Design: Token-Flow Graph with Explicit Routing
 
-**Status:** Draft for v1 · **Scope:** Core IR, routing semantics, engine interface
+**Status:** Draft for v1, incorporating Core Semantics Patch 01 (`core-gaps-handoff.md`)
+· **Scope:** Core IR, routing semantics, engine interface
 
 ## 1. Overview
 
@@ -45,6 +46,7 @@ pub struct ScopeId(u32);
 pub struct ExprId(u32);       // index into the graph's expression table
 pub struct FiringId(u64);
 pub struct Generation(u32);   // loop-iteration counter carried by tokens
+pub struct Attempt(u32);      // 1-based try counter; a retry is NOT a loop iteration
 
 pub type Value = serde_json::Value;
 
@@ -110,6 +112,8 @@ pub struct Node {
     pub precondition: Option<ExprId>,
     pub routing: Routing,
     pub budget: Budget,
+    /// How many attempts this node gets. Default: one, no retries.
+    pub retry: RetryPolicy,
     /// HIR only; lowered away before execution (see §6).
     pub expand: Option<Expansion>,
 }
@@ -160,8 +164,17 @@ pub enum ExpandTarget {
 pub struct Scope {
     pub id: ScopeId,
     pub env: BTreeMap<SmolStr, ExprOrValue>,
-    pub runtime: RuntimeSpec,          // HostProcess | Docker { image, .. }
+    pub runtime: RuntimeSpec,
     pub workspace: WorkspacePolicy,    // Shared | PerNode
+}
+
+pub struct RuntimeSpec {
+    pub target: RuntimeTarget,         // HostProcess | Docker { image, .. }
+    /// Opaque placement labels: GHA `runs-on`, BuildKite agent tags. The core never
+    /// reads them. The v1 local executor maps the labels it knows and rejects
+    /// unknown ones per label. No matching rules or queues until there is a
+    /// distributed agent system to consume them.
+    pub requirements: Vec<SmolStr>,
 }
 
 pub struct Graph {
@@ -187,15 +200,95 @@ pub struct Outcome {
     /// Structured output — the value guards and `map` expressions see.
     pub output: Value,
     pub metrics: Metrics,
+    /// The only write path into RunContext.kv. Merged in apply(), in event order.
+    pub context_updates: BTreeMap<SmolStr, Value>,
 }
 
-pub enum Status { Success, Failure(FailureInfo), Skipped, Cancelled, TimedOut }
+/// THIS ENUM IS CLOSED. These six variants are the complete and permanent status
+/// vocabulary; any future frontend concept maps onto them and never extends them.
+pub enum Status {
+    Success,
+    /// Soft failure or partial completion. Routing-visible, and success-like.
+    /// `underlying` carries the real failure whenever one was converted into this,
+    /// so the log never records a clean success for something that failed.
+    PartialSuccess { underlying: Option<FailureInfo> },
+    Failure(FailureInfo),
+    Skipped,
+    Cancelled,
+    TimedOut,
+}
+
+pub struct FailureInfo {
+    pub message: String,
+    /// What kind of failure this is, for `retry_on` to match: "network",
+    /// "rate_limit", "exit_status:2", "retry_requested". Step kinds set it.
+    pub class: SmolStr,
+}
 ```
+
+**One classification point.** `Status::is_success_like()` — `Success | PartialSuccess`
+— is the *only* definition of success-likeness. Joins, cancel scopes, default success
+guards and retry all call it; none of them open-codes the match. A guard that needs to
+tell the two apart calls `partial_success()` or `full_success()`.
+
+Three production paths yield `PartialSuccess`, and there is no node-level policy:
+a step kind's config (`soft_fail`), retry exhaustion under
+`Exhaustion::AcceptPartial`, and a step kind returning it directly.
+
+### Run context
+
+Run-scoped state that expressions read, and the only channel for one node to see
+another's result. Nothing is threaded through token payloads for that purpose.
+
+```rust
+pub struct RunContext {
+    /// Written ONLY by the core, per completed firing, keyed by node instance name
+    /// (a matrix clone records under `build#2`).
+    pub nodes: BTreeMap<SmolStr, NodeRecord>,
+    /// Written ONLY via Outcome.context_updates, merged in apply().
+    pub kv: BTreeMap<SmolStr, Value>,
+}
+
+pub struct NodeRecord {
+    pub status: Status,          // final attempt, raw
+    pub output: Value,
+    pub generation: Generation,  // latest generation to complete
+    pub attempts: u32,
+}
+```
+
+**Write rule.** Every write happens inside `apply`, in event order: node records when
+a firing's final attempt finishes, then `kv` merged last-write-wins in that same
+order. No other write path exists. This is what keeps the core pure and replay
+byte-identical. `RunContext` is derived state — reconstructible from the event log,
+never checkpointed separately.
+
+### Expression environment
+
+```rust
+pub struct EvalEnv<'a> {
+    pub token: &'a Value,        // the payload on the first input edge
+    pub run: &'a RunContext,     // exposed as `nodes.<id>.*` and `kv.*`
+    pub statics: &'a StaticCtx,  // scope env, node identity, generation, attempt,
+                                 // the firing's own outcome, `item` / `index`
+}
+```
+
+Guards, `map`, preconditions and `Expansion.items` all take an `EvalEnv`. `token` and
+`input` resolve to the token and shadow any static of the same name.
 
 **Firing rule.** For each (node, generation): collect tokens per `JoinPolicy`; when
 satisfied and budget allows, evaluate `precondition`, then either emit
 `Command::StartStep` or synthesize a `Skipped` outcome. On outcome, evaluate
 `routing`: token generation = source generation, `+1` per `back` edge.
+
+**Attempts.** Each firing starts at `Attempt(1)`. When an attempt's outcome matches
+`retry_on` and attempts remain, the core emits `Command::ScheduleRetry` and does
+**not** run routing. Routing, the run-context record, and cancel-scope failure
+propagation all key off the **final attempt only**; intermediate attempts live in the
+event log and in `nodes.<id>.attempts`. A firing waiting out its backoff stays live,
+so its scope stays held and the run is not quiescent. A cancelled firing is never
+retried.
 
 **Completion (quiescence).** The run is complete when there are no live firings and
 no pending tokens can satisfy any join. Run status is folded from node outcomes.
@@ -206,9 +299,12 @@ no pending tokens can satisfy any join. Run status is folded from node outcomes.
 pub enum Event {
     RunStarted,
     TokenEmitted(Token),
-    StepStarted   { firing: FiringId },
+    StepStarted   { firing: FiringId, attempt: Attempt },
     StepProgress  { firing: FiringId, ev: StepEvent },     // logs, artifacts, custom
-    StepFinished  { firing: FiringId, outcome: Outcome },
+    StepFinished  { firing: FiringId, attempt: Attempt, outcome: Outcome },
+    /// The driver waited out a retry's backoff. Same pattern as timeouts: the
+    /// driver applies jitter and does the sleeping, the core never sees a clock.
+    RetryElapsed  { firing: FiringId, next_attempt: Attempt },
     NodeExpanded  { node: NodeId, splice: SubgraphSplice }, // for_each results
     /// External cancellation; the run's root scope cancels everything.
     CancelRequested { scope: CancelScopeId },
@@ -221,6 +317,10 @@ pub enum Command {
     /// boundary" is an invariant of the type. Deserialization runs the same check.
     StartStep(ResolvedFiring),
     DeliverControl { firing: FiringId, ctl: Control },
+    /// Wait out `base_delay`, then feed back RetryElapsed. The delay is
+    /// `initial * factor^(n-1)` capped at `max`, computed by repeated multiplication
+    /// so it is bit-identical on replay.
+    ScheduleRetry  { firing: FiringId, next_attempt: Attempt, base_delay: Duration },
     ExpandNode     { node: NodeId, gen: Generation, expr: ExprId },
     AcquireScope   { scope: ScopeId },
     ReleaseScope   { scope: ScopeId },
@@ -248,8 +348,20 @@ in the pure core; only signal delivery happens in executors.
 pub fn apply(state: EngineState, ev: Event) -> (EngineState, Vec<Command>);
 ```
 
-Every `Event` is appended to a versioned event log before `apply` (event sourcing;
-replay/resume reserved for v2).
+Every `Event` is appended to a versioned event log before `apply`, including the ones
+the core emits itself while routing. Each record carries its provenance —
+`External` for what a host fed in, `Core` for what the core produced.
+
+**Log version 2.** v1 → v2: the firing key gained `Attempt`, `StepStarted` /
+`StepFinished` carry it, `ScheduleRetry` / `RetryElapsed` joined the vocabulary,
+finish records carry `context_updates`, and every record records its provenance. A v1
+log is rejected on read rather than half-understood.
+
+**Replay.** Feeding a log's `External` records back through `apply` from a fresh state
+reproduces the run. Everything marked `Core` is produced again rather than replayed,
+which is what makes a byte-identical replayed log a determinism check: if any core
+decision depended on a clock, on iteration order, or on anything outside the state,
+the two logs diverge. Resume is still future work.
 
 ## 6. HIR -> Plan lowering
 
@@ -287,6 +399,12 @@ frontend desugars it onto back-edges and generations:
   1. `back` edge, guard `idx + 1 < len(items)`, `map` = `{ idx: idx + 1, acc: acc ++ [output] }`
   2. exit edge (`Always`), payload = `acc ++ [output]`
 - Generations distinguish iterations in logs/joins; `Budget.max_firings` caps the loop.
+
+**Outcome-driven splice is deferred**, by decision. The splice *mechanism* ships
+anyway via `Expansion::ForEach` — `NodeExpanded`, cancel scopes, instance namespacing
+— so an outcome-driven entry point later is a new way into an existing path, not new
+machinery. The fields it would add (`Outcome.splice`, `Node.allow_splice`) are
+optional and additive: a backward-compatible change, not another format bump.
 
 A hierarchical alternative — a `SubgraphStep` running a nested graph inside one step —
 is deliberately rejected: it hides a second scheduler inside a step, so iterations
@@ -336,19 +454,41 @@ it exercises the degenerate subset, by construction.
    loop head. Put a dedicated join node in front of the loop head and let the back
    edge target the head.
 
+   `Quorum { n: 1 }` behaves identically to `Any` today, but the invariant admits only
+   `Any`: one canonical spelling is easier to grep and to review, and the equivalence
+   is a property of the current join semantics rather than a guarantee worth making
+   load-bearing. A frontend that naturally produces `Quorum { n: 1 }` runs
+   `lower::normalize_loop_heads` instead.
+
 **Warnings** (reported alongside errors; they do not block a load):
 
 - A path can leave a scope and return to it. Release is irreversible (§3), so re-entry
-  gets a fresh runtime and workspace. The check is a static over-approximation: it
-  fires whenever some node outside the scope is both reachable from it and able to
-  reach it, even where something always keeps the scope busy in practice.
+  gets a fresh runtime and workspace. The warning names the re-entry node.
+
+  **Suppressed** when the re-entry node joins with `All` and has at least one incoming
+  forward edge from inside the scope. Such a node needs the inside edge's token to
+  fire, and there are only two cases: either that token is emitted while the scope is
+  still held, in which case it pins the scope until the join resolves and release
+  cannot precede re-entry; or the inside arm never emits, in which case the `All` join
+  is permanently unsatisfiable and the node never fires at all. Both are safe, and the
+  test is purely structural. `Any` and `Quorum` re-entry nodes keep the warning: they
+  can fire on the outside token alone, after release.
+
+  What remains is still a static over-approximation — it cannot tell whether a given
+  run reaches the releasing state.
 
 ## 8. Reserved seams (v2, no rework required)
 
 - `StepKind::fingerprint(..) -> Option<Digest>` — defaults to `None`; content caching later.
 - `#[non_exhaustive] enum Control { Cancel }` — Pause/Steer/Approve later.
 - `Command::{Acquire,Release}Scope` — remote scope placement when distribution lands.
-- Event log format is versioned from day one — resume/replay/UI later.
+- `RuntimeSpec.requirements` — opaque placement labels now, matching semantics in v2.
+- Cross-run concurrency groups live in the multi-run driver layer, later. No IR field
+  now: v1 frontends **reject** GHA `concurrency:` and BuildKite `concurrency_group`
+  with an unsupported-feature message rather than parse-and-ignore a mutual-exclusion
+  feature. The eventual `concurrency_key: Option<ExprId>` is additive.
+- Event log format is versioned from day one. Replay has landed (§5); resume and UI
+  are still future work.
 - Expression evaluation is **total**: a missing field is `null`, so a guard always
   yields a boolean. A typo is therefore silently falsy. Reserved for v2: a strict mode,
   or an unknown-field lint at load time that reports a path no context can bind.

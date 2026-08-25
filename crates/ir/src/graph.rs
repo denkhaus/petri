@@ -1,6 +1,7 @@
 //! The token-flow graph: nodes, explicit routing, joins, scopes.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,8 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::expr::ExprTable;
-use crate::ids::{EdgeId, ExprId, NodeId, ScopeId, StepKindId};
+use crate::ids::{Attempt, EdgeId, ExprId, NodeId, ScopeId, StepKindId};
+use crate::runtime::{Status, StatusKind};
 
 // ── Guards & edges ────────────────────────────────────────────────────────
 
@@ -190,8 +192,11 @@ impl StepRef {
 /// Hard limits on a node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
-    /// Hard cap on firings of this node across all generations. Must be >= 1.
+    /// Hard cap on **firings** of this node across all generations. Must be >= 1.
+    /// Retries do not count: a firing that takes four attempts is still one firing.
     pub max_firings: u32,
+    /// Applies **per attempt**, not per firing. Node-total wall clock is not a thing
+    /// the core tracks.
     pub timeout: Duration,
 }
 
@@ -225,6 +230,176 @@ impl Default for Budget {
     fn default() -> Self {
         Self::once()
     }
+}
+
+/// How many times a node may be attempted, and when.
+///
+/// A retry is not a loop iteration: it advances [`Attempt`], never [`Generation`].
+/// Attempt counters never carry across firings, so a later generation retries from
+/// scratch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    /// 1 means no retries.
+    pub max_attempts: NonZeroU32,
+    pub backoff: Backoff,
+    pub retry_on: RetryOn,
+    pub on_exhaustion: Exhaustion,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl RetryPolicy {
+    /// One attempt, no retries.
+    pub fn none() -> Self {
+        Self {
+            max_attempts: NonZeroU32::new(1).expect("1 is non-zero"),
+            backoff: Backoff::default(),
+            retry_on: RetryOn::default(),
+            on_exhaustion: Exhaustion::Fail,
+        }
+    }
+
+    /// At most `n` attempts in total. `n == 0` is read as 1.
+    pub fn attempts(n: u32) -> Self {
+        Self {
+            max_attempts: NonZeroU32::new(n.max(1)).expect("max(1) is non-zero"),
+            ..Self::none()
+        }
+    }
+
+    pub fn with_backoff(mut self, backoff: Backoff) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    pub fn with_retry_on(mut self, retry_on: RetryOn) -> Self {
+        self.retry_on = retry_on;
+        self
+    }
+
+    /// Exhausting the attempts yields `PartialSuccess` instead of failing.
+    pub fn accepting_partial(mut self) -> Self {
+        self.on_exhaustion = Exhaustion::AcceptPartial;
+        self
+    }
+
+    /// Whether another attempt is left after `attempt` has finished.
+    pub fn has_attempt_after(&self, attempt: Attempt) -> bool {
+        attempt.raw() < self.max_attempts.get()
+    }
+
+    /// Whether this status is one the policy retries.
+    ///
+    /// Success-like statuses are never retried; that test goes through
+    /// [`Status::is_success_like`], the single classification point.
+    pub fn should_retry(&self, status: &Status) -> bool {
+        if status.is_success_like() {
+            return false;
+        }
+        if self.retry_on.statuses.contains(&status.kind()) {
+            return true;
+        }
+        status.failure_info().is_some_and(|info| {
+            !info.class.is_empty() && self.retry_on.failure_classes.contains(&info.class)
+        })
+    }
+
+    /// The delay before the attempt following `failed_attempt`:
+    /// `initial * factor^(n - 1)`, capped at `max`.
+    ///
+    /// Computed by repeated multiplication rather than `powi`, so the result is
+    /// bit-identical on every replay. The driver adds jitter and does the waiting;
+    /// the core never sees a clock or an RNG.
+    pub fn base_delay(&self, failed_attempt: Attempt) -> Duration {
+        let mut nanos = self.backoff.initial.as_nanos() as f64;
+        let cap = self.backoff.max.as_nanos() as f64;
+        for _ in 1..failed_attempt.raw().max(1) {
+            nanos *= self.backoff.factor;
+            if nanos >= cap {
+                return self.backoff.max;
+            }
+        }
+        if nanos >= cap {
+            return self.backoff.max;
+        }
+        Duration::from_nanos(nanos.max(0.0) as u64)
+    }
+}
+
+/// Exponential backoff between attempts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Backoff {
+    pub initial: Duration,
+    /// Exponential factor; `1.0` is a fixed delay.
+    pub factor: f64,
+    pub max: Duration,
+    /// Applied by the driver, never by the core — jitter is randomness, and the core
+    /// has none.
+    pub jitter: bool,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_secs(1),
+            factor: 2.0,
+            max: Duration::from_secs(60),
+            jitter: true,
+        }
+    }
+}
+
+/// Which failed outcomes are worth another attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RetryOn {
+    pub statuses: Vec<StatusKind>,
+    /// Matched against [`FailureInfo::class`](crate::FailureInfo::class).
+    pub failure_classes: Vec<SmolStr>,
+}
+
+impl Default for RetryOn {
+    fn default() -> Self {
+        Self {
+            statuses: vec![StatusKind::Failure, StatusKind::TimedOut],
+            failure_classes: Vec::new(),
+        }
+    }
+}
+
+impl RetryOn {
+    pub fn statuses(statuses: Vec<StatusKind>) -> Self {
+        Self {
+            statuses,
+            failure_classes: Vec::new(),
+        }
+    }
+
+    pub fn classes(classes: &[&str]) -> Self {
+        Self {
+            statuses: Vec::new(),
+            failure_classes: classes.iter().map(|c| SmolStr::new(*c)).collect(),
+        }
+    }
+
+    pub fn with_classes(mut self, classes: &[&str]) -> Self {
+        self.failure_classes = classes.iter().map(|c| SmolStr::new(*c)).collect();
+        self
+    }
+}
+
+/// What happens when the attempts run out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Exhaustion {
+    /// The last attempt's outcome stands.
+    #[default]
+    Fail,
+    /// The failure becomes `PartialSuccess`, carrying the real failure in
+    /// `underlying`.
+    AcceptPartial,
 }
 
 /// Parallel `for_each` / matrix.
@@ -267,6 +442,8 @@ pub struct Node {
     pub precondition: Option<ExprId>,
     pub routing: Routing,
     pub budget: Budget,
+    /// How many attempts this node gets. The default is one.
+    pub retry: RetryPolicy,
     /// HIR only; lowered away before execution.
     pub expand: Option<Expansion>,
 }
@@ -282,6 +459,7 @@ impl Node {
             precondition: None,
             routing: Routing::terminal(),
             budget: Budget::once(),
+            retry: RetryPolicy::none(),
             expand: None,
         }
     }
@@ -306,6 +484,11 @@ impl Node {
         self
     }
 
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+
     pub fn with_expansion(mut self, expand: Expansion) -> Self {
         self.expand = Some(expand);
         self
@@ -321,14 +504,60 @@ pub enum ExprOrValue {
     Expr(ExprId),
 }
 
+/// Where a scope's steps run, plus the placement hints that go with it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum RuntimeSpec {
+pub struct RuntimeSpec {
+    pub target: RuntimeTarget,
+    /// Uninterpreted placement labels, populated by frontends: GHA `runs-on`,
+    /// BuildKite agent tags.
+    ///
+    /// The core never reads these. The v1 local executor maps the labels it knows
+    /// (`ubuntu-latest` to its Docker image, say) and rejects unknown ones per label
+    /// with an unsupported-target message. No matching rules, queues or capability
+    /// types until there is a distributed agent system to consume them.
+    #[serde(default)]
+    pub requirements: Vec<SmolStr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RuntimeTarget {
     HostProcess,
     Docker {
         image: SmolStr,
         #[serde(default)]
         args: Vec<SmolStr>,
     },
+}
+
+impl Default for RuntimeSpec {
+    fn default() -> Self {
+        Self {
+            target: RuntimeTarget::HostProcess,
+            requirements: Vec::new(),
+        }
+    }
+}
+
+impl RuntimeSpec {
+    pub fn host_process() -> Self {
+        Self::default()
+    }
+
+    pub fn docker(image: &str) -> Self {
+        Self {
+            target: RuntimeTarget::Docker {
+                image: SmolStr::new(image),
+                args: Vec::new(),
+            },
+            requirements: Vec::new(),
+        }
+    }
+
+    /// Attach placement labels a frontend collected.
+    pub fn requiring(mut self, labels: &[&str]) -> Self {
+        self.requirements = labels.iter().map(|l| SmolStr::new(*l)).collect();
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,7 +583,7 @@ impl Scope {
         Self {
             id,
             env: BTreeMap::new(),
-            runtime: RuntimeSpec::HostProcess,
+            runtime: RuntimeSpec::default(),
             workspace: WorkspacePolicy::Shared,
         }
     }

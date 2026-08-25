@@ -1,4 +1,5 @@
-//! Values that flow while a graph runs: tokens, outcomes, step events, control signals.
+//! Values that flow while a graph runs: tokens, outcomes, run context, control
+//! signals.
 
 use std::collections::BTreeMap;
 
@@ -44,9 +45,22 @@ impl Token {
 }
 
 /// How a firing ended.
+///
+/// **This enum is closed.** These six variants are the complete and permanent status
+/// vocabulary. Any future frontend concept must map onto them; none may extend them.
+/// Attractor's first-class `RETRY` outcome, for instance, lowers to
+/// `Failure` with `class: "retry_requested"` plus a matching `retry_on`, not to a new
+/// variant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     Success,
+    /// Soft failure or partial completion. Routing-visible, and success-like.
+    ///
+    /// `underlying` carries the real failure whenever one was converted into this,
+    /// so the log never records a clean success for something that failed.
+    PartialSuccess {
+        underlying: Option<FailureInfo>,
+    },
     Failure(FailureInfo),
     /// The precondition was false, or an upstream skip propagated.
     Skipped,
@@ -54,11 +68,23 @@ pub enum Status {
     TimedOut,
 }
 
+/// A [`Status`] with its payload stripped, for matching on the variant alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum StatusKind {
+    Success,
+    PartialSuccess,
+    Failure,
+    Skipped,
+    Cancelled,
+    TimedOut,
+}
+
 impl Status {
-    /// The lowercase tag the `success()` / `failure()` expression functions match on.
+    /// The lowercase tag the status functions in expressions match on.
     pub fn tag(&self) -> &'static str {
         match self {
             Status::Success => "success",
+            Status::PartialSuccess { .. } => "partial_success",
             Status::Failure(_) => "failure",
             Status::Skipped => "skipped",
             Status::Cancelled => "cancelled",
@@ -66,49 +92,85 @@ impl Status {
         }
     }
 
-    pub fn is_success(&self) -> bool {
-        matches!(self, Status::Success)
+    pub fn kind(&self) -> StatusKind {
+        match self {
+            Status::Success => StatusKind::Success,
+            Status::PartialSuccess { .. } => StatusKind::PartialSuccess,
+            Status::Failure(_) => StatusKind::Failure,
+            Status::Skipped => StatusKind::Skipped,
+            Status::Cancelled => StatusKind::Cancelled,
+            Status::TimedOut => StatusKind::TimedOut,
+        }
+    }
+
+    /// **The** definition of success-likeness. Joins, cancel scopes, default success
+    /// guards and retry all call this; none of them open-codes the match.
+    ///
+    /// A guard that needs to tell the two apart tests `partial_success()` explicitly.
+    pub fn is_success_like(&self) -> bool {
+        matches!(self, Status::Success | Status::PartialSuccess { .. })
     }
 
     /// Whether this status counts as a failure when folding the run status.
-    /// `Skipped` and `Cancelled` do not.
+    /// `PartialSuccess`, `Skipped` and `Cancelled` do not.
     pub fn is_failure(&self) -> bool {
         matches!(self, Status::Failure(_) | Status::TimedOut)
     }
 
+    /// The failure behind this status, if any: the failure itself, or the one a
+    /// `PartialSuccess` was converted from.
+    pub fn failure_info(&self) -> Option<&FailureInfo> {
+        match self {
+            Status::Failure(info) => Some(info),
+            Status::PartialSuccess { underlying } => underlying.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn failure(message: impl Into<String>) -> Status {
         Status::Failure(FailureInfo::new(message))
+    }
+
+    /// A soft failure that keeps the real failure on the record.
+    pub fn partial(underlying: FailureInfo) -> Status {
+        Status::PartialSuccess {
+            underlying: Some(underlying),
+        }
+    }
+
+    /// A partial completion that was never a failure to begin with.
+    pub fn partial_clean() -> Status {
+        Status::PartialSuccess { underlying: None }
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureInfo {
     pub message: String,
-    /// Step-defined code, e.g. an exit status or an error class.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<SmolStr>,
-    /// A hint for retry policies; the core does not act on it in v1.
+    /// What kind of failure this is, for `retry_on` to match: `"network"`,
+    /// `"rate_limit"`, `"exit_status:2"`, `"retry_requested"`. Step kinds set it.
+    /// Empty means unclassified.
     #[serde(default)]
-    pub retryable: bool,
+    pub class: SmolStr,
 }
 
 impl FailureInfo {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            code: None,
-            retryable: false,
+            class: SmolStr::default(),
         }
     }
 
-    pub fn with_code(mut self, code: &str) -> Self {
-        self.code = Some(SmolStr::new(code));
+    pub fn with_class(mut self, class: &str) -> Self {
+        self.class = SmolStr::new(class);
         self
     }
 
-    pub fn retryable(mut self) -> Self {
-        self.retryable = true;
-        self
+    /// The conventional class for a process step that exited non-zero.
+    pub fn exit_status(code: i32) -> Self {
+        Self::new(format!("step exited with status {code}"))
+            .with_class(&format!("exit_status:{code}"))
     }
 }
 
@@ -135,7 +197,7 @@ impl Metrics {
     }
 }
 
-/// The result of one firing.
+/// The result of one attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Outcome {
     pub status: Status,
@@ -143,6 +205,10 @@ pub struct Outcome {
     pub output: Value,
     #[serde(default)]
     pub metrics: Metrics,
+    /// Writes into [`RunContext::kv`], merged in event order by the core. This is the
+    /// only path that writes run-scoped key/value state.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_updates: BTreeMap<SmolStr, Value>,
 }
 
 impl Outcome {
@@ -151,6 +217,7 @@ impl Outcome {
             status,
             output,
             metrics: Metrics::default(),
+            context_updates: BTreeMap::new(),
         }
     }
 
@@ -160,6 +227,11 @@ impl Outcome {
 
     pub fn failure(message: impl Into<String>) -> Self {
         Self::new(Status::failure(message), Value::Null)
+    }
+
+    /// A soft failure. The real failure stays on the record.
+    pub fn partial(underlying: FailureInfo, output: impl Into<Value>) -> Self {
+        Self::new(Status::partial(underlying), output.into())
     }
 
     pub fn skipped() -> Self {
@@ -174,7 +246,103 @@ impl Outcome {
         self.metrics = metrics;
         self
     }
+
+    pub fn with_context_update(mut self, key: &str, value: impl Into<Value>) -> Self {
+        self.context_updates.insert(SmolStr::new(key), value.into());
+        self
+    }
 }
+
+// ── Run context ───────────────────────────────────────────────────────────
+
+/// What one node instance left behind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeRecord {
+    /// The final attempt's status, raw.
+    pub status: Status,
+    pub output: Value,
+    /// The latest generation to complete.
+    pub generation: Generation,
+    /// How many attempts the final firing took.
+    pub attempts: u32,
+}
+
+impl NodeRecord {
+    /// The shape expressions see under `nodes.<id>`.
+    pub fn to_value(&self) -> Value {
+        serde_json::json!({
+            "status": self.status.tag(),
+            "output": self.output.clone(),
+            "generation": self.generation.raw(),
+            "attempts": self.attempts,
+            "success_like": self.status.is_success_like(),
+        })
+    }
+}
+
+/// Run-scoped state that expressions can read.
+///
+/// Written **only** inside `apply`, in event order: node records when a firing's
+/// final attempt finishes, and `kv` merged from `Outcome::context_updates` in that
+/// same order, last write winning. No other write path exists, which is what keeps
+/// the core pure and replay byte-identical.
+///
+/// This is derived state — reconstructible from the event log. It is part of the
+/// engine state, but it is never checkpointed as a separate artifact.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunContext {
+    /// Keyed by node instance name, so a matrix clone records under `build#2`.
+    pub nodes: BTreeMap<SmolStr, NodeRecord>,
+    pub kv: BTreeMap<SmolStr, Value>,
+}
+
+impl RunContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn node(&self, name: &str) -> Option<&NodeRecord> {
+        self.nodes.get(name)
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.kv.get(key)
+    }
+
+    /// Record a completed firing. Called by the core only, on a final attempt.
+    pub fn record(&mut self, name: SmolStr, record: NodeRecord) {
+        self.nodes.insert(name, record);
+    }
+
+    /// Merge `context_updates`, last write winning. Called by the core only.
+    pub fn merge(&mut self, updates: &BTreeMap<SmolStr, Value>) {
+        for (key, value) in updates {
+            self.kv.insert(key.clone(), value.clone());
+        }
+    }
+
+    /// The `nodes` map as expressions see it.
+    pub fn nodes_value(&self) -> Value {
+        Value::Object(
+            self.nodes
+                .iter()
+                .map(|(name, record)| (name.to_string(), record.to_value()))
+                .collect(),
+        )
+    }
+
+    /// The `kv` map as expressions see it.
+    pub fn kv_value(&self) -> Value {
+        Value::Object(
+            self.kv
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect(),
+        )
+    }
+}
+
+// ── Step progress and control ─────────────────────────────────────────────
 
 /// Progress reported by a running step. Carries no coordination meaning.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

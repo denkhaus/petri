@@ -78,9 +78,10 @@ pub enum ValidationError {
 
     // ── Invariant 8 ────────────────────────────────────────────────────────
     #[error(
-        "node {0:?} has an incoming back edge, so it must join with `Any`: a forward edge \
-         carries only generation 0 and a back edge only generations 1 and up, so `All` over \
-         both is unsatisfiable in every generation"
+        "node {0:?} has an incoming back edge, so it is a loop head: use `JoinPolicy::Any`. \
+         A forward edge into the head carries only generation 0 and a back edge only \
+         generations 1 and up, so no generation ever holds a token on both and any other \
+         policy is unsatisfiable forever"
     )]
     LoopHeadMustJoinAny(NodeId),
 
@@ -112,13 +113,22 @@ pub enum ValidationError {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationWarning {
     #[error(
-        "scope {scope:?} can be re-entered: a path leaves it through {via:?} and comes back. \
-         A scope is released once nothing in it can run, and release is irreversible, so \
-         re-entry acquires a fresh runtime and workspace and anything the earlier firings \
-         left behind is gone. This check is a static over-approximation: it fires whenever \
-         a path leaves and returns, even where something always keeps the scope busy."
+        "scope {scope:?} can be re-entered at {at:?}: a path leaves the scope through \
+         {via:?} and comes back. A scope is released once nothing in it can run, and \
+         release is irreversible, so re-entry acquires a fresh runtime and workspace and \
+         anything the earlier firings left behind is gone. Either restructure so the \
+         returning path joins on an edge from inside the scope, or accept \
+         fresh-environment semantics at {at:?}. What remains after suppression is still a \
+         static over-approximation: it cannot tell whether a given run reaches the \
+         releasing state."
     )]
-    ScopeReentry { scope: ScopeId, via: NodeId },
+    ScopeReentry {
+        scope: ScopeId,
+        /// The node inside the scope the path comes back to.
+        at: NodeId,
+        /// The node outside the scope the path travels through.
+        via: NodeId,
+    },
 }
 
 /// Everything one validation pass found. Errors block a load; warnings do not.
@@ -656,10 +666,22 @@ fn check_loop_head_joins(graph: &Graph, errors: &mut Vec<ValidationError>) {
 /// Warn where a path can leave a scope and come back.
 ///
 /// A scope is released once no live firing, pending token or deferred join needs it,
-/// and release is irreversible. Re-entry therefore gets a fresh runtime and
-/// workspace. Whether a given path actually releases the scope on the way through
-/// depends on runtime state, so this is a warning: the static condition is simply
-/// that some node outside the scope is both reachable from it and able to reach it.
+/// and release is irreversible, so re-entry gets a fresh runtime and workspace. The
+/// static condition is that some node outside the scope is both reachable from it and
+/// able to reach it.
+///
+/// **Suppression.** A re-entry node is safe when it joins with `All` and has at least
+/// one incoming forward edge from inside the scope. For such a node to fire it needs
+/// the inside edge's token, and there are only two cases. Either that token is
+/// emitted while the scope is still held, in which case it is a pending token pinning
+/// the scope until the join resolves and release cannot happen before re-entry. Or
+/// the inside arm never emits — its guard fails, or its group falls through — in
+/// which case the `All` join is permanently unsatisfiable, the node never fires, and
+/// there is no re-entry at all. Both branches are safe, so suppressing is sound, and
+/// the test is purely structural.
+///
+/// `Any` and `Quorum` re-entry nodes keep the warning: those can genuinely fire on
+/// the outside token alone, after the scope has been released.
 fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
     let mut by_scope: BTreeMap<ScopeId, BTreeSet<NodeId>> = BTreeMap::new();
     for node in &graph.nodes {
@@ -667,27 +689,53 @@ fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
     }
 
     let mut successors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut incoming: HashMap<NodeId, Vec<(NodeId, bool)>> = HashMap::new();
     for node in &graph.nodes {
         for edge in node.routing.edges() {
             if graph.node(edge.to).is_some() {
                 successors.entry(node.id).or_default().push(edge.to);
-                predecessors.entry(edge.to).or_default().push(node.id);
+                incoming
+                    .entry(edge.to)
+                    .or_default()
+                    .push((node.id, edge.back));
             }
         }
     }
+    let predecessors: HashMap<NodeId, Vec<NodeId>> = incoming
+        .iter()
+        .map(|(node, sources)| (*node, sources.iter().map(|(from, _)| *from).collect()))
+        .collect();
 
     for (scope, members) in &by_scope {
         let downstream = reachable(members, &successors);
         let upstream = reachable(members, &predecessors);
-        // A node outside the scope that the scope reaches and that reaches back into
-        // it closes a leave-and-return path.
-        let via = downstream
+        // Nodes outside the scope that sit on a leave-and-return path.
+        let outside: BTreeSet<NodeId> = downstream
             .intersection(&upstream)
-            .find(|node| !members.contains(node));
-        if let Some(via) = via {
+            .filter(|node| !members.contains(node))
+            .copied()
+            .collect();
+        if outside.is_empty() {
+            continue;
+        }
+
+        for member in members {
+            let sources = incoming.get(member).map(Vec::as_slice).unwrap_or(&[]);
+            let Some((via, _)) = sources.iter().find(|(from, _)| outside.contains(from)) else {
+                continue;
+            };
+            let joins_on_all = graph
+                .node(*member)
+                .is_some_and(|node| node.join == JoinPolicy::All);
+            let has_inside_forward_edge = sources
+                .iter()
+                .any(|(from, back)| !*back && members.contains(from));
+            if joins_on_all && has_inside_forward_edge {
+                continue;
+            }
             warnings.push(ValidationWarning::ScopeReentry {
                 scope: *scope,
+                at: *member,
                 via: *via,
             });
         }

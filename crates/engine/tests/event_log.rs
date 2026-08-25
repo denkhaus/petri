@@ -44,7 +44,7 @@ fn routing_tokens_appear_in_the_log() {
         h.state.log.events().next(),
         Some(Event::RunStarted)
     ));
-    assert_eq!(h.state.log.version, LOG_VERSION);
+    assert_eq!(h.state.log.version(), LOG_VERSION);
 
     // Sequence numbers are dense and in order.
     let seqs: Vec<u64> = h.state.log.records().iter().map(|r| r.seq).collect();
@@ -127,6 +127,7 @@ fn out_of_order_events_are_errors_not_panics() {
         state,
         Event::StepFinished {
             firing: ir::FiringId::new(99),
+            attempt: ir::Attempt::FIRST,
             outcome: Outcome::success(Value::Null),
         },
     );
@@ -138,6 +139,7 @@ fn out_of_order_events_are_errors_not_panics() {
         state,
         Event::StepFinished {
             firing: ir::FiringId::new(99),
+            attempt: ir::Attempt::FIRST,
             outcome: Outcome::success(Value::Null),
         },
     );
@@ -216,4 +218,107 @@ fn step_progress_changes_nothing() {
             .any(|e| matches!(e, Event::StepProgress { .. })),
         "it is still recorded"
     );
+}
+
+/// v2 records carry provenance. Replay feeds back only the external ones.
+#[test]
+fn records_say_whether_they_came_from_outside_or_from_the_core() {
+    let mut h = Harness::new(diamond());
+    assert_eq!(h.run(), RunStatus::Success);
+
+    let external: Vec<&Event> = h.state.log.external_events().collect();
+    assert!(
+        external
+            .iter()
+            .all(|e| !matches!(e, Event::TokenEmitted(_) | Event::NodeExpanded { .. })),
+        "routed tokens and splices are the core's own"
+    );
+    assert!(matches!(external.first(), Some(Event::RunStarted)));
+
+    let core_records = h
+        .state
+        .log
+        .records()
+        .iter()
+        .filter(|r| r.source == engine::EventSource::Core)
+        .count();
+    assert!(core_records > 0, "routing produced events of its own");
+    assert_eq!(
+        core_records + external.len(),
+        h.state.log.len(),
+        "every record is one or the other"
+    );
+}
+
+/// Replaying the external records reproduces the log byte for byte.
+#[test]
+fn replay_is_byte_identical() {
+    let graph = diamond();
+    let mut h = Harness::new(graph.clone());
+    assert_eq!(h.run(), RunStatus::Success);
+
+    let replayed = engine::verify_replay(graph, &h.state.log).expect("byte-identical");
+    assert_eq!(replayed.folded_status(), RunStatus::Success);
+    assert_eq!(replayed.history(), h.state.history());
+}
+
+/// Replay rebuilds a spliced graph from the events, rather than reading back a
+/// mutated one.
+#[test]
+fn replay_reproduces_an_expansion() {
+    use ir::{Arm, ExpandTarget, JoinPolicy, collector_exprs, parallel_for_each};
+
+    let mut b = ir::GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let plan = b.add_step("plan", scope, NOOP);
+    let work = b.add_step("work", scope, NOOP);
+    let collect = b.add_step("collect", scope, NOOP);
+    let collector = collector_exprs(b.exprs());
+    let items = b.exprs().var("input");
+    b.link(plan, work);
+    b.select(work, vec![Arm::always(collect).with_map(collector.indexed)]);
+    b.set_join(collect, JoinPolicy::All);
+    parallel_for_each(&mut b, work, items, ExpandTarget::Node, None, false);
+    let graph = b.build();
+
+    let mut h = Harness::new(graph.clone()).respond_with(|info| match info.base.as_str() {
+        "plan" => Outcome::success(json!(["a", "b", "c"])),
+        _ => Outcome::success(Value::Null),
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+
+    let replayed = engine::verify_replay(graph, &h.state.log).expect("byte-identical");
+    assert_eq!(
+        replayed.graph.nodes.len(),
+        h.state.graph.nodes.len(),
+        "the clones are re-derived, not copied"
+    );
+}
+
+/// A v1 log is rejected cleanly rather than half-understood.
+#[test]
+fn a_v1_log_is_rejected() {
+    let mut h = Harness::new(diamond());
+    h.run();
+    let encoded = serde_json::to_string(&h.state.log).expect("encode");
+    assert!(encoded.contains("\"version\":2"));
+
+    let downgraded = encoded.replacen("\"version\":2", "\"version\":1", 1);
+    let error = serde_json::from_str::<engine::EventLog>(&downgraded)
+        .expect_err("a v1 log must not deserialize");
+    assert!(
+        error.to_string().contains("version 1"),
+        "the error names the version it found: {error}"
+    );
+}
+
+/// The whole state still round-trips, now including the run context.
+#[test]
+fn state_round_trip_carries_the_run_context() {
+    let mut h = Harness::new(diamond());
+    h.run();
+    let encoded = serde_json::to_string(&h.state).expect("encode");
+    let decoded: EngineState = serde_json::from_str(&encoded).expect("decode");
+    assert_eq!(decoded.run_context(), h.state.run_context());
+    assert_eq!(decoded.log, h.state.log);
 }

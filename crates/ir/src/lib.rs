@@ -21,18 +21,24 @@ pub mod step;
 pub mod validate;
 
 pub use builder::{Arm, GraphBuilder};
-pub use expr::{BinOp, Context, EvalError, Expr, ExprTable, UnOp, eval, eval_bool, truthy};
-pub use graph::{
-    Budget, Edge, ExpandTarget, Expansion, ExprOrValue, Fallthrough, Graph, Guard, JoinPolicy,
-    Node, Routing, RuntimeSpec, Scope, SelectGroup, StepRef, WorkspacePolicy,
+pub use expr::{
+    BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, truthy,
 };
-pub use ids::{CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId};
+pub use graph::{
+    Backoff, Budget, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue, Fallthrough, Graph,
+    Guard, JoinPolicy, Node, RetryOn, RetryPolicy, Routing, RuntimeSpec, RuntimeTarget, Scope,
+    SelectGroup, StepRef, WorkspacePolicy,
+};
+pub use ids::{
+    Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId,
+};
 pub use lower::{
-    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs, parallel_for_each,
-    sequential_for_each,
+    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs,
+    normalize_loop_heads, parallel_for_each, sequential_for_each,
 };
 pub use runtime::{
-    Control, FailureInfo, LogStream, Metrics, Outcome, RunStatus, Status, StepEvent, Token,
+    Control, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext, RunStatus, Status,
+    StatusKind, StepEvent, Token,
 };
 pub use step::{Digest, StepKind, StepRegistry};
 pub use validate::{

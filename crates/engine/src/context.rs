@@ -1,110 +1,86 @@
-//! Building the expression context for a firing, and resolving HIR config
+//! Building the [`EvalEnv`] a firing's expressions see, and resolving HIR config
 //! placeholders against it.
 //!
-//! superseded by RunContext (handoff §2). This module is an ad-hoc precursor of
-//! `RunContext` / `EvalEnv`. When those land they replace it outright: there must be
-//! one way for expressions to see upstream state, not two. Do not extend the
-//! bindings here — add them to `RunContext` instead.
+//! There is exactly one way for an expression to reach upstream state: `nodes.*` and
+//! `kv.*` on the [`RunContext`], which only `apply` writes. Nothing is threaded
+//! through token payloads for that purpose, and no second bag of upstream bindings
+//! exists.
 //!
-//! Two contexts exist per firing. The **firing context** is what a precondition and
-//! a step's config see: inputs, upstream statuses, scope env, prior outputs. The
-//! **outcome context** adds the firing's own result and is what routing guards and
-//! `map` expressions see.
+//! An expression sees three things:
+//!
+//! - the **token**: the payload that arrived on the first input edge,
+//! - the **run context**: every completed node instance, and run-scoped `kv`,
+//! - the **statics**: scope `env`, the node's identity, generation and attempt, the
+//!   firing's own outcome where there is one, and `item` / `index` in a clone.
 
 use std::collections::BTreeMap;
 
 use ir::validate::EXPR_PLACEHOLDER_KEY;
 use ir::{
-    Context, EvalError, ExprId, ExprOrValue, Generation, NodeId, Outcome, Token, Value, eval,
+    Attempt, EvalEnv, EvalError, ExprId, ExprOrValue, Generation, NodeId, Outcome, RunContext,
+    StaticCtx, Status, Token, Value, eval,
 };
 use serde_json::Map;
 use smol_str::SmolStr;
 
 use crate::state::{EngineState, RunError};
 
-/// Bindings visible before the node runs.
-pub(crate) fn firing_context(
+/// The static bindings for a firing, before it runs.
+pub(crate) fn firing_statics(
     state: &EngineState,
     node: NodeId,
     inputs: &[Token],
     generation: Generation,
-) -> Result<Context, RunError> {
+    attempt: Attempt,
+) -> Result<StaticCtx, RunError> {
     let nd = state
         .graph
         .node(node)
         .ok_or(RunError::UnknownNode(node))?
         .clone();
 
-    let mut ctx = Context::new();
+    let mut ctx = StaticCtx::new();
+    let empty_run = RunContext::new();
 
-    // Scope env. Expressions in env see only the plain bindings, never each other,
-    // so env can never depend on its own resolution order.
+    // Scope env. An env expression sees nothing but itself, so env can never depend
+    // on its own resolution order.
     let mut env = Map::new();
     if let Some(scope) = state.graph.scope(nd.scope) {
         for (key, value) in &scope.env {
-            let resolved =
-                match value {
-                    ExprOrValue::Value(v) => v.clone(),
-                    ExprOrValue::Expr(id) => eval(&state.graph.exprs, *id, &Context::new())
-                        .map_err(|error| RunError::Eval {
-                            node,
-                            site: SmolStr::new(format!("scope env `{key}`")),
-                            error,
-                        })?,
-                };
+            let resolved = match value {
+                ExprOrValue::Value(v) => v.clone(),
+                ExprOrValue::Expr(id) => {
+                    let bare = StaticCtx::new();
+                    let env = EvalEnv::new(&Value::Null, &empty_run, &bare);
+                    eval(&state.graph.exprs, *id, &env).map_err(|error| RunError::Eval {
+                        node,
+                        site: SmolStr::new(format!("scope env `{key}`")),
+                        error,
+                    })?
+                }
+            };
             env.insert(key.to_string(), resolved);
         }
     }
     ctx.set("env", Value::Object(env));
 
+    // Every input payload, for a collector assembling results from a join. The
+    // primary payload is the token, and comes from `EvalEnv`, not from here.
     ctx.set(
-        "outputs",
-        Value::Object(
-            state
-                .outputs()
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect(),
-        ),
+        "inputs",
+        Value::Array(inputs.iter().map(|t| t.payload.clone()).collect()),
     );
 
-    let payloads: Vec<Value> = inputs.iter().map(|t| t.payload.clone()).collect();
-    ctx.set("input", payloads.first().cloned().unwrap_or(Value::Null));
-    ctx.set("inputs", Value::Array(payloads));
-
-    // Upstream statuses, so a precondition can ask `failure()` the way GHA's `if:`
-    // does. With no upstream at all (an entry node) the fold is a success.
-    let mut upstream = Vec::new();
-    let mut any_failed = false;
-    let mut any_ran = false;
-    for token in inputs {
-        if let Some(record) = state
-            .history()
-            .iter()
-            .rev()
-            .find(|r| r.firing == token.from)
-        {
-            let tag = record.outcome.status.tag();
-            any_failed |= record.outcome.status.is_failure();
-            any_ran |= !matches!(record.outcome.status, ir::Status::Skipped);
-            upstream.push(serde_json::json!({
-                "node": record.name.to_string(),
-                "status": tag,
-                "output": record.outcome.output.clone(),
-            }));
-        }
-    }
-    let folded = if any_failed {
-        "failure"
-    } else if upstream.is_empty() || any_ran {
-        "success"
-    } else {
-        "skipped"
-    };
-    ctx.set("upstream", Value::Array(upstream));
-    ctx.set("status", Value::String(folded.to_string()));
+    // The folded status of this node's upstream, read from the run context, so
+    // `success()` in a precondition behaves the way GHA's `if:` does. Statuses are
+    // read by node name through `nodes.*`; nothing rides on the token payload.
+    ctx.set(
+        "status",
+        Value::String(folded_upstream_status(state, inputs).to_string()),
+    );
 
     ctx.set("generation", Value::from(generation.raw()));
+    ctx.set("attempt", Value::from(attempt.raw()));
     ctx.set("node", Value::String(nd.name.to_string()));
     ctx.set(
         "run",
@@ -124,8 +100,8 @@ pub(crate) fn firing_context(
     Ok(ctx)
 }
 
-/// The firing context plus the firing's own result: what routing sees.
-pub(crate) fn outcome_context(base: &Context, outcome: &Outcome) -> Context {
+/// The statics plus the firing's own result: what routing sees.
+pub(crate) fn with_outcome(base: &StaticCtx, outcome: &Outcome) -> StaticCtx {
     let mut ctx = base.clone();
     ctx.set("status", Value::String(outcome.status.tag().to_string()));
     ctx.set("output", outcome.output.clone());
@@ -134,34 +110,75 @@ pub(crate) fn outcome_context(base: &Context, outcome: &Outcome) -> Context {
         serde_json::json!({
             "status": outcome.status.tag(),
             "output": outcome.output.clone(),
+            "success_like": outcome.status.is_success_like(),
         }),
     );
     ctx
 }
 
+/// The token an expression reads: the payload of the first input edge.
+pub(crate) fn primary_token(inputs: &[Token]) -> Value {
+    inputs
+        .first()
+        .map(|t| t.payload.clone())
+        .unwrap_or(Value::Null)
+}
+
+/// Fold the statuses of the nodes whose edges fed this firing.
+///
+/// Read from [`RunContext`], by looking up the source node of each input edge. With
+/// no upstream at all — an entry node, or a clone seeded by a splice — the fold is a
+/// success.
+fn folded_upstream_status(state: &EngineState, inputs: &[Token]) -> &'static str {
+    let mut saw_any = false;
+    let mut any_failed = false;
+    let mut any_ran = false;
+    for token in inputs {
+        let Some(source) = state.graph.edge_source(token.edge) else {
+            continue;
+        };
+        let Some(node) = state.graph.node(source) else {
+            continue;
+        };
+        let Some(record) = state.run_context().node(&node.name) else {
+            continue;
+        };
+        saw_any = true;
+        any_failed |= record.status.is_failure();
+        any_ran |= !matches!(record.status, Status::Skipped);
+    }
+    if any_failed {
+        "failure"
+    } else if !saw_any || any_ran {
+        "success"
+    } else {
+        "skipped"
+    }
+}
+
 /// Replace `{"$expr": <id>}` placeholders in a step config with their values.
 ///
-/// This is the lazy half of HIR lowering: config is bound against live contexts at
-/// firing time, not at load time.
+/// This is the lazy half of HIR lowering: config is bound against the live
+/// environment at firing time, not at load time.
 pub(crate) fn resolve_config(
     config: &Value,
     exprs: &ir::ExprTable,
-    ctx: &Context,
+    env: &EvalEnv<'_>,
 ) -> Result<Value, EvalError> {
     match config {
         Value::Object(map) => {
             if let Some(id) = map.get(EXPR_PLACEHOLDER_KEY).and_then(placeholder_id) {
-                return eval(exprs, id, ctx);
+                return eval(exprs, id, env);
             }
             let mut out = Map::with_capacity(map.len());
             for (key, value) in map {
-                out.insert(key.clone(), resolve_config(value, exprs, ctx)?);
+                out.insert(key.clone(), resolve_config(value, exprs, env)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(items) => items
             .iter()
-            .map(|i| resolve_config(i, exprs, ctx))
+            .map(|i| resolve_config(i, exprs, env))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         other => Ok(other.clone()),

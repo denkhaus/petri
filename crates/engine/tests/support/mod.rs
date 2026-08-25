@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use engine::{Command, EngineState, Event, apply};
 use ir::{
-    FiringId, Generation, Graph, NodeId, Outcome, RunStatus, StepKind, StepKindId, StepRegistry,
-    Token, Value,
+    Attempt, FiringId, Generation, Graph, NodeId, Outcome, RunStatus, StepKind, StepKindId,
+    StepRegistry, Token, Value,
 };
 
 /// What the host is being asked to run.
@@ -23,6 +23,8 @@ pub struct StartInfo {
     /// Clone index, when this node came out of an expansion.
     pub index: Option<u32>,
     pub generation: Generation,
+    /// Which try this is, 1-based.
+    pub attempt: Attempt,
     pub config: Value,
     pub inputs: Vec<Token>,
 }
@@ -61,6 +63,8 @@ type Responder = Box<dyn FnMut(&StartInfo) -> Outcome>;
 
 pub struct Harness {
     pub state: EngineState,
+    /// The graph the run started from, before any splice. Replay needs this one.
+    pub original_graph: Graph,
     responder: Responder,
     /// Every command the core produced, in order.
     pub commands: Vec<Command>,
@@ -68,17 +72,21 @@ pub struct Harness {
     pub started: Vec<String>,
     /// The most steps that were running at the same time.
     pub max_concurrent: usize,
+    /// Every `ScheduleRetry` the core issued, in order.
+    pub scheduled_retries: Vec<(FiringId, Attempt, std::time::Duration)>,
     pub status: Option<RunStatus>,
 }
 
 impl Harness {
     pub fn new(graph: Graph) -> Self {
         Self {
+            original_graph: graph.clone(),
             state: EngineState::new(graph),
             responder: Box::new(|_| Outcome::success(Value::Null)),
             commands: Vec::new(),
             started: Vec::new(),
             max_concurrent: 0,
+            scheduled_retries: Vec::new(),
             status: None,
         }
     }
@@ -134,6 +142,7 @@ impl Harness {
                     .unwrap_or_default();
                 let (base, index) = split_clone_name(&name);
                 let firing = resolved.id();
+                let attempt = resolved.attempt();
                 let info = StartInfo {
                     firing,
                     node: resolved.node(),
@@ -141,19 +150,57 @@ impl Harness {
                     base,
                     index,
                     generation: resolved.generation(),
+                    attempt,
                     config: resolved.config().clone(),
                     inputs: resolved.inputs().to_vec(),
                 };
                 self.started.push(name);
                 let outcome = (self.responder)(&info);
-                self.feed(Event::StepStarted { firing });
-                self.feed(Event::StepFinished { firing, outcome });
+                self.feed(Event::StepStarted { firing, attempt });
+                self.feed(Event::StepFinished {
+                    firing,
+                    attempt,
+                    outcome,
+                });
+                // A retry keeps the firing live; walk the backoff without a clock.
+                self.drain_retries();
                 if let Some(status) = self.status {
                     return status;
                 }
             }
         }
         self.status.unwrap_or_else(|| self.state.folded_status())
+    }
+
+    /// Answer every outstanding `ScheduleRetry` at once. The driver would sleep and
+    /// add jitter; a test just feeds the event straight back.
+    pub fn drain_retries(&mut self) {
+        loop {
+            let pending: Vec<(FiringId, Attempt, std::time::Duration)> = self
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    Command::ScheduleRetry {
+                        firing,
+                        next_attempt,
+                        base_delay,
+                    } => Some((*firing, *next_attempt, *base_delay)),
+                    _ => None,
+                })
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            self.commands
+                .retain(|c| !matches!(c, Command::ScheduleRetry { .. }));
+            self.scheduled_retries.extend(pending.iter().copied());
+            for (firing, next_attempt, _) in pending {
+                self.feed(Event::RetryElapsed {
+                    firing,
+                    next_attempt,
+                });
+            }
+        }
     }
 
     /// Push one event through the core, keeping the commands it produced.
@@ -200,10 +247,29 @@ impl Harness {
         starts
     }
 
-    /// Report a step's result to the core.
+    /// Report a step's result to the core, for the attempt it is running.
     pub fn finish(&mut self, firing: FiringId, outcome: Outcome) {
-        self.feed(Event::StepStarted { firing });
-        self.feed(Event::StepFinished { firing, outcome });
+        let attempt = self
+            .state
+            .firing(firing)
+            .map(|f| f.attempt)
+            .unwrap_or(Attempt::FIRST);
+        self.feed(Event::StepStarted { firing, attempt });
+        self.feed(Event::StepFinished {
+            firing,
+            attempt,
+            outcome,
+        });
+    }
+
+    /// Replay the log from a fresh state and check it comes back byte-identical.
+    ///
+    /// The determinism canary: if any core decision depended on a clock, on
+    /// iteration order, or on anything outside the state, the logs diverge.
+    pub fn verify_replay(&self) {
+        if let Err(mismatch) = engine::verify_replay(self.original_graph.clone(), &self.state.log) {
+            panic!("replay was not byte-identical: {mismatch}");
+        }
     }
 
     pub fn output(&self, node: &str) -> Value {
@@ -236,6 +302,33 @@ impl Harness {
 
     pub fn commands_of<T>(&self, f: impl Fn(&Command) -> Option<T>) -> Vec<T> {
         self.commands.iter().filter_map(f).collect()
+    }
+}
+
+/// Stand-in for the process step kind's `soft_fail` handling.
+///
+/// Producing `PartialSuccess` is a step-kind decision, not a core one: there is no
+/// node-level policy. This is the shape BuildKite's `soft_fail` and GHA's
+/// `continue-on-error` both lower onto.
+pub fn process_outcome(config: &Value, exit_code: i32) -> Outcome {
+    if exit_code == 0 {
+        return Outcome::success(serde_json::json!({ "exit_code": 0 }));
+    }
+    let failure = ir::FailureInfo::exit_status(exit_code);
+    let soft = match config.get("soft_fail") {
+        Some(Value::Bool(true)) => true,
+        Some(Value::Array(codes)) => codes
+            .iter()
+            .any(|c| c.as_i64() == Some(i64::from(exit_code))),
+        _ => false,
+    };
+    let output = serde_json::json!({ "exit_code": exit_code });
+    if soft {
+        // The real failure rides along in `underlying`, so the log never records a
+        // clean success for something that failed.
+        Outcome::partial(failure, output)
+    } else {
+        Outcome::new(ir::Status::Failure(failure), output)
     }
 }
 
