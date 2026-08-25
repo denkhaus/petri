@@ -263,6 +263,12 @@ order. No other write path exists. This is what keeps the core pure and replay
 byte-identical. `RunContext` is derived state — reconstructible from the event log,
 never checkpointed separately.
 
+`kv` merges on the **final attempt only**, like the node records. Guards read `kv`
+concurrently — a parallel node's routing can consult it mid-run — so merging a retried
+attempt's writes would let discarded work steer routing elsewhere in the graph.
+Retries are invisible everywhere except the event log; per-attempt `context_updates`
+are still on each attempt's finish record for tooling to read.
+
 ### Expression environment
 
 ```rust
@@ -350,18 +356,31 @@ pub fn apply(state: EngineState, ev: Event) -> (EngineState, Vec<Command>);
 
 Every `Event` is appended to a versioned event log before `apply`, including the ones
 the core emits itself while routing. Each record carries its provenance —
-`External` for what a host fed in, `Core` for what the core produced.
+`External` for what a host fed in, `Core` for what the core produced. **That enum is
+closed**: an event either entered from outside or the core produced it, and there is
+no third case.
 
 **Log version 2.** v1 → v2: the firing key gained `Attempt`, `StepStarted` /
 `StepFinished` carry it, `ScheduleRetry` / `RetryElapsed` joined the vocabulary,
 finish records carry `context_updates`, and every record records its provenance. A v1
 log is rejected on read rather than half-understood.
 
-**Replay.** Feeding a log's `External` records back through `apply` from a fresh state
-reproduces the run. Everything marked `Core` is produced again rather than replayed,
-which is what makes a byte-identical replayed log a determinism check: if any core
-decision depended on a clock, on iteration order, or on anything outside the state,
-the two logs diverge. Resume is still future work.
+**Replay, and the verification contract.** Feeding a log's `External` records back
+through `apply` from a fresh state reproduces the run. Everything marked `Core` is
+**regenerated**, never replayed from the log. A byte-identical replayed log therefore
+asserts that the core reached every one of those `Core` events again, in the same
+order, from the same inputs.
+
+The regenerated-versus-recorded distinction *is* the assertion — not redundancy, and
+not an optimisation. A future change that fed `Core` records back instead of
+regenerating them would leave `verify_replay` passing while asserting nothing: it
+would compare the log against a copy of itself. Anything that makes the core consult a
+clock, an RNG, an environment variable or a non-deterministic iteration order breaks
+byte-identity, which is the point. A host-fed event is `External` even when it answers
+something the core asked for — `RetryElapsed` answering `ScheduleRetry` — because the
+decision to send it, and when, came from outside.
+
+Resume is still future work.
 
 ## 6. HIR -> Plan lowering
 

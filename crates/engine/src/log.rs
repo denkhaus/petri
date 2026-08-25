@@ -14,9 +14,32 @@ pub const LOG_VERSION: u32 = 2;
 
 /// Where an event came from.
 ///
-/// Replay feeds back only [`EventSource::External`] records: the core regenerates
-/// every `Core` one, which is exactly what makes a byte-identical replay a
-/// determinism check rather than a copy.
+/// **This enum is closed.** `External` and `Core` are the complete and permanent
+/// vocabulary: an event either entered from outside the core or the core produced it,
+/// and there is no third case. Nothing may extend it.
+///
+/// # The verification contract
+///
+/// This is load-bearing for every determinism claim the system makes, so it is worth
+/// stating plainly:
+///
+/// - Replay feeds back **only** `External` records.
+/// - Every `Core` record is **regenerated** by the core during replay, never replayed
+///   from the log.
+/// - A replayed log that is byte-identical to the original therefore asserts that the
+///   core reached every one of those `Core` events again, in the same order, from the
+///   same inputs.
+///
+/// The regenerated-versus-recorded distinction *is* the assertion. It is not
+/// redundancy, and it is not an optimisation. If a future change feeds `Core` records
+/// back instead of regenerating them, `verify_replay` keeps passing while asserting
+/// nothing at all: it would be comparing the log against a copy of itself. Anything
+/// that makes the core consult a clock, an RNG, an environment variable, or a
+/// non-deterministic iteration order breaks byte-identity — which is the point.
+///
+/// A host feeding an event in is `External` even when that event describes something
+/// the core asked for, such as `RetryElapsed` answering a `ScheduleRetry`: the
+/// decision to send it, and when, came from outside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventSource {
     /// Fed in by the host: run start, step results, retry timers, cancellation.

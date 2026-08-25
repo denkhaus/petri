@@ -395,3 +395,100 @@ fn budget_still_bounds_a_retrying_loop() {
     assert_eq!(h.state.firing_count(spin), 3, "three firings, then the cap");
     h.verify_replay();
 }
+
+/// `AcceptPartial` with `max_attempts: 1`: exhaustion means "no attempts remain",
+/// which with one attempt is immediate. Reading it otherwise would make
+/// `allow_partial` conditional on unrelated retry configuration.
+///
+/// The conversion carries the real failure, and the exhausted attempt's
+/// `context_updates` are merged — that outcome is the final one.
+#[test]
+fn accept_partial_applies_with_no_retries_configured() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let step = b.add_step("step", scope, NOOP);
+    let after = b.add_step("after", scope, NOOP);
+    b.link(step, after);
+    b.node_mut(step).retry = RetryPolicy::attempts(1).accepting_partial();
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph).respond_with(|info| {
+        if info.base == "step" {
+            Outcome::new(
+                ir::Status::Failure(ir::FailureInfo::exit_status(4)),
+                json!("partial output"),
+            )
+            .with_context_update("wrote", "on the exhausted attempt")
+        } else {
+            Outcome::success(Value::Null)
+        }
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+    assert_eq!(h.start_count("step"), 1, "one attempt, no retry");
+    assert_eq!(h.start_count("after"), 1, "routing continued");
+
+    let record = h.state.history().iter().find(|r| r.name == "step").unwrap();
+    assert_eq!(record.outcome.status.tag(), "partial_success");
+    let underlying = record
+        .outcome
+        .status
+        .failure_info()
+        .expect("log truth: the real failure is kept");
+    assert_eq!(underlying.class, "exit_status:4");
+    assert_eq!(underlying.message, "step exited with status 4");
+    assert_eq!(record.outcome.output, json!("partial output"));
+
+    // The final outcome's updates reach the routing-visible store.
+    assert_eq!(
+        h.state.run_context().get("wrote"),
+        Some(&json!("on the exhausted attempt"))
+    );
+    h.verify_replay();
+}
+
+/// A retried attempt's `context_updates` never reach `kv`: retries are invisible
+/// everywhere except the event log. The discarded attempt's writes are still in its
+/// finish record, for tooling to read.
+#[test]
+fn a_discarded_attempts_updates_never_reach_the_run_context() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let step = b.add_step("step", scope, NOOP);
+    b.node_mut(step).retry = RetryPolicy::attempts(2);
+    let graph = b.build();
+
+    let mut h = Harness::new(graph).respond_with(|info| {
+        if info.attempt == Attempt::FIRST {
+            Outcome::failure("first try")
+                .with_context_update("marker", "from the discarded attempt")
+        } else {
+            Outcome::success(Value::Null).with_context_update("marker", "from the final attempt")
+        }
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+
+    assert_eq!(
+        h.state.run_context().get("marker"),
+        Some(&json!("from the final attempt")),
+        "only the final attempt writes to the routing-visible store"
+    );
+
+    // The discarded attempt's updates are still on the record, in the log.
+    let discarded = h
+        .state
+        .log
+        .events()
+        .filter_map(|e| match e {
+            Event::StepFinished {
+                attempt, outcome, ..
+            } if *attempt == Attempt::FIRST => Some(outcome.clone()),
+            _ => None,
+        })
+        .next()
+        .expect("the first attempt is in the log");
+    assert_eq!(
+        discarded.context_updates.get("marker").map(|v| v.as_str()),
+        Some(Some("from the discarded attempt"))
+    );
+}

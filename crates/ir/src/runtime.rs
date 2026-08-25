@@ -79,6 +79,20 @@ pub enum StatusKind {
     TimedOut,
 }
 
+/// The one place the status-to-kind mapping lives, so the two cannot drift.
+impl From<&Status> for StatusKind {
+    fn from(status: &Status) -> Self {
+        match status {
+            Status::Success => StatusKind::Success,
+            Status::PartialSuccess { .. } => StatusKind::PartialSuccess,
+            Status::Failure(_) => StatusKind::Failure,
+            Status::Skipped => StatusKind::Skipped,
+            Status::Cancelled => StatusKind::Cancelled,
+            Status::TimedOut => StatusKind::TimedOut,
+        }
+    }
+}
+
 impl Status {
     /// The lowercase tag the status functions in expressions match on.
     pub fn tag(&self) -> &'static str {
@@ -92,15 +106,10 @@ impl Status {
         }
     }
 
+    /// The variant, without its payload. See [`From<&Status> for StatusKind`], which
+    /// holds the only copy of this mapping.
     pub fn kind(&self) -> StatusKind {
-        match self {
-            Status::Success => StatusKind::Success,
-            Status::PartialSuccess { .. } => StatusKind::PartialSuccess,
-            Status::Failure(_) => StatusKind::Failure,
-            Status::Skipped => StatusKind::Skipped,
-            Status::Cancelled => StatusKind::Cancelled,
-            Status::TimedOut => StatusKind::TimedOut,
-        }
+        StatusKind::from(self)
     }
 
     /// **The** definition of success-likeness. Joins, cancel scopes, default success
@@ -286,6 +295,14 @@ impl NodeRecord {
 /// final attempt finishes, and `kv` merged from `Outcome::context_updates` in that
 /// same order, last write winning. No other write path exists, which is what keeps
 /// the core pure and replay byte-identical.
+///
+/// **`kv` merges on final attempts only**, like the node records. Guards read `kv`
+/// concurrently — a parallel node's routing can consult it mid-run — so merging a
+/// retried attempt's writes would let work that was later discarded steer routing
+/// elsewhere in the graph. The invariant is that retries are invisible everywhere
+/// except the event log. Per-attempt data is not lost: every attempt's finish record
+/// carries its full outcome, `context_updates` included, so tooling reads it from the
+/// log. It simply never enters the routing-visible store.
 ///
 /// This is derived state — reconstructible from the event log. It is part of the
 /// engine state, but it is never checkpointed as a separate artifact.

@@ -201,3 +201,83 @@ fn the_run_context_is_rebuilt_by_replay() {
     );
     assert_eq!(replayed.run_context().get("last"), Some(&json!("c")));
 }
+
+/// `success()` on an entry node: there are no real input edges, only the seed, so
+/// the upstream fold has nothing to look up and evaluates true.
+#[test]
+fn success_on_an_entry_node_evaluates_true_off_the_seed() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let entry = b.add_step("entry", scope, NOOP);
+    let after = b.add_step("after", scope, NOOP);
+    b.link(entry, after);
+    let succeeded = b.exprs().call("success", vec![]);
+    b.set_precondition(entry, succeeded);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph);
+    assert_eq!(h.run(), RunStatus::Success);
+    assert_eq!(
+        h.started,
+        vec!["entry", "after"],
+        "an entry node with a success() precondition still runs"
+    );
+}
+
+/// `success()` on a matrix clone: a clone is seeded like an entry node, so its own
+/// precondition evaluates true, and downstream nodes look the clone up by its
+/// instance name.
+#[test]
+fn success_works_on_a_matrix_clone_and_downstream_of_one() {
+    use ir::{BinOp, ExpandTarget, collector_exprs, parallel_for_each};
+
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let plan = b.add_step("plan", scope, NOOP);
+    let build = b.add_step("build", scope, NOOP);
+    let collect = b.add_step("collect", scope, NOOP);
+    let report = b.add_step("report", scope, NOOP);
+
+    let collector = collector_exprs(b.exprs());
+    let items = b.exprs().var("input");
+    let succeeded = b.exprs().call("success", vec![]);
+
+    // The collector gates on one clone by instance name.
+    let clone_ok = {
+        let e = b.exprs();
+        let status = e.path("nodes", &["build#1", "status"]);
+        let want = e.lit("success");
+        e.binary(BinOp::Eq, status, want)
+    };
+
+    b.link(plan, build);
+    b.select(
+        build,
+        vec![Arm::always(collect).with_map(collector.indexed)],
+    );
+    b.set_join(collect, JoinPolicy::All);
+    b.select(collect, vec![Arm::when(report, clone_ok)]);
+    // Every clone carries this precondition; each is seeded, so each evaluates true.
+    b.set_precondition(build, succeeded);
+    parallel_for_each(&mut b, build, items, ExpandTarget::Node, None, false);
+    let graph = b.build();
+
+    let mut h = Harness::new(graph).respond_with(|info| match info.base.as_str() {
+        "plan" => Outcome::success(json!(["a", "b"])),
+        _ => Outcome::success(Value::Null),
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+
+    assert_eq!(
+        h.start_count("build"),
+        2,
+        "success() on a seeded clone evaluates true"
+    );
+    assert_eq!(
+        h.start_count("report"),
+        1,
+        "the instance-name lookup found build#1"
+    );
+    assert!(h.state.run_context().node("build#1").is_some());
+}

@@ -58,6 +58,11 @@ pub struct Node {
   recording of the final status, and cancel-scope failure propagation all key off
   the **final attempt only**. Intermediate attempts are still in the event log and
   in `nodes.<id>.attempts` (§2).
+- `RunContext.kv` merges on the **final attempt only**, like the node records. Guards
+  read `kv` concurrently, so merging a retried attempt's `context_updates` would let
+  work that was later discarded steer routing elsewhere in the graph; retries must be
+  invisible everywhere except the event log. Per-attempt data is not lost — every
+  attempt's finish record carries its full outcome, `context_updates` included.
 - `Budget.max_firings` counts firings (generations), **not** attempts.
   `Budget.timeout` applies **per attempt**. (Node-total wall clock: not now.)
 
