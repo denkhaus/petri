@@ -38,7 +38,7 @@ let (state, commands) = apply(state, Event::RunStarted);
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
 | §6a sequential `for_each` | `ir::lower::sequential_for_each` — no new IR, just a cycle |
 | GHA frontend mapping | `crates/engine/tests/gha.rs` |
-| §7 validation invariants | `ir::validate` |
+| §7 validation invariants | `ir::validate` — `check` for errors and warnings, `validate` for errors alone |
 | §8 reserved seams | `StepKind::fingerprint`, `Control`, `Command::{Acquire,Release}Scope`, `EventLog::version` |
 
 ## Reading the tests
@@ -53,6 +53,8 @@ crates/engine/tests/expansion.rs     §6 parallel for_each, collectors, max_para
 crates/engine/tests/cancellation.rs  §5a cancel scopes, nesting, signal delivery
 crates/engine/tests/scopes.rs        §3 resource scopes, env, acquire/release
 crates/engine/tests/gha.rs           the GHA mapping table, end to end
+crates/engine/tests/seeding.rs       seed edges for entry nodes and clone entries
+crates/engine/tests/resolved_firing.rs  the executor boundary: no unresolved ExprId crosses it
 crates/engine/tests/event_log.rs     §5 logging, determinism, serde round-trip, §8 seams
 crates/ir/tests/validation.rs        §7, invariant by invariant
 crates/ir/tests/expressions.rs       the expression language
@@ -71,6 +73,10 @@ rather than erroring, so a guard is always total. Two list functions, `sort_by_k
 and `pluck`, exist so a collector can put clone results back in `items` order
 without needing lambdas.
 
+Evaluation is total by design: a guard must always produce a boolean, so a run never
+fails at the wrong moment over a typo. The cost is that a typo is silently falsy
+instead. A strict mode, or an unknown-field lint at load time, is a v2 seam (§8).
+
 **Firing contexts.** Two per firing. The *firing context* is what a precondition and
 a step config see: `input`, `inputs`, `env`, `outputs`, `upstream`, `generation`,
 `node`, plus `item` and `index` inside an expansion clone. `status` there is folded
@@ -78,65 +84,72 @@ from the upstream firings, which is what makes `if: success()` behave the way GH
 does. The *outcome context* adds `output`, `outcome` and the firing's own `status`,
 and is what routing guards and `map` expressions see.
 
+This is provisional. `engine::context` is an ad-hoc precursor of `RunContext` /
+`EvalEnv` (handoff §2); when those land they replace it outright, so that expressions
+have one way to see upstream state rather than two. The module carries a
+`superseded by RunContext` marker so the migration cannot skip it.
+
 **HIR config placeholders.** A `StepRef.config` marks an unresolved expression with
 `{"$expr": <id>}` (`ir::validate::EXPR_PLACEHOLDER_KEY`). Lowering is lazy: the core
-resolves placeholders against the firing context and puts the result in
-`Command::StartStep.config`.
+resolves placeholders against the firing context and hands the result over in a
+`ResolvedFiring`. `ir::validate::placeholder_path` finds the first unresolved one and
+says where it is; `validate_plan` uses it at load time and `ResolvedFiring::new` uses
+it at the executor boundary.
+
+## Folded back into the design document
+
+These began as implementation notes and are now rules in `ir-design.md`, because each
+follows from something the document already said rather than from a choice the code
+made:
+
+- **A splice supersedes the whole template region** (§6, splice semantics). `All` is
+  defined over incoming edges *at firing time*, so a template edge that no token can
+  cross is a deadlock generator. Superseding is not deletion: the edges stay in the
+  graph and only leave the join count. Regression test:
+  `superseded_template_edges_do_not_deadlock_the_collector`.
+- **Scope release is irreversible** (§3, and a §7 warning). A scope is held until no
+  firing, token or deferred join needs it; a path that leaves and returns gets a fresh
+  runtime and workspace. Validation warns rather than errors, because whether a given
+  path really releases the scope depends on runtime state. The check is a static
+  over-approximation.
+- **A loop head must join with `Any`** (§7, invariant 8), with the corollary that a
+  node cannot be both a multi-branch `All` join and a loop head.
+- **`Token.generation`** (§4) and **`Command::StartStep(ResolvedFiring)`** (§5).
 
 ## Where the code departs from the document
 
-Each of these is a place the document's literal text did not survive contact with
-the compiler or with a working execution path.
+1. **Entry nodes and clone entries get synthetic seed edges.** §3 seeds entry nodes
+   with a token, but a token names an edge and an entry node has none. The engine
+   allocates one seed edge per entry, above every declared edge id, so joins count it
+   like any other incoming edge and the firing rule needs no special case: `All` over
+   a single seed edge is satisfied by the seed token. Seed edges never appear in a
+   `Routing` group and never collide with a declared id
+   (`crates/engine/tests/seeding.rs`).
 
-1. **`Token.gen` is `Token.generation`.** `gen` is a reserved keyword in Rust
-   edition 2024.
-
-2. **`Command::StartStep` carries `config`.** Config resolution is lazy per §6, so
-   the graph's copy is still unresolved when the step runs. The host needs the
-   resolved value, not the placeholder.
-
-3. **`apply` keeps its signature but drains an internal queue.** Routing emits
-   tokens by feeding `Event::TokenEmitted` back to itself. Each one is appended to
-   the log before it is applied, so the log records token flow as well as external
-   input, and the caller only ever feeds in events from outside.
-
-4. **Entry nodes and clone entries get synthetic seed edges.** §3 seeds entry nodes
-   with a token, but a token names an edge and an entry node has no incoming edge.
-   The engine allocates one seed edge per entry, so the join rule needs no special
-   case: `All` over a single seed edge is satisfied by the seed token.
-
-5. **`Command::ExpandNode` is defined but not emitted.** `items` is a pure
+2. **`Command::ExpandNode` is defined but not emitted.** `items` is a pure
    expression, so the core evaluates it and builds the splice itself, in the same
-   `apply` call. The variant stays as the seam for a host that resolves items
-   externally and feeds back `Event::NodeExpanded`.
+   `apply` call. The variant is marked `// reserved: external expansion` and is the
+   seam for a host that resolves items externally and feeds back
+   `Event::NodeExpanded`.
 
-6. **`SubgraphSplice` carries the original region.** Every node the clones replace is
-   *superseded*: it never fires, and its outgoing edges stop counting toward
-   downstream joins. Without this the collector's `All` join would also wait on the
-   original region's edge, which no token ever crosses.
+3. **`ExpandTarget::Subgraph { entry, .. }` requires `entry` to be the expanding
+   node.** Otherwise it is ambiguous whether the expanding node runs before the region
+   is cloned. Violations are a run error, not a panic.
 
-7. **`ExpandTarget::Subgraph { entry, .. }` requires `entry` to be the expanding
-   node.** Otherwise it is ambiguous whether the expanding node runs before the
-   region is cloned. Violations are a run error, not a panic.
+4. **An entry node may have a back edge pointing at it.** §7 does not cover the case;
+   a loop head that is also the graph entry is legitimate, since the seed starts
+   generation 0 and the back edge starts each later one. Validation rejects only
+   *forward* edges into an entry.
 
-8. **Resource scopes are held, not refcounted.** A scope is acquired before the first
-   step in it starts and released once no live firing, pending token or deferred join
-   needs it. A per-firing refcount would tear a job down and rebuild it between two
-   consecutive steps of the same job.
+5. **Budget exhaustion drops the tokens.** §7 requires a finite cap on looped nodes
+   but does not say what happens at the cap. The firing is refused, the tokens are
+   dropped, a `RunError::BudgetExceeded` is recorded, and the run folds to failed — so
+   a runaway loop terminates rather than spinning.
 
-9. **A loop head must use `JoinPolicy::Any`.** On the first iteration only the entry
-   edge carries a token and on later ones only the back edge does, so `All` would
-   never be satisfied. `ir::lower::sequential_for_each` sets this for you.
-
-10. **An entry node may have a back edge pointing at it.** §7 implies entry nodes
-    are seeded rather than joined, but a loop head that is also the graph entry is
-    legitimate: the seed starts generation 0 and the back edge starts each later one.
-    Validation rejects only *forward* edges into an entry.
-
-11. **Budget exhaustion drops the tokens.** §7 requires a finite cap on looped nodes
-    but does not say what happens at the cap. The firing is refused, the tokens are
-    dropped, a `RunError::BudgetExceeded` is recorded, and the run folds to failed —
-    so a runaway loop terminates rather than spinning.
+6. **`apply` drains an internal event queue.** The signature is the document's, but
+   routing emits tokens by feeding `Event::TokenEmitted` back to itself. Each one is
+   logged before it is applied, so the log records token flow as well as external
+   input, and the caller only ever feeds in events from outside.
 
 ## Not built
 

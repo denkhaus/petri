@@ -22,6 +22,6 @@ pub mod log;
 pub mod state;
 
 pub use apply::apply;
-pub use event::{Command, Event, SpliceClone, SubgraphSplice};
+pub use event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice, UnresolvedConfig};
 pub use log::{EventLog, EventRecord, LOG_VERSION};
 pub use state::{CancelScope, EngineState, Firing, FiringRecord, RunError, Splice};

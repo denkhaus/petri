@@ -39,25 +39,135 @@ pub enum Event {
     },
 }
 
+/// Everything an executor needs to run one step, with every expression already
+/// resolved.
+///
+/// The type is the enforcement point for "no unresolved `ExprId` crosses the
+/// executor boundary". Its fields are private and the only way to build one is
+/// [`ResolvedFiring::new`], which rejects a config still holding an expression
+/// placeholder. Deserialization goes through the same check, so a value read back
+/// off the wire carries the invariant too.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(into = "ResolvedFiringRepr", try_from = "ResolvedFiringRepr")]
+pub struct ResolvedFiring {
+    id: FiringId,
+    node: NodeId,
+    generation: Generation,
+    scope: ScopeId,
+    inputs: Vec<Token>,
+    config: Value,
+}
+
+impl ResolvedFiring {
+    /// Build one, refusing a config that still holds an expression placeholder.
+    pub fn new(
+        id: FiringId,
+        node: NodeId,
+        generation: Generation,
+        scope: ScopeId,
+        inputs: Vec<Token>,
+        config: Value,
+    ) -> Result<Self, UnresolvedConfig> {
+        match ir::validate::placeholder_path(&config) {
+            Some(path) => Err(UnresolvedConfig { node, path }),
+            None => Ok(Self {
+                id,
+                node,
+                generation,
+                scope,
+                inputs,
+                config,
+            }),
+        }
+    }
+
+    pub fn id(&self) -> FiringId {
+        self.id
+    }
+
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    /// The resource scope the step runs in.
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+
+    /// The tokens whose arrival satisfied the node's join.
+    pub fn inputs(&self) -> &[Token] {
+        &self.inputs
+    }
+
+    /// The step's configuration. Guaranteed free of expression placeholders.
+    pub fn config(&self) -> &Value {
+        &self.config
+    }
+
+    pub fn into_config(self) -> Value {
+        self.config
+    }
+}
+
+/// A config reached the executor boundary with an expression still in it.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[error("step config for node {node:?} still holds an unresolved expression at `{path}`")]
+pub struct UnresolvedConfig {
+    pub node: NodeId,
+    pub path: String,
+}
+
+/// The wire shape. Private, so the only public way in is through the checked
+/// constructor.
+#[derive(Serialize, Deserialize)]
+struct ResolvedFiringRepr {
+    id: FiringId,
+    node: NodeId,
+    generation: Generation,
+    scope: ScopeId,
+    inputs: Vec<Token>,
+    config: Value,
+}
+
+impl From<ResolvedFiring> for ResolvedFiringRepr {
+    fn from(f: ResolvedFiring) -> Self {
+        Self {
+            id: f.id,
+            node: f.node,
+            generation: f.generation,
+            scope: f.scope,
+            inputs: f.inputs,
+            config: f.config,
+        }
+    }
+}
+
+impl TryFrom<ResolvedFiringRepr> for ResolvedFiring {
+    type Error = UnresolvedConfig;
+
+    fn try_from(r: ResolvedFiringRepr) -> Result<Self, Self::Error> {
+        ResolvedFiring::new(r.id, r.node, r.generation, r.scope, r.inputs, r.config)
+    }
+}
+
 /// Something the host must do.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    StartStep {
-        firing: FiringId,
-        node: NodeId,
-        generation: Generation,
-        inputs: Vec<Token>,
-        scope: ScopeId,
-        /// The node's `StepRef.config` with expression placeholders resolved against
-        /// the firing's context. The host runs this, not the graph's copy.
-        config: Value,
-    },
+    /// Run a step. The payload carries the config already resolved against the
+    /// firing's context, so the host never reads the graph's unresolved copy.
+    StartStep(ResolvedFiring),
     DeliverControl {
         firing: FiringId,
         ctl: Control,
     },
-    /// Reserved seam: emitted only when expansion is delegated to the host. The core
-    /// resolves `items` itself in v1 and splices in the same `apply` call.
+    // reserved: external expansion. The core resolves `items` itself and splices in
+    // the same `apply` call, so it never emits this. The variant is the seam for a
+    // host that resolves items externally and feeds back `Event::NodeExpanded` — do
+    // not delete it as dead code.
     ExpandNode {
         node: NodeId,
         generation: Generation,

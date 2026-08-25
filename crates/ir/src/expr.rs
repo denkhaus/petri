@@ -4,6 +4,12 @@
 //! [`Graph`](crate::Graph) stays a plain tree of `Copy` ids with no interior pointers.
 //! Evaluation has no IO, no clocks and no randomness: the same [`Context`] always
 //! produces the same [`Value`].
+//!
+//! Evaluation is **total**: a missing field is `null` rather than an error, so a
+//! guard always yields a boolean and a typo can never fail a run at the wrong
+//! moment. The cost is that a typo is silently falsy instead. Reserved seam for v2:
+//! a strict mode, or an unknown-field lint at load time, that reports a path no
+//! context can ever bind.
 
 use std::collections::BTreeMap;
 

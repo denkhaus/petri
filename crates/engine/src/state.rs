@@ -76,6 +76,8 @@ pub enum RunError {
     NoArmMatched { node: NodeId, group: usize },
     #[error("node {node:?}: `for_each` items evaluated to {got}, not an array")]
     ItemsNotArray { node: NodeId, got: SmolStr },
+    #[error("node {node:?}: step config still holds an unresolved expression at `{path}`")]
+    UnresolvedConfig { node: NodeId, path: String },
     #[error("node {node:?}: expansion subgraph entry must be the expanding node")]
     ExpansionEntryMismatch { node: NodeId },
     #[error("token refers to unknown edge {0:?}")]
@@ -244,6 +246,18 @@ impl EngineState {
             .flat_map(|g| g.values())
             .map(|t| t.len())
             .sum()
+    }
+
+    /// The synthetic incoming edges allocated for entry nodes and expansion clone
+    /// entries, with the node each one feeds.
+    ///
+    /// These are allocated from the free edge-id space above every id the graph
+    /// declares, so they never collide with a declared edge, and they are never
+    /// written into a [`ir::Routing`] group — they exist only here. Joins count them
+    /// alongside real incoming edges, which is what lets an entry node use any join
+    /// policy without a special case.
+    pub fn seed_edges(&self) -> impl Iterator<Item = (EdgeId, NodeId)> + '_ {
+        self.seed_edges.iter().map(|(edge, node)| (*edge, *node))
     }
 
     pub fn cancel_scope(&self, id: CancelScopeId) -> Option<&CancelScope> {

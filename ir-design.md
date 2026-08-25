@@ -148,6 +148,15 @@ pub enum ExpandTarget {
 }
 
 /// "Job" generalized: a resource scope, not a sequence.
+///
+/// A scope is acquired before the first step in it starts and released once no live
+/// firing, pending token or deferred join needs it. **Release is irreversible.** A
+/// routing path or a cycle may leave a scope and come back; re-entry acquires a
+/// fresh runtime and workspace, so anything the earlier firings left behind is gone.
+/// Validation warns (it does not error) when any path can re-enter a scope — see §7.
+///
+/// The rejected alternative, for the record: holding a re-enterable scope open until
+/// quiescence. That pins containers open on paths that may never execute.
 pub struct Scope {
     pub id: ScopeId,
     pub env: BTreeMap<SmolStr, ExprOrValue>,
@@ -168,7 +177,7 @@ pub struct Graph {
 ```rust
 pub struct Token {
     pub edge: EdgeId,
-    pub gen: Generation,
+    pub generation: Generation,   // `gen` is a reserved keyword in edition 2024
     pub payload: Value,
     pub from: FiringId,
 }
@@ -206,8 +215,11 @@ pub enum Event {
 }
 
 pub enum Command {
-    StartStep      { firing: FiringId, node: NodeId, gen: Generation,
-                     inputs: Vec<Token>, scope: ScopeId },
+    /// Everything the executor needs, with every expression already resolved.
+    /// `ResolvedFiring`'s constructor rejects a config that still holds an
+    /// expression placeholder, so "no unresolved ExprId crosses the executor
+    /// boundary" is an invariant of the type. Deserialization runs the same check.
+    StartStep(ResolvedFiring),
     DeliverControl { firing: FiringId, ctl: Control },
     ExpandNode     { node: NodeId, gen: Generation, expr: ExprId },
     AcquireScope   { scope: ScopeId },
@@ -252,6 +264,17 @@ adds one edge per clone into the downstream **collector** node. No special join 
 needed: `JoinPolicy::All` counts incoming edges *as of firing time*, so dynamically
 added edges are included. Each clone's output token carries its `index`; the
 collector's `map` expression assembles the ordered result array.
+
+A splice also **supersedes the whole template region** — every node the clones
+replace, entry and interior alike. A superseded node never fires, and its outgoing
+edges stop counting toward downstream joins.
+
+This follows directly from `All` being defined over "incoming edges at firing time".
+The template's own edge into the collector survives the splice, and no token can ever
+cross it, because the node it leaves has been replaced. Counting it would make the
+collector wait forever: a template edge left in the join count is a deadlock
+generator. Superseding is not deletion — the edges stay in the graph so the log still
+describes what was there — it only removes them from the count.
 
 ### 6a. Sequential for_each: desugars to a cycle
 
@@ -304,6 +327,21 @@ it exercises the degenerate subset, by construction.
 6. Expression references resolve; HIR-only fields absent from executable plans.
 7. `ExpandTarget::Subgraph { entry, exit }`: exit postdominates entry; no edges cross
    the subgraph boundary except into `entry` and out of `exit`.
+8. Any node with an incoming back edge must use `JoinPolicy::Any`. A forward edge into
+   the head carries only generation 0 and a back edge only generations 1 and up;
+   tokens are matched per `(node, generation)`, so no generation ever holds a token on
+   both and `All` is unsatisfiable forever.
+
+   *Corollary users meet first:* a node cannot be both a multi-branch `All` join and a
+   loop head. Put a dedicated join node in front of the loop head and let the back
+   edge target the head.
+
+**Warnings** (reported alongside errors; they do not block a load):
+
+- A path can leave a scope and return to it. Release is irreversible (§3), so re-entry
+  gets a fresh runtime and workspace. The check is a static over-approximation: it
+  fires whenever some node outside the scope is both reachable from it and able to
+  reach it, even where something always keeps the scope busy in practice.
 
 ## 8. Reserved seams (v2, no rework required)
 
@@ -311,3 +349,9 @@ it exercises the degenerate subset, by construction.
 - `#[non_exhaustive] enum Control { Cancel }` — Pause/Steer/Approve later.
 - `Command::{Acquire,Release}Scope` — remote scope placement when distribution lands.
 - Event log format is versioned from day one — resume/replay/UI later.
+- Expression evaluation is **total**: a missing field is `null`, so a guard always
+  yields a boolean. A typo is therefore silently falsy. Reserved for v2: a strict mode,
+  or an unknown-field lint at load time that reports a path no context can bind.
+- Firing contexts are built ad hoc today. `RunContext` / `EvalEnv` (handoff §2)
+  replaces that mechanism outright when it lands — one way for expressions to see
+  upstream state, not two.

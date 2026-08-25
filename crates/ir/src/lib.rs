@@ -35,7 +35,10 @@ pub use runtime::{
     Control, FailureInfo, LogStream, Metrics, Outcome, RunStatus, Status, StepEvent, Token,
 };
 pub use step::{Digest, StepKind, StepRegistry};
-pub use validate::{ValidationError, validate, validate_plan, validate_with};
+pub use validate::{
+    ValidationError, ValidationReport, ValidationWarning, check, check_with, validate,
+    validate_plan, validate_with,
+};
 
 /// The value type carried by tokens, outcomes and step configuration.
 pub type Value = serde_json::Value;

@@ -1,6 +1,11 @@
 //! Building the expression context for a firing, and resolving HIR config
 //! placeholders against it.
 //!
+//! superseded by RunContext (handoff §2). This module is an ad-hoc precursor of
+//! `RunContext` / `EvalEnv`. When those land they replace it outright: there must be
+//! one way for expressions to see upstream state, not two. Do not extend the
+//! bindings here — add them to `RunContext` instead.
+//!
 //! Two contexts exist per firing. The **firing context** is what a precondition and
 //! a step's config see: inputs, upstream statuses, scope env, prior outputs. The
 //! **outcome context** adds the firing's own result and is what routing guards and

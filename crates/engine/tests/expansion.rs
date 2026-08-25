@@ -174,9 +174,15 @@ fn fail_fast_cancels_the_sibling_clones() {
     assert!(h.state.cancel_scope(splice.cancel_scope).unwrap().cancelled);
 }
 
-/// A subgraph expansion clones the whole region, not just one node.
+/// Splice semantics: a splice supersedes the whole template region, so a template
+/// edge no token can cross stops counting toward a downstream join.
+///
+/// This is the regression test for a deadlock generator. `All` is defined over the
+/// incoming edges a node has *at firing time*, so if the template's `test -> collect`
+/// edge kept counting after the clones were spliced in, the collector would wait
+/// forever on an edge nothing can ever cross.
 #[test]
-fn subgraph_expansion_clones_the_region() {
+fn superseded_template_edges_do_not_deadlock_the_collector() {
     let mut b = GraphBuilder::new();
     let scope = ir::ScopeId::new(0);
     let plan = b.add_step("plan", scope, NOOP);
@@ -188,7 +194,8 @@ fn subgraph_expansion_clones_the_region() {
     let items = b.exprs().var("input");
     b.link(plan, setup);
     b.link(setup, test);
-    b.select(test, vec![Arm::always(collect).with_map(collector.indexed)]);
+    let template_edges = b.select(test, vec![Arm::always(collect).with_map(collector.indexed)]);
+    let template_edge = template_edges[0];
     b.set_join(collect, JoinPolicy::All);
     parallel_for_each(
         &mut b,
@@ -209,13 +216,29 @@ fn subgraph_expansion_clones_the_region() {
         _ => Outcome::success(Value::Null),
     });
     assert_eq!(h.run(), RunStatus::Success);
+
+    // The whole region is cloned, not just the node carrying the expansion.
     assert_eq!(h.start_count("setup"), 2);
     assert_eq!(h.start_count("test"), 2);
-    assert_eq!(h.start_count("collect"), 1);
-    assert!(
-        h.state.is_superseded(setup),
-        "the original region entry is replaced by its clones"
+    assert_eq!(
+        h.start_count("collect"),
+        1,
+        "the collector is not deadlocked"
     );
+
+    // Every template node is superseded, entry and interior alike.
+    assert!(h.state.is_superseded(setup), "the region entry");
+    assert!(h.state.is_superseded(test), "the region exit");
+    assert!(!h.state.is_superseded(collect), "the collector is outside");
+
+    // The template edge is still in the graph — superseding is not deletion, so the
+    // log and the graph still describe what was there.
+    assert!(
+        h.state.graph.edge(template_edge).is_some(),
+        "the template edge is kept, only discounted"
+    );
+    assert!(h.state.is_quiescent());
+    assert_eq!(h.state.pending_count(), 0, "no token is left stranded");
 }
 
 /// Expanding over an empty array leaves the collector with nothing to wait for and

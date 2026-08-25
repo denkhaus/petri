@@ -3,13 +3,13 @@
 //!
 //! Every check runs, so one call reports every problem rather than the first.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::expr::Expr;
-use crate::graph::{ExpandTarget, Expansion, ExprOrValue, Graph, Guard};
+use crate::graph::{ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
 use crate::ids::{EdgeId, ExprId, NodeId, ScopeId};
 use crate::step::StepRegistry;
 
@@ -73,8 +73,16 @@ pub enum ValidationError {
     UnknownExpr { site: SmolStr, expr: ExprId },
     #[error("node {0:?} still carries an `expand`; executable plans are fully lowered")]
     HirFieldInPlan(NodeId),
-    #[error("node {0:?} still carries an unresolved config placeholder")]
-    HirConfigInPlan(NodeId),
+    #[error("node {node:?} still carries an unresolved config placeholder at `{path}`")]
+    HirConfigInPlan { node: NodeId, path: String },
+
+    // ── Invariant 8 ────────────────────────────────────────────────────────
+    #[error(
+        "node {0:?} has an incoming back edge, so it must join with `Any`: a forward edge \
+         carries only generation 0 and a back edge only generations 1 and up, so `All` over \
+         both is unsatisfiable in every generation"
+    )]
+    LoopHeadMustJoinAny(NodeId),
 
     // ── Invariant 7 ────────────────────────────────────────────────────────
     #[error("node {node:?}: expansion subgraph entry {entry:?} does not reach exit {exit:?}")]
@@ -100,13 +108,66 @@ pub enum ValidationError {
     BoundaryCrossing { node: NodeId, edge: EdgeId },
 }
 
+/// Something worth flagging that is still a legal graph.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ValidationWarning {
+    #[error(
+        "scope {scope:?} can be re-entered: a path leaves it through {via:?} and comes back. \
+         A scope is released once nothing in it can run, and release is irreversible, so \
+         re-entry acquires a fresh runtime and workspace and anything the earlier firings \
+         left behind is gone. This check is a static over-approximation: it fires whenever \
+         a path leaves and returns, even where something always keeps the scope busy."
+    )]
+    ScopeReentry { scope: ScopeId, via: NodeId },
+}
+
+/// Everything one validation pass found. Errors block a load; warnings do not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ValidationReport {
+    pub errors: Vec<ValidationError>,
+    pub warnings: Vec<ValidationWarning>,
+}
+
+impl ValidationReport {
+    /// No errors. Warnings may still be present.
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// The warnings, or the errors that block the load.
+    pub fn into_result(self) -> Result<Vec<ValidationWarning>, Vec<ValidationError>> {
+        if self.errors.is_empty() {
+            Ok(self.warnings)
+        } else {
+            Err(self.errors)
+        }
+    }
+}
+
 /// The marker a HIR `StepRef.config` uses for a value that is still an expression.
 /// Lowering replaces these with concrete values before execution.
 pub const EXPR_PLACEHOLDER_KEY: &str = "$expr";
 
 /// Validate a graph in HIR form: `expand` and config placeholders are allowed.
+///
+/// Errors only. Use [`check`] when the warnings matter too.
 pub fn validate(graph: &Graph) -> Result<(), Vec<ValidationError>> {
     validate_with(graph, None)
+}
+
+/// Validate a graph and return both errors and warnings.
+pub fn check(graph: &Graph) -> ValidationReport {
+    check_with(graph, None)
+}
+
+/// Validate a graph against a step registry and return both errors and warnings.
+pub fn check_with(graph: &Graph, registry: Option<&StepRegistry>) -> ValidationReport {
+    let mut warnings = Vec::new();
+    check_scope_reentry(graph, &mut warnings);
+    ValidationReport {
+        errors: collect(graph, registry),
+        warnings,
+    }
 }
 
 /// Validate an executable plan: everything [`validate`] checks, plus invariant 6's
@@ -141,6 +202,7 @@ fn collect(graph: &Graph, registry: Option<&StepRegistry>) -> Vec<ValidationErro
     check_exprs_resolve(graph, &mut errors);
     check_back_edges(graph, &mut errors);
     check_budgets(graph, &mut errors);
+    check_loop_head_joins(graph, &mut errors);
     check_expansions(graph, &mut errors);
     errors
 }
@@ -330,20 +392,49 @@ fn check_fully_lowered(graph: &Graph, errors: &mut Vec<ValidationError>) {
         if node.expand.is_some() {
             errors.push(ValidationError::HirFieldInPlan(node.id));
         }
-        if has_placeholder(&node.step.config) {
-            errors.push(ValidationError::HirConfigInPlan(node.id));
+        if let Some(path) = placeholder_path(&node.step.config) {
+            errors.push(ValidationError::HirConfigInPlan {
+                node: node.id,
+                path,
+            });
         }
     }
 }
 
-fn has_placeholder(config: &Value) -> bool {
-    match config {
-        Value::Object(map) => {
-            map.contains_key(EXPR_PLACEHOLDER_KEY) || map.values().any(has_placeholder)
+/// Where the first unresolved expression placeholder sits in a config, as a dotted
+/// path (`""` when the whole config is one).
+///
+/// Both halves of "no unresolved `ExprId` crosses the executor boundary" use this:
+/// [`validate_plan`] at load time, and `ResolvedFiring`'s constructor at firing time.
+pub fn placeholder_path(config: &Value) -> Option<String> {
+    fn walk(value: &Value, path: &str) -> Option<String> {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key(EXPR_PLACEHOLDER_KEY) {
+                    return Some(path.to_string());
+                }
+                map.iter().find_map(|(key, child)| {
+                    let next = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    walk(child, &next)
+                })
+            }
+            Value::Array(items) => items
+                .iter()
+                .enumerate()
+                .find_map(|(i, child)| walk(child, &format!("{path}[{i}]"))),
+            _ => None,
         }
-        Value::Array(items) => items.iter().any(has_placeholder),
-        _ => false,
     }
+    walk(config, "")
+}
+
+/// Whether a config still holds an unresolved expression placeholder.
+pub fn contains_placeholder(config: &Value) -> bool {
+    placeholder_path(config).is_some()
 }
 
 // ── Invariant 1 ───────────────────────────────────────────────────────────
@@ -529,6 +620,94 @@ fn check_expansions(graph: &Graph, errors: &mut Vec<ValidationError>) {
             }
         }
     }
+}
+
+// ── Invariant 8 ───────────────────────────────────────────────────────────
+
+/// A node with an incoming back edge is a loop head, and a loop head must join with
+/// `Any`.
+///
+/// The reason is structural. A forward edge into the head only ever carries
+/// generation 0, and a back edge only ever carries generation 1 and up. Tokens are
+/// matched per `(node, generation)`, so no generation ever holds a token on both, and
+/// `All` is unsatisfiable forever.
+///
+/// The corollary users meet first: a node cannot be both a multi-branch `All` join
+/// and a loop head. Put a dedicated join node in front of the loop head and let the
+/// back edge target the head.
+fn check_loop_head_joins(graph: &Graph, errors: &mut Vec<ValidationError>) {
+    let mut heads: BTreeSet<NodeId> = BTreeSet::new();
+    for edge in graph.edges() {
+        if edge.back && graph.node(edge.to).is_some() {
+            heads.insert(edge.to);
+        }
+    }
+    for head in heads {
+        if let Some(node) = graph.node(head)
+            && node.join != JoinPolicy::Any
+        {
+            errors.push(ValidationError::LoopHeadMustJoinAny(head));
+        }
+    }
+}
+
+// ── Warnings ──────────────────────────────────────────────────────────────
+
+/// Warn where a path can leave a scope and come back.
+///
+/// A scope is released once no live firing, pending token or deferred join needs it,
+/// and release is irreversible. Re-entry therefore gets a fresh runtime and
+/// workspace. Whether a given path actually releases the scope on the way through
+/// depends on runtime state, so this is a warning: the static condition is simply
+/// that some node outside the scope is both reachable from it and able to reach it.
+fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
+    let mut by_scope: BTreeMap<ScopeId, BTreeSet<NodeId>> = BTreeMap::new();
+    for node in &graph.nodes {
+        by_scope.entry(node.scope).or_default().insert(node.id);
+    }
+
+    let mut successors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for node in &graph.nodes {
+        for edge in node.routing.edges() {
+            if graph.node(edge.to).is_some() {
+                successors.entry(node.id).or_default().push(edge.to);
+                predecessors.entry(edge.to).or_default().push(node.id);
+            }
+        }
+    }
+
+    for (scope, members) in &by_scope {
+        let downstream = reachable(members, &successors);
+        let upstream = reachable(members, &predecessors);
+        // A node outside the scope that the scope reaches and that reaches back into
+        // it closes a leave-and-return path.
+        let via = downstream
+            .intersection(&upstream)
+            .find(|node| !members.contains(node));
+        if let Some(via) = via {
+            warnings.push(ValidationWarning::ScopeReentry {
+                scope: *scope,
+                via: *via,
+            });
+        }
+    }
+}
+
+/// Every node reachable from `seeds` in one or more steps.
+fn reachable(seeds: &BTreeSet<NodeId>, edges: &HashMap<NodeId, Vec<NodeId>>) -> BTreeSet<NodeId> {
+    let mut seen = BTreeSet::new();
+    let mut queue: VecDeque<NodeId> = seeds
+        .iter()
+        .flat_map(|node| edges.get(node).into_iter().flatten().copied())
+        .collect();
+    while let Some(node) = queue.pop_front() {
+        if !seen.insert(node) {
+            continue;
+        }
+        queue.extend(edges.get(&node).into_iter().flatten().copied());
+    }
+    seen
 }
 
 /// Map of edge id to the node it leaves, built once for callers that need it often.

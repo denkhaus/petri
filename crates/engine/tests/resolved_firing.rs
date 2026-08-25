@@ -1,0 +1,148 @@
+//! `ResolvedFiring` is where "no unresolved `ExprId` crosses the executor boundary"
+//! is enforced. The invariant lives in the type, not in a review comment.
+
+mod support;
+
+use engine::{Command, EngineState, Event, ResolvedFiring, RunError, apply};
+use ir::validate::EXPR_PLACEHOLDER_KEY;
+use ir::{
+    FiringId, Generation, GraphBuilder, NodeId, RunStatus, ScopeId, StepRef, Value, validate,
+};
+use serde_json::json;
+use support::{Harness, NOOP};
+
+fn firing(config: Value) -> Result<ResolvedFiring, engine::UnresolvedConfig> {
+    ResolvedFiring::new(
+        FiringId::new(1),
+        NodeId::new(0),
+        Generation::ZERO,
+        ScopeId::new(0),
+        vec![],
+        config,
+    )
+}
+
+/// A clean config builds; one holding a placeholder does not.
+#[test]
+fn the_constructor_refuses_an_unresolved_config() {
+    let ok = firing(json!({ "region": "us-east" })).expect("resolved config is accepted");
+    assert_eq!(ok.config(), &json!({ "region": "us-east" }));
+
+    let err = firing(json!({ "env": { "TOKEN": { EXPR_PLACEHOLDER_KEY: 3 } } }))
+        .expect_err("a placeholder must be refused");
+    assert_eq!(err.node, NodeId::new(0));
+    assert_eq!(err.path, "env.TOKEN");
+}
+
+/// Deserialization goes through the same constructor, so a value read off the wire
+/// carries the invariant too.
+#[test]
+fn deserialization_cannot_smuggle_a_placeholder_through() {
+    let clean = firing(json!({ "region": "eu" })).unwrap();
+    let encoded = serde_json::to_string(&clean).expect("encode");
+    let decoded: ResolvedFiring = serde_json::from_str(&encoded).expect("decode");
+    assert_eq!(decoded, clean);
+
+    // The same wire shape, with a placeholder put back into the config by hand.
+    let smuggled = encoded.replace(r#"{"region":"eu"}"#, r#"{"region":{"$expr":3}}"#);
+    assert!(
+        serde_json::from_str::<ResolvedFiring>(&smuggled).is_err(),
+        "deserializing an unresolved config must fail"
+    );
+}
+
+/// The core resolves config against the firing context before handing it over.
+#[test]
+fn the_core_resolves_config_before_the_boundary() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let a = b.add_step("a", scope, NOOP);
+    let c = b.add_step("c", scope, NOOP);
+    b.link(a, c);
+    let input = b.exprs().var("input");
+    b.node_mut(c).step = StepRef::new(
+        NOOP,
+        json!({ "from_upstream": { EXPR_PLACEHOLDER_KEY: input.raw() } }),
+    );
+    let graph = b.build();
+    validate(&graph).expect("valid as HIR");
+
+    let mut h = Harness::new(graph).respond_with(|info| {
+        if info.base == "a" {
+            ir::Outcome::success(json!("carried"))
+        } else {
+            assert_eq!(info.config, json!({ "from_upstream": "carried" }));
+            ir::Outcome::success(Value::Null)
+        }
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+
+    // Every command the run produced carries a placeholder-free config.
+    for command in &h.commands {
+        if let Command::StartStep(resolved) = command {
+            assert!(!ir::validate::contains_placeholder(resolved.config()));
+        }
+    }
+}
+
+/// A placeholder the resolver cannot read — `$expr` with a non-numeric value — is
+/// caught at the boundary and fails that node, instead of reaching a step.
+#[test]
+fn a_malformed_placeholder_fails_the_node_at_the_boundary() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let a = b.add_step("a", scope, NOOP);
+    b.node_mut(a).step = StepRef::new(
+        NOOP,
+        json!({ "broken": { EXPR_PLACEHOLDER_KEY: "not an expression id" } }),
+    );
+    let graph = b.build();
+
+    let mut h = Harness::new(graph);
+    assert_eq!(h.run(), RunStatus::Failed);
+    assert_eq!(h.start_count("a"), 0, "the step never ran");
+    assert!(matches!(
+        h.state.errors().first(),
+        Some(RunError::UnresolvedConfig { path, .. }) if path == "broken"
+    ));
+}
+
+/// `validate_plan` catches the same thing at load time, so the runtime check is a
+/// backstop rather than the only line of defence.
+#[test]
+fn load_time_validation_catches_it_first() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let a = b.add_step("a", scope, NOOP);
+    let value = b.exprs().lit(1);
+    b.node_mut(a).step = StepRef::new(NOOP, json!({ "x": { EXPR_PLACEHOLDER_KEY: value.raw() } }));
+    let graph = b.build();
+
+    let errors = ir::validate_plan(&graph).expect_err("not an executable plan");
+    assert!(errors.iter().any(|e| matches!(
+        e,
+        ir::ValidationError::HirConfigInPlan { path, .. } if path == "x"
+    )));
+}
+
+/// The payload names the firing, so a host can correlate it with the events it
+/// sends back.
+#[test]
+fn the_payload_identifies_the_firing() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_step("only", scope, NOOP);
+    let graph = b.build();
+
+    let (state, commands) = apply(EngineState::new(graph), Event::RunStarted);
+    let Some(Command::StartStep(resolved)) =
+        commands.iter().find(|c| matches!(c, Command::StartStep(_)))
+    else {
+        panic!("expected a StartStep");
+    };
+    assert_eq!(resolved.node(), NodeId::new(0));
+    assert_eq!(resolved.generation(), Generation::ZERO);
+    assert_eq!(resolved.scope(), ScopeId::new(0));
+    assert_eq!(resolved.inputs().len(), 1, "the seed token");
+    assert!(state.firing(resolved.id()).is_some());
+}

@@ -14,7 +14,7 @@ use ir::{
 use smol_str::SmolStr;
 
 use crate::context::{clone_bindings, firing_context, outcome_context, resolve_config};
-use crate::event::{Command, Event, SpliceClone, SubgraphSplice};
+use crate::event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice};
 use crate::state::{EngineState, Firing, FiringRecord, RunError, Splice, synthetic};
 
 /// Apply one event and return the commands it produced.
@@ -244,27 +244,50 @@ fn try_fire(
         }
     };
 
+    let firing_id = state.next_firing_id();
+    // The constructor is where "no unresolved ExprId crosses the executor boundary"
+    // is enforced. A malformed placeholder that `resolve_config` could not read is
+    // caught here rather than reaching a step.
+    let resolved = match ResolvedFiring::new(
+        firing_id,
+        node_id,
+        generation,
+        node.scope,
+        inputs.clone(),
+        config,
+    ) {
+        Ok(resolved) => resolved,
+        Err(unresolved) => {
+            state.push_error(RunError::UnresolvedConfig {
+                node: node_id,
+                path: unresolved.path,
+            });
+            complete_without_running(
+                state,
+                &node,
+                generation,
+                &inputs,
+                Outcome::failure("step config still holds an unresolved expression"),
+                queue,
+            );
+            return;
+        }
+    };
+
     let firing = Firing {
-        id: state.next_firing_id(),
+        id: firing_id,
         node: node_id,
         generation,
         scope: node.scope,
         cancel_scope: state.cancel_scope_of(node_id),
-        inputs: inputs.clone(),
+        inputs,
         started: false,
         cancelling: false,
     };
     if state.acquire_scope(node.scope) {
         cmds.push(Command::AcquireScope { scope: node.scope });
     }
-    cmds.push(Command::StartStep {
-        firing: firing.id,
-        node: node_id,
-        generation,
-        inputs,
-        scope: node.scope,
-        config,
-    });
+    cmds.push(Command::StartStep(resolved));
     state.insert_firing(firing);
 }
 

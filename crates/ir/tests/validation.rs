@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ir::validate::{EXPR_PLACEHOLDER_KEY, ValidationError};
+use ir::validate::{EXPR_PLACEHOLDER_KEY, ValidationError, ValidationWarning};
 use ir::{
     Arm, Budget, Edge, ExpandTarget, Expansion, ExprId, Graph, GraphBuilder, Guard, JoinPolicy,
     Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef, Value, validate,
@@ -211,7 +211,7 @@ fn a_plan_may_not_carry_hir_fields() {
         validate_plan(&graph)
             .expect_err("not a plan")
             .iter()
-            .any(|e| matches!(e, ValidationError::HirConfigInPlan(_)))
+            .any(|e| matches!(e, ValidationError::HirConfigInPlan { .. }))
     );
 }
 
@@ -387,4 +387,147 @@ fn a_single_always_arm_is_legal() {
         graph.node(a).unwrap().routing.groups[0].arms[0].guard,
         Guard::Always
     );
+}
+
+/// Invariant 8: a node with an incoming back edge is a loop head, and must join
+/// with `Any`.
+#[test]
+fn a_loop_head_must_join_with_any() {
+    let build = |join: JoinPolicy| {
+        let mut b = GraphBuilder::new();
+        let scope = ScopeId::new(0);
+        let head = b.add_step("head", scope, NOOP);
+        let tail = b.add_step("tail", scope, NOOP);
+        b.set_join(head, join);
+        b.link(head, tail);
+        b.select(tail, vec![Arm::always(head).as_back()]);
+        b.set_budget(head, Budget::looped(5));
+        b.set_budget(tail, Budget::looped(5));
+        b.mark_entry(head);
+        b.build()
+    };
+
+    for join in [JoinPolicy::All, JoinPolicy::Quorum { n: 2 }] {
+        let graph = build(join);
+        assert!(
+            errors(&graph)
+                .iter()
+                .any(|e| matches!(e, ValidationError::LoopHeadMustJoinAny(_))),
+            "{join:?} should be rejected on a loop head"
+        );
+    }
+    validate(&build(JoinPolicy::Any)).expect("Any is the only legal loop-head join");
+}
+
+/// The corollary: a node cannot be both a multi-branch `All` join and a loop head.
+/// The fix is a dedicated join node in front of the head.
+#[test]
+fn a_multi_branch_join_needs_its_own_node_in_front_of_a_loop_head() {
+    // Broken: `head` tries to be both the `All` join for two branches and the target
+    // of the back edge.
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let start = b.add_step("start", scope, NOOP);
+    let left = b.add_step("left", scope, NOOP);
+    let right = b.add_step("right", scope, NOOP);
+    let head = b.add_step("head", scope, NOOP);
+    b.fan_out(start, &[left, right]);
+    b.link(left, head);
+    b.link(right, head);
+    b.set_join(head, JoinPolicy::All);
+    b.select(head, vec![Arm::always(head).as_back()]);
+    b.set_budget(head, Budget::looped(5));
+    assert!(
+        errors(&b.build())
+            .iter()
+            .any(|e| matches!(e, ValidationError::LoopHeadMustJoinAny(_)))
+    );
+
+    // Fixed: `gate` does the `All` join, `head` does the looping.
+    let mut b = GraphBuilder::new();
+    let start = b.add_step("start", scope, NOOP);
+    let left = b.add_step("left", scope, NOOP);
+    let right = b.add_step("right", scope, NOOP);
+    let gate = b.add_step("gate", scope, NOOP);
+    let head = b.add_step("head", scope, NOOP);
+    b.fan_out(start, &[left, right]);
+    b.link(left, gate);
+    b.link(right, gate);
+    b.set_join(gate, JoinPolicy::All);
+    b.link(gate, head);
+    b.set_join(head, JoinPolicy::Any);
+    b.select(head, vec![Arm::always(head).as_back()]);
+    b.set_budget(head, Budget::looped(5));
+    validate(&b.build()).expect("valid");
+}
+
+/// A scope a path can leave and return to gets a warning, not an error: release is
+/// irreversible, so re-entry acquires a fresh runtime and workspace.
+#[test]
+fn re_entering_a_scope_is_a_warning() {
+    let mut b = GraphBuilder::bare();
+    let job = b.add_scope(Scope::new(ScopeId::new(0)));
+    let helper = b.add_scope(Scope::new(ScopeId::new(0)));
+    let first = b.add_step("first", job, NOOP);
+    let away = b.add_step("away", helper, NOOP);
+    let back = b.add_step("back", job, NOOP);
+    b.link(first, away);
+    b.link(away, back);
+    let graph = b.build();
+
+    let report = ir::check(&graph);
+    assert!(report.is_ok(), "re-entry is legal, just risky");
+    assert_eq!(
+        report.warnings,
+        vec![ValidationWarning::ScopeReentry {
+            scope: job,
+            via: away
+        }]
+    );
+
+    // A scope nothing leaves and returns to draws no warning.
+    let mut b = GraphBuilder::bare();
+    let job = b.add_scope(Scope::new(ScopeId::new(0)));
+    let helper = b.add_scope(Scope::new(ScopeId::new(0)));
+    let first = b.add_step("first", job, NOOP);
+    let second = b.add_step("second", job, NOOP);
+    let after = b.add_step("after", helper, NOOP);
+    b.link(first, second);
+    b.link(second, after);
+    assert!(ir::check(&b.build()).warnings.is_empty());
+}
+
+/// `check` reports errors and warnings together; `validate` is the errors-only view.
+#[test]
+fn check_reports_both_errors_and_warnings() {
+    let mut b = GraphBuilder::bare();
+    let job = b.add_scope(Scope::new(ScopeId::new(0)));
+    let helper = b.add_scope(Scope::new(ScopeId::new(0)));
+    let first = b.add_step("first", job, NOOP);
+    let away = b.add_step("away", helper, NOOP);
+    let back = b.add_step("back", job, NOOP);
+    b.link(first, away);
+    b.link(away, back);
+    b.set_budget(back, Budget::new(0, Duration::from_secs(1)));
+    let graph = b.build();
+
+    let report = ir::check(&graph);
+    assert!(!report.is_ok());
+    assert!(!report.warnings.is_empty());
+    assert!(report.into_result().is_err());
+}
+
+/// An unresolved placeholder is reported with its path, so a deep config says where.
+#[test]
+fn placeholder_paths_point_at_the_offending_field() {
+    use ir::validate::{contains_placeholder, placeholder_path};
+
+    let config = json!({ "env": { "TOKEN": { EXPR_PLACEHOLDER_KEY: 3 } } });
+    assert!(contains_placeholder(&config));
+    assert_eq!(placeholder_path(&config).as_deref(), Some("env.TOKEN"));
+
+    let in_array = json!({ "args": ["--flag", { EXPR_PLACEHOLDER_KEY: 1 }] });
+    assert_eq!(placeholder_path(&in_array).as_deref(), Some("args[1]"));
+
+    assert_eq!(placeholder_path(&json!({ "plain": 1 })), None);
 }

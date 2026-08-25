@@ -113,7 +113,7 @@ impl Harness {
             let pending: Vec<Command> = self
                 .commands
                 .iter()
-                .filter(|c| matches!(c, Command::StartStep { .. }))
+                .filter(|c| matches!(c, Command::StartStep(_)))
                 .cloned()
                 .collect();
             self.commands
@@ -123,33 +123,26 @@ impl Harness {
             }
             self.max_concurrent = self.max_concurrent.max(pending.len());
             for command in pending {
-                let Command::StartStep {
-                    firing,
-                    node,
-                    generation,
-                    inputs,
-                    config,
-                    ..
-                } = command
-                else {
+                let Command::StartStep(resolved) = command else {
                     continue;
                 };
                 let name = self
                     .state
                     .graph
-                    .node(node)
+                    .node(resolved.node())
                     .map(|n| n.name.to_string())
                     .unwrap_or_default();
                 let (base, index) = split_clone_name(&name);
+                let firing = resolved.id();
                 let info = StartInfo {
                     firing,
-                    node,
+                    node: resolved.node(),
                     name: name.clone(),
                     base,
                     index,
-                    generation,
-                    config,
-                    inputs,
+                    generation: resolved.generation(),
+                    config: resolved.config().clone(),
+                    inputs: resolved.inputs().to_vec(),
                 };
                 self.started.push(name);
                 let outcome = (self.responder)(&info);
@@ -188,11 +181,11 @@ impl Harness {
             .commands
             .iter()
             .filter_map(|c| match c {
-                Command::StartStep { firing, node, .. } => Some((
-                    *firing,
+                Command::StartStep(resolved) => Some((
+                    resolved.id(),
                     self.state
                         .graph
-                        .node(*node)
+                        .node(resolved.node())
                         .map(|n| n.name.to_string())
                         .unwrap_or_default(),
                 )),
