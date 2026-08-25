@@ -1,0 +1,121 @@
+//! The engine's interface: what goes in ([`Event`]) and what comes out ([`Command`]).
+//!
+//! The core is sans-IO. It never runs a step, never reads a clock and never blocks.
+//! A host turns commands into effects and feeds the results back as events.
+
+use ir::{
+    CancelScopeId, Control, EdgeId, FiringId, Generation, Node, NodeId, Outcome, RunStatus,
+    ScopeId, StepEvent, Token, Value,
+};
+use serde::{Deserialize, Serialize};
+
+/// Something that happened. Every event is appended to the log before `apply`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Event {
+    RunStarted,
+    /// A token was placed on an edge. The core emits these for its own routing and
+    /// seeding; a host may also inject one.
+    TokenEmitted(Token),
+    StepStarted {
+        firing: FiringId,
+    },
+    /// Logs, artifacts and step-defined progress. Carries no coordination meaning.
+    StepProgress {
+        firing: FiringId,
+        ev: StepEvent,
+    },
+    StepFinished {
+        firing: FiringId,
+        outcome: Outcome,
+    },
+    /// The result of a `for_each` expansion: clones spliced into the live graph.
+    NodeExpanded {
+        node: NodeId,
+        splice: SubgraphSplice,
+    },
+    /// External cancellation. The run's root scope cancels everything.
+    CancelRequested {
+        scope: CancelScopeId,
+    },
+}
+
+/// Something the host must do.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Command {
+    StartStep {
+        firing: FiringId,
+        node: NodeId,
+        generation: Generation,
+        inputs: Vec<Token>,
+        scope: ScopeId,
+        /// The node's `StepRef.config` with expression placeholders resolved against
+        /// the firing's context. The host runs this, not the graph's copy.
+        config: Value,
+    },
+    DeliverControl {
+        firing: FiringId,
+        ctl: Control,
+    },
+    /// Reserved seam: emitted only when expansion is delegated to the host. The core
+    /// resolves `items` itself in v1 and splices in the same `apply` call.
+    ExpandNode {
+        node: NodeId,
+        generation: Generation,
+        expr: ir::ExprId,
+    },
+    AcquireScope {
+        scope: ScopeId,
+    },
+    ReleaseScope {
+        scope: ScopeId,
+    },
+    FinishRun {
+        status: RunStatus,
+    },
+}
+
+/// One `for_each` element: a cloned node or subgraph, ready to splice in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpliceClone {
+    /// Position in the `items` array; bound as `index` inside the clone.
+    pub index: u32,
+    /// The element itself; bound as `item` inside the clone.
+    pub item: Value,
+    /// Fully formed clone nodes. Their ids are already allocated in graph order.
+    pub nodes: Vec<Node>,
+    /// Where the clone starts. Seeded with `seed_edge`.
+    pub entry: NodeId,
+    /// Synthetic incoming edge for `entry`, so its join counts like any other.
+    pub seed_edge: EdgeId,
+}
+
+/// The whole expansion: every clone, plus the cancel scope that covers them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubgraphSplice {
+    /// A fresh cancel scope over the clones. `fail_fast` cancels this one.
+    pub cancel_scope: CancelScopeId,
+    /// The expanding node, which is the region's entry.
+    pub source: NodeId,
+    /// The original region the clones replace. Every node in it is superseded: it
+    /// never executes, and its outgoing edges stop counting toward downstream
+    /// joins, so a collector waits for the clones instead of the originals.
+    pub region: Vec<NodeId>,
+    /// Generation the expansion happened in; clones start there.
+    pub generation: Generation,
+    /// Payload the expanding node's join produced, seeded into every clone.
+    pub payload: Value,
+    pub clones: Vec<SpliceClone>,
+    /// Admission control: at most this many clone firings run at once.
+    pub max_parallel: Option<u32>,
+    /// The first clone failure cancels the siblings.
+    pub fail_fast: bool,
+}
+
+impl SubgraphSplice {
+    /// Every node id this splice added.
+    pub fn cloned_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.clones
+            .iter()
+            .flat_map(|c| c.nodes.iter().map(|n| n.id))
+    }
+}
