@@ -1,0 +1,22 @@
+[package]
+name = "driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The IO loop between the pure core and real processes."
+
+[dev-dependencies]
+engine = { workspace = true }
+async-trait = { workspace = true }
+
+[dependencies]
+ir = { workspace = true }
+engine = { workspace = true }
+executor = { workspace = true }
+steps = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

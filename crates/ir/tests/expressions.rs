@@ -345,3 +345,33 @@ fn success_is_success_like() {
     assert_eq!(eval(&t, full, &soft.env()).unwrap(), json!(false));
     assert_eq!(eval(&t, failure, &soft.env()).unwrap(), json!(false));
 }
+
+/// `split` turns a step's string output into a list, which is what feeds `for_each`.
+#[test]
+fn split_turns_output_into_a_list() {
+    let mut t = ExprTable::new();
+    let text = t.var("regions");
+    let newline = t.lit("\n");
+    let parts = t.call("split", vec![text, newline]);
+
+    let c = ctx(&[("regions", json!("us-east\nus-west\neu\n"))]);
+    assert_eq!(
+        eval(&t, parts, &c.env()).unwrap(),
+        json!(["us-east", "us-west", "eu"]),
+        "a trailing newline does not produce an empty entry"
+    );
+
+    let comma = t.lit(",");
+    let by_comma = t.call("split", vec![text, comma]);
+    let c = ctx(&[("regions", json!("a,b"))]);
+    assert_eq!(eval(&t, by_comma, &c.env()).unwrap(), json!(["a", "b"]));
+
+    // An empty separator has no sensible meaning, and is an error rather than a
+    // silent character split.
+    let empty = t.lit("");
+    let bad = t.call("split", vec![text, empty]);
+    assert!(matches!(
+        eval(&t, bad, &c.env()),
+        Err(EvalError::Type { .. })
+    ));
+}

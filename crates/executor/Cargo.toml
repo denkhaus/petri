@@ -1,0 +1,16 @@
+[package]
+name = "executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Environments for running steps: host processes and Docker containers."
+
+[dependencies]
+ir = { workspace = true }
+async-trait = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

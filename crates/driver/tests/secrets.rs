@@ -1,0 +1,263 @@
+//! Handoff §7 test 8 and §6: secrets reach the process and nothing else.
+
+mod support;
+
+use driver::RunConfig;
+use executor::{MapSecrets, Retention};
+use ir::{GraphBuilder, RunStatus, ScopeId, StepRef, validate};
+use serde_json::json;
+use steps::PROCESS_KIND;
+use support::*;
+
+const SECRET: &str = "sk-live-9f3a2b7c1d4e";
+
+/// §7 test 8. A step echoes a secret and round-trips it through its outputs file.
+/// The log shows `***`, the output is masked too, and the raw event log holds only
+/// the reference — checked by grepping the log's bytes for the value.
+#[tokio::test]
+async fn a_secret_reaches_the_process_and_nothing_else() {
+    let dir = RunDir::new("secrets");
+
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_node(
+        "deploy",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            json!({
+                "run": r#"echo "token is $DEPLOY_TOKEN"; echo "echoed=$DEPLOY_TOKEN" > "$CI_OUTPUT""#,
+                "env": { "DEPLOY_TOKEN": { "$secret": "DEPLOY_TOKEN" } }
+            }),
+        ),
+    );
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let secrets = MapSecrets::from_pairs(&[("DEPLOY_TOKEN", SECRET)]);
+    let report = host_driver_with(
+        graph,
+        &dir,
+        secrets,
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+    )
+    .await_run()
+    .await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+
+    // The step really did receive the value: it echoed something, and what came back
+    // is masked rather than empty.
+    let lines = log_lines(&report);
+    assert!(
+        lines.iter().any(|l| l == "token is ***"),
+        "the log line is masked: {lines:?}"
+    );
+
+    // The value round-tripped through the outputs file and is masked there too.
+    assert_eq!(
+        output_of(&report, "deploy")["echoed"],
+        json!("***"),
+        "output strings are masked before the finish record is appended"
+    );
+
+    // The decisive check: grep the bytes of everything the engine persists — the
+    // event log, and the whole state, which carries the graph and so the configs.
+    let log_bytes = serde_json::to_string(&report.state.log).expect("encode");
+    assert!(
+        !log_bytes.contains(SECRET),
+        "the secret value leaked into the event log"
+    );
+    let state_bytes = serde_json::to_string(&report.state).expect("encode");
+    assert!(
+        !state_bytes.contains(SECRET),
+        "the secret value leaked into the persisted state"
+    );
+
+    // What is persisted is the reference, by name.
+    assert!(
+        state_bytes.contains("$secret"),
+        "the reference is what crossed the boundary"
+    );
+    assert!(state_bytes.contains("DEPLOY_TOKEN"), "by name");
+
+    // Nor on disk, in the persisted step log.
+    let log_dir = dir.logs();
+    let mut found_masked = false;
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        for entry in entries.flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(
+                !text.contains(SECRET),
+                "the secret leaked into {:?}",
+                entry.path()
+            );
+            found_masked |= text.contains("***");
+        }
+    }
+    assert!(found_masked, "the persisted log was written, and masked");
+}
+
+/// A short secret is not masked, GHA-style: masking `ok` would turn every log into
+/// asterisks.
+#[tokio::test]
+async fn short_secrets_are_not_masked() {
+    let dir = RunDir::new("short-secret");
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_node(
+        "show",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            json!({
+                "run": r#"echo "value is $TINY""#,
+                "env": { "TINY": { "$secret": "TINY" } }
+            }),
+        ),
+    );
+    let graph = b.build();
+
+    let report = host_driver_with(
+        graph,
+        &dir,
+        MapSecrets::from_pairs(&[("TINY", "ok")]),
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+    )
+    .await_run()
+    .await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(log_lines(&report).iter().any(|l| l == "value is ok"));
+}
+
+/// A `$secret` outside an env-shaped position is a step failure, not something to
+/// pass through as literal JSON.
+#[tokio::test]
+async fn a_misplaced_secret_reference_fails_the_step() {
+    let dir = RunDir::new("misplaced-secret");
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_node(
+        "sneaky",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            json!({ "run": "echo hello", "working_dir": { "$secret": "DEPLOY_TOKEN" } }),
+        ),
+    );
+    let graph = b.build();
+
+    let report = host_driver_with(
+        graph,
+        &dir,
+        MapSecrets::from_pairs(&[("DEPLOY_TOKEN", SECRET)]),
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+    )
+    .await_run()
+    .await;
+
+    assert_eq!(report.status, RunStatus::Failed);
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "sneaky")
+        .unwrap();
+    assert_eq!(
+        record
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.class.as_str()),
+        Some(steps::SECRET_MISPLACED_CLASS)
+    );
+}
+
+/// A secret that does not exist fails the step rather than passing an empty value.
+#[tokio::test]
+async fn an_unknown_secret_fails_the_step() {
+    let dir = RunDir::new("unknown-secret");
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_node(
+        "deploy",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            json!({
+                "run": "echo hello",
+                "env": { "TOKEN": { "$secret": "NOT_CONFIGURED" } }
+            }),
+        ),
+    );
+    let graph = b.build();
+
+    let report = host_driver_with(
+        graph,
+        &dir,
+        MapSecrets::empty(),
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+    )
+    .await_run()
+    .await;
+    assert_eq!(report.status, RunStatus::Failed);
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "deploy")
+        .unwrap();
+    assert_eq!(
+        record
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.class.as_str()),
+        Some("secret_unavailable")
+    );
+}
+
+/// A multi-line secret is masked line by line, because the log is line-buffered.
+#[tokio::test]
+async fn multiline_secrets_are_masked_per_line() {
+    let dir = RunDir::new("multiline-secret");
+    let key = "-----BEGIN KEY-----\nabcdefghijklmnop\nqrstuvwxyz012345\n-----END KEY-----";
+
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_node(
+        "show",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            json!({
+                "run": r#"echo "$PRIVATE_KEY""#,
+                "env": { "PRIVATE_KEY": { "$secret": "PRIVATE_KEY" } }
+            }),
+        ),
+    );
+    let graph = b.build();
+
+    let report = host_driver_with(
+        graph,
+        &dir,
+        MapSecrets::from_pairs(&[("PRIVATE_KEY", key)]),
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+    )
+    .await_run()
+    .await;
+    assert_eq!(report.status, RunStatus::Success);
+
+    let lines = log_lines(&report);
+    for secret_line in key.lines() {
+        assert!(
+            !lines.iter().any(|l| l.contains(secret_line)),
+            "a line of the key survived: {secret_line}"
+        );
+    }
+    assert!(lines.iter().any(|l| l == "***"), "{lines:?}");
+}

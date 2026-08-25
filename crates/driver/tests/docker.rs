@@ -1,0 +1,273 @@
+//! Handoff §7 tests 3 and 10, Docker halves. These skip when no daemon is reachable.
+//!
+//! The one that matters most is `docker_cancel_kills_the_exec_process_group`:
+//! `docker kill` signals PID 1 and never reaches an exec'd step, so cancellation has
+//! to be `docker exec … kill -- -PGID`. Getting that wrong is the classic bug, and
+//! this is the test aimed at it.
+
+mod support;
+
+use std::time::Duration;
+
+use driver::RunConfig;
+use executor::{Retention, list_containers};
+use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
+use serde_json::json;
+use steps::PROCESS_KIND;
+use support::*;
+
+const IMAGE: &str = "alpine:3.20";
+
+/// Docker tests need a daemon and the image. Say so and skip rather than fail.
+async fn docker_ready() -> bool {
+    if !docker_available().await {
+        eprintln!("skipping: no Docker daemon reachable");
+        return false;
+    }
+    true
+}
+
+fn docker_graph(name: &str, run: &str) -> ir::Graph {
+    let mut b = GraphBuilder::bare();
+    let mut scope = ir::Scope::new(ScopeId::new(0));
+    scope.runtime = RuntimeSpec::docker(IMAGE);
+    let scope = b.add_scope(scope);
+    b.add_node(
+        name,
+        scope,
+        StepRef::new(PROCESS_KIND, script_with(run, json!({ "shell": "sh" }))),
+    );
+    let graph = b.build();
+    validate(&graph).expect("valid");
+    graph
+}
+
+/// A step runs inside the container, against the bind-mounted workspace.
+#[tokio::test]
+async fn a_step_runs_inside_the_container() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-basic");
+    let graph = docker_graph(
+        "inside",
+        r#"echo "running on $(uname -s)"; echo "where=$(pwd)" > "$CI_OUTPUT""#,
+    );
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Never);
+
+    let report = docker_driver(graph, &dir, config).await_run().await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(
+        log_lines(&report).iter().any(|l| l == "running on Linux"),
+        "{:?}",
+        log_lines(&report)
+    );
+    assert_eq!(
+        output_of(&report, "inside")["where"],
+        json!("/workspace"),
+        "the workspace is bind-mounted at a known path"
+    );
+}
+
+/// §7 test 3, Docker variant, and the §4.1 test.
+///
+/// The step backgrounds a grandchild inside the container. `docker kill` would
+/// signal PID 1 and leave both alive; only `docker exec … kill -- -PGID` reaches
+/// them. The heartbeat file is on the bind mount, so the host can watch it stop.
+#[tokio::test]
+async fn docker_cancel_kills_the_exec_process_group() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-group-kill");
+    let graph = docker_graph(
+        "backgrounder",
+        r#"
+( while :; do echo tick >> heartbeat; sleep 0.05; done ) &
+echo ready > ready
+sleep 300
+"#,
+    );
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Always);
+    let workspace = dir.workspace();
+
+    let driver = docker_driver(graph, &dir, config);
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+
+    assert!(
+        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
+        "the step never started inside the container"
+    );
+    let heartbeat = workspace.join("heartbeat");
+    assert!(
+        wait_for_file(&heartbeat, Duration::from_secs(30)).await,
+        "the grandchild never ticked"
+    );
+
+    handle.cancel(ir::CancelScopeId::ROOT).await;
+    let report = run.await.expect("the run finished");
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert_eq!(
+        status_of(&report, "backgrounder").as_deref(),
+        Some("cancelled")
+    );
+
+    // If the signal had gone to PID 1 instead of the step's group, the grandchild
+    // would still be ticking here.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let before = file_len(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        file_len(&heartbeat),
+        before,
+        "the grandchild survived: the signal did not reach the exec's process group"
+    );
+}
+
+/// §7 test 10, Docker half. Release leaves no container behind.
+#[tokio::test]
+async fn docker_release_leaves_no_container() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-release");
+    let graph = docker_graph("quick", "echo done");
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Never);
+
+    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let report = driver.await_run().await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        report.releases.iter().any(|r| r.container_removed),
+        "the release reported removing the container: {:?}",
+        report.releases
+    );
+
+    // Only this test's own containers: the suite runs in parallel.
+    let leftovers = list_containers(&prefix).await;
+    assert!(
+        leftovers.is_empty(),
+        "containers were left behind: {leftovers:?}"
+    );
+}
+
+/// A non-zero exit inside the container maps the same way it does on the host.
+#[tokio::test]
+async fn docker_exit_statuses_propagate() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-exit");
+    let graph = docker_graph("failing", "echo about to fail; exit 7");
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Never);
+
+    let report = docker_driver(graph, &dir, config).await_run().await;
+    assert_eq!(report.status, RunStatus::Failed);
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "failing")
+        .unwrap();
+    assert_eq!(
+        record
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.class.as_str()),
+        Some("exit_status:7"),
+        "the exit status survived `docker exec`, `setsid` and the wrapper"
+    );
+}
+
+/// A bad image is an acquire failure, not a run abort.
+#[tokio::test]
+async fn a_bad_image_fails_the_scope() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-bad-image");
+    let mut b = GraphBuilder::bare();
+    let mut scope = ir::Scope::new(ScopeId::new(0));
+    scope.runtime = RuntimeSpec::docker("petri-nonexistent/definitely-not-real:v0");
+    let scope = b.add_scope(scope);
+    b.add_node(
+        "doomed",
+        scope,
+        StepRef::new(PROCESS_KIND, script("echo never runs")),
+    );
+    let graph = b.build();
+
+    let config = RunConfig::new(dir.path()).with_retention(Retention::Never);
+    let report = docker_driver(graph, &dir, config).await_run().await;
+
+    assert_eq!(report.status, RunStatus::Failed);
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "doomed")
+        .expect("the firing failed rather than vanishing");
+    assert_eq!(
+        record
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.class.as_str()),
+        Some("env_acquire")
+    );
+    assert!(report.state.is_finished(), "the run completed");
+}
+
+/// The step's real duration and exit status both survive, whether or not `setsid`
+/// forked. If `docker exec` returned early we would see a fast success here instead
+/// of a slow failure.
+#[tokio::test]
+async fn docker_wait_follows_the_step_not_the_client() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-wait");
+    let graph = docker_graph("slow-failure", "sleep 1; exit 5");
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Never);
+
+    let started = std::time::Instant::now();
+    let report = docker_driver(graph, &dir, config).await_run().await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(report.status, RunStatus::Failed);
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "slow-failure")
+        .unwrap();
+    assert_eq!(
+        record
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.class.as_str()),
+        Some("exit_status:5")
+    );
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "the wait returned before the step was done: {elapsed:?}"
+    );
+}

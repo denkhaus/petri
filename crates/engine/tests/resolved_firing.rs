@@ -4,7 +4,7 @@
 mod support;
 
 use engine::{Command, EngineState, Event, ResolvedFiring, RunError, apply};
-use ir::validate::EXPR_PLACEHOLDER_KEY;
+use ir::validate::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{
     Attempt, FiringId, Generation, GraphBuilder, NodeId, RunStatus, ScopeId, StepRef, Value,
     validate,
@@ -34,6 +34,48 @@ fn the_constructor_refuses_an_unresolved_config() {
         .expect_err("a placeholder must be refused");
     assert_eq!(err.node, NodeId::new(0));
     assert_eq!(err.path, "env.TOKEN");
+    assert_eq!(err.reason, engine::BoundaryViolation::UnresolvedExpression);
+}
+
+/// A secret reference is the one non-literal form that may cross the boundary. It
+/// has to: a `ResolvedFiring` is serialized into the event log, so resolving the
+/// value here would write the secret to disk.
+#[test]
+fn a_secret_reference_is_allowed_across_the_boundary() {
+    let ok = firing(json!({ "env": { "TOKEN": { SECRET_REF_KEY: "DEPLOY_KEY" } } }))
+        .expect("a secret reference is permitted");
+    assert_eq!(
+        ok.config()["env"]["TOKEN"][SECRET_REF_KEY],
+        json!("DEPLOY_KEY"),
+        "the reference crosses intact; the value is fetched at spawn"
+    );
+
+    // The name must be a string. Anything else is refused here rather than reaching
+    // a step as literal JSON.
+    let err = firing(json!({ "env": { "TOKEN": { SECRET_REF_KEY: ["not", "a", "name"] } } }))
+        .expect_err("a malformed reference must be refused");
+    assert_eq!(err.path, "env.TOKEN");
+    assert_eq!(err.reason, engine::BoundaryViolation::MalformedSecretRef);
+}
+
+/// The sibling of the expression wire-tamper test: hand-editing a secret reference
+/// into a bad shape on the wire is caught on the way back in.
+#[test]
+fn deserialization_rejects_a_tampered_secret_reference() {
+    let clean = firing(json!({ "env": { "TOKEN": { SECRET_REF_KEY: "DEPLOY_KEY" } } })).unwrap();
+    let encoded = serde_json::to_string(&clean).expect("encode");
+    let decoded: ResolvedFiring = serde_json::from_str(&encoded).expect("a good one decodes");
+    assert_eq!(decoded, clean);
+
+    let tampered = encoded.replace(r#"{"$secret":"DEPLOY_KEY"}"#, r#"{"$secret":{"nested":1}}"#);
+    assert!(
+        serde_json::from_str::<ResolvedFiring>(&tampered).is_err(),
+        "a malformed secret reference must not deserialize"
+    );
+
+    // And the secret's *value* is nowhere in the encoded form, only its name.
+    assert!(encoded.contains("DEPLOY_KEY"));
+    assert!(!encoded.contains("s3cr3t-value"));
 }
 
 /// Deserialization goes through the same constructor, so a value read off the wire

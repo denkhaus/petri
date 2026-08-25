@@ -52,11 +52,18 @@ pub enum Event {
 /// Everything an executor needs to run one step, with every expression already
 /// resolved.
 ///
-/// The type is the enforcement point for "no unresolved `ExprId` crosses the
-/// executor boundary". Its fields are private and the only way to build one is
-/// [`ResolvedFiring::new`], which rejects a config still holding an expression
-/// placeholder. Deserialization goes through the same check, so a value read back
-/// off the wire carries the invariant too.
+/// The type is the enforcement point for the boundary invariant: **no unresolved
+/// expression placeholder crosses it, and a secret reference is the only non-literal
+/// form that may.** Its fields are private and the only way to build one is
+/// [`ResolvedFiring::new`]. Deserialization goes through the same check, so a value
+/// read back off the wire carries the invariant too.
+///
+/// Secret references survive on purpose. A `ResolvedFiring` is serialized into the
+/// event log, so resolving a secret here would write it to disk. `{"$secret": "NAME"}`
+/// crosses instead, and the value is fetched at spawn time straight into the child's
+/// environment. The reference must name a string; anything else is rejected here
+/// rather than reaching a step. Whether a secret reference is in a position that
+/// allows one is the step kind's business, not the boundary's.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(into = "ResolvedFiringRepr", try_from = "ResolvedFiringRepr")]
 pub struct ResolvedFiring {
@@ -80,18 +87,29 @@ impl ResolvedFiring {
         inputs: Vec<Token>,
         config: Value,
     ) -> Result<Self, UnresolvedConfig> {
-        match ir::validate::placeholder_path(&config) {
-            Some(path) => Err(UnresolvedConfig { node, path }),
-            None => Ok(Self {
-                id,
+        if let Some(path) = ir::validate::placeholder_path(&config) {
+            return Err(UnresolvedConfig {
                 node,
-                generation,
-                attempt,
-                scope,
-                inputs,
-                config,
-            }),
+                path,
+                reason: BoundaryViolation::UnresolvedExpression,
+            });
         }
+        if let Some(path) = ir::validate::malformed_secret_ref(&config) {
+            return Err(UnresolvedConfig {
+                node,
+                path,
+                reason: BoundaryViolation::MalformedSecretRef,
+            });
+        }
+        Ok(Self {
+            id,
+            node,
+            generation,
+            attempt,
+            scope,
+            inputs,
+            config,
+        })
     }
 
     pub fn id(&self) -> FiringId {
@@ -132,12 +150,33 @@ impl ResolvedFiring {
     }
 }
 
-/// A config reached the executor boundary with an expression still in it.
+/// What was wrong at the boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoundaryViolation {
+    /// An `{"$expr": id}` placeholder was never resolved.
+    UnresolvedExpression,
+    /// A `{"$secret": ...}` whose name is not a string.
+    MalformedSecretRef,
+}
+
+impl std::fmt::Display for BoundaryViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BoundaryViolation::UnresolvedExpression => f.write_str("an unresolved expression"),
+            BoundaryViolation::MalformedSecretRef => {
+                f.write_str("a secret reference whose name is not a string")
+            }
+        }
+    }
+}
+
+/// A config reached the executor boundary in a state it may not cross in.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
-#[error("step config for node {node:?} still holds an unresolved expression at `{path}`")]
+#[error("step config for node {node:?} holds {reason} at `{path}`")]
 pub struct UnresolvedConfig {
     pub node: NodeId,
     pub path: String,
+    pub reason: BoundaryViolation,
 }
 
 /// The wire shape. Private, so the only public way in is through the checked

@@ -38,6 +38,12 @@ let (state, commands) = apply(state, Event::RunStarted);
 | §4 retries | `ir::RetryPolicy`, `engine::apply::on_retry_elapsed` |
 | §4 run context | `ir::RunContext`, `engine::state::EngineState::record_outcome` |
 | §4 expression environment | `ir::EvalEnv` — one way to see upstream state |
+| exec §1 layering | `executor::Executor` / `ExecEnv`, `steps::StepRunner`, `driver::Driver` |
+| exec §2 driver loop | `driver::run` — one channel, so arrival order is the total order |
+| exec §3 process step | `steps::process`, `steps::outputs` |
+| exec §4 cancellation | `steps::process::ladder`, `driver::Driver::on_hard_deadline` |
+| exec §5 environments | `executor::host`, `executor::docker`, `executor::scope` |
+| exec §6 secrets | `executor::secrets`, `driver::LogSink` |
 | §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel` |
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
@@ -66,7 +72,17 @@ crates/engine/tests/resolved_firing.rs  the executor boundary: no unresolved Exp
 crates/engine/tests/event_log.rs     §5 logging, determinism, serde round-trip, §8 seams
 crates/ir/tests/validation.rs        §7, invariant by invariant
 crates/ir/tests/expressions.rs       the expression language
+
+crates/driver/tests/e2e.rs           exec §7 1-2: native loop and GHA-shaped, real processes
+crates/driver/tests/cancellation.rs  exec §7 3,4,5,9: the ladder and the hard deadline
+crates/driver/tests/timeout.rs       exec §7 6: timeouts, and the race under replay
+crates/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
+crates/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
+crates/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
 ```
+
+Docker tests skip with a message when no daemon is reachable, so `cargo test` is
+green on a machine without one.
 
 `cargo test` runs all of them.
 
@@ -210,9 +226,82 @@ with a working execution path.
     nor run state: scope `env`, node identity, generation, attempt, the firing's own
     outcome, and `item` / `index`.
 
+### From the executor handoff
+
+18. **`Executor::release` takes a `ScopeOutcome`.** The handoff's signature is
+    `release(&self, env: EnvHandle)`, but the retention default is *keep on failure*
+    and an environment cannot know whether the work inside it failed. The driver
+    knows, so it says.
+
+19. **`ProcessHandle` exposes one merged `lines()` stream, not `stdout()` and
+    `stderr()`.** §3.4 requires log lines in arrival order across both streams, and
+    merging two receivers after the fact cannot recover an order that was never
+    recorded. Each line carries its stream tag, so nothing is lost.
+
+20. **The cancellation escalation is in `output`, not a failure class.** §2.4 asks
+    for `Status::Cancelled` with class `"cancel_forced"`, and §7 test 5 for a class
+    recording the TERM-to-KILL escalation — but `Status::Cancelled` carries no
+    `FailureInfo`, and adding one would widen a closed enum that core §4 says is
+    permanent. So `cancel_escalation` is a field on the outcome's output object,
+    valued `sigterm`, `sigkill` or `cancel_forced`.
+
+21. **Docker exit status comes from a status file the wrapper writes, not from the
+    `docker exec` client.** `setsid` forks when its caller is already a process-group
+    leader, and whether `docker exec` hands it one is not something to rely on. When
+    it forks, `setsid` exits as soon as the child is running and `docker exec` returns
+    0 while the step is still going — the status is lost, and so is the step's real
+    duration. A test caught this: `exit 7` came back `Success`. The wrapper now
+    records the status beside the pgid, and `wait` polls the process group's liveness
+    rather than trusting an early return, which makes the executor correct whichever
+    way `setsid` behaves. `docker_wait_follows_the_step_not_the_client` pins both the
+    status and the duration.
+
+22. **The ladder lives in the step kind; the driver owns the outer deadline and the
+    timeout-versus-cancel decision.** A step reports `Cancelled` however it was
+    stopped, because it cannot know why. Only the driver sees which terminal arrived
+    first, so it rewrites `Cancelled` to `TimedOut` when its timer got there first.
+    This keeps `Control` closed at `Cancel` rather than growing a variant per reason.
+
+23. **Retry jitter is a hash of `(firing, attempt)`, not an RNG.** Jitter's job is
+    decorrelating *different* retries so they do not stampede, which a per-firing hash
+    does. It avoids a dependency and leaves the driver reproducible, so retry timing
+    is testable.
+
+24. **`ResolvedFiring` never actually reaches the event log here.** §6.1 motivates
+    the secret-reference amendment with "`ResolvedFiring` is serialized into
+    `StartStep` records", but in this implementation commands are not events, so no
+    command is ever logged. The amendment is implemented anyway — it is the right
+    invariant for any host that persists commands — and the secret test greps the
+    whole serialized `EngineState`, not just the log, which is the stronger check.
+
+25. **`split(string, separator)` joined the expression language.** The outputs-file
+    protocol yields strings, so a step that produces a list of regions produces one
+    string; `for_each` needs an array. Acceptance test 1 cannot be written without it.
+
+26. **Docker images must provide `setsid`.** busybox and util-linux both do, so
+    alpine, debian and ubuntu are all fine. A spawn into an image without it fails
+    with a spawn error rather than silently losing the process group.
+
+27. **Log draining after a process ends is bounded at 5 seconds.** §3.4 says capture
+    continues "until both streams close", which a grandchild holding the pipe open can
+    delay indefinitely. The driver's hard deadline would eventually fire, but bounding
+    the drain keeps the failure local and legible.
+
+28. **`ScopeSpec`, `EnvHandle` and `Teardown` are defined here.** §1 names the first
+    two without giving their shape.
+
+29. **`RunHandle` is how a cancel gets in.** The handoff has `CancelRequested`
+    arriving as an event without saying who sends it; `Driver::handle()` returns a
+    handle that can inject one into a run in flight.
+
 ## Not built
 
-Deliberately out of scope, per the handoff: outcome-driven splice (§3, deferred —
+Out of scope per executor §0, and not built: GHA action shims and the JS action host,
+artifact and cache stores, remote or distributed executors, Windows, service
+containers, and cpu/memory limits. The `LogSink` writes to the run directory and
+optionally stdout; richer sinks come later.
+
+Deliberately out of scope, per the core handoff: outcome-driven splice (§3, deferred —
 `Expansion::ForEach` already ships the mechanism), cross-run concurrency groups (D2 —
 frontends must reject `concurrency:` rather than ignore it), and placement *semantics*
 for `RuntimeSpec.requirements` (D3 — the labels are carried, uninterpreted).

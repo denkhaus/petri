@@ -554,6 +554,28 @@ fn eval_call(
             });
             Ok(Value::Array(items))
         }
+        "split" => {
+            // The outputs-file protocol yields strings, so turning one into a list
+            // is what a frontend needs to feed `for_each`. Empty trailing segments
+            // are dropped, which is what a trailing newline means in practice.
+            arity(2)?;
+            let (text, separator) = (arg(0)?, arg(1)?);
+            let text = text
+                .as_str()
+                .ok_or_else(|| type_err("split", "a string", &text))?;
+            let separator = separator
+                .as_str()
+                .ok_or_else(|| type_err("split", "a string separator", &separator))?;
+            if separator.is_empty() {
+                return Err(type_err("split", "a non-empty separator", &Value::Null));
+            }
+            let parts: Vec<Value> = text
+                .split(separator)
+                .filter(|piece| !piece.is_empty())
+                .map(|piece| Value::String(piece.to_string()))
+                .collect();
+            Ok(Value::Array(parts))
+        }
         "pluck" => {
             arity(2)?;
             let (array, key) = (arg(0)?, arg(1)?);

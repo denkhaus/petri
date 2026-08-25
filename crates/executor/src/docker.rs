@@ -1,0 +1,466 @@
+//! The Docker executor: a long-lived container with the workspace bind-mounted, and
+//! steps run through `docker exec`.
+//!
+//! # Why `docker exec … kill`, and not `docker kill`
+//!
+//! `docker kill` signals PID 1 of the container. Steps are not PID 1 — they are
+//! `docker exec` processes, siblings of init — so `docker kill` never reaches them.
+//! Cancelling a step is therefore `docker exec <c> kill -<SIG> -- -<PGID>`, run
+//! inside the container against the step's own process group. Container-level kill is
+//! reserved for scope release, where killing everything is the point.
+//!
+//! To have a process group to signal, each step is launched under `setsid` and
+//! records its own pid into a file on the bind-mounted workspace, where the host can
+//! read it. `setsid` makes the shell a session leader, so its pid *is* its pgid.
+//! **The image must provide `setsid`** (busybox and util-linux both do).
+//!
+//! # Why the exit status comes from a file
+//!
+//! `setsid` forks when its caller is already a process group leader, and whether
+//! `docker exec` hands its process one is not something to rely on. If it does fork,
+//! `setsid` exits as soon as the child is running and `docker exec` returns 0
+//! immediately — the step is still going, and its real exit status is lost.
+//!
+//! So the wrapper records the status itself, and [`DockerProcess::wait`] prefers that
+//! file over the client's exit code, polling the process group's liveness rather than
+//! trusting an early return. This makes the executor correct whichever way `setsid`
+//! behaves, instead of correct on the platforms that happen to suit it.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ir::RuntimeTarget;
+use smol_str::SmolStr;
+use tokio::sync::mpsc;
+
+use crate::env::{ExecEnv, ExitStatus, LineStream, ProcessHandle, ProcessSpec, Sig};
+use crate::error::{EnvError, ReleaseReport};
+use crate::host::from_std;
+use crate::scope::{EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec, Teardown};
+
+/// Where the workspace is mounted inside the container.
+pub const CONTAINER_WORKSPACE: &str = "/workspace";
+
+/// When to pull an image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PullPolicy {
+    #[default]
+    IfNotPresent,
+    Always,
+    Never,
+}
+
+/// Runs steps inside containers.
+pub struct DockerExecutor {
+    run_dir: PathBuf,
+    run_id: SmolStr,
+    retention: Retention,
+    pull: PullPolicy,
+}
+
+impl DockerExecutor {
+    pub fn new(run_dir: impl Into<PathBuf>, run_id: &str) -> Self {
+        Self {
+            run_dir: run_dir.into(),
+            run_id: SmolStr::new(run_id),
+            retention: Retention::default(),
+            pull: PullPolicy::default(),
+        }
+    }
+
+    pub fn with_retention(mut self, retention: Retention) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    pub fn with_pull_policy(mut self, pull: PullPolicy) -> Self {
+        self.pull = pull;
+        self
+    }
+
+    /// Whether a Docker daemon is reachable. Tests skip rather than fail without one.
+    pub async fn is_available() -> bool {
+        run_docker(&["info", "--format", "{{.ServerVersion}}"])
+            .await
+            .is_ok()
+    }
+
+    fn container_name(&self, instance: &str) -> String {
+        let sanitized: String = instance
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        format!("petri-{}-{sanitized}", self.run_id)
+    }
+
+    async fn ensure_image(&self, image: &str) -> Result<(), EnvError> {
+        let present = run_docker(&["image", "inspect", image]).await.is_ok();
+        match self.pull {
+            PullPolicy::Never => Ok(()),
+            PullPolicy::IfNotPresent if present => Ok(()),
+            _ => run_docker(&["pull", image]).await.map(|_| ()),
+        }
+    }
+}
+
+#[async_trait]
+impl Executor for DockerExecutor {
+    async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
+        let RuntimeTarget::Docker { image, args } = &scope.runtime.target else {
+            return Err(EnvError::Docker {
+                command: SmolStr::new("acquire"),
+                message: "this scope does not ask for a container".into(),
+            });
+        };
+
+        let workspace = self
+            .run_dir
+            .join("scopes")
+            .join(scope.instance.as_str())
+            .join("work");
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .map_err(|e| EnvError::Workspace {
+                path: workspace.display().to_string(),
+                message: e.to_string(),
+            })?;
+
+        self.ensure_image(image).await?;
+
+        let name = self.container_name(&scope.instance);
+        // A previous run may have left this name behind.
+        let _ = run_docker(&["rm", "-f", &name]).await;
+
+        let mount = format!("{}:{CONTAINER_WORKSPACE}", workspace.display());
+        let mut create: Vec<String> = vec![
+            "create".into(),
+            "--init".into(),
+            "--name".into(),
+            name.clone(),
+            "-v".into(),
+            mount,
+            "-w".into(),
+            CONTAINER_WORKSPACE.into(),
+        ];
+        for (key, value) in &scope.env {
+            create.push("-e".into());
+            create.push(format!("{key}={value}"));
+        }
+        for arg in args {
+            create.push(arg.to_string());
+        }
+        create.push(image.to_string());
+        // A long-lived init command, so the container outlives any one step.
+        create.extend(["sleep".to_string(), "infinity".to_string()]);
+
+        let refs: Vec<&str> = create.iter().map(String::as_str).collect();
+        run_docker(&refs).await?;
+        run_docker(&["start", &name]).await?;
+
+        Ok(EnvHandle::new(
+            scope.id,
+            scope.instance.clone(),
+            Arc::new(DockerEnv {
+                container: name.clone(),
+                workspace: workspace.clone(),
+                grace: scope.grace,
+            }),
+            Teardown::DockerContainer {
+                container: name,
+                path: workspace,
+                retention: self.retention,
+                grace: scope.grace,
+            },
+        ))
+    }
+
+    async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
+        let mut report = ReleaseReport::default();
+        let Teardown::DockerContainer {
+            container,
+            path,
+            retention,
+            grace,
+        } = env.teardown()
+        else {
+            return report.problem("docker executor was handed a foreign environment");
+        };
+
+        // Container-level kill is exactly right here: everything inside is meant to
+        // stop. `stop` sends TERM and waits, then `rm -f` guarantees no leak.
+        let grace_secs = grace.as_secs().max(1).to_string();
+        let _ = run_docker(&["stop", "-t", &grace_secs, container]).await;
+        match run_docker(&["rm", "-f", "-v", container]).await {
+            Ok(_) => report.container_removed = true,
+            Err(e) => report = report.problem(format!("could not remove {container}: {e}")),
+        }
+
+        if retention.keeps(outcome) {
+            report.workspace_kept = Some(path.display().to_string());
+            return report;
+        }
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => report.workspace_removed = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.workspace_removed = true,
+            Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
+        }
+        report
+    }
+}
+
+struct DockerEnv {
+    container: String,
+    workspace: PathBuf,
+    grace: Duration,
+}
+
+#[async_trait]
+impl ExecEnv for DockerEnv {
+    async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
+        // The pgid file lives on the bind mount, so the container writes it and the
+        // host reads it.
+        let token = format!("{}-{}", std::process::id(), next_token());
+        let pgid_dir = self.workspace.join(".ci").join("pg");
+        tokio::fs::create_dir_all(&pgid_dir)
+            .await
+            .map_err(|e| EnvError::Workspace {
+                path: pgid_dir.display().to_string(),
+                message: e.to_string(),
+            })?;
+        let pgid_host = pgid_dir.join(&token);
+        let pgid_in_container = format!("{CONTAINER_WORKSPACE}/.ci/pg/{token}");
+
+        let workdir = match &spec.cwd {
+            Some(rel) => format!("{CONTAINER_WORKSPACE}/{}", rel.display()),
+            None => CONTAINER_WORKSPACE.to_string(),
+        };
+
+        let mut argv: Vec<String> = vec!["exec".into(), "-w".into(), workdir];
+        for (key, value) in &spec.env {
+            argv.push("-e".into());
+            argv.push(format!("{key}={value}"));
+        }
+        argv.push(self.container.clone());
+        // `setsid` makes the shell a session leader, so its pid is its pgid. The
+        // wrapper records that pid, runs the step, and writes the step's exit status
+        // beside it — the status file is the source of truth, not the client's code.
+        argv.extend([
+            "setsid".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"p="$1"; shift; echo $$ > "$p"; "$@"; s=$?; echo "$s" > "$p.status"; exit "$s""#
+                .to_string(),
+            "sh".to_string(),
+            pgid_in_container,
+        ]);
+        argv.push(spec.program.to_string());
+        argv.extend(spec.args.iter().map(|a| a.to_string()));
+
+        let mut command = tokio::process::Command::new("docker");
+        command
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = command.spawn().map_err(|e| EnvError::Spawn {
+            program: SmolStr::new("docker exec"),
+            message: e.to_string(),
+        })?;
+
+        let (tx, rx) = mpsc::channel(256);
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(crate::host::pump_public(
+                stdout,
+                ir::LogStream::Stdout,
+                tx.clone(),
+            ));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(crate::host::pump_public(
+                stderr,
+                ir::LogStream::Stderr,
+                tx.clone(),
+            ));
+        }
+        drop(tx);
+
+        Ok(Box::new(DockerProcess {
+            container: self.container.clone(),
+            child,
+            status_file: pgid_host.with_extension("status"),
+            pgid_file: pgid_host,
+            pgid: None,
+            lines: Some(rx),
+            signalled: false,
+        }))
+    }
+
+    fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    fn workspace_in_env(&self) -> &str {
+        CONTAINER_WORKSPACE
+    }
+
+    fn grace(&self) -> Duration {
+        self.grace
+    }
+}
+
+struct DockerProcess {
+    container: String,
+    child: tokio::process::Child,
+    pgid_file: PathBuf,
+    status_file: PathBuf,
+    pgid: Option<i32>,
+    lines: Option<LineStream>,
+    /// Set once the ladder has signalled, so `wait` stops waiting for a status file
+    /// the wrapper will never get to write.
+    signalled: bool,
+}
+
+impl DockerProcess {
+    /// The exit status the wrapper recorded, if it got that far.
+    async fn recorded_status(&self) -> Option<ExitStatus> {
+        let text = tokio::fs::read_to_string(&self.status_file).await.ok()?;
+        text.trim().parse::<i32>().ok().map(ExitStatus::code)
+    }
+
+    /// Whether the step's process group still has anything in it.
+    async fn group_alive(&self) -> bool {
+        let Some(pgid) = self.pgid else {
+            return false;
+        };
+        let target = format!("-{pgid}");
+        run_docker(&["exec", &self.container, "kill", "-0", "--", &target])
+            .await
+            .is_ok()
+    }
+}
+
+impl DockerProcess {
+    /// Read the pgid the step recorded, waiting briefly for it to appear. A cancel
+    /// can arrive before the step has written it.
+    async fn pgid(&mut self) -> Option<i32> {
+        if let Some(pgid) = self.pgid {
+            return Some(pgid);
+        }
+        for _ in 0..100 {
+            if let Ok(text) = tokio::fs::read_to_string(&self.pgid_file).await
+                && let Ok(pgid) = text.trim().parse::<i32>()
+                && pgid > 0
+            {
+                self.pgid = Some(pgid);
+                return Some(pgid);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+}
+
+#[async_trait]
+impl ProcessHandle for DockerProcess {
+    fn lines(&mut self) -> Option<LineStream> {
+        self.lines.take()
+    }
+
+    async fn wait(&mut self) -> Result<ExitStatus, EnvError> {
+        let client = self
+            .child
+            .wait()
+            .await
+            .map_err(|e| EnvError::Wait(e.to_string()))?;
+
+        // The client returning does not mean the step is over: if `setsid` forked, it
+        // returned as soon as the child was running. Keep waiting while the step's
+        // process group is alive and no status has been recorded.
+        let mut status = self.recorded_status().await;
+        if status.is_none() && !self.signalled {
+            // Give the wrapper a moment to write, then follow the group.
+            let _ = self.pgid().await;
+            loop {
+                if let Some(recorded) = self.recorded_status().await {
+                    status = Some(recorded);
+                    break;
+                }
+                if !self.group_alive().await {
+                    // One last look: the wrapper may have written on its way out.
+                    status = self.recorded_status().await;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        let _ = tokio::fs::remove_file(&self.pgid_file).await;
+        let _ = tokio::fs::remove_file(&self.status_file).await;
+        Ok(status.unwrap_or_else(|| from_std(client)))
+    }
+
+    async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
+        self.signalled = true;
+        let Some(pgid) = self.pgid().await else {
+            // The step never got far enough to record a group. Killing the `docker
+            // exec` client is all that is left, and it is enough: there is nothing
+            // inside to reach.
+            let _ = self.child.start_kill();
+            return Ok(());
+        };
+        // Signal the group INSIDE the container. `docker kill` would hit PID 1 and
+        // miss the step entirely.
+        let target = format!("-{pgid}");
+        let signal = format!("-{}", sig.number());
+        let result = run_docker(&["exec", &self.container, "kill", &signal, "--", &target]).await;
+        match result {
+            Ok(_) => Ok(()),
+            // The group is already gone, which is what we wanted anyway.
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+fn next_token() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
+    let output = tokio::process::Command::new("docker")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| EnvError::Docker {
+            command: SmolStr::new(args.first().copied().unwrap_or("docker")),
+            message: e.to_string(),
+        })?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    Err(EnvError::Docker {
+        command: SmolStr::new(args.first().copied().unwrap_or("docker")),
+        message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+/// Containers this run left behind, for leak checks in tests.
+pub async fn list_containers(prefix: &str) -> Vec<String> {
+    run_docker(&["ps", "-a", "--format", "{{.Names}}"])
+        .await
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|n| n.starts_with(prefix))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}

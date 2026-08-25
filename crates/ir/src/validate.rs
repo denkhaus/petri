@@ -158,6 +158,52 @@ impl ValidationReport {
 /// Lowering replaces these with concrete values before execution.
 pub const EXPR_PLACEHOLDER_KEY: &str = "$expr";
 
+/// The marker for a secret reference: `{"$secret": "NAME"}`.
+///
+/// Unlike an expression placeholder, this one **survives** into a `ResolvedFiring`
+/// and crosses the executor boundary. It has to: a `ResolvedFiring` is serialized
+/// into the event log, and a resolved secret in the log is a secret on disk. The
+/// value is fetched at spawn time instead, straight into the child's environment.
+///
+/// Secrets are not in [`EvalEnv`](crate::EvalEnv) either, so a guard cannot read one
+/// by construction.
+pub const SECRET_REF_KEY: &str = "$secret";
+
+/// A malformed secret reference: `{"$secret": <not a string>}`.
+///
+/// Returns the path of the first one found.
+pub fn malformed_secret_ref(config: &Value) -> Option<String> {
+    fn walk(value: &Value, path: &str) -> Option<String> {
+        match value {
+            Value::Object(map) => {
+                if let Some(name) = map.get(SECRET_REF_KEY)
+                    && !name.is_string()
+                {
+                    return Some(if path.is_empty() {
+                        "<root>".into()
+                    } else {
+                        path.into()
+                    });
+                }
+                map.iter().find_map(|(key, child)| {
+                    let next = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    walk(child, &next)
+                })
+            }
+            Value::Array(items) => items
+                .iter()
+                .enumerate()
+                .find_map(|(i, child)| walk(child, &format!("{path}[{i}]"))),
+            _ => None,
+        }
+    }
+    walk(config, "")
+}
+
 /// Validate a graph in HIR form: `expand` and config placeholders are allowed.
 ///
 /// Errors only. Use [`check`] when the warnings matter too.
