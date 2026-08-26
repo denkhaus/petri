@@ -267,6 +267,9 @@ After a cancel the core routes and fires whatever `run_on_cancel` admits;
 **bounding** cleanup is the driver's job (§10): a cleanup that outlives the
 grace is ended by feeding back `KillRequested`.
 
+`Control::Deliver` is not a stop signal: it never starts the cancellation
+ladder or the kill tier, and delivering one touches no cancel-scope state.
+
 A hierarchical `SubgraphStep` (nested scheduler) remains rejected: loops and
 matrices always flatten into the one graph.
 
@@ -274,9 +277,21 @@ matrices always flatten into the one graph.
 
 Events: `RunStarted`, `TokenEmitted`, `StepStarted{firing, attempt}`,
 `StepProgress`, `StepFinished{firing, attempt, outcome}`, `RetryElapsed`,
-`NodeExpanded`, `CancelRequested{scope}`, `KillRequested{scope}`. Commands:
-`StartStep(ResolvedFiring)`, `DeliverControl`, `ScheduleRetry`, `ExpandNode`
-(reserved), `AcquireScope`, `ReleaseScope`, `FinishRun`.
+`NodeExpanded`, `CancelRequested{scope}`, `KillRequested{scope}`,
+`ControlRequested{firing, ctl}`. Commands: `StartStep(ResolvedFiring)`,
+`DeliverControl`, `ScheduleRetry`, `ExpandNode` (reserved), `AcquireScope`,
+`ReleaseScope`, `FinishRun`.
+
+**`ControlRequested`** is the host delivering a value into a live firing — a
+human gate's answer, a supervisor's steering — through the engine, so question
+and answer are both in the log and replay/resume reproduce a pending
+interaction. Only `Control::Deliver` to a live, not-cancelling,
+not-awaiting-retry firing emits `DeliverControl`; no state change, no routing
+effect. Everything else is a **logged no-op**, never a `RunError`: a dead or
+unknown firing (a late answer must not fail the run), and `Cancel`/`Kill`,
+whose own scope-routed events carry closure bookkeeping (`cancelling`, kill
+tiers, `run_on_cancel` admission) a raw per-firing path would bypass. The
+command-or-no-command result of `apply` is the disposition the driver reports.
 
 **Log v3 + EventSource.** Append-then-apply; every record carries
 `EventSource::{External, Core}` (closed enum). Replay feeds back **External
@@ -379,6 +394,18 @@ jitter + sleep → `RetryElapsed`; hard deadline after `Control::Cancel` of
 `grace + 5s`, then task abort and synthesized `Cancelled` with
 `cancel_escalation: "cancel_forced"`. `release` never fails the run.
 
+**Delivery.** A `DeliverControl{Deliver}` only forwards to the firing's control
+channel — no deadline, no reason: a delivered value never starts the
+cancellation ladder or the kill tier. Delivery is **reliable, not `try_send`**:
+every control send rides a per-firing serialized forwarder that awaits channel
+capacity, so a full channel never blocks the driver loop and sends land in
+order (channel capacity is `CONTROL_CHANNEL_CAPACITY = 32`, a named
+implementation constant, not a compatibility rule). `RunHandle::deliver`
+returns a disposition the forwarder completes: `Delivered` only after the send
+lands; `NotLive` when `apply` emitted no command or the firing ended first.
+Best-effort steering drop semantics live in the host hub, on top of this
+reliable primitive.
+
 **Two-tier stop wiring.** The driver never decides to stop the run by itself;
 it feeds events and the core decides. The first root `cancel` feeds
 `CancelRequested { ROOT }` and arms the cleanup-grace timer
@@ -445,6 +472,17 @@ from `EvalEnv` — guards cannot read them by construction. Masking (exact-match
 `context_updates`. Encoded variants (base64/urlencoded) are a documented v2
 gap.
 
+A sensitive `Deliver` payload crosses the same way: `{"$secret": "answer:<id>"}`
+in the event (the log keeps the reference), resolved by the driver at
+command-dispatch time into the step. `SecretProvider::register(name, value)`
+lets the host add a dynamic value after run start (default: a typed unsupported
+error); duplicate names are rejected so an answer id can never shadow a
+configured secret, and registration feeds the masker, so anything resolvable is
+maskable by construction — the lifetime is the provider instance, i.e. the run.
+Dynamic values are not in the log by design, so after a crash the host must
+re-provide them on resume; an unresolvable reference at dispatch fails the step
+with `secret_unavailable`.
+
 ## 12. Frontend lowering contracts
 
 **GHA** (exercises the degenerate subset — no back edges, no `Any`/`Quorum`,
@@ -495,8 +533,8 @@ for a caller that skipped validation.
 Outcome-driven splice / BuildKite pipeline upload (`Outcome.splice`,
 `allow_splice` — additive later). Cross-run concurrency: driver-layer service
 (D2); eventual `concurrency_key` is additive. Placement semantics beyond
-opaque labels (D3). `Control::{Pause, Steer, Approve}` (enum is
-`#[non_exhaustive]`). Replay/resume UX (log versioned; `EngineState`
+opaque labels (D3). `Control::Pause` (enum is `#[non_exhaustive]`); `Steer` and
+`Approve` shipped as `Control::Deliver` (§6, §10). Replay/resume UX (log versioned; `EngineState`
 round-trips serde). Strict expression mode. Encoded-secret masking. Content
 caching (`StepKind::fingerprint` defaults `None`). JS action host; action
 shims are package 04. Windows; service containers; resource limits.

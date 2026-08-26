@@ -18,7 +18,11 @@ use crate::event::Event;
 ///
 /// v3 → v4: `Node` — serialized inside `NodeExpanded` splices — gained `meta`.
 /// Standing policy again: no migrator, a v3 log is rejected cleanly.
-pub const LOG_VERSION: u32 = 4;
+///
+/// v4 → v5: `ControlRequested` and `Control::Deliver` joined the vocabulary, so a
+/// pending host-delivered interaction is in the log and replay reproduces it.
+/// Standing policy, no migrator.
+pub const LOG_VERSION: u32 = 5;
 
 /// Where an event came from.
 ///

@@ -12,5 +12,8 @@ pub mod jitter;
 pub mod run;
 pub mod sink;
 
-pub use run::{CANCEL_FORCED, DEFAULT_CLEANUP_GRACE, Driver, RunConfig, RunHandle, RunReport};
+pub use run::{
+    CANCEL_FORCED, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE, DeliverDisposition, Driver,
+    RunConfig, RunHandle, RunReport,
+};
 pub use sink::LogSink;

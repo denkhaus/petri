@@ -56,6 +56,19 @@ pub enum Event {
     KillRequested {
         scope: CancelScopeId,
     },
+    /// The host asks the core to deliver a control to one live firing — a human
+    /// gate's answer, a supervisor's steering. Question and answer are both in the
+    /// log, so replay and resume reproduce a pending interaction.
+    ///
+    /// Only `Control::Deliver` produces a command, and only for a firing that is
+    /// live, not cancelling and not awaiting a retry. Everything else — a dead or
+    /// unknown firing, a `Cancel` or `Kill` (which have their own scope-routed
+    /// events whose closure bookkeeping a raw per-firing path would bypass) — is a
+    /// logged no-op, never a `RunError`: a late answer must not fail the run (§6).
+    ControlRequested {
+        firing: FiringId,
+        ctl: Control,
+    },
 }
 
 /// Everything an executor needs to run one step, with every expression already

@@ -36,6 +36,11 @@ pub const NO_RUNNER: &str = "no_runner";
 /// feeds back `KillRequested` (§10, resolved decision 3).
 pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(120);
 
+/// Capacity of a firing's control channel. A named implementation constant, not a
+/// compatibility rule: reliable delivery and ordering hold when the channel is
+/// full, because every send rides the firing's serialized forwarder.
+pub const CONTROL_CHANNEL_CAPACITY: usize = 32;
+
 /// Knobs, with the defaults from the handoff's table.
 #[derive(Clone, Debug)]
 pub struct RunConfig {
@@ -100,7 +105,20 @@ enum CancelReason {
     TimedOut,
 }
 
-/// Cancel a running run from outside it.
+/// How a host-delivered control landed. Hosts retry or report per class: answers
+/// are must-deliver, steering is best-effort.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliverDisposition {
+    /// The value reached the firing's control channel.
+    Delivered,
+    /// The firing was not live — unknown, finished, cancelling, awaiting a retry —
+    /// or it ended before the delivery cleared the channel.
+    NotLive,
+}
+
+type DeliverAck = tokio::sync::oneshot::Sender<DeliverDisposition>;
+
+/// Cancel a running run, or deliver a value into one of its firings, from outside.
 #[derive(Clone)]
 pub struct RunHandle {
     tx: mpsc::Sender<Signal>,
@@ -114,12 +132,38 @@ impl RunHandle {
             .send(Signal::Inject(Event::CancelRequested { scope }))
             .await;
     }
+
+    /// Deliver a control to a live firing — a human gate's answer, a supervisor's
+    /// steering — through the engine, so question and answer are both in the log.
+    ///
+    /// The disposition is completed by the firing's forwarder: `Delivered` only
+    /// after the value is in the firing's control channel, `NotLive` when the core
+    /// emitted no command (the event is still logged — the audit trail) or the
+    /// firing ended before the send completed.
+    pub async fn deliver(&self, firing: FiringId, ctl: Control) -> DeliverDisposition {
+        let (ack, disposition) = tokio::sync::oneshot::channel();
+        if self
+            .tx
+            .send(Signal::Deliver { firing, ctl, ack })
+            .await
+            .is_err()
+        {
+            return DeliverDisposition::NotLive;
+        }
+        disposition.await.unwrap_or(DeliverDisposition::NotLive)
+    }
 }
 
 /// Everything that reaches the loop, through one channel, in arrival order.
 enum Signal {
     /// An event from outside the run entirely, such as an operator cancelling.
     Inject(Event),
+    /// A host delivers a value into a firing, and wants to know how it landed.
+    Deliver {
+        firing: FiringId,
+        ctl: Control,
+        ack: DeliverAck,
+    },
     Progress {
         firing: FiringId,
         event: StepEvent,
@@ -143,11 +187,23 @@ enum Signal {
     },
 }
 
+/// One control send, queued on a firing's forwarder.
+struct Forward {
+    ctl: Control,
+    /// Completed by the forwarder: `Delivered` once the send lands, `NotLive` when
+    /// the receiver is gone. Stop signals carry no ack.
+    ack: Option<DeliverAck>,
+}
+
 struct Task {
     name: SmolStr,
     scope: ScopeId,
     attempt: Attempt,
-    control: mpsc::Sender<Control>,
+    /// The firing's serialized forwarder: control sends await channel capacity
+    /// here, in order, so the driver loop never blocks on a full channel. When the
+    /// firing ends the receiver drops, pending sends fail, and their acks resolve
+    /// `NotLive`.
+    forwards: mpsc::UnboundedSender<Forward>,
     join: JoinHandle<()>,
     timeout: Option<JoinHandle<()>>,
     deadline: Option<JoinHandle<()>>,
@@ -249,6 +305,7 @@ impl Driver {
                 self.kill_root().await
             }
             Signal::Inject(event) => self.feed(event).await,
+            Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack).await,
             Signal::Progress { firing, event } => {
                 let event = self.mask_progress(firing, event).await;
                 self.feed(Event::StepProgress { firing, ev: event }).await;
@@ -326,6 +383,31 @@ impl Driver {
         }
     }
 
+    /// A host delivery: feed `ControlRequested` and report the disposition.
+    ///
+    /// The command-or-no-command result of `apply` is the disposition. When a
+    /// `DeliverControl` comes out, the ack travels with the forward and the
+    /// forwarder completes it; when none does — the firing is dead, unknown,
+    /// cancelling or awaiting a retry — the event is in the log regardless (the
+    /// audit trail) and the host hears `NotLive`.
+    async fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
+        let state = std::mem::replace(&mut self.engine, EngineState::new(Graph::new()));
+        let (state, commands) = apply(state, Event::ControlRequested { firing, ctl });
+        self.engine = state;
+        let mut ack = Some(ack);
+        for command in commands {
+            match command {
+                Command::DeliverControl { firing, ctl } if matches!(ctl, Control::Deliver(_)) => {
+                    self.forward_deliver(firing, ctl, ack.take());
+                }
+                other => self.dispatch(other).await,
+            }
+        }
+        if let Some(ack) = ack {
+            let _ = ack.send(DeliverDisposition::NotLive);
+        }
+    }
+
     async fn dispatch(&mut self, command: Command) {
         match command {
             Command::AcquireScope { scope } => self.acquire(scope).await,
@@ -341,9 +423,12 @@ impl Driver {
                     .send(Signal::Inject(Event::StepStarted { firing, attempt }))
                     .await;
             }
-            Command::DeliverControl { firing, ctl } => {
-                self.deliver(firing, ctl, CancelReason::Requested).await
-            }
+            Command::DeliverControl { firing, ctl } => match ctl {
+                // A delivered value only forwards: no deadline, no reason — it never
+                // starts the cancellation ladder or the kill tier.
+                Control::Deliver(_) => self.forward_deliver(firing, ctl, None),
+                stop => self.stop_step(firing, stop, CancelReason::Requested),
+            },
             Command::ScheduleRetry {
                 firing,
                 next_attempt,
@@ -487,7 +572,24 @@ impl Driver {
         };
 
         let (log_tx, mut log_rx) = mpsc::channel::<StepEvent>(256);
-        let (control_tx, control_rx) = mpsc::channel::<Control>(4);
+        let (control_tx, control_rx) = mpsc::channel::<Control>(CONTROL_CHANNEL_CAPACITY);
+
+        // The firing's serialized forwarder: the one place that awaits control
+        // channel capacity, so backpressure never reaches the driver loop and
+        // sends land in order. It drains what is queued when the task goes away —
+        // a dropped receiver resolves the remaining acks `NotLive`.
+        let (forward_tx, mut forward_rx) = mpsc::unbounded_channel::<Forward>();
+        tokio::spawn(async move {
+            while let Some(forward) = forward_rx.recv().await {
+                let disposition = match control_tx.send(forward.ctl).await {
+                    Ok(()) => DeliverDisposition::Delivered,
+                    Err(_) => DeliverDisposition::NotLive,
+                };
+                if let Some(ack) = forward.ack {
+                    let _ = ack.send(disposition);
+                }
+            }
+        });
 
         let progress_tx = self.tx.clone();
         tokio::spawn(async move {
@@ -545,7 +647,7 @@ impl Driver {
                 name,
                 scope,
                 attempt,
-                control: control_tx,
+                forwards: forward_tx,
                 join,
                 timeout,
                 deadline: None,
@@ -572,7 +674,12 @@ impl Driver {
     }
 
     /// Tell a step to stop, and start the clock on how long it may take.
-    async fn deliver(&mut self, firing: FiringId, ctl: Control, reason: CancelReason) {
+    ///
+    /// The send itself rides the firing's forwarder — the control channel may be
+    /// full of pending deliveries, and that must never block the driver loop — so
+    /// the deadline is armed here, at signal time, not after the send lands: the
+    /// deadline is what guarantees progress.
+    fn stop_step(&mut self, firing: FiringId, ctl: Control, reason: CancelReason) {
         let Some(task) = self.tasks.get_mut(&firing) else {
             return;
         };
@@ -581,7 +688,7 @@ impl Driver {
             task.reason = Some(reason);
         }
         let kill = matches!(ctl, Control::Kill);
-        let _ = task.control.send(ctl).await;
+        let _ = task.forwards.send(Forward { ctl, ack: None });
 
         // A kill's deadline has no grace in it: the step was told to SIGKILL and
         // return, so a deadline armed by an earlier polite cancel is re-armed
@@ -605,6 +712,49 @@ impl Driver {
         }
     }
 
+    /// Queue a `Deliver` on the firing's forwarder: no deadline, no reason.
+    ///
+    /// `$secret` references in the payload resolve here, at command-dispatch time —
+    /// the logged event keeps the reference, so dynamic values never enter the log.
+    /// An unresolvable reference — the post-resume shape, where the host must
+    /// re-provide dynamic values — fails the step with `secret_unavailable`.
+    fn forward_deliver(&mut self, firing: FiringId, ctl: Control, ack: Option<DeliverAck>) {
+        let Control::Deliver(payload) = ctl else {
+            return;
+        };
+        let payload = match resolve_secret_refs(payload, self.secrets.as_ref()) {
+            Ok(payload) => payload,
+            Err(missing) => {
+                if let Some(task) = self.tasks.get(&firing) {
+                    let attempt = task.attempt;
+                    self.fail_now(
+                        firing,
+                        attempt,
+                        &format!("secret `{missing}` is not available for delivery"),
+                        steps::SECRET_UNAVAILABLE_CLASS,
+                    );
+                }
+                if let Some(ack) = ack {
+                    let _ = ack.send(DeliverDisposition::NotLive);
+                }
+                return;
+            }
+        };
+        let Some(task) = self.tasks.get(&firing) else {
+            if let Some(ack) = ack {
+                let _ = ack.send(DeliverDisposition::NotLive);
+            }
+            return;
+        };
+        if let Err(rejected) = task.forwards.send(Forward {
+            ctl: Control::Deliver(payload),
+            ack,
+        }) && let Some(ack) = rejected.0.ack
+        {
+            let _ = ack.send(DeliverDisposition::NotLive);
+        }
+    }
+
     async fn on_timeout(&mut self, firing: FiringId, attempt: Attempt) {
         let still_running = self
             .tasks
@@ -613,8 +763,7 @@ impl Driver {
         if !still_running {
             return;
         }
-        self.deliver(firing, Control::Cancel, CancelReason::TimedOut)
-            .await;
+        self.stop_step(firing, Control::Cancel, CancelReason::TimedOut);
     }
 
     async fn on_hard_deadline(&mut self, firing: FiringId, attempt: Attempt) {
@@ -713,5 +862,36 @@ fn value_to_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// Replace every `{"$secret": "NAME"}` reference in a `Deliver` payload — the
+/// exact one-key form, anywhere in the value — with its resolved secret. Returns
+/// the first unresolvable name. Resolution registers the value with the masker,
+/// so anything resolvable is maskable by construction.
+fn resolve_secret_refs(value: Value, secrets: &dyn SecretProvider) -> Result<Value, SmolStr> {
+    match value {
+        Value::Object(map) => {
+            if map.len() == 1
+                && let Some(name) = map.get(ir::placeholder::SECRET_REF_KEY)
+                && let Some(name) = name.as_str()
+            {
+                return match secrets.resolve(name) {
+                    Ok(resolved) => Ok(Value::String(resolved.to_string())),
+                    Err(_) => Err(SmolStr::new(name)),
+                };
+            }
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, child) in map {
+                out.insert(key, resolve_secret_refs(child, secrets)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| resolve_secret_refs(item, secrets))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        other => Ok(other),
     }
 }

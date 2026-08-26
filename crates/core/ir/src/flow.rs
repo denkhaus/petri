@@ -377,9 +377,10 @@ pub enum LogStream {
 
 /// A signal delivered to a live firing.
 ///
-/// Reserved seam: `Pause` / `Steer` / `Approve` land here in v2 and reuse the same
-/// cancel-scope machinery, so this enum is non-exhaustive from day one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Reserved seam: `Pause` lands here in v2 and reuses the same cancel-scope
+/// machinery, so this enum is non-exhaustive from day one. `Steer` and `Approve`
+/// shipped as [`Control::Deliver`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Control {
     /// Ask the step to stop: the polite ladder (TERM, grace, KILL).
@@ -388,6 +389,10 @@ pub enum Control {
     /// a `KillRequested` — to every live firing in the killed closure, ones already
     /// politely cancelling included, which a plain `Cancel` cannot say.
     Kill,
+    /// A value delivered to a waiting step: a human's answer, a supervisor's
+    /// instruction. May be delivered repeatedly to one firing (steering is a
+    /// stream). Never starts the cancellation ladder or the kill tier.
+    Deliver(Value),
 }
 
 /// How a whole run ended.

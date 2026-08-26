@@ -27,12 +27,29 @@ pub const MASK: &str = "***";
 pub enum SecretError {
     #[error("no secret named `{0}`")]
     Unknown(SmolStr),
+    #[error("a secret named `{0}` already exists")]
+    Duplicate(SmolStr),
+    #[error("this secret provider does not support registering secrets at runtime")]
+    RegistrationUnsupported,
 }
 
 /// Where secret values come from.
 pub trait SecretProvider: Send + Sync {
     /// Fetch a secret and register it for masking.
     fn resolve(&self, name: &str) -> Result<SmolStr, SecretError>;
+
+    /// Register a secret at runtime, so a dynamic value — a human gate's sensitive
+    /// answer — can cross as a `{"$secret": ...}` reference and stay out of the
+    /// log. Registration feeds the masker, so anything resolvable is maskable by
+    /// construction; the lifetime is the provider instance, i.e. the run.
+    ///
+    /// Duplicate names are rejected, so a runtime registration can never shadow a
+    /// configured secret. The default is a typed unsupported error; providers opt
+    /// in.
+    fn register(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        let _ = (name, value);
+        Err(SecretError::RegistrationUnsupported)
+    }
 
     /// The mask set, shared with the log sink.
     fn masker(&self) -> Masker;
@@ -109,16 +126,17 @@ impl Masker {
     }
 }
 
-/// A provider backed by a fixed map. The run's secrets are loaded once and handed in.
+/// A provider backed by a map: the run's secrets are loaded once and handed in,
+/// and [`SecretProvider::register`] can add run-scoped values on top.
 pub struct MapSecrets {
-    secrets: BTreeMap<SmolStr, SmolStr>,
+    secrets: RwLock<BTreeMap<SmolStr, SmolStr>>,
     masker: Masker,
 }
 
 impl MapSecrets {
     pub fn new(secrets: BTreeMap<SmolStr, SmolStr>) -> Self {
         Self {
-            secrets,
+            secrets: RwLock::new(secrets),
             masker: Masker::new(),
         }
     }
@@ -139,12 +157,24 @@ impl MapSecrets {
 
 impl SecretProvider for MapSecrets {
     fn resolve(&self, name: &str) -> Result<SmolStr, SecretError> {
-        let value = self
-            .secrets
+        let secrets = self.secrets.read().expect("secret map is not poisoned");
+        let value = secrets
             .get(name)
             .ok_or_else(|| SecretError::Unknown(SmolStr::new(name)))?;
         self.masker.register(value);
         Ok(value.clone())
+    }
+
+    fn register(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        let mut secrets = self.secrets.write().expect("secret map is not poisoned");
+        if secrets.contains_key(name) {
+            return Err(SecretError::Duplicate(SmolStr::new(name)));
+        }
+        secrets.insert(SmolStr::new(name), SmolStr::new(value));
+        // Feed the masker at registration, not first resolution: the value is
+        // sensitive from the moment the provider holds it.
+        self.masker.register(value);
+        Ok(())
     }
 
     fn masker(&self) -> Masker {

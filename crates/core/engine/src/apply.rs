@@ -97,6 +97,7 @@ fn step(
         Event::NodeExpanded { node, splice } => on_node_expanded(state, node, splice, queue),
         Event::CancelRequested { scope } => on_cancel(state, scope, cmds, queue),
         Event::KillRequested { scope } => on_kill(state, scope, cmds, queue),
+        Event::ControlRequested { firing, ctl } => on_control_requested(state, firing, ctl, cmds),
     }
 }
 
@@ -943,6 +944,38 @@ fn on_node_expanded(
             splice.generation,
             splice.payload.clone(),
         )));
+    }
+}
+
+// ── Host-delivered controls ───────────────────────────────────────────────
+
+/// A host asks for a control to reach one live firing (§6).
+///
+/// Only `Control::Deliver` to a live, not-cancelling, not-awaiting-retry firing
+/// produces a `DeliverControl` command; no state changes and nothing routes.
+/// Everything else is a logged no-op — the event is the audit trail either way:
+///
+/// - `Cancel` and `Kill` have their own scope-routed events whose closure
+///   bookkeeping (`cancelling`, kill tiers, `run_on_cancel` admission) a raw
+///   per-firing path would bypass.
+/// - A dead, unknown or awaiting-retry firing is never a `RunError`: a late
+///   answer must not fail the run.
+///
+/// The command-or-no-command result is the disposition the driver reports.
+fn on_control_requested(
+    state: &mut EngineState,
+    firing: FiringId,
+    ctl: Control,
+    cmds: &mut Vec<Command>,
+) {
+    if !matches!(ctl, Control::Deliver(_)) {
+        return;
+    }
+    let deliverable = state
+        .firing(firing)
+        .is_some_and(|f| !f.cancelling && !f.awaiting_retry);
+    if deliverable {
+        cmds.push(Command::DeliverControl { firing, ctl });
     }
 }
 
