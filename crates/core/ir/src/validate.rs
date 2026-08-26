@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use smol_str::SmolStr;
 
 use crate::expr::Expr;
-use crate::graph::{ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
+use crate::graph::{Completion, ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
 use crate::ids::{EdgeId, ExprId, NodeId, ScopeId, StepKindId};
 use crate::placeholder::placeholder_path;
 use crate::step::StepKinds;
@@ -43,6 +43,8 @@ pub enum ValidationError {
          a back edge may point at one"
     )]
     EntryHasIncoming(NodeId),
+    #[error("the completion policy names unknown node {0:?}")]
+    CompletionUnknownNode(NodeId),
 
     // ── Invariant 1 ────────────────────────────────────────────────────────
     #[error("cycle through {0:?} contains no back edge")]
@@ -239,6 +241,7 @@ fn done(errors: Vec<ValidationError>) -> Result<(), Vec<ValidationError>> {
 fn collect(graph: &Graph, registry: Option<&dyn StepKinds>) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     check_structure(graph, registry, &mut errors);
+    check_completion(graph, &mut errors);
     check_edge_ids(graph, &mut errors);
     check_routing_shape(graph, &mut errors);
     check_exprs_resolve(graph, &mut errors);
@@ -323,6 +326,17 @@ fn check_structure(
         if graph.edges().any(|edge| edge.to == entry && !edge.back) {
             errors.push(ValidationError::EntryHasIncoming(entry));
         }
+    }
+}
+
+/// `Completion::TerminalNode` must name a node that exists. Nothing more: the node
+/// is *expected* to be terminal, but the semantics only need a final record, so
+/// "terminal" and outside-expansion topology rules belong to frontends.
+fn check_completion(graph: &Graph, errors: &mut Vec<ValidationError>) {
+    if let Completion::TerminalNode(node) = graph.completion
+        && graph.node(node).is_none()
+    {
+        errors.push(ValidationError::CompletionUnknownNode(node));
     }
 }
 

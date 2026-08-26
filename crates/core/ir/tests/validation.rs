@@ -319,6 +319,7 @@ fn structural_problems_are_reported() {
         exprs: Default::default(),
         entry: vec![],
         params: Default::default(),
+        completion: Default::default(),
     };
     let found = errors(&graph);
     assert!(
@@ -661,4 +662,27 @@ fn loop_head_normalization_rewrites_quorum_one_to_any() {
 
     // It only touches loop heads, and only `Quorum { n: 1 }`.
     assert_eq!(ir::normalize_loop_heads(&mut graph), 0);
+}
+
+/// `Completion::TerminalNode` must name a node that exists — and nothing more:
+/// terminal-shaped routing is not required (resolved decision 2; the semantics only
+/// need a final record), so a node with outgoing edges is accepted.
+#[test]
+fn completion_terminal_node_must_exist() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let a = b.add_step("a", scope, NOOP);
+    let c = b.add_step("c", scope, NOOP);
+    b.link(a, c);
+    let mut graph = b.build();
+
+    graph.completion = ir::Completion::TerminalNode(NodeId::new(7));
+    assert!(
+        errors(&graph).contains(&ValidationError::CompletionUnknownNode(NodeId::new(7))),
+        "an unknown node is rejected"
+    );
+
+    // `a` routes onward, and is still accepted.
+    graph.completion = ir::Completion::TerminalNode(a);
+    validate(&graph).expect("an existing node is accepted; empty routing is not required");
 }

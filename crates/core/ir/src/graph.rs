@@ -637,6 +637,29 @@ impl Scope {
 
 // ── Graph ─────────────────────────────────────────────────────────────────
 
+/// How the run's status folds from node outcomes.
+///
+/// Root cancellation and engine `RunError`s outrank both policies: a cancelled run
+/// is `Cancelled`, and an engine error fails the run — errors are never control
+/// flow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Completion {
+    /// Any failed node record fails the run. The CI rule; today's behavior.
+    #[default]
+    AnyFailure,
+    /// Success iff this node has a success-like final record at quiescence.
+    /// Failures elsewhere are control flow. The fabro rule at the exit node.
+    ///
+    /// The node is *expected* to be terminal; the core does not require it —
+    /// the semantics only need a final record — and frontends enforce their own
+    /// shape.
+    TerminalNode(NodeId),
+}
+
+fn is_default_completion(completion: &Completion) -> bool {
+    *completion == Completion::AnyFailure
+}
+
 /// A whole workflow. HIR and executable plans share this shape; a plan is a graph
 /// that carries no [`Node::expand`] and no unresolved config placeholders.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -656,6 +679,9 @@ pub struct Graph {
     /// a parameter of the same name. Read-only for the whole run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<SmolStr, Value>,
+    /// How the run's status folds from node outcomes (§1).
+    #[serde(default, skip_serializing_if = "is_default_completion")]
+    pub completion: Completion,
 }
 
 impl Graph {

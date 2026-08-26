@@ -34,9 +34,9 @@ pub use flow::{
     StatusKind, StepEvent, Token,
 };
 pub use graph::{
-    Backoff, Budget, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue, Fallthrough, Graph,
-    Guard, JoinPolicy, Node, RetryOn, RetryPolicy, Routing, RuntimeSpec, RuntimeTarget, Scope,
-    SelectGroup, StepRef, WorkspacePolicy,
+    Backoff, Budget, Completion, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue,
+    Fallthrough, Graph, Guard, JoinPolicy, Node, RetryOn, RetryPolicy, Routing, RuntimeSpec,
+    RuntimeTarget, Scope, SelectGroup, StepRef, WorkspacePolicy,
 };
 pub use ids::{
     Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId,

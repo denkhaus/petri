@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ir::{
-    Attempt, CancelScopeId, EdgeId, EvalError, FiringId, Generation, Graph, NodeId, NodeRecord,
-    Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
+    Attempt, CancelScopeId, Completion, EdgeId, EvalError, FiringId, Generation, Graph, NodeId,
+    NodeRecord, Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -331,17 +331,51 @@ impl EngineState {
         self.live.values().filter(|f| f.awaiting_retry)
     }
 
-    /// The run status folded from node outcomes, as it stands right now.
+    /// The run status folded from node outcomes, as it stands right now, under the
+    /// graph's [`Completion`] policy.
     pub fn folded_status(&self) -> RunStatus {
         if self.cancelled {
-            RunStatus::Cancelled
-        } else if !self.errors.is_empty()
-            || self.history.iter().any(|r| r.outcome.status.is_failure())
-        {
-            RunStatus::Failed
-        } else {
-            RunStatus::Success
+            return RunStatus::Cancelled;
         }
+        // Engine errors are never control flow: they fail the run under both
+        // policies.
+        if !self.errors.is_empty() {
+            return RunStatus::Failed;
+        }
+        match self.graph.completion {
+            Completion::AnyFailure => {
+                if self.history.iter().any(|r| r.outcome.status.is_failure()) {
+                    RunStatus::Failed
+                } else {
+                    RunStatus::Success
+                }
+            }
+            // Success iff the terminal node has a success-like final record.
+            // Failures elsewhere are control flow; a missing record means the run
+            // never got there, which fails it whatever else succeeded.
+            Completion::TerminalNode(id) => {
+                let record = self
+                    .graph
+                    .node(id)
+                    .and_then(|node| self.run.node(&node.name));
+                match record {
+                    Some(record) if record.status.is_success_like() => RunStatus::Success,
+                    _ => RunStatus::Failed,
+                }
+            }
+        }
+    }
+
+    /// Whether anything has failed so far: an engine error, or any failed record in
+    /// history.
+    ///
+    /// This is what the `run.failed` static means — "any failure so far", under
+    /// every completion policy. It is deliberately not [`Self::folded_status`]:
+    /// under [`Completion::TerminalNode`] the fold reads `Failed` until the exit
+    /// record exists, which would poison `run.failed` guards mid-run. Two names,
+    /// two meanings.
+    pub fn any_failure(&self) -> bool {
+        !self.errors.is_empty() || self.history.iter().any(|r| r.outcome.status.is_failure())
     }
 
     // ── Mutation used by `apply` ───────────────────────────────────────────

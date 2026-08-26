@@ -91,11 +91,14 @@ pub(crate) fn firing_statics(
     ctx.set("generation", Value::from(generation.raw()));
     ctx.set("attempt", Value::from(attempt.raw()));
     ctx.set("node", Value::String(nd.name.to_string()));
+    // `run.failed` means "any failure so far" under every completion policy — not
+    // the folded status, which under `Completion::TerminalNode` reads `Failed`
+    // until the exit record exists and would poison these guards mid-run.
     ctx.set(
         "run",
         serde_json::json!({
-            "failed": matches!(state.folded_status(), ir::RunStatus::Failed),
-            "cancelled": matches!(state.folded_status(), ir::RunStatus::Cancelled),
+            "failed": state.any_failure(),
+            "cancelled": state.is_cancelled(),
         }),
     );
     // `run.cancelled` is root-only, so a `fail_fast` scope cancel is invisible to

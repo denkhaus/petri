@@ -15,7 +15,15 @@ semantics. A node **fires** when its join policy is satisfied by incoming tokens
 of one generation; on completion, routing emits tokens on outgoing edges.
 Multiple tokens in flight = concurrent nodes. The run is **complete at
 quiescence**: no live firings and no pending token can satisfy any join. Run
-status folds from node outcomes.
+status folds from node outcomes under the graph's `Completion` policy:
+`AnyFailure` (default — any failed record fails the run, the CI rule) or
+`TerminalNode(id)` (success iff that node has a success-like final record at
+quiescence; failures elsewhere are control flow, and a missing record is a
+failure — the successful nonterminal dead end fails, a pinned departure from
+fabro_core). Root cancellation and engine `RunError`s outrank both. The
+`run.failed` static keeps its own meaning — "any failure so far" (errors or
+failed history), under every policy — deliberately not the folded status,
+which under `TerminalNode` would read `Failed` until the exit record exists.
 
 All coordination lives in a pure, sans-IO core: `apply(state, event) ->
 (state, commands)` — deterministic, no clocks, no RNG, no filesystem. All side
@@ -97,6 +105,11 @@ pub struct Token {
     pub edge: EdgeId,
     pub generation: Generation,    // renamed from `gen` (edition-2024 keyword)
     pub payload: Value, pub from: FiringId,
+}
+
+pub enum Completion {               // Graph.completion: how run status folds (§1)
+    AnyFailure,                     // default
+    TerminalNode(NodeId),
 }
 ```
 
@@ -319,6 +332,9 @@ strict/unknown-field-lint mode is a v2 seam.
    cannot be both a multi-branch `All` join and a loop head — put a join node
    in front of the loop head. Entry-node seeding checks consider forward edges
    only (an entry node may also be a loop head).
+9. `Completion::TerminalNode(id)`: the node must exist. Nothing more — the node
+   is *expected* to be terminal, but the semantics only need a final record, so
+   terminal shape and reachability rules belong to frontends.
 
 **Lint (warning, not error):** possible scope re-entry after release — a node
 outside a scope both reachable from it and reaching back into it. Suppressed
