@@ -18,13 +18,21 @@ use support::*;
 
 const IMAGE: &str = "alpine:3.20";
 
-/// Docker tests need a daemon and the image. Say so and skip rather than fail.
+/// Docker tests need a daemon. Skip without one, so `cargo test` is green on a
+/// machine that has none.
+///
+/// `PETRI_REQUIRE_DOCKER` turns that skip into a failure. CI sets it on the Linux
+/// job, because a silently skipped acceptance battery is indistinguishable from a
+/// passing one, and this is the job whose whole purpose is that the battery ran.
 async fn docker_ready() -> bool {
-    if !docker_available().await {
-        eprintln!("skipping: no Docker daemon reachable");
-        return false;
+    if docker_available().await {
+        return true;
     }
-    true
+    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
+        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
+    }
+    eprintln!("skipping: no Docker daemon reachable");
+    false
 }
 
 fn docker_graph(name: &str, run: &str) -> ir::Graph {
@@ -120,6 +128,16 @@ sleep 300
     assert_eq!(
         status_of(&report, "backgrounder").as_deref(),
         Some("cancelled")
+    );
+
+    // This step does not trap TERM, so TERM alone must have ended it. If the signal
+    // had not reached the group the ladder would have waited out the whole grace
+    // period and escalated — and the heartbeat check below would then pass for the
+    // wrong reason, because release removes the container either way.
+    assert_eq!(
+        output_of(&report, "backgrounder")["cancel_escalation"],
+        json!("sigterm"),
+        "the signal never reached the exec's process group"
     );
 
     // If the signal had gone to PID 1 instead of the step's group, the grandchild
@@ -269,5 +287,64 @@ async fn docker_wait_follows_the_step_not_the_client() {
     assert!(
         elapsed >= Duration::from_millis(900),
         "the wait returned before the step was done: {elapsed:?}"
+    );
+}
+
+/// The wrapper is inside the group the ladder kills, so it never gets to record a
+/// status. That path must land on the cancellation outcome rather than hanging on a
+/// status file that is not coming, or falling back to a default.
+#[tokio::test]
+async fn docker_cancel_without_a_recorded_status_still_reports_cancelled() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-killed-wrapper");
+    // Ignores TERM, so the ladder escalates and SIGKILLs the whole group, wrapper
+    // included, mid-step.
+    let graph = docker_graph(
+        "stubborn",
+        r#"
+trap '' TERM
+echo ready > ready
+while :; do sleep 0.1; done
+"#,
+    );
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(1))
+        .with_retention(Retention::Always);
+    let workspace = dir.workspace();
+
+    let driver = docker_driver(graph, &dir, config);
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+
+    assert!(wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await);
+    handle.cancel(ir::CancelScopeId::ROOT).await;
+
+    let report = tokio::time::timeout(Duration::from_secs(30), run)
+        .await
+        .expect("the run must not hang waiting for a status file that is not coming")
+        .expect("the run finished");
+
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert_eq!(status_of(&report, "stubborn").as_deref(), Some("cancelled"));
+    assert_eq!(
+        output_of(&report, "stubborn")["cancel_escalation"],
+        json!("sigkill"),
+        "the escalation is recorded even though no status file was written"
+    );
+
+    // Nothing recorded a status, which is the state this test exists to cover.
+    let leftovers: Vec<_> = std::fs::read_dir(workspace.join(".ci").join("pg"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !leftovers.iter().any(|n| n.ends_with(".status")),
+        "a status file appeared after a SIGKILL: {leftovers:?}"
     );
 }

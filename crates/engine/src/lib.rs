@@ -27,6 +27,8 @@ pub use event::{
     BoundaryViolation, Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice,
     UnresolvedConfig,
 };
-pub use log::{EventLog, EventRecord, EventSource, LOG_VERSION, UnsupportedLogVersion};
+pub use log::{
+    CANCEL_ESCALATION_KEY, EventLog, EventRecord, EventSource, LOG_VERSION, UnsupportedLogVersion,
+};
 pub use replay::{ReplayMismatch, replay, verify_replay};
 pub use state::{CancelScope, EngineState, Firing, FiringRecord, RunError, Splice};

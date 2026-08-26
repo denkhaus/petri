@@ -238,6 +238,143 @@ impl StaticCtx {
     }
 }
 
+/// One entry in the built-in function table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Builtin {
+    pub name: &'static str,
+    pub arity: usize,
+    pub summary: &'static str,
+}
+
+/// Every function an expression may call.
+///
+/// This table is not documentation that sits beside the implementation — it **gates**
+/// it. [`eval`] looks a call up here before dispatching, so a function that is not in
+/// the table is unknown however many match arms exist, and an entry with no arm fails
+/// its own conformance test. The two cannot drift.
+///
+/// # The bar for adding one
+///
+/// A language that grows a function whenever a test needs one becomes an ad-hoc
+/// scripting language by accretion. Every entry must be:
+///
+/// - **pure** — no IO, no clock, no randomness, no ambient state;
+/// - **total** — every input either yields a value or a typed [`EvalError`], never a
+///   panic;
+/// - **tested** — in `crates/ir/tests/expressions.rs`, including its error cases;
+/// - **necessary** — justified by a test or a frontend mapping that genuinely cannot
+///   be written without it. `split` met this bar: the outputs-file protocol yields
+///   strings, and `for_each` needs an array.
+///
+/// This is also the surface a frontend expression grammar maps onto, so additions
+/// widen a contract rather than adding a convenience.
+pub const BUILTINS: &[Builtin] = &[
+    // Status predicates. `status` is bound wherever an outcome is in scope.
+    Builtin {
+        name: "always",
+        arity: 0,
+        summary: "true, whatever the status",
+    },
+    Builtin {
+        name: "never",
+        arity: 0,
+        summary: "false, whatever the status",
+    },
+    Builtin {
+        name: "success",
+        arity: 0,
+        summary: "success-like: Success or PartialSuccess (see Status::is_success_like)",
+    },
+    Builtin {
+        name: "partial_success",
+        arity: 0,
+        summary: "exactly PartialSuccess",
+    },
+    Builtin {
+        name: "full_success",
+        arity: 0,
+        summary: "exactly Success, excluding PartialSuccess",
+    },
+    Builtin {
+        name: "failure",
+        arity: 0,
+        summary: "exactly Failure",
+    },
+    Builtin {
+        name: "skipped",
+        arity: 0,
+        summary: "exactly Skipped",
+    },
+    Builtin {
+        name: "cancelled",
+        arity: 0,
+        summary: "exactly Cancelled",
+    },
+    Builtin {
+        name: "timed_out",
+        arity: 0,
+        summary: "exactly TimedOut",
+    },
+    // Values.
+    Builtin {
+        name: "not",
+        arity: 1,
+        summary: "logical negation, by truthiness",
+    },
+    Builtin {
+        name: "len",
+        arity: 1,
+        summary: "length of an array, object or string",
+    },
+    Builtin {
+        name: "to_string",
+        arity: 1,
+        summary: "render a value as a string",
+    },
+    Builtin {
+        name: "default",
+        arity: 2,
+        summary: "the first value unless it is null, else the second",
+    },
+    Builtin {
+        name: "get",
+        arity: 2,
+        summary: "index an array by number or an object by key",
+    },
+    Builtin {
+        name: "contains",
+        arity: 2,
+        summary: "membership in an array, object keys, or a substring",
+    },
+    Builtin {
+        name: "concat",
+        arity: 2,
+        summary: "join two arrays, strings or objects",
+    },
+    // Lists. These exist so a collector can reassemble expansion results, and so a
+    // step's string output can feed `for_each`, without the language needing lambdas.
+    Builtin {
+        name: "split",
+        arity: 2,
+        summary: "split a string on a separator, dropping empty pieces",
+    },
+    Builtin {
+        name: "sort_by_key",
+        arity: 2,
+        summary: "order an array of objects by one field",
+    },
+    Builtin {
+        name: "pluck",
+        arity: 2,
+        summary: "take one field from every object in an array",
+    },
+];
+
+/// Look a function up in the table.
+pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    BUILTINS.iter().find(|b| b.name == name)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum EvalError {
     #[error("expression {0} is not in the table")]
@@ -432,17 +569,16 @@ fn eval_call(
     env: &EvalEnv<'_>,
     depth: u32,
 ) -> Result<Value, EvalError> {
-    let arity = |expected: usize| -> Result<(), EvalError> {
-        if args.len() == expected {
-            Ok(())
-        } else {
-            Err(EvalError::Arity {
-                name: name.clone(),
-                expected,
-                got: args.len(),
-            })
-        }
-    };
+    // The table gates dispatch: an unknown name never reaches a match arm, and arity
+    // is checked once, here, rather than in nineteen places.
+    let spec = builtin(name).ok_or_else(|| EvalError::UnknownFunction(name.clone()))?;
+    if args.len() != spec.arity {
+        return Err(EvalError::Arity {
+            name: name.clone(),
+            expected: spec.arity,
+            got: args.len(),
+        });
+    }
     let arg = |i: usize| eval_at(table, args[i], env, depth);
     // `status` is bound by the core wherever an outcome is in scope.
     let status_is = |want: &str| -> Result<Value, EvalError> {
@@ -452,50 +588,24 @@ fn eval_call(
 
     match name.as_str() {
         // GHA-style status functions.
-        "always" => {
-            arity(0)?;
-            Ok(Value::Bool(true))
-        }
-        "never" => {
-            arity(0)?;
-            Ok(Value::Bool(false))
-        }
+        "always" => Ok(Value::Bool(true)),
+        "never" => Ok(Value::Bool(false)),
         // `success()` is success-like, per Status::is_success_like: it is the default
         // success guard, and it must not open-code the classification.
         "success" => {
-            arity(0)?;
             let tag = env.lookup("status").unwrap_or(Value::Null);
             let tag = tag.as_str().unwrap_or_default();
             Ok(Value::Bool(tag == "success" || tag == "partial_success"))
         }
         // Exactly `PartialSuccess`, for a guard that needs to tell the two apart.
-        "partial_success" => {
-            arity(0)?;
-            status_is("partial_success")
-        }
+        "partial_success" => status_is("partial_success"),
         // Strictly `Success`, excluding `PartialSuccess`.
-        "full_success" => {
-            arity(0)?;
-            status_is("success")
-        }
-        "failure" => {
-            arity(0)?;
-            status_is("failure")
-        }
-        "skipped" => {
-            arity(0)?;
-            status_is("skipped")
-        }
-        "cancelled" => {
-            arity(0)?;
-            status_is("cancelled")
-        }
-        "timed_out" => {
-            arity(0)?;
-            status_is("timed_out")
-        }
+        "full_success" => status_is("success"),
+        "failure" => status_is("failure"),
+        "skipped" => status_is("skipped"),
+        "cancelled" => status_is("cancelled"),
+        "timed_out" => status_is("timed_out"),
         "len" => {
-            arity(1)?;
             let v = arg(0)?;
             let n = match &v {
                 Value::Array(a) => a.len(),
@@ -506,12 +616,8 @@ fn eval_call(
             };
             Ok(num(n as f64))
         }
-        "concat" => {
-            arity(2)?;
-            concat(&arg(0)?, &arg(1)?)
-        }
+        "concat" => concat(&arg(0)?, &arg(1)?),
         "contains" => {
-            arity(2)?;
             let (hay, needle) = (arg(0)?, arg(1)?);
             Ok(Value::Bool(match &hay {
                 Value::Array(a) => a.contains(&needle),
@@ -520,19 +626,14 @@ fn eval_call(
                 other => return Err(type_err("contains", "array, object or string", other)),
             }))
         }
-        "get" => {
-            arity(2)?;
-            Ok(index_into(&arg(0)?, &arg(1)?))
-        }
+        "get" => Ok(index_into(&arg(0)?, &arg(1)?)),
         "default" => {
-            arity(2)?;
             let v = arg(0)?;
             Ok(if v.is_null() { arg(1)? } else { v })
         }
         "sort_by_key" => {
             // Order an array of objects by one field. Lets a collector put clone
             // results back in `index` order without needing lambdas.
-            arity(2)?;
             let (array, key) = (arg(0)?, arg(1)?);
             let Value::Array(mut items) = array else {
                 return Err(type_err("sort_by_key", "an array", &array));
@@ -558,7 +659,6 @@ fn eval_call(
             // The outputs-file protocol yields strings, so turning one into a list
             // is what a frontend needs to feed `for_each`. Empty trailing segments
             // are dropped, which is what a trailing newline means in practice.
-            arity(2)?;
             let (text, separator) = (arg(0)?, arg(1)?);
             let text = text
                 .as_str()
@@ -577,7 +677,6 @@ fn eval_call(
             Ok(Value::Array(parts))
         }
         "pluck" => {
-            arity(2)?;
             let (array, key) = (arg(0)?, arg(1)?);
             let Value::Array(items) = array else {
                 return Err(type_err("pluck", "an array", &array));
@@ -593,14 +692,10 @@ fn eval_call(
                     .collect(),
             ))
         }
-        "to_string" => {
-            arity(1)?;
-            Ok(Value::String(to_display(&arg(0)?)))
-        }
-        "not" => {
-            arity(1)?;
-            Ok(Value::Bool(!truthy(&arg(0)?)))
-        }
+        "to_string" => Ok(Value::String(to_display(&arg(0)?))),
+        "not" => Ok(Value::Bool(!truthy(&arg(0)?))),
+        // Unreachable: the table gated this call, so every entry has an arm above.
+        // A new table entry with no arm lands here and fails its conformance test.
         _ => Err(EvalError::UnknownFunction(name.clone())),
     }
 }

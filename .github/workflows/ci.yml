@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu runners have a native Docker daemon, so the Docker half of the
+          # acceptance battery runs for real here.
+          - os: ubuntu-latest
+            docker: required
+          # macOS runners have no daemon. The Docker tests skip themselves, and the
+          # rest of the suite still exercises the host executor.
+          - os: macos-latest
+            docker: absent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      # Pull it here rather than inside a test, so a registry hiccup fails as an
+      # infrastructure problem instead of a flaky cancellation test.
+      - name: Pre-pull the test image
+        if: matrix.docker == 'required'
+        run: docker pull alpine:3.20
+
+      - name: Tests
+        run: cargo test --workspace --all-features
+        env:
+          # On a runner that has Docker, a skipped Docker test is a failure: the
+          # whole point of this job is that the acceptance battery actually ran.
+          PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
+
+      - name: No containers left behind
+        if: matrix.docker == 'required'
+        run: |
+          leftovers=$(docker ps -a --format '{{.Names}}' | grep '^petri-' || true)
+          if [ -n "$leftovers" ]; then
+            echo "the run leaked containers:"
+            echo "$leftovers"
+            exit 1
+          fi
+          echo "clean"
+
+  # Release mode catches what debug assertions hide, and is cheap enough to run once.
+  release-build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --release

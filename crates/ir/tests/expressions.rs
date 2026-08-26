@@ -375,3 +375,64 @@ fn split_turns_output_into_a_list() {
         Err(EvalError::Type { .. })
     ));
 }
+
+/// The function table gates dispatch, so it cannot drift from the implementation:
+/// every entry must evaluate, and a name that is not an entry must be unknown.
+#[test]
+fn the_builtin_table_matches_the_implementation() {
+    use ir::expr::{BUILTINS, builtin};
+
+    let mut t = ExprTable::new();
+    let c = ctx(&[("status", json!("success"))]);
+
+    for spec in BUILTINS {
+        // Call it with its declared arity. Arguments are deliberately the wrong
+        // *types* for most functions: a type error proves the arm was reached, which
+        // is what this test is checking.
+        let args: Vec<_> = (0..spec.arity).map(|_| t.lit(json!("x"))).collect();
+        let call = t.call(spec.name, args);
+        match eval(&t, call, &c.env()) {
+            Err(EvalError::UnknownFunction(name)) => {
+                panic!("`{name}` is in the table but has no implementation")
+            }
+            Err(EvalError::Arity { name, .. }) => {
+                panic!("`{name}` declares the wrong arity in the table")
+            }
+            _ => {}
+        }
+    }
+
+    // And nothing outside the table dispatches, however plausible it sounds.
+    for name in ["map", "filter", "reduce", "now", "random", "env"] {
+        let call = t.call(name, vec![]);
+        assert!(
+            matches!(
+                eval(&t, call, &c.env()),
+                Err(EvalError::UnknownFunction(_)) | Err(EvalError::Arity { .. })
+            ),
+            "`{name}` dispatched without being in the table"
+        );
+    }
+
+    assert!(builtin("split").is_some());
+    assert!(builtin("definitely_not_a_builtin").is_none());
+}
+
+/// Arity is checked once, from the table, for every function.
+#[test]
+fn arity_comes_from_the_table() {
+    use ir::expr::BUILTINS;
+
+    let mut t = ExprTable::new();
+    let c = empty();
+    for spec in BUILTINS {
+        let too_many: Vec<_> = (0..spec.arity + 1).map(|_| t.lit(1)).collect();
+        let call = t.call(spec.name, too_many);
+        assert!(
+            matches!(eval(&t, call, &c.env()), Err(EvalError::Arity { .. })),
+            "`{}` accepted {} arguments",
+            spec.name,
+            spec.arity + 1
+        );
+    }
+}

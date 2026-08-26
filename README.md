@@ -245,8 +245,25 @@ with a working execution path.
     permanent. So `cancel_escalation` is a field on the outcome's output object,
     valued `sigterm`, `sigkill` or `cancel_forced`.
 
-21. **Docker exit status comes from a status file the wrapper writes, not from the
-    `docker exec` client.** `setsid` forks when its caller is already a process-group
+21a. **In-container signals are `kill -SIG -PGID`, with no `--` separator.** The
+    handoff spells it `docker exec <c> kill -<SIG> -- -<PGID>`, which is the POSIX
+    form — and busybox rejects it outright: `sh: invalid number '--'`. A rejected
+    signal is a silent one, so cancellation never reached the step; the ladder waited
+    out its whole grace period and the step ran on until the container was torn down.
+    Since alpine is the obvious base image, the separator cannot be used.
+    `kill -TERM -123` is understood by busybox ash, dash and bash alike, and the call
+    goes through `sh -c` so it is the shell builtin rather than whichever `kill`
+    binary the image carries.
+
+    This one hid behind a green test. `docker_cancel_kills_the_exec_process_group`
+    asserted that a backgrounded grandchild stopped ticking after a cancel — which it
+    did, but because release removed the container, not because the signal landed.
+    The test now also asserts the escalation was `sigterm`: that step does not trap
+    TERM, so TERM alone must have ended it, and a signal that never arrives shows up
+    as a `sigkill` escalation instead. **A cancellation test that only checks the
+    process is gone will pass on teardown alone; it has to pin how it went.**
+
+21b. **Docker `wait` follows the process group, not the `docker exec` client.** `setsid` forks when its caller is already a process-group
     leader, and whether `docker exec` hands it one is not something to rely on. When
     it forks, `setsid` exits as soon as the child is running and `docker exec` returns
     0 while the step is still going — the status is lost, and so is the step's real
@@ -255,6 +272,15 @@ with a working execution path.
     rather than trusting an early return, which makes the executor correct whichever
     way `setsid` behaves. `docker_wait_follows_the_step_not_the_client` pins both the
     status and the duration.
+
+    The same reasoning covers a second way the client lies. After `SIGTERM` the
+    wrapper dies at once — it traps nothing — so the client returns while a step that
+    *does* trap TERM is still running. Believing it there reports a graceful exit,
+    skips the escalation to `SIGKILL`, and leaves the step running. So `wait` waits
+    for a recorded status or a dead process group, whichever comes first; `SIGKILL`
+    guarantees the second, which is what bounds the loop.
+    `docker_cancel_without_a_recorded_status_still_reports_cancelled` pins the path
+    where the wrapper is killed before it can record anything.
 
 22. **The ladder lives in the step kind; the driver owns the outer deadline and the
     timeout-versus-cancel decision.** A step reports `Cancelled` however it was
@@ -274,9 +300,19 @@ with a working execution path.
     invariant for any host that persists commands — and the secret test greps the
     whole serialized `EngineState`, not just the log, which is the stronger check.
 
-25. **`split(string, separator)` joined the expression language.** The outputs-file
-    protocol yields strings, so a step that produces a list of regions produces one
-    string; `for_each` needs an array. Acceptance test 1 cannot be written without it.
+25. **`split(string, separator)` joined the expression language**, and the language
+    now has a gate. The outputs-file protocol yields strings, so a step that produces
+    a list of regions produces one string, and `for_each` needs an array — acceptance
+    test 1 cannot be written without it.
+
+    Three functions had by then accreted under pressure from individual tests, which
+    is how ad-hoc scripting languages are born. `ir::expr::BUILTINS` is now a table
+    that **gates dispatch** rather than describing it: a call is looked up there
+    before any match arm is reached, and arity is checked once from the entry. A
+    function missing from the table is unknown however many arms exist, and an entry
+    with no arm fails its own conformance test. The bar for adding one — pure, total,
+    tested including error cases, and justified by something that cannot be written
+    without it — is documented on the table itself.
 
 26. **Docker images must provide `setsid`.** busybox and util-linux both do, so
     alpine, debian and ubuntu are all fine. A spawn into an image without it fails
@@ -293,6 +329,22 @@ with a working execution path.
 29. **`RunHandle` is how a cancel gets in.** The handoff has `CancelRequested`
     arriving as an event without saying who sends it; `Driver::handle()` returns a
     handle that can inject one into a run in flight.
+
+## Testing notes
+
+Three things this package taught, kept because they generalise:
+
+- **Assert the duration, not just the result.** A `docker exec` that returns early
+  looks exactly like a step that finished fast. Pinning elapsed time alongside the
+  exit status in `docker_wait_follows_the_step_not_the_client` is what makes that
+  regression loud instead of silent.
+- **A cancellation test that only checks the process is gone will pass on teardown
+  alone.** Releasing the scope kills everything either way, so the test has to pin
+  *how* the step ended — which signal, which escalation — not merely that it did.
+- **Docker tests skip without a daemon, and `PETRI_REQUIRE_DOCKER` turns that skip
+  into a failure.** CI sets it on the Linux job. A silently skipped acceptance
+  battery is indistinguishable from a passing one, and that job exists precisely to
+  say the battery ran.
 
 ## Not built
 

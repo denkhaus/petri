@@ -44,6 +44,20 @@ use crate::scope::{EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec, Tear
 /// Where the workspace is mounted inside the container.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
+/// How often [`DockerProcess::wait`] checks whether the step's process group is
+/// still alive, once the `docker exec` client has returned without a recorded status.
+///
+/// This sets two things at once: how long after a step really ends before the driver
+/// notices, and how much idle `docker exec` traffic a long step costs. At 50ms a
+/// ten-minute step costs about 12,000 liveness checks in the worst case — the case
+/// where `setsid` forked. When it did not fork, which is the common case, the status
+/// file is already there on the first look and the loop never runs.
+pub const LIVENESS_POLL: Duration = Duration::from_millis(50);
+
+/// How long to wait for the step to record its pgid before giving up on signalling
+/// the group. A cancel can arrive before the step has written it.
+pub const PGID_WAIT: Duration = Duration::from_secs(2);
+
 /// When to pull an image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PullPolicy {
@@ -251,7 +265,10 @@ impl ExecEnv for DockerEnv {
             "setsid".to_string(),
             "sh".to_string(),
             "-c".to_string(),
-            r#"p="$1"; shift; echo $$ > "$p"; "$@"; s=$?; echo "$s" > "$p.status"; exit "$s""#
+            // Both files are written to a temporary name and renamed into place.
+            // Rename within a directory is atomic on POSIX, so the host can never
+            // read a half-written pgid or status.
+            r#"p="$1"; shift; echo $$ > "$p.tmp"; mv "$p.tmp" "$p"; "$@"; s=$?; echo "$s" > "$p.status.tmp"; mv "$p.status.tmp" "$p.status"; exit "$s""#
                 .to_string(),
             "sh".to_string(),
             pgid_in_container,
@@ -296,7 +313,6 @@ impl ExecEnv for DockerEnv {
             pgid_file: pgid_host,
             pgid: None,
             lines: Some(rx),
-            signalled: false,
         }))
     }
 
@@ -320,9 +336,6 @@ struct DockerProcess {
     status_file: PathBuf,
     pgid: Option<i32>,
     lines: Option<LineStream>,
-    /// Set once the ladder has signalled, so `wait` stops waiting for a status file
-    /// the wrapper will never get to write.
-    signalled: bool,
 }
 
 impl DockerProcess {
@@ -337,10 +350,7 @@ impl DockerProcess {
         let Some(pgid) = self.pgid else {
             return false;
         };
-        let target = format!("-{pgid}");
-        run_docker(&["exec", &self.container, "kill", "-0", "--", &target])
-            .await
-            .is_ok()
+        signal_group(&self.container, pgid, "0").await.is_ok()
     }
 }
 
@@ -351,7 +361,8 @@ impl DockerProcess {
         if let Some(pgid) = self.pgid {
             return Some(pgid);
         }
-        for _ in 0..100 {
+        let deadline = tokio::time::Instant::now() + PGID_WAIT;
+        while tokio::time::Instant::now() < deadline {
             if let Ok(text) = tokio::fs::read_to_string(&self.pgid_file).await
                 && let Ok(pgid) = text.trim().parse::<i32>()
                 && pgid > 0
@@ -359,7 +370,7 @@ impl DockerProcess {
                 self.pgid = Some(pgid);
                 return Some(pgid);
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(LIVENESS_POLL).await;
         }
         None
     }
@@ -378,12 +389,21 @@ impl ProcessHandle for DockerProcess {
             .await
             .map_err(|e| EnvError::Wait(e.to_string()))?;
 
-        // The client returning does not mean the step is over: if `setsid` forked, it
-        // returned as soon as the child was running. Keep waiting while the step's
-        // process group is alive and no status has been recorded.
+        // The client returning does not mean the step is over, in two distinct ways,
+        // and the group is the authority on both.
+        //
+        // If `setsid` forked, the client returned as soon as the child was running.
+        //
+        // And after a `SIGTERM`, the wrapper — which does not trap anything — dies at
+        // once, so the client returns while a step that *does* trap `TERM` is still
+        // running inside. Believing the client there would report a graceful exit,
+        // skip the escalation to `SIGKILL`, and leave the step running until the
+        // container was torn down.
+        //
+        // So: wait until a status is recorded or the process group is gone. `SIGKILL`
+        // guarantees the second, which is what bounds this loop.
         let mut status = self.recorded_status().await;
-        if status.is_none() && !self.signalled {
-            // Give the wrapper a moment to write, then follow the group.
+        if status.is_none() {
             let _ = self.pgid().await;
             loop {
                 if let Some(recorded) = self.recorded_status().await {
@@ -395,7 +415,7 @@ impl ProcessHandle for DockerProcess {
                     status = self.recorded_status().await;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(LIVENESS_POLL).await;
             }
         }
 
@@ -405,7 +425,6 @@ impl ProcessHandle for DockerProcess {
     }
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
-        self.signalled = true;
         let Some(pgid) = self.pgid().await else {
             // The step never got far enough to record a group. Killing the `docker
             // exec` client is all that is left, and it is enough: there is nothing
@@ -424,6 +443,25 @@ impl ProcessHandle for DockerProcess {
             Err(_) => Ok(()),
         }
     }
+}
+
+/// Signal a process group inside a container.
+///
+/// Written `kill -SIG -PGID`, with **no `--` separator**. The handoff spells it
+/// `kill -<SIG> -- -<PGID>`, which is the POSIX form, but busybox rejects it —
+/// `sh: invalid number '--'` — and a rejected signal is a silent one: the step keeps
+/// running and the ladder waits out its whole grace period for nothing. Since alpine
+/// is the obvious base image, the separator cannot be used. `kill -TERM -123` is
+/// understood by busybox ash, dash and bash alike.
+///
+/// It also goes through `sh -c` rather than as a bare `docker exec … kill`, so this
+/// is the shell builtin rather than whichever `kill` binary the image happens to
+/// carry.
+async fn signal_group(container: &str, pgid: i32, signal: &str) -> Result<(), EnvError> {
+    let script = format!("kill -{signal} -{pgid}");
+    run_docker(&["exec", container, "sh", "-c", &script])
+        .await
+        .map(|_| ())
 }
 
 fn next_token() -> u64 {

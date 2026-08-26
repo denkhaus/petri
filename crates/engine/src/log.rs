@@ -48,6 +48,22 @@ pub enum EventSource {
     Core,
 }
 
+/// Where a cancellation's escalation is recorded, and why it is not a failure class.
+///
+/// A consumer reading the log for "how did this step get stopped" looks here, not at
+/// [`ir::Status`]. `Status::Cancelled` and `Status::TimedOut` carry no `FailureInfo`,
+/// and giving them one would widen an enum the core declares closed and permanent.
+/// So the escalation is a field on the finish record's `outcome.output`:
+///
+/// | Value | Meaning |
+/// |---|---|
+/// | `sigterm` | the step exited within the grace period after `SIGTERM` |
+/// | `sigkill` | the grace period ran out and the group was killed |
+/// | `cancel_forced` | the step kind never returned; the driver stopped waiting |
+///
+/// The key is absent on any outcome that was not cancelled or timed out.
+pub const CANCEL_ESCALATION_KEY: &str = "cancel_escalation";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
     /// Position in the log, starting at 0.
