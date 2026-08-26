@@ -59,6 +59,7 @@ pub struct Runtime {
     executor: Option<Arc<dyn Executor>>,
     secrets: Arc<dyn SecretProvider>,
     observers: Vec<Arc<dyn EventObserver>>,
+    caps: ::steps::CapabilitiesBuilder,
     options: RunOptions,
 }
 
@@ -81,6 +82,7 @@ impl Runtime {
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
             observers: Vec::new(),
+            caps: ::steps::Capabilities::builder(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
@@ -95,6 +97,7 @@ impl Runtime {
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
             observers: Vec::new(),
+            caps: ::steps::Capabilities::builder(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
@@ -141,6 +144,19 @@ impl Runtime {
     /// every appended record, in seq order, with the post-apply state.
     pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
+        self
+    }
+
+    /// Register a host service for steps, keyed by its concrete type: every
+    /// step this runtime's drivers run can ask for it through `StepCtx`.
+    ///
+    /// # Panics
+    ///
+    /// On a duplicate type — registration is configuration, the same rule as
+    /// step registration. A host with per-run services builds its own
+    /// [`::steps::Capabilities`] and calls `Driver::with_capabilities` instead.
+    pub fn capability<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.caps = self.caps.provide(value);
         self
     }
 
@@ -245,7 +261,7 @@ impl Runtime {
             Arc::clone(&self.secrets),
             self.run_config(),
         );
-        self.with_observers(driver)
+        self.equip(driver)
     }
 
     /// A driver continuing a crashed run's log, however the host stored it —
@@ -265,7 +281,7 @@ impl Runtime {
             Arc::clone(&self.secrets),
             self.run_config(),
         )?;
-        Ok((self.with_observers(driver), info))
+        Ok((self.equip(driver), info))
     }
 
     fn run_config(&self) -> RunConfig {
@@ -284,7 +300,9 @@ impl Runtime {
             .unwrap_or_else(|| self.default_executor())
     }
 
-    fn with_observers(&self, mut driver: Driver) -> Driver {
+    /// The registrations every driver gets, whichever way it was built.
+    fn equip(&self, mut driver: Driver) -> Driver {
+        driver = driver.with_capabilities(self.caps.clone().build());
         for observer in &self.observers {
             driver = driver.observe(Arc::clone(observer));
         }

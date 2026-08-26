@@ -4,11 +4,13 @@
 //! [`ExecEnv`](executor::ExecEnv) capability and uses it, which is why the process
 //! step is written once and runs either way.
 
+pub mod caps;
 pub mod ctx;
 pub mod noop;
 pub mod outputs;
 pub mod process;
 
+pub use caps::{CAPABILITY_UNAVAILABLE_CLASS, Capabilities, CapabilitiesBuilder};
 pub use ctx::{BAD_CONFIG_CLASS, Registry, Step, StepCtx, StepFailure, StepRunner};
 pub use noop::{NOOP_KIND, NoopStep};
 pub use outputs::{BAD_OUTPUT_CLASS, OutputError, parse as parse_outputs};

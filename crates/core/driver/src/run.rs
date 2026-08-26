@@ -18,7 +18,7 @@ use ir::{
     RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
 };
 use smol_str::SmolStr;
-use steps::{Registry, StepCtx};
+use steps::{Capabilities, Registry, StepCtx};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -270,6 +270,7 @@ pub struct Driver {
     acquire_failures: HashMap<ScopeId, String>,
     scope_failed: HashSet<ScopeId>,
     tasks: HashMap<FiringId, Task>,
+    caps: Capabilities,
     observers: Vec<Arc<dyn EventObserver>>,
     releases: Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
@@ -345,6 +346,7 @@ impl Driver {
             acquire_failures: HashMap::new(),
             scope_failed: HashSet::new(),
             tasks: HashMap::new(),
+            caps: Capabilities::default(),
             observers: Vec::new(),
             releases: Vec::new(),
             cleanup_timer: None,
@@ -358,6 +360,12 @@ impl Driver {
     /// the post-apply state, and its `finish` is awaited before the report.
     pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
+        self
+    }
+
+    /// The host services every step's `StepCtx` carries (default: none).
+    pub fn with_capabilities(mut self, caps: Capabilities) -> Self {
+        self.caps = caps;
         self
     }
 
@@ -810,6 +818,7 @@ impl Driver {
             config: resolved.config().clone(),
             env,
             secrets: Arc::clone(&self.secrets),
+            caps: self.caps.clone(),
             logs: log_tx,
             control: control_rx,
         };

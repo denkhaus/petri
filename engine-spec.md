@@ -448,6 +448,17 @@ encourage intra-scope parallel writes to the same paths.
 owns environments (`acquire`/`release` + the `ExecEnv` spawn capability handed
 to steps); StepKind owns step semantics and never mentions host-vs-Docker.
 
+**Capabilities.** `StepCtx` carries a typed, host-registered capability map
+(`Capabilities`, in the `steps` crate): components define concrete handle
+types and register values — on the `Runtime` builder or per run via
+`Driver::with_capabilities` — and a step asks by type; **the core never names
+a capability**. The key is the concrete type (`Arc<dyn Any>` downcasts only to
+sized types), so a `dyn`-trait service rides behind a concrete newtype.
+Duplicate registration panics, like step registration. `require_capability`
+fails routably with class `capability_unavailable` (§13), mirroring
+`secret_unavailable`. Capabilities live entirely on the effects side: nothing
+touches the engine, the log, or determinism.
+
 **Driver rules:** single command consumer, single External-event producer;
 per-attempt timeout timers (expiry → cancellation ladder → `TimedOut`); retry
 jitter + sleep → `RetryElapsed`; hard deadline after `Control::Cancel` of
@@ -612,6 +623,7 @@ groups; `for_each` + `parallel: true|false` → `ForEach` vs cycle desugar.
 | `spawn_failed` | the process could not be started at all |
 | `env_acquire` | the scope's environment could not be materialized |
 | `no_runner` | no step kind is registered for a node's `StepRef.kind` |
+| `capability_unavailable` | a step required a host capability no one registered (§10) |
 
 Not classes, listed here so they are findable: `cancel_forced` is a value of
 `output.cancel_escalation` (§3.1 rule 5); `UnresolvedConfig` is an error type that

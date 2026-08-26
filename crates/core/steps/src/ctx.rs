@@ -30,6 +30,9 @@ pub struct StepCtx {
     pub config: Value,
     pub env: Arc<dyn ExecEnv>,
     pub secrets: Arc<dyn SecretProvider>,
+    /// Host services, looked up by type ([`StepCtx::capability`]). The core
+    /// never names one.
+    pub caps: crate::caps::Capabilities,
     /// Progress out: logs and artifacts, in arrival order.
     pub logs: mpsc::Sender<StepEvent>,
     /// Control in. A `Cancel` starts the ladder.
@@ -46,6 +49,18 @@ impl StepCtx {
                 line: line.into(),
             })
             .await;
+    }
+
+    /// The host service of this type, if the host registered one.
+    pub fn capability<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        self.caps.get::<T>()
+    }
+
+    /// The host service of this type, or the routable `capability_unavailable`
+    /// failure — a step missing its host service fails its node, mirroring
+    /// `secret_unavailable`.
+    pub fn require_capability<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, StepFailure> {
+        self.caps.require::<T>()
     }
 }
 
