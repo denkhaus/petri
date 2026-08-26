@@ -1,1 +1,11 @@
+/.ai/*
+!/.ai/style-guides.lock
+!/.ai/journal/
+!/.ai/plans/
+/.ai/plans/*
+!/.ai/plans/DRAFTING.md
+node_modules/
 /target
+__pycache__/
+tmp
+/dist/
