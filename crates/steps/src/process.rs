@@ -107,6 +107,11 @@ pub struct ProcessConfig {
     pub working_dir: Option<PathBuf>,
     #[serde(default)]
     pub soft_fail: SoftFail,
+    /// Extra environment variables that name the same outputs file as `CI_OUTPUT`.
+    /// The GHA frontend sets `["GITHUB_OUTPUT"]`, so a `run:` step that writes
+    /// `>> "$GITHUB_OUTPUT"` lands in the outputs file without a shim.
+    #[serde(default)]
+    pub output_env_aliases: Vec<SmolStr>,
 }
 
 /// Runs a script as a process, as its own process group.
@@ -192,10 +197,11 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
         })?;
     }
     let _ = tokio::fs::write(&output_host, "").await;
-    env.insert(
-        SmolStr::new(OUTPUT_ENV),
-        SmolStr::new(format!("{}/{output_rel}", ctx.env.workspace_in_env())),
-    );
+    let output_path = SmolStr::new(format!("{}/{output_rel}", ctx.env.workspace_in_env()));
+    env.insert(SmolStr::new(OUTPUT_ENV), output_path.clone());
+    for alias in &config.output_env_aliases {
+        env.insert(alias.clone(), output_path.clone());
+    }
 
     let (program, mut args) = config.shell.invocation();
     let mut argv: Vec<SmolStr> = args.drain(..).map(SmolStr::new).collect();

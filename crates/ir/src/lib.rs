@@ -15,7 +15,9 @@ pub mod builder;
 pub mod expr;
 pub mod graph;
 pub mod ids;
+pub mod loose;
 pub mod lower;
+pub mod matrix;
 pub mod runtime;
 pub mod step;
 pub mod validate;
@@ -33,8 +35,8 @@ pub use ids::{
     Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId,
 };
 pub use lower::{
-    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs,
-    normalize_loop_heads, parallel_for_each, sequential_for_each,
+    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs, loop_exprs_over,
+    normalize_loop_heads, parallel_for_each, sequential_for_each, sequential_for_each_over,
 };
 pub use runtime::{
     Control, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext, RunStatus, Status,

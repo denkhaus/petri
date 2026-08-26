@@ -1,6 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/engine", "crates/executor", "crates/steps", "crates/driver"]
+members = [
+    "crates/ir",
+    "crates/engine",
+    "crates/executor",
+    "crates/steps",
+    "crates/driver",
+    "crates/frontend",
+    "crates/frontend-gha",
+    "crates/frontend-native",
+    "crates/petri",
+    "crates/corpus",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +23,14 @@ ir = { path = "crates/ir" }
 engine = { path = "crates/engine" }
 executor = { path = "crates/executor" }
 steps = { path = "crates/steps" }
+driver = { path = "crates/driver" }
+frontend = { path = "crates/frontend" }
+frontend-gha = { path = "crates/frontend-gha" }
+frontend-native = { path = "crates/frontend-native" }
 async-trait = "0.1"
+clap = { version = "4.6", features = ["derive"] }
+marked-yaml = "0.8"
+proptest = "1.11"
 libc = "0.2"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -24,6 +42,8 @@ tokio = { version = "1", features = [
     "fs",
 ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: GHA matrix axes, object filters and outputs follow document
+# order, and a sorted map would silently reorder them.
+serde_json = { version = "1", features = ["preserve_order"] }
 smol_str = { version = "0.3", features = ["serde"] }
 thiserror = "2"

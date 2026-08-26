@@ -31,11 +31,19 @@ pub struct LoopExprs {
 }
 
 /// Build the loop-state expressions once; reuse the ids across the loop's edges.
+/// The items are the source node's whole `output`.
 pub fn loop_exprs(t: &mut ExprTable) -> LoopExprs {
+    let output = t.var("output");
+    loop_exprs_over(t, output)
+}
+
+/// Build the loop-state expressions with `items` as the array to iterate, evaluated
+/// in the source node's outcome context.
+pub fn loop_exprs_over(t: &mut ExprTable, items_expr: ExprId) -> LoopExprs {
     let output = t.var("output");
     let zero = t.lit(0);
     let empty = t.array(vec![]);
-    let init = t.object(vec![("items", output), ("idx", zero), ("acc", empty)]);
+    let init = t.object(vec![("items", items_expr), ("idx", zero), ("acc", empty)]);
 
     let items = t.path("input", &["items"]);
     let index = t.path("input", &["idx"]);
@@ -95,7 +103,22 @@ pub fn sequential_for_each(
     collector: NodeId,
     max_iterations: u32,
 ) -> SequentialForEach {
-    let exprs = loop_exprs(b.exprs());
+    let output = b.exprs().var("output");
+    sequential_for_each_over(b, source, head, tail, collector, max_iterations, output)
+}
+
+/// [`sequential_for_each`] with an explicit `items` expression, evaluated in the
+/// source node's outcome context, instead of the source's whole `output`.
+pub fn sequential_for_each_over(
+    b: &mut GraphBuilder,
+    source: NodeId,
+    head: NodeId,
+    tail: NodeId,
+    collector: NodeId,
+    max_iterations: u32,
+    items: ExprId,
+) -> SequentialForEach {
+    let exprs = loop_exprs_over(b.exprs(), items);
 
     let enter = {
         let ids = b.select(source, vec![Arm::always(head).with_map(exprs.init)]);

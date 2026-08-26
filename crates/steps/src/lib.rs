@@ -5,10 +5,12 @@
 //! step is written once and runs either way.
 
 pub mod ctx;
+pub mod noop;
 pub mod outputs;
 pub mod process;
 
 pub use ctx::{RunnerRegistry, StepCtx, StepRunner};
+pub use noop::{NOOP_KIND, NoopStep};
 pub use outputs::{BAD_OUTPUT_CLASS, OutputError, parse as parse_outputs};
 pub use process::{
     BAD_CONFIG_CLASS, OUTPUT_ENV, PROCESS_KIND, ProcessConfig, ProcessStep, SECRET_MISPLACED_CLASS,

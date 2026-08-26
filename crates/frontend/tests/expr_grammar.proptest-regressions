@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ca061fdff01a18c2fc97028043d5ae80a5bd149ab38a11e79f7a09185c5a0b0e # shrinks to expr = Binary(Lt, Group(Literal(Null)), Group(Property(Literal(Number(0.0)), "a")))
+cc 1ab04c051b4a1d456827d2684368281859db10fe169a1552c3f0290e332837eb # shrinks to expr = Property(Literal(Number(0.0)), "_")
+cc 6543159bdfc35bfae9cf28518d4a23fda04e3cc5f3332e2f31060ac0d35376ed # shrinks to expr = Property(Unary(Not, Group(Literal(Null))), "a")

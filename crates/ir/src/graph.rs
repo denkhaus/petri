@@ -615,6 +615,16 @@ pub struct Graph {
     pub exprs: ExprTable,
     /// Seeded with one `Generation(0)` token each.
     pub entry: Vec<NodeId>,
+    /// Per-run parameters, visible to every expression as a static binding of the
+    /// same name — the GHA `github`, `vars` and `runner` contexts, a native format's
+    /// `params`. Frontends leave this empty; the host fills it in before the run
+    /// starts, so the graph a run used is self-describing and replay needs nothing
+    /// beyond it.
+    ///
+    /// Lowest precedence: a firing's own bindings (`env`, `item`, `status`, …) shadow
+    /// a parameter of the same name. Read-only for the whole run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<SmolStr, Value>,
 }
 
 impl Graph {
@@ -671,5 +681,11 @@ impl Graph {
     /// Whether this graph is executable: no HIR-only fields left (invariant 6).
     pub fn is_plan(&self) -> bool {
         self.nodes.iter().all(|n| n.expand.is_none())
+    }
+
+    /// Set a run parameter. Chainable, for hosts filling the graph in before a run.
+    pub fn with_param(mut self, name: &str, value: Value) -> Self {
+        self.params.insert(SmolStr::new(name), value);
+        self
     }
 }

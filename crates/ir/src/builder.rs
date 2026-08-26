@@ -80,6 +80,10 @@ impl GraphBuilder {
         &self.graph
     }
 
+    pub fn graph_mut(&mut self) -> &mut Graph {
+        &mut self.graph
+    }
+
     pub fn add_scope(&mut self, scope: Scope) -> ScopeId {
         let id = ScopeId::new(self.graph.scopes.len() as u32);
         let mut scope = scope;

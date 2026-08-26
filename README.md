@@ -78,6 +78,12 @@ crates/driver/tests/timeout.rs       exec §7 6: timeouts, and the race under re
 crates/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
 crates/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
 crates/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
+
+crates/frontend/tests/expr_grammar.rs      frontend §7 1-2: grammar, precedence, coercion, fuzz, table gate
+crates/frontend-gha/tests/lowering.rs      frontend §7 3-6: status truth table, matrix, composites, secrets
+crates/frontend-native/tests/native.rs     frontend §7 7: cycle + XOR + any, run end to end; invariant 8 hint
+crates/corpus/tests/harness.rs             frontend §7 8: every corpus workflow lowers or is rejected specifically
+crates/corpus/tests/e2e.rs                 frontend §7 9: two real corpus workflows run on the executor
 ```
 
 Docker tests skip with a message when no daemon is reachable, so `cargo test` is
@@ -328,6 +334,191 @@ with a working execution path.
 29. **`RunHandle` is how a cancel gets in.** The handoff has `CancelRequested`
     arriving as an event without saying who sends it; `Driver::handle()` returns a
     handle that can inject one into a run in flight.
+
+## Frontends (package 03)
+
+Both frontends are pure: text in, `Graph` and diagnostics out. One parser reads the
+`${{ }}` grammar; two lowerings give it meaning. The GHA lowering maps `==` onto
+`loose_eq`, `&&` onto a value-returning conditional, and every GitHub function onto a
+table entry — there is no second evaluator, and a property test asserts that whatever
+parses lowers only onto `ir::expr::BUILTINS`. The native lowering maps the same syntax
+onto the engine's own `Eq` / `And` / `Not`.
+
+### The corpus
+
+316 workflows from 21 repositories with `.github/workflows` (25 vendored; see
+`corpus/*/PROVENANCE.md` for commit and licence), through `petri check`:
+
+| Result | Count |
+|---|---|
+| lowered | 5 |
+| rejected with a specific `unsupported.*` code | 311 |
+| failed for any other reason | **0** |
+| panicked | **0** |
+
+The bar was zero crashes and zero generic errors, and it is met. Nearly every real
+workflow is rejected, and almost always for one reason: `actions/checkout` is the first
+step of 296 of them. The histogram package 04 should read is in `corpus/REPORT.md`; the
+top of it is `actions/checkout` 660, `upload-artifact` 251, `download-artifact` 207,
+`setup-node` 124, `Swatinem/rust-cache` 111, `github-script` 111, `setup-python` 107,
+`cache/restore` + `cache` + `cache/save` 220 between them. 152 distinct actions.
+
+Two corpus workflows run end to end on the host executor
+(`crates/corpus/tests/e2e.rs`): facebook/react's cache cleanup and nodejs/node's
+label-triggered commenter, with a stub `gh` on `PATH` so nothing reaches GitHub's API.
+Everything else — bash, the outputs file, env layering, `if:` gates over the `github`
+context, job summaries, replay byte-identity — is real.
+
+### Findings for the spec
+
+These are places a real workflow needs something the engine or the expression table
+cannot express. They are reported, not worked around; each is rejected with the code
+in brackets.
+
+1. **There was no per-run input channel.** The `github`, `vars` and `runner` contexts
+   are values a host knows and the graph does not. I added `Graph.params`: a read-only
+   map merged into every firing's statics at the lowest precedence, filled in by the
+   host before the run. It lives on the graph rather than in a `RunStarted` payload so
+   the graph a run used is self-describing and replay needs nothing more. This is an
+   IR extension, made because nothing in the package works without it; if it should
+   live elsewhere, it is a small swap.
+
+2. **`hashFiles()` cannot be a total builtin** [`unsupported.expression.hashFiles`].
+   It reads the workspace at run time. It needs a resolution-time placeholder like
+   `$secret` — the second permitted non-literal across the executor boundary.
+   Rare in the corpus (1 workflow) because it mostly appears inside `actions/cache`
+   inputs, which are rejected first.
+
+3. **Nothing runs after a cancel**, so `if: cancelled()` and `if: always()` cleanup
+   steps cannot. The lowering is faithful — the expression is right — and
+   `cancelled_steps_cannot_run_today` pins that it never fires. GitHub runs these
+   steps; the engine drops a cancelled firing's tokens. Routing a `Cancelled` outcome
+   at least to status-function guards would need a core decision.
+
+4. **One scope per job, so no per-leg runtime** [`unsupported.runs_on.expression`].
+   `runs-on: ${{ matrix.os }}` is the single most common reason a matrix job is
+   rejected: 47 workflows. Each leg would need its own environment. Either scopes
+   become per-clone, or the frontend splits a matrix over `runs-on` into one job per
+   OS at lowering time.
+
+5. **Secrets in expressions** [`unsupported.secrets.expression`]. `if: ${{ secrets.X
+   != '' }}` and `${{ secrets.A || secrets.B }}` are real idioms — 12 workflows. The
+   engine keeps secrets out of `EvalEnv` by construction, which is the right rule; a
+   sanctioned `secret_present('X')` builtin resolved at the boundary would cover the
+   common case without a value ever entering an expression.
+
+6. **Background steps** [`unsupported.step.background`]. facebook/react and
+   vercel/next.js use `background: true` on a step and `wait: <id>` / `wait-all` later
+   — GitHub syntax newer than this implementation's knowledge. The IR can express it
+   exactly: a background step is a fan-out, a `wait` is an `All` join. Mapping it is a
+   spec decision.
+
+7. **Local actions are resolved against the checked-out workspace, at run time**
+   [`unsupported.action.local_missing`]. `uses: ./localClone` and
+   `uses: ./node/.github/actions/x` name directories that exist only after a checkout
+   step. Static lowering cannot see them. 4 workflows.
+
+8. **`GITHUB_ENV` and `GITHUB_PATH` are unset.** A step that appends to them fails
+   loudly (an ambiguous redirect), never silently. Propagating them is job-scoped
+   mutable env across steps; `kv` plus a process-step hook is the natural shape, and
+   it belongs with the shims in package 04.
+
+9. **The positional YAML reader has two gaps** [`unsupported.yaml.anchors`,
+   `unsupported.yaml.multiline_flow`]: no anchors or aliases, and a multi-line
+   `[ … ]` value followed by a dedent is misread. Three cpython workflows. Both are
+   library limitations, named as such.
+
+Common enough to shrink the rejection set before package 04: `runs-on` expressions
+(4), custom `shell: bash …` invocations (8 workflows, `unsupported.shell.custom` — the
+difference from `bash -eo pipefail` is usually `-l` or `--noprofile`), and
+`concurrency:` (108 workflows — not shrinkable, D2 stands, but it is the second most
+common rejection).
+
+### Departures from the frontend handoff
+
+30. **`Graph.params`** — see finding 1.
+
+31. **Nineteen new builtins, one gate.** GHA's operators and functions became table
+    entries — `loose_eq`/`lt`/`le`/`gt`/`ge`/`truthy`/`number`/`string`,
+    `contains_ci`, `starts_with`, `ends_with`, `format`, `join`, `to_json`, `from_json`,
+    `get_ci`, `values`, `filter_field`, `matrix_combinations` — because the handoff's
+    mapping rule requires it: no second evaluator. Each is pure, total, tested against
+    GitHub's documented tables, and needed by an acceptance test. The table grew from
+    19 to 38; the table still gates dispatch. `matrix_combinations` is the whole matrix
+    algorithm as one function, so a literal matrix and a `fromJSON(...)` one go through
+    the same code.
+
+32. **Coercion follows the runner, not the docs' wording.** GitHub's docs say a string
+    coerces "from any legal JSON number format"; the runner uses .NET's
+    `AllowLeadingSign | AllowDecimalPoint | AllowExponent`, which also takes `+1`, `01`
+    and `1.`. Workflows run against the runner.
+
+33. **`.` on a plain array is `null`, not a filter.** The handoff says "`.` on arrays
+    (object-filter semantics)". In the runner, property access maps over elements only
+    on a *filtered* array — the result of `*`; on an ordinary array it is `null`.
+    `a.list.k` is `null` and `a.list.*.k` is the mapped list, and the test pins both.
+    Filtered-ness is tracked statically in the lowering, so no runtime flag exists.
+
+34. **Every GHA property access is `get_ci`.** Contexts are case-insensitive in
+    GitHub; `Field` is not. `github.Event_Name` works, at the cost of a call per
+    property.
+
+35. **Status functions expand per site, not to the core builtins.** A step's
+    `success()` means "no earlier step of this job failed", built as an expression
+    over the earlier steps' `nodes.*` records and conjoined with "the job started";
+    a job's means "every needed job's `done` reports success". The core's `success()`
+    builtin folds immediate upstream edges, which is not GitHub's job-status rule.
+    A step or job `if:` naming no status function gets `success() &&` in front, as
+    GitHub does; one that names any status function stands alone.
+
+36. **Jobs get `start` and `done` noop nodes.** `start` is the gate (`needs` + `if:`);
+    `done` folds the job — `{ result, outputs }` — from the payload the last step's
+    edge carries, one per matrix leg, and fans out to dependents. Every `needs.J.*`
+    reads `J/done`. `NoopStep` is a step kind whose output is its resolved config,
+    which makes a structural node also a way to compute a value.
+
+37. **`kv` is unused by the GHA lowering.** Job outputs ride the summary payload
+    instead; there was no need for run-scoped state.
+
+38. **`secrets.misplaced` became `unsupported.secrets.expression`.** The handoff
+    asked for an Error diagnostic; this is one, coded as a rejection because it is an
+    engine property by construction, not a user mistake — and so it counts as
+    specific in the corpus.
+
+39. **`permissions:` and `on:` are accepted.** Both describe the GitHub side —
+    token scope, triggers — and change nothing about how the graph runs locally, so
+    they are not "parse and ignore" in the sense the rule forbids. `permissions` gets
+    an `ignored.permissions` warning so nobody wonders; `on:` is the host's business.
+
+40. **Fuzzing is proptest, not cargo-fuzz.** Random text, random bytes lossily
+    decoded, and random glued syntax fragments, 600 cases each, assert the parser
+    never panics. cargo-fuzz needs nightly; this runs in the ordinary suite.
+
+41. **`serde_json` has `preserve_order` on, workspace-wide.** Matrix axes,
+    `include` order and outputs follow document order in GitHub; a sorted map
+    silently reordered them (the matrix test caught it).
+
+42. **The driver now records `StepStarted`.** It never had, only the test harness
+    did — so a real run's log had no start events. A package 02 gap, found by the first
+    test that read a real driver's log for them.
+
+43. **Reusable-workflow callers are not asked for `runs-on`**, `strategy:` without
+    `matrix:` is legal, `uses: ./` is the repository root, and current GitHub-hosted
+    labels (`ubuntu-slim`, `ubuntu-26.04`, `ubuntu-24.04-arm`, `macos-15`) are known.
+    All four came from the corpus; each cost a real workflow a generic error before.
+
+44. **`KNOWN_RUNS_ON` lives in the frontend.** The handoff puts label mapping in the
+    executor; `petri check` still needs to reject unknown labels without one, so the
+    frontend carries the list the local executor honours. Third-party runner labels
+    (`depot-*`, `namespace-profile-*`, `*-16-core-*`) are rejected per label: 23
+    workflows.
+
+45. **Composite outputs are expression substitution.** `steps.<caller>.outputs.<n>`
+    resolves to the action's declared `value:` expression, lowered in the composite's
+    own site — no node, no record.
+
+46. **`GITHUB_OUTPUT` is an alias**, via `ProcessConfig.output_env_aliases`. A `run:`
+    step that appends to it lands in the outputs file without a shim.
 
 ## Testing notes
 

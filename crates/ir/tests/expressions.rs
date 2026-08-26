@@ -436,3 +436,387 @@ fn arity_comes_from_the_table() {
         );
     }
 }
+
+// ── GitHub Actions semantics ──────────────────────────────────────────────
+
+fn call(t: &mut ExprTable, name: &str, args: &[Value]) -> ir::ExprId {
+    let ids: Vec<_> = args.iter().map(|a| t.lit(a.clone())).collect();
+    t.call(name, ids)
+}
+
+fn run(name: &str, args: &[Value]) -> Value {
+    let mut t = ExprTable::new();
+    let id = call(&mut t, name, args);
+    eval(&t, id, &empty().env()).unwrap_or_else(|e| panic!("{name}{args:?}: {e}"))
+}
+
+/// GitHub's documented coercion table, as a table.
+#[test]
+fn loose_number_follows_the_documented_coercion_table() {
+    let cases: &[(Value, Value)] = &[
+        (json!(null), json!(0)),
+        (json!(true), json!(1)),
+        (json!(false), json!(0)),
+        (json!(""), json!(0)),
+        (json!("  "), json!(0)),
+        (json!("42"), json!(42)),
+        (json!(" 42 "), json!(42)),
+        (json!("-2.5e1"), json!(-25)),
+        (json!("0xff"), json!(255)),
+        (json!("-0x10"), json!(-16)),
+        (json!("abc"), json!(null)),
+        (json!("1abc"), json!(null)),
+        // The runner is looser than the docs' "JSON number" wording: it accepts a
+        // leading sign, leading zeros and a trailing point.
+        (json!("+1"), json!(1)),
+        (json!("01"), json!(1)),
+        (json!("1."), json!(1)),
+        (json!(".5"), json!(0.5)),
+        (json!("0o17"), json!(15)),
+        (json!("1,000"), json!(null)),
+        (json!("1 000"), json!(null)),
+        (json!("--1"), json!(null)),
+        (json!([]), json!(null)),
+        (json!({}), json!(null)),
+        (json!([1]), json!(null)),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(
+            &run("loose_number", std::slice::from_ref(input)),
+            expected,
+            "loose_number({input})"
+        );
+    }
+}
+
+/// Truthiness: `false`, `0`, `-0`, `""`, `null`, NaN are falsy. Empty containers
+/// are **truthy**, the opposite of this crate's own rule.
+#[test]
+fn loose_truthy_matrix() {
+    for falsy in [json!(false), json!(0), json!(-0.0), json!(""), json!(null)] {
+        assert_eq!(
+            run("loose_truthy", std::slice::from_ref(&falsy)),
+            json!(false),
+            "{falsy}"
+        );
+    }
+    for truthy in [
+        json!(true),
+        json!(1),
+        json!(-1),
+        json!("0"),
+        json!("false"),
+        json!([]),
+        json!({}),
+        json!([0]),
+    ] {
+        assert_eq!(
+            run("loose_truthy", std::slice::from_ref(&truthy)),
+            json!(true),
+            "{truthy}"
+        );
+    }
+    // NaN arrives as a string that coerces to NaN, since JSON has no NaN.
+    let mut t = ExprTable::new();
+    let nan = call(&mut t, "loose_number", &[json!("abc")]);
+    let truthy = t.call("loose_truthy", vec![nan]);
+    assert_eq!(
+        eval(&t, truthy, &empty().env()).unwrap(),
+        json!(false),
+        "NaN is falsy"
+    );
+}
+
+/// Equality: same kinds compare directly (strings case-insensitively); different
+/// kinds coerce to numbers; NaN equals nothing; containers never equal.
+#[test]
+fn loose_equality_matrix() {
+    let equal: &[(Value, Value)] = &[
+        (json!(null), json!(null)),
+        (json!(null), json!(0)),
+        (json!(null), json!("")),
+        (json!(null), json!(false)),
+        (json!(true), json!(1)),
+        (json!(false), json!(0)),
+        (json!("1"), json!(1)),
+        (json!("0xff"), json!(255)),
+        (json!("Hello"), json!("hello")),
+        (json!("ÉCOLE"), json!("école")),
+        (json!(1), json!(1.0)),
+        (json!(""), json!(0)),
+        (json!(" 7 "), json!(7)),
+    ];
+    for (a, b) in equal {
+        assert_eq!(
+            run("loose_eq", &[a.clone(), b.clone()]),
+            json!(true),
+            "{a} == {b}"
+        );
+        assert_eq!(
+            run("loose_eq", &[b.clone(), a.clone()]),
+            json!(true),
+            "{b} == {a}"
+        );
+    }
+    let unequal: &[(Value, Value)] = &[
+        (json!("abc"), json!(0)),
+        (json!("abc"), json!(null)),
+        (json!("abc"), json!("abd")),
+        (json!([]), json!([])),
+        (json!({}), json!({})),
+        (json!([]), json!(0)),
+        (json!({}), json!(null)),
+        (json!(true), json!("true")),
+        (json!(1), json!(2)),
+        (json!("1"), json!("01")),
+    ];
+    for (a, b) in unequal {
+        assert_eq!(
+            run("loose_eq", &[a.clone(), b.clone()]),
+            json!(false),
+            "{a} != {b}"
+        );
+    }
+}
+
+/// Relational: two strings compare as strings, case-insensitively; anything else as
+/// numbers; NaN makes every comparison false.
+#[test]
+fn loose_relational_matrix() {
+    assert_eq!(run("loose_lt", &[json!(1), json!(2)]), json!(true));
+    assert_eq!(run("loose_lt", &[json!("1"), json!(2)]), json!(true));
+    assert_eq!(
+        run("loose_lt", &[json!("10"), json!("9")]),
+        json!(true),
+        "two strings compare as strings"
+    );
+    assert_eq!(
+        run("loose_lt", &[json!("a"), json!("B")]),
+        json!(true),
+        "case-insensitively"
+    );
+    assert_eq!(run("loose_le", &[json!(null), json!(0)]), json!(true));
+    assert_eq!(run("loose_ge", &[json!(true), json!(1)]), json!(true));
+    assert_eq!(
+        run("loose_gt", &[json!("abc"), json!(0)]),
+        json!(false),
+        "NaN: false"
+    );
+    assert_eq!(
+        run("loose_lt", &[json!("abc"), json!(0)]),
+        json!(false),
+        "NaN: false both ways"
+    );
+    assert_eq!(
+        run("loose_le", &[json!([]), json!([])]),
+        json!(false),
+        "arrays coerce to NaN"
+    );
+}
+
+#[test]
+fn loose_string_coercion() {
+    assert_eq!(run("loose_string", &[json!(null)]), json!(""));
+    assert_eq!(run("loose_string", &[json!(true)]), json!("true"));
+    assert_eq!(run("loose_string", &[json!(3)]), json!("3"));
+    assert_eq!(run("loose_string", &[json!(3.0)]), json!("3"));
+    assert_eq!(run("loose_string", &[json!(2.5)]), json!("2.5"));
+    assert_eq!(run("loose_string", &[json!([1])]), json!("Array"));
+    assert_eq!(run("loose_string", &[json!({"a": 1})]), json!("Object"));
+}
+
+#[test]
+fn gha_string_functions() {
+    assert_eq!(
+        run("contains_ci", &[json!("Hello World"), json!("WORLD")]),
+        json!(true)
+    );
+    assert_eq!(
+        run("contains_ci", &[json!(["a", "B"]), json!("b")]),
+        json!(true),
+        "array membership is loose"
+    );
+    assert_eq!(
+        run("contains_ci", &[json!([1, 2]), json!("2")]),
+        json!(true)
+    );
+    assert_eq!(
+        run("contains_ci", &[json!({"a": 1}), json!("a")]),
+        json!(false),
+        "objects: false"
+    );
+    assert_eq!(run("contains_ci", &[json!("abc"), json!([])]), json!(false));
+    assert_eq!(
+        run("starts_with", &[json!("Hello"), json!("HE")]),
+        json!(true)
+    );
+    assert_eq!(
+        run("ends_with", &[json!("Hello"), json!("LO")]),
+        json!(true)
+    );
+    assert_eq!(
+        run("starts_with", &[json!(123), json!("12")]),
+        json!(true),
+        "coerces to strings"
+    );
+    assert_eq!(run("starts_with", &[json!([]), json!("")]), json!(false));
+}
+
+#[test]
+fn gha_format_and_join() {
+    assert_eq!(
+        run("format", &[json!("{0} and {1}"), json!(["a", 2])]),
+        json!("a and 2")
+    );
+    assert_eq!(
+        run("format", &[json!("{{literal}} {0}"), json!([true])]),
+        json!("{literal} true")
+    );
+    assert_eq!(run("format", &[json!("{0}"), json!([null])]), json!(""));
+    let mut t = ExprTable::new();
+    let bad = call(&mut t, "format", &[json!("{0} {1}"), json!(["only one"])]);
+    assert!(
+        matches!(eval(&t, bad, &empty().env()), Err(EvalError::Type { .. })),
+        "missing argument is an error"
+    );
+
+    assert_eq!(
+        run("join", &[json!(["a", 1, true]), json!(null)]),
+        json!("a,1,true"),
+        "default separator"
+    );
+    assert_eq!(
+        run("join", &[json!(["a", "b"]), json!(" | ")]),
+        json!("a | b")
+    );
+    assert_eq!(
+        run("join", &[json!("solo"), json!(",")]),
+        json!("solo"),
+        "a non-array is just stringified"
+    );
+}
+
+#[test]
+fn gha_json_functions() {
+    assert_eq!(
+        run("from_json", &[json!(r#"{"a":[1,2]}"#)]),
+        json!({"a": [1, 2]})
+    );
+    assert_eq!(
+        run("from_json", &[json!({"already": true})]),
+        json!({"already": true}),
+        "non-strings pass through"
+    );
+    let mut t = ExprTable::new();
+    let bad = call(&mut t, "from_json", &[json!("{not json")]);
+    assert!(matches!(
+        eval(&t, bad, &empty().env()),
+        Err(EvalError::Type { .. })
+    ));
+    let text = run("to_json", &[json!({"a": 1})]);
+    assert_eq!(
+        serde_json::from_str::<Value>(text.as_str().unwrap()).unwrap(),
+        json!({"a": 1})
+    );
+}
+
+#[test]
+fn gha_context_access_functions() {
+    let obj = json!({"Event_Name": "push", "ref": "main"});
+    assert_eq!(
+        run("get_ci", &[obj.clone(), json!("event_name")]),
+        json!("push")
+    );
+    assert_eq!(run("get_ci", &[obj.clone(), json!("REF")]), json!("main"));
+    assert_eq!(run("get_ci", &[obj.clone(), json!("missing")]), json!(null));
+    assert_eq!(
+        run("get_ci", &[json!([1]), json!("x")]),
+        json!(null),
+        "not an object: null"
+    );
+
+    assert_eq!(run("values", &[json!({"a": 1, "b": 2})]), json!([1, 2]));
+    assert_eq!(run("values", &[json!([1, 2])]), json!([1, 2]));
+    assert_eq!(run("values", &[json!("x")]), json!(null));
+
+    // The filtered-array rule: elements lacking the key are skipped, present keys
+    // (even null-valued) are kept.
+    let commits = json!([{"message": "a"}, {"other": 1}, {"message": null}, "not an object"]);
+    assert_eq!(
+        run("filter_field", &[commits, json!("message")]),
+        json!(["a", null])
+    );
+}
+
+/// The matrix algorithm, against GitHub's documented examples.
+#[test]
+fn matrix_combinations_follow_the_documented_rules() {
+    // Plain product: first key varies slowest.
+    let combos = run(
+        "matrix_combinations",
+        &[json!({"os": ["ubuntu", "windows"], "node": [14, 16]})],
+    );
+    assert_eq!(
+        combos,
+        json!([
+            {"os": "ubuntu", "node": 14}, {"os": "ubuntu", "node": 16},
+            {"os": "windows", "node": 14}, {"os": "windows", "node": 16},
+        ])
+    );
+
+    // The documented include example.
+    let combos = run(
+        "matrix_combinations",
+        &[json!({
+            "fruit": ["apple", "pear"],
+            "animal": ["cat", "dog"],
+            "include": [
+                {"color": "green"},
+                {"color": "pink", "animal": "cat"},
+                {"fruit": "apple", "shape": "circle"},
+                {"fruit": "banana"},
+                {"fruit": "banana", "animal": "cat"},
+            ]
+        })],
+    );
+    assert_eq!(
+        combos,
+        json!([
+            {"fruit": "apple", "animal": "cat", "color": "pink", "shape": "circle"},
+            {"fruit": "apple", "animal": "dog", "color": "green", "shape": "circle"},
+            {"fruit": "pear", "animal": "cat", "color": "pink"},
+            {"fruit": "pear", "animal": "dog", "color": "green"},
+            {"fruit": "banana"},
+            {"fruit": "banana", "animal": "cat"},
+        ])
+    );
+
+    // Exclude runs before include, so an include can add a leg back.
+    let combos = run(
+        "matrix_combinations",
+        &[json!({
+            "os": ["a", "b"],
+            "v": [1, 2],
+            "exclude": [{"os": "a", "v": 2}],
+            "include": [{"os": "a", "v": 2, "special": true}]
+        })],
+    );
+    assert_eq!(
+        combos,
+        json!([
+            {"os": "a", "v": 1}, {"os": "b", "v": 1}, {"os": "b", "v": 2},
+            {"os": "a", "v": 2, "special": true},
+        ])
+    );
+
+    // Include only.
+    assert_eq!(
+        run(
+            "matrix_combinations",
+            &[json!({"include": [{"a": 1}, {"a": 2}]})]
+        ),
+        json!([{"a": 1}, {"a": 2}])
+    );
+    // Not an object: no legs, not an error.
+    assert_eq!(run("matrix_combinations", &[json!(null)]), json!([]));
+}

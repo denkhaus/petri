@@ -1,0 +1,445 @@
+//! YAML with positions.
+//!
+//! Every node knows where it came from, so a diagnostic can point at the line. This
+//! wraps `marked_yaml` in a small API shaped for what frontends do: look up keys,
+//! iterate sequences, read scalars as the type the format expects, and complain with
+//! a span when the shape is wrong.
+
+use marked_yaml::types::{MarkedMappingNode, MarkedScalarNode, MarkedSequenceNode};
+use marked_yaml::{LoadError, Node as MarkedNode};
+use serde_json::Value;
+use smol_str::SmolStr;
+
+use crate::diag::{Diagnostics, Span};
+
+/// A parsed document, with the file name every span will carry.
+pub struct Document {
+    file: SmolStr,
+    root: MarkedNode,
+}
+
+impl Document {
+    /// Parse a file's text. A syntax error becomes a `yaml.syntax` diagnostic rather
+    /// than a panic or a bare `Err`.
+    pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Document> {
+        match marked_yaml::parse_yaml(0, text) {
+            Ok(root) => Some(Document {
+                file: SmolStr::new(file),
+                root,
+            }),
+            Err(error) => {
+                let (mut line, mut column, message) = match &error {
+                    LoadError::ScanError(marker, scan) => (
+                        marker.line() as u32,
+                        marker.column() as u32,
+                        scan.to_string(),
+                    ),
+                    other => (0, 0, other.to_string()),
+                };
+                // Some errors carry their position only in the text.
+                if line == 0
+                    && let Some((l, c)) = position_in_message(&message)
+                {
+                    line = l;
+                    column = c;
+                }
+                if message.contains("invalid indentation")
+                    && multiline_flow_before(text, line as usize)
+                {
+                    // The underlying reader rejects a multi-line `[…]` or `{…}` value
+                    // followed by a dedent, which GitHub accepts. A known limitation of
+                    // the positional YAML library, named as such rather than blamed on
+                    // the file.
+                    diags.unsupported(
+                        "yaml.multiline_flow",
+                        Span::new(file, line, column),
+                        "a multi-line `[…]` or `{…}` value followed by a dedent",
+                        "the positional YAML reader does not accept this shape yet; write the list in block \
+                         form (`- item` per line) or on one line",
+                    );
+                } else if message.contains("anchor") || message.contains("alias") {
+                    diags.unsupported(
+                        "yaml.anchors",
+                        Span::new(file, line, column),
+                        "YAML anchors and aliases (`&name` / `*name`)",
+                        "the positional YAML reader does not resolve anchors yet; expand the aliased content inline",
+                    );
+                } else {
+                    diags.error(
+                        "yaml.syntax",
+                        Span::new(file, line, column),
+                        format!("could not parse YAML: {message}"),
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    pub fn root(&self) -> Node<'_> {
+        Node {
+            file: &self.file,
+            inner: &self.root,
+        }
+    }
+
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+}
+
+/// `… line 67 column 9` → (67, 9).
+fn position_in_message(message: &str) -> Option<(u32, u32)> {
+    let after = message.split("line ").nth(1)?;
+    let line: u32 = after.split_whitespace().next()?.parse().ok()?;
+    let column: u32 = message
+        .split("column ")
+        .nth(1)
+        .and_then(|c| c.split_whitespace().next())
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    Some((line, column))
+}
+
+/// Whether the lines before `line` close a flow collection that opened on an earlier
+/// line — the shape the underlying reader gets wrong.
+fn multiline_flow_before(text: &str, line: usize) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    if line == 0 {
+        return false;
+    }
+    // Start at the failing line itself — the reader often reports the closing
+    // bracket — and look back a few non-blank lines from there.
+    let mut i = line.min(lines.len());
+    let mut looked = 0;
+    while i > 0 && looked < 4 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        looked += 1;
+        if t.ends_with(']') || t.ends_with('}') {
+            // Find the opener on an earlier line.
+            let mut depth = 0i32;
+            for j in (0..=i).rev() {
+                for c in lines[j].chars().rev() {
+                    match c {
+                        ']' | '}' => depth += 1,
+                        '[' | '{' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return j < i;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// A node in the document, with its file attached so it can produce spans.
+#[derive(Clone, Copy)]
+pub struct Node<'a> {
+    file: &'a str,
+    inner: &'a MarkedNode,
+}
+
+impl<'a> Node<'a> {
+    pub fn span(&self) -> Span {
+        let start = self.inner.span().start();
+        Span::new(
+            self.file,
+            start.map_or(0, |m| m.line() as u32),
+            start.map_or(0, |m| m.column() as u32),
+        )
+    }
+
+    pub fn as_mapping(&self) -> Option<Mapping<'a>> {
+        self.inner.as_mapping().map(|m| Mapping {
+            file: self.file,
+            inner: m,
+            span: self.span(),
+        })
+    }
+
+    pub fn as_sequence(&self) -> Option<Sequence<'a>> {
+        self.inner.as_sequence().map(|s| Sequence {
+            file: self.file,
+            inner: s,
+            span: self.span(),
+        })
+    }
+
+    pub fn as_scalar(&self) -> Option<Scalar<'a>> {
+        self.inner.as_scalar().map(|s| Scalar {
+            inner: s,
+            span: self.span(),
+        })
+    }
+
+    /// The raw text of a scalar, whatever its type.
+    pub fn as_str(&self) -> Option<&'a str> {
+        self.inner.as_scalar().map(|s| s.as_str())
+    }
+
+    pub fn is_mapping(&self) -> bool {
+        self.inner.as_mapping().is_some()
+    }
+
+    pub fn is_sequence(&self) -> bool {
+        self.inner.as_sequence().is_some()
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        self.inner.as_scalar().is_some()
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        if self.is_mapping() {
+            "a mapping"
+        } else if self.is_sequence() {
+            "a sequence"
+        } else {
+            "a scalar"
+        }
+    }
+
+    /// Require a mapping, or report `code`.
+    pub fn expect_mapping(&self, diags: &mut Diagnostics, what: &str) -> Option<Mapping<'a>> {
+        let mapping = self.as_mapping();
+        if mapping.is_none() {
+            diags.error(
+                "yaml.shape",
+                self.span(),
+                format!("{what} must be a mapping, found {}", self.kind_name()),
+            );
+        }
+        mapping
+    }
+
+    pub fn expect_sequence(&self, diags: &mut Diagnostics, what: &str) -> Option<Sequence<'a>> {
+        let sequence = self.as_sequence();
+        if sequence.is_none() {
+            diags.error(
+                "yaml.shape",
+                self.span(),
+                format!("{what} must be a sequence, found {}", self.kind_name()),
+            );
+        }
+        sequence
+    }
+
+    pub fn expect_scalar(&self, diags: &mut Diagnostics, what: &str) -> Option<Scalar<'a>> {
+        let scalar = self.as_scalar();
+        if scalar.is_none() {
+            diags.error(
+                "yaml.shape",
+                self.span(),
+                format!("{what} must be a scalar, found {}", self.kind_name()),
+            );
+        }
+        scalar
+    }
+
+    /// Convert to a JSON value, inferring scalar types the way YAML 1.2 core does
+    /// for plain scalars and keeping quoted scalars as strings.
+    pub fn to_json(&self) -> Value {
+        if let Some(m) = self.as_mapping() {
+            let mut out = serde_json::Map::new();
+            for (key, value) in m.iter() {
+                out.insert(key.to_string(), value.to_json());
+            }
+            Value::Object(out)
+        } else if let Some(s) = self.as_sequence() {
+            Value::Array(s.iter().map(|n| n.to_json()).collect())
+        } else if let Some(s) = self.as_scalar() {
+            s.to_json()
+        } else {
+            Value::Null
+        }
+    }
+}
+
+pub struct Mapping<'a> {
+    file: &'a str,
+    inner: &'a MarkedMappingNode,
+    span: Span,
+}
+
+impl<'a> Mapping<'a> {
+    pub fn span(&self) -> Span {
+        self.span.clone()
+    }
+
+    pub fn get(&self, key: &str) -> Option<Node<'a>> {
+        self.inner.get(key).map(|n| Node {
+            file: self.file,
+            inner: n,
+        })
+    }
+
+    /// Case-insensitive lookup, for formats whose keys are.
+    pub fn get_ci(&self, key: &str) -> Option<Node<'a>> {
+        let lowered = key.to_lowercase();
+        self.inner
+            .iter()
+            .find(|(k, _)| k.as_str().to_lowercase() == lowered)
+            .map(|(_, n)| Node {
+                file: self.file,
+                inner: n,
+            })
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.inner.contains_key(key)
+    }
+
+    /// Entries in document order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'a str, Node<'a>)> + '_ {
+        self.inner.iter().map(|(k, v)| {
+            (
+                k.as_str(),
+                Node {
+                    file: self.file,
+                    inner: v,
+                },
+            )
+        })
+    }
+
+    /// Keys with their own spans, for pointing at a bad key.
+    pub fn keys(&self) -> impl Iterator<Item = (&'a str, Span)> + '_ {
+        self.inner.iter().map(|(k, _)| {
+            let start = k.span().start();
+            (
+                k.as_str(),
+                Span::new(
+                    self.file,
+                    start.map_or(0, |m| m.line() as u32),
+                    start.map_or(0, |m| m.column() as u32),
+                ),
+            )
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Report every key not in `allowed` as `code`. Formats reject unknown keys so a
+    /// typo cannot be silently ignored.
+    pub fn reject_unknown_keys(&self, allowed: &[&str], diags: &mut Diagnostics, where_: &str) {
+        for (key, span) in self.keys() {
+            if !allowed.contains(&key) {
+                diags.error(
+                    "yaml.unknown_key",
+                    span,
+                    format!("unknown key `{key}` in {where_}"),
+                );
+            }
+        }
+    }
+}
+
+pub struct Sequence<'a> {
+    file: &'a str,
+    inner: &'a MarkedSequenceNode,
+    span: Span,
+}
+
+impl<'a> Sequence<'a> {
+    pub fn span(&self) -> Span {
+        self.span.clone()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Node<'a>> + '_ {
+        self.inner.iter().map(|n| Node {
+            file: self.file,
+            inner: n,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+pub struct Scalar<'a> {
+    inner: &'a MarkedScalarNode,
+    span: Span,
+}
+
+impl<'a> Scalar<'a> {
+    pub fn span(&self) -> Span {
+        self.span.clone()
+    }
+
+    pub fn as_str(&self) -> &'a str {
+        self.inner.as_str()
+    }
+
+    /// Whether the scalar was written unquoted, so YAML type inference applies.
+    pub fn is_plain(&self) -> bool {
+        self.inner.may_coerce()
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        if !self.is_plain() {
+            return None;
+        }
+        match self.as_str() {
+            "true" | "True" | "TRUE" => Some(true),
+            "false" | "False" | "FALSE" => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        if !self.is_plain() {
+            return None;
+        }
+        self.as_str().parse().ok()
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        if !self.is_plain() {
+            return None;
+        }
+        let s = self.as_str();
+        if s.parse::<i64>().is_ok() {
+            return None;
+        }
+        s.parse().ok()
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.is_plain() && matches!(self.as_str(), "" | "~" | "null" | "Null" | "NULL")
+    }
+
+    pub fn to_json(&self) -> Value {
+        if self.is_null() {
+            Value::Null
+        } else if let Some(b) = self.as_bool() {
+            Value::Bool(b)
+        } else if let Some(i) = self.as_i64() {
+            Value::from(i)
+        } else if let Some(f) = self.as_f64() {
+            serde_json::Number::from_f64(f)
+                .map_or_else(|| Value::String(self.as_str().to_string()), Value::Number)
+        } else {
+            Value::String(self.as_str().to_string())
+        }
+    }
+}

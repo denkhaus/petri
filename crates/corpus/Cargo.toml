@@ -1,0 +1,20 @@
+[package]
+name = "corpus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The compatibility corpus harness: real workflows through the GHA frontend."
+publish = false
+
+[dependencies]
+ir = { workspace = true }
+frontend = { workspace = true }
+frontend-gha = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+engine = { workspace = true }
+driver = { workspace = true }
+executor = { workspace = true }
+steps = { workspace = true }
+tokio = { workspace = true }

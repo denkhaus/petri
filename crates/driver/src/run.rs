@@ -266,7 +266,17 @@ impl Driver {
         match command {
             Command::AcquireScope { scope } => self.acquire(scope).await,
             Command::ReleaseScope { scope } => self.release(scope),
-            Command::StartStep(resolved) => self.start(resolved).await,
+            Command::StartStep(resolved) => {
+                let (firing, attempt) = (resolved.id(), resolved.attempt());
+                self.start(resolved).await;
+                // The acknowledgement that the attempt was dispatched. It goes through
+                // the one channel like every other external event, so its place in the
+                // log is its arrival order and replay feeds it back verbatim.
+                let _ = self
+                    .tx
+                    .send(Signal::Inject(Event::StepStarted { firing, attempt }))
+                    .await;
+            }
             Command::DeliverControl { firing, ctl } => {
                 self.deliver(firing, ctl, CancelReason::Requested).await
             }
@@ -332,10 +342,14 @@ impl Driver {
         let Some(definition) = self.engine.graph.scope(scope) else {
             return spec;
         };
-        // Scope env is resolved once, against nothing: it cannot depend on a firing.
+        // Scope env is resolved once, against the run parameters and nothing else:
+        // it cannot depend on a firing.
         let empty_run = RunContext::new();
-        let bare = StaticCtx::new();
-        let env_context = EvalEnv::new(&Value::Null, &empty_run, &bare);
+        let mut params_only = StaticCtx::new();
+        for (key, value) in &self.engine.graph.params {
+            params_only.set(key, value.clone());
+        }
+        let env_context = EvalEnv::new(&Value::Null, &empty_run, &params_only);
         let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
         for (key, value) in &definition.env {
             let resolved = match value {

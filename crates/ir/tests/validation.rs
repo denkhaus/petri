@@ -316,6 +316,7 @@ fn structural_problems_are_reported() {
         scopes: vec![Scope::new(ScopeId::new(0))],
         exprs: Default::default(),
         entry: vec![],
+        params: Default::default(),
     };
     let found = errors(&graph);
     assert!(

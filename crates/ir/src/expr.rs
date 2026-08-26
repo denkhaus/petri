@@ -368,6 +368,103 @@ pub const BUILTINS: &[Builtin] = &[
         arity: 2,
         summary: "take one field from every object in an array",
     },
+    // GitHub Actions semantics. The GHA frontend lowers `${{ }}` onto these; there is
+    // no second evaluator. Coercion rules are in `crate::loose`.
+    Builtin {
+        name: "loose_eq",
+        arity: 2,
+        summary: "GHA `==`: coerce differing kinds to numbers; strings case-insensitive",
+    },
+    Builtin {
+        name: "loose_lt",
+        arity: 2,
+        summary: "GHA `<`; false whenever a side coerces to NaN",
+    },
+    Builtin {
+        name: "loose_le",
+        arity: 2,
+        summary: "GHA `<=`",
+    },
+    Builtin {
+        name: "loose_gt",
+        arity: 2,
+        summary: "GHA `>`",
+    },
+    Builtin {
+        name: "loose_ge",
+        arity: 2,
+        summary: "GHA `>=`",
+    },
+    Builtin {
+        name: "loose_truthy",
+        arity: 1,
+        summary: "GHA truthiness: empty arrays and objects are truthy",
+    },
+    Builtin {
+        name: "loose_number",
+        arity: 1,
+        summary: "GHA number coercion; NaN prints as null",
+    },
+    Builtin {
+        name: "loose_string",
+        arity: 1,
+        summary: "GHA string coercion: null is empty, arrays print `Array`",
+    },
+    Builtin {
+        name: "contains_ci",
+        arity: 2,
+        summary: "GHA contains(): array membership by loose equality, or case-insensitive substring",
+    },
+    Builtin {
+        name: "starts_with",
+        arity: 2,
+        summary: "case-insensitive prefix test over string coercions",
+    },
+    Builtin {
+        name: "ends_with",
+        arity: 2,
+        summary: "case-insensitive suffix test over string coercions",
+    },
+    Builtin {
+        name: "format",
+        arity: 2,
+        summary: "`{N}` substitution from an array of arguments; `{{` and `}}` are literal braces",
+    },
+    Builtin {
+        name: "join",
+        arity: 2,
+        summary: "join an array with a separator, coercing each element to a string",
+    },
+    Builtin {
+        name: "to_json",
+        arity: 1,
+        summary: "pretty-printed JSON",
+    },
+    Builtin {
+        name: "from_json",
+        arity: 1,
+        summary: "parse a JSON string; a non-string passes through",
+    },
+    Builtin {
+        name: "get_ci",
+        arity: 2,
+        summary: "case-insensitive property lookup, the way GHA contexts behave",
+    },
+    Builtin {
+        name: "values",
+        arity: 1,
+        summary: "GHA `*`: an object's values, or an array itself",
+    },
+    Builtin {
+        name: "filter_field",
+        arity: 2,
+        summary: "GHA filtered-array property: the field from every element that has it",
+    },
+    Builtin {
+        name: "matrix_combinations",
+        arity: 1,
+        summary: "expand a GHA `strategy.matrix` object into its combinations",
+    },
 ];
 
 /// Look a function up in the table.
@@ -692,12 +789,175 @@ fn eval_call(
                     .collect(),
             ))
         }
+        // ── GitHub Actions semantics ──────────────────────────────────────
+        "loose_eq" => Ok(Value::Bool(crate::loose::equal(&arg(0)?, &arg(1)?))),
+        "loose_lt" | "loose_le" | "loose_gt" | "loose_ge" => {
+            let ord = crate::loose::compare(&arg(0)?, &arg(1)?);
+            Ok(Value::Bool(match (name.as_str(), ord) {
+                (_, None) => false,
+                ("loose_lt", Some(o)) => o.is_lt(),
+                ("loose_le", Some(o)) => o.is_le(),
+                ("loose_gt", Some(o)) => o.is_gt(),
+                (_, Some(o)) => o.is_ge(),
+            }))
+        }
+        "loose_truthy" => Ok(Value::Bool(crate::loose::truthy(&arg(0)?))),
+        "loose_number" => Ok(num(crate::loose::to_number(&arg(0)?))),
+        "loose_string" => Ok(Value::String(crate::loose::to_string(&arg(0)?))),
+        "contains_ci" => {
+            let (search, item) = (arg(0)?, arg(1)?);
+            Ok(Value::Bool(match &search {
+                Value::Array(items) => items.iter().any(|i| crate::loose::equal(i, &item)),
+                Value::Object(_) => false,
+                primitive => match &item {
+                    Value::Array(_) | Value::Object(_) => false,
+                    _ => crate::loose::to_string(primitive)
+                        .to_lowercase()
+                        .contains(&crate::loose::to_string(&item).to_lowercase()),
+                },
+            }))
+        }
+        "starts_with" | "ends_with" => {
+            let (text, probe) = (arg(0)?, arg(1)?);
+            if matches!(text, Value::Array(_) | Value::Object(_))
+                || matches!(probe, Value::Array(_) | Value::Object(_))
+            {
+                return Ok(Value::Bool(false));
+            }
+            let text = crate::loose::to_string(&text).to_lowercase();
+            let probe = crate::loose::to_string(&probe).to_lowercase();
+            Ok(Value::Bool(if name == "starts_with" {
+                text.starts_with(&probe)
+            } else {
+                text.ends_with(&probe)
+            }))
+        }
+        "format" => {
+            let (template, args_value) = (arg(0)?, arg(1)?);
+            let template = crate::loose::to_string(&template);
+            let values: Vec<Value> = match args_value {
+                Value::Array(items) => items,
+                other => vec![other],
+            };
+            gha_format(&template, &values)
+        }
+        "join" => {
+            let (items, separator) = (arg(0)?, arg(1)?);
+            let separator = if separator.is_null() {
+                ",".to_string()
+            } else {
+                crate::loose::to_string(&separator)
+            };
+            Ok(Value::String(match &items {
+                Value::Array(items) => items
+                    .iter()
+                    .map(crate::loose::to_string)
+                    .collect::<Vec<_>>()
+                    .join(&separator),
+                other => crate::loose::to_string(other),
+            }))
+        }
+        "to_json" => Ok(Value::String(
+            serde_json::to_string_pretty(&arg(0)?).unwrap_or_default(),
+        )),
+        "from_json" => {
+            let v = arg(0)?;
+            match &v {
+                Value::String(s) => serde_json::from_str::<Value>(s).map_err(|e| EvalError::Type {
+                    op: SmolStr::new("from_json"),
+                    expected: SmolStr::new("valid JSON"),
+                    got: SmolStr::new(format!("invalid JSON ({e})")),
+                }),
+                _ => Ok(v),
+            }
+        }
+        "get_ci" => {
+            let (object, key) = (arg(0)?, arg(1)?);
+            let Some(key) = key.as_str() else {
+                return Ok(Value::Null);
+            };
+            Ok(crate::loose::get_ci(&object, key)
+                .cloned()
+                .unwrap_or(Value::Null))
+        }
+        "values" => Ok(match arg(0)? {
+            Value::Object(map) => Value::Array(map.into_iter().map(|(_, v)| v).collect()),
+            array @ Value::Array(_) => array,
+            _ => Value::Null,
+        }),
+        "filter_field" => {
+            let (items, key) = (arg(0)?, arg(1)?);
+            let (Value::Array(items), Some(key)) = (items, key.as_str()) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Array(
+                items
+                    .iter()
+                    .filter_map(|item| crate::loose::get_ci(item, key).cloned())
+                    .collect(),
+            ))
+        }
+        "matrix_combinations" => Ok(Value::Array(crate::matrix::combinations(&arg(0)?))),
         "to_string" => Ok(Value::String(to_display(&arg(0)?))),
         "not" => Ok(Value::Bool(!truthy(&arg(0)?))),
         // Unreachable: the table gated this call, so every entry has an arm above.
         // A new table entry with no arm lands here and fails its conformance test.
         _ => Err(EvalError::UnknownFunction(name.clone())),
     }
+}
+
+/// GitHub's `format()`: `{N}` substitutes argument N, `{{` and `}}` are literal
+/// braces. An index with no argument is an error rather than an empty string, which
+/// is what GitHub does too.
+fn gha_format(template: &str, args: &[Value]) -> Result<Value, EvalError> {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    out.push('{');
+                    continue;
+                }
+                let mut digits = String::new();
+                while let Some(d) = chars.peek().copied() {
+                    if d.is_ascii_digit() {
+                        digits.push(d);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if digits.is_empty() || chars.next() != Some('}') {
+                    return Err(EvalError::Type {
+                        op: SmolStr::new("format"),
+                        expected: SmolStr::new("`{N}` placeholders"),
+                        got: SmolStr::new("a malformed placeholder"),
+                    });
+                }
+                let index: usize = digits.parse().unwrap_or(usize::MAX);
+                match args.get(index) {
+                    Some(v) => out.push_str(&crate::loose::to_string(v)),
+                    None => {
+                        return Err(EvalError::Type {
+                            op: SmolStr::new("format"),
+                            expected: SmolStr::new(format!("at least {} argument(s)", index + 1)),
+                            got: SmolStr::new(format!("{}", args.len())),
+                        });
+                    }
+                }
+            }
+            '}' => {
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+                out.push('}');
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(Value::String(out))
 }
 
 fn index_into(base: &Value, idx: &Value) -> Value {

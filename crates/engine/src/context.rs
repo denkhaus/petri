@@ -42,6 +42,11 @@ pub(crate) fn firing_statics(
     let mut ctx = StaticCtx::new();
     let empty_run = RunContext::new();
 
+    // Run parameters first, so everything below shadows them.
+    for (key, value) in &state.graph.params {
+        ctx.set(key, value.clone());
+    }
+
     // Scope env. An env expression sees nothing but itself, so env can never depend
     // on its own resolution order.
     let mut env = Map::new();
@@ -50,8 +55,12 @@ pub(crate) fn firing_statics(
             let resolved = match value {
                 ExprOrValue::Value(v) => v.clone(),
                 ExprOrValue::Expr(id) => {
-                    let bare = StaticCtx::new();
-                    let env = EvalEnv::new(&Value::Null, &empty_run, &bare);
+                    // Scope env sees the run parameters and nothing else.
+                    let mut params_only = StaticCtx::new();
+                    for (key, value) in &state.graph.params {
+                        params_only.set(key, value.clone());
+                    }
+                    let env = EvalEnv::new(&Value::Null, &empty_run, &params_only);
                     eval(&state.graph.exprs, *id, &env).map_err(|error| RunError::Eval {
                         node,
                         site: SmolStr::new(format!("scope env `{key}`")),
