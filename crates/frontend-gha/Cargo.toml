@@ -17,10 +17,4 @@ smol_str = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-steps = { workspace = true }
-engine = { workspace = true }
-driver = { workspace = true }
-executor = { workspace = true }
-executor-host = { workspace = true }
-tokio = { workspace = true }
 proptest = { workspace = true }

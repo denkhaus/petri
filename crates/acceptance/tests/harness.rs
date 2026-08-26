@@ -4,7 +4,7 @@
 //! `unsupported.*` code. Zero panics, zero generic errors. The report is written to
 //! `corpus/REPORT.md` on every run so it stays current with the code.
 
-use corpus::{Class, check_all, report};
+use acceptance::{Class, check_all, report};
 
 fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus")

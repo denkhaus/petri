@@ -1,14 +1,14 @@
 [package]
-name = "petri-corpus"
+name = "petri-acceptance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The compatibility corpus harness: real workflows through the GHA frontend."
+description = "The acceptance battery: the compatibility corpus, and real workflows run end to end."
 publish = false
 
 [lib]
-# The package is `petri-corpus`; the crate is `corpus`, so code reads `corpus::…`.
-name = "corpus"
+# The package is `petri-acceptance`; the crate is `acceptance`, so code reads `acceptance::…`.
+name = "acceptance"
 
 [dependencies]
 ir = { workspace = true }
@@ -17,9 +17,7 @@ frontend-gha = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-engine = { workspace = true }
-driver = { workspace = true }
-executor = { workspace = true }
-executor-host = { workspace = true }
-steps = { workspace = true }
+petri = { workspace = true }
+testkit = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }

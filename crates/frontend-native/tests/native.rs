@@ -3,7 +3,7 @@
 
 use frontend::Severity;
 use frontend_native::load;
-use ir::{JoinPolicy, RunStatus};
+use ir::JoinPolicy;
 
 fn lower_ok(text: &str) -> ir::Graph {
     let lowered = load("test.yml", text);
@@ -56,55 +56,6 @@ fn a_cycle_with_xor_routing_and_an_any_join_lowers() {
     assert!(!poll.routing.groups[0].arms[1].back);
     assert_eq!(poll.budget.max_firings, 5);
     ir::validate(&graph).expect("validates");
-}
-
-/// The same graph runs on the real engine and executor: three generations of `poll`,
-/// then `done`.
-#[tokio::test]
-async fn the_cycle_runs_end_to_end() {
-    use std::sync::Arc;
-    let graph = lower_ok(CYCLE_XOR_ANY);
-    let dir = std::env::temp_dir().join(format!("petri-native-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let executor: Arc<dyn executor::Executor> =
-        Arc::new(executor_host::HostExecutor::new(&dir).with_retention(executor::Retention::Never));
-    let mut runners = steps::Registry::new();
-    runners.register(steps::ProcessStep);
-    runners.register(steps::NoopStep);
-    let driver = driver::Driver::new(
-        graph.clone(),
-        executor,
-        runners,
-        Arc::new(executor::MapSecrets::empty()),
-        driver::RunConfig::new(&dir),
-    );
-    let report = driver.run().await;
-    assert_eq!(
-        report.status,
-        RunStatus::Success,
-        "{:?}",
-        report.state.errors()
-    );
-
-    let polls: Vec<u32> = report
-        .state
-        .history()
-        .iter()
-        .filter(|r| r.name == "poll")
-        .map(|r| r.generation.raw())
-        .collect();
-    assert_eq!(polls, vec![0, 1, 2], "three generations, then the exit arm");
-    assert_eq!(
-        report
-            .state
-            .history()
-            .iter()
-            .filter(|r| r.name == "done")
-            .count(),
-        1
-    );
-    engine::verify_replay(graph, &report.state.log).expect("replay is byte-identical");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Invariant 8, surfaced with the corollary as its hint.

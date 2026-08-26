@@ -4,16 +4,20 @@
 //! machine's credentials, so `gh` is a stub on `PATH` that records its invocations
 //! and answers the one query the scripts make. Everything else — bash, the outputs
 //! file, env layering, `if:` gates over the `github` context, job summaries — is the
-//! real thing, on real processes, with replay verified byte for byte.
+//! real thing, on real processes through `petri::Runtime`, with replay verified byte
+//! for byte by the runtime itself.
 
-use std::sync::Arc;
+use std::path::Path;
 use std::time::Duration;
 
-use driver::{Driver, RunConfig};
-use executor::{MapSecrets, Retention};
-use executor_host::HostExecutor;
-use ir::{Graph, RunStatus};
+use petri::driver::RunReport;
+use petri::executor::{MapSecrets, Retention};
+use petri::frontend::DirFiles;
+use petri::frontend::gha::load;
+use petri::ir::{Graph, RunStatus};
+use petri::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
+use testkit::install_gh_stub;
 
 fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus")
@@ -23,39 +27,15 @@ fn lower(repo: &str, workflow: &str) -> Graph {
     let root = corpus_root().join(repo);
     let file = root.join(".github/workflows").join(workflow);
     let text = std::fs::read_to_string(&file).expect("vendored workflow");
-    let lowered = frontend_gha::load(
+    let lowered = load(
         &format!(".github/workflows/{workflow}"),
         &text,
-        &frontend::DirFiles { root },
+        &DirFiles { root },
     );
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
     }
     lowered.graph.expect("the workflow lowers")
-}
-
-/// A `gh` that records what it was asked and answers `cache list`.
-fn install_gh_stub(dir: &std::path::Path) -> std::path::PathBuf {
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let stub = bin.join("gh");
-    std::fs::write(
-        &stub,
-        r#"#!/bin/sh
-echo "gh $*" >> "$GH_STUB_LOG"
-case "$1 $2" in
-  "cache list") echo 101; echo 202 ;;
-esac
-exit 0
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    bin
 }
 
 /// Point every scope's `PATH` at the stub, and give the run its `github` context.
@@ -88,22 +68,17 @@ fn prepare(
     graph
 }
 
-async fn run(graph: Graph, dir: &std::path::Path) -> driver::RunReport {
-    let executor: Arc<dyn executor::Executor> =
-        Arc::new(HostExecutor::new(dir).with_retention(Retention::Never));
-    let mut runners = steps::Registry::new();
-    runners.register(steps::ProcessStep);
-    runners.register(steps::NoopStep);
-    let secrets = MapSecrets::from_pairs(&[("GITHUB_TOKEN", "ghs_dummy_token_for_the_stub_0000")]);
-    Driver::new(
-        graph,
-        executor,
-        runners,
-        Arc::new(secrets),
-        RunConfig::new(dir).with_grace(Duration::from_secs(2)),
-    )
-    .run()
-    .await
+async fn run(graph: Graph, dir: &Path) -> RunReport {
+    let mut options = RunOptions::new(dir);
+    options.grace = Duration::from_secs(2);
+    options.retention = Retention::Never;
+    let rt = Runtime::standard()
+        .secrets(MapSecrets::from_pairs(&[(
+            "GITHUB_TOKEN",
+            "ghs_dummy_token_for_the_stub_0000",
+        )]))
+        .options(options);
+    rt.run(graph).await.expect("replay is byte-identical")
 }
 
 fn fresh_dir(label: &str) -> std::path::PathBuf {
@@ -131,14 +106,13 @@ async fn react_cleanup_stale_branch_caches_runs() {
         json!({ "repository": "facebook/react", "event_name": "schedule", "actor": "bot", "sha": "abc", "ref": "refs/heads/main" }),
     );
 
-    let report = run(graph.clone(), &dir).await;
+    let report = run(graph, &dir).await;
     assert_eq!(
         report.status,
         RunStatus::Success,
         "{:?}",
         report.state.errors()
     );
-    engine::verify_replay(graph, &report.state.log).expect("replay is byte-identical");
 
     let calls = std::fs::read_to_string(&stub_log).unwrap_or_default();
     assert!(calls.contains("gh cache list"), "{calls}");
@@ -197,14 +171,13 @@ async fn nodejs_comment_labeled_runs_the_matching_job() {
         }),
     );
 
-    let report = run(graph.clone(), &dir).await;
+    let report = run(graph, &dir).await;
     assert_eq!(
         report.status,
         RunStatus::Success,
         "{:?}",
         report.state.errors()
     );
-    engine::verify_replay(graph, &report.state.log).expect("replay is byte-identical");
 
     let calls = std::fs::read_to_string(&stub_log).unwrap_or_default();
     assert!(
