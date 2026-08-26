@@ -8,36 +8,10 @@ use std::sync::Arc;
 
 use driver::RunConfig;
 use executor::MapSecrets;
-use ir::{Arm, BinOp, GraphBuilder, Outcome, RunStatus, ScopeId};
+use ir::{Arm, BinOp, GraphBuilder, RunStatus, ScopeId};
 use serde_json::json;
 use steps::{CAPABILITY_UNAVAILABLE_CLASS, Capabilities};
 use support::*;
-
-/// The handle a host registers: a concrete type over whatever it wraps.
-struct Greeting(&'static str);
-
-struct GreetStep;
-
-const GREET: ir::StepKindId = ir::StepKindId::new_static("greet");
-
-impl ir::StepKind for GreetStep {
-    fn id(&self) -> ir::StepKindId {
-        GREET
-    }
-    fn name(&self) -> &str {
-        "greet"
-    }
-}
-
-#[async_trait::async_trait]
-impl steps::StepRunner for GreetStep {
-    async fn run(&self, ctx: steps::StepCtx) -> Outcome {
-        match ctx.require_capability::<Greeting>() {
-            Ok(greeting) => Outcome::success(json!(greeting.0)),
-            Err(failure) => failure.into(),
-        }
-    }
-}
 
 fn greet_registry() -> steps::Registry {
     let mut registry = runners();
@@ -50,7 +24,7 @@ fn greet_registry() -> steps::Registry {
 async fn a_registered_capability_reaches_the_step() {
     let dir = RunDir::new("caps-present");
     let mut b = GraphBuilder::new();
-    b.add_step("greet", ScopeId::new(0), GREET);
+    b.add_step("greet", ScopeId::new(0), GREET_KIND);
     let report = host_driver_full(
         b.build(),
         &dir,
@@ -77,7 +51,7 @@ async fn a_missing_capability_fails_the_node_routably() {
     let dir = RunDir::new("caps-absent");
     let mut b = GraphBuilder::new();
     let scope = ScopeId::new(0);
-    let greet = b.add_step("greet", scope, GREET);
+    let greet = b.add_step("greet", scope, GREET_KIND);
     let rescue = add_script(&mut b, "rescue", scope, "echo rescued");
     let failed = {
         let e = b.exprs();

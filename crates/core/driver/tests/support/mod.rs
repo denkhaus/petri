@@ -5,13 +5,14 @@
 
 pub use testkit::*;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use driver::{Driver, RunConfig, RunReport};
 use executor::{Executor, MapSecrets, Retention};
 use executor_docker::DockerExecutor;
 use executor_host::HostExecutor;
-use ir::{Graph, ScopeId};
+use ir::{Control, Graph, Outcome, ScopeId, Value};
 use steps::{ProcessStep, Registry};
 
 pub fn runners() -> Registry {
@@ -195,4 +196,44 @@ pub fn runners_with_spawn_and_wedge() -> Registry {
     let mut registry = runners();
     registry.register_runner(Arc::new(SpawnAndWedge));
     registry
+}
+
+/// The minimal human-gate shape: wait for one `Deliver`, record what arrived, and
+/// return it as the step's output. An optional `linger_ms` config keeps it running
+/// that long after the answer before returning it.
+pub struct GateStep {
+    pub received: Arc<Mutex<Vec<Value>>>,
+}
+
+pub const GATE_KIND: ir::StepKindId = ir::StepKindId::new_static("gate");
+
+impl ir::StepKind for GateStep {
+    fn id(&self) -> ir::StepKindId {
+        GATE_KIND
+    }
+
+    fn name(&self) -> &str {
+        "gate"
+    }
+}
+
+#[async_trait::async_trait]
+impl steps::StepRunner for GateStep {
+    async fn run(&self, mut ctx: steps::StepCtx) -> Outcome {
+        match ctx.control.recv().await {
+            Some(Control::Deliver(value)) => {
+                self.received
+                    .lock()
+                    .expect("not poisoned")
+                    .push(value.clone());
+                let linger = ctx.config["linger_ms"].as_u64().unwrap_or(0);
+                if linger > 0 {
+                    tokio::time::sleep(Duration::from_millis(linger)).await;
+                }
+                Outcome::success(value)
+            }
+            Some(_) => Outcome::cancelled(),
+            None => Outcome::failure("the control channel closed with no answer"),
+        }
+    }
 }

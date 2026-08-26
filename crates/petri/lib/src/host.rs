@@ -118,38 +118,33 @@ pub struct DecodedEvents {
 
 /// Decode `events.jsonl` bytes: header, records, strict torn-line rule.
 pub fn decode_events(bytes: &[u8]) -> Result<DecodedEvents, EventsDecodeError> {
-    let mut lines: Vec<(usize, usize)> = Vec::new();
-    let mut start = 0;
-    for (i, b) in bytes.iter().enumerate() {
-        if *b == b'\n' {
-            lines.push((start, i));
-            start = i + 1;
-        }
-    }
-    let torn = start < bytes.len();
-    let clean_len = start;
+    let clean_len = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |last| last + 1);
+    let mut lines = bytes[..clean_len]
+        .split_inclusive(|b| *b == b'\n')
+        .map(|line| &line[..line.len() - 1]);
 
-    let mut complete = lines.into_iter();
-    let Some((hs, he)) = complete.next() else {
+    let Some(header) = lines.next() else {
         return Err(EventsDecodeError::MissingHeader);
     };
-    let header: Header = serde_json::from_slice(&bytes[hs..he])
-        .map_err(|e| EventsDecodeError::BadHeader(e.to_string()))?;
+    let header: Header =
+        serde_json::from_slice(header).map_err(|e| EventsDecodeError::BadHeader(e.to_string()))?;
 
     let mut records: Vec<EventRecord> = Vec::new();
-    for (index, (s, e)) in complete.enumerate() {
-        let record =
-            serde_json::from_slice(&bytes[s..e]).map_err(|e| EventsDecodeError::BadRecord {
-                line: index + 2,
-                message: e.to_string(),
-            })?;
+    for (index, line) in lines.enumerate() {
+        let record = serde_json::from_slice(line).map_err(|e| EventsDecodeError::BadRecord {
+            line: index + 2,
+            message: e.to_string(),
+        })?;
         records.push(record);
     }
     let log = EventLog::try_from_records(header.version, records)?;
     Ok(DecodedEvents {
         log,
         clean_len,
-        torn,
+        torn: clean_len < bytes.len(),
     })
 }
 
@@ -305,20 +300,18 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
 }
 
 /// A driver over the runtime's configuration with the run dir persisted:
-/// `graph.json` written now (after the known-secret check), a fresh
-/// [`JsonlEventLog`] battery attached. [`run`] is the plain path; use this when
-/// you need the [`Driver::handle`] before running.
-///
-/// `masker` comes from the same `SecretProvider` configured into the runtime —
-/// the host holds the provider it built.
-pub fn driver(rt: &Runtime, graph: Graph, masker: &Masker) -> Result<Driver, HostError> {
+/// `graph.json` written now (after the known-secret check, against the
+/// runtime's own mask set), a fresh [`JsonlEventLog`] battery attached. [`run`]
+/// is the plain path; use this when you need the [`Driver::handle`] before
+/// running.
+pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
     std::fs::create_dir_all(&run_dir).map_err(|e| HostError::Io {
         action: "create",
         path: run_dir.clone(),
         source: e,
     })?;
-    let encoded = encode_graph_checked(&graph, masker)?;
+    let encoded = encode_graph_checked(&graph, &rt.masker())?;
     write_file(&run_dir.join(GRAPH_FILE), &encoded)?;
     let events = run_dir.join(EVENTS_FILE);
     let battery = JsonlEventLog::create(&events).map_err(|e| HostError::Io {
@@ -334,17 +327,12 @@ pub fn driver(rt: &Runtime, graph: Graph, masker: &Masker) -> Result<Driver, Hos
 /// write failures are in `RunReport::observer_errors`. With the runtime's
 /// `verify_replay` on (the default), the log is replayed afterwards and any
 /// divergence is the error.
-pub async fn run(rt: &Runtime, graph: Graph, masker: &Masker) -> Result<RunReport, HostError> {
-    let original = rt.run_options().verify_replay.then(|| graph.clone());
-    let report = driver(rt, graph, masker)?.run().await;
-    if let Some(graph) = original {
-        engine::verify_replay(graph, &report.state.log)?;
-    }
-    Ok(report)
+pub async fn run(rt: &Runtime, graph: Graph) -> Result<RunReport, HostError> {
+    rt.run_verified(graph, |graph| driver(rt, graph)).await
 }
 
-fn read_graph(run_dir: &Path) -> Result<Graph, HostError> {
-    let path = run_dir.join(GRAPH_FILE);
+fn read_graph(rt: &Runtime) -> Result<Graph, HostError> {
+    let path = rt.run_options().run_dir.join(GRAPH_FILE);
     let bytes = std::fs::read(&path).map_err(|e| HostError::Io {
         action: "read",
         path: path.clone(),
@@ -362,12 +350,17 @@ fn read_graph(run_dir: &Path) -> Result<Graph, HostError> {
 /// Dynamic secrets (`answer:<id>`) are not in the log by design: re-register
 /// them on the provider before delivering again, or the resumed step fails with
 /// `secret_unavailable`.
-pub fn resume_driver(rt: &Runtime, masker: &Masker) -> Result<(Driver, ResumeInfo), HostError> {
+pub fn resume_driver(rt: &Runtime) -> Result<(Driver, ResumeInfo), HostError> {
+    resume_over(rt, read_graph(rt)?)
+}
+
+/// [`resume_driver`] past the graph read, so [`resume`] can keep the graph it
+/// read for verification.
+fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostError> {
     let run_dir = rt.run_options().run_dir.clone();
-    let graph = read_graph(&run_dir)?;
     // The §11 contract holds on resume too; a refusal here is a refusal to
     // continue, not to write.
-    encode_graph_checked(&graph, masker)?;
+    encode_graph_checked(&graph, &rt.masker())?;
 
     let events = run_dir.join(EVENTS_FILE);
     let decoded = read_events(&events)?;
@@ -399,16 +392,10 @@ pub fn resume_driver(rt: &Runtime, masker: &Masker) -> Result<(Driver, ResumeInf
 
 /// Continue the run in the runtime's run dir, to completion — the crash side of
 /// [`run`]. Same file guarantees, same replay verification.
-pub async fn resume(rt: &Runtime, masker: &Masker) -> Result<RunReport, HostError> {
-    let (driver, _info) = resume_driver(rt, masker)?;
-    let original = rt
-        .run_options()
-        .verify_replay
-        .then(|| read_graph(&rt.run_options().run_dir))
-        .transpose()?;
-    let report = driver.run().await;
-    if let Some(graph) = original {
-        engine::verify_replay(graph, &report.state.log)?;
-    }
-    Ok(report)
+pub async fn resume(rt: &Runtime) -> Result<RunReport, HostError> {
+    let graph = read_graph(rt)?;
+    rt.run_verified(graph, |graph| {
+        resume_over(rt, graph).map(|(driver, _info)| driver)
+    })
+    .await
 }

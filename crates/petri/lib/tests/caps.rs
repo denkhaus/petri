@@ -4,39 +4,14 @@
 
 use std::sync::Arc;
 
-use petri::ir::{GraphBuilder, Outcome, RunStatus, ScopeId};
+use petri::ir::{GraphBuilder, RunStatus, ScopeId};
 use petri::{RunOptions, steps};
 use serde_json::json;
-use testkit::RunDir;
-
-struct Greeting(&'static str);
-
-struct GreetStep;
-
-const GREET: petri::ir::StepKindId = petri::ir::StepKindId::new_static("greet");
-
-impl petri::ir::StepKind for GreetStep {
-    fn id(&self) -> petri::ir::StepKindId {
-        GREET
-    }
-    fn name(&self) -> &str {
-        "greet"
-    }
-}
-
-#[async_trait::async_trait]
-impl steps::StepRunner for GreetStep {
-    async fn run(&self, ctx: steps::StepCtx) -> Outcome {
-        match ctx.require_capability::<Greeting>() {
-            Ok(greeting) => Outcome::success(json!(greeting.0)),
-            Err(failure) => failure.into(),
-        }
-    }
-}
+use testkit::{GREET_KIND, GreetStep, Greeting, RunDir};
 
 fn greet_graph() -> petri::ir::Graph {
     let mut b = GraphBuilder::new();
-    b.add_step("greet", ScopeId::new(0), GREET);
+    b.add_step("greet", ScopeId::new(0), GREET_KIND);
     b.build()
 }
 

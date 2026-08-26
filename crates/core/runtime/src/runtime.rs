@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunReport};
 use engine::{EventLog, ReplayMismatch};
-use executor::{DEFAULT_GRACE, Executor, MapSecrets, Retention, SecretProvider};
+use executor::{DEFAULT_GRACE, Executor, MapSecrets, Masker, Retention, SecretProvider};
 use frontend::{DirFiles, Frontend, Lowered, Span};
 use ir::Graph;
 
@@ -312,12 +312,32 @@ impl Runtime {
     /// Run a graph to completion. With `verify_replay` on (the default), the log is
     /// replayed afterwards and any divergence is the error.
     pub async fn run(&self, graph: Graph) -> Result<RunReport, ReplayMismatch> {
+        self.run_verified(graph, |graph| Ok(self.driver(graph)))
+            .await
+    }
+
+    /// Run the driver `build` makes over `graph` to completion, with the same
+    /// verification as [`Runtime::run`]: `verify_replay` on (the default) replays
+    /// the log against the graph as it was before the run, and any divergence is
+    /// the error. For hosts that build their own driver — one with observers
+    /// attached, or a resumed one.
+    pub async fn run_verified<E: From<ReplayMismatch>>(
+        &self,
+        graph: Graph,
+        build: impl FnOnce(Graph) -> Result<Driver, E>,
+    ) -> Result<RunReport, E> {
         let original = self.options.verify_replay.then(|| graph.clone());
-        let report = self.driver(graph).run().await;
+        let report = build(graph)?.run().await;
         if let Some(graph) = original {
             engine::verify_replay(graph, &report.state.log)?;
         }
         Ok(report)
+    }
+
+    /// The mask set of the configured `SecretProvider`, for a host that persists
+    /// anything beside the run.
+    pub fn masker(&self) -> Masker {
+        self.secrets.masker()
     }
 
     /// Host and Docker executors over the run dir, dispatched by target.

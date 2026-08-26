@@ -35,8 +35,7 @@ async fn the_run_dir_is_self_describing() {
     let dir = RunDir::new("host-e2e");
     let rt = test_runtime(&dir);
     let graph = two_step_graph();
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, graph.clone(), &masker).await.expect("runs");
+    let report = host::run(&rt, graph.clone()).await.expect("runs");
     assert_eq!(report.status, RunStatus::Success);
     assert!(
         report.observer_errors.is_empty(),
@@ -68,10 +67,7 @@ async fn the_run_dir_is_self_describing() {
 async fn the_byte_codec_round_trips_without_a_filesystem() {
     let dir = RunDir::new("host-codec");
     let rt = test_runtime(&dir);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
     let bytes = host::encode_events(&report.state.log);
     let decoded = host::decode_events(&bytes).expect("decodes");
@@ -115,10 +111,7 @@ fn out_of_sequence_records_are_rejected() {
 async fn an_eof_torn_final_line_drops_to_the_prefix() {
     let dir = RunDir::new("host-torn");
     let rt = test_runtime(&dir);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
     let bytes = host::encode_events(&report.state.log);
     let torn = &bytes[..bytes.len() - 10];
@@ -138,10 +131,7 @@ async fn an_eof_torn_final_line_drops_to_the_prefix() {
 async fn a_terminated_undecodable_line_refuses_the_load() {
     let dir = RunDir::new("host-tamper");
     let rt = test_runtime(&dir);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
     let mut bytes = host::encode_events(&report.state.log);
     bytes.extend(b"not a record\n");
@@ -161,7 +151,6 @@ const SECRET: &str = "sk-live-9f3a2b7c1d4e";
 async fn the_files_hold_no_secret_bytes() {
     let dir = RunDir::new("host-secrets");
     let provider = MapSecrets::from_pairs(&[("DEPLOY_TOKEN", SECRET)]);
-    let masker = provider.masker();
     let rt = petri::runtime()
         .secrets(provider)
         .options(RunOptions::new(dir.path()));
@@ -178,7 +167,7 @@ async fn the_files_hold_no_secret_bytes() {
             }),
         ),
     );
-    let report = host::run(&rt, b.build(), &masker).await.expect("runs");
+    let report = host::run(&rt, b.build()).await.expect("runs");
     assert_eq!(report.status, RunStatus::Success);
 
     for file in [EVENTS_FILE, GRAPH_FILE] {
@@ -196,7 +185,6 @@ async fn a_known_secret_in_the_graph_refuses_the_run() {
     let dir = RunDir::new("host-refuse");
     let provider = MapSecrets::empty();
     provider.register("answer:1", SECRET).expect("registers");
-    let masker = provider.masker();
     let rt = petri::runtime()
         .secrets(provider)
         .options(RunOptions::new(dir.path()));
@@ -205,7 +193,7 @@ async fn a_known_secret_in_the_graph_refuses_the_run() {
     graph
         .params
         .insert(smol_str::SmolStr::new("leak"), json!(SECRET));
-    match host::run(&rt, graph, &masker).await {
+    match host::run(&rt, graph).await {
         Err(HostError::SecretInGraph) => {}
         Ok(_) => panic!("the run started with a secret in the graph"),
         Err(other) => panic!("expected the known-secret refusal, got {other}"),
@@ -237,9 +225,8 @@ async fn a_cancelled_run_leaves_complete_files() {
         ScopeId::new(0),
         "echo go > running; sleep 300",
     );
-    let masker = MapSecrets::empty().masker();
 
-    let driver = host::driver(&rt, b.build(), &masker).expect("prepared");
+    let driver = host::driver(&rt, b.build()).expect("prepared");
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     started(&dir).await;
@@ -271,9 +258,8 @@ async fn a_killed_run_leaves_complete_files() {
         ScopeId::new(0),
         "trap '' TERM; echo go > running; while :; do sleep 0.1; done",
     );
-    let masker = MapSecrets::empty().masker();
 
-    let driver = host::driver(&rt, b.build(), &masker).expect("prepared");
+    let driver = host::driver(&rt, b.build()).expect("prepared");
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     started(&dir).await;
@@ -323,16 +309,13 @@ fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
 async fn a_crashed_run_resumes_from_the_run_dir() {
     let dir = RunDir::new("host-resume");
     let rt = test_runtime(&dir);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
     let total = report.state.log.len();
 
     // Drop the final record — the second step's finish — at a line boundary:
     // the arbitrary-tail loss window, in its cleanest shape.
     damage_events(&dir, total, b"");
-    let resumed = host::resume(&rt, &masker).await.expect("resumes");
+    let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(resumed.status, RunStatus::Success);
     assert!(
         resumed.observer_errors.is_empty(),
@@ -354,14 +337,11 @@ async fn a_crashed_run_resumes_from_the_run_dir() {
 async fn a_torn_tail_is_truncated_and_resumed() {
     let dir = RunDir::new("host-resume-torn");
     let rt = test_runtime(&dir);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
     let total = report.state.log.len();
 
     damage_events(&dir, total, b"{\"seq\":9999,\"source\":\"Ext");
-    let resumed = host::resume(&rt, &masker).await.expect("resumes");
+    let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(resumed.status, RunStatus::Success);
 
     let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads clean");
@@ -377,17 +357,14 @@ async fn a_torn_tail_is_truncated_and_resumed() {
 async fn an_undecodable_record_refuses_resume() {
     let dir = RunDir::new("host-resume-refuse");
     let rt = test_runtime(&dir);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
     damage_events(
         &dir,
         report.state.log.len(),
         b"corrupted beyond recognition\n",
     );
-    match host::resume(&rt, &masker).await {
+    match host::resume(&rt).await {
         Err(HostError::Events { source, .. }) => {
             assert!(matches!(source, EventsDecodeError::BadRecord { .. }));
         }
@@ -415,10 +392,7 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
     let dir = RunDir::new("host-runtime-observe");
     let counting = Arc::new(Counting::default());
     let rt = test_runtime(&dir).observe(Arc::clone(&counting) as Arc<dyn EventObserver>);
-    let masker = MapSecrets::empty().masker();
-    let report = host::run(&rt, two_step_graph(), &masker)
-        .await
-        .expect("runs");
+    let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
     let seen = counting.seen.lock().expect("not poisoned");
     let expected: Vec<u64> = report.state.log.records().iter().map(|r| r.seq).collect();

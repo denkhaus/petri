@@ -146,13 +146,7 @@ impl EventLog {
         version: u32,
         records: Vec<EventRecord>,
     ) -> Result<Self, InvalidRecords> {
-        if version != LOG_VERSION {
-            return Err(UnsupportedLogVersion {
-                found: version,
-                expected: LOG_VERSION,
-            }
-            .into());
-        }
+        check_version(version)?;
         for (index, record) in records.iter().enumerate() {
             if record.seq != index as u64 {
                 return Err(InvalidRecords::SeqMismatch {
@@ -228,15 +222,21 @@ impl TryFrom<EventLogRepr> for EventLog {
     type Error = UnsupportedLogVersion;
 
     fn try_from(repr: EventLogRepr) -> Result<Self, Self::Error> {
-        if repr.version != LOG_VERSION {
-            return Err(UnsupportedLogVersion {
-                found: repr.version,
-                expected: LOG_VERSION,
-            });
-        }
+        check_version(repr.version)?;
         Ok(Self {
             version: repr.version,
             records: repr.records,
         })
     }
+}
+
+/// The standing no-migrator policy: only this build's version reads.
+fn check_version(found: u32) -> Result<(), UnsupportedLogVersion> {
+    if found != LOG_VERSION {
+        return Err(UnsupportedLogVersion {
+            found,
+            expected: LOG_VERSION,
+        });
+    }
+    Ok(())
 }

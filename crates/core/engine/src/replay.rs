@@ -26,10 +26,21 @@ use crate::state::EngineState;
 /// The graph must be the original one, before any splice: expansions are re-derived
 /// from the events, not read back from a mutated graph.
 pub fn replay(graph: Graph, log: &EventLog) -> EngineState {
+    replay_with(graph, log, drop)
+}
+
+/// The replay fold: every external event applied in order, each step's commands
+/// handed to `on_commands`.
+fn replay_with(
+    graph: Graph,
+    log: &EventLog,
+    mut on_commands: impl FnMut(Vec<Command>),
+) -> EngineState {
     let mut state = EngineState::new(graph);
     for event in log.external_events() {
-        let (next, _commands) = apply(state, event.clone());
+        let (next, commands) = apply(state, event.clone());
         state = next;
+        on_commands(commands);
     }
     state
 }
@@ -77,12 +88,9 @@ pub struct ResumePoint {
 /// not re-forwarded; the resumed step waits again and the host re-sends what its
 /// own store says is outstanding.
 pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatch> {
-    let mut state = EngineState::new(graph);
     let mut last_start: BTreeMap<FiringId, Command> = BTreeMap::new();
     let mut last_retry: BTreeMap<FiringId, Command> = BTreeMap::new();
-    for event in log.external_events() {
-        let (next, commands) = apply(state, event.clone());
-        state = next;
+    let state = replay_with(graph, log, |commands| {
         for command in commands {
             match &command {
                 Command::StartStep(resolved) => {
@@ -96,7 +104,7 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
                 _ => {}
             }
         }
-    }
+    });
     verify_prefix(log, &state.log)?;
 
     let mut pending: Vec<Command> = state
@@ -130,8 +138,8 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
 }
 
 /// The loaded log must be a byte-prefix of the regenerated one. Byte-wise per
-/// record, exactly as `verify_replay` compares — record `PartialEq` is weaker
-/// (JSON maps compare order-insensitively).
+/// record — record `PartialEq` is weaker (JSON maps compare order-insensitively).
+/// `verify_replay` is this plus "and no longer".
 fn verify_prefix(loaded: &EventLog, rebuilt: &EventLog) -> Result<(), ReplayMismatch> {
     let mismatch = |first_divergence| ReplayMismatch {
         original_records: loaded.len(),
@@ -157,23 +165,13 @@ fn verify_prefix(loaded: &EventLog, rebuilt: &EventLog) -> Result<(), ReplayMism
 /// core.
 pub fn verify_replay(graph: Graph, log: &EventLog) -> Result<EngineState, ReplayMismatch> {
     let state = replay(graph, log);
-    let (original, replayed) = (log, &state.log);
-
-    let encoded_original = serde_json::to_vec(original).expect("a log always encodes");
-    let encoded_replayed = serde_json::to_vec(replayed).expect("a log always encodes");
-    if encoded_original == encoded_replayed {
-        return Ok(state);
+    verify_prefix(log, &state.log)?;
+    if state.log.len() > log.len() {
+        return Err(ReplayMismatch {
+            original_records: log.len(),
+            replayed_records: state.log.len(),
+            first_divergence: None,
+        });
     }
-
-    let first_divergence = original
-        .records()
-        .iter()
-        .zip(replayed.records())
-        .find(|(a, b)| a != b)
-        .map(|(a, _)| a.seq);
-    Err(ReplayMismatch {
-        original_records: original.len(),
-        replayed_records: replayed.len(),
-        first_divergence,
-    })
+    Ok(state)
 }

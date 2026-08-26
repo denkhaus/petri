@@ -285,34 +285,21 @@ impl Executor for HostExecutor {
         }
         // Reap the sentinels. Only after this can the kernel recycle the ids,
         // which is why nothing below ever signals a group again.
-        let mut pending = Vec::new();
+        let mut pgids = Vec::new();
         for mut group in groups {
             let _ = group.sentinel.wait().await;
-            pending.push(group.pgid);
+            pgids.push(group.pgid);
         }
         // Observe group death — non-signalling, all groups under one shared
-        // deadline. Members our KILL reached are zombies at worst (init reaps
-        // them); only live members count, and a group that outlives the deadline
-        // is a leak to report.
+        // deadline. A group that outlives it is a leak to report.
         let deadline = tokio::time::Instant::now() + OBSERVE_DEADLINE;
-        while !pending.is_empty() {
-            let (dead, live): (Vec<i32>, Vec<i32>) = pending
-                .into_iter()
-                .partition(|&pgid| live_group_members(pgid) == 0);
-            for pgid in dead {
-                report = report.released(format!("process group {pgid}"));
-            }
-            pending = live;
-            if pending.is_empty() {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                for &pgid in &pending {
-                    report = report.problem(format!("process group {pgid} outlived release"));
-                }
-                break;
-            }
-            tokio::time::sleep(LIVENESS_POLL).await;
+        let leaked = await_drain(pgids.clone(), deadline).await;
+        for pgid in pgids {
+            report = if leaked.contains(&pgid) {
+                report.problem(format!("process group {pgid} outlived release"))
+            } else {
+                report.released(format!("process group {pgid}"))
+            };
         }
 
         let workspace = format!("workspace {}", path.display());
@@ -588,35 +575,39 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
         }
     }
 
-    let mut outstanding: Vec<(SmolStr, i32)> = discovered
-        .into_iter()
-        .filter(|(_, pgid)| live_group_members(*pgid) > 0)
-        .collect();
-    if outstanding.is_empty() {
-        return Ok(());
-    }
     let deadline = tokio::time::Instant::now() + drain;
+    let pgids = discovered.iter().map(|(_, pgid)| *pgid).collect();
+    let leaked = await_drain(pgids, deadline).await;
+    let Some((generation, pgid)) = discovered
+        .into_iter()
+        .find(|(_, pgid)| leaked.contains(pgid))
+    else {
+        return Ok(());
+    };
+    let why = if sentinel_is_live(pgid) {
+        "whatever leads it never honored the marker, so it is not ours to kill"
+    } else {
+        "its sentinel is gone, so nothing can kill it from inside"
+    };
+    Err(EnvError::FenceLeaked {
+        generation,
+        detail: format!(
+            "process group {pgid} did not drain ({why}); no signal is ever sent \
+             to a bare recorded pgid — end the group and retry"
+        ),
+    })
+}
+
+/// Wait for process groups to drain without signalling any of them: the groups
+/// still alive at `deadline`, empty when all are gone. Members a KILL reached
+/// are zombies at worst (init reaps them); only live members count.
+async fn await_drain(mut pgids: Vec<i32>, deadline: tokio::time::Instant) -> Vec<i32> {
     loop {
+        pgids.retain(|&pgid| live_group_members(pgid) > 0);
+        if pgids.is_empty() || tokio::time::Instant::now() >= deadline {
+            return pgids;
+        }
         tokio::time::sleep(LIVENESS_POLL).await;
-        outstanding.retain(|(_, pgid)| live_group_members(*pgid) > 0);
-        if outstanding.is_empty() {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let (generation, pgid) = &outstanding[0];
-            let why = if sentinel_is_live(*pgid) {
-                "whatever leads it never honored the marker, so it is not ours to kill"
-            } else {
-                "its sentinel is gone, so nothing can kill it from inside"
-            };
-            return Err(EnvError::FenceLeaked {
-                generation: generation.clone(),
-                detail: format!(
-                    "process group {pgid} did not drain ({why}); no signal is ever sent \
-                     to a bare recorded pgid — end the group and retry"
-                ),
-            });
-        }
     }
 }
 

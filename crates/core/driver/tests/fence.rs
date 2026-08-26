@@ -128,7 +128,7 @@ async fn a_prefenced_generation_never_starts_the_workload() {
         .await
         .expect("the group ends without outside help")
         .expect("wait");
-    assert_eq!(status, ExitStatus::signalled(libc_sigkill()));
+    assert_eq!(status, ExitStatus::signalled(SIGKILL));
     assert!(
         !dir.workspace().join("started").exists(),
         "a fenced generation can never start a workload"
@@ -137,9 +137,7 @@ async fn a_prefenced_generation_never_starts_the_workload() {
 }
 
 /// SIGKILL's number without linking libc into this test crate.
-fn libc_sigkill() -> i32 {
-    9
-}
+const SIGKILL: i32 = 9;
 
 /// A group whose in-group kill mechanism is gone — a dead sentinel with a
 /// surviving workload, or a recorded pgid that now belongs to someone else

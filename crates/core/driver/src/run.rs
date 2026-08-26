@@ -14,8 +14,8 @@ use executor::{
     SecretProvider,
 };
 use ir::{
-    Attempt, Control, EvalEnv, ExprOrValue, FailureInfo, FiringId, Graph, Outcome, RunContext,
-    RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
+    Attempt, Control, EvalEnv, ExprOrValue, FailureInfo, FiringId, Graph, NodeId, Outcome,
+    RunContext, RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
 };
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
@@ -279,6 +279,16 @@ pub struct Driver {
     resume: Option<PendingResume>,
     tx: mpsc::Sender<Signal>,
     rx: mpsc::Receiver<Signal>,
+}
+
+/// A stop's outcome: `status`, with the escalation that ended the step in the
+/// output — `Status::Cancelled` carries no `FailureInfo`, so the tag rides the
+/// output (§3.1 rule 5).
+fn escalation_outcome(status: Status, escalation: &str) -> Outcome {
+    Outcome::new(
+        status,
+        serde_json::json!({ CANCEL_ESCALATION_KEY: escalation }),
+    )
 }
 
 impl Driver {
@@ -567,25 +577,22 @@ impl Driver {
             Command::ReleaseScope { scope } => self.release(scope),
             Command::StartStep(resolved) => {
                 let (firing, attempt) = (resolved.id(), resolved.attempt());
+                let live = self.engine.firing(firing);
                 // A firing the stop tiers marked cancelling reaches dispatch
                 // only on resume, and is never re-spawned: it finishes directly
                 // with the same `Cancelled` outcome the live run would have fed
                 // once the stop landed, tagged with the tier from the replayed
                 // state (§10).
-                if self
-                    .engine
-                    .firing(firing)
-                    .is_some_and(|state| state.cancelling)
+                if let Some(node) = live
+                    .filter(|state| state.cancelling)
+                    .map(|state| state.node)
                 {
-                    self.finish_instead_of_resuming(firing, attempt);
+                    self.finish_instead_of_resuming(firing, attempt, node);
                     return;
                 }
                 // A started firing is already acknowledged in the loaded log; a
                 // second `StepStarted` would be a replay divergence.
-                let started = self
-                    .engine
-                    .firing(firing)
-                    .is_some_and(|state| state.started);
+                let started = live.is_some_and(|state| state.started);
                 self.start(resolved).await;
                 if !started {
                     // The acknowledgement that the attempt was dispatched. It goes
@@ -631,22 +638,13 @@ impl Driver {
     /// code path for both tiers, the tier read from the replayed state. The
     /// finish rides the signal channel like every step result, so its place in
     /// the log is its arrival order.
-    fn finish_instead_of_resuming(&self, firing: FiringId, attempt: Attempt) {
-        let killed = self
-            .engine
-            .firing(firing)
-            .is_some_and(|state| self.engine.is_node_killed(state.node));
-        let escalation = if killed {
+    fn finish_instead_of_resuming(&self, firing: FiringId, attempt: Attempt, node: NodeId) {
+        let escalation = if self.engine.is_node_killed(node) {
             KILLED_BEFORE_RESUME
         } else {
             CANCELLED_BEFORE_RESUME
         };
-        let mut output = serde_json::Map::new();
-        output.insert(
-            CANCEL_ESCALATION_KEY.into(),
-            Value::String(escalation.to_string()),
-        );
-        let outcome = Outcome::new(Status::Cancelled, Value::Object(output));
+        let outcome = escalation_outcome(Status::Cancelled, escalation);
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let _ = tx
@@ -983,11 +981,6 @@ impl Driver {
         // The step ignored its cancel. Stop waiting for it.
         task.join.abort();
 
-        let mut output = serde_json::Map::new();
-        output.insert(
-            "cancel_escalation".into(),
-            Value::String(CANCEL_FORCED.to_string()),
-        );
         let status = match reason {
             CancelReason::TimedOut => Status::TimedOut,
             CancelReason::Requested => Status::Cancelled,
@@ -1001,7 +994,7 @@ impl Driver {
                 "the step did not return after Control::Cancel; the driver stopped waiting",
             )
             .await;
-        self.finish(firing, attempt, Outcome::new(status, Value::Object(output)))
+        self.finish(firing, attempt, escalation_outcome(status, CANCEL_FORCED))
             .await;
     }
 

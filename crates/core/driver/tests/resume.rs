@@ -197,39 +197,6 @@ impl steps::StepRunner for WaitingStep {
     }
 }
 
-/// The human gate: records what arrives, returns the first `Deliver`.
-struct GateStep {
-    received: Arc<Mutex<Vec<Value>>>,
-}
-
-const GATE: ir::StepKindId = ir::StepKindId::new_static("gate");
-
-impl ir::StepKind for GateStep {
-    fn id(&self) -> ir::StepKindId {
-        GATE
-    }
-    fn name(&self) -> &str {
-        "gate"
-    }
-}
-
-#[async_trait::async_trait]
-impl steps::StepRunner for GateStep {
-    async fn run(&self, mut ctx: steps::StepCtx) -> Outcome {
-        match ctx.control.recv().await {
-            Some(Control::Deliver(value)) => {
-                self.received
-                    .lock()
-                    .expect("not poisoned")
-                    .push(value.clone());
-                Outcome::success(value)
-            }
-            Some(_) => Outcome::cancelled(),
-            None => Outcome::failure("no answer"),
-        }
-    }
-}
-
 fn registry_with(runner: Arc<dyn steps::StepRunner>) -> Registry {
     let mut registry = runners();
     registry.register_runner(runner);
@@ -521,12 +488,9 @@ async fn a_pending_retry_is_rearmed_not_restarted() {
     assert_replay_identical(&graph, &resumed);
 }
 
-async fn stopped_run(
-    dir: &RunDir,
-    hard: bool,
-    kill: bool,
-    runs: &Arc<AtomicUsize>,
-) -> (Graph, RunReport) {
+/// A run stopped mid-step. With `kill`, the step ignores the polite cancel and
+/// a second root cancel escalates to the kill tier.
+async fn stopped_run(dir: &RunDir, kill: bool, runs: &Arc<AtomicUsize>) -> (Graph, RunReport) {
     let marker = dir.path().join("marker");
     let mut b = GraphBuilder::new();
     b.add_node(
@@ -543,7 +507,7 @@ async fn stopped_run(
         RunConfig::new(dir.path()),
         registry_with(Arc::new(WaitingStep {
             runs: Arc::clone(runs),
-            hard,
+            hard: kill,
         })),
     );
     let handle: RunHandle = driver.handle();
@@ -569,7 +533,7 @@ async fn stopped_run(
 async fn a_killed_firing_is_finished_not_respawned() {
     let dir = RunDir::new("resume-killed");
     let runs = Arc::new(AtomicUsize::new(0));
-    let (graph, report) = stopped_run(&dir, true, true, &runs).await;
+    let (graph, report) = stopped_run(&dir, true, &runs).await;
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 
     let target = firing_of(&report, "work");
@@ -614,7 +578,7 @@ async fn a_killed_firing_is_finished_not_respawned() {
 async fn a_cancel_truncation_drives_to_a_quiescent_cancelled_report() {
     let dir = RunDir::new("resume-cancelled");
     let runs = Arc::new(AtomicUsize::new(0));
-    let (graph, report) = stopped_run(&dir, false, false, &runs).await;
+    let (graph, report) = stopped_run(&dir, false, &runs).await;
 
     let cut = seq_of(&report.state.log, |r| {
         matches!(&r.event, Event::CancelRequested { .. })
@@ -814,7 +778,7 @@ async fn a_gate_resumes_waiting_and_the_host_redelivers() {
     let dir = RunDir::new("resume-gate");
     let received = Arc::new(Mutex::new(Vec::new()));
     let mut b = GraphBuilder::new();
-    b.add_step("gate", ScopeId::new(0), GATE);
+    b.add_step("gate", ScopeId::new(0), GATE_KIND);
     let graph = b.build();
     let gate_firing = FiringId::new(1);
 
@@ -896,7 +860,7 @@ async fn a_dynamic_secret_must_be_reregistered_after_resume() {
     let dir = RunDir::new("resume-secret");
     let received = Arc::new(Mutex::new(Vec::new()));
     let mut b = GraphBuilder::new();
-    b.add_step("gate", ScopeId::new(0), GATE);
+    b.add_step("gate", ScopeId::new(0), GATE_KIND);
     let graph = b.build();
     let gate_firing = FiringId::new(1);
 

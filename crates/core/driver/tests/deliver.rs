@@ -18,45 +18,6 @@ use support::*;
 
 // ── Test step kinds ───────────────────────────────────────────────────────
 
-/// The minimal human-gate shape: wait for one `Deliver`, record what arrived, and
-/// return it as the step's output. An optional `linger_ms` keeps it running that
-/// long after the answer before returning it.
-struct GateStep {
-    received: Arc<Mutex<Vec<Value>>>,
-}
-
-const GATE_KIND: ir::StepKindId = ir::StepKindId::new_static("gate");
-
-impl ir::StepKind for GateStep {
-    fn id(&self) -> ir::StepKindId {
-        GATE_KIND
-    }
-    fn name(&self) -> &str {
-        "gate"
-    }
-}
-
-#[async_trait::async_trait]
-impl steps::StepRunner for GateStep {
-    async fn run(&self, mut ctx: steps::StepCtx) -> Outcome {
-        match ctx.control.recv().await {
-            Some(Control::Deliver(value)) => {
-                self.received
-                    .lock()
-                    .expect("not poisoned")
-                    .push(value.clone());
-                let linger = ctx.config["linger_ms"].as_u64().unwrap_or(0);
-                if linger > 0 {
-                    tokio::time::sleep(Duration::from_millis(linger)).await;
-                }
-                Outcome::success(value)
-            }
-            Some(_) => Outcome::cancelled(),
-            None => Outcome::failure("the control channel closed with no answer"),
-        }
-    }
-}
-
 /// Holds off reading its control channel until `start_file` exists, then reads
 /// `count` delivered values and returns them in arrival order.
 struct CollectStep;

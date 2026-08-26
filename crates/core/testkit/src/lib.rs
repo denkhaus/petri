@@ -2,8 +2,9 @@
 //!
 //! What every end-to-end harness needs and none should copy: a run directory that
 //! cleans itself up, readers over a [`RunReport`], the replay canary as an
-//! assertion, a step that ignores cancellation, and the `gh` stub the corpus
-//! workflows drive. Dev-dependency only; never published.
+//! assertion, a step that ignores cancellation, a step that needs a capability,
+//! and the `gh` stub the corpus workflows drive. Dev-dependency only; never
+//! published.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -108,6 +109,37 @@ impl steps::StepRunner for WedgedStep {
         let _ = ctx.control.recv().await;
         loop {
             tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    }
+}
+
+/// The handle a host registers as a capability: a concrete type over whatever it
+/// wraps. [`GreetStep`] requires it.
+pub struct Greeting(pub &'static str);
+
+/// A step kind that requires the [`Greeting`] capability and outputs its text —
+/// or, with no host having registered one, fails routably with
+/// `capability_unavailable`.
+pub struct GreetStep;
+
+pub const GREET_KIND: ir::StepKindId = ir::StepKindId::new_static("greet");
+
+impl ir::StepKind for GreetStep {
+    fn id(&self) -> ir::StepKindId {
+        GREET_KIND
+    }
+
+    fn name(&self) -> &str {
+        "greet"
+    }
+}
+
+#[async_trait::async_trait]
+impl steps::StepRunner for GreetStep {
+    async fn run(&self, ctx: steps::StepCtx) -> ir::Outcome {
+        match ctx.require_capability::<Greeting>() {
+            Ok(greeting) => ir::Outcome::success(json!(greeting.0)),
+            Err(failure) => failure.into(),
         }
     }
 }
