@@ -41,7 +41,7 @@ pub use graph::{
 pub use ids::{
     Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId,
 };
-pub use step::{Digest, StepKind, StepRegistry};
+pub use step::{Digest, StepKind, StepKinds};
 pub use validate::{
     ValidationError, ValidationReport, ValidationWarning, check, check_with, validate,
     validate_plan, validate_with,

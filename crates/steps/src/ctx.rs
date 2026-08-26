@@ -1,11 +1,23 @@
-//! What a step kind is handed, and what it returns.
+//! What a step kind is handed, what it returns, and the one registry.
+//!
+//! A step kind is written once, as a [`Step`]: a name, a typed config, and one
+//! attempt. Registration erases it into the two faces the rest of the system uses —
+//! [`StepRunner`] for the driver to dispatch to, and [`ir::StepKind`] for
+//! `validate_with` to check configs against at load. One definition, one registry,
+//! so a kind with no runner or a config that cannot deserialize is caught by
+//! `petri check` rather than at firing time.
 
 use std::sync::Arc;
 
 use executor::{ExecEnv, SecretProvider};
-use ir::{Attempt, Control, FiringId, StepEvent, Value};
+use ir::placeholder::contains_placeholder;
+use ir::{Attempt, Control, FiringId, Outcome, StepEvent, StepKind, StepKindId, StepKinds, Value};
+use serde::de::DeserializeOwned;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
+
+/// The step's config did not deserialize.
+pub const BAD_CONFIG_CLASS: &str = "bad_config";
 
 /// Everything a step needs to run one attempt.
 pub struct StepCtx {
@@ -37,36 +49,174 @@ impl StepCtx {
     }
 }
 
-/// A step kind, as the driver runs it.
+/// A step that failed before it could run, in the few bytes needed to say so.
 ///
-/// One attempt per call. Retries are the core's business: a runner never loops.
+/// The short-circuit arm used to be a whole `Outcome`, which made every caller pay
+/// for the larger of two identical types for no benefit. This carries the class and
+/// the message, and becomes an `Outcome` once, at the boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepFailure {
+    pub class: &'static str,
+    pub message: String,
+}
+
+impl From<StepFailure> for Outcome {
+    fn from(failure: StepFailure) -> Self {
+        Outcome::new(
+            ir::Status::Failure(ir::FailureInfo::new(failure.message).with_class(failure.class)),
+            Value::Null,
+        )
+    }
+}
+
+/// A step kind, as an author writes one.
+///
+/// One attempt per call. Retries are the core's business: a step never loops.
+/// Registering a `Step` yields both faces — the runner the driver dispatches to and
+/// the load-time validator — so a kind is defined exactly once.
+///
+/// `NAME` is the kind's identity: bare for the built-ins (`process`, `noop`),
+/// `vendor/kind` for kinds defined in another repository (`attractor/llm`), so two
+/// repositories never collide.
 #[async_trait::async_trait]
-pub trait StepRunner: Send + Sync {
-    fn kind(&self) -> ir::StepKindId;
+pub trait Step: Send + Sync + 'static {
+    const NAME: &'static str;
 
-    fn name(&self) -> &str;
+    /// The config's shape. Deserialization failure is class `bad_config` — at load
+    /// when the config is literal, at firing time when it held placeholders.
+    type Config: DeserializeOwned + Send;
 
-    async fn run(&self, ctx: StepCtx) -> ir::Outcome;
+    /// Checks on the raw config that outrank deserialization, with their own
+    /// failure class. Run at load time and again before each attempt.
+    fn check_raw(&self, _config: &Value) -> Result<(), StepFailure> {
+        Ok(())
+    }
+
+    async fn run(&self, config: Self::Config, ctx: StepCtx) -> Outcome;
+
+    /// Reserved seam for content caching: `None` means "never reuse a result".
+    fn fingerprint(&self, _config: &Value) -> Option<ir::Digest> {
+        None
+    }
 }
 
-/// The step kinds a driver can dispatch to.
-#[derive(Default)]
-pub struct RunnerRegistry {
-    runners: std::collections::HashMap<ir::StepKindId, Arc<dyn StepRunner>>,
+/// A step kind, erased: what the driver dispatches to.
+///
+/// Authors implement [`Step`] and let registration erase it. Implementing this
+/// directly is for the rare kind whose config handling fits no `Config` type; it
+/// then carries its `StepKind` half by hand.
+#[async_trait::async_trait]
+pub trait StepRunner: StepKind {
+    async fn run(&self, ctx: StepCtx) -> Outcome;
 }
 
-impl RunnerRegistry {
+/// The erasure: one `Step` becomes both a `StepRunner` and a `StepKind`.
+struct Erased<S>(S);
+
+impl<S: Step> StepKind for Erased<S> {
+    fn id(&self) -> StepKindId {
+        StepKindId::new_static(S::NAME)
+    }
+
+    fn name(&self) -> &str {
+        S::NAME
+    }
+
+    fn validate_config(&self, config: &Value) -> Result<(), String> {
+        self.0
+            .check_raw(config)
+            .map_err(|f| format!("{}: {}", f.class, f.message))?;
+        if contains_placeholder(config) {
+            // HIR: the value is still an expression. The typed check runs at firing
+            // time, against the resolved config.
+            return Ok(());
+        }
+        serde_json::from_value::<S::Config>(config.clone())
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
+    fn fingerprint(&self, config: &Value) -> Option<ir::Digest> {
+        self.0.fingerprint(config)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: Step> StepRunner for Erased<S> {
+    async fn run(&self, ctx: StepCtx) -> Outcome {
+        if let Err(failure) = self.0.check_raw(&ctx.config) {
+            return failure.into();
+        }
+        let config = match serde_json::from_value::<S::Config>(ctx.config.clone()) {
+            Ok(config) => config,
+            Err(e) => {
+                return StepFailure {
+                    class: BAD_CONFIG_CLASS,
+                    message: format!("step config is invalid: {e}"),
+                }
+                .into();
+            }
+        };
+        Step::run(&self.0, config, ctx).await
+    }
+}
+
+/// The step kinds a run can use: the driver dispatches through it, and
+/// `validate_with` checks graphs against it, so a kind with no runner cannot get
+/// past load.
+#[derive(Clone, Default)]
+pub struct Registry {
+    runners: std::collections::HashMap<StepKindId, Arc<dyn StepRunner>>,
+}
+
+impl Registry {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn register(&mut self, runner: Arc<dyn StepRunner>) -> ir::StepKindId {
-        let id = runner.kind();
+    /// Register a typed step kind under [`Step::NAME`].
+    ///
+    /// # Panics
+    ///
+    /// On a duplicate name. Registration is configuration, and two kinds under one
+    /// name is a programming error the run must not paper over.
+    pub fn register<S: Step>(&mut self, step: S) -> StepKindId {
+        self.insert(Arc::new(Erased(step)))
+    }
+
+    /// Register a hand-erased runner. Same duplicate rule as [`Registry::register`].
+    pub fn register_runner(&mut self, runner: Arc<dyn StepRunner>) -> StepKindId {
+        self.insert(runner)
+    }
+
+    fn insert(&mut self, runner: Arc<dyn StepRunner>) -> StepKindId {
+        let id = runner.id();
+        assert!(
+            !self.runners.contains_key(&id),
+            "step kind `{id}` is already registered"
+        );
         self.runners.insert(id.clone(), runner);
         id
     }
 
-    pub fn get(&self, id: &ir::StepKindId) -> Option<Arc<dyn StepRunner>> {
+    pub fn get(&self, id: &StepKindId) -> Option<Arc<dyn StepRunner>> {
         self.runners.get(id).cloned()
+    }
+}
+
+impl StepKinds for Registry {
+    fn get(&self, id: &StepKindId) -> Option<&dyn StepKind> {
+        self.runners.get(id).map(|r| {
+            let runner: &dyn StepRunner = r.as_ref();
+            runner as &dyn StepKind
+        })
+    }
+}
+
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut names: Vec<_> = self.runners.values().map(|r| r.name()).collect();
+        names.sort_unstable();
+        f.debug_struct("Registry").field("kinds", &names).finish()
     }
 }

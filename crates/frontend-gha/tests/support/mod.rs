@@ -69,9 +69,9 @@ fn run_dir(label: &str) -> std::path::PathBuf {
 fn driver_for(graph: Graph, dir: &std::path::Path) -> Driver {
     let executor: Arc<dyn executor::Executor> =
         Arc::new(HostExecutor::new(dir).with_retention(Retention::Never));
-    let mut runners = steps::RunnerRegistry::new();
-    runners.register(Arc::new(steps::ProcessStep));
-    runners.register(Arc::new(steps::NoopStep));
+    let mut runners = steps::Registry::new();
+    runners.register(steps::ProcessStep);
+    runners.register(steps::NoopStep);
     Driver::new(
         graph,
         executor,

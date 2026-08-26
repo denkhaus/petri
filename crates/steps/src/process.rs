@@ -15,7 +15,7 @@ use serde_json::Map;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 
-use crate::ctx::{StepCtx, StepRunner};
+use crate::ctx::{Step, StepCtx, StepFailure};
 use crate::outputs::{BAD_OUTPUT_CLASS, parse};
 
 /// The step kind id the process step registers under.
@@ -26,9 +26,6 @@ pub const OUTPUT_ENV: &str = "CI_OUTPUT";
 
 /// A `$secret` reference turned up somewhere it is not allowed.
 pub const SECRET_MISPLACED_CLASS: &str = "secret_misplaced";
-
-/// The step's config did not deserialize.
-pub const BAD_CONFIG_CLASS: &str = "bad_config";
 
 /// A named secret is not configured for this run.
 pub const SECRET_UNAVAILABLE_CLASS: &str = "secret_unavailable";
@@ -119,60 +116,32 @@ pub struct ProcessConfig {
 pub struct ProcessStep;
 
 #[async_trait::async_trait]
-impl StepRunner for ProcessStep {
-    fn kind(&self) -> StepKindId {
-        PROCESS_KIND
+impl Step for ProcessStep {
+    const NAME: &'static str = "process";
+    type Config = ProcessConfig;
+
+    /// A `$secret` outside an env-shaped position outranks deserialization: it is a
+    /// misplaced secret, not a malformed config, and would otherwise reach the
+    /// process as literal JSON.
+    fn check_raw(&self, config: &Value) -> Result<(), StepFailure> {
+        if let Some(path) = misplaced_secret(config) {
+            return Err(fail(
+                SECRET_MISPLACED_CLASS,
+                format!("`{SECRET_REF_KEY}` is only valid in `env`; found one at `{path}`"),
+            ));
+        }
+        Ok(())
     }
 
-    fn name(&self) -> &str {
-        "process"
-    }
-
-    async fn run(&self, ctx: StepCtx) -> Outcome {
-        match execute(ctx).await {
+    async fn run(&self, config: ProcessConfig, ctx: StepCtx) -> Outcome {
+        match execute(config, ctx).await {
             Ok(outcome) => outcome,
             Err(failure) => failure.into(),
         }
     }
 }
 
-/// A step that failed before it could run, in the few bytes needed to say so.
-///
-/// The short-circuit arm used to be a whole `Outcome`, which made every caller pay
-/// for the larger of two identical types for no benefit. This carries the class and
-/// the message, and becomes an `Outcome` once, at the boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StepFailure {
-    pub class: &'static str,
-    pub message: String,
-}
-
-impl From<StepFailure> for Outcome {
-    fn from(failure: StepFailure) -> Self {
-        Outcome::new(
-            Status::Failure(FailureInfo::new(failure.message).with_class(failure.class)),
-            Value::Null,
-        )
-    }
-}
-
-async fn execute(mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
-    // A `$secret` outside an env-shaped position is a step failure, not something to
-    // quietly ignore: it would otherwise reach the process as the literal JSON.
-    if let Some(path) = misplaced_secret(&ctx.config) {
-        return Err(fail(
-            SECRET_MISPLACED_CLASS,
-            format!("`{SECRET_REF_KEY}` is only valid in `env`; found one at `{path}`"),
-        ));
-    }
-
-    let config: ProcessConfig = serde_json::from_value(ctx.config.clone()).map_err(|e| {
-        fail(
-            BAD_CONFIG_CLASS,
-            format!("process step config is invalid: {e}"),
-        )
-    })?;
-
+async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // Secrets are resolved here, into the child's environment, and nowhere else.
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     for (key, value) in &config.env {

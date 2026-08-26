@@ -1,7 +1,10 @@
-//! Step kinds: the registry the engine resolves [`StepRef::kind`](crate::StepRef::kind)
-//! against. The engine never runs a step itself; it names one in a command.
-
-use std::collections::HashMap;
+//! Step kinds, as validation sees them.
+//!
+//! The engine never runs a step itself; it names one in a command. What runs steps
+//! lives in the `steps` crate; this is the load-time face — enough for
+//! [`validate_with`](crate::validate_with) to check that every
+//! [`StepRef::kind`](crate::StepRef::kind) is known and every literal config is
+//! well-formed before a run starts.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,46 +42,10 @@ pub trait StepKind: Send + Sync {
     }
 }
 
-/// The set of step kinds a graph may refer to.
-#[derive(Default)]
-pub struct StepRegistry {
-    kinds: HashMap<StepKindId, Box<dyn StepKind>>,
-}
-
-impl StepRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(&mut self, kind: Box<dyn StepKind>) -> StepKindId {
-        let id = kind.id();
-        self.kinds.insert(id.clone(), kind);
-        id
-    }
-
-    pub fn get(&self, id: &StepKindId) -> Option<&dyn StepKind> {
-        self.kinds.get(id).map(|k| k.as_ref())
-    }
-
-    pub fn contains(&self, id: &StepKindId) -> bool {
-        self.kinds.contains_key(id)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.kinds.len()
-    }
-}
-
-impl std::fmt::Debug for StepRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut names: Vec<_> = self.kinds.values().map(|k| k.name()).collect();
-        names.sort_unstable();
-        f.debug_struct("StepRegistry")
-            .field("kinds", &names)
-            .finish()
-    }
+/// A set of step kinds, looked up by id.
+///
+/// The one registry lives in the `steps` crate and implements this; validation only
+/// needs the lookup, so this crate carries the trait and no store.
+pub trait StepKinds {
+    fn get(&self, id: &StepKindId) -> Option<&dyn StepKind>;
 }

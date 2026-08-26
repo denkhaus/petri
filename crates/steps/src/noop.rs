@@ -8,9 +8,9 @@
 //!
 //! It is a step kind, not an engine feature. The core does not know it exists.
 
-use ir::{Outcome, StepKindId};
+use ir::{Outcome, StepKindId, Value};
 
-use crate::ctx::{StepCtx, StepRunner};
+use crate::ctx::{Step, StepCtx};
 
 /// The step kind id the noop registers under.
 pub const NOOP_KIND: StepKindId = StepKindId::new_static("noop");
@@ -18,16 +18,11 @@ pub const NOOP_KIND: StepKindId = StepKindId::new_static("noop");
 pub struct NoopStep;
 
 #[async_trait::async_trait]
-impl StepRunner for NoopStep {
-    fn kind(&self) -> StepKindId {
-        NOOP_KIND
-    }
+impl Step for NoopStep {
+    const NAME: &'static str = "noop";
+    type Config = Value;
 
-    fn name(&self) -> &str {
-        "noop"
-    }
-
-    async fn run(&self, ctx: StepCtx) -> Outcome {
-        Outcome::success(ctx.config)
+    async fn run(&self, config: Value, _ctx: StepCtx) -> Outcome {
+        Outcome::success(config)
     }
 }

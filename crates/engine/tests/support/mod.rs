@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use engine::{Command, EngineState, Event, apply};
 use ir::{
     Attempt, FiringId, Generation, Graph, NodeId, Outcome, RunStatus, StepKind, StepKindId,
-    StepRegistry, Token, Value,
+    StepKinds, Token, Value,
 };
 
 /// What the host is being asked to run.
@@ -51,10 +51,17 @@ impl StepKind for Noop {
     }
 }
 
-pub fn registry() -> StepRegistry {
-    let mut registry = StepRegistry::new();
-    registry.register(Box::new(Noop));
-    registry
+/// The load-time lookup `validate_with` takes, over the one test kind.
+pub struct Kinds(Vec<Box<dyn StepKind>>);
+
+impl StepKinds for Kinds {
+    fn get(&self, id: &StepKindId) -> Option<&dyn StepKind> {
+        self.0.iter().find(|k| k.id() == *id).map(|k| k.as_ref())
+    }
+}
+
+pub fn registry() -> Kinds {
+    Kinds(vec![Box::new(Noop)])
 }
 
 pub const NOOP: StepKindId = StepKindId::new_static("noop");

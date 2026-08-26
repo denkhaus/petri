@@ -91,9 +91,9 @@ fn prepare(
 async fn run(graph: Graph, dir: &std::path::Path) -> driver::RunReport {
     let executor: Arc<dyn executor::Executor> =
         Arc::new(HostExecutor::new(dir).with_retention(Retention::Never));
-    let mut runners = steps::RunnerRegistry::new();
-    runners.register(Arc::new(steps::ProcessStep));
-    runners.register(Arc::new(steps::NoopStep));
+    let mut runners = steps::Registry::new();
+    runners.register(steps::ProcessStep);
+    runners.register(steps::NoopStep);
     let secrets = MapSecrets::from_pairs(&[("GITHUB_TOKEN", "ghs_dummy_token_for_the_stub_0000")]);
     Driver::new(
         graph,

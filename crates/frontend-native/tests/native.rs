@@ -68,9 +68,9 @@ async fn the_cycle_runs_end_to_end() {
     let _ = std::fs::remove_dir_all(&dir);
     let executor: Arc<dyn executor::Executor> =
         Arc::new(executor_host::HostExecutor::new(&dir).with_retention(executor::Retention::Never));
-    let mut runners = steps::RunnerRegistry::new();
-    runners.register(Arc::new(steps::ProcessStep));
-    runners.register(Arc::new(steps::NoopStep));
+    let mut runners = steps::Registry::new();
+    runners.register(steps::ProcessStep);
+    runners.register(steps::NoopStep);
     let driver = driver::Driver::new(
         graph.clone(),
         executor,

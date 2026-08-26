@@ -13,7 +13,7 @@ use executor_docker::DockerExecutor;
 use executor_host::HostExecutor;
 use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
 use serde_json::json;
-use steps::{PROCESS_KIND, ProcessStep, RunnerRegistry};
+use steps::{PROCESS_KIND, ProcessStep, Registry};
 
 /// A run directory that cleans itself up.
 pub struct RunDir {
@@ -81,9 +81,9 @@ pub fn add_script(b: &mut GraphBuilder, name: &str, scope: ScopeId, run: &str) -
     b.add_node(name, scope, StepRef::new(PROCESS_KIND, script(run)))
 }
 
-pub fn runners() -> RunnerRegistry {
-    let mut registry = RunnerRegistry::new();
-    registry.register(Arc::new(ProcessStep));
+pub fn runners() -> Registry {
+    let mut registry = Registry::new();
+    registry.register(ProcessStep);
     registry
 }
 
@@ -106,7 +106,7 @@ pub fn host_driver_full(
     dir: &RunDir,
     secrets: MapSecrets,
     config: RunConfig,
-    runners: RunnerRegistry,
+    runners: Registry,
 ) -> Driver {
     let executor: Arc<dyn Executor> =
         Arc::new(HostExecutor::new(dir.path()).with_retention(config.keep_workspaces));
@@ -119,16 +119,18 @@ pub struct WedgedStep;
 
 pub const WEDGED_KIND: ir::StepKindId = ir::StepKindId::new_static("wedged");
 
-#[async_trait::async_trait]
-impl steps::StepRunner for WedgedStep {
-    fn kind(&self) -> ir::StepKindId {
+impl ir::StepKind for WedgedStep {
+    fn id(&self) -> ir::StepKindId {
         WEDGED_KIND
     }
 
     fn name(&self) -> &str {
         "wedged"
     }
+}
 
+#[async_trait::async_trait]
+impl steps::StepRunner for WedgedStep {
     async fn run(&self, mut ctx: steps::StepCtx) -> ir::Outcome {
         ctx.log(ir::LogStream::Stdout, "wedged step is running")
             .await;
@@ -194,9 +196,9 @@ pub fn broken_scope_driver(
     )
 }
 
-pub fn runners_with_wedged() -> RunnerRegistry {
+pub fn runners_with_wedged() -> Registry {
     let mut registry = runners();
-    registry.register(Arc::new(WedgedStep));
+    registry.register_runner(Arc::new(WedgedStep));
     registry
 }
 

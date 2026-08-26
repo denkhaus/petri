@@ -76,7 +76,7 @@ id_newtype!(
 /// A name, not a number, so a serialized graph says what each node runs and two
 /// repositories never have to agree on a `u32`. Built-in kinds use bare names; kinds
 /// defined elsewhere use `<vendor>/<kind>`, and a registry rejects a duplicate. Names
-/// are what a [`StepRegistry`](crate::StepRegistry) is keyed by.
+/// are what a step registry is keyed by.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StepKindId(SmolStr);

@@ -11,7 +11,7 @@ use crate::expr::Expr;
 use crate::graph::{ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
 use crate::ids::{EdgeId, ExprId, NodeId, ScopeId, StepKindId};
 use crate::placeholder::placeholder_path;
-use crate::step::StepRegistry;
+use crate::step::StepKinds;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationError {
@@ -167,7 +167,7 @@ pub fn check(graph: &Graph) -> ValidationReport {
 }
 
 /// Validate a graph against a step registry and return both errors and warnings.
-pub fn check_with(graph: &Graph, registry: Option<&StepRegistry>) -> ValidationReport {
+pub fn check_with(graph: &Graph, registry: Option<&dyn StepKinds>) -> ValidationReport {
     let mut warnings = Vec::new();
     check_scope_reentry(graph, &mut warnings);
     ValidationReport {
@@ -187,7 +187,7 @@ pub fn validate_plan(graph: &Graph) -> Result<(), Vec<ValidationError>> {
 /// Validate a graph and resolve every step kind against `registry`.
 pub fn validate_with(
     graph: &Graph,
-    registry: Option<&StepRegistry>,
+    registry: Option<&dyn StepKinds>,
 ) -> Result<(), Vec<ValidationError>> {
     done(collect(graph, registry))
 }
@@ -200,7 +200,7 @@ fn done(errors: Vec<ValidationError>) -> Result<(), Vec<ValidationError>> {
     }
 }
 
-fn collect(graph: &Graph, registry: Option<&StepRegistry>) -> Vec<ValidationError> {
+fn collect(graph: &Graph, registry: Option<&dyn StepKinds>) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     check_structure(graph, registry, &mut errors);
     check_edge_ids(graph, &mut errors);
@@ -217,7 +217,7 @@ fn collect(graph: &Graph, registry: Option<&StepRegistry>) -> Vec<ValidationErro
 
 fn check_structure(
     graph: &Graph,
-    registry: Option<&StepRegistry>,
+    registry: Option<&dyn StepKinds>,
     errors: &mut Vec<ValidationError>,
 ) {
     for (index, scope) in graph.scopes.iter().enumerate() {

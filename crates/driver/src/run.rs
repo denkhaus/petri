@@ -15,7 +15,7 @@ use ir::{
     RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
 };
 use smol_str::SmolStr;
-use steps::{RunnerRegistry, StepCtx};
+use steps::{Registry, StepCtx};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -28,9 +28,8 @@ pub const CANCEL_FORCED: &str = "cancel_forced";
 
 /// No step kind is registered for a node's `StepRef.kind`.
 ///
-/// This is a configuration mistake the driver can only catch at firing time: the
-/// driver's runner registry is separate from the `StepRegistry` that
-/// `validate_with` checks against. Worth unifying so it fails at load.
+/// `validate_with(graph, Some(&registry))` reports this at load; the guard here is
+/// the backstop for a caller that skipped validation.
 pub const NO_RUNNER: &str = "no_runner";
 
 /// Knobs, with the defaults from the handoff's table.
@@ -145,7 +144,7 @@ struct Task {
 pub struct Driver {
     engine: EngineState,
     executor: Arc<dyn Executor>,
-    runners: Arc<RunnerRegistry>,
+    runners: Arc<Registry>,
     secrets: Arc<dyn SecretProvider>,
     sink: Arc<LogSink>,
     config: RunConfig,
@@ -162,7 +161,7 @@ impl Driver {
     pub fn new(
         graph: Graph,
         executor: Arc<dyn Executor>,
-        runners: RunnerRegistry,
+        runners: Registry,
         secrets: Arc<dyn SecretProvider>,
         config: RunConfig,
     ) -> Self {

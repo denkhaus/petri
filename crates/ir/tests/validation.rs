@@ -350,9 +350,14 @@ fn unknown_step_kinds_are_reported() {
     let graph = b.build();
 
     validate(&graph).expect("valid without a registry");
-    let registry = ir::StepRegistry::new();
+    struct NoKinds;
+    impl ir::StepKinds for NoKinds {
+        fn get(&self, _id: &ir::StepKindId) -> Option<&dyn ir::StepKind> {
+            None
+        }
+    }
     assert!(
-        ir::validate_with(&graph, Some(&registry))
+        ir::validate_with(&graph, Some(&NoKinds))
             .expect_err("kind `unregistered` is not registered")
             .iter()
             .any(|e| matches!(e, ValidationError::UnknownStepKind { .. }))
