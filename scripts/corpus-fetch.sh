@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
-# Vendor the `.github/workflows` of well-known OSS repositories at a pinned commit.
+# Fetch the `.github/workflows` of well-known OSS repositories at a pinned commit.
 # Each repo gets crates/github/corpus/<owner>__<repo>/ with its workflows and a PROVENANCE.md
 # recording the commit, the licence, and when it was fetched.
+#
+# The corpus data is not committed — crates/github/corpus/ is gitignored apart from
+# REPORT.md. Commits come from crates/github/corpus-pins.txt, which is committed, so
+# two fetches of the same pins produce the same corpus. `--repin` re-resolves HEAD for
+# every repo and rewrites the pins file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+PINS=crates/github/corpus-pins.txt
+REPIN=0
+for arg in "$@"; do
+  case "$arg" in
+    --repin) REPIN=1 ;;
+    *) echo "usage: $0 [--repin]" >&2; exit 2 ;;
+  esac
+done
 
 REPOS=(
   rust-lang/cargo
@@ -30,12 +44,29 @@ REPOS=(
   golang/tools
 )
 
+# The sha recorded for $1 in the pins file, or empty when it has none.
+pinned_sha() {
+  [ -f "$PINS" ] || return 0
+  awk -v repo="$1" '$1 == repo { print $2; exit }' "$PINS"
+}
+
+declare -a RESOLVED=()
+
 for repo in "${REPOS[@]}"; do
   owner="${repo%%/*}"; name="${repo##*/}"
   dir="crates/github/corpus/${owner}__${name}"
   mkdir -p "$dir/.github/workflows"
   echo "== $repo"
-  sha=$(gh api "repos/$repo/commits/HEAD" --jq .sha 2>/dev/null || echo unknown)
+  sha=""
+  if [ "$REPIN" -eq 0 ]; then
+    sha=$(pinned_sha "$repo")
+  fi
+  if [ -n "$sha" ]; then
+    echo "   pinned at $sha"
+  else
+    sha=$(gh api "repos/$repo/commits/HEAD" --jq .sha 2>/dev/null || echo unknown)
+  fi
+  RESOLVED+=("$repo $sha")
   license=$(gh api "repos/$repo" --jq '.license.spdx_id // "unknown"' 2>/dev/null || echo unknown)
   default_branch=$(gh api "repos/$repo" --jq .default_branch 2>/dev/null || echo main)
   # List workflow files at that commit.
@@ -68,9 +99,20 @@ for repo in "${REPOS[@]}"; do
 - Fetched: $(date -u +%Y-%m-%dT%H:%MZ)
 - Files: $count workflow(s) under .github/workflows
 
-Vendored for compatibility testing of the GitHub Actions frontend. The workflow
+Fetched for compatibility testing of the GitHub Actions frontend. The workflow
 files are the property of their authors and remain under the licence above.
 EOF
   echo "   $count workflows, licence $license"
 done
+
+if [ "$REPIN" -eq 1 ]; then
+  {
+    echo '# Pinned commits for the compatibility corpus, one `owner/repo <sha>` per line.'
+    echo '# scripts/corpus-fetch.sh fetches each repo at the sha recorded here, so a fetch is'
+    echo '# reproducible; `scripts/corpus-fetch.sh --repin` re-resolves HEAD and rewrites this file.'
+    printf '%s\n' "${RESOLVED[@]}" | sort
+  } > "$PINS"
+  echo "repinned $PINS"
+fi
+
 echo "done"

@@ -6,6 +6,9 @@ echo "== fmt"
 cargo fmt --all --check
 echo "== clippy (flags forced, so the cache cannot stay quiet)"
 cargo clippy --all-targets --all-features -- -D warnings
+if [ -z "$(find crates/github/corpus -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" ]; then
+  echo "note: corpus not fetched (scripts/corpus-fetch.sh); corpus tests will skip"
+fi
 echo "== tests"
 cargo test --workspace --all-features 2>&1 | grep -E 'test result' | awk '{p+=$4; f+=$6} END {print p" passed, "f" failed"; if (f>0) exit 1}'
 echo "== release"

@@ -6,6 +6,9 @@
 //! file, env layering, `if:` gates over the `github` context, job summaries — is the
 //! real thing, on real processes through `petri::Runtime`, with replay verified byte
 //! for byte by the runtime itself.
+//!
+//! The corpus is fetched, not committed, so these skip when it is absent. See
+//! `acceptance::corpus_present` for the convention.
 
 use std::path::Path;
 use std::time::Duration;
@@ -23,10 +26,25 @@ fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
+/// Is this corpus repo fetched? These tests name specific files, so it is that repo's
+/// workflows that have to be on disk, not merely some of the corpus.
+///
+/// `PETRI_REQUIRE_CORPUS` turns the skip into a failure; CI sets it.
+fn corpus_repo_ready(repo: &str) -> bool {
+    if corpus_root().join(repo).join(".github/workflows").is_dir() {
+        return true;
+    }
+    if std::env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()) {
+        panic!("PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched ({repo} is missing)");
+    }
+    eprintln!("skipping: corpus not fetched; run scripts/corpus-fetch.sh");
+    false
+}
+
 fn lower(repo: &str, workflow: &str) -> Graph {
     let root = corpus_root().join(repo);
     let file = root.join(".github/workflows").join(workflow);
-    let text = std::fs::read_to_string(&file).expect("vendored workflow");
+    let text = std::fs::read_to_string(&file).expect("corpus workflow");
     let lowered = load(
         &format!(".github/workflows/{workflow}"),
         &text,
@@ -95,6 +113,9 @@ fn fresh_dir(label: &str) -> std::path::PathBuf {
 /// cache ids, the script deletes both.
 #[tokio::test]
 async fn react_cleanup_stale_branch_caches_runs() {
+    if !corpus_repo_ready("facebook__react") {
+        return;
+    }
     let dir = fresh_dir("react-cleanup");
     let bin = install_gh_stub(&dir);
     let stub_log = dir.join("gh.log");
@@ -157,6 +178,9 @@ async fn react_cleanup_stale_branch_caches_runs() {
 /// other two are skipped by their `if:`.
 #[tokio::test]
 async fn nodejs_comment_labeled_runs_the_matching_job() {
+    if !corpus_repo_ready("nodejs__node") {
+        return;
+    }
     let dir = fresh_dir("node-comment-labeled");
     let bin = install_gh_stub(&dir);
     let stub_log = dir.join("gh.log");

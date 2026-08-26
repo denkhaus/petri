@@ -1,9 +1,13 @@
 //! The compatibility corpus harness.
 //!
-//! Runs every vendored workflow through the GHA frontend and classifies the result.
+//! Runs every corpus workflow through the GHA frontend and classifies the result.
 //! The bar is not 100% lowering. It is: every workflow either lowers, or is rejected
 //! with a specific `unsupported.*` code — zero panics, zero generic errors. The report
 //! is the empirical answer to which action shims package 04 should build first.
+//!
+//! The corpus data is not committed. `scripts/corpus-fetch.sh` downloads it, so on a
+//! fresh clone it is simply absent, and the corpus tests skip themselves rather than
+//! fail — see [`corpus_present`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -64,6 +68,25 @@ impl Outcome {
             .filter(|d| d.severity == Severity::Error && d.unsupported_feature().is_none())
             .collect()
     }
+}
+
+/// Is the corpus fetched?
+///
+/// True when `root` exists and at least one repo directory under it has a
+/// `.github/workflows` directory. The corpus is gitignored, so a fresh clone has
+/// none of it until `scripts/corpus-fetch.sh` runs.
+///
+/// The convention, mirroring `PETRI_REQUIRE_DOCKER` for the Docker battery: a corpus
+/// test skips with a message when this is false, and `PETRI_REQUIRE_CORPUS` turns that
+/// skip into a failure. CI sets it, because a silently skipped battery is
+/// indistinguishable from a passing one.
+pub fn corpus_present(root: &Path) -> bool {
+    let Ok(repos) = std::fs::read_dir(root) else {
+        return false;
+    };
+    repos
+        .flatten()
+        .any(|e| e.path().join(".github").join("workflows").is_dir())
 }
 
 /// Every workflow under `crates/github/corpus/*/.github/workflows/`.

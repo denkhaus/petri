@@ -1,0 +1,25 @@
+# Pinned commits for the compatibility corpus, one `owner/repo <sha>` per line.
+# scripts/corpus-fetch.sh fetches each repo at the sha recorded here, so a fetch is
+# reproducible; `scripts/corpus-fetch.sh --repin` re-resolves HEAD and rewrites this file.
+actions/checkout f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+astral-sh/ruff a9fa5e59e5ccc57ee3a79d595e97ebccc26aa7cf
+astral-sh/uv a3343a269d6b5fe3289128d1030235bc5f905c0b
+BurntSushi/ripgrep 3fce3b5bb0236da2df6d99672afb8a719642eca7
+cli/cli 9e69e88539a0d7078c2282d430f3d3446660a664
+denoland/deno 19e7a9ed1402732a7cfdbc5c9e8deb45b2a336aa
+django/django 0b40210e4808937a7c0922e8b7502bff4752faa3
+facebook/react a1124489a5e8f81e16ac957699a60038b965f502
+golang/tools d40fc7dde60f788986e2cb45c503bd7c4a5201ba
+hashicorp/terraform 8b54d8708cc34f875aa59c3163893f72bdbf498a
+nodejs/node 7b6b21a8aaeac2e8409aaa4123f1535f6b07a306
+ohmyzsh/ohmyzsh 146461f7c6d95f4ba1220559d66eb113418b40a8
+pola-rs/polars 30f876b15987d575ac306e36444d98f0c322f671
+prometheus/prometheus 9af09ef749a92cf8bbeb24e580932a05459a25c9
+python/cpython f54fd2ab6e1f3e3e81a88be3d94ff9d5867b3b3a
+rails/rails 0ffca96a3ce5c2c30784c84072983a50506cb418
+rust-lang/cargo 94ba974179df2adb3c911fadf361f03b84aa8f14
+serde-rs/serde a874a1b1bb1cc16cf5ee3b1b7b527af5705742bb
+sharkdp/bat b671e53c2cd0177beb357cf6cb997ee4215c7155
+tailwindlabs/tailwindcss 90f8ff41c8e2a4d17bc76921e23e9d672123da76
+tokio-rs/tokio ea91b33ca57ff0581b38e735cc108f831bccbdaa
+vercel/next.js efd592e9d01a40702b293df8595d087667102b5a

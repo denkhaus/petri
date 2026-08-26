@@ -38,6 +38,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The compatibility corpus is other projects' workflows, fetched rather than
+      # committed. `gh api` needs a token on a runner.
+      - name: Fetch the corpus
+        run: ./scripts/corpus-fetch.sh && ./scripts/corpus-fetch-actions.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Formatting
         run: cargo fmt --all --check
 
@@ -56,6 +63,10 @@ jobs:
           # On a runner that has Docker, a skipped Docker test is a failure: the
           # whole point of this job is that the acceptance battery actually ran.
           PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
+          # Same reasoning for the corpus: it was just fetched, so a skipped corpus
+          # battery means the fetch failed, and a silently skipped battery is
+          # indistinguishable from a passing one.
+          PETRI_REQUIRE_CORPUS: '1'
 
       - name: No containers left behind
         if: matrix.docker == 'required'

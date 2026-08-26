@@ -359,8 +359,8 @@ onto the engine's own `Eq` / `And` / `Not`.
 
 ### The corpus
 
-316 workflows from 21 repositories with `.github/workflows` (25 vendored; see
-`crates/github/corpus/*/PROVENANCE.md` for commit and licence), through `petri check`:
+316 workflows from 21 repositories with `.github/workflows` (22 fetched), through
+`petri check`:
 
 | Result | Count |
 |---|---|
@@ -368,6 +368,13 @@ onto the engine's own `Eq` / `And` / `Not`.
 | rejected with a specific `unsupported.*` code | 311 |
 | failed for any other reason | **0** |
 | panicked | **0** |
+
+The corpus is fetched, not committed: the workflows are their authors' property, so
+`scripts/corpus-fetch.sh` downloads them at the commits pinned in
+`crates/github/corpus-pins.txt`, and `crates/github/corpus/` is gitignored apart from
+`REPORT.md`. Each fetched repo gets a `PROVENANCE.md` with its commit and licence. The
+corpus tests skip when the corpus is absent, and `PETRI_REQUIRE_CORPUS=1` — which CI
+sets — turns that skip into a failure.
 
 The bar was zero crashes and zero generic errors, and it is met. Nearly every real
 workflow is rejected, and almost always for one reason: `actions/checkout` is the first

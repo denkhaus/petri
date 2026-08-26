@@ -9,3 +9,5 @@ node_modules/
 __pycache__/
 tmp
 /dist/
+/crates/github/corpus/*
+!/crates/github/corpus/REPORT.md

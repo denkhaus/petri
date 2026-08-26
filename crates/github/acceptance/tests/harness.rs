@@ -1,10 +1,13 @@
 //! Handoff §7 test 8: the corpus bar.
 //!
-//! Every vendored workflow either lowers or is rejected with a specific
+//! Every corpus workflow either lowers or is rejected with a specific
 //! `unsupported.*` code. Zero panics, zero generic errors. The report is written to
 //! `crates/github/corpus/REPORT.md` on every run so it stays current with the code.
+//!
+//! The corpus itself is fetched, not committed, so this skips when it is absent. See
+//! `acceptance::corpus_present`.
 
-use acceptance::{Class, check_all, report};
+use acceptance::{Class, check_all, corpus_present, report};
 
 fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
@@ -13,10 +16,18 @@ fn corpus_root() -> std::path::PathBuf {
 #[test]
 fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
     let root = corpus_root();
+    if !corpus_present(&root) {
+        if std::env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()) {
+            panic!("PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched");
+        }
+        eprintln!("skipping: corpus not fetched; run scripts/corpus-fetch.sh");
+        return;
+    }
+
     let outcomes = check_all(&root);
     assert!(
         outcomes.len() > 100,
-        "the corpus is vendored: {} workflows",
+        "the corpus is fetched: {} workflows",
         outcomes.len()
     );
 
