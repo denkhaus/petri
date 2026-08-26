@@ -11,6 +11,7 @@ pub mod process;
 pub use ctx::{RunnerRegistry, StepCtx, StepRunner};
 pub use outputs::{BAD_OUTPUT_CLASS, OutputError, parse as parse_outputs};
 pub use process::{
-    OUTPUT_ENV, PROCESS_KIND, ProcessConfig, ProcessStep, SECRET_MISPLACED_CLASS, Shell, SoftFail,
-    ValueOrSecretRef,
+    BAD_CONFIG_CLASS, OUTPUT_ENV, PROCESS_KIND, ProcessConfig, ProcessStep,
+    SECRET_MISPLACED_CLASS, SECRET_UNAVAILABLE_CLASS, SPAWN_CLASS, Shell, SoftFail, StepFailure,
+    ValueOrSecretRef, WORKSPACE_CLASS,
 };

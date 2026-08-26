@@ -26,6 +26,18 @@ pub const OUTPUT_ENV: &str = "CI_OUTPUT";
 /// A `$secret` reference turned up somewhere it is not allowed.
 pub const SECRET_MISPLACED_CLASS: &str = "secret_misplaced";
 
+/// The step's config did not deserialize.
+pub const BAD_CONFIG_CLASS: &str = "bad_config";
+
+/// A named secret is not configured for this run.
+pub const SECRET_UNAVAILABLE_CLASS: &str = "secret_unavailable";
+
+/// The workspace could not be prepared for the step.
+pub const WORKSPACE_CLASS: &str = "workspace_setup";
+
+/// The process could not be started at all.
+pub const SPAWN_CLASS: &str = "spawn_failed";
+
 /// How long to keep draining log output after the process has gone.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
 
@@ -113,13 +125,32 @@ impl StepRunner for ProcessStep {
     async fn run(&self, ctx: StepCtx) -> Outcome {
         match execute(ctx).await {
             Ok(outcome) => outcome,
-            Err(outcome) => outcome,
+            Err(failure) => failure.into(),
         }
     }
 }
 
-/// The `Err` arm is an outcome too — it just short-circuits.
-async fn execute(mut ctx: StepCtx) -> Result<Outcome, Outcome> {
+/// A step that failed before it could run, in the few bytes needed to say so.
+///
+/// The short-circuit arm used to be a whole `Outcome`, which made every caller pay
+/// for the larger of two identical types for no benefit. This carries the class and
+/// the message, and becomes an `Outcome` once, at the boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepFailure {
+    pub class: &'static str,
+    pub message: String,
+}
+
+impl From<StepFailure> for Outcome {
+    fn from(failure: StepFailure) -> Self {
+        Outcome::new(
+            Status::Failure(FailureInfo::new(failure.message).with_class(failure.class)),
+            Value::Null,
+        )
+    }
+}
+
+async fn execute(mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // A `$secret` outside an env-shaped position is a step failure, not something to
     // quietly ignore: it would otherwise reach the process as the literal JSON.
     if let Some(path) = misplaced_secret(&ctx.config) {
@@ -130,7 +161,7 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, Outcome> {
     }
 
     let config: ProcessConfig = serde_json::from_value(ctx.config.clone())
-        .map_err(|e| fail("bad_config", format!("process step config is invalid: {e}")))?;
+        .map_err(|e| fail(BAD_CONFIG_CLASS, format!("process step config is invalid: {e}")))?;
 
     // Secrets are resolved here, into the child's environment, and nowhere else.
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
@@ -139,7 +170,7 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, Outcome> {
             ValueOrSecretRef::Secret { name } => ctx
                 .secrets
                 .resolve(name)
-                .map_err(|e| fail("secret_unavailable", e.to_string()))?,
+                .map_err(|e| fail(SECRET_UNAVAILABLE_CLASS, e.to_string()))?,
             ValueOrSecretRef::Literal(literal) => SmolStr::new(stringify(literal)),
         };
         env.insert(key.clone(), resolved);
@@ -151,7 +182,7 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, Outcome> {
     if let Some(parent) = output_host.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
             fail(
-                "workspace",
+                WORKSPACE_CLASS,
                 format!("could not create the outputs directory: {e}"),
             )
         })?;
@@ -176,7 +207,7 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, Outcome> {
         .env
         .spawn(spec)
         .await
-        .map_err(|e| fail("spawn", e.to_string()))?;
+        .map_err(|e| fail(SPAWN_CLASS, e.to_string()))?;
 
     // Log capture runs on its own task and keeps going through cancellation, so a
     // cancelled step's final output is not lost.
@@ -323,11 +354,11 @@ fn stringify(value: &Value) -> String {
     }
 }
 
-fn fail(class: &str, message: impl Into<String>) -> Outcome {
-    Outcome::new(
-        Status::Failure(FailureInfo::new(message).with_class(class)),
-        Value::Null,
-    )
+fn fail(class: &'static str, message: impl Into<String>) -> StepFailure {
+    StepFailure {
+        class,
+        message: message.into(),
+    }
 }
 
 /// Find a `$secret` reference outside `env`, and say where it is.

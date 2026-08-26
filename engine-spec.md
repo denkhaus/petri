@@ -148,7 +148,10 @@ separately):
 
 - `nodes.<instance>.{status, output, generation, attempts}` — written only by
   the core on final-attempt `StepFinished`; clones record under instance names
-  (`build[2]`).
+  (`build#2`). The separator is `#`, not `[n]`: instance names become expression
+  keys, and `nodes.build[2].status` would collide visually with the `[0]` /
+  `['key']` index syntax a frontend grammar has to parse, while `build#2` is
+  unambiguously one key.
 - `kv.*` — written only via `Outcome.context_updates`, merged in `apply()` in
   event order, last-write-wins.
 
@@ -349,10 +352,32 @@ groups; `for_each` + `parallel: true|false` → `ForEach` vs cycle desugar.
 
 ## 13. Failure-class registry (grep anchor; extend here first)
 
-`exit_status:N` · `signal:S` · `retry_requested` · `env_acquire` ·
-`cancel_forced` (in `cancel_escalation`, not a class) · `bad_output_file` ·
-`secret_misplaced` · `UnresolvedConfig` (error type; surfaces as node failure)
-· `invalid_splice` (reserved; outcome-splice is deferred).
+**Step outcome classes** (`FailureInfo.class`, matchable by `retry_on`):
+
+| Class | Raised when |
+|---|---|
+| `exit_status:N` | the process exited non-zero |
+| `signal:S` | the process was killed by a signal that was not ours |
+| `retry_requested` | a step asked to be run again (Attractor's `RETRY`) |
+| `bad_output_file` | the outputs file did not parse |
+| `bad_config` | the step's config did not deserialize |
+| `secret_misplaced` | a `$secret` ref outside an env-shaped position |
+| `secret_unavailable` | a named secret is not configured for this run |
+| `workspace_setup` | the workspace could not be prepared for the step |
+| `spawn_failed` | the process could not be started at all |
+| `env_acquire` | the scope's environment could not be materialized |
+| `no_runner` | no step kind is registered for a node's `StepRef.kind` |
+
+Not classes, listed here so they are findable: `cancel_forced` is a value of
+`output.cancel_escalation` (§3.1 rule 5); `UnresolvedConfig` is an error type that
+surfaces as a node failure; `invalid_splice` is reserved for the deferred
+outcome-driven splice.
+
+Names say what went wrong, so a `retry_on` entry reads as a policy rather than a
+riddle — this is why `spawn` and `workspace` became `spawn_failed` and
+`workspace_setup`. `no_runner` is a configuration mistake caught later than it
+should be: the driver's runner registry is separate from the `StepRegistry` that
+`validate_with` checks, so it cannot be caught at load. Worth unifying.
 
 ## 14. Deferred and v2 seams (build nothing here)
 

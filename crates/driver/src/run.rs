@@ -26,6 +26,13 @@ use crate::sink::LogSink;
 /// `Control::Cancel`.
 pub const CANCEL_FORCED: &str = "cancel_forced";
 
+/// No step kind is registered for a node's `StepRef.kind`.
+///
+/// This is a configuration mistake the driver can only catch at firing time: the
+/// driver's runner registry is separate from the `StepRegistry` that
+/// `validate_with` checks against. Worth unifying so it fails at load.
+pub const NO_RUNNER: &str = "no_runner";
+
 /// Knobs, with the defaults from the handoff's table.
 #[derive(Clone, Debug)]
 pub struct RunConfig {
@@ -397,7 +404,7 @@ impl Driver {
             .node(node)
             .and_then(|n| self.runners.get(n.step.kind))
         else {
-            self.fail_now(firing, attempt, "no runner for this step kind", "no_runner");
+            self.fail_now(firing, attempt, "no runner for this step kind", NO_RUNNER);
             return;
         };
 
