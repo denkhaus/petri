@@ -177,6 +177,7 @@ dependencies = [
  "driver",
  "engine",
  "executor",
+ "executor-host",
  "frontend",
  "frontend-gha",
  "ir",
@@ -198,6 +199,8 @@ dependencies = [
  "async-trait",
  "engine",
  "executor",
+ "executor-docker",
+ "executor-host",
  "ir",
  "serde",
  "serde_json",
@@ -258,6 +261,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "executor-docker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "executor",
+ "ir",
+ "smol_str",
+ "tokio",
+]
+
+[[package]]
+name = "executor-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "executor",
+ "ir",
+ "libc",
+ "smol_str",
+ "tokio",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -296,6 +322,7 @@ dependencies = [
  "driver",
  "engine",
  "executor",
+ "executor-host",
  "frontend",
  "ir",
  "proptest",
@@ -313,6 +340,7 @@ dependencies = [
  "driver",
  "engine",
  "executor",
+ "executor-host",
  "frontend",
  "ir",
  "serde_json",

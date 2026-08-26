@@ -368,52 +368,53 @@ pub const BUILTINS: &[Builtin] = &[
         arity: 2,
         summary: "take one field from every object in an array",
     },
-    // GitHub Actions semantics. The GHA frontend lowers `${{ }}` onto these; there is
-    // no second evaluator. Coercion rules are in `crate::loose`.
+    // Loose semantics: the JavaScript-family coercion rules most CI expression
+    // languages share. A frontend whose format compares loosely lowers its operators
+    // onto these instead of `Eq` / `Lt`. Rules are in `crate::loose`.
     Builtin {
         name: "loose_eq",
         arity: 2,
-        summary: "GHA `==`: coerce differing kinds to numbers; strings case-insensitive",
+        summary: "loose `==`: differing kinds coerce to numbers; strings compare case-insensitively",
     },
     Builtin {
         name: "loose_lt",
         arity: 2,
-        summary: "GHA `<`; false whenever a side coerces to NaN",
+        summary: "loose `<`; false whenever a side coerces to NaN",
     },
     Builtin {
         name: "loose_le",
         arity: 2,
-        summary: "GHA `<=`",
+        summary: "loose `<=`",
     },
     Builtin {
         name: "loose_gt",
         arity: 2,
-        summary: "GHA `>`",
+        summary: "loose `>`",
     },
     Builtin {
         name: "loose_ge",
         arity: 2,
-        summary: "GHA `>=`",
+        summary: "loose `>=`",
     },
     Builtin {
         name: "loose_truthy",
         arity: 1,
-        summary: "GHA truthiness: empty arrays and objects are truthy",
+        summary: "loose truthiness: empty arrays and objects are truthy",
     },
     Builtin {
         name: "loose_number",
         arity: 1,
-        summary: "GHA number coercion; NaN prints as null",
+        summary: "loose number coercion; NaN becomes null",
     },
     Builtin {
         name: "loose_string",
         arity: 1,
-        summary: "GHA string coercion: null is empty, arrays print `Array`",
+        summary: "loose string coercion: null is empty, containers render as their type name",
     },
     Builtin {
         name: "contains_ci",
         arity: 2,
-        summary: "GHA contains(): array membership by loose equality, or case-insensitive substring",
+        summary: "array membership by loose equality, or case-insensitive substring",
     },
     Builtin {
         name: "starts_with",
@@ -428,7 +429,7 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "format",
         arity: 2,
-        summary: "`{N}` substitution from an array of arguments; `{{` and `}}` are literal braces",
+        summary: "positional `{N}` substitution from an array of arguments; `{{` and `}}` are literal braces",
     },
     Builtin {
         name: "join",
@@ -445,25 +446,46 @@ pub const BUILTINS: &[Builtin] = &[
         arity: 1,
         summary: "parse a JSON string; a non-string passes through",
     },
+    // Records and lists of records.
     Builtin {
         name: "get_ci",
         arity: 2,
-        summary: "case-insensitive property lookup, the way GHA contexts behave",
+        summary: "case-insensitive property lookup",
     },
     Builtin {
         name: "values",
         arity: 1,
-        summary: "GHA `*`: an object's values, or an array itself",
+        summary: "an object's values, or an array itself",
     },
     Builtin {
-        name: "filter_field",
+        name: "pluck_present",
         arity: 2,
-        summary: "GHA filtered-array property: the field from every element that has it",
+        summary: "one field from every record that has it; records without it are dropped",
     },
     Builtin {
-        name: "matrix_combinations",
+        name: "keys",
         arity: 1,
-        summary: "expand a GHA `strategy.matrix` object into its combinations",
+        summary: "an object's keys, in order",
+    },
+    Builtin {
+        name: "omit",
+        arity: 2,
+        summary: "an object without the named keys",
+    },
+    Builtin {
+        name: "cartesian",
+        arity: 1,
+        summary: "every combination of one value per key of an object of arrays",
+    },
+    Builtin {
+        name: "reject_where",
+        arity: 2,
+        summary: "drop every record matching any of the partial records",
+    },
+    Builtin {
+        name: "extend_where",
+        arity: 3,
+        summary: "merge partial records into compatible records, protecting the named keys; append the rest",
     },
 ];
 
@@ -684,7 +706,7 @@ fn eval_call(
     };
 
     match name.as_str() {
-        // GHA-style status functions.
+        // Status predicates over the bound `status`.
         "always" => Ok(Value::Bool(true)),
         "never" => Ok(Value::Bool(false)),
         // `success()` is success-like, per Status::is_success_like: it is the default
@@ -789,7 +811,7 @@ fn eval_call(
                     .collect(),
             ))
         }
-        // ── GitHub Actions semantics ──────────────────────────────────────
+        // ── Loose semantics ───────────────────────────────────────────────
         "loose_eq" => Ok(Value::Bool(crate::loose::equal(&arg(0)?, &arg(1)?))),
         "loose_lt" | "loose_le" | "loose_gt" | "loose_ge" => {
             let ord = crate::loose::compare(&arg(0)?, &arg(1)?);
@@ -839,7 +861,7 @@ fn eval_call(
                 Value::Array(items) => items,
                 other => vec![other],
             };
-            gha_format(&template, &values)
+            positional_format(&template, &values)
         }
         "join" => {
             let (items, separator) = (arg(0)?, arg(1)?);
@@ -885,7 +907,7 @@ fn eval_call(
             array @ Value::Array(_) => array,
             _ => Value::Null,
         }),
-        "filter_field" => {
+        "pluck_present" => {
             let (items, key) = (arg(0)?, arg(1)?);
             let (Value::Array(items), Some(key)) = (items, key.as_str()) else {
                 return Ok(Value::Null);
@@ -897,7 +919,18 @@ fn eval_call(
                     .collect(),
             ))
         }
-        "matrix_combinations" => Ok(Value::Array(crate::matrix::combinations(&arg(0)?))),
+        "keys" => Ok(Value::Array(crate::combine::keys(&arg(0)?))),
+        "omit" => Ok(crate::combine::omit(&arg(0)?, &arg(1)?)),
+        "cartesian" => Ok(Value::Array(crate::combine::cartesian(&arg(0)?))),
+        "reject_where" => Ok(Value::Array(crate::combine::reject_where(
+            &arg(0)?,
+            &arg(1)?,
+        ))),
+        "extend_where" => Ok(Value::Array(crate::combine::extend_where(
+            &arg(0)?,
+            &arg(1)?,
+            &arg(2)?,
+        ))),
         "to_string" => Ok(Value::String(to_display(&arg(0)?))),
         "not" => Ok(Value::Bool(!truthy(&arg(0)?))),
         // Unreachable: the table gated this call, so every entry has an arm above.
@@ -906,10 +939,9 @@ fn eval_call(
     }
 }
 
-/// GitHub's `format()`: `{N}` substitutes argument N, `{{` and `}}` are literal
-/// braces. An index with no argument is an error rather than an empty string, which
-/// is what GitHub does too.
-fn gha_format(template: &str, args: &[Value]) -> Result<Value, EvalError> {
+/// Positional formatting: `{N}` substitutes argument N, `{{` and `}}` are literal
+/// braces. An index with no argument is an error rather than an empty string.
+fn positional_format(template: &str, args: &[Value]) -> Result<Value, EvalError> {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {

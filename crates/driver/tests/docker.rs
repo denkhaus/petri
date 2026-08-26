@@ -10,7 +10,8 @@ mod support;
 use std::time::Duration;
 
 use driver::RunConfig;
-use executor::{Retention, list_containers};
+use executor::Retention;
+use executor_docker::list_containers;
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;

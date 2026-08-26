@@ -258,8 +258,16 @@ jobs:
         .unwrap();
     assert!(start.expand.is_some());
     let printed = frontend::print_graph(&graph);
-    assert!(printed.contains("matrix_combinations"), "{printed}");
+    // GitHub's matrix rule is a composition of engine combinators, not a builtin.
+    assert!(
+        printed.contains("extend_where(reject_where(cartesian("),
+        "{printed}"
+    );
     assert!(printed.contains("from_json"), "{printed}");
+    assert!(
+        !printed.contains("matrix_combinations"),
+        "no GitHub-specific builtin exists"
+    );
 
     let report = run_host(graph, "matrix-dynamic").await;
     assert_eq!(

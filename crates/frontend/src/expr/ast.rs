@@ -6,7 +6,7 @@ use std::fmt;
 pub enum Literal {
     Null,
     Bool(bool),
-    /// All GitHub numbers are doubles.
+    /// Numbers are doubles.
     Number(f64),
     Str(String),
 }
@@ -42,7 +42,7 @@ impl BinaryOp {
         }
     }
 
-    /// Binding strength; higher binds tighter. GitHub's table, top to bottom.
+    /// Binding strength; higher binds tighter.
     pub fn precedence(self) -> u8 {
         match self {
             BinaryOp::Or => 1,
@@ -63,7 +63,7 @@ pub enum Expr {
     Property(Box<Expr>, String),
     /// `a[expr]` — index by a computed key.
     Index(Box<Expr>, Box<Expr>),
-    /// `a.*` or `a[*]` — GitHub's object filter.
+    /// `a.*` or `a[*]` — the object filter: an object's values, or an array's elements.
     Wildcard(Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),

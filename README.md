@@ -41,7 +41,7 @@ let (state, commands) = apply(state, Event::RunStarted);
 | exec §2 driver loop | `driver::run` — one channel, so arrival order is the total order |
 | exec §3 process step | `steps::process`, `steps::outputs` |
 | exec §4 cancellation | `steps::process::ladder`, `driver::Driver::on_hard_deadline` |
-| exec §5 environments | `executor::host`, `executor::docker`, `executor::scope` |
+| exec §5 environments | `executor::scope` (the interface), `executor_host::HostExecutor`, `executor_docker::DockerExecutor` |
 | exec §6 secrets | `executor::secrets`, `driver::LogSink` |
 | §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel` |
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
@@ -434,19 +434,62 @@ difference from `bash -eo pipefail` is usually `-l` or `--noprofile`), and
 `concurrency:` (108 workflows — not shrinkable, D2 stands, but it is the second most
 common rejection).
 
+### What the core may know
+
+An audit after package 03 asked whether GitHub-specific code had leaked into the
+core, since every frontend added later — CircleCI, Buildkite, RWX, Attractor — would
+otherwise leave its own residue there. The rule that came out of it:
+
+> A primitive may enter `ir`/`engine` when it is generic — a thing several formats
+> would plausibly want, described on its own terms. Nothing uniquely one format's may.
+> Format semantics are *compositions* of primitives, and they live in that format's
+> crate.
+
+What the audit found and changed:
+
+- **One real leak:** the `matrix_combinations` builtin carried GitHub's
+  `include`/`exclude` merging rule. Replaced by generic combinators (above); the
+  GitHub rule is spelled out in `frontend_gha::expr_lower::matrix_legs`, and GitHub's
+  documented examples are tested there, through the engine's evaluator.
+- **Wrong layer:** the GHA expression lowering (`gha`, `gha_function`,
+  `GHA_FUNCTIONS`) lived in the *shared* `frontend` crate. Moved to
+  `frontend-gha`. The shared crate now owns syntax and the strict lowering only.
+- **Framing:** `loose.rs` and the `loose_*` summaries described themselves as
+  "GitHub's rules". The semantics are the JavaScript-family ones; they are now
+  described that way. `filter_field` became `pluck_present`; `gha_format` became
+  `positional_format`.
+- **Kept, by judgment:** `loose_string` renders a container as its type name
+  (`Array`, `Object`), which is exactly GitHub's output. A loose string coercion needs
+  *some* rule for containers, and type-name makes a value that should have been a
+  scalar visible instead of a JSON blob silently reaching a command line. Documented
+  on those terms.
+- **Runtime layer, GitHub-influenced by design:** the process step's outputs file
+  accepts the `key<<DELIM` heredoc form, a superset of `$GITHUB_OUTPUT`'s format so
+  that variable can be a plain alias. A compatibility choice inside one step kind,
+  documented as such; the engine does not know it exists.
+- **Clean:** `Status`, `RetryPolicy`, `Expansion`, `RunContext`, `Graph.params`,
+  `NoopStep`, `soft_fail`, the driver, the executor. Comments that cited GitHub as
+  the *reason* for a rule were reworded to state the rule.
+
 ### Departures from the frontend handoff
 
 30. **`Graph.params`** — see finding 1.
 
-31. **Nineteen new builtins, one gate.** GHA's operators and functions became table
-    entries — `loose_eq`/`lt`/`le`/`gt`/`ge`/`truthy`/`number`/`string`,
-    `contains_ci`, `starts_with`, `ends_with`, `format`, `join`, `to_json`, `from_json`,
-    `get_ci`, `values`, `filter_field`, `matrix_combinations` — because the handoff's
-    mapping rule requires it: no second evaluator. Each is pure, total, tested against
-    GitHub's documented tables, and needed by an acceptance test. The table grew from
-    19 to 38; the table still gates dispatch. `matrix_combinations` is the whole matrix
-    algorithm as one function, so a literal matrix and a `fromJSON(...)` one go through
-    the same code.
+31. **Twenty-three new builtins, one gate — and none of them GitHub's.** The
+    handoff's mapping rule (no second evaluator) means GitHub's operators and
+    functions must become table entries, so the question is what *kind* of entry.
+    The rule adopted: a primitive may enter the core when it is generic — loose
+    JavaScript-family coercion (`loose_eq`/`lt`/`le`/`gt`/`ge`/`truthy`/`number`/
+    `string`), string functions (`contains_ci`, `starts_with`, `ends_with`, `format`,
+    `join`, `to_json`, `from_json`), record access (`get_ci`, `values`,
+    `pluck_present`, `keys`, `omit`) and record combinators (`cartesian`,
+    `reject_where`, `extend_where`). Nothing uniquely GitHub's may. GitHub's matrix
+    `include`/`exclude` rule, which an earlier draft had as a `matrix_combinations`
+    builtin, is now a *composition* the GHA frontend emits:
+    `extend_where(reject_where(cartesian(omit(m, [include, exclude])), m.exclude),
+    m.include, keys(axes))` — the engine has combinators, GitHub has a use of them,
+    and Buildkite's `adjustments` will compose the same pieces differently. The table
+    grew from 19 to 42 and still gates dispatch. See "What the core may know" below.
 
 32. **Coercion follows the runner, not the docs' wording.** GitHub's docs say a string
     coerces "from any legal JSON number format"; the runner uses .NET's

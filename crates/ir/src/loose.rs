@@ -1,10 +1,10 @@
-//! GitHub Actions' loose coercion rules, as pure functions over JSON values.
+//! Loose coercion: the JavaScript-family rules, as pure functions over JSON values.
 //!
-//! These back the `loose_*` builtins. They are here rather than in a frontend
-//! because the frontend does not evaluate anything: it lowers `==` onto
-//! `loose_eq`, and the *engine* applies these rules at firing time. One evaluator.
+//! These back the `loose_*` builtins. A frontend whose expression language compares
+//! loosely — GitHub Actions does, and most YAML CI dialects follow it — lowers its
+//! operators onto them; the frontend evaluates nothing. One evaluator.
 //!
-//! The rules are GitHub's documented ones:
+//! The rules:
 //!
 //! | Type    | As a number                                          |
 //! |---------|------------------------------------------------------|
@@ -23,15 +23,20 @@
 //! **truthy** — the opposite of this crate's own `truthy`, which is why the two are
 //! separate functions rather than one with a flag.
 //!
-//! On string-to-number: GitHub's documentation says "any legal JSON number format",
-//! but the runner parses with .NET's `AllowLeadingSign | AllowDecimalPoint |
-//! AllowExponent`, which also accepts `+1`, `01` and `1.`. Workflows run against the
-//! runner, so that is what this follows.
+//! On string-to-number: the reference implementations parse with a leading sign,
+//! leading zeros and a trailing point allowed (`+1`, `01`, `1.`), which is looser than
+//! JSON's grammar. That is what this follows, since it is what real expressions were
+//! written against.
+//!
+//! On string-from-container: a container has no loose string form. It renders as its
+//! type name (`Array`, `Object`) so that a value that should have been a scalar shows
+//! up as a visible mistake rather than as a JSON blob silently reaching a command
+//! line.
 
 use serde_json::Value;
 use std::cmp::Ordering;
 
-/// Coerce a value to a number by GitHub's rules.
+/// Coerce a value to a number by the loose rules.
 pub fn to_number(value: &Value) -> f64 {
     match value {
         Value::Null => 0.0,
@@ -110,7 +115,7 @@ fn looks_like_decimal(s: &str) -> bool {
     i == bytes.len()
 }
 
-/// Coerce a value to a string by GitHub's rules: `null` is empty, booleans are
+/// Coerce a value to a string by the loose rules: `null` is empty, booleans are
 /// lowercase, numbers print integral when they are integral, arrays and objects
 /// print as their type names.
 pub fn to_string(value: &Value) -> String {
@@ -138,7 +143,7 @@ pub fn format_number(n: f64) -> String {
     }
 }
 
-/// GitHub's truthiness. Note that empty arrays and objects are truthy.
+/// Loose truthiness. Note that empty arrays and objects are truthy.
 pub fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -161,7 +166,7 @@ fn same_kind(a: &Value, b: &Value) -> bool {
     )
 }
 
-/// GitHub's `==`.
+/// Loose `==`.
 pub fn equal(a: &Value, b: &Value) -> bool {
     if same_kind(a, b) {
         return match (a, b) {
@@ -182,7 +187,7 @@ pub fn equal(a: &Value, b: &Value) -> bool {
     !x.is_nan() && x == y
 }
 
-/// GitHub's relational comparison. Two strings compare case-insensitively as
+/// Loose relational comparison. Two strings compare case-insensitively as
 /// strings; anything else coerces to numbers, and NaN makes every comparison false.
 pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     if let (Value::String(x), Value::String(y)) = (a, b) {
@@ -192,7 +197,7 @@ pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     x.partial_cmp(&y)
 }
 
-/// Case-insensitive property lookup, the way GitHub contexts behave.
+/// Case-insensitive property lookup.
 pub fn get_ci<'a>(object: &'a Value, key: &str) -> Option<&'a Value> {
     let map = object.as_object()?;
     if let Some(exact) = map.get(key) {

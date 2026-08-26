@@ -17,7 +17,7 @@ use smol_str::SmolStr;
 /// form and the step kind that resolves it must agree.
 pub use ir::validate::SECRET_REF_KEY;
 
-/// Values shorter than this are not masked, GHA-style: masking `1` or `true` would
+/// Values shorter than this are not masked: masking `1` or `true` would
 /// turn every log into asterisks.
 pub const MIN_MASK_LENGTH: usize = 6;
 

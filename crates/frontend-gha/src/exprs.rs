@@ -9,7 +9,9 @@
 use std::collections::BTreeMap;
 
 use frontend::diag::{Diagnostics, Span};
-use frontend::expr::lower::{LowerError, Roots, builtin, gha};
+use frontend::expr::lower::{LowerError, Roots, builtin};
+
+use crate::expr_lower::gha;
 use frontend::expr::{Expr, Segment, parse, split_template};
 use ir::validate::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{BinOp, ExprId, ExprOrValue, ExprTable, UnOp, Value};

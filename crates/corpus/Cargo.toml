@@ -16,5 +16,6 @@ serde_json = { workspace = true }
 engine = { workspace = true }
 driver = { workspace = true }
 executor = { workspace = true }
+executor-host = { workspace = true }
 steps = { workspace = true }
 tokio = { workspace = true }

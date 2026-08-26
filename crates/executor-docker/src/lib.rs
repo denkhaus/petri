@@ -1,6 +1,10 @@
 //! The Docker executor: a long-lived container with the workspace bind-mounted, and
 //! steps run through `docker exec`.
 //!
+//! Implements the [`executor`] interface. The bind mount is what keeps the two sides
+//! symmetric: [`ExecEnv::workspace`] is the host path, so artifacts and logs are
+//! handled the same way whether or not a container is involved.
+//!
 //! # Why `docker exec … kill`, and not `docker kill`
 //!
 //! `docker kill` signals PID 1 of the container. Steps are not PID 1 — they are
@@ -32,14 +36,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use executor::lines::pump;
+use executor::{
+    EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle, ProcessSpec,
+    ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
+};
 use ir::RuntimeTarget;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
-
-use crate::env::{ExecEnv, ExitStatus, LineStream, ProcessHandle, ProcessSpec, Sig};
-use crate::error::{EnvError, ReleaseReport};
-use crate::host::from_std;
-use crate::scope::{EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec, Teardown};
 
 /// Where the workspace is mounted inside the container.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
@@ -120,6 +124,15 @@ impl DockerExecutor {
     }
 }
 
+/// What release needs: the container to stop, the workspace, and whether to keep it.
+#[derive(Clone, Debug)]
+struct DockerTeardown {
+    container: String,
+    path: PathBuf,
+    retention: Retention,
+    grace: Duration,
+}
+
 #[async_trait]
 impl Executor for DockerExecutor {
     async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
@@ -182,7 +195,7 @@ impl Executor for DockerExecutor {
                 workspace: workspace.clone(),
                 grace: scope.grace,
             }),
-            Teardown::DockerContainer {
+            DockerTeardown {
                 container: name,
                 path: workspace,
                 retention: self.retention,
@@ -193,12 +206,12 @@ impl Executor for DockerExecutor {
 
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
         let mut report = ReleaseReport::default();
-        let Teardown::DockerContainer {
+        let Some(DockerTeardown {
             container,
             path,
             retention,
             grace,
-        } = env.teardown()
+        }) = env.teardown::<DockerTeardown>()
         else {
             return report.problem("docker executor was handed a foreign environment");
         };
@@ -291,18 +304,10 @@ impl ExecEnv for DockerEnv {
 
         let (tx, rx) = mpsc::channel(256);
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(crate::host::pump_public(
-                stdout,
-                ir::LogStream::Stdout,
-                tx.clone(),
-            ));
+            tokio::spawn(pump(stdout, ir::LogStream::Stdout, tx.clone()));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(crate::host::pump_public(
-                stderr,
-                ir::LogStream::Stderr,
-                tx.clone(),
-            ));
+            tokio::spawn(pump(stderr, ir::LogStream::Stderr, tx.clone()));
         }
         drop(tx);
 
@@ -421,7 +426,7 @@ impl ProcessHandle for DockerProcess {
 
         let _ = tokio::fs::remove_file(&self.pgid_file).await;
         let _ = tokio::fs::remove_file(&self.status_file).await;
-        Ok(status.unwrap_or_else(|| from_std(client)))
+        Ok(status.unwrap_or_else(|| ExitStatus::from(client)))
     }
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {

@@ -12,12 +12,12 @@
 //! crate; side effects live behind traits in the host.
 
 pub mod builder;
+pub mod combine;
 pub mod expr;
 pub mod graph;
 pub mod ids;
 pub mod loose;
 pub mod lower;
-pub mod matrix;
 pub mod runtime;
 pub mod step;
 pub mod validate;

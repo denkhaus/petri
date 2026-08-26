@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use driver::{Driver, RunConfig, RunReport};
-use executor::{HostExecutor, MapSecrets, Retention};
+use executor::{MapSecrets, Retention};
+use executor_host::HostExecutor;
 use frontend::Diagnostic;
 use frontend_gha::{FileSource, MapFiles, NoFiles, load};
 use ir::Graph;

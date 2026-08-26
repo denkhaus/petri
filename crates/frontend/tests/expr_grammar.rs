@@ -3,7 +3,7 @@
 //! Parse → print → reparse round-trips; malformed text yields an error and never a
 //! panic; precedence is GitHub's; the two lowerings emit only table functions.
 
-use frontend::expr::lower::{EngineBindings, gha, strict};
+use frontend::expr::lower::{EngineBindings, strict};
 use frontend::expr::{BinaryOp, Expr, Segment, parse, print, split_template};
 use ir::ExprTable;
 use proptest::prelude::*;
@@ -206,79 +206,36 @@ fn templates_split_into_segments() {
     assert_eq!(split_template("x ${{ never closed"), Err(2));
 }
 
-/// Both lowerings only ever emit functions the engine's table has. This is the
-/// "no frontend evaluator path" assertion in mechanical form: the frontend produces
-/// `ir::Expr` and nothing else, and every call it produces is gated by the table.
+/// The strict lowering only ever emits functions the engine's table has.
 #[test]
-fn lowerings_emit_only_table_functions() {
+fn strict_lowering_emits_only_table_functions() {
     let sources = [
         "a == b",
         "a != b && c < d || !e",
-        "contains(a, 'x') && startsWith(b, 'y') && endsWith(c, 'z')",
-        "format('{0}', a, b, c)",
-        "join(a, ', ')",
-        "join(a)",
-        "toJSON(a) == fromJSON(b)",
         "a.b.c",
         "a['b'][0]",
         "a.*.b",
-        "a.*.*",
-        "a.b.*.c[1]",
-        "always() || success() || failure() || cancelled()",
         "(a || b) && c",
+        "len(a) > 0 && contains(a, 'x')",
+        "always() || success()",
     ];
     for source in sources {
         let ast = parses_to(source);
-        for (name, lower) in [
-            (
-                "gha",
-                gha as fn(&Expr, &mut ExprTable, &mut dyn frontend::expr::lower::Roots) -> _,
-            ),
-            ("strict", strict),
-        ] {
-            let mut table = ExprTable::new();
-            let mut roots = EngineBindings;
-            let result = lower(&ast, &mut table, &mut roots);
-            // Strict lowering does not know GitHub's function names, which is right:
-            // native format users call builtins by their engine names.
-            if name == "strict" && result.is_err() {
-                continue;
-            }
-            result.unwrap_or_else(|e| panic!("{name} lowering of `{source}`: {e}"));
-            for (_, expr) in table.iter() {
-                if let ir::Expr::Call(fname, args) = expr {
-                    let spec = ir::expr::builtin(fname)
-                        .unwrap_or_else(|| panic!("{name} lowering of `{source}` emitted `{fname}`, which is not in BUILTINS"));
-                    assert_eq!(spec.arity, args.len(), "`{fname}` arity in `{source}`");
-                }
+        let mut table = ExprTable::new();
+        strict(&ast, &mut table, &mut EngineBindings).unwrap_or_else(|e| panic!("`{source}`: {e}"));
+        for (_, expr) in table.iter() {
+            if let ir::Expr::Call(fname, args) = expr {
+                let spec = ir::expr::builtin(fname).unwrap_or_else(|| {
+                    panic!("`{source}` emitted `{fname}`, which is not in BUILTINS")
+                });
+                assert_eq!(spec.arity, args.len(), "`{fname}` arity in `{source}`");
             }
         }
     }
-}
-
-/// Every GitHub function has a home in the table, and the one that cannot is named
-/// with its reason.
-#[test]
-fn every_gha_function_has_a_home() {
-    use frontend::expr::lower::{GHA_FUNCTIONS, GHA_FUNCTIONS_UNSUPPORTED, gha_function};
-    for name in GHA_FUNCTIONS {
-        let mut table = ExprTable::new();
-        let arity = match *name {
-            "always" | "success" | "failure" | "cancelled" => 0,
-            "toJSON" | "fromJSON" => 1,
-            _ => 2,
-        };
-        let args: Vec<_> = (0..arity).map(|_| table.lit(1)).collect();
-        gha_function(name, args, &mut table).unwrap_or_else(|e| panic!("{name}: {e}"));
-    }
-    assert!(
-        GHA_FUNCTIONS_UNSUPPORTED
-            .iter()
-            .any(|(n, _)| *n == "hashFiles")
-    );
+    // A function the table does not have is an error, not a call.
+    let ast = parses_to("hashFiles('x')");
     let mut table = ExprTable::new();
-    assert!(gha_function("hashFiles", vec![], &mut table).is_err());
-    assert!(gha_function("definitelyNot", vec![], &mut table).is_err());
+    assert!(strict(&ast, &mut table, &mut EngineBindings).is_err());
 }
 
 // ── Properties ────────────────────────────────────────────────────────────
@@ -398,85 +355,18 @@ proptest! {
         let _ = split_template(&text);
     }
 
-    /// Whatever parses, lowers — under both semantics — to expressions whose calls
-    /// are all in the table. A lowering can fail on an unknown function, but it
-    /// never panics and never smuggles a call past the gate.
+    /// Whatever parses, lowers to expressions whose calls are all in the table. A
+    /// lowering can fail on an unknown function, but it never panics and never
+    /// smuggles a call past the gate.
     #[test]
     fn whatever_parses_lowers_onto_the_table(expr in arb_expr()) {
-        for lower in [gha as fn(&Expr, &mut ExprTable, &mut dyn frontend::expr::lower::Roots) -> _, strict] {
-            let mut table = ExprTable::new();
-            if lower(&expr, &mut table, &mut EngineBindings).is_ok() {
-                for (_, e) in table.iter() {
-                    if let ir::Expr::Call(name, _) = e {
-                        prop_assert!(ir::expr::builtin(name).is_some(), "`{name}` escaped the table");
-                    }
+        let mut table = ExprTable::new();
+        if strict(&expr, &mut table, &mut EngineBindings).is_ok() {
+            for (_, e) in table.iter() {
+                if let ir::Expr::Call(name, _) = e {
+                    prop_assert!(ir::expr::builtin(name).is_some(), "`{name}` escaped the table");
                 }
             }
         }
-    }
-}
-
-/// GitHub's semantics come out of the GHA lowering — checked by running the lowered
-/// expression through the engine's evaluator, since the frontend has none.
-#[test]
-fn gha_lowering_produces_github_semantics() {
-    use ir::{EvalEnv, RunContext, StaticCtx, eval};
-
-    struct Ctx;
-    impl frontend::expr::lower::Roots for Ctx {
-        fn root(&mut self, name: &str, table: &mut ExprTable) -> Option<ir::ExprId> {
-            Some(table.var(name))
-        }
-    }
-
-    let mut statics = StaticCtx::new();
-    statics.set(
-        "a",
-        serde_json::json!({"Name": "x", "list": [{"k": 1}, {"k": 2}, {"other": 3}], "n": "3"}),
-    );
-    statics.set("empty", serde_json::json!([]));
-    let run = RunContext::new();
-    let token = serde_json::Value::Null;
-    let env = EvalEnv::new(&token, &run, &statics);
-
-    let cases: &[(&str, serde_json::Value)] = &[
-        // Loose equality and coercion.
-        ("a.n == 3", serde_json::json!(true)),
-        ("'ABC' == 'abc'", serde_json::json!(true)),
-        ("null == 0", serde_json::json!(true)),
-        ("a.n < 10", serde_json::json!(true)),
-        // `&&` / `||` return operand values, not booleans.
-        ("a.n && 'yes'", serde_json::json!("yes")),
-        ("null && 'yes'", serde_json::json!(null)),
-        ("null || 'fallback'", serde_json::json!("fallback")),
-        ("'first' || 'second'", serde_json::json!("first")),
-        // GitHub truthiness: empty arrays are truthy.
-        ("!empty", serde_json::json!(false)),
-        ("!''", serde_json::json!(true)),
-        // Case-insensitive property access.
-        ("a.name", serde_json::json!("x")),
-        ("a.NAME", serde_json::json!("x")),
-        ("a['nAmE']", serde_json::json!("x")),
-        // Object filter: elements lacking the key are dropped.
-        ("a.list.*.k", serde_json::json!([1, 2])),
-        // A plain property on a non-filtered array is null, not a map.
-        ("a.list.k", serde_json::json!(null)),
-        // Functions.
-        ("contains(a.name, 'X')", serde_json::json!(true)),
-        ("format('{0}={1}', 'a', a.n)", serde_json::json!("a=3")),
-        ("join(a.list.*.k, '+')", serde_json::json!("1+2")),
-        (
-            "startsWith(a.name, 'X') && endsWith('hello', 'LO')",
-            serde_json::json!(true),
-        ),
-        ("fromJSON('{\"z\": [1]}').z[0]", serde_json::json!(1)),
-        ("a.missing.deeper", serde_json::json!(null)),
-    ];
-    for (source, expected) in cases {
-        let ast = parses_to(source);
-        let mut table = ExprTable::new();
-        let id = gha(&ast, &mut table, &mut Ctx).unwrap_or_else(|e| panic!("{source}: {e}"));
-        let got = eval(&table, id, &env).unwrap_or_else(|e| panic!("{source}: {e}"));
-        assert_eq!(&got, expected, "{source}");
     }
 }

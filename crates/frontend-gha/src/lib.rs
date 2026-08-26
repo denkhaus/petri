@@ -37,6 +37,7 @@
 //!   and the IR has one scope per job. Rejected as `unsupported.runs_on.expression`.
 
 pub mod composite;
+pub mod expr_lower;
 pub mod exprs;
 pub mod lower;
 pub mod model;

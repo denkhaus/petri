@@ -113,6 +113,19 @@ impl ExitStatus {
     }
 }
 
+/// The mapping every executor needs when the process it waited on was a real child
+/// of this one: an exit code when there is one, otherwise the signal that killed it.
+impl From<std::process::ExitStatus> for ExitStatus {
+    fn from(status: std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        match (status.code(), status.signal()) {
+            (Some(code), _) => ExitStatus::code(code),
+            (None, Some(signal)) => ExitStatus::signalled(signal),
+            (None, None) => ExitStatus::code(-1),
+        }
+    }
+}
+
 /// A running process, addressed as a process group.
 #[async_trait]
 pub trait ProcessHandle: Send {

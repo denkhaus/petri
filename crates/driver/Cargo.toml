@@ -7,6 +7,8 @@ description = "The IO loop between the pure core and real processes."
 
 [dev-dependencies]
 engine = { workspace = true }
+executor-host = { workspace = true }
+executor-docker = { workspace = true }
 async-trait = { workspace = true }
 
 [dependencies]

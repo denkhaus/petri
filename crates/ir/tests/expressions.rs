@@ -437,7 +437,7 @@ fn arity_comes_from_the_table() {
     }
 }
 
-// ── GitHub Actions semantics ──────────────────────────────────────────────
+// ── Loose semantics ───────────────────────────────────────────────────────
 
 fn call(t: &mut ExprTable, name: &str, args: &[Value]) -> ir::ExprId {
     let ids: Vec<_> = args.iter().map(|a| t.lit(a.clone())).collect();
@@ -450,9 +450,9 @@ fn run(name: &str, args: &[Value]) -> Value {
     eval(&t, id, &empty().env()).unwrap_or_else(|e| panic!("{name}{args:?}: {e}"))
 }
 
-/// GitHub's documented coercion table, as a table.
+/// The loose number coercion table.
 #[test]
-fn loose_number_follows_the_documented_coercion_table() {
+fn loose_number_coercion_table() {
     let cases: &[(Value, Value)] = &[
         (json!(null), json!(0)),
         (json!(true), json!(1)),
@@ -466,8 +466,7 @@ fn loose_number_follows_the_documented_coercion_table() {
         (json!("-0x10"), json!(-16)),
         (json!("abc"), json!(null)),
         (json!("1abc"), json!(null)),
-        // The runner is looser than the docs' "JSON number" wording: it accepts a
-        // leading sign, leading zeros and a trailing point.
+        // Looser than JSON: a leading sign, leading zeros and a trailing point.
         (json!("+1"), json!(1)),
         (json!("01"), json!(1)),
         (json!("1."), json!(1)),
@@ -626,7 +625,7 @@ fn loose_string_coercion() {
 }
 
 #[test]
-fn gha_string_functions() {
+fn loose_string_functions() {
     assert_eq!(
         run("contains_ci", &[json!("Hello World"), json!("WORLD")]),
         json!(true)
@@ -663,7 +662,7 @@ fn gha_string_functions() {
 }
 
 #[test]
-fn gha_format_and_join() {
+fn format_and_join() {
     assert_eq!(
         run("format", &[json!("{0} and {1}"), json!(["a", 2])]),
         json!("a and 2")
@@ -697,7 +696,7 @@ fn gha_format_and_join() {
 }
 
 #[test]
-fn gha_json_functions() {
+fn json_functions() {
     assert_eq!(
         run("from_json", &[json!(r#"{"a":[1,2]}"#)]),
         json!({"a": [1, 2]})
@@ -721,7 +720,7 @@ fn gha_json_functions() {
 }
 
 #[test]
-fn gha_context_access_functions() {
+fn record_access_functions() {
     let obj = json!({"Event_Name": "push", "ref": "main"});
     assert_eq!(
         run("get_ci", &[obj.clone(), json!("event_name")]),
@@ -739,84 +738,90 @@ fn gha_context_access_functions() {
     assert_eq!(run("values", &[json!([1, 2])]), json!([1, 2]));
     assert_eq!(run("values", &[json!("x")]), json!(null));
 
-    // The filtered-array rule: elements lacking the key are skipped, present keys
-    // (even null-valued) are kept.
+    // `pluck_present` skips records lacking the key and keeps present keys, even
+    // null-valued ones — the difference from `pluck`.
     let commits = json!([{"message": "a"}, {"other": 1}, {"message": null}, "not an object"]);
     assert_eq!(
-        run("filter_field", &[commits, json!("message")]),
+        run("pluck_present", &[commits, json!("message")]),
         json!(["a", null])
     );
 }
 
-/// The matrix algorithm, against GitHub's documented examples.
+/// The record combinators a frontend composes a matrix from.
 #[test]
-fn matrix_combinations_follow_the_documented_rules() {
-    // Plain product: first key varies slowest.
-    let combos = run(
-        "matrix_combinations",
-        &[json!({"os": ["ubuntu", "windows"], "node": [14, 16]})],
+fn record_combinators() {
+    // Cartesian: first key varies slowest; a scalar is a one-value axis.
+    assert_eq!(
+        run("cartesian", &[json!({"os": ["a", "b"], "v": [1, 2]})]),
+        json!([{"os": "a", "v": 1}, {"os": "a", "v": 2}, {"os": "b", "v": 1}, {"os": "b", "v": 2}])
     );
     assert_eq!(
-        combos,
-        json!([
-            {"os": "ubuntu", "node": 14}, {"os": "ubuntu", "node": 16},
-            {"os": "windows", "node": 14}, {"os": "windows", "node": 16},
-        ])
+        run("cartesian", &[json!({"os": "solo", "v": [1]})]),
+        json!([{"os": "solo", "v": 1}])
+    );
+    assert_eq!(run("cartesian", &[json!(null)]), json!([]));
+    assert_eq!(run("cartesian", &[json!({})]), json!([]));
+
+    // keys / omit.
+    assert_eq!(
+        run("keys", &[json!({"b": 1, "a": 2})]),
+        json!(["b", "a"]),
+        "document order"
+    );
+    assert_eq!(
+        run("omit", &[json!({"a": 1, "b": 2, "c": 3}), json!(["b"])]),
+        json!({"a": 1, "c": 3})
+    );
+    assert_eq!(
+        run("omit", &[json!("scalar"), json!(["b"])]),
+        json!("scalar")
     );
 
-    // The documented include example.
-    let combos = run(
-        "matrix_combinations",
-        &[json!({
-            "fruit": ["apple", "pear"],
-            "animal": ["cat", "dog"],
-            "include": [
-                {"color": "green"},
-                {"color": "pink", "animal": "cat"},
-                {"fruit": "apple", "shape": "circle"},
-                {"fruit": "banana"},
-                {"fruit": "banana", "animal": "cat"},
-            ]
-        })],
+    // reject_where: any partial that matches removes the record; null removes nothing.
+    let records = json!([{"os": "a", "v": 1}, {"os": "a", "v": 2}, {"os": "b", "v": 1}]);
+    assert_eq!(
+        run(
+            "reject_where",
+            &[records.clone(), json!([{"os": "a", "v": 2}])]
+        ),
+        json!([{"os": "a", "v": 1}, {"os": "b", "v": 1}])
     );
     assert_eq!(
-        combos,
+        run("reject_where", &[records.clone(), json!([{"os": "a"}])]),
+        json!([{"os": "b", "v": 1}])
+    );
+    assert_eq!(
+        run("reject_where", &[records.clone(), json!(null)]),
+        records
+    );
+
+    // extend_where: compatible partials merge their unprotected keys into every
+    // compatible record; incompatible ones are appended; appended records are never
+    // themselves extended.
+    let base = json!([{"fruit": "apple", "animal": "cat"}, {"fruit": "pear", "animal": "dog"}]);
+    let partials = json!([
+        {"color": "green"},
+        {"color": "pink", "animal": "cat"},
+        {"fruit": "banana"},
+        {"fruit": "banana", "animal": "cat"},
+    ]);
+    assert_eq!(
+        run(
+            "extend_where",
+            &[base, partials, json!(["fruit", "animal"])]
+        ),
         json!([
-            {"fruit": "apple", "animal": "cat", "color": "pink", "shape": "circle"},
-            {"fruit": "apple", "animal": "dog", "color": "green", "shape": "circle"},
-            {"fruit": "pear", "animal": "cat", "color": "pink"},
+            {"fruit": "apple", "animal": "cat", "color": "pink"},
             {"fruit": "pear", "animal": "dog", "color": "green"},
             {"fruit": "banana"},
             {"fruit": "banana", "animal": "cat"},
         ])
     );
-
-    // Exclude runs before include, so an include can add a leg back.
-    let combos = run(
-        "matrix_combinations",
-        &[json!({
-            "os": ["a", "b"],
-            "v": [1, 2],
-            "exclude": [{"os": "a", "v": 2}],
-            "include": [{"os": "a", "v": 2, "special": true}]
-        })],
-    );
-    assert_eq!(
-        combos,
-        json!([
-            {"os": "a", "v": 1}, {"os": "b", "v": 1}, {"os": "b", "v": 2},
-            {"os": "a", "v": 2, "special": true},
-        ])
-    );
-
-    // Include only.
     assert_eq!(
         run(
-            "matrix_combinations",
-            &[json!({"include": [{"a": 1}, {"a": 2}]})]
+            "extend_where",
+            &[json!([{"a": 1}]), json!(null), json!(["a"])]
         ),
-        json!([{"a": 1}, {"a": 2}])
+        json!([{"a": 1}])
     );
-    // Not an object: no legs, not an error.
-    assert_eq!(run("matrix_combinations", &[json!(null)]), json!([]));
 }

@@ -80,9 +80,9 @@ pub(crate) fn firing_statics(
         Value::Array(inputs.iter().map(|t| t.payload.clone()).collect()),
     );
 
-    // The folded status of this node's upstream, read from the run context, so
-    // `success()` in a precondition behaves the way GHA's `if:` does. Statuses are
-    // read by node name through `nodes.*`; nothing rides on the token payload.
+    // The folded status of this node's upstream, read from the run context: failure
+    // if any upstream failed, skipped if none ran, else success. Statuses are read by
+    // node name through `nodes.*`; nothing rides on the token payload.
     ctx.set(
         "status",
         Value::String(folded_upstream_status(state, inputs).to_string()),

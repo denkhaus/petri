@@ -16,4 +16,5 @@ smol_str = { workspace = true }
 engine = { workspace = true }
 driver = { workspace = true }
 executor = { workspace = true }
+executor-host = { workspace = true }
 tokio = { workspace = true }

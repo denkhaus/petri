@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use driver::{Driver, RunConfig, RunReport};
-use executor::{DockerExecutor, Executor, HostExecutor, MapSecrets, Retention};
+use executor::{Executor, MapSecrets, Retention};
+use executor_docker::DockerExecutor;
+use executor_host::HostExecutor;
 use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
 use serde_json::json;
 use steps::{PROCESS_KIND, ProcessStep, RunnerRegistry};

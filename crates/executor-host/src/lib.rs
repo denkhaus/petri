@@ -1,21 +1,22 @@
 //! The host executor: a workspace directory and real processes on this machine.
+//!
+//! Implements the [`executor`] interface with nothing in between a step and the
+//! operating system. Each step is spawned into its own process group, so a `run:`
+//! script that backgrounds children can be signalled — and dies — as a unit.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use executor::lines::pump;
+use executor::{
+    EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle, ProcessSpec,
+    ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
+};
+use smol_str::SmolStr;
 use tokio::sync::mpsc;
-
-use crate::env::{ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSpec, Sig};
-use crate::error::EnvError;
-use crate::error::ReleaseReport;
-use crate::scope::{EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec, Teardown};
-
-/// Lines longer than this are cut, with a marker.
-pub const LINE_CAP: usize = 64 * 1024;
-
-const TRUNCATION_MARKER: &str = " …[line truncated]";
 
 /// Runs steps as processes on this machine.
 pub struct HostExecutor {
@@ -45,6 +46,13 @@ impl HostExecutor {
     }
 }
 
+/// What release needs: the workspace, and whether to keep it.
+#[derive(Clone, Debug)]
+struct HostTeardown {
+    path: PathBuf,
+    retention: Retention,
+}
+
 #[async_trait]
 impl Executor for HostExecutor {
     async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
@@ -58,13 +66,13 @@ impl Executor for HostExecutor {
         Ok(EnvHandle::new(
             scope.id,
             scope.instance.clone(),
-            std::sync::Arc::new(HostEnv {
+            Arc::new(HostEnv {
                 workspace: workspace.clone(),
                 workspace_str: workspace.display().to_string(),
                 env: scope.env.clone(),
                 grace: scope.grace,
             }),
-            Teardown::HostWorkspace {
+            HostTeardown {
                 path: workspace,
                 retention: self.retention,
             },
@@ -73,7 +81,7 @@ impl Executor for HostExecutor {
 
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
         let mut report = ReleaseReport::default();
-        let Teardown::HostWorkspace { path, retention } = env.teardown() else {
+        let Some(HostTeardown { path, retention }) = env.teardown::<HostTeardown>() else {
             return report.problem("host executor was handed a foreign environment");
         };
         if retention.keeps(outcome) {
@@ -92,7 +100,7 @@ impl Executor for HostExecutor {
 struct HostEnv {
     workspace: PathBuf,
     workspace_str: String,
-    env: std::collections::BTreeMap<smol_str::SmolStr, smol_str::SmolStr>,
+    env: BTreeMap<SmolStr, SmolStr>,
     grace: Duration,
 }
 
@@ -182,7 +190,7 @@ impl ProcessHandle for HostProcess {
             .wait()
             .await
             .map_err(|e| EnvError::Wait(e.to_string()))?;
-        Ok(from_std(status))
+        Ok(ExitStatus::from(status))
     }
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
@@ -203,62 +211,6 @@ impl ProcessHandle for HostProcess {
                 self.pgid,
                 sig.name()
             ))),
-        }
-    }
-}
-
-pub(crate) fn from_std(status: std::process::ExitStatus) -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    match (status.code(), status.signal()) {
-        (Some(code), _) => ExitStatus::code(code),
-        (None, Some(signal)) => ExitStatus::signalled(signal),
-        (None, None) => ExitStatus::code(-1),
-    }
-}
-
-/// Read one stream line by line, capping each line, and forward in arrival order.
-pub(crate) async fn pump_public<R: AsyncRead + Unpin + Send + 'static>(
-    reader: R,
-    stream: ir::LogStream,
-    tx: mpsc::Sender<LogLine>,
-) {
-    pump(reader, stream, tx).await
-}
-
-async fn pump<R: AsyncRead + Unpin + Send + 'static>(
-    reader: R,
-    stream: ir::LogStream,
-    tx: mpsc::Sender<LogLine>,
-) {
-    let mut reader = BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-        while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-            buf.pop();
-        }
-        let truncated = buf.len() > LINE_CAP;
-        if truncated {
-            buf.truncate(LINE_CAP);
-        }
-        let mut line = String::from_utf8_lossy(&buf).into_owned();
-        if truncated {
-            line.push_str(TRUNCATION_MARKER);
-        }
-        if tx
-            .send(LogLine {
-                stream,
-                line,
-                truncated,
-            })
-            .await
-            .is_err()
-        {
-            return;
         }
     }
 }

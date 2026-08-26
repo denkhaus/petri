@@ -1,7 +1,7 @@
 //! Acquiring and releasing scope environments.
 
+use std::any::Any;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,20 +84,17 @@ impl Retention {
     }
 }
 
-/// How to tear a particular environment down.
-#[derive(Clone, Debug)]
-pub enum Teardown {
-    HostWorkspace {
-        path: PathBuf,
-        retention: Retention,
-    },
-    DockerContainer {
-        container: String,
-        path: PathBuf,
-        retention: Retention,
-        grace: Duration,
-    },
-}
+/// What it takes to tear one environment down.
+///
+/// Each executor defines its own — a workspace path and a retention policy on the
+/// host, a container name besides under Docker — and gets it back, untouched, in
+/// [`Executor::release`]. The interface only carries it and never looks inside, so a
+/// new kind of environment needs no change here. Any `Debug + Send + Sync + 'static`
+/// type qualifies: an executor derives `Debug` on a struct and passes it to
+/// [`EnvHandle::new`].
+pub trait Teardown: Any + std::fmt::Debug + Send + Sync {}
+
+impl<T: Any + std::fmt::Debug + Send + Sync> Teardown for T {}
 
 /// A live environment, and what it takes to get rid of it.
 #[derive(Clone)]
@@ -105,7 +102,7 @@ pub struct EnvHandle {
     scope: ScopeId,
     instance: SmolStr,
     env: Arc<dyn ExecEnv>,
-    teardown: Teardown,
+    teardown: Arc<dyn Teardown>,
 }
 
 impl EnvHandle {
@@ -113,13 +110,13 @@ impl EnvHandle {
         scope: ScopeId,
         instance: SmolStr,
         env: Arc<dyn ExecEnv>,
-        teardown: Teardown,
+        teardown: impl Teardown,
     ) -> Self {
         Self {
             scope,
             instance,
             env,
-            teardown,
+            teardown: Arc::new(teardown),
         }
     }
 
@@ -136,8 +133,14 @@ impl EnvHandle {
         Arc::clone(&self.env)
     }
 
-    pub fn teardown(&self) -> &Teardown {
-        &self.teardown
+    /// The executor's own teardown record, when this handle was made by an executor
+    /// that uses `T`. `None` means the handle came from some other executor.
+    pub fn teardown<T: Teardown>(&self) -> Option<&T> {
+        // Deref to the trait object before upcasting. `Arc<dyn Teardown>` is itself a
+        // `Teardown`, and a method call on the `Arc` would resolve there and downcast
+        // the wrapper instead of what it holds.
+        let record: &dyn Any = &*self.teardown;
+        record.downcast_ref::<T>()
     }
 }
 

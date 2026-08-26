@@ -1,7 +1,12 @@
 //! The outputs-file protocol.
 //!
-//! A step writes `key=value` lines, or GHA's heredoc form, to the file named by
-//! `CI_OUTPUT`. After the step exits the file is parsed into `Outcome.output`.
+//! A step writes `key=value` lines to the file named by `CI_OUTPUT`; a multi-line
+//! value uses the heredoc form `key<<DELIM … DELIM`. After the step exits the file is
+//! parsed into `Outcome.output`.
+//!
+//! The format is deliberately a superset of GitHub's `$GITHUB_OUTPUT` file so that
+//! variable can be a plain alias of ours (see `ProcessConfig.output_env_aliases`).
+//! That is a compatibility choice in this step kind, not something the engine knows.
 
 use std::collections::BTreeMap;
 

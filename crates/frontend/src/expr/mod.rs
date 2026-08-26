@@ -1,14 +1,11 @@
-//! The `${{ }}` expression grammar: one parser, two lowerings.
+//! The `${{ }}` expression grammar: one parser, semantics decided by the lowering.
 //!
-//! The syntax is GitHub's — it is what users already know, and it is what real
-//! workflows are written in. The *semantics* are decided at lowering time:
-//!
-//! - [`lower::gha`] maps operators onto the `loose_*` builtins, so `==` coerces the
-//!   way GitHub documents and `&&` returns an operand value.
-//! - [`lower::strict`] maps operators onto the engine's own `Eq`, `And`, `Not`, for
-//!   the native format, where the engine's semantics *are* the semantics.
-//!
-//! Neither lowering evaluates anything. Evaluation happens once, in the engine.
+//! The syntax is the one users of YAML CI systems already know. What an operator
+//! *means* is the lowering's decision, and lowerings live with the format that owns
+//! them: [`lower::strict`] here, for the native format, maps `==` onto the engine's
+//! own `Eq`; the GitHub Actions frontend carries a lowering onto the loose builtins in
+//! its own crate. No lowering evaluates anything. Evaluation happens once, in the
+//! engine.
 
 pub mod ast;
 pub mod lexer;

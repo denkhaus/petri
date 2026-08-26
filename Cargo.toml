@@ -4,6 +4,8 @@ members = [
     "crates/ir",
     "crates/engine",
     "crates/executor",
+    "crates/executor-host",
+    "crates/executor-docker",
     "crates/steps",
     "crates/driver",
     "crates/frontend",
@@ -22,6 +24,8 @@ license = "MIT OR Apache-2.0"
 ir = { path = "crates/ir" }
 engine = { path = "crates/engine" }
 executor = { path = "crates/executor" }
+executor-host = { path = "crates/executor-host" }
+executor-docker = { path = "crates/executor-docker" }
 steps = { path = "crates/steps" }
 driver = { path = "crates/driver" }
 frontend = { path = "crates/frontend" }

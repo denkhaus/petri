@@ -401,7 +401,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 }
             };
             if let Some(m) = matrix_expr {
-                matrix_items = builtin(self.b.exprs(), "matrix_combinations", vec![m]).ok();
+                matrix_items = crate::expr_lower::matrix_legs(self.b.exprs(), m).ok();
             }
         }
 
@@ -1189,7 +1189,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if has_expr(node) {
             return None;
         }
-        Some(ir::matrix::combinations(&node.to_json()).len())
+        // The same composition the engine will run, evaluated here on the literal.
+        let mut table = ir::ExprTable::new();
+        let matrix = table.lit(node.to_json());
+        let legs = crate::expr_lower::matrix_legs(&mut table, matrix).ok()?;
+        let run = ir::RunContext::new();
+        let statics = ir::StaticCtx::new();
+        let env = ir::EvalEnv::new(&Value::Null, &run, &statics);
+        ir::eval(&table, legs, &env).ok()?.as_array().map(Vec::len)
     }
 
     fn span_for(&self, error: &ValidationError) -> Span {

@@ -1,0 +1,13 @@
+[package]
+name = "executor-docker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Docker executor: a long-lived container with the workspace bind-mounted."
+
+[dependencies]
+executor = { workspace = true }
+ir = { workspace = true }
+async-trait = { workspace = true }
+smol_str = { workspace = true }
+tokio = { workspace = true }

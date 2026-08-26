@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use driver::{Driver, RunConfig};
-use executor::{HostExecutor, MapSecrets, Retention};
+use executor::{MapSecrets, Retention};
+use executor_host::HostExecutor;
 use ir::{Graph, RunStatus};
 use serde_json::json;
 

@@ -50,7 +50,7 @@ pub enum Shell {
 }
 
 impl Shell {
-    /// GHA's defaults: fail on error, and fail a pipeline on any stage's error.
+    /// Fail on error, and fail a pipeline on any stage's error.
     fn invocation(self) -> (&'static str, Vec<&'static str>) {
         match self {
             Shell::Bash => ("bash", vec!["-eo", "pipefail", "-c"]),
@@ -107,9 +107,9 @@ pub struct ProcessConfig {
     pub working_dir: Option<PathBuf>,
     #[serde(default)]
     pub soft_fail: SoftFail,
-    /// Extra environment variables that name the same outputs file as `CI_OUTPUT`.
-    /// The GHA frontend sets `["GITHUB_OUTPUT"]`, so a `run:` step that writes
-    /// `>> "$GITHUB_OUTPUT"` lands in the outputs file without a shim.
+    /// Extra environment variables that name the same outputs file as `CI_OUTPUT`,
+    /// so a frontend whose scripts already write to a differently named file needs no
+    /// shim. (The GitHub Actions frontend sets `["GITHUB_OUTPUT"]`.)
     #[serde(default)]
     pub output_env_aliases: Vec<SmolStr>,
 }
