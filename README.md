@@ -4,9 +4,19 @@ A Rust implementation of [`engine-spec.md`](engine-spec.md): a token-flow graph 
 explicit routing, plus the pure state machine that executes it.
 
 ```
-crates/ir       core types, expressions, lowering helpers, load-time validation
-crates/engine   the sans-IO state machine: apply(state, event) -> (state, commands)
+crates/ir              the vocabulary: graph, ids, expressions, values, validation
+crates/engine          the sans-IO state machine: apply(state, event) -> (state, commands)
+crates/executor        the environment interface; executor-host and executor-docker implement it
+crates/steps           step kinds and the one registry; frontends depend on names, not on this
+crates/driver          the IO loop between the pure core and real processes
+crates/frontend        what every format shares; frontend-gha and frontend-native implement it
+crates/petri           the facade and the assembly (`Runtime`); petri-cli is the binary
+crates/acceptance      the corpus harness and the end-to-end batteries; testkit is their shared scaffolding
 ```
+
+Crate organization follows `.ai/plans/crate-organization.md`: packages are named
+`petri-*`, arrows point down, the format side and the run side meet only in
+`crates/petri`.
 
 A node fires when its **join policy** is satisfied by incoming tokens. On completion
 its **routing policy** emits tokens on outgoing edges. Routing is an AND of XORs:
@@ -80,10 +90,12 @@ crates/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the l
 crates/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
 
 crates/frontend/tests/expr_grammar.rs      frontend §7 1-2: grammar, precedence, coercion, fuzz, table gate
-crates/frontend-gha/tests/lowering.rs      frontend §7 3-6: status truth table, matrix, composites, secrets
-crates/frontend-native/tests/native.rs     frontend §7 7: cycle + XOR + any, run end to end; invariant 8 hint
-crates/corpus/tests/harness.rs             frontend §7 8: every corpus workflow lowers or is rejected specifically
-crates/corpus/tests/e2e.rs                 frontend §7 9: two real corpus workflows run on the executor
+crates/frontend-gha/tests/lowering.rs      frontend §7 3-6, the pure half: what lowering produces
+crates/frontend-native/tests/native.rs     frontend §7 7, the pure half; invariant 8 hint
+crates/acceptance/tests/gha_e2e.rs         frontend §7 3-6, run for real: truth table, matrix, composites
+crates/acceptance/tests/native_e2e.rs      frontend §7 7: the cycle, run end to end
+crates/acceptance/tests/harness.rs         frontend §7 8: every corpus workflow lowers or is rejected specifically
+crates/acceptance/tests/e2e.rs             frontend §7 9: two real corpus workflows run on the executor
 ```
 
 Docker tests skip with a message when no daemon is reachable, so `cargo test` is
@@ -364,7 +376,7 @@ top of it is `actions/checkout` 660, `upload-artifact` 251, `download-artifact` 
 `cache/restore` + `cache` + `cache/save` 220 between them. 152 distinct actions.
 
 Two corpus workflows run end to end on the host executor
-(`crates/corpus/tests/e2e.rs`): facebook/react's cache cleanup and nodejs/node's
+(`crates/acceptance/tests/e2e.rs`): facebook/react's cache cleanup and nodejs/node's
 label-triggered commenter, with a stub `gh` on `PATH` so nothing reaches GitHub's API.
 Everything else — bash, the outputs file, env layering, `if:` gates over the `github`
 context, job summaries, replay byte-identity — is real.

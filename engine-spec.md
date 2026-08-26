@@ -375,9 +375,10 @@ outcome-driven splice.
 
 Names say what went wrong, so a `retry_on` entry reads as a policy rather than a
 riddle — this is why `spawn` and `workspace` became `spawn_failed` and
-`workspace_setup`. `no_runner` is a configuration mistake caught later than it
-should be: the driver's runner registry is separate from the `StepRegistry` that
-`validate_with` checks, so it cannot be caught at load. Worth unifying.
+`workspace_setup`. `no_runner` is caught at load: the one step registry
+implements the lookup `validate_with` takes, so a node naming a kind with no
+runner is a validation error, and the driver's firing-time guard is the backstop
+for a caller that skipped validation.
 
 ## 14. Deferred and v2 seams (build nothing here)
 
