@@ -160,8 +160,12 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
         ));
     }
 
-    let config: ProcessConfig = serde_json::from_value(ctx.config.clone())
-        .map_err(|e| fail(BAD_CONFIG_CLASS, format!("process step config is invalid: {e}")))?;
+    let config: ProcessConfig = serde_json::from_value(ctx.config.clone()).map_err(|e| {
+        fail(
+            BAD_CONFIG_CLASS,
+            format!("process step config is invalid: {e}"),
+        )
+    })?;
 
     // Secrets are resolved here, into the child's environment, and nowhere else.
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
