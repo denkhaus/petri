@@ -50,7 +50,11 @@ fn assert_kill_in_log(report: &driver::RunReport) {
         .iter()
         .filter(|r| matches!(r.event, Event::KillRequested { .. }))
         .map(|r| {
-            assert_eq!(r.source, EventSource::External, "the kill is in the log as External");
+            assert_eq!(
+                r.source,
+                EventSource::External,
+                "the kill is in the log as External"
+            );
             r.seq
         })
         .collect();

@@ -60,7 +60,7 @@ let (state, commands) = apply(state, Event::RunStarted);
 | exec §4 cancellation | `steps::process::ladder`, `driver::Driver::on_hard_deadline` |
 | exec §5 environments | `executor::scope` (the interface), `executor_host::HostExecutor`, `executor_docker::DockerExecutor` |
 | exec §6 secrets | `executor::secrets`, `driver::LogSink` |
-| §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel` |
+| §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel`, `apply::on_kill` |
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
 | §6a sequential `for_each` | `ir::desugar::sequential_for_each` — no new IR, just a cycle |
@@ -77,7 +77,7 @@ crates/core/engine/tests/routing.rs          §2 selection, fan-out, OR-split, g
 crates/core/engine/tests/joins.rs            §3 All / Any / Quorum, generations, entry seeding
 crates/core/engine/tests/loops.rs            §6a sequential for_each, back edges, firing budgets
 crates/core/engine/tests/expansion.rs        §6 parallel for_each, collectors, max_parallel, fail_fast
-crates/core/engine/tests/cancellation.rs     §5a cancel scopes, nesting, signal delivery
+crates/core/engine/tests/cancellation.rs     §5a cancel scopes, both tiers: routing, run_on_cancel, kill
 crates/core/engine/tests/scopes.rs           §3 resource scopes, env, acquire/release
 crates/core/engine/tests/gha.rs              the GHA mapping table, end to end
 crates/core/engine/tests/retries.rs          handoff §1 attempts, backoff, exhaustion
@@ -91,6 +91,8 @@ crates/core/ir/tests/expressions.rs          the expression language
 
 crates/core/driver/tests/e2e.rs           exec §7 1-2: native loop and GHA-shaped, real processes
 crates/core/driver/tests/cancellation.rs  exec §7 3,4,5,9: the ladder and the hard deadline
+crates/core/driver/tests/kill.rs          §10 two-tier stop: cleanup after cancel, cleanup grace, KillRequested
+crates/core/driver/tests/release.rs       §10 sentinel-pinned groups: release kills, reaps, then only observes
 crates/core/driver/tests/timeout.rs       exec §7 6: timeouts, and the race under replay
 crates/core/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
 crates/core/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
@@ -354,6 +356,26 @@ with a working execution path.
     arriving as an event without saying who sends it; `Driver::handle()` returns a
     handle that can inject one into a run in flight.
 
+30. **Cancelled outcomes route, and stopping has two tiers.** Frontend finding 3:
+    GitHub runs `if: always()` and `if: cancelled()` cleanup after a cancel, and
+    the engine could not, ever — the spec had cancellation drop the scope's
+    tokens, making `Cancelled` the one terminal status that was recorded but
+    never routed. Spec §5 now says: a cancelled firing's outcome routes like any
+    other, pending tokens survive, and what stops work from restarting is
+    **structural** — a node in a cancelled scope, or fed by a token from a firing
+    that recorded `Cancelled`, completes `Cancelled` without evaluating anything
+    unless it carries `Node.run_on_cancel`. No gate anywhere has to be right for
+    cancellation to be safe (review showed the implicit gates could not be: a
+    job's first step, a dependent whose needs finished pre-cancel, and a
+    `max_parallel`-deferred clone all pass them). The engine's *previous* cancel
+    behavior was renamed rather than deleted: `Event::KillRequested` is the
+    forced tier — tokens drop, nothing routes, nothing is admitted,
+    `Control::Kill` goes straight to `SIGKILL` — and it is in the log, so replay
+    gets the hard stop for free and the mode of stopping is recorded, never
+    inferred. The driver wires the tiers as cleanup grace and second-cancel; the
+    host executor grew sentinel-pinned process groups so release can end
+    stragglers without ever signalling a recycled pgid. Log v2 → v3.
+
 ## Frontends (package 03)
 
 Both frontends are pure: text in, `Graph` and diagnostics out. One parser reads the
@@ -415,11 +437,12 @@ in brackets.
    Rare in the corpus (1 workflow) because it mostly appears inside `actions/cache`
    inputs, which are rejected first.
 
-3. **Nothing runs after a cancel**, so `if: cancelled()` and `if: always()` cleanup
-   steps cannot. The lowering is faithful — the expression is right — and
-   `cancelled_steps_cannot_run_today` pins that it never fires. GitHub runs these
-   steps; the engine drops a cancelled firing's tokens. Routing a `Cancelled` outcome
-   at least to status-function guards would need a core decision.
+3. **Nothing ran after a cancel** — resolved; see departure 30 and spec §5.
+   `if: cancelled()` and `if: always()` cleanup can now run: cancelled outcomes
+   route, admission is the structural `Node.run_on_cancel` flag, and the forced
+   tier (`KillRequested`) keeps the old stop-everything semantics under its own
+   logged event. The pinning test flipped into
+   `cancelled_steps_run_after_a_cancel`.
 
 4. **One scope per job, so no per-leg runtime** [`unsupported.runs_on.expression`].
    `runs-on: ${{ matrix.os }}` is the single most common reason a matrix job is
@@ -658,10 +681,6 @@ for `RuntimeSpec.requirements` (D3 — the labels are carried, uninterpreted).
 
 Still v2 in the design document: resume, content caching, remote scope placement, and
 `Control::{Pause, Steer, Approve}`. The seams are in place — the log is versioned and
-rejects v1 cleanly, `EngineState` serializes whole, `StepKind::fingerprint` defaults
-to `None`, and `Control` is `#[non_exhaustive]`. Replay has landed;
-`engine::verify_replay` is the determinism canary.
-
-No YAML or GitHub Actions parser is included. `crates/core/engine/tests/gha.rs` builds the
-mapping table's output directly, which is what pins the semantics; a parser that
-produces the same graphs is a separate piece of work.
+rejects old versions cleanly, `EngineState` serializes whole, `StepKind::fingerprint`
+defaults to `None`, and `Control` is `#[non_exhaustive]` (`Kill` was its first
+addition). Replay has landed; `engine::verify_replay` is the determinism canary.

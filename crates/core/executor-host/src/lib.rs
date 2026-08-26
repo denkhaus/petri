@@ -206,10 +206,8 @@ impl Executor for HostExecutor {
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    report = report.problem(format!(
-                        "process group {} outlived release",
-                        group.pgid
-                    ));
+                    report =
+                        report.problem(format!("process group {} outlived release", group.pgid));
                     break;
                 }
                 tokio::time::sleep(LIVENESS_POLL).await;
@@ -506,15 +504,8 @@ unsafe fn is_live(pid: i32) -> bool {
     const SZOMB: u32 = 5;
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = size_of::<libc::proc_bsdinfo>() as i32;
-    let got = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&raw mut info).cast(),
-            size,
-        )
-    };
+    let got =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
     // A process that vanished between the listing and this query is not live.
     got == size && info.pbi_status != SZOMB
 }

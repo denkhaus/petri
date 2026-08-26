@@ -250,9 +250,7 @@ impl Driver {
             {
                 self.on_root_cancel().await
             }
-            Signal::Inject(Event::KillRequested { scope })
-                if scope == ir::CancelScopeId::ROOT =>
-            {
+            Signal::Inject(Event::KillRequested { scope }) if scope == ir::CancelScopeId::ROOT => {
                 self.kill_root().await
             }
             Signal::Inject(event) => self.feed(event).await,

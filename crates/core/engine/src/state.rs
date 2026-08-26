@@ -586,7 +586,9 @@ impl EngineState {
     }
 
     pub(crate) fn is_scope_killed(&self, id: CancelScopeId) -> bool {
-        self.cancel_scopes.get(&id).is_some_and(|scope| scope.killed)
+        self.cancel_scopes
+            .get(&id)
+            .is_some_and(|scope| scope.killed)
     }
 
     /// Whether the node sits in a killed scope. A root kill marks the root scope,

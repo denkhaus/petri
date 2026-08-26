@@ -306,11 +306,7 @@ fn an_old_log_version_is_rejected() {
     // v3 changed replay semantics (cancelled outcomes route), so a v2 log is
     // rejected cleanly rather than replayed under rules it was not written for.
     for old in [1, 2] {
-        let downgraded = encoded.replacen(
-            "\"version\":3",
-            &format!("\"version\":{old}"),
-            1,
-        );
+        let downgraded = encoded.replacen("\"version\":3", &format!("\"version\":{old}"), 1);
         let error = serde_json::from_str::<engine::EventLog>(&downgraded)
             .expect_err("an old log must not deserialize");
         assert!(

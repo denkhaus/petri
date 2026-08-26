@@ -265,7 +265,14 @@ fn try_fire(
                 } else {
                     Status::Skipped
                 };
-                complete_without_running(state, &node, generation, &inputs, synthetic(status), queue);
+                complete_without_running(
+                    state,
+                    &node,
+                    generation,
+                    &inputs,
+                    synthetic(status),
+                    queue,
+                );
                 return;
             }
             Err(error) => {
@@ -368,9 +375,7 @@ fn has_cancelled_input(state: &EngineState, key: (NodeId, Generation)) -> bool {
     let Some(tokens) = state.tokens_for(key) else {
         return false;
     };
-    tokens
-        .values()
-        .any(|t| state.outcome_was_cancelled(t.from))
+    tokens.values().any(|t| state.outcome_was_cancelled(t.from))
 }
 
 fn join_satisfied(state: &EngineState, node: &Node, key: (NodeId, Generation)) -> bool {

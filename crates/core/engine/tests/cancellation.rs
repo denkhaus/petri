@@ -219,7 +219,10 @@ fn run_on_cancel_admits_cleanup_and_unmarked_work_is_never_evaluated() {
 
     let cleanup_starts = h.take_starts();
     assert_eq!(
-        cleanup_starts.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+        cleanup_starts
+            .iter()
+            .map(|(_, n)| n.as_str())
+            .collect::<Vec<_>>(),
         vec!["cleanup"],
         "the marked node fires for real"
     );
@@ -384,7 +387,10 @@ fn a_back_edge_through_a_cancelled_region_stops_at_its_budget() {
         .iter()
         .filter(|r| r.name == "spin")
         .count();
-    assert_eq!(spins, 4, "one synthesized Cancelled per generation, then the cap");
+    assert_eq!(
+        spins, 4,
+        "one synthesized Cancelled per generation, then the cap"
+    );
     assert!(matches!(
         h.state.errors().first(),
         Some(engine::RunError::BudgetExceeded { max_firings: 4, .. })
@@ -434,7 +440,11 @@ fn a_parked_token_does_not_hold_its_scope_past_the_finish() {
     }
 
     assert_eq!(h.status, Some(RunStatus::Cancelled));
-    assert_eq!(h.state.pending_count(), 1, "steady's token is parked at the join");
+    assert_eq!(
+        h.state.pending_count(),
+        1,
+        "steady's token is parked at the join"
+    );
     assert_eq!(
         h.state.held_scopes().count(),
         0,
@@ -500,7 +510,11 @@ fn cancel_settles_an_awaiting_retry_firing_at_once() {
         firing: a,
         next_attempt: Attempt::FIRST.next(),
     });
-    assert_eq!(h.state.errors().len(), errors_before, "no error for the tombstone");
+    assert_eq!(
+        h.state.errors().len(),
+        errors_before,
+        "no error for the tombstone"
+    );
 
     // A duplicate — the tombstone is consumed — and a never-existing firing both
     // still error: the no-op is cancellation-specific.
@@ -731,13 +745,15 @@ fn killing_a_splice_scope_spares_the_rest_of_the_run() {
     let kills = h
         .commands
         .iter()
-        .filter(|c| matches!(
-            c,
-            Command::DeliverControl {
-                ctl: Control::Kill,
-                ..
-            }
-        ))
+        .filter(|c| {
+            matches!(
+                c,
+                Command::DeliverControl {
+                    ctl: Control::Kill,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(kills, 2, "only the clones are killed");
     assert!(!h.state.is_cancelled(), "the run itself is not cancelled");
@@ -837,7 +853,8 @@ fn scope_cancelled_and_run_cancelled_read_correctly() {
     let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
         "plan" => Outcome::success(json!(["a", "b"])),
         "work" => {
-            sink.borrow_mut().push((info.name.clone(), info.config.clone()));
+            sink.borrow_mut()
+                .push((info.name.clone(), info.config.clone()));
             if info.index == Some(0) {
                 Outcome::failure("boom")
             } else {
