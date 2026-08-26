@@ -31,5 +31,5 @@ pub use log::{
     CANCEL_ESCALATION_KEY, EventLog, EventRecord, EventSource, InvalidRecords, LOG_VERSION,
     UnsupportedLogVersion,
 };
-pub use replay::{ReplayMismatch, replay, verify_replay};
+pub use replay::{ReplayMismatch, ResumePoint, replay, resume, verify_replay};
 pub use state::{CancelScope, EngineState, Firing, FiringRecord, RunError, Splice};

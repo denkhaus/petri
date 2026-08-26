@@ -20,6 +20,14 @@ pub enum EnvError {
         operation: SmolStr,
         message: String,
     },
+    /// `acquire`'s fence found prior work still alive that it could not safely
+    /// end — the executor's kill mechanism is gone or never engaged, and nothing
+    /// is ever signalled on a bare recorded id (it can be recycled to an
+    /// innocent; the no-innocent-signal invariant is absolute). The scope's
+    /// firings fail routably through the ordinary acquire-failure path; cleanup
+    /// belongs to the operator or host policy.
+    #[error("prior work from generation {generation} survived the fence: {detail}")]
+    FenceLeaked { generation: SmolStr, detail: String },
     #[error("the environment is gone")]
     Gone,
 }

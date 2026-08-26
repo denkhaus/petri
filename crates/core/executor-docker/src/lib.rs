@@ -159,7 +159,12 @@ impl Executor for DockerExecutor {
         self.ensure_image(image).await?;
 
         let name = self.container_name(&scope.instance);
-        // A previous run may have left this name behind.
+        // The fence half of the acquire contract (§9): a previous acquisition —
+        // a crashed driver's included — left a container under this
+        // deterministic name; removing it ends whatever still runs inside and
+        // makes its status unreadable. Names carry the run id, so a resuming
+        // host must construct its executor with the run's original id for the
+        // fence to reach the crashed run's containers.
         let _ = run_docker(&["rm", "-f", &name]).await;
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", workspace.display());

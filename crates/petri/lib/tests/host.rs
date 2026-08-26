@@ -296,6 +296,106 @@ async fn a_killed_run_leaves_complete_files() {
     );
 }
 
+/// Rewrite `events.jsonl` keeping only the first `keep` complete lines
+/// (header included), plus `extra` raw bytes — the crash simulator.
+fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
+    let path = dir.path().join(EVENTS_FILE);
+    let bytes = std::fs::read(&path).expect("reads");
+    let mut end = 0;
+    let mut seen = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\n' {
+            seen += 1;
+            if seen == keep {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    let mut out = bytes[..end].to_vec();
+    out.extend_from_slice(extra);
+    std::fs::write(&path, out).expect("writes");
+}
+
+/// A crashed run resumes from nothing but the run dir, and the file converges
+/// to the resumed run's log without rewriting history.
+#[tokio::test]
+async fn a_crashed_run_resumes_from_the_run_dir() {
+    let dir = RunDir::new("host-resume");
+    let rt = test_runtime(&dir);
+    let masker = MapSecrets::empty().masker();
+    let report = host::run(&rt, two_step_graph(), &masker)
+        .await
+        .expect("runs");
+    let total = report.state.log.len();
+
+    // Drop the final record — the second step's finish — at a line boundary:
+    // the arbitrary-tail loss window, in its cleanest shape.
+    damage_events(&dir, total, b"");
+    let resumed = host::resume(&rt, &masker).await.expect("resumes");
+    assert_eq!(resumed.status, RunStatus::Success);
+    assert!(
+        resumed.observer_errors.is_empty(),
+        "{:?}",
+        resumed.observer_errors
+    );
+
+    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads");
+    assert_eq!(
+        serde_json::to_vec(&decoded.log).expect("encodes"),
+        serde_json::to_vec(&resumed.state.log).expect("encodes"),
+        "the file converged to the resumed log"
+    );
+}
+
+/// A torn tail — EOF mid-record — is truncated away and the run resumes from
+/// the prefix.
+#[tokio::test]
+async fn a_torn_tail_is_truncated_and_resumed() {
+    let dir = RunDir::new("host-resume-torn");
+    let rt = test_runtime(&dir);
+    let masker = MapSecrets::empty().masker();
+    let report = host::run(&rt, two_step_graph(), &masker)
+        .await
+        .expect("runs");
+    let total = report.state.log.len();
+
+    damage_events(&dir, total, b"{\"seq\":9999,\"source\":\"Ext");
+    let resumed = host::resume(&rt, &masker).await.expect("resumes");
+    assert_eq!(resumed.status, RunStatus::Success);
+
+    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads clean");
+    assert!(!decoded.torn, "the torn tail is gone");
+    assert_eq!(
+        serde_json::to_vec(&decoded.log).expect("encodes"),
+        serde_json::to_vec(&resumed.state.log).expect("encodes"),
+    );
+}
+
+/// A complete but undecodable line refuses the resume outright.
+#[tokio::test]
+async fn an_undecodable_record_refuses_resume() {
+    let dir = RunDir::new("host-resume-refuse");
+    let rt = test_runtime(&dir);
+    let masker = MapSecrets::empty().masker();
+    let report = host::run(&rt, two_step_graph(), &masker)
+        .await
+        .expect("runs");
+
+    damage_events(
+        &dir,
+        report.state.log.len(),
+        b"corrupted beyond recognition\n",
+    );
+    match host::resume(&rt, &masker).await {
+        Err(HostError::Events { source, .. }) => {
+            assert!(matches!(source, EventsDecodeError::BadRecord { .. }));
+        }
+        Ok(_) => panic!("a corrupted file resumed"),
+        Err(other) => panic!("expected the record refusal, got {other}"),
+    }
+}
+
 /// An observer registered on the `Runtime` builder reaches the driver it
 /// builds, alongside the host's own battery.
 #[derive(Default)]

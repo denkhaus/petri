@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use driver::{Driver, EventObserver, RunConfig, RunReport};
-use engine::ReplayMismatch;
+use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunReport};
+use engine::{EventLog, ReplayMismatch};
 use executor::{DEFAULT_GRACE, Executor, MapSecrets, Retention, SecretProvider};
 use frontend::{DirFiles, Frontend, Lowered, Span};
 use ir::Graph;
@@ -238,23 +238,53 @@ impl Runtime {
     /// A driver over this configuration, for callers that need the handle (to
     /// cancel a run in flight). [`Runtime::run`] is the plain path.
     pub fn driver(&self, graph: Graph) -> Driver {
+        let driver = Driver::new(
+            graph,
+            self.run_executor(),
+            self.steps.clone(),
+            Arc::clone(&self.secrets),
+            self.run_config(),
+        );
+        self.with_observers(driver)
+    }
+
+    /// A driver continuing a crashed run's log, however the host stored it —
+    /// the mirror of [`Runtime::driver`] over `Driver::resume`. `ResumeInfo`
+    /// comes back beside the driver, so a host installs its own execution
+    /// identities for the re-dispatched firings before calling `run()`.
+    pub fn resume_driver(
+        &self,
+        graph: Graph,
+        log: EventLog,
+    ) -> Result<(Driver, ResumeInfo), ResumeError> {
+        let (driver, info) = Driver::resume(
+            graph,
+            log,
+            self.run_executor(),
+            self.steps.clone(),
+            Arc::clone(&self.secrets),
+            self.run_config(),
+        )?;
+        Ok((self.with_observers(driver), info))
+    }
+
+    fn run_config(&self) -> RunConfig {
         let mut config = RunConfig::new(&self.options.run_dir)
             .with_grace(self.options.grace)
             .with_cleanup_grace(self.options.cleanup_grace)
             .with_retention(self.options.retention)
             .echoing(self.options.echo);
         config.hard_deadline_slack = self.options.hard_deadline_slack;
-        let executor = self
-            .executor
+        config
+    }
+
+    fn run_executor(&self) -> Arc<dyn Executor> {
+        self.executor
             .clone()
-            .unwrap_or_else(|| self.default_executor());
-        let mut driver = Driver::new(
-            graph,
-            executor,
-            self.steps.clone(),
-            Arc::clone(&self.secrets),
-            config,
-        );
+            .unwrap_or_else(|| self.default_executor())
+    }
+
+    fn with_observers(&self, mut driver: Driver) -> Driver {
         for observer in &self.observers {
             driver = driver.observe(Arc::clone(observer));
         }

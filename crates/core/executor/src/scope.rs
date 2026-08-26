@@ -157,6 +157,21 @@ impl std::fmt::Debug for EnvHandle {
 /// Materializes environments. Knows nothing about what steps mean.
 #[async_trait]
 pub trait Executor: Send + Sync {
+    /// Materialize the scope's environment.
+    ///
+    /// **`acquire` fences prior work** (§9): when it returns, no process from a
+    /// previous acquisition of this scope can still mutate the workspace or be
+    /// observed as this environment's status. A driver crash does not kill
+    /// running steps — release owns cleanup, and remote sandboxes outlive
+    /// workers by design — so resume leans on this fence before re-dispatching.
+    /// The stock executors implement it (the host executor's generation-scoped
+    /// sentinel protocol; Docker's remove-by-deterministic-name); a remote
+    /// provider implements its own reconnect-and-fence here. Work that cannot
+    /// be safely ended fails the acquire with [`EnvError::FenceLeaked`] rather
+    /// than signalling an unverified id. The fence is idempotent, and it covers
+    /// the workspace only: side effects outside it (network calls, pushes) may
+    /// have happened in the crashed attempt and happen again — resume is
+    /// at-least-once for external side effects.
     async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError>;
 
     /// Tear down. Idempotent, and never fails the run: problems are reported.

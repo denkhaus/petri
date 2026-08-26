@@ -29,8 +29,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
+use std::sync::Arc;
+
 use runtime::Runtime;
-use runtime::driver::{Driver, EventObserver, ObserveError, RunReport};
+use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
 use runtime::engine::{self, EngineState, EventLog, EventRecord, InvalidRecords};
 use runtime::executor::Masker;
 use runtime::ir::Graph;
@@ -66,6 +68,14 @@ pub enum HostError {
     SecretInGraph,
     #[error("could not encode the graph: {0}")]
     EncodeGraph(#[source] serde_json::Error),
+    #[error("`{path}` is not a graph: {source}")]
+    BadGraph {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(transparent)]
+    Resume(#[from] ResumeError),
     #[error(transparent)]
     Replay(#[from] engine::ReplayMismatch),
 }
@@ -316,7 +326,7 @@ pub fn driver(rt: &Runtime, graph: Graph, masker: &Masker) -> Result<Driver, Hos
         path: events,
         source: e,
     })?;
-    Ok(rt.driver(graph).observe(std::sync::Arc::new(battery)))
+    Ok(rt.driver(graph).observe(Arc::new(battery)))
 }
 
 /// Run a graph with the durable run dir, to completion. The battery's `finish`
@@ -327,6 +337,76 @@ pub fn driver(rt: &Runtime, graph: Graph, masker: &Masker) -> Result<Driver, Hos
 pub async fn run(rt: &Runtime, graph: Graph, masker: &Masker) -> Result<RunReport, HostError> {
     let original = rt.run_options().verify_replay.then(|| graph.clone());
     let report = driver(rt, graph, masker)?.run().await;
+    if let Some(graph) = original {
+        engine::verify_replay(graph, &report.state.log)?;
+    }
+    Ok(report)
+}
+
+fn read_graph(run_dir: &Path) -> Result<Graph, HostError> {
+    let path = run_dir.join(GRAPH_FILE);
+    let bytes = std::fs::read(&path).map_err(|e| HostError::Io {
+        action: "read",
+        path: path.clone(),
+        source: e,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|e| HostError::BadGraph { path, source: e })
+}
+
+/// A driver continuing the run in the runtime's run dir: `graph.json` and
+/// `events.jsonl` loaded back, any EOF-torn tail truncated away (a shorter
+/// prefix, by the strict rule), and a battery that appends to the same file —
+/// the regenerated suffix converges it without rewriting history. [`resume`] is
+/// the plain path.
+///
+/// Dynamic secrets (`answer:<id>`) are not in the log by design: re-register
+/// them on the provider before delivering again, or the resumed step fails with
+/// `secret_unavailable`.
+pub fn resume_driver(rt: &Runtime, masker: &Masker) -> Result<(Driver, ResumeInfo), HostError> {
+    let run_dir = rt.run_options().run_dir.clone();
+    let graph = read_graph(&run_dir)?;
+    // The §11 contract holds on resume too; a refusal here is a refusal to
+    // continue, not to write.
+    encode_graph_checked(&graph, masker)?;
+
+    let events = run_dir.join(EVENTS_FILE);
+    let decoded = read_events(&events)?;
+    if decoded.torn {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&events)
+            .map_err(|e| HostError::Io {
+                action: "open",
+                path: events.clone(),
+                source: e,
+            })?;
+        file.set_len(decoded.clean_len as u64)
+            .map_err(|e| HostError::Io {
+                action: "truncate",
+                path: events.clone(),
+                source: e,
+            })?;
+    }
+    let loaded = decoded.log.len() as u64;
+    let (driver, info) = rt.resume_driver(graph, decoded.log)?;
+    let battery = JsonlEventLog::append_to(&events, loaded).map_err(|e| HostError::Io {
+        action: "open",
+        path: events,
+        source: e,
+    })?;
+    Ok((driver.observe(Arc::new(battery)), info))
+}
+
+/// Continue the run in the runtime's run dir, to completion — the crash side of
+/// [`run`]. Same file guarantees, same replay verification.
+pub async fn resume(rt: &Runtime, masker: &Masker) -> Result<RunReport, HostError> {
+    let (driver, _info) = resume_driver(rt, masker)?;
+    let original = rt
+        .run_options()
+        .verify_replay
+        .then(|| read_graph(&rt.run_options().run_dir))
+        .transpose()?;
+    let report = driver.run().await;
     if let Some(graph) = original {
         engine::verify_replay(graph, &report.state.log)?;
     }

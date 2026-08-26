@@ -72,6 +72,8 @@ pub enum EventSource {
 /// | `sigterm` | the step exited within the grace period after `SIGTERM` |
 /// | `sigkill` | the grace period ran out and the group was killed |
 /// | `cancel_forced` | the step kind never returned; the driver stopped waiting |
+/// | `cancelled_before_resume` | the polite tier had marked the firing cancelling when the driver died; resume finished it without re-spawning |
+/// | `killed_before_resume` | the kill tier had; same direct finish, recorded without routing |
 ///
 /// The key is absent on any outcome that was not cancelled or timed out.
 pub const CANCEL_ESCALATION_KEY: &str = "cancel_escalation";
@@ -190,6 +192,18 @@ impl EventLog {
 
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// The first `len` records, as a log of their own.
+    ///
+    /// The rewind/fork helper: resuming a truncated log is rewind, doing it in a
+    /// fresh run dir is fork — replay regenerates everything past the prefix.
+    /// One method, no policy.
+    pub fn prefix(&self, len: usize) -> EventLog {
+        Self {
+            version: self.version,
+            records: self.records[..len.min(self.records.len())].to_vec(),
+        }
     }
 }
 

@@ -653,7 +653,11 @@ impl EngineState {
 
     /// Whether the node sits in a killed scope. A root kill marks the root scope,
     /// and every node's scope chain ends there, so no separate run flag is needed.
-    pub(crate) fn is_node_killed(&self, node: NodeId) -> bool {
+    ///
+    /// Public because a resumed driver needs the stop tier: a cancelling firing
+    /// is finished rather than re-spawned, and which tier stopped it comes from
+    /// the replayed state — killed scopes are in the log.
+    pub fn is_node_killed(&self, node: NodeId) -> bool {
         self.any_enclosing_scope(node, |scope| scope.killed)
     }
 

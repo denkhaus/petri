@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::{Command, EngineState, Event, ResolvedFiring, apply};
+use engine::{
+    CANCEL_ESCALATION_KEY, Command, EngineState, Event, EventLog, ReplayMismatch, ResolvedFiring,
+    apply,
+};
 use executor::{
     EnvError, EnvHandle, Executor, ReleaseReport, Retention, ScopeOutcome, ScopeSpec,
     SecretProvider,
@@ -26,6 +29,19 @@ use crate::sink::LogSink;
 /// The failure class recorded when the driver had to abort a step that ignored
 /// `Control::Cancel`.
 pub const CANCEL_FORCED: &str = "cancel_forced";
+
+/// The `cancel_escalation` value on a firing the polite tier had marked
+/// cancelling when the driver died: resume never re-spawns it — re-spawning
+/// real work only to stop it records nothing the stop had not already decided —
+/// and finishes it directly with the same `Cancelled` outcome a live cancel
+/// would have fed. Routes exactly as a live cancel's outcome would.
+pub const CANCELLED_BEFORE_RESUME: &str = "cancelled_before_resume";
+
+/// The kill-tier counterpart of [`CANCELLED_BEFORE_RESUME`]: same direct
+/// finish, and — the tier coming from the replayed state, where killed scopes
+/// are in the log — the outcome is recorded without routing, as a live kill's
+/// would be.
+pub const KILLED_BEFORE_RESUME: &str = "killed_before_resume";
 
 /// No step kind is registered for a node's `StepRef.kind`.
 ///
@@ -89,6 +105,35 @@ impl RunConfig {
         self.echo_logs = echo;
         self
     }
+}
+
+/// Why a log could not be resumed.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ResumeError {
+    #[error(transparent)]
+    Replay(#[from] ReplayMismatch),
+}
+
+/// What a host learns from [`Driver::resume`], before calling `run()`.
+pub struct ResumeInfo {
+    /// The firings whose step will actually execute again. Resume is invisible
+    /// in the log, so this is where the host mints its own new execution
+    /// identity for each — without any log event.
+    pub redispatched: Vec<FiringId>,
+    /// The rebuilt log: the loaded prefix plus the regenerated suffix. A host
+    /// whose own durable ingest lagged further behind than the loaded log
+    /// catches up from here before attaching.
+    pub log: EventLog,
+    /// How many records were loaded; everything past them was regenerated.
+    pub loaded: usize,
+}
+
+/// What a resumed driver owes before entering the normal loop.
+struct PendingResume {
+    commands: Vec<Command>,
+    /// Where the loaded log ended. Records past this are the regenerated
+    /// suffix, handed to observers before any pending command is dispatched.
+    suffix_from: usize,
 }
 
 /// How a run ended, and what it left behind.
@@ -229,6 +274,8 @@ pub struct Driver {
     releases: Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer: Option<JoinHandle<()>>,
+    /// Set by [`Driver::resume`]; consumed at the top of [`Driver::run`].
+    resume: Option<PendingResume>,
     tx: mpsc::Sender<Signal>,
     rx: mpsc::Receiver<Signal>,
 }
@@ -241,11 +288,54 @@ impl Driver {
         secrets: Arc<dyn SecretProvider>,
         config: RunConfig,
     ) -> Self {
+        Self::with_state(EngineState::new(graph), executor, runners, secrets, config)
+    }
+
+    /// Continue a run whose process died — the primary resume API (§10). The
+    /// host hands in the graph and log however it stored them; replay rebuilds
+    /// the state and regenerates the commands still owed (held scopes are
+    /// re-acquired, live firings re-dispatched, pending retries re-armed —
+    /// timers restart in full, the log has no clock). `ResumeInfo` comes back
+    /// beside the driver so the host installs its own execution identities for
+    /// the re-dispatched firings *before* calling `run()`.
+    ///
+    /// An empty log resumes as a fresh start: nothing durable happened.
+    pub fn resume(
+        graph: Graph,
+        log: EventLog,
+        executor: Arc<dyn Executor>,
+        runners: Registry,
+        secrets: Arc<dyn SecretProvider>,
+        config: RunConfig,
+    ) -> Result<(Self, ResumeInfo), ResumeError> {
+        let point = engine::resume(graph, &log)?;
+        let info = ResumeInfo {
+            redispatched: point.redispatched,
+            log: point.state.log.clone(),
+            loaded: log.len(),
+        };
+        let mut driver = Self::with_state(point.state, executor, runners, secrets, config);
+        if !log.is_empty() {
+            driver.resume = Some(PendingResume {
+                commands: point.pending,
+                suffix_from: log.len(),
+            });
+        }
+        Ok((driver, info))
+    }
+
+    fn with_state(
+        engine: EngineState,
+        executor: Arc<dyn Executor>,
+        runners: Registry,
+        secrets: Arc<dyn SecretProvider>,
+        config: RunConfig,
+    ) -> Self {
         let sink =
             Arc::new(LogSink::new(&config.run_dir, secrets.masker()).echoing(config.echo_logs));
         let (tx, rx) = mpsc::channel(1024);
         Self {
-            engine: EngineState::new(graph),
+            engine,
             executor,
             runners: Arc::new(runners),
             secrets,
@@ -258,6 +348,7 @@ impl Driver {
             observers: Vec::new(),
             releases: Vec::new(),
             cleanup_timer: None,
+            resume: None,
             tx,
             rx,
         }
@@ -272,7 +363,19 @@ impl Driver {
 
     /// Run to completion.
     pub async fn run(mut self) -> RunReport {
-        self.feed(Event::RunStarted).await;
+        match self.resume.take() {
+            None => self.feed(Event::RunStarted).await,
+            Some(resume) => {
+                // Observers see the regenerated suffix first — the records past
+                // the loaded prefix, which the crash kept off disk — before any
+                // pending command is dispatched, so a store attaching here
+                // starts from a converged view.
+                self.notify_observers(resume.suffix_from);
+                for command in resume.commands {
+                    self.dispatch(command).await;
+                }
+            }
+        }
 
         while !self.engine.is_finished() {
             let Some(signal) = self.rx.recv().await else {
@@ -456,14 +559,36 @@ impl Driver {
             Command::ReleaseScope { scope } => self.release(scope),
             Command::StartStep(resolved) => {
                 let (firing, attempt) = (resolved.id(), resolved.attempt());
+                // A firing the stop tiers marked cancelling reaches dispatch
+                // only on resume, and is never re-spawned: it finishes directly
+                // with the same `Cancelled` outcome the live run would have fed
+                // once the stop landed, tagged with the tier from the replayed
+                // state (§10).
+                if self
+                    .engine
+                    .firing(firing)
+                    .is_some_and(|state| state.cancelling)
+                {
+                    self.finish_instead_of_resuming(firing, attempt);
+                    return;
+                }
+                // A started firing is already acknowledged in the loaded log; a
+                // second `StepStarted` would be a replay divergence.
+                let started = self
+                    .engine
+                    .firing(firing)
+                    .is_some_and(|state| state.started);
                 self.start(resolved).await;
-                // The acknowledgement that the attempt was dispatched. It goes through
-                // the one channel like every other external event, so its place in the
-                // log is its arrival order and replay feeds it back verbatim.
-                let _ = self
-                    .tx
-                    .send(Signal::Inject(Event::StepStarted { firing, attempt }))
-                    .await;
+                if !started {
+                    // The acknowledgement that the attempt was dispatched. It goes
+                    // through the one channel like every other external event, so its
+                    // place in the log is its arrival order and replay feeds it back
+                    // verbatim.
+                    let _ = self
+                        .tx
+                        .send(Signal::Inject(Event::StepStarted { firing, attempt }))
+                        .await;
+                }
             }
             Command::DeliverControl { firing, ctl } => match ctl {
                 // A delivered value only forwards: no deadline, no reason — it never
@@ -492,6 +617,38 @@ impl Driver {
             // sees the state finished.
             Command::ExpandNode { .. } | Command::FinishRun { .. } => {}
         }
+    }
+
+    /// Finish a cancelling firing that resume would otherwise re-spawn: one
+    /// code path for both tiers, the tier read from the replayed state. The
+    /// finish rides the signal channel like every step result, so its place in
+    /// the log is its arrival order.
+    fn finish_instead_of_resuming(&self, firing: FiringId, attempt: Attempt) {
+        let killed = self
+            .engine
+            .firing(firing)
+            .is_some_and(|state| self.engine.is_node_killed(state.node));
+        let escalation = if killed {
+            KILLED_BEFORE_RESUME
+        } else {
+            CANCELLED_BEFORE_RESUME
+        };
+        let mut output = serde_json::Map::new();
+        output.insert(
+            CANCEL_ESCALATION_KEY.into(),
+            Value::String(escalation.to_string()),
+        );
+        let outcome = Outcome::new(Status::Cancelled, Value::Object(output));
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Signal::Finished {
+                    firing,
+                    attempt,
+                    outcome,
+                })
+                .await;
+        });
     }
 
     // ── Scopes ─────────────────────────────────────────────────────────────
