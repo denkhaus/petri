@@ -40,7 +40,7 @@ pub struct Builtin {
 /// - **pure** — no IO, no clock, no randomness, no ambient state;
 /// - **total** — every input either yields a value or a typed [`EvalError`], never a
 ///   panic;
-/// - **tested** — in `crates/ir/tests/expressions.rs`, including its error cases;
+/// - **tested** — in `crates/core/ir/tests/expressions.rs`, including its error cases;
 /// - **necessary** — justified by a test or a frontend mapping that genuinely cannot
 ///   be written without it. `split` met this bar: the outputs-file protocol yields
 ///   strings, and `for_each` needs an array.

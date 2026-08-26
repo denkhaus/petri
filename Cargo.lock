@@ -371,18 +371,6 @@ dependencies = [
  "petri-ir",
  "petri-steps",
  "smol_str",
-]
-
-[[package]]
-name = "petri-acceptance"
-version = "0.1.0"
-dependencies = [
- "petri",
- "petri-frontend",
- "petri-frontend-gha",
- "petri-ir",
- "petri-testkit",
- "serde_json",
  "tokio",
 ]
 
@@ -496,6 +484,19 @@ dependencies = [
  "petri-ir",
  "serde_json",
  "smol_str",
+]
+
+[[package]]
+name = "petri-github-acceptance"
+version = "0.1.0"
+dependencies = [
+ "petri",
+ "petri-frontend",
+ "petri-frontend-gha",
+ "petri-ir",
+ "petri-testkit",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

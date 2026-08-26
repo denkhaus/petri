@@ -3,7 +3,7 @@
 # at each repo's pinned commit, so composite inlining has the files it needs.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-for repodir in corpus/*/; do
+for repodir in crates/github/corpus/*/; do
   repo=$(basename "$repodir" | sed 's/__/\//')
   sha=$(grep -oE 'Commit: [0-9a-f]+' "$repodir/PROVENANCE.md" | awk '{print $2}')
   [ -n "$sha" ] || continue

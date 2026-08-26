@@ -66,7 +66,7 @@ impl Outcome {
     }
 }
 
-/// Every workflow under `corpus/*/.github/workflows/`.
+/// Every workflow under `crates/github/corpus/*/.github/workflows/`.
 pub fn workflows(corpus_root: &Path) -> Vec<(String, PathBuf, PathBuf)> {
     let mut out = Vec::new();
     let Ok(repos) = std::fs::read_dir(corpus_root) else {

@@ -1,7 +1,7 @@
 //! Handoff §7 tests 3–6, the behavioural half: the status truth table, matrices,
 //! composites and job outputs, lowered by the real GHA frontend and run on the
 //! standard runtime. The pure lowering half stays with the frontend, in
-//! `crates/frontend-gha/tests/lowering.rs`.
+//! `crates/github/frontend/tests/lowering.rs`.
 
 mod support;
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vendor the `.github/workflows` of well-known OSS repositories at a pinned commit.
-# Each repo gets corpus/<owner>__<repo>/ with its workflows and a PROVENANCE.md
+# Each repo gets crates/github/corpus/<owner>__<repo>/ with its workflows and a PROVENANCE.md
 # recording the commit, the licence, and when it was fetched.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,7 +32,7 @@ REPOS=(
 
 for repo in "${REPOS[@]}"; do
   owner="${repo%%/*}"; name="${repo##*/}"
-  dir="corpus/${owner}__${name}"
+  dir="crates/github/corpus/${owner}__${name}"
   mkdir -p "$dir/.github/workflows"
   echo "== $repo"
   sha=$(gh api "repos/$repo/commits/HEAD" --jq .sha 2>/dev/null || echo unknown)

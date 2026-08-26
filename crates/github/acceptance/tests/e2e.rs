@@ -20,7 +20,7 @@ use serde_json::json;
 use testkit::install_gh_stub;
 
 fn corpus_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
 fn lower(repo: &str, workflow: &str) -> Graph {

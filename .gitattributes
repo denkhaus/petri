@@ -1,2 +1,2 @@
 # Vendored third-party workflows are stored byte-for-byte; no line-ending conversion.
-corpus/** -text
+crates/github/corpus/** -text

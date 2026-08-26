@@ -1,6 +1,6 @@
 //! Handoff §7 tests 3–6, the pure half: what lowering produces, without running it.
 //! The behavioural half — the same constructs through the engine on real processes —
-//! lives in `crates/acceptance/tests/gha_e2e.rs`.
+//! lives in `crates/github/acceptance/tests/gha_e2e.rs`.
 
 mod support;
 

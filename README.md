@@ -4,14 +4,15 @@ A Rust implementation of [`engine-spec.md`](engine-spec.md): a token-flow graph 
 explicit routing, plus the pure state machine that executes it.
 
 ```
-crates/ir              the vocabulary: graph, ids, expressions, values, validation
-crates/engine          the sans-IO state machine: apply(state, event) -> (state, commands)
-crates/executor        the environment interface; executor-host and executor-docker implement it
-crates/steps           step kinds and the one registry; frontends depend on names, not on this
-crates/driver          the IO loop between the pure core and real processes
-crates/frontend        what every format shares; frontend-gha and frontend-native implement it
+crates/core/ir         the vocabulary: graph, ids, expressions, values, validation
+crates/core/engine     the sans-IO state machine: apply(state, event) -> (state, commands)
+crates/core/executor   the environment interface; executor-host and executor-docker implement it
+crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
+crates/core/driver     the IO loop between the pure core and real processes
+crates/core/frontend   what every format shares; frontend-gha and frontend-native implement it
+crates/core/testkit    the scaffolding the end-to-end batteries share
+crates/github          everything GitHub Actions: the frontend, the corpus, the acceptance battery
 crates/petri           the facade and the assembly (`Runtime`); petri-cli is the binary
-crates/acceptance      the corpus harness and the end-to-end batteries; testkit is their shared scaffolding
 ```
 
 Crate organization follows `.ai/plans/crate-organization.md`: packages are named
@@ -57,7 +58,7 @@ let (state, commands) = apply(state, Event::RunStarted);
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
 | §6a sequential `for_each` | `ir::desugar::sequential_for_each` — no new IR, just a cycle |
-| GHA frontend mapping | `crates/engine/tests/gha.rs` |
+| GHA frontend mapping | `crates/core/engine/tests/gha.rs` |
 | §7 validation invariants | `ir::validate` — `check` for errors and warnings, `validate` for errors alone |
 | §8 reserved seams | `StepKind::fingerprint`, `Control`, `Command::{Acquire,Release}Scope`, `EventLog::version` |
 
@@ -66,36 +67,36 @@ let (state, commands) = apply(state, Event::RunStarted);
 The test suites are the executable form of the design document.
 
 ```
-crates/engine/tests/routing.rs       §2 selection, fan-out, OR-split, guards, preconditions
-crates/engine/tests/joins.rs         §3 All / Any / Quorum, generations, entry seeding
-crates/engine/tests/loops.rs         §6a sequential for_each, back edges, firing budgets
-crates/engine/tests/expansion.rs     §6 parallel for_each, collectors, max_parallel, fail_fast
-crates/engine/tests/cancellation.rs  §5a cancel scopes, nesting, signal delivery
-crates/engine/tests/scopes.rs        §3 resource scopes, env, acquire/release
-crates/engine/tests/gha.rs           the GHA mapping table, end to end
-crates/engine/tests/retries.rs       handoff §1 attempts, backoff, exhaustion
-crates/engine/tests/run_context.rs   handoff §2 nodes.* / kv.*, goal gates, merge order
-crates/engine/tests/partial_success.rs  handoff §4 soft failure, is_success_like
-crates/engine/tests/seeding.rs       seed edges for entry nodes and clone entries
-crates/engine/tests/resolved_firing.rs  the executor boundary: no unresolved ExprId crosses it
-crates/engine/tests/event_log.rs     §5 logging, determinism, serde round-trip, §8 seams
-crates/ir/tests/validation.rs        §7, invariant by invariant
-crates/ir/tests/expressions.rs       the expression language
+crates/core/engine/tests/routing.rs          §2 selection, fan-out, OR-split, guards, preconditions
+crates/core/engine/tests/joins.rs            §3 All / Any / Quorum, generations, entry seeding
+crates/core/engine/tests/loops.rs            §6a sequential for_each, back edges, firing budgets
+crates/core/engine/tests/expansion.rs        §6 parallel for_each, collectors, max_parallel, fail_fast
+crates/core/engine/tests/cancellation.rs     §5a cancel scopes, nesting, signal delivery
+crates/core/engine/tests/scopes.rs           §3 resource scopes, env, acquire/release
+crates/core/engine/tests/gha.rs              the GHA mapping table, end to end
+crates/core/engine/tests/retries.rs          handoff §1 attempts, backoff, exhaustion
+crates/core/engine/tests/run_context.rs      handoff §2 nodes.* / kv.*, goal gates, merge order
+crates/core/engine/tests/partial_success.rs  handoff §4 soft failure, is_success_like
+crates/core/engine/tests/seeding.rs          seed edges for entry nodes and clone entries
+crates/core/engine/tests/resolved_firing.rs  the executor boundary: no unresolved ExprId crosses it
+crates/core/engine/tests/event_log.rs        §5 logging, determinism, serde round-trip, §8 seams
+crates/core/ir/tests/validation.rs           §7, invariant by invariant
+crates/core/ir/tests/expressions.rs          the expression language
 
-crates/driver/tests/e2e.rs           exec §7 1-2: native loop and GHA-shaped, real processes
-crates/driver/tests/cancellation.rs  exec §7 3,4,5,9: the ladder and the hard deadline
-crates/driver/tests/timeout.rs       exec §7 6: timeouts, and the race under replay
-crates/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
-crates/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
-crates/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
+crates/core/driver/tests/e2e.rs           exec §7 1-2: native loop and GHA-shaped, real processes
+crates/core/driver/tests/cancellation.rs  exec §7 3,4,5,9: the ladder and the hard deadline
+crates/core/driver/tests/timeout.rs       exec §7 6: timeouts, and the race under replay
+crates/core/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
+crates/core/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
+crates/core/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
 
-crates/frontend/tests/expr_grammar.rs      frontend §7 1-2: grammar, precedence, coercion, fuzz, table gate
-crates/frontend-gha/tests/lowering.rs      frontend §7 3-6, the pure half: what lowering produces
-crates/frontend-native/tests/native.rs     frontend §7 7, the pure half; invariant 8 hint
-crates/acceptance/tests/gha_e2e.rs         frontend §7 3-6, run for real: truth table, matrix, composites
-crates/acceptance/tests/native_e2e.rs      frontend §7 7: the cycle, run end to end
-crates/acceptance/tests/harness.rs         frontend §7 8: every corpus workflow lowers or is rejected specifically
-crates/acceptance/tests/e2e.rs             frontend §7 9: two real corpus workflows run on the executor
+crates/core/frontend/tests/expr_grammar.rs   frontend §7 1-2: grammar, precedence, coercion, fuzz, table gate
+crates/github/frontend/tests/lowering.rs     frontend §7 3-6, the pure half: what lowering produces
+crates/core/frontend-native/tests/native.rs  frontend §7 7, the pure half; invariant 8 hint
+crates/github/acceptance/tests/gha_e2e.rs    frontend §7 3-6, run for real: truth table, matrix, composites
+crates/petri/tests/native_e2e.rs             frontend §7 7: the cycle, run end to end
+crates/github/acceptance/tests/harness.rs    frontend §7 8: every corpus workflow lowers or is rejected specifically
+crates/github/acceptance/tests/e2e.rs        frontend §7 9: two real corpus workflows run on the executor
 ```
 
 Docker tests skip with a message when no daemon is reachable, so `cargo test` is
@@ -167,7 +168,7 @@ with a working execution path.
    like any other incoming edge and the firing rule needs no special case: `All` over
    a single seed edge is satisfied by the seed token. Seed edges never appear in a
    `Routing` group and never collide with a declared id
-   (`crates/engine/tests/seeding.rs`).
+   (`crates/core/engine/tests/seeding.rs`).
 
 2. **`Command::ExpandNode` is defined but not emitted.** `items` is a pure
    expression, so the core evaluates it and builds the splice itself, in the same
@@ -359,7 +360,7 @@ onto the engine's own `Eq` / `And` / `Not`.
 ### The corpus
 
 316 workflows from 21 repositories with `.github/workflows` (25 vendored; see
-`corpus/*/PROVENANCE.md` for commit and licence), through `petri check`:
+`crates/github/corpus/*/PROVENANCE.md` for commit and licence), through `petri check`:
 
 | Result | Count |
 |---|---|
@@ -370,13 +371,13 @@ onto the engine's own `Eq` / `And` / `Not`.
 
 The bar was zero crashes and zero generic errors, and it is met. Nearly every real
 workflow is rejected, and almost always for one reason: `actions/checkout` is the first
-step of 296 of them. The histogram package 04 should read is in `corpus/REPORT.md`; the
+step of 296 of them. The histogram package 04 should read is in `crates/github/corpus/REPORT.md`; the
 top of it is `actions/checkout` 660, `upload-artifact` 251, `download-artifact` 207,
 `setup-node` 124, `Swatinem/rust-cache` 111, `github-script` 111, `setup-python` 107,
 `cache/restore` + `cache` + `cache/save` 220 between them. 152 distinct actions.
 
 Two corpus workflows run end to end on the host executor
-(`crates/acceptance/tests/e2e.rs`): facebook/react's cache cleanup and nodejs/node's
+(`crates/github/acceptance/tests/e2e.rs`): facebook/react's cache cleanup and nodejs/node's
 label-triggered commenter, with a stub `gh` on `PATH` so nothing reaches GitHub's API.
 Everything else — bash, the outputs file, env layering, `if:` gates over the `github`
 context, job summaries, replay byte-identity — is real.
@@ -648,6 +649,6 @@ rejects v1 cleanly, `EngineState` serializes whole, `StepKind::fingerprint` defa
 to `None`, and `Control` is `#[non_exhaustive]`. Replay has landed;
 `engine::verify_replay` is the determinism canary.
 
-No YAML or GitHub Actions parser is included. `crates/engine/tests/gha.rs` builds the
+No YAML or GitHub Actions parser is included. `crates/core/engine/tests/gha.rs` builds the
 mapping table's output directly, which is what pins the semantics; a parser that
 produces the same graphs is a separate piece of work.

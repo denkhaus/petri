@@ -2,12 +2,12 @@
 //!
 //! Every vendored workflow either lowers or is rejected with a specific
 //! `unsupported.*` code. Zero panics, zero generic errors. The report is written to
-//! `corpus/REPORT.md` on every run so it stays current with the code.
+//! `crates/github/corpus/REPORT.md` on every run so it stays current with the code.
 
 use acceptance::{Class, check_all, report};
 
 fn corpus_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
 #[test]

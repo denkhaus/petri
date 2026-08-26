@@ -1,20 +1,20 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ir",
-    "crates/engine",
-    "crates/executor",
-    "crates/executor-host",
-    "crates/executor-docker",
-    "crates/steps",
-    "crates/driver",
-    "crates/frontend",
-    "crates/frontend-gha",
-    "crates/frontend-native",
+    "crates/core/ir",
+    "crates/core/engine",
+    "crates/core/executor",
+    "crates/core/executor-host",
+    "crates/core/executor-docker",
+    "crates/core/steps",
+    "crates/core/driver",
+    "crates/core/frontend",
+    "crates/core/frontend-native",
+    "crates/core/testkit",
+    "crates/github/frontend",
+    "crates/github/acceptance",
     "crates/petri",
     "crates/petri-cli",
-    "crates/acceptance",
-    "crates/testkit",
 ]
 
 [workspace.package]
@@ -23,18 +23,18 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-ir = { package = "petri-ir", path = "crates/ir" }
-engine = { package = "petri-engine", path = "crates/engine" }
-executor = { package = "petri-executor", path = "crates/executor" }
-executor-host = { package = "petri-executor-host", path = "crates/executor-host" }
-executor-docker = { package = "petri-executor-docker", path = "crates/executor-docker" }
-steps = { package = "petri-steps", path = "crates/steps" }
-driver = { package = "petri-driver", path = "crates/driver" }
-frontend = { package = "petri-frontend", path = "crates/frontend" }
-frontend-gha = { package = "petri-frontend-gha", path = "crates/frontend-gha" }
-frontend-native = { package = "petri-frontend-native", path = "crates/frontend-native" }
+ir = { package = "petri-ir", path = "crates/core/ir" }
+engine = { package = "petri-engine", path = "crates/core/engine" }
+executor = { package = "petri-executor", path = "crates/core/executor" }
+executor-host = { package = "petri-executor-host", path = "crates/core/executor-host" }
+executor-docker = { package = "petri-executor-docker", path = "crates/core/executor-docker" }
+steps = { package = "petri-steps", path = "crates/core/steps" }
+driver = { package = "petri-driver", path = "crates/core/driver" }
+frontend = { package = "petri-frontend", path = "crates/core/frontend" }
+frontend-gha = { package = "petri-frontend-gha", path = "crates/github/frontend" }
+frontend-native = { package = "petri-frontend-native", path = "crates/core/frontend-native" }
 petri = { path = "crates/petri" }
-testkit = { package = "petri-testkit", path = "crates/testkit" }
+testkit = { package = "petri-testkit", path = "crates/core/testkit" }
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
 marked-yaml = "0.8"
