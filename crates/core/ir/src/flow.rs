@@ -382,7 +382,12 @@ pub enum LogStream {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Control {
+    /// Ask the step to stop: the polite ladder (TERM, grace, KILL).
     Cancel,
+    /// Stop the step now: straight to `SIGKILL`, no ladder, no grace. Delivered by
+    /// a `KillRequested` — to every live firing in the killed closure, ones already
+    /// politely cancelling included, which a plain `Cancel` cannot say.
+    Kill,
 }
 
 /// How a whole run ended.

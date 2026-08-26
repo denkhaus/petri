@@ -202,16 +202,29 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
         ctx.diags.push(d);
     }
     for warning in &report.warnings {
-        let span = match warning {
-            ValidationWarning::ScopeReentry { at, .. } => ctx.spans.get(at).cloned(),
-        }
-        .unwrap_or_else(|| Span::file(doc.file()));
-        ctx.diags.push(
-            frontend::Diagnostic::warning("lint.scope_reentry", span, warning.to_string()).with_hint(
-                "this lint is a static over-approximation: it fires whenever a path can leave a scope and \
-                 return, and cannot tell whether a given run reaches the releasing state",
+        let (code, at, hint) = match warning {
+            ValidationWarning::ScopeReentry { at, .. } => (
+                "lint.scope_reentry",
+                at,
+                Some(
+                    "this lint is a static over-approximation: it fires whenever a path can leave a scope and \
+                     return, and cannot tell whether a given run reaches the releasing state",
+                ),
             ),
-        );
+            ValidationWarning::RunOnCancelExpansion { node } => {
+                ("lint.run_on_cancel_expansion", node, None)
+            }
+        };
+        let span = ctx
+            .spans
+            .get(at)
+            .cloned()
+            .unwrap_or_else(|| Span::file(doc.file()));
+        let mut d = frontend::Diagnostic::warning(code, span, warning.to_string());
+        if let Some(hint) = hint {
+            d = d.with_hint(hint);
+        }
+        ctx.diags.push(d);
     }
     Lowered::from_parts(graph, ctx.diags)
 }

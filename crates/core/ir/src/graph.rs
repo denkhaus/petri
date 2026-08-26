@@ -447,6 +447,13 @@ pub struct Node {
     pub budget: Budget,
     /// How many attempts this node gets. The default is one.
     pub retry: RetryPolicy,
+    /// The node may fire inside a cancelled scope (§5): its precondition is
+    /// evaluated, and absent-or-true means it runs for real. Unset — the default —
+    /// means the node completes `Cancelled` without evaluating anything, so
+    /// un-marked work can never restart after a cancel, whatever its gates say.
+    /// Kill admits nothing, flag or no flag.
+    #[serde(default)]
+    pub run_on_cancel: bool,
     /// HIR only; lowered away before execution.
     pub expand: Option<Expansion>,
 }
@@ -463,6 +470,7 @@ impl Node {
             routing: Routing::terminal(),
             budget: Budget::once(),
             retry: RetryPolicy::none(),
+            run_on_cancel: false,
             expand: None,
         }
     }
@@ -489,6 +497,12 @@ impl Node {
 
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Opt in to firing inside a cancelled scope (§5).
+    pub fn with_run_on_cancel(mut self) -> Self {
+        self.run_on_cancel = true;
         self
     }
 

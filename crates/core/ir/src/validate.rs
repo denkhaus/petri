@@ -129,6 +129,12 @@ pub enum ValidationWarning {
         /// The node outside the scope the path travels through.
         via: NodeId,
     },
+    #[error(
+        "node {node:?} sets `run_on_cancel` on an expansion node; a cancelled scope \
+         never splices, so the flag is ignored (v1). Flag the template nodes inside \
+         the region instead — clones inherit it"
+    )]
+    RunOnCancelExpansion { node: NodeId },
 }
 
 /// Everything one validation pass found. Errors block a load; warnings do not.
@@ -170,6 +176,7 @@ pub fn check(graph: &Graph) -> ValidationReport {
 pub fn check_with(graph: &Graph, registry: Option<&dyn StepKinds>) -> ValidationReport {
     let mut warnings = Vec::new();
     check_scope_reentry(graph, &mut warnings);
+    check_run_on_cancel(graph, &mut warnings);
     ValidationReport {
         errors: collect(graph, registry),
         warnings,
@@ -698,6 +705,17 @@ fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
                 at: *member,
                 via: *via,
             });
+        }
+    }
+}
+
+/// Warn where `run_on_cancel` sits on an expansion node: a cancelled scope never
+/// splices, so the flag can never admit anything there. v1 ignores it; the fix is to
+/// flag the template nodes inside the region, which clones inherit.
+fn check_run_on_cancel(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
+    for node in &graph.nodes {
+        if node.run_on_cancel && node.expand.is_some() {
+            warnings.push(ValidationWarning::RunOnCancelExpansion { node: node.id });
         }
     }
 }

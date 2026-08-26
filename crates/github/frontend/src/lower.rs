@@ -78,15 +78,22 @@ pub fn lower(wf: &Workflow<'_>, files: &dyn FileSource, diags: Diagnostics) -> L
         );
     }
     for warning in &report.warnings {
-        let span = match warning {
-            ValidationWarning::ScopeReentry { at, .. } => {
-                lw.spans.get(at).cloned().unwrap_or_default()
+        let (code, at, hint) = match warning {
+            ValidationWarning::ScopeReentry { at, .. } => (
+                "lint.scope_reentry",
+                at,
+                Some("this lint is a static over-approximation"),
+            ),
+            ValidationWarning::RunOnCancelExpansion { node } => {
+                ("lint.run_on_cancel_expansion", node, None)
             }
         };
-        lw.diags.push(
-            Diagnostic::warning("lint.scope_reentry", span, warning.to_string())
-                .with_hint("this lint is a static over-approximation"),
-        );
+        let span = lw.spans.get(at).cloned().unwrap_or_default();
+        let mut d = Diagnostic::warning(code, span, warning.to_string());
+        if let Some(hint) = hint {
+            d = d.with_hint(hint);
+        }
+        lw.diags.push(d);
     }
     Lowered::from_parts(graph, lw.diags)
 }
