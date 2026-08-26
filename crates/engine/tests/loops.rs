@@ -3,7 +3,7 @@
 
 mod support;
 
-use ir::validate::EXPR_PLACEHOLDER_KEY;
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, Budget, GraphBuilder, JoinPolicy, Outcome, RunStatus, StepRef, Value, sequential_for_each,
     validate,

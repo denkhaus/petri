@@ -7,7 +7,7 @@ use frontend::diag::{Diagnostics, Lowered, Span};
 use frontend::expr::lower::{LowerError, Roots, strict};
 use frontend::expr::{Segment, parse, split_template};
 use frontend::yaml::{Document, Mapping, Node};
-use ir::validate::EXPR_PLACEHOLDER_KEY;
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, Backoff, Budget, ExpandTarget, ExprId, ExprOrValue, ExprTable, Fallthrough, GraphBuilder,
     JoinPolicy, NodeId, RetryOn, RetryPolicy, RuntimeSpec, Scope, ScopeId, StatusKind, StepKindId,

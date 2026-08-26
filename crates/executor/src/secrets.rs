@@ -15,7 +15,7 @@ use smol_str::SmolStr;
 ///
 /// Re-exported from `ir` so there is one definition: the constructor that permits the
 /// form and the step kind that resolves it must agree.
-pub use ir::validate::SECRET_REF_KEY;
+pub use ir::placeholder::SECRET_REF_KEY;
 
 /// Values shorter than this are not masked: masking `1` or `true` would
 /// turn every log into asterisks.

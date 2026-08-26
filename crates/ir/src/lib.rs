@@ -12,19 +12,26 @@
 //! crate; side effects live behind traits in the host.
 
 pub mod builder;
-pub mod combine;
+pub mod desugar;
 pub mod expr;
+pub mod flow;
 pub mod graph;
 pub mod ids;
-pub mod loose;
-pub mod lower;
-pub mod runtime;
+pub mod placeholder;
 pub mod step;
 pub mod validate;
 
 pub use builder::{Arm, GraphBuilder};
+pub use desugar::{
+    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs, loop_exprs_over,
+    normalize_loop_heads, parallel_for_each, sequential_for_each, sequential_for_each_over,
+};
 pub use expr::{
     BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, truthy,
+};
+pub use flow::{
+    Control, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext, RunStatus, Status,
+    StatusKind, StepEvent, Token,
 };
 pub use graph::{
     Backoff, Budget, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue, Fallthrough, Graph,
@@ -33,14 +40,6 @@ pub use graph::{
 };
 pub use ids::{
     Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId,
-};
-pub use lower::{
-    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs, loop_exprs_over,
-    normalize_loop_heads, parallel_for_each, sequential_for_each, sequential_for_each_over,
-};
-pub use runtime::{
-    Control, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext, RunStatus, Status,
-    StatusKind, StepEvent, Token,
 };
 pub use step::{Digest, StepKind, StepRegistry};
 pub use validate::{

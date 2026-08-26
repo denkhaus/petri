@@ -7,7 +7,7 @@ use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
 use frontend::expr::parse;
 use frontend::yaml::Node;
-use ir::validate::EXPR_PLACEHOLDER_KEY;
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     BinOp, Budget, ExpandTarget, ExprId, ExprOrValue, GraphBuilder, NodeId, RuntimeSpec, Scope,
     ScopeId, StepRef, ValidationError, ValidationWarning, Value,
@@ -559,7 +559,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         // Step env is visible to the step's own expressions.
         let mut env_config = Map::new();
         for (key, name) in job_secret_env {
-            env_config.insert(key.clone(), json!({ ir::validate::SECRET_REF_KEY: name }));
+            env_config.insert(
+                key.clone(),
+                json!({ ir::placeholder::SECRET_REF_KEY: name }),
+            );
         }
         for (key, node) in &step.env {
             match self.env_value(node, &step_site, true) {
@@ -574,7 +577,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     );
                 }
                 Some(EnvValue::Secret(name)) => {
-                    env_config.insert(key.clone(), json!({ ir::validate::SECRET_REF_KEY: name }));
+                    env_config.insert(
+                        key.clone(),
+                        json!({ ir::placeholder::SECRET_REF_KEY: name }),
+                    );
                 }
                 None => {}
             }

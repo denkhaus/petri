@@ -149,7 +149,7 @@ fn print_config(table: &ExprTable, value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
             if let Some(id) = map
-                .get(ir::validate::EXPR_PLACEHOLDER_KEY)
+                .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
                 .and_then(|v| v.as_u64())
             {
                 return format!("${{{{ {} }}}}", print_expr(table, ExprId::new(id as u32)));

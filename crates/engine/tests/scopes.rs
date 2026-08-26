@@ -84,7 +84,7 @@ fn scope_env_reaches_the_step_config() {
     let env = b.exprs().var("env");
     b.node_mut(node).step = StepRef::new(
         NOOP,
-        json!({ "env": { ir::validate::EXPR_PLACEHOLDER_KEY: env.raw() } }),
+        json!({ "env": { ir::placeholder::EXPR_PLACEHOLDER_KEY: env.raw() } }),
     );
     let graph = b.build();
     validate(&graph).expect("valid");

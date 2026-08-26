@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use executor::secrets::SECRET_REF_KEY;
 use executor::{ExitStatus, LogLine, ProcessSpec, Sig};
+use ir::placeholder::SECRET_REF_KEY;
 use ir::{FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::Map;

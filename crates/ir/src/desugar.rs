@@ -1,4 +1,4 @@
-//! Frontend helpers for the two `for_each` shapes of §6.
+//! Desugaring: frontend helpers for the two `for_each` shapes of §6.
 //!
 //! Sequential iteration uses **no new IR**: it desugars onto back edges and
 //! generations ([`sequential_for_each`]). Parallel iteration uses [`Expansion`],

@@ -9,8 +9,8 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::expr::ExprTable;
+use crate::flow::{Status, StatusKind};
 use crate::ids::{Attempt, EdgeId, ExprId, NodeId, ScopeId, StepKindId};
-use crate::runtime::{Status, StatusKind};
 
 // ── Guards & edges ────────────────────────────────────────────────────────
 

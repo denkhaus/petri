@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use ir::validate::EXPR_PLACEHOLDER_KEY;
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Attempt, EvalEnv, EvalError, ExprId, ExprOrValue, Generation, NodeId, Outcome, RunContext,
     StaticCtx, Status, Token, Value, eval,

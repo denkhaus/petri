@@ -87,14 +87,14 @@ impl ResolvedFiring {
         inputs: Vec<Token>,
         config: Value,
     ) -> Result<Self, UnresolvedConfig> {
-        if let Some(path) = ir::validate::placeholder_path(&config) {
+        if let Some(path) = ir::placeholder::placeholder_path(&config) {
             return Err(UnresolvedConfig {
                 node,
                 path,
                 reason: BoundaryViolation::UnresolvedExpression,
             });
         }
-        if let Some(path) = ir::validate::malformed_secret_ref(&config) {
+        if let Some(path) = ir::placeholder::malformed_secret_ref(&config) {
             return Err(UnresolvedConfig {
                 node,
                 path,

@@ -28,7 +28,7 @@ let (state, commands) = apply(state, Event::RunStarted);
 | §2 routing, AND-of-XOR | `ir::graph::{Routing, SelectGroup, Guard, Fallthrough}` |
 | §3 core types | `ir::graph`, `ir::ids` |
 | §3 expressions | `ir::expr` — `Expr`, `ExprTable`, `Context`, `eval` |
-| §4 runtime types | `ir::runtime` — `Token`, `Outcome`, `Status`, `Metrics` |
+| §4 runtime types | `ir::flow` — `Token`, `Outcome`, `Status`, `Metrics` |
 | §4 firing rule | `engine::apply::try_fire` |
 | §4 quiescence | `EngineState::is_quiescent`, `apply::finish_if_quiescent` |
 | §5 engine interface | `engine::event` — `Event`, `Command`; `engine::apply::apply` |
@@ -46,7 +46,7 @@ let (state, commands) = apply(state, Event::RunStarted);
 | §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel` |
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
-| §6a sequential `for_each` | `ir::lower::sequential_for_each` — no new IR, just a cycle |
+| §6a sequential `for_each` | `ir::desugar::sequential_for_each` — no new IR, just a cycle |
 | GHA frontend mapping | `crates/engine/tests/gha.rs` |
 | §7 validation invariants | `ir::validate` — `check` for errors and warnings, `validate` for errors alone |
 | §8 reserved seams | `StepKind::fingerprint`, `Control`, `Command::{Acquire,Release}Scope`, `EventLog::version` |

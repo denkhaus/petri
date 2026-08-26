@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use ir::validate::{EXPR_PLACEHOLDER_KEY, ValidationError, ValidationWarning};
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
+
+use ir::validate::{ValidationError, ValidationWarning};
 use ir::{
     Arm, Budget, Edge, ExpandTarget, Expansion, ExprId, Graph, GraphBuilder, Guard, JoinPolicy,
     Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef, Value, validate,
@@ -614,8 +616,7 @@ fn check_reports_both_errors_and_warnings() {
 /// An unresolved placeholder is reported with its path, so a deep config says where.
 #[test]
 fn placeholder_paths_point_at_the_offending_field() {
-    use ir::validate::{contains_placeholder, placeholder_path};
-
+    use ir::placeholder::{contains_placeholder, placeholder_path};
     let config = json!({ "env": { "TOKEN": { EXPR_PLACEHOLDER_KEY: 3 } } });
     assert!(contains_placeholder(&config));
     assert_eq!(placeholder_path(&config).as_deref(), Some("env.TOKEN"));
