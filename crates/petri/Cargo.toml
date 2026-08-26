@@ -3,16 +3,18 @@ name = "petri"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The petri CLI."
-
-[[bin]]
-name = "petri"
-path = "src/main.rs"
+description = "A token-flow workflow engine: every layer, assembled."
 
 [dependencies]
 ir = { workspace = true }
+engine = { workspace = true }
+executor = { workspace = true }
+executor-host = { workspace = true }
+executor-docker = { workspace = true }
+steps = { workspace = true }
+driver = { workspace = true }
 frontend = { workspace = true }
 frontend-gha = { workspace = true }
 frontend-native = { workspace = true }
-clap = { workspace = true }
-serde_json = { workspace = true }
+async-trait = { workspace = true }
+smol_str = { workspace = true }

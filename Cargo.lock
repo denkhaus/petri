@@ -359,12 +359,28 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "petri"
 version = "0.1.0"
 dependencies = [
- "clap",
+ "async-trait",
+ "petri-driver",
+ "petri-engine",
+ "petri-executor",
+ "petri-executor-docker",
+ "petri-executor-host",
  "petri-frontend",
  "petri-frontend-gha",
  "petri-frontend-native",
  "petri-ir",
+ "petri-steps",
+ "smol_str",
+]
+
+[[package]]
+name = "petri-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "petri",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -455,7 +471,6 @@ version = "0.1.0"
 dependencies = [
  "marked-yaml",
  "petri-ir",
- "petri-steps",
  "proptest",
  "serde",
  "serde_json",

@@ -12,6 +12,7 @@ members = [
     "crates/frontend-gha",
     "crates/frontend-native",
     "crates/petri",
+    "crates/petri-cli",
     "crates/corpus",
 ]
 
@@ -31,6 +32,7 @@ driver = { package = "petri-driver", path = "crates/driver" }
 frontend = { package = "petri-frontend", path = "crates/frontend" }
 frontend-gha = { package = "petri-frontend-gha", path = "crates/frontend-gha" }
 frontend-native = { package = "petri-frontend-native", path = "crates/frontend-native" }
+petri = { path = "crates/petri" }
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
 marked-yaml = "0.8"
