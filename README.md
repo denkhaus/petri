@@ -1,7 +1,6 @@
 # Engine IR
 
-A Rust implementation of [`ir-design.md`](ir-design.md), including Core Semantics
-Patch 01 ([`core-gaps-handoff.md`](core-gaps-handoff.md)): a token-flow graph with
+A Rust implementation of [`engine-spec.md`](engine-spec.md): a token-flow graph with
 explicit routing, plus the pure state machine that executes it.
 
 ```
@@ -114,8 +113,8 @@ node. Nothing is threaded through token payloads to carry status.
 
 ## Folded back into the design document
 
-These began as implementation notes and are now rules in `ir-design.md`, because each
-follows from something the document already said rather than from a choice the code
+These began as implementation notes and are now rules in `engine-spec.md`, because
+each follows from something the design already said rather than from a choice the code
 made:
 
 - **A splice supersedes the whole template region** (§6, splice semantics). `All` is
