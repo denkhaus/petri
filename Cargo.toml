@@ -21,16 +21,16 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-ir = { path = "crates/ir" }
-engine = { path = "crates/engine" }
-executor = { path = "crates/executor" }
-executor-host = { path = "crates/executor-host" }
-executor-docker = { path = "crates/executor-docker" }
-steps = { path = "crates/steps" }
-driver = { path = "crates/driver" }
-frontend = { path = "crates/frontend" }
-frontend-gha = { path = "crates/frontend-gha" }
-frontend-native = { path = "crates/frontend-native" }
+ir = { package = "petri-ir", path = "crates/ir" }
+engine = { package = "petri-engine", path = "crates/engine" }
+executor = { package = "petri-executor", path = "crates/executor" }
+executor-host = { package = "petri-executor-host", path = "crates/executor-host" }
+executor-docker = { package = "petri-executor-docker", path = "crates/executor-docker" }
+steps = { package = "petri-steps", path = "crates/steps" }
+driver = { package = "petri-driver", path = "crates/driver" }
+frontend = { package = "petri-frontend", path = "crates/frontend" }
+frontend-gha = { package = "petri-frontend-gha", path = "crates/frontend-gha" }
+frontend-native = { package = "petri-frontend-native", path = "crates/frontend-native" }
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
 marked-yaml = "0.8"

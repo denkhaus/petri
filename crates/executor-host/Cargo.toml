@@ -1,9 +1,13 @@
 [package]
-name = "executor-host"
+name = "petri-executor-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The host executor: a workspace directory and real processes on this machine."
+
+[lib]
+# The package is `petri-executor-host`; the crate is `executor_host`, so code reads `executor_host::…`.
+name = "executor_host"
 
 [dependencies]
 executor = { workspace = true }

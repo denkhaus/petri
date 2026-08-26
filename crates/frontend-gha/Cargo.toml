@@ -1,9 +1,13 @@
 [package]
-name = "frontend-gha"
+name = "petri-frontend-gha"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "GitHub Actions workflow YAML to HIR."
+
+[lib]
+# The package is `petri-frontend-gha`; the crate is `frontend_gha`, so code reads `frontend_gha::…`.
+name = "frontend_gha"
 
 [dependencies]
 ir = { workspace = true }

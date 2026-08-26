@@ -1,9 +1,13 @@
 [package]
-name = "engine"
+name = "petri-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Pure, sans-IO token-flow state machine over the ir crate."
+
+[lib]
+# The package is `petri-engine`; the crate is `engine`, so code reads `engine::…`.
+name = "engine"
 
 [dependencies]
 ir = { workspace = true }

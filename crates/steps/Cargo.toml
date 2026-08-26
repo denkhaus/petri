@@ -1,9 +1,13 @@
 [package]
-name = "steps"
+name = "petri-steps"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Step kinds. The process step, written once against ExecEnv."
+
+[lib]
+# The package is `petri-steps`; the crate is `steps`, so code reads `steps::…`.
+name = "steps"
 
 [dependencies]
 ir = { workspace = true }

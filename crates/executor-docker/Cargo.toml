@@ -1,9 +1,13 @@
 [package]
-name = "executor-docker"
+name = "petri-executor-docker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The Docker executor: a long-lived container with the workspace bind-mounted."
+
+[lib]
+# The package is `petri-executor-docker`; the crate is `executor_docker`, so code reads `executor_docker::…`.
+name = "executor_docker"
 
 [dependencies]
 executor = { workspace = true }
