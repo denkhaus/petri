@@ -10,6 +10,7 @@ description = "Token-flow graph IR: nodes, explicit routing, joins, expressions,
 name = "ir"
 
 [dependencies]
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }

@@ -44,6 +44,10 @@ clap = { version = "4.6", features = ["derive"] }
 marked-yaml = "0.8"
 proptest = "1.11"
 libc = "0.2"
+# Full `regex`, not `regex-lite`: the `matches` builtin must accept every pattern
+# the frontends it serves validate at parse time, so this is a language-compatibility
+# decision, not a binary-size one.
+regex = "1"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

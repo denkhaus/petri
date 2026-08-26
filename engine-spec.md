@@ -294,7 +294,9 @@ checked from the entry; a function absent from the table cannot be called even
 if a match arm exists; every entry has a conformance test). 19 entries as of
 ce8de21; the code is the authoritative list. **Growth bar, documented on the
 table:** pure, total, tested, and justified by an acceptance test that cannot be
-written without it (how `split`, `sort_by_key`, `pluck` earned entry). This
+written without it (how `split`, `sort_by_key`, `pluck` earned entry — and
+`matches`, full-`regex` unanchored search, which a frontend condition grammar
+with a regex operator cannot lower without). This
 table is the target surface for the GHA `${{ }}` grammar (package 03). A
 strict/unknown-field-lint mode is a v2 seam.
 

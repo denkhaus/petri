@@ -125,6 +125,14 @@ pub const BUILTINS: &[Builtin] = &[
         arity: 2,
         summary: "membership in an array, object keys, or a substring",
     },
+    // Full `regex` semantics, unanchored search, compiled per evaluation: a frontend
+    // that validates patterns at parse time must never have the core reject one at
+    // runtime, which is why this is `regex` and not `regex-lite`.
+    Builtin {
+        name: "matches",
+        arity: 2,
+        summary: "regex search in a string",
+    },
     Builtin {
         name: "concat",
         arity: 2,
@@ -336,6 +344,25 @@ pub(super) fn eval_call(
                 Value::String(s) => needle.as_str().is_some_and(|n| s.contains(n)),
                 other => return Err(type_err("contains", "array, object or string", other)),
             }))
+        }
+        "matches" => {
+            let (text, pattern) = (arg(0)?, arg(1)?);
+            let text = text
+                .as_str()
+                .ok_or_else(|| type_err("matches", "a string", &text))?;
+            let pattern = pattern
+                .as_str()
+                .ok_or_else(|| type_err("matches", "a string pattern", &pattern))?;
+            // Unanchored search, like `Regex::is_match` everywhere: a pattern that
+            // wants anchoring writes its own `^` and `$`. Compiled per evaluation —
+            // deterministic and pure; a cache would need interior mutability the
+            // table deliberately does not have.
+            let re = regex::Regex::new(pattern).map_err(|e| EvalError::Type {
+                op: SmolStr::new("matches"),
+                expected: SmolStr::new("a valid regex pattern"),
+                got: SmolStr::new(format!("an invalid pattern ({e})")),
+            })?;
+            Ok(Value::Bool(re.is_match(text)))
         }
         "get" => Ok(index_into(&arg(0)?, &arg(1)?)),
         "default" => {

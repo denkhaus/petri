@@ -376,6 +376,123 @@ fn split_turns_output_into_a_list() {
     ));
 }
 
+/// `matches`: regex search in a string — the one builtin a frontend condition
+/// grammar with a regex operator (`context.version matches ^v\d+`) forces.
+#[test]
+fn matches_searches_a_string() {
+    let mut t = ExprTable::new();
+    let text = t.var("text");
+    let version = t.lit(r"^v\d+");
+    let versioned = t.call("matches", vec![text, version]);
+
+    let c = ctx(&[("text", json!("v12.3"))]);
+    assert_eq!(eval(&t, versioned, &c.env()).unwrap(), json!(true));
+    let c = ctx(&[("text", json!("release-v12"))]);
+    assert_eq!(
+        eval(&t, versioned, &c.env()).unwrap(),
+        json!(false),
+        "the pattern's own anchor holds"
+    );
+
+    // Unanchored by default: a bare pattern searches anywhere in the string.
+    let bare = t.lit(r"v\d+");
+    let anywhere = t.call("matches", vec![text, bare]);
+    assert_eq!(eval(&t, anywhere, &c.env()).unwrap(), json!(true));
+
+    // Character classes.
+    let sha = t.lit(r"^[0-9a-f]{7}$");
+    let is_sha = t.call("matches", vec![text, sha]);
+    let c = ctx(&[("text", json!("902a62e"))]);
+    assert_eq!(eval(&t, is_sha, &c.env()).unwrap(), json!(true));
+    let c = ctx(&[("text", json!("not-a-sha"))]);
+    assert_eq!(eval(&t, is_sha, &c.env()).unwrap(), json!(false));
+}
+
+/// `matches` is total: bad inputs are typed errors, never panics.
+#[test]
+fn matches_rejects_bad_inputs_with_typed_errors() {
+    let mut t = ExprTable::new();
+
+    // Non-string text is a type error, consistent with `contains`. Coercion is the
+    // lowering's job (see the equivalence test below).
+    let number = t.lit(7);
+    let any = t.lit(".*");
+    let non_string = t.call("matches", vec![number, any]);
+    assert!(matches!(
+        eval(&t, non_string, &empty().env()),
+        Err(EvalError::Type { .. })
+    ));
+
+    // An invalid pattern is a typed error, never a panic. Frontends validate
+    // patterns at parse time, so runtime never sees one; totality holds anyway.
+    let text = t.lit("abc");
+    let unclosed = t.lit("(unclosed");
+    let invalid = t.call("matches", vec![text, unclosed]);
+    assert!(matches!(
+        eval(&t, invalid, &empty().env()),
+        Err(EvalError::Type { .. })
+    ));
+
+    let numeric_pattern = t.lit(1);
+    let bad_pattern = t.call("matches", vec![text, numeric_pattern]);
+    assert!(matches!(
+        eval(&t, bad_pattern, &empty().env()),
+        Err(EvalError::Type { .. })
+    ));
+
+    let one_arg = t.call("matches", vec![text]);
+    assert!(matches!(
+        eval(&t, one_arg, &empty().env()),
+        Err(EvalError::Arity { .. })
+    ));
+}
+
+/// The fabro condition lowering is `matches(to_string(default(v, "")), pattern)`:
+/// `default` supplies fabro's null-and-missing -> `""` rule, and `to_string`
+/// renders the rest exactly as fabro's `json_value_to_string` does — booleans and
+/// numbers as text, arrays and objects as JSON. Pinned per value kind with fully
+/// anchored patterns, so a drift in any rendering fails here.
+#[test]
+fn matches_lowering_coerces_like_fabro() {
+    let mut t = ExprTable::new();
+
+    let cases: &[(Value, &str, bool)] = &[
+        (Value::Null, "^$", true), // null renders as ""
+        (Value::Null, "x", false),
+        (json!(true), "^true$", true), // booleans as text
+        (json!(false), "^false$", true),
+        (json!(42), "^42$", true), // numbers as text
+        (json!(4.5), r"^4\.5$", true),
+        (json!(["a", "b"]), r#"^\["a","b"\]$"#, true), // arrays as JSON
+        (json!({"k": 1}), r#"^\{"k":1\}$"#, true),     // objects as JSON
+    ];
+    for (bound, pattern, want) in cases {
+        let value = t.var("value");
+        let empty_string = t.lit("");
+        let defaulted = t.call("default", vec![value, empty_string]);
+        let text = t.call("to_string", vec![defaulted]);
+        let pat = t.lit(*pattern);
+        let call = t.call("matches", vec![text, pat]);
+        let c = ctx(&[("value", bound.clone())]);
+        assert_eq!(
+            eval(&t, call, &c.env()).unwrap(),
+            json!(*want),
+            "{bound} against {pattern}"
+        );
+    }
+
+    // The missing case: an absent field evaluates to null, and the lowering renders
+    // it as "" like fabro renders a missing context path.
+    let missing = t.path("input", &["version"]);
+    let empty_string = t.lit("");
+    let defaulted = t.call("default", vec![missing, empty_string]);
+    let text = t.call("to_string", vec![defaulted]);
+    let empty_pattern = t.lit("^$");
+    let call = t.call("matches", vec![text, empty_pattern]);
+    let c = empty().with_token(json!({}));
+    assert_eq!(eval(&t, call, &c.env()).unwrap(), json!(true));
+}
+
 /// The function table gates dispatch, so it cannot drift from the implementation:
 /// every entry must evaluate, and a name that is not an entry must be unknown.
 #[test]
