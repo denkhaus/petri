@@ -193,6 +193,21 @@ pub fn assert_replay_identical(graph: &Graph, report: &RunReport) {
     }
 }
 
+/// Exactly one terminal `StepFinished` per firing, however many cancels, kills,
+/// timeouts, or step returns raced to produce one.
+pub fn assert_one_terminal_per_firing(report: &RunReport) {
+    let mut finishes: BTreeMap<u64, usize> = BTreeMap::new();
+    for event in report.state.log.events() {
+        if let engine::Event::StepFinished { firing, .. } = event {
+            *finishes.entry(firing.raw()).or_default() += 1;
+        }
+    }
+    assert!(
+        finishes.values().all(|n| *n == 1),
+        "one terminal event per firing: {finishes:?}"
+    );
+}
+
 pub async fn docker_available() -> bool {
     DockerExecutor::is_available().await
 }

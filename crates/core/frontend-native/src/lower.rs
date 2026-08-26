@@ -11,7 +11,7 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, Backoff, Budget, ExpandTarget, ExprId, ExprOrValue, ExprTable, Fallthrough, GraphBuilder,
     JoinPolicy, NodeId, RetryOn, RetryPolicy, RuntimeSpec, Scope, ScopeId, StatusKind, StepRef,
-    ValidationError, ValidationWarning, WorkspacePolicy,
+    ValidationError, WorkspacePolicy,
 };
 use serde_json::{Map, Value};
 use smol_str::SmolStr;
@@ -202,26 +202,13 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
         ctx.diags.push(d);
     }
     for warning in &report.warnings {
-        let (code, at, hint) = match warning {
-            ValidationWarning::ScopeReentry { at, .. } => (
-                "lint.scope_reentry",
-                at,
-                Some(
-                    "this lint is a static over-approximation: it fires whenever a path can leave a scope and \
-                     return, and cannot tell whether a given run reaches the releasing state",
-                ),
-            ),
-            ValidationWarning::RunOnCancelExpansion { node } => {
-                ("lint.run_on_cancel_expansion", node, None)
-            }
-        };
         let span = ctx
             .spans
-            .get(at)
+            .get(&warning.at())
             .cloned()
             .unwrap_or_else(|| Span::file(doc.file()));
-        let mut d = frontend::Diagnostic::warning(code, span, warning.to_string());
-        if let Some(hint) = hint {
+        let mut d = frontend::Diagnostic::warning(warning.code(), span, warning.to_string());
+        if let Some(hint) = warning.hint() {
             d = d.with_hint(hint);
         }
         ctx.diags.push(d);

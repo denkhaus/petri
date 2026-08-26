@@ -232,11 +232,5 @@ while :; do sleep 0.1; done
     assert_eq!(report.status, RunStatus::Cancelled);
 
     // Exactly one terminal event for the firing, however many cancels arrived.
-    let finishes = report
-        .state
-        .log
-        .events()
-        .filter(|e| matches!(e, engine::Event::StepFinished { .. }))
-        .count();
-    assert_eq!(finishes, 1, "exactly one terminal StepFinished per firing");
+    assert_one_terminal_per_firing(&report);
 }

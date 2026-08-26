@@ -11,7 +11,7 @@ use frontend::yaml::Node;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     BinOp, Budget, ExpandTarget, ExprId, ExprOrValue, GraphBuilder, NodeId, RuntimeSpec, Scope,
-    ScopeId, StepRef, ValidationError, ValidationWarning, Value,
+    ScopeId, StepRef, ValidationError, Value,
 };
 use serde_json::{Map, json};
 use smol_str::SmolStr;
@@ -78,19 +78,9 @@ pub fn lower(wf: &Workflow<'_>, files: &dyn FileSource, diags: Diagnostics) -> L
         );
     }
     for warning in &report.warnings {
-        let (code, at, hint) = match warning {
-            ValidationWarning::ScopeReentry { at, .. } => (
-                "lint.scope_reentry",
-                at,
-                Some("this lint is a static over-approximation"),
-            ),
-            ValidationWarning::RunOnCancelExpansion { node } => {
-                ("lint.run_on_cancel_expansion", node, None)
-            }
-        };
-        let span = lw.spans.get(at).cloned().unwrap_or_default();
-        let mut d = Diagnostic::warning(code, span, warning.to_string());
-        if let Some(hint) = hint {
+        let span = lw.spans.get(&warning.at()).cloned().unwrap_or_default();
+        let mut d = Diagnostic::warning(warning.code(), span, warning.to_string());
+        if let Some(hint) = warning.hint() {
             d = d.with_hint(hint);
         }
         lw.diags.push(d);
@@ -1081,39 +1071,24 @@ impl<'w, 'a> Lowering<'w, 'a> {
             let success = site.status_function(self.b.exprs(), "success", at_step);
             return Some(self.b.exprs().binary(BinOp::And, success, lit));
         }
-        let text = scalar.as_str();
-        let source = if text.contains("${{") {
-            match frontend::expr::split_template(text) {
-                Ok(segments) => match segments.as_slice() {
-                    [frontend::expr::Segment::Expr { source, .. }] => source.clone(),
-                    _ => {
-                        self.diags.error(
-                            "expr.mixed_condition",
-                            node.span(),
-                            "an `if` is one expression, bare or in a single `${{ }}`",
-                        );
-                        return None;
-                    }
-                },
-                Err(_) => {
-                    self.diags
-                        .error("expr.unterminated", node.span(), "unterminated `${{`");
-                    return None;
-                }
+        let source = match if_expr_source(scalar.as_str()) {
+            Ok(source) => source,
+            Err(IfTemplateError::Mixed) => {
+                self.diags.error(
+                    "expr.mixed_condition",
+                    node.span(),
+                    "an `if` is one expression, bare or in a single `${{ }}`",
+                );
+                return None;
             }
-        } else {
-            text.to_string()
+            Err(IfTemplateError::Unterminated) => {
+                self.diags
+                    .error("expr.unterminated", node.span(), "unterminated `${{`");
+                return None;
+            }
         };
-        let uses_status_function = parse(&source)
-            .map(|ast| {
-                ast.calls().iter().any(|c| {
-                    matches!(
-                        c.to_lowercase().as_str(),
-                        "success" | "failure" | "cancelled" | "always"
-                    )
-                })
-            })
-            .unwrap_or(false);
+        let uses_status_function =
+            if_calls_any(&source, &["success", "failure", "cancelled", "always"]);
         let lowered = lower_scalar(
             &format!("${{{{ {source} }}}}"),
             span,
@@ -1282,38 +1257,57 @@ enum EnvValue {
     Secret(String),
 }
 
+/// Why an `if:` text holds no single expression. `condition` turns these into
+/// diagnostics; `names_cleanup` reads them as false.
+enum IfTemplateError {
+    /// Text mixed with `${{ }}`, or more than one `${{ }}`.
+    Mixed,
+    /// An unterminated `${{`.
+    Unterminated,
+}
+
+/// The one expression an `if:` string holds: the text itself, or the body of its
+/// single `${{ }}`. Both readers of an `if:` go through here, so they cannot
+/// disagree on what counts as one expression.
+fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
+    if !text.contains("${{") {
+        return Ok(text.to_string());
+    }
+    match frontend::expr::split_template(text) {
+        Ok(segments) => match segments.as_slice() {
+            [frontend::expr::Segment::Expr { source, .. }] => Ok(source.clone()),
+            _ => Err(IfTemplateError::Mixed),
+        },
+        Err(_) => Err(IfTemplateError::Unterminated),
+    }
+}
+
+/// Whether the expression calls any of these functions. Parse problems read as
+/// false.
+fn if_calls_any(source: &str, names: &[&str]) -> bool {
+    parse(source)
+        .map(|ast| {
+            ast.calls()
+                .iter()
+                .any(|c| names.contains(&c.to_lowercase().as_str()))
+        })
+        .unwrap_or(false)
+}
+
 /// Whether an `if:` names `always()` or `cancelled()` — the conditions GitHub
 /// still honours after a cancellation, and therefore where `run_on_cancel`
 /// belongs. Parse problems read as false; `condition` reports them.
 fn names_cleanup(node: Option<Node<'_>>) -> bool {
-    let Some(node) = node else {
-        return false;
-    };
-    let Some(scalar) = node.as_scalar() else {
+    let Some(scalar) = node.and_then(|n| n.as_scalar()) else {
         return false;
     };
     if scalar.as_bool().is_some() {
         return false;
     }
-    let text = scalar.as_str();
-    let source = if text.contains("${{") {
-        match frontend::expr::split_template(text) {
-            Ok(segments) => match segments.as_slice() {
-                [frontend::expr::Segment::Expr { source, .. }] => source.clone(),
-                _ => return false,
-            },
-            Err(_) => return false,
-        }
-    } else {
-        text.to_string()
+    let Ok(source) = if_expr_source(scalar.as_str()) else {
+        return false;
     };
-    parse(&source)
-        .map(|ast| {
-            ast.calls()
-                .iter()
-                .any(|c| matches!(c.to_lowercase().as_str(), "always" | "cancelled"))
-        })
-        .unwrap_or(false)
+    if_calls_any(&source, &["always", "cancelled"])
 }
 
 fn variant(error: &ValidationError) -> &'static str {

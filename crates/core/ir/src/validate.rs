@@ -137,6 +137,35 @@ pub enum ValidationWarning {
     RunOnCancelExpansion { node: NodeId },
 }
 
+impl ValidationWarning {
+    /// The diagnostic code a frontend reports this warning under.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ScopeReentry { .. } => "lint.scope_reentry",
+            Self::RunOnCancelExpansion { .. } => "lint.run_on_cancel_expansion",
+        }
+    }
+
+    /// The node a frontend anchors the diagnostic's span to.
+    pub fn at(&self) -> NodeId {
+        match self {
+            Self::ScopeReentry { at, .. } => *at,
+            Self::RunOnCancelExpansion { node } => *node,
+        }
+    }
+
+    /// A hint to attach beneath the message, if the warning has one.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::ScopeReentry { .. } => Some(
+                "this lint is a static over-approximation: it fires whenever a path can leave a scope and \
+                 return, and cannot tell whether a given run reaches the releasing state",
+            ),
+            Self::RunOnCancelExpansion { .. } => None,
+        }
+    }
+}
+
 /// Everything one validation pass found. Errors block a load; warnings do not.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ValidationReport {

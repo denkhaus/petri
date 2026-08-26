@@ -183,35 +183,50 @@ impl Executor for HostExecutor {
         // Process groups first, workspace second — a straggler may still be
         // writing into it. Groups are cleaned whatever the retention policy says
         // about the workspace: retention keeps files, never processes.
-        for mut group in groups {
-            // One SIGKILL, sent while the sentinel — alive or zombie — still pins
-            // the id, so it cannot reach a recycled group.
-            //
-            // SAFETY: killpg takes a pgid and a signal number and has no memory
-            // effects. Errors are ignored: an unsignallable member (root-owned)
-            // is caught by the observation below.
+        //
+        // One SIGKILL per group, each sent while its sentinel — alive or zombie —
+        // still pins the id, so none can reach a recycled group. All groups are
+        // killed before any is observed, so a straggler in one never delays the
+        // kill of the next.
+        //
+        // SAFETY: killpg takes a pgid and a signal number and has no memory
+        // effects. Errors are ignored: an unsignallable member (root-owned) is
+        // caught by the observation below.
+        for group in &groups {
             unsafe {
                 libc::killpg(group.pgid, libc::SIGKILL);
             }
-            // Reap the sentinel. Only after this can the kernel recycle the id,
-            // which is why nothing below ever signals the group again.
+        }
+        // Reap the sentinels. Only after this can the kernel recycle the ids,
+        // which is why nothing below ever signals a group again.
+        let mut pending = Vec::new();
+        for mut group in groups {
             let _ = group.sentinel.wait().await;
-            // Observe group death — non-signalling, bounded. Members our KILL
-            // reached are zombies at worst (init reaps them); only live members
-            // count, and one that outlives the deadline is a leak to report.
-            let deadline = tokio::time::Instant::now() + OBSERVE_DEADLINE;
-            loop {
-                if live_group_members(group.pgid) == 0 {
-                    report = report.released(format!("process group {}", group.pgid));
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    report =
-                        report.problem(format!("process group {} outlived release", group.pgid));
-                    break;
-                }
-                tokio::time::sleep(LIVENESS_POLL).await;
+            pending.push(group.pgid);
+        }
+        // Observe group death — non-signalling, all groups under one shared
+        // deadline. Members our KILL reached are zombies at worst (init reaps
+        // them); only live members count, and a group that outlives the deadline
+        // is a leak to report.
+        let deadline = tokio::time::Instant::now() + OBSERVE_DEADLINE;
+        while !pending.is_empty() {
+            let (dead, live): (Vec<i32>, Vec<i32>) = pending
+                .into_iter()
+                .partition(|&pgid| live_group_members(pgid) == 0);
+            for pgid in dead {
+                report = report.released(format!("process group {pgid}"));
             }
+            pending = live;
+            if pending.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                for &pgid in &pending {
+                    report = report.problem(format!("process group {pgid} outlived release"));
+                }
+                break;
+            }
+            tokio::time::sleep(LIVENESS_POLL).await;
         }
 
         let workspace = format!("workspace {}", path.display());
@@ -378,7 +393,7 @@ impl ProcessHandle for HostProcess {
                 self.status = Some(status);
                 return Ok(status);
             }
-            if live_group_members(self.pgid) == 0 {
+            if !group_is_live(self.pgid) {
                 // The sentinel died without recording — our KILL, or a hostile
                 // workload's. One more read covers a rename that landed between
                 // the two checks.
@@ -431,6 +446,29 @@ fn decode_status(code: i32) -> ExitStatus {
     } else {
         ExitStatus::code(code)
     }
+}
+
+/// Whether the group still has a live member, probed cheaply through the
+/// sentinel first. `wait` runs this every poll tick for a step's whole natural
+/// duration, and while the executor holds the sentinel unreaped its pid — the
+/// pgid — cannot be recycled, so the probe is the sentinel itself: alive means
+/// the group is alive without enumerating it. Only a dead or zombie sentinel —
+/// our KILL, or a hostile workload's — makes the full listing necessary.
+fn group_is_live(pgid: i32) -> bool {
+    sentinel_is_live(pgid) || live_group_members(pgid) > 0
+}
+
+/// One `/proc/<pgid>/stat` read: the sentinel, live and still leading the group.
+#[cfg(target_os = "linux")]
+fn sentinel_is_live(pgid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pgid}/stat"))
+        .is_ok_and(|stat| stat_is_live_in_group(&stat, pgid))
+}
+
+/// One libproc query: the sentinel, not yet a zombie.
+#[cfg(target_os = "macos")]
+fn sentinel_is_live(pgid: i32) -> bool {
+    unsafe { is_live(pgid) }
 }
 
 /// How many *live* processes remain in the group. Non-signalling, and zombies do

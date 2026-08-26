@@ -166,10 +166,6 @@ pub struct Driver {
     scope_failed: HashSet<ScopeId>,
     tasks: HashMap<FiringId, Task>,
     releases: Vec<JoinHandle<ReleaseReport>>,
-    /// How many root cancels have arrived. The first is polite; the second is a
-    /// kill. The driver never decides to stop the run by itself beyond this
-    /// count: it feeds events and the core decides.
-    root_cancels: u32,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer: Option<JoinHandle<()>>,
     tx: mpsc::Sender<Signal>,
@@ -199,7 +195,6 @@ impl Driver {
             scope_failed: HashSet::new(),
             tasks: HashMap::new(),
             releases: Vec::new(),
-            root_cancels: 0,
             cleanup_timer: None,
             tx,
             rx,
@@ -284,10 +279,11 @@ impl Driver {
     /// `CancelRequested` and arms the cleanup-grace timer; expiry, or another
     /// root cancel (a CLI maps a second Ctrl-C to it), feeds `KillRequested`.
     /// Both are ordinary External events, so the hard stop is in the log and
-    /// replay reproduces it.
+    /// replay reproduces it. The engine's own state says which tier this is —
+    /// `is_cancelled` is set by exactly the root cancel and the root kill — so
+    /// the driver keeps no count of its own.
     async fn on_root_cancel(&mut self) {
-        self.root_cancels += 1;
-        if self.root_cancels > 1 {
+        if self.engine.is_cancelled() {
             self.kill_root().await;
             return;
         }

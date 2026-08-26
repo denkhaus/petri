@@ -26,20 +26,6 @@ fn cleanup_graph(cleanup_script: &str) -> ir::Graph {
     graph
 }
 
-/// Exactly one terminal `StepFinished` per firing, whatever arrived.
-fn assert_one_terminal_per_firing(report: &driver::RunReport) {
-    let mut finishes: std::collections::BTreeMap<u64, usize> = Default::default();
-    for event in report.state.log.events() {
-        if let Event::StepFinished { firing, .. } = event {
-            *finishes.entry(firing.raw()).or_default() += 1;
-        }
-    }
-    assert!(
-        finishes.values().all(|n| *n == 1),
-        "one terminal event per firing: {finishes:?}"
-    );
-}
-
 /// The log's one `KillRequested`, which must be External, with nothing starting
 /// after it.
 fn assert_kill_in_log(report: &driver::RunReport) {

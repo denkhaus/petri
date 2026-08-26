@@ -957,38 +957,7 @@ fn on_cancel(
     cmds: &mut Vec<Command>,
     queue: &mut VecDeque<Event>,
 ) {
-    let closure = state.cancel_scope_closure(scope);
-    for id in &closure {
-        state.mark_scope_cancelled(*id);
-    }
-    if scope == CancelScopeId::ROOT {
-        state.mark_cancelled();
-    }
-
-    let root = scope == CancelScopeId::ROOT;
-    let doomed: Vec<Firing> = state
-        .live_firings()
-        .filter(|f| root || closure.contains(&f.cancel_scope))
-        .cloned()
-        .collect();
-    for firing in doomed {
-        // A firing waiting out a retry backoff has no work in flight and no driver
-        // task to deliver to, so the core settles it at once: recorded and routed.
-        if firing.awaiting_retry {
-            settle_awaiting_retry(state, &firing, true, queue);
-            continue;
-        }
-        if let Some(f) = state.firing_mut(firing.id) {
-            if f.cancelling {
-                continue;
-            }
-            f.cancelling = true;
-        }
-        cmds.push(Command::DeliverControl {
-            firing: firing.id,
-            ctl: Control::Cancel,
-        });
-    }
+    stop_scope(state, scope, false, cmds, queue);
 }
 
 /// The forced tier: the pre-v3 cancel behavior, kept under its own event. Tokens
@@ -1000,18 +969,38 @@ fn on_kill(
     cmds: &mut Vec<Command>,
     queue: &mut VecDeque<Event>,
 ) {
+    stop_scope(state, scope, true, cmds, queue);
+}
+
+/// Both tiers share one shape — mark the closure, doom its live firings — and
+/// differ only where the spec says they do: a kill drops tokens, routes nothing,
+/// and reaches firings the polite tier already signalled.
+fn stop_scope(
+    state: &mut EngineState,
+    scope: CancelScopeId,
+    kill: bool,
+    cmds: &mut Vec<Command>,
+    queue: &mut VecDeque<Event>,
+) {
     let closure = state.cancel_scope_closure(scope);
     for id in &closure {
-        state.mark_scope_killed(*id);
+        if kill {
+            state.mark_scope_killed(*id);
+        } else {
+            state.mark_scope_cancelled(*id);
+        }
     }
-
     let root = scope == CancelScopeId::ROOT;
     if root {
         state.mark_cancelled();
-        state.drop_all_tokens();
-    } else {
-        let nodes = state.nodes_in_scopes(&closure);
-        state.drop_tokens_for_nodes(&nodes);
+    }
+    if kill {
+        if root {
+            state.drop_all_tokens();
+        } else {
+            let nodes = state.nodes_in_scopes(&closure);
+            state.drop_tokens_for_nodes(&nodes);
+        }
     }
 
     let doomed: Vec<Firing> = state
@@ -1020,18 +1009,24 @@ fn on_kill(
         .cloned()
         .collect();
     for firing in doomed {
+        // A firing waiting out a retry backoff has no work in flight and no driver
+        // task to deliver to, so the core settles it at once: recorded — and, under
+        // a cancel only, routed.
         if firing.awaiting_retry {
-            settle_awaiting_retry(state, &firing, false, queue);
+            settle_awaiting_retry(state, &firing, !kill, queue);
             continue;
         }
-        // No `cancelling` skip: a plain Cancel cannot say "skip the ladder", so the
-        // kill reaches firings the polite tier already signalled.
         if let Some(f) = state.firing_mut(firing.id) {
+            // Only the polite tier skips already-cancelling firings: a plain Cancel
+            // cannot say "skip the ladder", so a kill reaches them too.
+            if !kill && f.cancelling {
+                continue;
+            }
             f.cancelling = true;
         }
         cmds.push(Command::DeliverControl {
             firing: firing.id,
-            ctl: Control::Kill,
+            ctl: if kill { Control::Kill } else { Control::Cancel },
         });
     }
 }

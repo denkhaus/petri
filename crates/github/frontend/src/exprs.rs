@@ -220,17 +220,16 @@ impl Site {
                 table.unary(UnOp::Not, bad)
             }
             ("failure", true) => self.earlier_step_failed(table),
-            ("cancelled", true) => {
-                let earlier = self.earlier_step_cancelled(table);
-                let scoped = table.var("scope_cancelled");
-                table.binary(BinOp::Or, earlier, scoped)
-            }
             ("success", false) => self.needs_succeeded(table),
             ("failure", false) => self.needs_failed(table),
-            ("cancelled", false) => {
-                let needs = self.needs_cancelled(table);
+            ("cancelled", _) => {
+                let base = if at_step {
+                    self.earlier_step_cancelled(table)
+                } else {
+                    self.needs_cancelled(table)
+                };
                 let scoped = table.var("scope_cancelled");
-                table.binary(BinOp::Or, needs, scoped)
+                table.binary(BinOp::Or, base, scoped)
             }
             _ => table.lit(false),
         }

@@ -133,6 +133,11 @@ pub struct EngineState {
     live: BTreeMap<FiringId, Firing>,
     firing_counts: BTreeMap<NodeId, u32>,
     history: Vec<FiringRecord>,
+    /// Firings whose latest recorded outcome is `Cancelled` — the admission check
+    /// runs per token, so this is kept alongside `history` rather than scanned out
+    /// of it.
+    #[serde(default)]
+    cancelled_outcomes: BTreeSet<FiringId>,
     /// Run-scoped state expressions read as `nodes.*` and `kv.*`.
     ///
     /// Derived: every write happens in `apply`, in event order, so replaying the log
@@ -203,6 +208,7 @@ impl EngineState {
             live: BTreeMap::new(),
             firing_counts: BTreeMap::new(),
             history: Vec::new(),
+            cancelled_outcomes: BTreeSet::new(),
             run: RunContext::new(),
             cancel_scopes,
             node_cancel_scope: BTreeMap::new(),
@@ -487,6 +493,11 @@ impl EngineState {
             },
         );
         self.run.merge(&record.outcome.context_updates);
+        if matches!(record.outcome.status, Status::Cancelled) {
+            self.cancelled_outcomes.insert(record.firing);
+        } else {
+            self.cancelled_outcomes.remove(&record.firing);
+        }
         self.history.push(record);
     }
 
@@ -562,19 +573,24 @@ impl EngineState {
             .is_some_and(|scope| scope.cancelled)
     }
 
-    /// Whether the node sits in a cancelled scope.
-    pub(crate) fn is_node_cancelled(&self, node: NodeId) -> bool {
-        if self.cancelled {
-            return true;
-        }
+    /// Whether any scope on the node's chain, innermost to root, satisfies `pred`.
+    fn any_enclosing_scope(&self, node: NodeId, pred: impl Fn(&CancelScope) -> bool) -> bool {
         let mut current = Some(self.cancel_scope_of(node));
         while let Some(id) = current {
-            if self.is_scope_cancelled(id) {
+            let Some(scope) = self.cancel_scopes.get(&id) else {
+                return false;
+            };
+            if pred(scope) {
                 return true;
             }
-            current = self.cancel_scopes.get(&id).and_then(|s| s.parent);
+            current = scope.parent;
         }
         false
+    }
+
+    /// Whether the node sits in a cancelled scope.
+    pub(crate) fn is_node_cancelled(&self, node: NodeId) -> bool {
+        self.cancelled || self.any_enclosing_scope(node, |scope| scope.cancelled)
     }
 
     /// Mark a scope killed. Killed implies cancelled.
@@ -585,33 +601,16 @@ impl EngineState {
         }
     }
 
-    pub(crate) fn is_scope_killed(&self, id: CancelScopeId) -> bool {
-        self.cancel_scopes
-            .get(&id)
-            .is_some_and(|scope| scope.killed)
-    }
-
     /// Whether the node sits in a killed scope. A root kill marks the root scope,
     /// and every node's scope chain ends there, so no separate run flag is needed.
     pub(crate) fn is_node_killed(&self, node: NodeId) -> bool {
-        let mut current = Some(self.cancel_scope_of(node));
-        while let Some(id) = current {
-            if self.is_scope_killed(id) {
-                return true;
-            }
-            current = self.cancel_scopes.get(&id).and_then(|s| s.parent);
-        }
-        false
+        self.any_enclosing_scope(node, |scope| scope.killed)
     }
 
     /// Whether this firing's recorded final outcome is `Cancelled`. Seed tokens
     /// carry `FiringId(0)`, which no record ever uses.
     pub(crate) fn outcome_was_cancelled(&self, firing: FiringId) -> bool {
-        self.history
-            .iter()
-            .rev()
-            .find(|r| r.firing == firing)
-            .is_some_and(|r| matches!(r.outcome.status, Status::Cancelled))
+        self.cancelled_outcomes.contains(&firing)
     }
 
     pub(crate) fn add_retry_tombstone(&mut self, firing: FiringId) {
