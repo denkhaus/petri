@@ -300,6 +300,23 @@ regeneration is the determinism assertion, not redundancy. Arrival order at the
 driver's single mpsc is canonical; all wall-clock nondeterminism (completion
 order, retry timing, races) is captured in External events.
 
+**Observers.** The driver's `EventObserver` is the host-facing record stream:
+every appended record, External and Core, in seq order, exactly once per
+driver lifetime — at-least-once across a resume, deduped by `(log identity,
+seq)` (`seq` is per-log; the identity is host-named, stable across resume,
+fresh per fork) — with the post-apply `EngineState` alongside, so a consumer
+resolves a firing to its node, name and `meta` in place
+(`EngineState::firing_node`, which searches live firings and history both). A
+callback, deliberately not a broadcast channel: broadcast drops on lag, and a
+store ingest must never lose a record.
+
+**Persistence surface.** The core's whole persistence surface is `EventLog`'s
+serde plus `EventLog::try_from_records(version, records)` (version checked
+under the standing no-migrator policy; seqs contiguous from 0). How records
+are framed and stored is the host's business; the stock run-dir file
+convention (`events.jsonl` + `graph.json`) is the standalone petri host's own
+and is documented with it, not here.
+
 **ResolvedFiring** is the fully-bound payload of `StartStep` — the "second IR",
 scoped to a firing (the graph itself is the **live graph**, mutated by
 splices; "HIR-ness" is a per-node property). Constructor invariant, enforced in
@@ -392,7 +409,13 @@ to steps); StepKind owns step semantics and never mentions host-vs-Docker.
 per-attempt timeout timers (expiry → cancellation ladder → `TimedOut`); retry
 jitter + sleep → `RetryElapsed`; hard deadline after `Control::Cancel` of
 `grace + 5s`, then task abort and synthesized `Cancelled` with
-`cancel_escalation: "cancel_forced"`. `release` never fails the run.
+`cancel_escalation: "cancel_forced"`. `release` never fails the run. Observers
+are notified after every apply, and the driver awaits every observer's
+`finish` before building the report; observer failures surface in
+`RunReport.observer_errors` and never change the run status (a host with
+fatal-sink semantics watches its own observer and cancels via `RunHandle`).
+The stock petri host persists a post-mask run dir through an observer battery;
+details live with that host, not here.
 
 **Delivery.** A `DeliverControl{Deliver}` only forwards to the firing's control
 channel — no deadline, no reason: a delivered value never starts the
@@ -468,9 +491,19 @@ spawn-time via `SecretProvider` directly into the child env. `$secret` is valid
 only in env-shaped positions (`secret_misplaced` otherwise); secrets are absent
 from `EvalEnv` — guards cannot read them by construction. Masking (exact-match
 → `***`, min length 6, multiline masked per line) applies before append to:
-`StepEvent::Log` lines, and all string values in `Outcome.output` and
-`context_updates`. Encoded variants (base64/urlencoded) are a documented v2
-gap.
+`StepEvent::Log` lines, `StepEvent::Artifact` names and uris, and all string
+values in `StepEvent::Custom`, `Outcome.output` and `context_updates`. Encoded
+variants (base64/urlencoded) are a documented v2 gap.
+
+`Graph.params` are recorded data: a raw secret value never belongs in them —
+the graph is persisted as it ran (replay needs it byte-exact, so a masked copy
+would be a different graph), and this contract is what makes that safe. The
+standalone petri host adds a checkable backstop: if the masker already
+recognizes a value in the serialized graph, it refuses to start the run rather
+than persist. Exact-value masking of registered values is the driver's job;
+pattern-based redaction beyond registered values is the **emitting step's**
+job before it sends — a product's redaction policy does not belong in the
+core.
 
 A sensitive `Deliver` payload crosses the same way: `{"$secret": "answer:<id>"}`
 in the event (the log keeps the reference), resolved by the driver at

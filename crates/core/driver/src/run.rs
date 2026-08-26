@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::jitter::jittered;
+use crate::observe::{EventObserver, ObserveError};
 use crate::sink::LogSink;
 
 /// The failure class recorded when the driver had to abort a step that ignored
@@ -95,6 +96,9 @@ pub struct RunReport {
     pub status: RunStatus,
     pub state: EngineState,
     pub releases: Vec<ReleaseReport>,
+    /// What each failing observer's `finish` reported. Never changes `status`:
+    /// a host with fatal-sink semantics watches its own observer and cancels.
+    pub observer_errors: Vec<ObserveError>,
 }
 
 /// Why a step was told to stop. The distinction cannot be made by the step — only
@@ -221,6 +225,7 @@ pub struct Driver {
     acquire_failures: HashMap<ScopeId, String>,
     scope_failed: HashSet<ScopeId>,
     tasks: HashMap<FiringId, Task>,
+    observers: Vec<Arc<dyn EventObserver>>,
     releases: Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer: Option<JoinHandle<()>>,
@@ -250,11 +255,19 @@ impl Driver {
             acquire_failures: HashMap::new(),
             scope_failed: HashSet::new(),
             tasks: HashMap::new(),
+            observers: Vec::new(),
             releases: Vec::new(),
             cleanup_timer: None,
             tx,
             rx,
         }
+    }
+
+    /// Register an observer: it sees every appended record, in seq order, with
+    /// the post-apply state, and its `finish` is awaited before the report.
+    pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
+        self.observers.push(observer);
+        self
     }
 
     /// Run to completion.
@@ -280,10 +293,20 @@ impl Driver {
             }
         }
 
+        // Every record has been handed over; what remains is the observers'
+        // own queues and files.
+        let mut observer_errors = Vec::new();
+        for observer in &self.observers {
+            if let Err(error) = observer.finish().await {
+                observer_errors.push(error);
+            }
+        }
+
         RunReport {
             status: self.engine.folded_status(),
             state: self.engine,
             releases,
+            observer_errors,
         }
     }
 
@@ -381,11 +404,29 @@ impl Driver {
     }
 
     /// Run one event through the core: append, apply, hand back the commands.
+    ///
+    /// The one hook point for observers: every path into the engine — `feed`,
+    /// `on_deliver`, everything — goes through here, so observers see every
+    /// appended record exactly once, in seq order, with the post-apply state.
     fn apply_event(&mut self, event: Event) -> Vec<Command> {
+        let before = self.engine.log.len();
         let state = std::mem::replace(&mut self.engine, EngineState::new(Graph::new()));
         let (state, commands) = apply(state, event);
         self.engine = state;
+        self.notify_observers(before);
         commands
+    }
+
+    /// Hand every record appended since `from` to each observer.
+    fn notify_observers(&self, from: usize) {
+        if self.observers.is_empty() {
+            return;
+        }
+        for record in &self.engine.log.records()[from..] {
+            for observer in &self.observers {
+                observer.on_record(record, &self.engine);
+            }
+        }
     }
 
     /// A host delivery: feed `ControlRequested` and report the disposition.
@@ -850,7 +891,10 @@ impl Driver {
                 let line = self.sink.record(&name, firing.raw(), stream, &line).await;
                 StepEvent::Log { stream, line }
             }
-            StepEvent::Artifact { name, uri } => StepEvent::Artifact { name, uri },
+            StepEvent::Artifact { name, uri } => StepEvent::Artifact {
+                name: SmolStr::new(self.sink.masker().mask(&name)),
+                uri: self.sink.masker().mask(&uri),
+            },
             StepEvent::Custom(value) => StepEvent::Custom(self.sink.mask_value(&value)),
         }
     }

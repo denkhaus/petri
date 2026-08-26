@@ -9,9 +9,11 @@
 //! processes whose completion order is a wall-clock accident.
 
 pub mod jitter;
+pub mod observe;
 pub mod run;
 pub mod sink;
 
+pub use observe::{EventObserver, ObserveError};
 pub use run::{
     CANCEL_FORCED, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE, DeliverDisposition, Driver,
     RunConfig, RunHandle, RunReport,

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use driver::{Driver, RunConfig, RunReport};
+use driver::{Driver, EventObserver, RunConfig, RunReport};
 use engine::ReplayMismatch;
 use executor::{DEFAULT_GRACE, Executor, MapSecrets, Retention, SecretProvider};
 use frontend::{DirFiles, Frontend, Lowered, Span};
@@ -58,6 +58,7 @@ pub struct Runtime {
     steps: ::steps::Registry,
     executor: Option<Arc<dyn Executor>>,
     secrets: Arc<dyn SecretProvider>,
+    observers: Vec<Arc<dyn EventObserver>>,
     options: RunOptions,
 }
 
@@ -79,6 +80,7 @@ impl Runtime {
             steps: crate::steps::standard(),
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
+            observers: Vec::new(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
@@ -92,6 +94,7 @@ impl Runtime {
             steps: ::steps::Registry::new(),
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
+            observers: Vec::new(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
@@ -134,9 +137,22 @@ impl Runtime {
         self
     }
 
+    /// Register an event observer on every driver this runtime builds: it sees
+    /// every appended record, in seq order, with the post-apply state.
+    pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
+        self.observers.push(observer);
+        self
+    }
+
     pub fn options(mut self, options: RunOptions) -> Self {
         self.options = options;
         self
+    }
+
+    /// The options runs get, for a host wrapping this runtime — the standalone
+    /// petri host reads the run directory here.
+    pub fn run_options(&self) -> &RunOptions {
+        &self.options
     }
 
     /// The step registry, for lookups (`type_known`-style lints, validation).
@@ -232,13 +248,17 @@ impl Runtime {
             .executor
             .clone()
             .unwrap_or_else(|| self.default_executor());
-        Driver::new(
+        let mut driver = Driver::new(
             graph,
             executor,
             self.steps.clone(),
             Arc::clone(&self.secrets),
             config,
-        )
+        );
+        for observer in &self.observers {
+            driver = driver.observe(Arc::clone(observer));
+        }
+        driver
     }
 
     /// Run a graph to completion. With `verify_replay` on (the default), the log is

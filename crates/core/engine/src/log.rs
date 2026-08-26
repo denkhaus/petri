@@ -92,6 +92,15 @@ pub struct UnsupportedLogVersion {
     pub expected: u32,
 }
 
+/// A record list that cannot become a log.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidRecords {
+    #[error(transparent)]
+    Version(#[from] UnsupportedLogVersion),
+    #[error("record at index {index} has seq {found}; a log's records are contiguous from 0")]
+    SeqMismatch { index: usize, found: u64 },
+}
+
 /// An append-only list of every event the run has applied, in order.
 ///
 /// The core appends here before applying, including for the events it emits itself
@@ -121,6 +130,36 @@ impl EventLog {
     /// The format version. Always [`LOG_VERSION`] for a log this build produced.
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Rebuild a log from records a host persisted in its own store.
+    ///
+    /// This constructor, plus the serde round-trip of [`EventLog`] itself, is the
+    /// whole of the core's persistence surface: a host frames and stores records
+    /// however it likes — a jsonl file, a database, an object store — and hands
+    /// them back here. The version is checked exactly as deserialization checks it
+    /// (standing no-migrator policy), and the records must be contiguous from
+    /// seq 0.
+    pub fn try_from_records(
+        version: u32,
+        records: Vec<EventRecord>,
+    ) -> Result<Self, InvalidRecords> {
+        if version != LOG_VERSION {
+            return Err(UnsupportedLogVersion {
+                found: version,
+                expected: LOG_VERSION,
+            }
+            .into());
+        }
+        for (index, record) in records.iter().enumerate() {
+            if record.seq != index as u64 {
+                return Err(InvalidRecords::SeqMismatch {
+                    index,
+                    found: record.seq,
+                });
+            }
+        }
+        Ok(Self { version, records })
     }
 
     pub fn append(&mut self, source: EventSource, event: Event) -> u64 {

@@ -221,6 +221,98 @@ async fn an_unknown_secret_fails_the_step() {
     );
 }
 
+/// A step kind that resolves a secret and then leaks it through every progress
+/// shape: a log line, an artifact's name and uri, and a custom payload.
+struct LeakyStep;
+
+const LEAKY_KIND: ir::StepKindId = ir::StepKindId::new_static("leaky");
+
+impl ir::StepKind for LeakyStep {
+    fn id(&self) -> ir::StepKindId {
+        LEAKY_KIND
+    }
+    fn name(&self) -> &str {
+        "leaky"
+    }
+}
+
+#[async_trait::async_trait]
+impl steps::StepRunner for LeakyStep {
+    async fn run(&self, ctx: steps::StepCtx) -> ir::Outcome {
+        let token = ctx.secrets.resolve("DEPLOY_TOKEN").expect("configured");
+        let _ = ctx
+            .logs
+            .send(ir::StepEvent::Artifact {
+                name: smol_str::SmolStr::new(format!("report-{token}")),
+                uri: format!("s3://bucket/{token}/report.tgz"),
+            })
+            .await;
+        let _ = ctx
+            .logs
+            .send(ir::StepEvent::Custom(json!({ "token": token.as_str() })))
+            .await;
+        // Progress rides its own pump task; give it time to reach the driver
+        // before the finish signal races it there.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ir::Outcome::success(json!("done"))
+    }
+}
+
+/// Exact-value masking covers every progress shape, `Artifact` included: a
+/// registered value in an artifact's name or uri is `***` in the log.
+#[tokio::test]
+async fn an_artifact_carrying_a_registered_value_is_masked() {
+    let dir = RunDir::new("artifact-secret");
+    let mut b = GraphBuilder::new();
+    b.add_node(
+        "leak",
+        ScopeId::new(0),
+        StepRef::new(LEAKY_KIND, serde_json::Value::Null),
+    );
+    let graph = b.build();
+
+    let mut registry = runners();
+    registry.register_runner(std::sync::Arc::new(LeakyStep));
+    let report = host_driver_full(
+        graph,
+        &dir,
+        MapSecrets::from_pairs(&[("DEPLOY_TOKEN", SECRET)]),
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+        registry,
+    )
+    .await_run()
+    .await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+
+    let artifacts: Vec<(String, String)> = report
+        .state
+        .log
+        .events()
+        .filter_map(|e| match e {
+            engine::Event::StepProgress {
+                ev: ir::StepEvent::Artifact { name, uri },
+                ..
+            } => Some((name.to_string(), uri.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        artifacts,
+        vec![("report-***".into(), "s3://bucket/***/report.tgz".into())]
+    );
+
+    let log_bytes = serde_json::to_string(&report.state.log).expect("encode");
+    assert!(
+        !log_bytes.contains(SECRET),
+        "the secret leaked into the event log"
+    );
+}
+
 /// A multi-line secret is masked line by line, because the log is line-buffered.
 #[tokio::test]
 async fn multiline_secrets_are_masked_per_line() {

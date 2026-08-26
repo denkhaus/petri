@@ -259,6 +259,22 @@ impl EngineState {
         self.live.get(&id)
     }
 
+    /// The node a firing belongs to, live or finished.
+    ///
+    /// [`EngineState::firing`] sees only live firings, and by the time an observer
+    /// runs for a finish record the firing is already retired — so this searches
+    /// history too. The stable way for a host to resolve a firing to its node, and
+    /// from there its name and `meta`.
+    pub fn firing_node(&self, id: FiringId) -> Option<NodeId> {
+        self.live.get(&id).map(|f| f.node).or_else(|| {
+            self.history
+                .iter()
+                .rev()
+                .find(|r| r.firing == id)
+                .map(|r| r.node)
+        })
+    }
+
     /// Run-scoped state as expressions see it.
     pub fn run_context(&self) -> &RunContext {
         &self.run

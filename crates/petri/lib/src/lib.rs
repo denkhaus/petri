@@ -11,6 +11,10 @@
 //! (with [`executor::host`] and [`executor::docker`]) are reachable through this
 //! crate, so an external repository names one dependency and never a layer crate.
 //!
+//! The one thing here that is not wiring or re-export is [`host`]: the
+//! standalone host's durable run dir — `graph.json`, `events.jsonl`, and the
+//! run wrappers that keep a run resumable when no product store sits behind it.
+//!
 //! ```no_run
 //! # async fn demo() -> Result<(), String> {
 //! let rt = petri::runtime().options(petri::RunOptions::new("/tmp/petri-demo"));
@@ -25,6 +29,8 @@
 
 pub use runtime::{RunOptions, Runtime, TargetExecutor};
 pub use runtime::{driver, engine, ir};
+
+pub mod host;
 
 /// The executor interface, with the two local executors as submodules.
 pub mod executor {
