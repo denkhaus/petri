@@ -454,6 +454,10 @@ pub struct Node {
     /// Kill admits nothing, flag or no flag.
     #[serde(default)]
     pub run_on_cancel: bool,
+    /// Frontend-supplied metadata: display label, source span, classes. Opaque to the
+    /// engine; `apply` never reads it. Hosts and observers render with it.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub meta: Value,
     /// HIR only; lowered away before execution.
     pub expand: Option<Expansion>,
 }
@@ -471,6 +475,7 @@ impl Node {
             budget: Budget::once(),
             retry: RetryPolicy::none(),
             run_on_cancel: false,
+            meta: Value::Null,
             expand: None,
         }
     }
@@ -503,6 +508,12 @@ impl Node {
     /// Opt in to firing inside a cancelled scope (§5).
     pub fn with_run_on_cancel(mut self) -> Self {
         self.run_on_cancel = true;
+        self
+    }
+
+    /// Attach frontend metadata. The core carries it and never reads it.
+    pub fn with_meta(mut self, meta: Value) -> Self {
+        self.meta = meta;
         self
     }
 

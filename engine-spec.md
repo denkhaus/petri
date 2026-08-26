@@ -68,6 +68,7 @@ pub struct Node {
     pub budget: Budget,                    // max_firings (counts generations), timeout (per attempt)
     pub retry: RetryPolicy,
     pub run_on_cancel: bool,               // §5: may fire inside a cancelled scope
+    pub meta: Value,                       // opaque, host-facing; the core never reads it
     pub expand: Option<Expansion>,         // HIR only
 }
 

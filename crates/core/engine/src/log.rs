@@ -15,7 +15,10 @@ use crate::event::Event;
 /// `KillRequested` joined the vocabulary, and `Node` — serialized inside
 /// `NodeExpanded` splices — gained `run_on_cancel`. Per the standing policy there is
 /// no migrator: a v2 log is rejected cleanly.
-pub const LOG_VERSION: u32 = 3;
+///
+/// v3 → v4: `Node` — serialized inside `NodeExpanded` splices — gained `meta`.
+/// Standing policy again: no migrator, a v3 log is rejected cleanly.
+pub const LOG_VERSION: u32 = 4;
 
 /// Where an event came from.
 ///

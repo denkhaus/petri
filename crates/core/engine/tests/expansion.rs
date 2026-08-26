@@ -35,6 +35,7 @@ fn matrix_graph(max_parallel: Option<u32>, fail_fast: bool) -> ir::Graph {
         NOOP,
         json!({ "region": { EXPR_PLACEHOLDER_KEY: item.raw() } }),
     );
+    b.set_meta(deploy, json!({ "label": "Deploy" }));
 
     parallel_for_each(
         &mut b,
@@ -69,6 +70,16 @@ fn for_each_clones_the_node_and_the_collector_waits_for_all_of_them() {
         h.started,
         vec!["plan", "deploy#0", "deploy#1", "deploy#2", "collect"]
     );
+
+    // A splice clones the node wholesale, so a clone carries the template's `meta`.
+    let clone = h
+        .state
+        .graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "deploy#1")
+        .expect("the clone is in the live graph");
+    assert_eq!(clone.meta, json!({ "label": "Deploy" }));
 }
 
 /// `index` and `item` are bound inside each clone, so the collector can put the

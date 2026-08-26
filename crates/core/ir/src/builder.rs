@@ -126,6 +126,11 @@ impl GraphBuilder {
         self.node_mut(node).expand = Some(expand);
     }
 
+    /// Attach frontend metadata to a node. Opaque to the engine.
+    pub fn set_meta(&mut self, node: NodeId, meta: Value) {
+        self.node_mut(node).meta = meta;
+    }
+
     pub fn mark_entry(&mut self, node: NodeId) {
         self.graph.entry.push(node);
     }
