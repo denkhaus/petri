@@ -165,7 +165,7 @@ async fn docker_release_leaves_no_container() {
         .with_grace(Duration::from_secs(2))
         .with_retention(Retention::Never);
 
-    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
     let report = driver.await_run().await;
     assert_eq!(report.status, RunStatus::Success);
     assert!(
@@ -206,7 +206,7 @@ while :; do sleep 0.1; done
         .with_retention(Retention::Never);
     let workspace = dir.workspace();
 
-    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
@@ -233,6 +233,75 @@ while :; do sleep 0.1; done
     assert!(
         elapsed < Duration::from_secs(8),
         "no TERM grace was waited out: {elapsed:?}"
+    );
+    let leftovers = list_containers(&prefix).await;
+    assert!(
+        leftovers.is_empty(),
+        "containers were left behind: {leftovers:?}"
+    );
+}
+
+/// The fence half of the acquire contract (§9), across a driver's death: the
+/// driver dies with a container step running, a fresh executor over the same
+/// run dir acquires the same scope, and the crashed container stops mutating
+/// the workspace — its name is rebuilt from the run id recorded in the run dir,
+/// not re-minted.
+#[tokio::test]
+async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-fence");
+    // The beater runs in its own session: an aborted driver still lets the
+    // orphaned step task stop its own process group as the channels close, so a
+    // detached beater is what a dead *process* leaves behind — only a
+    // container-level fence can end it. With `done` already in the workspace
+    // the step exits at once, so the second run completes instead of beating.
+    let graph = docker_graph(
+        "beat",
+        "[ -e done ] && exit 0\n\
+         setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &\n\
+         sleep 300",
+    );
+    // The workspace is kept: release would otherwise remove the directory the
+    // heartbeat is checked through, hiding a beater the fence missed.
+    let config = || {
+        RunConfig::new(dir.path())
+            .with_grace(Duration::from_secs(2))
+            .with_retention(Retention::Always)
+    };
+    let workspace = dir.workspace();
+    let heartbeat = workspace.join("heartbeat");
+
+    let (driver, prefix) = docker_driver_named(graph.clone(), &dir, config()).await;
+    let run = tokio::spawn(driver.run());
+    assert!(
+        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
+        "the step never started inside the container"
+    );
+    // The crash: the driver is gone, release never runs, the container beats on.
+    run.abort();
+    let _ = run.await;
+    assert!(
+        !list_containers(&prefix).await.is_empty(),
+        "the crashed run's container outlives its driver"
+    );
+
+    std::fs::write(workspace.join("done"), b"").expect("done");
+    let report = docker_driver(graph, &dir, config()).await_run().await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+
+    let before = file_len(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        file_len(&heartbeat),
+        before,
+        "the crashed container kept writing: the fence missed it"
     );
     let leftovers = list_containers(&prefix).await;
     assert!(

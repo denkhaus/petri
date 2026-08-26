@@ -19,6 +19,11 @@
 //! [`EventLog::try_from_records`]. A system with its own store persists records
 //! through its own observer and never sees these files.
 //!
+//! These two files are the run; everything else under the run dir — workspaces,
+//! logs, the executors' own records (`groups/`, `docker-run-id`) — identifies the
+//! processes and containers of *this* run and fences them on resume. A fork
+//! therefore copies exactly these two files into a fresh run dir, nothing else.
+//!
 //! The battery's durability bar is flush per record, no fsync: on process death
 //! the writer's queue is a loss window — an arbitrary tail, not just one torn
 //! line — and resume tolerates any lost suffix as a shorter prefix. A host that

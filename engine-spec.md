@@ -426,9 +426,11 @@ signals a bare recorded pgid** — it can be recycled to an innocent — so a gr
 that never drains fails the acquire with the typed `FenceLeaked` error, and the
 scope's firings fail routably; cleanup belongs to the operator or host policy
 (an identity-bound kill via Linux `pidfd` is an optional platform upgrade,
-never a requirement). Docker's fence is remove-by-deterministic-name, which
-requires the resuming host to construct its executor with the run's original
-id. The fence is idempotent and covers the workspace only: side effects
+never a requirement). Docker's fence is remove-by-deterministic-name; the name
+carries a run id the executor records in the run dir (`docker-run-id`) before
+its first container exists, so any executor over the same run dir — a resuming
+process's included — reaches the same containers, and a fork into a fresh run
+dir gets a fresh id. The fence is idempotent and covers the workspace only: side effects
 outside it may have happened in the crashed attempt and happen again — resume
 is **at-least-once for external side effects**, exactly-once only for the log
 and the workspace fence.

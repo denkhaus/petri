@@ -340,15 +340,10 @@ impl Runtime {
         self.secrets.masker()
     }
 
-    /// Host and Docker executors over the run dir, dispatched by target.
+    /// Host and Docker executors over the run dir, dispatched by target. Both
+    /// take their identity from the run dir, so a resumed run's executors reach
+    /// the crashed run's environments.
     fn default_executor(&self) -> Arc<dyn Executor> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let run_id = format!(
-            "{}x{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
         Arc::new(
             TargetExecutor::new()
                 .host(
@@ -356,7 +351,7 @@ impl Runtime {
                         .with_retention(self.options.retention),
                 )
                 .container(
-                    executor_docker::DockerExecutor::new(&self.options.run_dir, &run_id)
+                    executor_docker::DockerExecutor::new(&self.options.run_dir)
                         .with_retention(self.options.retention),
                 ),
         )

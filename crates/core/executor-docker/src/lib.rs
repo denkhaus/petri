@@ -33,6 +33,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,10 +44,19 @@ use executor::{
 };
 use ir::RuntimeTarget;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{OnceCell, mpsc};
 
 /// Where the workspace is mounted inside the container.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
+
+/// The run id's file under the run dir. Container names carry the id and the
+/// acquire fence is remove-by-name, so the id must outlive the process that
+/// minted it: it is recorded here before the run's first container exists, and
+/// any later executor over the same run dir — a resuming process's — reads it
+/// back and reaches the same containers. A fork into a fresh run dir gets a
+/// fresh id.
+pub const RUN_ID_FILE: &str = "docker-run-id";
 
 /// How often [`DockerProcess::wait`] checks whether the step's process group is
 /// still alive, once the `docker exec` client has returned without a recorded status.
@@ -74,16 +84,18 @@ pub enum PullPolicy {
 /// Runs steps inside containers.
 pub struct DockerExecutor {
     run_dir: PathBuf,
-    run_id: SmolStr,
+    /// Resolved on first use from [`RUN_ID_FILE`]: the run dir's recorded id, or
+    /// a fresh one recorded there.
+    run_id: OnceCell<SmolStr>,
     retention: Retention,
     pull: PullPolicy,
 }
 
 impl DockerExecutor {
-    pub fn new(run_dir: impl Into<PathBuf>, run_id: &str) -> Self {
+    pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         Self {
             run_dir: run_dir.into(),
-            run_id: SmolStr::new(run_id),
+            run_id: OnceCell::new(),
             retention: Retention::default(),
             pull: PullPolicy::default(),
         }
@@ -106,12 +118,24 @@ impl DockerExecutor {
             .is_ok()
     }
 
-    fn container_name(&self, instance: &str) -> String {
+    /// The run id, recorded in the run dir the first time anything needs it.
+    async fn run_id(&self) -> Result<&SmolStr, EnvError> {
+        self.run_id
+            .get_or_try_init(|| load_or_record_run_id(&self.run_dir))
+            .await
+    }
+
+    /// The name prefix every container of this run shares, for leak checks.
+    pub async fn container_prefix(&self) -> Result<String, EnvError> {
+        Ok(format!("petri-{}-", self.run_id().await?))
+    }
+
+    async fn container_name(&self, instance: &str) -> Result<String, EnvError> {
         let sanitized: String = instance
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        format!("petri-{}-{sanitized}", self.run_id)
+        Ok(format!("{}{sanitized}", self.container_prefix().await?))
     }
 
     async fn ensure_image(&self, image: &str) -> Result<(), EnvError> {
@@ -158,13 +182,13 @@ impl Executor for DockerExecutor {
 
         self.ensure_image(image).await?;
 
-        let name = self.container_name(&scope.instance);
+        let name = self.container_name(&scope.instance).await?;
         // The fence half of the acquire contract (§9): a previous acquisition —
         // a crashed driver's included — left a container under this
         // deterministic name; removing it ends whatever still runs inside and
-        // makes its status unreadable. Names carry the run id, so a resuming
-        // host must construct its executor with the run's original id for the
-        // fence to reach the crashed run's containers.
+        // makes its status unreadable. The name carries the run id recorded in
+        // the run dir, so a resuming process over the same run dir reaches the
+        // crashed run's containers.
         let _ = run_docker(&["rm", "-f", &name]).await;
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", workspace.display());
@@ -526,6 +550,57 @@ async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
         operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
         message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
+}
+
+/// The run dir's recorded run id, or a fresh one recorded now — on disk before
+/// any container carries it, so a crash can never leave a container whose name
+/// no later process can rebuild. One executor per run dir is the rule
+/// (workspaces would collide otherwise), so write-then-rename is enough: a
+/// reader sees the whole id or none.
+async fn load_or_record_run_id(run_dir: &Path) -> Result<SmolStr, EnvError> {
+    let path = run_dir.join(RUN_ID_FILE);
+    let io_error = |path: &Path, e: std::io::Error| EnvError::Workspace {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    };
+    match tokio::fs::read_to_string(&path).await {
+        Ok(recorded) if !recorded.trim().is_empty() => return Ok(SmolStr::new(recorded.trim())),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_error(&path, e)),
+    }
+
+    let minted = fresh_run_id();
+    tokio::fs::create_dir_all(run_dir)
+        .await
+        .map_err(|e| io_error(run_dir, e))?;
+    let staged = run_dir.join(format!("{RUN_ID_FILE}.tmp"));
+    let mut file = tokio::fs::File::create(&staged)
+        .await
+        .map_err(|e| io_error(&staged, e))?;
+    file.write_all(minted.as_bytes())
+        .await
+        .map_err(|e| io_error(&staged, e))?;
+    file.sync_all().await.map_err(|e| io_error(&staged, e))?;
+    tokio::fs::rename(&staged, &path)
+        .await
+        .map_err(|e| io_error(&path, e))?;
+    Ok(SmolStr::new(minted))
+}
+
+/// Unique across processes and time: two runs on one daemon must never share a
+/// container name, or one run's fence would remove the other's containers.
+fn fresh_run_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{nanos:x}-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Containers this run left behind, for leak checks in tests.

@@ -398,3 +398,82 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
     let expected: Vec<u64> = report.state.log.records().iter().map(|r| r.seq).collect();
     assert_eq!(*seen, expected);
 }
+
+/// The Docker fence across a resume, through the host: `host::resume` builds a
+/// fresh executor, which rebuilds the crashed run's container names from the
+/// run id recorded in the run dir and ends the container before re-dispatching
+/// the step.
+#[tokio::test]
+async fn resume_fences_the_crashed_container() {
+    if !testkit::docker_available().await {
+        eprintln!("skipping: no Docker daemon reachable");
+        return;
+    }
+    let dir = RunDir::new("host-docker-resume");
+    // The workspace is kept: release would otherwise remove the directory the
+    // heartbeat is checked through, hiding a beater the fence missed.
+    let mut options = RunOptions::new(dir.path());
+    options.retention = petri::executor::Retention::Always;
+    let rt = petri::runtime().options(options);
+    let mut b = GraphBuilder::bare();
+    let mut scope = petri::ir::Scope::new(ScopeId::new(0));
+    scope.runtime = petri::ir::RuntimeSpec::container("alpine:3.20");
+    let scope = b.add_scope(scope);
+    // The beater runs in its own session: an aborted driver still lets the
+    // orphaned step task stop its own process group as the channels close, so a
+    // detached beater is what a dead *process* leaves behind — only a
+    // container-level fence can end it. With `done` already in the workspace
+    // the step exits at once, so the resumed run completes instead of beating.
+    b.add_node(
+        "beat",
+        scope,
+        petri::ir::StepRef::new(
+            petri::steps::PROCESS_KIND,
+            testkit::script_with(
+                "[ -e done ] && exit 0\n\
+                 setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &\n\
+                 sleep 300",
+                json!({ "shell": "sh" }),
+            ),
+        ),
+    );
+    let graph = b.build();
+    let workspace = dir.workspace();
+    let heartbeat = workspace.join("heartbeat");
+
+    let driver = host::driver(&rt, graph).expect("prepared");
+    let run = tokio::spawn(driver.run());
+    assert!(
+        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
+        "the step never started inside the container"
+    );
+    // The crash: the driver is gone, release never runs, the container beats on.
+    run.abort();
+    let _ = run.await;
+    // The crashed run's id, as a resuming process must find it.
+    let run_id = std::fs::read_to_string(dir.path().join(petri::executor::docker::RUN_ID_FILE))
+        .expect("the run id is in the run dir");
+    let prefix = format!("petri-{run_id}-");
+
+    std::fs::write(workspace.join("done"), b"").expect("done");
+    let resumed = host::resume(&rt).await.expect("resumes");
+    assert_eq!(
+        resumed.status,
+        RunStatus::Success,
+        "{:?}",
+        resumed.state.errors()
+    );
+
+    let before = testkit::file_len(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        testkit::file_len(&heartbeat),
+        before,
+        "the crashed container kept writing: the fence missed it"
+    );
+    let leftovers = petri::executor::docker::list_containers(&prefix).await;
+    assert!(
+        leftovers.is_empty(),
+        "containers were left behind: {leftovers:?}"
+    );
+}

@@ -121,14 +121,19 @@ pub fn runners_with_wedged() -> Registry {
 
 /// Build a driver over the Docker executor, and the container-name prefix it will
 /// use, so a leak check can look only at this test's own containers.
-pub fn docker_driver_named(graph: Graph, dir: &RunDir, config: RunConfig) -> (Driver, String) {
-    let run_id = format!("t{}x{}", std::process::id(), unique_id());
-    let prefix = format!("petri-{run_id}-");
-    let executor: Arc<dyn Executor> =
-        Arc::new(DockerExecutor::new(dir.path(), &run_id).with_retention(config.keep_workspaces));
+pub async fn docker_driver_named(
+    graph: Graph,
+    dir: &RunDir,
+    config: RunConfig,
+) -> (Driver, String) {
+    let executor = DockerExecutor::new(dir.path()).with_retention(config.keep_workspaces);
+    let prefix = executor
+        .container_prefix()
+        .await
+        .expect("the run id is recorded in the run dir");
     let driver = Driver::new(
         graph,
-        executor,
+        Arc::new(executor),
         runners(),
         Arc::new(MapSecrets::empty()),
         config,
@@ -137,7 +142,15 @@ pub fn docker_driver_named(graph: Graph, dir: &RunDir, config: RunConfig) -> (Dr
 }
 
 pub fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Driver {
-    docker_driver_named(graph, dir, config).0
+    let executor: Arc<dyn Executor> =
+        Arc::new(DockerExecutor::new(dir.path()).with_retention(config.keep_workspaces));
+    Driver::new(
+        graph,
+        executor,
+        runners(),
+        Arc::new(MapSecrets::empty()),
+        config,
+    )
 }
 
 /// Run a graph on the host executor and return the report.
