@@ -4,7 +4,10 @@
 //! whether it claims a path, instead of matching on an enum. Adding a format is a
 //! new crate that implements this trait, and one entry in that list.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+use smol_str::SmolStr;
 
 use crate::diag::Lowered;
 use crate::files::FileSource;
@@ -23,6 +26,25 @@ pub trait Frontend: Send + Sync {
     /// Parse and lower one file. `file` is the name spans carry — usually the
     /// repository-relative path — and `files` resolves local includes.
     fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered;
+
+    /// Run parameters a host owes this format when it has nothing better: fixed
+    /// values, so lowering the same file twice yields the identical graph and a
+    /// saved log replays against it. `repo` is the repository root. Default: none.
+    fn default_params(&self, _repo: &Path) -> Vec<(SmolStr, Value)> {
+        Vec::new()
+    }
+
+    /// Where the repository root is above `file`, when the host was not told. A
+    /// format whose files sit at a fixed place in a repository walks up to it;
+    /// the default is the file's own directory.
+    ///
+    /// It is the root local includes resolve against, and the prefix stripped from
+    /// the name spans carry.
+    fn repo_root(&self, file: &Path) -> PathBuf {
+        file.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
 /// The frontend called `name`, if any.

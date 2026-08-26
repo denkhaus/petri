@@ -4,7 +4,7 @@
 //! machine's credentials, so `gh` is a stub on `PATH` that records its invocations
 //! and answers the one query the scripts make. Everything else — bash, the outputs
 //! file, env layering, `if:` gates over the `github` context, job summaries — is the
-//! real thing, on real processes through `petri::Runtime`, with replay verified byte
+//! real thing, on real processes through `runtime::Runtime`, with replay verified byte
 //! for byte by the runtime itself.
 //!
 //! The corpus is fetched, not committed, so these skip when it is absent. See
@@ -13,12 +13,12 @@
 use std::path::Path;
 use std::time::Duration;
 
-use petri::driver::RunReport;
-use petri::executor::{MapSecrets, Retention};
-use petri::frontend::DirFiles;
-use petri::frontend::gha::load;
-use petri::ir::{Graph, RunStatus};
-use petri::{RunOptions, Runtime, engine, ir};
+use frontend_gha::load;
+use runtime::driver::RunReport;
+use runtime::executor::{MapSecrets, Retention};
+use runtime::frontend::DirFiles;
+use runtime::ir::{Graph, RunStatus};
+use runtime::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
 use testkit::install_gh_stub;
 

@@ -58,19 +58,20 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// The standard configuration: the `gha` and `native` frontends, the `noop` and
-    /// `process` step kinds, no secrets, and — unless [`Runtime::executors`]
-    /// overrides it — a host executor and a Docker executor dispatched by each
-    /// scope's [`ir::RuntimeTarget`].
+    /// The standard configuration: the formats and step kinds core itself owns —
+    /// the `native` frontend, the `noop` and `process` steps — no secrets, and,
+    /// unless [`Runtime::executors`] overrides it, a host executor and a Docker
+    /// executor dispatched by each scope's [`ir::RuntimeTarget`].
+    ///
+    /// A distribution or a consumer registers its own frontends on top with
+    /// [`Runtime::frontend`]; each one goes to the front of the list, ahead of the
+    /// native catch-all.
     ///
     /// The default run directory is under the system temp dir; set a real one with
     /// [`Runtime::options`].
     pub fn standard() -> Self {
         Self {
-            frontends: vec![
-                Arc::new(frontend_gha::Gha),
-                Arc::new(frontend_native::Native),
-            ],
+            frontends: vec![Arc::new(frontend_native::Native)],
             steps: crate::steps::standard(),
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
@@ -158,25 +159,6 @@ impl Runtime {
         }
     }
 
-    /// Where the repository root is, for a workflow file: the nearest ancestor with
-    /// a `.github` directory, else the file's own directory.
-    pub fn guess_repo(file: &Path) -> PathBuf {
-        let mut dir = file
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let start = dir.clone();
-        loop {
-            if dir.join(".github").is_dir() {
-                return dir;
-            }
-            match dir.parent() {
-                Some(parent) => dir = parent.to_path_buf(),
-                None => return start,
-            }
-        }
-    }
-
     /// Read and lower one file. `Err` is an IO-or-usage problem; a rejected
     /// workflow comes back as `Ok` with diagnostics and no graph.
     pub fn lower(
@@ -188,7 +170,7 @@ impl Runtime {
         let frontend = self.frontend_for(file, format)?;
         let repo = repo
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| Self::guess_repo(file));
+            .unwrap_or_else(|| frontend.repo_root(file));
         let text = std::fs::read_to_string(file)
             .map_err(|e| format!("could not read {}: {e}", file.display()))?;
         let name = file

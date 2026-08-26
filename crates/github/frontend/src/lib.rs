@@ -43,9 +43,11 @@ pub mod exprs;
 pub mod lower;
 pub mod model;
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
+use serde_json::Value;
+use smol_str::SmolStr;
 
 /// Parse and lower a workflow file.
 pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
@@ -80,5 +82,59 @@ impl Frontend for Gha {
 
     fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered {
         load(file, text, files)
+    }
+
+    /// The `github`, `runner` and `vars` contexts a runner would supply. Fixed
+    /// values — a local run is not a real GitHub event — so the same file lowers to
+    /// the same graph every time and a saved log replays against it.
+    fn default_params(&self, repo: &Path) -> Vec<(SmolStr, Value)> {
+        let name = repo
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string());
+        vec![
+            (
+                SmolStr::new("github"),
+                serde_json::json!({
+                    "repository": format!("local/{name}"),
+                    "event_name": "workflow_dispatch",
+                    "actor": "petri",
+                    "ref": "refs/heads/main",
+                    "ref_name": "main",
+                    "sha": "0000000000000000000000000000000000000000",
+                    "run_id": "1",
+                    "run_number": "1",
+                }),
+            ),
+            (
+                SmolStr::new("runner"),
+                serde_json::json!({
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "name": "local",
+                }),
+            ),
+            (SmolStr::new("vars"), serde_json::json!({})),
+        ]
+    }
+
+    /// A workflow file lives at `<repo>/.github/workflows/`, so the root is the
+    /// nearest ancestor holding a `.github` directory — else the file's own
+    /// directory, for a file that is not in a checkout at all.
+    fn repo_root(&self, file: &Path) -> PathBuf {
+        let mut dir = file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let start = dir.clone();
+        loop {
+            if dir.join(".github").is_dir() {
+                return dir;
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent.to_path_buf(),
+                None => return start,
+            }
+        }
     }
 }

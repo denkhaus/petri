@@ -1,0 +1,15 @@
+[package]
+name = "petri-cli-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The command line, over whatever runtime it is handed."
+
+[lib]
+# The package is `petri-cli-core`; the crate is `cli`, so code reads `cli::…`.
+name = "cli"
+
+[dependencies]
+runtime = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

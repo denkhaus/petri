@@ -2,9 +2,9 @@
 //! end to end on the standard runtime. The lowering half stays with the frontend,
 //! in `crates/core/frontend-native/tests/native.rs` (which lowers this same document).
 
-use petri::frontend::native::load;
-use petri::ir::RunStatus;
-use petri::{RunOptions, Runtime};
+use runtime::frontend::native::load;
+use runtime::ir::RunStatus;
+use runtime::{RunOptions, Runtime};
 
 const CYCLE_XOR_ANY: &str = r#"
 name: poll-until-ready
@@ -44,7 +44,7 @@ async fn the_cycle_runs_end_to_end() {
     let dir = std::env::temp_dir().join(format!("petri-native-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut options = RunOptions::new(&dir);
-    options.retention = petri::executor::Retention::Never;
+    options.retention = runtime::executor::Retention::Never;
     let rt = Runtime::standard().options(options);
     let report = rt.run(graph).await.expect("replay is byte-identical");
     assert_eq!(

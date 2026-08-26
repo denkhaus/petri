@@ -5,8 +5,8 @@
 
 mod support;
 
-use petri::ir::RunStatus;
-use petri::{engine, frontend, ir};
+use runtime::ir::RunStatus;
+use runtime::{engine, frontend, ir};
 use serde_json::json;
 use support::*;
 

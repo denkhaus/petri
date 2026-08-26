@@ -6,12 +6,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use petri::driver::RunReport;
-use petri::executor::Retention;
-use petri::frontend::gha::load;
-use petri::frontend::{FileSource, MapFiles, NoFiles};
-use petri::ir::Graph;
-use petri::{RunOptions, Runtime, engine, ir};
+use frontend_gha::load;
+use runtime::driver::RunReport;
+use runtime::executor::Retention;
+use runtime::frontend::{FileSource, MapFiles, NoFiles};
+use runtime::ir::Graph;
+use runtime::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
 
 pub fn files(pairs: &[(&str, &str)]) -> MapFiles {

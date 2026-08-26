@@ -3,21 +3,8 @@ name = "petri"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A token-flow workflow engine: every layer, assembled."
+description = "A token-flow workflow engine: core, plus every component it ships with."
 
 [dependencies]
-ir = { workspace = true }
-engine = { workspace = true }
-executor = { workspace = true }
-executor-host = { workspace = true }
-executor-docker = { workspace = true }
-steps = { workspace = true }
-driver = { workspace = true }
-frontend = { workspace = true }
+runtime = { workspace = true }
 frontend-gha = { workspace = true }
-frontend-native = { workspace = true }
-async-trait = { workspace = true }
-smol_str = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true }

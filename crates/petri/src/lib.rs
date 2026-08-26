@@ -1,20 +1,19 @@
-//! Petri, assembled.
+//! Petri, as it ships.
 //!
-//! This is the one crate a consumer depends on. It does two jobs:
+//! This is the distribution: the one crate a consumer depends on, and the only
+//! crate in the tree that names every component. Core is `petri-runtime` and knows
+//! the native format and nothing else; each component — today, GitHub Actions —
+//! is its own crate and knows core. Here the two meet: [`runtime()`] is core's
+//! standard runtime with every in-tree component registered on it.
 //!
-//! - **Facade.** Every layer is reachable through it — [`ir`], [`engine`],
-//!   [`driver`], [`frontend`] (with [`frontend::gha`] and [`frontend::native`]),
-//!   [`steps`], and [`executor`] (with [`executor::host`] and [`executor::docker`])
-//!   — so an external repository names one dependency and never a layer crate.
-//! - **Assembly.** [`Runtime`] is the standard configuration: the known frontends,
-//!   the built-in step kinds, and an executor per [`ir::RuntimeTarget`], wired into
-//!   the driver with the replay canary on. A consumer registers its own frontends
-//!   and step kinds on the same builder.
+//! Everything else is re-export. [`ir`], [`engine`], [`driver`], [`frontend`]
+//! (with [`frontend::gha`] and [`frontend::native`]), [`steps`] and [`executor`]
+//! (with [`executor::host`] and [`executor::docker`]) are reachable through this
+//! crate, so an external repository names one dependency and never a layer crate.
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), String> {
-//! let rt = petri::Runtime::standard()
-//!     .options(petri::RunOptions::new("/tmp/petri-demo"));
+//! let rt = petri::runtime().options(petri::RunOptions::new("/tmp/petri-demo"));
 //! let lowered = rt.check(std::path::Path::new("pipeline.yml"), None, None)?;
 //! if let Some(graph) = lowered.graph {
 //!     let report = rt.run(graph).await.expect("replay is byte-identical");
@@ -24,39 +23,29 @@
 //! # }
 //! ```
 
-pub use driver;
-pub use engine;
-pub use ir;
+pub use runtime::{RunOptions, Runtime, TargetExecutor};
+pub use runtime::{driver, engine, ir};
 
 /// The executor interface, with the two local executors as submodules.
 pub mod executor {
-    pub use ::executor::*;
-    pub use executor_docker as docker;
-    pub use executor_host as host;
+    pub use runtime::executor::*;
 }
 
-/// The frontend interface, with the two built-in formats as submodules.
+/// The frontend interface, with every format this distribution ships.
 pub mod frontend {
-    pub use ::frontend::*;
     pub use frontend_gha as gha;
-    pub use frontend_native as native;
+    pub use runtime::frontend::*;
 }
 
 /// Step kinds, with the standard registry.
 pub mod steps {
-    pub use ::steps::*;
-
-    /// The built-in step kinds: `noop` and `process`.
-    pub fn standard() -> Registry {
-        let mut registry = Registry::new();
-        registry.register(::steps::NoopStep);
-        registry.register(::steps::ProcessStep);
-        registry
-    }
+    pub use runtime::steps::*;
 }
 
-mod runtime;
-mod target;
-
-pub use runtime::{RunOptions, Runtime};
-pub use target::TargetExecutor;
+/// The shipped configuration: core's standard runtime plus every in-tree component.
+///
+/// A consumer that wants a different set builds one itself — `Runtime::standard()`
+/// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
+pub fn runtime() -> Runtime {
+    Runtime::standard().frontend(frontend_gha::Gha)
+}

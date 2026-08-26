@@ -359,29 +359,26 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "petri"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "petri-driver",
- "petri-engine",
- "petri-executor",
- "petri-executor-docker",
- "petri-executor-host",
- "petri-frontend",
  "petri-frontend-gha",
- "petri-frontend-native",
- "petri-ir",
- "petri-steps",
- "smol_str",
- "tokio",
+ "petri-runtime",
 ]
 
 [[package]]
 name = "petri-cli"
 version = "0.1.0"
 dependencies = [
- "clap",
  "petri",
- "serde_json",
+ "petri-cli-core",
  "tokio",
+]
+
+[[package]]
+name = "petri-cli-core"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "petri-runtime",
+ "serde_json",
 ]
 
 [[package]]
@@ -490,10 +487,10 @@ dependencies = [
 name = "petri-github-acceptance"
 version = "0.1.0"
 dependencies = [
- "petri",
  "petri-frontend",
  "petri-frontend-gha",
  "petri-ir",
+ "petri-runtime",
  "petri-testkit",
  "serde_json",
  "tokio",
@@ -507,6 +504,24 @@ dependencies = [
  "serde_json",
  "smol_str",
  "thiserror",
+]
+
+[[package]]
+name = "petri-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "petri-driver",
+ "petri-engine",
+ "petri-executor",
+ "petri-executor-docker",
+ "petri-executor-host",
+ "petri-frontend",
+ "petri-frontend-native",
+ "petri-ir",
+ "petri-steps",
+ "smol_str",
+ "tokio",
 ]
 
 [[package]]
