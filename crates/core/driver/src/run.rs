@@ -1078,7 +1078,7 @@ fn resolve_secret_refs(value: Value, secrets: &dyn SecretProvider) -> Result<Val
                 && let Some(name) = name.as_str()
             {
                 return match secrets.resolve(name) {
-                    Ok(resolved) => Ok(Value::String(resolved.to_string())),
+                    Ok(secret) => Ok(Value::String(secret.expose().to_string())),
                     Err(_) => Err(SmolStr::new(name)),
                 };
             }

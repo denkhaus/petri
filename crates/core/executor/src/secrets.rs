@@ -4,7 +4,8 @@
 //! `{"$secret": "NAME"}` references, and the value is fetched at spawn time and put
 //! straight into the child's environment. Resolving a secret also registers its value
 //! for masking, so the two cannot get out of step: anything that was resolved is
-//! masked, by construction.
+//! masked, by construction. A resolved value is a [`Secret`], whose plaintext leaves
+//! only through an explicit [`Secret::expose`].
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -33,10 +34,36 @@ pub enum SecretError {
     RegistrationUnsupported,
 }
 
+/// A resolved secret value.
+///
+/// The plaintext leaves only through [`Secret::expose`], so every consumer is an
+/// explicit call at the boundary that needs the value — the child's environment, a
+/// `Deliver` payload. `Debug` redacts and there is no `Display`, so a resolved value
+/// cannot ride into an error message or a log line by accident.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(SmolStr);
+
+impl Secret {
+    pub fn new(value: impl Into<SmolStr>) -> Self {
+        Self(value.into())
+    }
+
+    /// The plaintext. Call it where the value is consumed, never to build a message.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Secret({MASK})")
+    }
+}
+
 /// Where secret values come from.
 pub trait SecretProvider: Send + Sync {
     /// Fetch a secret and register it for masking.
-    fn resolve(&self, name: &str) -> Result<SmolStr, SecretError>;
+    fn resolve(&self, name: &str) -> Result<Secret, SecretError>;
 
     /// Register a secret at runtime, so a dynamic value — a human gate's sensitive
     /// answer — can cross as a `{"$secret": ...}` reference and stay out of the
@@ -156,13 +183,13 @@ impl MapSecrets {
 }
 
 impl SecretProvider for MapSecrets {
-    fn resolve(&self, name: &str) -> Result<SmolStr, SecretError> {
+    fn resolve(&self, name: &str) -> Result<Secret, SecretError> {
         let secrets = self.secrets.read().expect("secret map is not poisoned");
         let value = secrets
             .get(name)
             .ok_or_else(|| SecretError::Unknown(SmolStr::new(name)))?;
         self.masker.register(value);
-        Ok(value.clone())
+        Ok(Secret::new(value.clone()))
     }
 
     fn register(&self, name: &str, value: &str) -> Result<(), SecretError> {
@@ -179,5 +206,20 @@ impl SecretProvider for MapSecrets {
 
     fn masker(&self) -> Masker {
         self.masker.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_debug_redacts_and_expose_reveals() {
+        let secrets = MapSecrets::from_pairs(&[("TOKEN", "hunter2-hunter2")]);
+        let secret = secrets.resolve("TOKEN").expect("configured");
+        assert_eq!(format!("{secret:?}"), "Secret(***)");
+        assert_eq!(secret.expose(), "hunter2-hunter2");
+        // Resolution registered the value, so the masker knows it.
+        assert_eq!(secrets.masker().mask("got hunter2-hunter2"), "got ***");
     }
 }

@@ -239,7 +239,12 @@ impl ir::StepKind for LeakyStep {
 #[async_trait::async_trait]
 impl steps::StepRunner for LeakyStep {
     async fn run(&self, ctx: steps::StepCtx) -> ir::Outcome {
-        let token = ctx.secrets.resolve("DEPLOY_TOKEN").expect("configured");
+        let token = ctx
+            .secrets
+            .resolve("DEPLOY_TOKEN")
+            .expect("configured")
+            .expose()
+            .to_string();
         let _ = ctx
             .logs
             .send(ir::StepEvent::Artifact {

@@ -22,4 +22,4 @@ pub use env::{ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSp
 pub use error::{EnvError, ReleaseReport};
 pub use lines::LINE_CAP;
 pub use scope::{DEFAULT_GRACE, EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec, Teardown};
-pub use secrets::{MASK, MIN_MASK_LENGTH, MapSecrets, Masker, SecretError, SecretProvider};
+pub use secrets::{MASK, MIN_MASK_LENGTH, MapSecrets, Masker, Secret, SecretError, SecretProvider};
