@@ -206,9 +206,10 @@ impl Site {
     ///
     /// In a step: over the earlier steps of the job (GitHub's job status). In a
     /// job's `if:`: over the needed jobs. `always()` is `true` everywhere.
-    /// `cancelled()` lowers faithfully, but see the note on cancellation routing in
-    /// the crate docs: the engine drops a cancelled firing's tokens, so a step gated
-    /// on `cancelled()` never gets to run today.
+    /// `cancelled()` also ORs in the engine's `scope_cancelled` static: a cancel
+    /// that lands between steps cancels no step record, a not-yet-started job has
+    /// no cancelled needs, and a `fail_fast` splice cancel is not a root cancel —
+    /// `scope_cancelled` covers all three.
     pub fn status_function(&self, table: &mut ExprTable, name: &str, at_step: bool) -> ExprId {
         match (name, at_step) {
             ("always", _) => table.lit(true),
@@ -219,10 +220,18 @@ impl Site {
                 table.unary(UnOp::Not, bad)
             }
             ("failure", true) => self.earlier_step_failed(table),
-            ("cancelled", true) => self.earlier_step_cancelled(table),
+            ("cancelled", true) => {
+                let earlier = self.earlier_step_cancelled(table);
+                let scoped = table.var("scope_cancelled");
+                table.binary(BinOp::Or, earlier, scoped)
+            }
             ("success", false) => self.needs_succeeded(table),
             ("failure", false) => self.needs_failed(table),
-            ("cancelled", false) => self.needs_cancelled(table),
+            ("cancelled", false) => {
+                let needs = self.needs_cancelled(table);
+                let scoped = table.var("scope_cancelled");
+                table.binary(BinOp::Or, needs, scoped)
+            }
             _ => table.lit(false),
         }
     }

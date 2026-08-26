@@ -273,3 +273,100 @@ jobs:
     assert!(graph.nodes.iter().all(|n| n.join == ir::JoinPolicy::All));
     ir::validate(&graph).expect("valid");
 }
+
+// ── Cancellation flags ────────────────────────────────────────────────────
+
+/// Where `run_on_cancel` lands (spec §5): on steps gated `always()` or
+/// `cancelled()`, on every node of a job so gated, on every inlined node of a
+/// composite so gated at the caller, and on every `done` unconditionally.
+/// Nothing else carries it.
+#[test]
+fn run_on_cancel_lands_exactly_where_github_keeps_going() {
+    let action = r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo one
+    - shell: bash
+      run: echo two
+"#;
+    let text = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+      - id: tidy
+        if: always()
+        run: echo tidy
+      - id: onfail
+        if: failure()
+        run: echo onfail
+      - id: sweep
+        if: cancelled()
+        uses: ./.github/actions/sweeper
+      - id: plain
+        uses: ./.github/actions/sweeper
+  cleanup:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo cleanup
+"#;
+    let files = files(&[(".github/actions/sweeper/action.yml", action)]);
+    let graph = lower_ok_with(text, &files);
+
+    let flagged: Vec<&str> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.run_on_cancel)
+        .map(|n| n.name.as_str())
+        .collect();
+    let mut expected = vec![
+        // done: always, both jobs.
+        "build/done",
+        "cleanup/done",
+        // step-level always()/cancelled(), composites inlined per node.
+        "build/tidy",
+        "build/sweep/step-1",
+        "build/sweep/step-2",
+        // job-level always(): every node of the job.
+        "cleanup/start",
+        "cleanup/step-1",
+    ];
+    let mut flagged_sorted = flagged.clone();
+    flagged_sorted.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(flagged_sorted, expected, "flags: {flagged:?}");
+}
+
+/// `cancelled()` ORs in the engine's `scope_cancelled` static, at step and job
+/// level, so a cancel no step record can show — between steps, before a job
+/// starts, a `fail_fast` scope cancel — still reads as cancelled.
+#[test]
+fn cancelled_lowers_with_scope_cancelled() {
+    let text = r#"
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+  b:
+    needs: a
+    if: cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - if: cancelled()
+        run: echo b
+"#;
+    let graph = lower_ok(text);
+    let printed = frontend::print_graph(&graph);
+    assert!(
+        printed.contains("scope_cancelled"),
+        "the static appears in the lowered expressions: {printed}"
+    );
+}

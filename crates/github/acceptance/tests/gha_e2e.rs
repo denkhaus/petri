@@ -79,21 +79,280 @@ async fn status_functions_truth_table() {
     }
 }
 
-/// `cancelled()` is lowered faithfully, and never true today: the engine drops a
-/// cancelled firing's tokens, so nothing downstream fires. A spec finding, pinned.
+/// The cancelled row of the truth table. After a cancel lands mid-step, the
+/// `always()` and `cancelled()` steps run for real, the un-gated steps between
+/// record `Cancelled`, and the run still reports `Cancelled`.
 #[tokio::test]
-async fn cancelled_steps_cannot_run_today() {
-    let text = status_table_workflow("        run: sleep 30");
+async fn cancelled_steps_run_after_a_cancel() {
+    let text = status_table_workflow("        run: echo ready && sleep 30");
     let graph = lower_ok(&text);
     let (report, _) = run_host_then_cancel(graph, "truth-cancelled", "j/a").await;
     assert_eq!(report.status, RunStatus::Cancelled);
+    assert_eq!(status_of(&report, "j/a").as_deref(), Some("cancelled"));
+
+    let ran: Vec<String> = ["b", "c", "d", "e", "f"]
+        .iter()
+        .filter(|s| started(&report).iter().any(|n| n == &format!("j/{s}")))
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        ran,
+        vec!["d", "e"],
+        "`always()` and `cancelled()` run; nothing else does"
+    );
+    for step in ["j/b", "j/c", "j/f"] {
+        assert_eq!(
+            status_of(&report, step).as_deref(),
+            Some("cancelled"),
+            "{step} records why it did not run"
+        );
+    }
+}
+
+/// A not-yet-started job with `if: always()` runs after the run is cancelled —
+/// GitHub's observed behavior, pinned (resolved decision 5) — and its interior
+/// steps run normally. An un-gated dependent job does not start.
+#[tokio::test]
+async fn an_always_job_runs_after_a_run_cancel() {
+    let text = r#"
+on: push
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    steps:
+      - id: work
+        run: echo ready && sleep 30
+  cleanup:
+    needs: main
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo cleaning
+      - run: echo swept
+  dependent:
+    needs: main
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never
+"#;
+    let graph = lower_ok(text);
+    let (report, _) = run_host_then_cancel(graph, "always-job", "main/work").await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+
+    let ran = started(&report);
     assert!(
-        !started(&report).iter().any(|n| n == "j/e"),
-        "the engine does not route after a cancel, so `if: cancelled()` never runs — see the crate docs"
+        ran.iter().any(|n| n == "cleanup/step-1") && ran.iter().any(|n| n == "cleanup/step-2"),
+        "the always() job's interior steps run normally: {ran:?}"
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"cleaning".to_string()), "{lines:?}");
+    assert!(lines.contains(&"swept".to_string()), "{lines:?}");
+
+    assert!(
+        !ran.iter().any(|n| n == "dependent/step-1"),
+        "the un-gated dependent does not start: {ran:?}"
+    );
+    assert_eq!(
+        status_of(&report, "dependent/step-1").as_deref(),
+        Some("cancelled")
+    );
+}
+
+/// A cancel that lands with no step of the job cancelled: the dependent job's
+/// first step is gated on `cancelled()`, and no earlier step of that job carries a
+/// `Cancelled` record — only the `scope_cancelled` static can admit it.
+#[tokio::test]
+async fn a_cancelled_step_fires_via_scope_cancelled() {
+    let text = r#"
+on: push
+jobs:
+  w:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ready && sleep 30
+  c:
+    needs: w
+    runs-on: ubuntu-latest
+    steps:
+      - id: witness
+        if: cancelled()
+        run: echo witness-ran
+"#;
+    let graph = lower_ok(text);
+    let (report, _) = run_host_then_cancel(graph, "between-steps", "w/step-1").await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert!(
+        log_lines(&report).contains(&"witness-ran".to_string()),
+        "the first step of the job has no cancelled earlier step; scope_cancelled admits it: {:?}",
+        log_lines(&report)
+    );
+}
+
+/// Job summaries survive a cancel: a job with cleanup steps but no job-level
+/// opt-in still runs its `done`, so a dependent `always()` job reads
+/// `needs.J.result == "cancelled"` and the job's outputs.
+#[tokio::test]
+async fn job_summaries_survive_a_cancel() {
+    let text = r#"
+on: push
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.produce.outputs.artifact }}
+    steps:
+      - id: produce
+        run: echo "artifact=app.tar" >> "$GITHUB_OUTPUT"
+      - id: slow
+        run: echo ready && sleep 30
+      - id: tidy
+        if: always()
+        run: echo tidying
+  report:
+    needs: main
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "saw ${{ needs.main.result }} with ${{ needs.main.outputs.artifact }}"
+"#;
+    let graph = lower_ok(text);
+    let (report, _) = run_host_then_cancel(graph, "summaries", "main/slow").await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+
+    assert!(
+        started(&report).iter().any(|n| n == "main/tidy"),
+        "the always() cleanup step ran"
+    );
+    assert_eq!(
+        report
+            .state
+            .run_context()
+            .node("main/done")
+            .expect("done ran")
+            .output["result"],
+        json!("cancelled"),
+        "the summary says what happened"
     );
     assert!(
-        !started(&report).iter().any(|n| n == "j/d"),
-        "nor `if: always()`"
+        log_lines(&report).contains(&"saw cancelled with app.tar".to_string()),
+        "the dependent reads the result and the outputs: {:?}",
+        log_lines(&report)
+    );
+}
+
+/// Composite cleanup: a local composite with `if: always()` (and one with
+/// `cancelled()`) runs its inlined steps after a cancel, while an un-gated
+/// composite's inlined steps record `Cancelled`.
+#[tokio::test]
+async fn composite_cleanup_runs_after_a_cancel() {
+    let sweeper = r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo sweeping-1
+    - shell: bash
+      run: echo sweeping-2
+"#;
+    let echoer = r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo plain-ran
+"#;
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: slow
+        run: echo ready && sleep 30
+      - id: plain
+        uses: ./.github/actions/echoer
+      - id: sweep
+        if: always()
+        uses: ./.github/actions/sweeper
+      - id: sweep2
+        if: cancelled()
+        uses: ./.github/actions/echoer
+"#;
+    let files = files(&[
+        (".github/actions/sweeper/action.yml", sweeper),
+        (".github/actions/echoer/action.yml", echoer),
+    ]);
+    let graph = lower_ok_with(text, &files);
+    let (report, _) = run_host_then_cancel(graph, "composite-cleanup", "j/slow").await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"sweeping-1".to_string()), "{lines:?}");
+    assert!(lines.contains(&"sweeping-2".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"plain-ran".to_string()),
+        "the cancelled() composite's steps ran too: {lines:?}"
+    );
+    assert!(
+        !started(&report).iter().any(|n| n == "j/plain/step-1"),
+        "the un-gated composite never starts"
+    );
+    assert_eq!(
+        status_of(&report, "j/plain/step-1").as_deref(),
+        Some("cancelled")
+    );
+}
+
+/// `fail_fast` plus `max-parallel`: a leg that was still deferred when the splice
+/// scope was cancelled runs its `if: cancelled()` step — admitted by
+/// `scope_cancelled`, since no step of that leg holds a `Cancelled` record — and
+/// its un-gated step records `Cancelled`.
+#[tokio::test]
+async fn a_deferred_legs_cancelled_step_runs_under_fail_fast() {
+    let text = r#"
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        n: [1, 2]
+    steps:
+      - id: recover
+        if: cancelled()
+        run: echo "recover-${{ matrix.n }}"
+      - id: work
+        run: |
+          if [ "${{ matrix.n }}" = "1" ]; then exit 1; fi
+          echo "work-${{ matrix.n }}"
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "fail-fast-deferred").await;
+    assert_eq!(report.status, RunStatus::Failed);
+
+    let lines = log_lines(&report);
+    assert!(
+        lines.contains(&"recover-2".to_string()),
+        "the deferred leg's cancelled() step ran: {lines:?}"
+    );
+    assert!(
+        !lines.contains(&"recover-1".to_string()),
+        "the failing leg's cancelled() step was evaluated before the cancel and skipped"
+    );
+    assert_eq!(
+        status_of(&report, "test/recover#0").as_deref(),
+        Some("skipped")
+    );
+    assert_eq!(
+        status_of(&report, "test/work#1").as_deref(),
+        Some("cancelled"),
+        "the un-gated step of the cancelled leg records Cancelled"
+    );
+    assert!(
+        !lines.contains(&"work-2".to_string()),
+        "it never actually ran"
     );
 }
 

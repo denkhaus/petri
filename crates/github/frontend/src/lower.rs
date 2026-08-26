@@ -127,6 +127,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
             scope,
             StepRef::new("noop", Value::Null),
         );
+        // Every `done` runs on cancel, unconditionally: it is a side-effect-free
+        // fold, and a dependent's `always()` gate and `needs.J.*` reads need a
+        // truthful summary in every cancel case.
+        self.b.node_mut(done).run_on_cancel = true;
         self.spans.insert(done, job.span.clone());
         self.jobs.insert(
             job.id.clone(),
@@ -463,6 +467,18 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
 
+        // A job whose own `if:` names `always()` or `cancelled()` is a cleanup job:
+        // GitHub admits the whole job after a cancel, so every node of it — start,
+        // steps, done (flagged already) — must be able to fire. The interior steps'
+        // own gates then keep their normal meaning, observed over this job's steps.
+        // Matrix legs are covered too: clones inherit the flag from these templates.
+        if names_cleanup(job.condition) {
+            self.b.node_mut(start).run_on_cancel = true;
+            for id in &chain {
+                self.b.node_mut(*id).run_on_cancel = true;
+            }
+        }
+
         let last = *chain.last().unwrap_or(&start);
         if let Some(j) = self.jobs.get_mut(&job.id) {
             j.last = last;
@@ -700,6 +716,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
             None => started,
         };
         self.b.set_precondition(id, pre);
+
+        // A step gated on `always()` or `cancelled()` runs after a cancel in
+        // GitHub, so it opts in; its precondition then decides as usual.
+        if names_cleanup(step.condition) {
+            self.b.node_mut(id).run_on_cancel = true;
+        }
         vec![id]
     }
 
@@ -834,7 +856,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .collect();
         inner_site.composite_outputs = BTreeMap::new();
 
-        let mut names_so_far: Vec<String> = earlier.to_vec();
+        // Inner steps observe the composite's own steps, not the caller's: the
+        // action is a unit, and its steps' implicit `success()` must not re-judge
+        // work outside it. The caller's gate below is what speaks for that work.
+        let mut names_so_far: Vec<String> = Vec::new();
+        inner_site.earlier_steps = Vec::new();
         let mut ids = Vec::new();
         for inner in &action.steps {
             let inherited = Defaults {
@@ -861,6 +887,26 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 names_so_far.push(name);
                 inner_site.earlier_steps = names_so_far.clone();
                 ids.push(id);
+            }
+        }
+
+        // The caller's `if:` gates the whole inlined unit the way a job's gate
+        // does: there is no wrapper node, so it is ANDed into every inlined node's
+        // precondition (default: `success()` over the caller's earlier steps). And
+        // when it names `always()` or `cancelled()`, the composite is cleanup:
+        // every inlined node opts in, mirroring the cleanup-job rule.
+        let caller_gate = self.condition(step.condition, &caller_site, true, span.clone());
+        let cleanup = names_cleanup(step.condition);
+        for id in &ids {
+            if let Some(gate) = caller_gate {
+                let pre = match self.b.graph().node(*id).and_then(|n| n.precondition) {
+                    Some(own) => self.b.exprs().binary(BinOp::And, gate, own),
+                    None => gate,
+                };
+                self.b.set_precondition(*id, pre);
+            }
+            if cleanup {
+                self.b.node_mut(*id).run_on_cancel = true;
             }
         }
 
@@ -1234,6 +1280,40 @@ impl<'w, 'a> Lowering<'w, 'a> {
 enum EnvValue {
     Plain(ExprOrValue),
     Secret(String),
+}
+
+/// Whether an `if:` names `always()` or `cancelled()` — the conditions GitHub
+/// still honours after a cancellation, and therefore where `run_on_cancel`
+/// belongs. Parse problems read as false; `condition` reports them.
+fn names_cleanup(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    let Some(scalar) = node.as_scalar() else {
+        return false;
+    };
+    if scalar.as_bool().is_some() {
+        return false;
+    }
+    let text = scalar.as_str();
+    let source = if text.contains("${{") {
+        match frontend::expr::split_template(text) {
+            Ok(segments) => match segments.as_slice() {
+                [frontend::expr::Segment::Expr { source, .. }] => source.clone(),
+                _ => return false,
+            },
+            Err(_) => return false,
+        }
+    } else {
+        text.to_string()
+    };
+    parse(&source)
+        .map(|ast| {
+            ast.calls()
+                .iter()
+                .any(|c| matches!(c.to_lowercase().as_str(), "always" | "cancelled"))
+        })
+        .unwrap_or(false)
 }
 
 fn variant(error: &ValidationError) -> &'static str {

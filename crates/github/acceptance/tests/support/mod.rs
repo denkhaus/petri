@@ -50,10 +50,14 @@ pub fn with_params(graph: Graph) -> Graph {
     graph
 }
 
-fn run_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir()
+fn run_dir_path(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
         .join("petri-gha")
-        .join(format!("{label}-{}", std::process::id()));
+        .join(format!("{label}-{}", std::process::id()))
+}
+
+fn run_dir(label: &str) -> std::path::PathBuf {
+    let dir = run_dir_path(label);
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -78,10 +82,18 @@ pub async fn run_host(graph: Graph, label: &str) -> RunReportPlus {
 }
 
 /// Start a run, cancel it once `node` has started, and return the report.
+///
+/// The step must print something once it is under way (`echo ready && sleep 30`):
+/// the cancel is triggered by its log file appearing. Replay byte-identity is
+/// verified on the way out, cancellation included.
 pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (RunReportPlus, ()) {
     let graph = with_params(graph);
-    let dir = run_dir(label);
-    let driver = runtime(&dir).driver(graph);
+    let original = graph.clone();
+    let driver = {
+        let dir = run_dir(label);
+        runtime(&dir).driver(graph)
+    };
+    let dir = run_dir_path(label);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     // Wait for the named step's log file to appear, then cancel.
@@ -104,6 +116,7 @@ pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (Run
     handle.cancel(ir::CancelScopeId::ROOT).await;
     let report = run.await.expect("run finished");
     let _ = std::fs::remove_dir_all(&dir);
+    engine::verify_replay(original, &report.state.log).expect("replay is byte-identical");
     (RunReportPlus::from(report), ())
 }
 

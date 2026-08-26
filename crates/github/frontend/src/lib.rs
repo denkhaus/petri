@@ -26,14 +26,23 @@
 //! job having started. That is how a false job `if:` skips every step, and how
 //! `continue-on-error` (a `PartialSuccess`) does not fail the job.
 //!
-//! # Two things the engine cannot do today
+//! # Cancellation
 //!
-//! Both are reported as spec findings rather than worked around:
+//! GitHub runs `if: always()` and `if: cancelled()` work after a cancellation, and
+//! the engine admits post-cancel work only through the structural
+//! `Node.run_on_cancel` flag (spec §5). The lowering sets it where GitHub would
+//! keep going: on a step whose `if:` names `always()` or `cancelled()`; on every
+//! node of a job whose own `if:` does; on every inlined node of a local composite
+//! whose caller's `if:` does; and on every `done` node unconditionally, because a
+//! dependent's `needs.J.*` reads need a truthful summary in every cancel case.
+//! `cancelled()` also ORs in the `scope_cancelled` static, so a cancel that lands
+//! between steps — or a `fail_fast` scope cancel, which root-only `run.cancelled`
+//! cannot see — still reads as cancelled.
 //!
-//! - **`cancelled()` steps.** GitHub runs `if: cancelled()` and `if: always()` steps
-//!   after a cancellation. The engine drops a cancelled firing's tokens, so nothing
-//!   downstream of a cancelled step fires. The lowering is faithful and the step can
-//!   never run.
+//! # One thing the engine cannot do today
+//!
+//! Reported as a spec finding rather than worked around:
+//!
 //! - **`runs-on: ${{ matrix.os }}`.** Each matrix leg would need its own environment,
 //!   and the IR has one scope per job. Rejected as `unsupported.runs_on.expression`.
 
