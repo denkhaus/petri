@@ -43,8 +43,17 @@ pub enum Event {
         node: NodeId,
         splice: SubgraphSplice,
     },
-    /// External cancellation. The run's root scope cancels everything.
+    /// External cancellation, the polite tier. The run's root scope cancels
+    /// everything. Live firings get `Control::Cancel`, cancelled outcomes route,
+    /// and `run_on_cancel` cleanup is admitted (§5).
     CancelRequested {
+        scope: CancelScopeId,
+    },
+    /// External kill, the forced tier. Tokens drop, nothing routes, nothing is
+    /// admitted — `run_on_cancel` included — and every live firing in the closure
+    /// gets `Control::Kill`, already-cancelling ones included. In the log so the
+    /// mode of stopping is recorded, never inferred (§5).
+    KillRequested {
         scope: CancelScopeId,
     },
 }

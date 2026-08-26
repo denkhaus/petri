@@ -10,7 +10,12 @@ use crate::event::Event;
 /// carry it, `ScheduleRetry` / `RetryElapsed` joined the vocabulary, finish records
 /// carry `context_updates`, and every record records whether it came from outside or
 /// from the core.
-pub const LOG_VERSION: u32 = 2;
+///
+/// v2 → v3: cancelled outcomes route (the semantics change under replay),
+/// `KillRequested` joined the vocabulary, and `Node` — serialized inside
+/// `NodeExpanded` splices — gained `run_on_cancel`. Per the standing policy there is
+/// no migrator: a v2 log is rejected cleanly.
+pub const LOG_VERSION: u32 = 3;
 
 /// Where an event came from.
 ///

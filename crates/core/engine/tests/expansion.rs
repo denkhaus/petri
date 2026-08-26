@@ -152,7 +152,10 @@ fn fail_fast_cancels_the_sibling_clones() {
     let mut h = Harness::new(graph).respond_with(|info| match info.base.as_str() {
         "plan" => Outcome::success(json!(["a", "b", "c"])),
         "deploy" if info.index == Some(0) => Outcome::failure("boom"),
-        _ => Outcome::success(Value::Null),
+        // The siblings honour the cancel. Their outcomes route (§5), but a token
+        // from a cancelled firing admits only `run_on_cancel` nodes, so the
+        // un-flagged collector still never starts.
+        _ => Outcome::cancelled(),
     });
     assert_eq!(h.run(), RunStatus::Failed);
 
@@ -163,6 +166,11 @@ fn fail_fast_cancels_the_sibling_clones() {
         .count();
     assert_eq!(cancels, 2, "the two live siblings are cancelled");
     assert_eq!(h.start_count("collect"), 0, "the collector never fires");
+    assert_eq!(
+        h.status_of("collect").as_deref(),
+        Some("cancelled"),
+        "it completes without running instead"
+    );
 
     // The splice made its own cancel scope, nested under the root.
     let splice = h.state.splices().first().expect("one splice");
@@ -172,6 +180,63 @@ fn fail_fast_cancels_the_sibling_clones() {
         Some(CancelScopeId::ROOT)
     );
     assert!(h.state.cancel_scope(splice.cancel_scope).unwrap().cancelled);
+}
+
+/// The other half of the `fail_fast` rule: a collector marked `run_on_cancel`
+/// fires and gathers the partial results — the failed leg's, and the cancelled
+/// siblings' — instead of never firing.
+#[test]
+fn fail_fast_still_fires_a_marked_collector() {
+    let mut graph = matrix_graph(None, true);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.name == "collect")
+        .unwrap()
+        .run_on_cancel = true;
+    validate(&graph).expect("valid");
+
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    let sink = seen.clone();
+    let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
+        "plan" => Outcome::success(json!(["a", "b", "c"])),
+        "deploy" if info.index == Some(0) => Outcome::failure("boom"),
+        "collect" => {
+            *sink.borrow_mut() = info.inputs.len();
+            Outcome::success(Value::Null)
+        }
+        _ => Outcome::cancelled(),
+    });
+    assert_eq!(h.run(), RunStatus::Failed);
+    assert_eq!(h.start_count("collect"), 1, "the marked collector fires");
+    assert_eq!(*seen.borrow(), 3, "and sees every leg's token");
+}
+
+/// §5: a root cancel does not start `max_parallel`-deferred clones. They are
+/// un-marked, so once the running clone settles they complete `Cancelled` without
+/// a `StartStep` — deferral is not a back door around the admission rule.
+#[test]
+fn a_cancel_does_not_start_deferred_unmarked_clones() {
+    let graph = matrix_graph(Some(1), false);
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph);
+    h.feed(engine::Event::RunStarted);
+    let starts = h.take_starts();
+    h.finish(starts[0].0, Outcome::success(json!(["a", "b", "c"])));
+    let running = h.take_starts();
+    assert_eq!(running.len(), 1, "max_parallel admits one clone");
+
+    h.cancel(CancelScopeId::ROOT);
+    h.finish(running[0].0, Outcome::cancelled());
+
+    assert_eq!(h.take_starts(), vec![], "the deferred clones never start");
+    assert_eq!(h.start_count("deploy"), 1);
+    for leg in ["deploy#1", "deploy#2"] {
+        assert_eq!(h.status_of(leg).as_deref(), Some("cancelled"), "{leg}");
+    }
+    assert_eq!(h.status, Some(RunStatus::Cancelled));
+    h.verify_replay();
 }
 
 /// Splice semantics: a splice supersedes the whole template region, so a template

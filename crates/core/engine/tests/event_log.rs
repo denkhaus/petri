@@ -297,19 +297,27 @@ fn replay_reproduces_an_expansion() {
 
 /// A v1 log is rejected cleanly rather than half-understood.
 #[test]
-fn a_v1_log_is_rejected() {
+fn an_old_log_version_is_rejected() {
     let mut h = Harness::new(diamond());
     h.run();
     let encoded = serde_json::to_string(&h.state.log).expect("encode");
-    assert!(encoded.contains("\"version\":2"));
+    assert!(encoded.contains("\"version\":3"));
 
-    let downgraded = encoded.replacen("\"version\":2", "\"version\":1", 1);
-    let error = serde_json::from_str::<engine::EventLog>(&downgraded)
-        .expect_err("a v1 log must not deserialize");
-    assert!(
-        error.to_string().contains("version 1"),
-        "the error names the version it found: {error}"
-    );
+    // v3 changed replay semantics (cancelled outcomes route), so a v2 log is
+    // rejected cleanly rather than replayed under rules it was not written for.
+    for old in [1, 2] {
+        let downgraded = encoded.replacen(
+            "\"version\":3",
+            &format!("\"version\":{old}"),
+            1,
+        );
+        let error = serde_json::from_str::<engine::EventLog>(&downgraded)
+            .expect_err("an old log must not deserialize");
+        assert!(
+            error.to_string().contains(&format!("version {old}")),
+            "the error names the version it found: {error}"
+        );
+    }
 }
 
 /// The whole state still round-trips, now including the run context.

@@ -208,6 +208,11 @@ and Kill — the workflow-level analogue of `SIGTERM` and `SIGKILL`.
    - An expansion node in a cancelled scope never expands; it completes
      `Cancelled`. `run_on_cancel` on an expansion node is a validation warning
      (ignored in v1).
+   - The same admission applies to work **fed by** cancelled work: a node any
+     of whose join tokens was emitted by a firing that recorded `Cancelled`
+     completes `Cancelled` unless it is marked. This is what keeps a
+     `fail_fast` splice's un-marked collector — outside the cancelled scope —
+     from starting, while a marked one fires and gathers partial results.
 3. A firing **awaiting a retry backoff** has no work in flight and no driver
    task to deliver to, so the core settles it at once instead of waiting out
    the backoff: it records a `Cancelled` outcome and routes it (under Kill:

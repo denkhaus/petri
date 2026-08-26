@@ -98,6 +98,14 @@ pub(crate) fn firing_statics(
             "cancelled": matches!(state.folded_status(), ir::RunStatus::Cancelled),
         }),
     );
+    // `run.cancelled` is root-only, so a `fail_fast` scope cancel is invisible to
+    // it. This one is true whenever the firing's node lies in a cancelled
+    // cancel-scope; a root cancel marks every scope, so it subsumes `run.cancelled`
+    // for gating.
+    ctx.set(
+        "scope_cancelled",
+        Value::Bool(state.is_node_cancelled(node)),
+    );
 
     // `item` and `index` for a node that came out of an expansion.
     if let Some(bindings) = state.clone_bindings_for(node) {
@@ -141,6 +149,7 @@ pub(crate) fn primary_token(inputs: &[Token]) -> Value {
 fn folded_upstream_status(state: &EngineState, inputs: &[Token]) -> &'static str {
     let mut saw_any = false;
     let mut any_failed = false;
+    let mut any_cancelled = false;
     let mut any_ran = false;
     for token in inputs {
         let Some(source) = state.graph.edge_source(token.edge) else {
@@ -154,10 +163,16 @@ fn folded_upstream_status(state: &EngineState, inputs: &[Token]) -> &'static str
         };
         saw_any = true;
         any_failed |= record.status.is_failure();
+        any_cancelled |= matches!(record.status, Status::Cancelled);
         any_ran |= !matches!(record.status, Status::Skipped);
     }
+    // failure > cancelled > skipped > success: an upstream failure still reads as
+    // "failure" even when a cancel also landed, and a cancelled upstream makes the
+    // core `success()` guard false and `cancelled()` true.
     if any_failed {
         "failure"
+    } else if any_cancelled {
+        "cancelled"
     } else if !saw_any || any_ran {
         "success"
     } else {

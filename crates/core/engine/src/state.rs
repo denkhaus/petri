@@ -56,6 +56,10 @@ pub struct CancelScope {
     /// this empty.
     pub nodes: BTreeSet<NodeId>,
     pub cancelled: bool,
+    /// The forced tier: nothing in the scope fires or routes any more, and
+    /// `run_on_cancel` admits nothing. Killed implies cancelled.
+    #[serde(default)]
+    pub killed: bool,
 }
 
 /// Bookkeeping for one spliced expansion.
@@ -145,6 +149,13 @@ pub struct EngineState {
     /// `item` / `index` bindings a clone's nodes see.
     clone_bindings: BTreeMap<NodeId, BTreeMap<SmolStr, Value>>,
 
+    /// Firings settled by a cancel or kill while awaiting a retry backoff. The
+    /// driver's sleeper cannot be recalled, so the one matching late `RetryElapsed`
+    /// consumes its tombstone silently; any other invalid `RetryElapsed` still
+    /// errors.
+    #[serde(default)]
+    retry_tombstones: BTreeSet<FiringId>,
+
     /// Synthetic incoming edges for entry nodes and clone entries.
     seed_edges: BTreeMap<EdgeId, NodeId>,
     /// Resource scopes currently held. A scope is held from the moment one of its
@@ -180,6 +191,7 @@ impl EngineState {
                 children: Vec::new(),
                 nodes: BTreeSet::new(),
                 cancelled: false,
+                killed: false,
             },
         );
         Self {
@@ -197,6 +209,7 @@ impl EngineState {
             splices: Vec::new(),
             superseded: BTreeSet::new(),
             clone_bindings: BTreeMap::new(),
+            retry_tombstones: BTreeSet::new(),
             seed_edges: BTreeMap::new(),
             held_scopes: BTreeSet::new(),
             next_firing: 1,
@@ -503,6 +516,7 @@ impl EngineState {
                 children: Vec::new(),
                 nodes,
                 cancelled: false,
+                killed: false,
             },
         );
         if let Some(p) = self.cancel_scopes.get_mut(&parent) {
@@ -561,6 +575,50 @@ impl EngineState {
             current = self.cancel_scopes.get(&id).and_then(|s| s.parent);
         }
         false
+    }
+
+    /// Mark a scope killed. Killed implies cancelled.
+    pub(crate) fn mark_scope_killed(&mut self, id: CancelScopeId) {
+        if let Some(scope) = self.cancel_scopes.get_mut(&id) {
+            scope.cancelled = true;
+            scope.killed = true;
+        }
+    }
+
+    pub(crate) fn is_scope_killed(&self, id: CancelScopeId) -> bool {
+        self.cancel_scopes.get(&id).is_some_and(|scope| scope.killed)
+    }
+
+    /// Whether the node sits in a killed scope. A root kill marks the root scope,
+    /// and every node's scope chain ends there, so no separate run flag is needed.
+    pub(crate) fn is_node_killed(&self, node: NodeId) -> bool {
+        let mut current = Some(self.cancel_scope_of(node));
+        while let Some(id) = current {
+            if self.is_scope_killed(id) {
+                return true;
+            }
+            current = self.cancel_scopes.get(&id).and_then(|s| s.parent);
+        }
+        false
+    }
+
+    /// Whether this firing's recorded final outcome is `Cancelled`. Seed tokens
+    /// carry `FiringId(0)`, which no record ever uses.
+    pub(crate) fn outcome_was_cancelled(&self, firing: FiringId) -> bool {
+        self.history
+            .iter()
+            .rev()
+            .find(|r| r.firing == firing)
+            .is_some_and(|r| matches!(r.outcome.status, Status::Cancelled))
+    }
+
+    pub(crate) fn add_retry_tombstone(&mut self, firing: FiringId) {
+        self.retry_tombstones.insert(firing);
+    }
+
+    /// Consume the tombstone for a settled awaiting-retry firing, if one exists.
+    pub(crate) fn take_retry_tombstone(&mut self, firing: FiringId) -> bool {
+        self.retry_tombstones.remove(&firing)
     }
 
     pub(crate) fn nodes_in_scopes(&self, scopes: &BTreeSet<CancelScopeId>) -> BTreeSet<NodeId> {
@@ -628,6 +686,16 @@ impl EngineState {
         for scope in &released {
             self.held_scopes.remove(scope);
         }
+        released
+    }
+
+    /// Terminal release: drop every held scope, and say which they were. Nothing can
+    /// need an environment after `FinishRun`, and a finished serialized state must
+    /// claim no resources — a token parked at an unsatisfiable join no longer holds
+    /// its environment past the end of the run.
+    pub(crate) fn release_all_scopes(&mut self) -> Vec<ScopeId> {
+        let released: Vec<ScopeId> = self.held_scopes.iter().copied().collect();
+        self.held_scopes.clear();
         released
     }
 
