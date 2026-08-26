@@ -9,9 +9,8 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use driver::{CONTROL_CHANNEL_CAPACITY, DeliverDisposition, Driver, RunConfig, RunHandle};
-use executor::{Executor, MapSecrets, Retention, SecretProvider};
-use executor_host::HostExecutor;
+use driver::{CONTROL_CHANNEL_CAPACITY, DeliverDisposition, RunConfig, RunHandle};
+use executor::{MapSecrets, SecretProvider};
 use ir::{Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId, Value};
 use serde_json::json;
 use steps::Registry;
@@ -20,7 +19,8 @@ use support::*;
 // ── Test step kinds ───────────────────────────────────────────────────────
 
 /// The minimal human-gate shape: wait for one `Deliver`, record what arrived, and
-/// return it as the step's output.
+/// return it as the step's output. An optional `linger_ms` keeps it running that
+/// long after the answer before returning it.
 struct GateStep {
     received: Arc<Mutex<Vec<Value>>>,
 }
@@ -45,6 +45,10 @@ impl steps::StepRunner for GateStep {
                     .lock()
                     .expect("not poisoned")
                     .push(value.clone());
+                let linger = ctx.config["linger_ms"].as_u64().unwrap_or(0);
+                if linger > 0 {
+                    tokio::time::sleep(Duration::from_millis(linger)).await;
+                }
                 Outcome::success(value)
             }
             Some(_) => Outcome::cancelled(),
@@ -117,35 +121,6 @@ impl steps::StepRunner for BusyStep {
     }
 }
 
-/// Receives one `Deliver`, then keeps running well past `grace + slack` before
-/// returning it — proof the delivery armed no hard deadline.
-struct LingerStep;
-
-const LINGER_KIND: ir::StepKindId = ir::StepKindId::new_static("linger");
-
-impl ir::StepKind for LingerStep {
-    fn id(&self) -> ir::StepKindId {
-        LINGER_KIND
-    }
-    fn name(&self) -> &str {
-        "linger"
-    }
-}
-
-#[async_trait::async_trait]
-impl steps::StepRunner for LingerStep {
-    async fn run(&self, mut ctx: steps::StepCtx) -> Outcome {
-        match ctx.control.recv().await {
-            Some(Control::Deliver(value)) => {
-                let ms = ctx.config["linger_ms"].as_u64().unwrap_or(0);
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-                Outcome::success(value)
-            }
-            _ => Outcome::cancelled(),
-        }
-    }
-}
-
 // ── Scaffolding ───────────────────────────────────────────────────────────
 
 fn single_node(kind: ir::StepKindId, config: Value) -> Graph {
@@ -156,18 +131,6 @@ fn single_node(kind: ir::StepKindId, config: Value) -> Graph {
 
 /// The first firing of a run is always `FiringId(1)`.
 const FIRST: FiringId = FiringId::new(1);
-
-fn driver_with(
-    graph: Graph,
-    dir: &RunDir,
-    secrets: Arc<MapSecrets>,
-    registry: Registry,
-    config: RunConfig,
-) -> Driver {
-    let executor: Arc<dyn Executor> =
-        Arc::new(HostExecutor::new(dir.path()).with_retention(Retention::Never));
-    Driver::new(graph, executor, registry, secrets, config)
-}
 
 fn gate_registry(received: &Arc<Mutex<Vec<Value>>>) -> Registry {
     let mut registry = runners();
@@ -191,12 +154,12 @@ async fn a_gate_step_receives_an_answer_end_to_end() {
     let dir = RunDir::new("deliver-gate");
     let received = Arc::new(Mutex::new(Vec::new()));
     let graph = single_node(GATE_KIND, Value::Null);
-    let driver = driver_with(
+    let driver = host_driver_full(
         graph.clone(),
         &dir,
-        Arc::new(MapSecrets::empty()),
-        gate_registry(&received),
+        MapSecrets::empty(),
         RunConfig::new(dir.path()),
+        gate_registry(&received),
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
@@ -250,12 +213,12 @@ async fn ordering_and_liveness_hold_when_the_control_channel_is_full() {
     );
     let mut registry = runners();
     registry.register_runner(Arc::new(CollectStep));
-    let driver = driver_with(
+    let driver = host_driver_full(
         graph,
         &dir,
-        Arc::new(MapSecrets::empty()),
-        registry,
+        MapSecrets::empty(),
         RunConfig::new(dir.path()),
+        registry,
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
@@ -311,12 +274,12 @@ async fn a_firing_that_finishes_first_turns_a_parked_delivery_not_live() {
     );
     let mut registry = runners();
     registry.register_runner(Arc::new(BusyStep));
-    let driver = driver_with(
+    let driver = host_driver_full(
         graph,
         &dir,
-        Arc::new(MapSecrets::empty()),
-        registry,
+        MapSecrets::empty(),
         RunConfig::new(dir.path()),
+        registry,
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
@@ -357,13 +320,18 @@ async fn a_firing_that_finishes_first_turns_a_parked_delivery_not_live() {
 #[tokio::test]
 async fn a_delivery_arms_no_hard_deadline() {
     let dir = RunDir::new("deliver-no-deadline");
-    let graph = single_node(LINGER_KIND, json!({ "linger_ms": 600 }));
-    let mut registry = runners();
-    registry.register_runner(Arc::new(LingerStep));
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let graph = single_node(GATE_KIND, json!({ "linger_ms": 600 }));
     let mut config = RunConfig::new(dir.path());
     config.grace = Duration::from_millis(200);
     config.hard_deadline_slack = Duration::from_millis(100);
-    let driver = driver_with(graph, &dir, Arc::new(MapSecrets::empty()), registry, config);
+    let driver = host_driver_full(
+        graph,
+        &dir,
+        MapSecrets::empty(),
+        config,
+        gate_registry(&received),
+    );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
@@ -397,12 +365,12 @@ async fn a_sensitive_answer_crosses_as_a_reference_and_never_enters_the_log() {
     let received = Arc::new(Mutex::new(Vec::new()));
     let graph = single_node(GATE_KIND, Value::Null);
     let secrets = Arc::new(MapSecrets::empty());
-    let driver = driver_with(
+    let driver = host_driver_shared(
         graph,
         &dir,
         Arc::clone(&secrets),
-        gate_registry(&received),
         RunConfig::new(dir.path()),
+        gate_registry(&received),
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
@@ -460,12 +428,12 @@ async fn an_unresolvable_reference_fails_the_step() {
     let dir = RunDir::new("deliver-missing-secret");
     let received = Arc::new(Mutex::new(Vec::new()));
     let graph = single_node(GATE_KIND, Value::Null);
-    let driver = driver_with(
+    let driver = host_driver_full(
         graph,
         &dir,
-        Arc::new(MapSecrets::empty()),
-        gate_registry(&received),
+        MapSecrets::empty(),
         RunConfig::new(dir.path()),
+        gate_registry(&received),
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());

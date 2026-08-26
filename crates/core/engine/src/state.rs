@@ -344,7 +344,7 @@ impl EngineState {
         }
         match self.graph.completion {
             Completion::AnyFailure => {
-                if self.history.iter().any(|r| r.outcome.status.is_failure()) {
+                if self.any_failure() {
                     RunStatus::Failed
                 } else {
                     RunStatus::Success

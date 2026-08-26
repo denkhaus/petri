@@ -305,7 +305,7 @@ impl Driver {
                 self.kill_root().await
             }
             Signal::Inject(event) => self.feed(event).await,
-            Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack).await,
+            Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack),
             Signal::Progress { firing, event } => {
                 let event = self.mask_progress(firing, event).await;
                 self.feed(Event::StepProgress { firing, ev: event }).await;
@@ -375,36 +375,37 @@ impl Driver {
     /// The append happens inside `apply`, which records this event as `External` and
     /// everything it derives as `Core`.
     async fn feed(&mut self, event: Event) {
-        let state = std::mem::replace(&mut self.engine, EngineState::new(Graph::new()));
-        let (state, commands) = apply(state, event);
-        self.engine = state;
-        for command in commands {
+        for command in self.apply_event(event) {
             self.dispatch(command).await;
         }
     }
 
+    /// Run one event through the core: append, apply, hand back the commands.
+    fn apply_event(&mut self, event: Event) -> Vec<Command> {
+        let state = std::mem::replace(&mut self.engine, EngineState::new(Graph::new()));
+        let (state, commands) = apply(state, event);
+        self.engine = state;
+        commands
+    }
+
     /// A host delivery: feed `ControlRequested` and report the disposition.
     ///
-    /// The command-or-no-command result of `apply` is the disposition. When a
-    /// `DeliverControl` comes out, the ack travels with the forward and the
-    /// forwarder completes it; when none does — the firing is dead, unknown,
-    /// cancelling or awaiting a retry — the event is in the log regardless (the
-    /// audit trail) and the host hears `NotLive`.
-    async fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
-        let state = std::mem::replace(&mut self.engine, EngineState::new(Graph::new()));
-        let (state, commands) = apply(state, Event::ControlRequested { firing, ctl });
-        self.engine = state;
-        let mut ack = Some(ack);
-        for command in commands {
-            match command {
-                Command::DeliverControl { firing, ctl } if matches!(ctl, Control::Deliver(_)) => {
-                    self.forward_deliver(firing, ctl, ack.take());
-                }
-                other => self.dispatch(other).await,
+    /// The command-or-no-command result of `apply` is the disposition:
+    /// `ControlRequested` yields at most one command, a `DeliverControl` carrying
+    /// the `Deliver` (see `on_control_requested`). When it comes out, the ack
+    /// travels with the forward and the forwarder completes it; when none does —
+    /// the firing is dead, unknown, cancelling or awaiting a retry — the event is
+    /// in the log regardless (the audit trail) and the host hears `NotLive`.
+    fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
+        let commands = self.apply_event(Event::ControlRequested { firing, ctl });
+        match commands.into_iter().next() {
+            Some(Command::DeliverControl {
+                firing,
+                ctl: Control::Deliver(payload),
+            }) => self.forward_deliver(firing, payload, Some(ack)),
+            _ => {
+                let _ = ack.send(DeliverDisposition::NotLive);
             }
-        }
-        if let Some(ack) = ack {
-            let _ = ack.send(DeliverDisposition::NotLive);
         }
     }
 
@@ -426,7 +427,7 @@ impl Driver {
             Command::DeliverControl { firing, ctl } => match ctl {
                 // A delivered value only forwards: no deadline, no reason — it never
                 // starts the cancellation ladder or the kill tier.
-                Control::Deliver(_) => self.forward_deliver(firing, ctl, None),
+                Control::Deliver(payload) => self.forward_deliver(firing, payload, None),
                 stop => self.stop_step(firing, stop, CancelReason::Requested),
             },
             Command::ScheduleRetry {
@@ -718,10 +719,7 @@ impl Driver {
     /// the logged event keeps the reference, so dynamic values never enter the log.
     /// An unresolvable reference — the post-resume shape, where the host must
     /// re-provide dynamic values — fails the step with `secret_unavailable`.
-    fn forward_deliver(&mut self, firing: FiringId, ctl: Control, ack: Option<DeliverAck>) {
-        let Control::Deliver(payload) = ctl else {
-            return;
-        };
+    fn forward_deliver(&mut self, firing: FiringId, payload: Value, ack: Option<DeliverAck>) {
         let payload = match resolve_secret_refs(payload, self.secrets.as_ref()) {
             Ok(payload) => payload,
             Err(missing) => {

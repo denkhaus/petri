@@ -33,11 +33,7 @@ pub(crate) fn firing_statics(
     generation: Generation,
     attempt: Attempt,
 ) -> Result<StaticCtx, RunError> {
-    let nd = state
-        .graph
-        .node(node)
-        .ok_or(RunError::UnknownNode(node))?
-        .clone();
+    let nd = state.graph.node(node).ok_or(RunError::UnknownNode(node))?;
 
     let mut ctx = StaticCtx::new();
     let empty_run = RunContext::new();

@@ -41,9 +41,21 @@ pub fn host_driver_full(
     config: RunConfig,
     runners: Registry,
 ) -> Driver {
+    host_driver_shared(graph, dir, Arc::new(secrets), config, runners)
+}
+
+/// Like [`host_driver_full`], but the caller keeps a handle to the secrets — to
+/// register values mid-run.
+pub fn host_driver_shared(
+    graph: Graph,
+    dir: &RunDir,
+    secrets: Arc<MapSecrets>,
+    config: RunConfig,
+    runners: Registry,
+) -> Driver {
     let executor: Arc<dyn Executor> =
         Arc::new(HostExecutor::new(dir.path()).with_retention(config.keep_workspaces));
-    Driver::new(graph, executor, runners, Arc::new(secrets), config)
+    Driver::new(graph, executor, runners, secrets, config)
 }
 
 /// A host executor that refuses to acquire particular scopes, standing in for one

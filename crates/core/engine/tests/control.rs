@@ -22,13 +22,10 @@ fn chain() -> ir::Graph {
 }
 
 fn deliveries(h: &Harness) -> Vec<(FiringId, Control)> {
-    h.commands
-        .iter()
-        .filter_map(|c| match c {
-            Command::DeliverControl { firing, ctl } => Some((*firing, ctl.clone())),
-            _ => None,
-        })
-        .collect()
+    h.commands_of(|c| match c {
+        Command::DeliverControl { firing, ctl } => Some((*firing, ctl.clone())),
+        _ => None,
+    })
 }
 
 /// A deliver to a live firing produces exactly one `DeliverControl`, with the
