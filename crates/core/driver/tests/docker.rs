@@ -182,6 +182,65 @@ async fn docker_release_leaves_no_container() {
     );
 }
 
+/// §6 driver test 3, Docker half: after a kill (a second cancel), the step goes
+/// straight to `SIGKILL` — the 10s TERM grace is deliberately long enough that
+/// waiting it out would fail the timing assertion — and release still leaves no
+/// container behind.
+#[tokio::test]
+async fn docker_kill_leaves_no_container() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-kill");
+    let graph = docker_graph(
+        "stubborn",
+        r#"
+trap '' TERM
+echo ready > ready
+while :; do sleep 0.1; done
+"#,
+    );
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(10))
+        .with_cleanup_grace(Duration::from_secs(300))
+        .with_retention(Retention::Never);
+    let workspace = dir.workspace();
+
+    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+
+    assert!(
+        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
+        "the step never started inside the container"
+    );
+    handle.cancel(ir::CancelScopeId::ROOT).await;
+    let killed_at = std::time::Instant::now();
+    handle.cancel(ir::CancelScopeId::ROOT).await;
+    let report = tokio::time::timeout(Duration::from_secs(30), run)
+        .await
+        .expect("the kill ends the run")
+        .expect("the run finished");
+    let elapsed = killed_at.elapsed();
+
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert_eq!(status_of(&report, "stubborn").as_deref(), Some("cancelled"));
+    assert_eq!(
+        output_of(&report, "stubborn")["cancel_escalation"],
+        json!("sigkill"),
+        "the kill skipped the ladder"
+    );
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "no TERM grace was waited out: {elapsed:?}"
+    );
+    let leftovers = list_containers(&prefix).await;
+    assert!(
+        leftovers.is_empty(),
+        "containers were left behind: {leftovers:?}"
+    );
+}
+
 /// A non-zero exit inside the container maps the same way it does on the host.
 #[tokio::test]
 async fn docker_exit_statuses_propagate() {

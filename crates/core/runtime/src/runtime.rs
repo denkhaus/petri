@@ -27,6 +27,9 @@ pub struct RunOptions {
     pub grace: Duration,
     /// How much longer than `grace` a step gets before the driver stops waiting.
     pub hard_deadline_slack: Duration,
+    /// Between the first root cancel and the `KillRequested` that ends whatever
+    /// cleanup is still running.
+    pub cleanup_grace: Duration,
     pub retention: Retention,
     /// Echo step output to this process's stdout.
     pub echo: bool,
@@ -41,6 +44,7 @@ impl RunOptions {
             run_dir: run_dir.into(),
             grace: DEFAULT_GRACE,
             hard_deadline_slack: Duration::from_secs(5),
+            cleanup_grace: driver::DEFAULT_CLEANUP_GRACE,
             retention: Retention::default(),
             echo: false,
             verify_replay: true,
@@ -220,6 +224,7 @@ impl Runtime {
     pub fn driver(&self, graph: Graph) -> Driver {
         let mut config = RunConfig::new(&self.options.run_dir)
             .with_grace(self.options.grace)
+            .with_cleanup_grace(self.options.cleanup_grace)
             .with_retention(self.options.retention)
             .echoing(self.options.echo);
         config.hard_deadline_slack = self.options.hard_deadline_slack;

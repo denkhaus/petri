@@ -142,3 +142,45 @@ impl DriverExt for Driver {
         Box::pin(self.run())
     }
 }
+
+/// A step kind that spawns a real process tree and then wedges: it ignores
+/// `Control::Cancel` and never returns, so the driver's hard deadline aborts its
+/// future — and, with `kill_on_drop` gone, only scope release can end the tree.
+pub struct SpawnAndWedge;
+
+pub const SPAWN_AND_WEDGE_KIND: ir::StepKindId = ir::StepKindId::new_static("spawn-and-wedge");
+
+impl ir::StepKind for SpawnAndWedge {
+    fn id(&self) -> ir::StepKindId {
+        SPAWN_AND_WEDGE_KIND
+    }
+
+    fn name(&self) -> &str {
+        "spawn-and-wedge"
+    }
+}
+
+#[async_trait::async_trait]
+impl steps::StepRunner for SpawnAndWedge {
+    async fn run(&self, mut ctx: steps::StepCtx) -> ir::Outcome {
+        let spec = executor::ProcessSpec::new(
+            "bash",
+            &[
+                "-c",
+                "( while :; do echo tick >> heartbeat; sleep 0.05; done ) >/dev/null 2>&1 & \
+                 echo ready > ready; sleep 300",
+            ],
+        );
+        let _handle = ctx.env.spawn(spec).await.expect("spawn");
+        let _ = ctx.control.recv().await;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    }
+}
+
+pub fn runners_with_spawn_and_wedge() -> Registry {
+    let mut registry = runners();
+    registry.register_runner(Arc::new(SpawnAndWedge));
+    registry
+}

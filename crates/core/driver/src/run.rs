@@ -32,6 +32,10 @@ pub const CANCEL_FORCED: &str = "cancel_forced";
 /// the backstop for a caller that skipped validation.
 pub const NO_RUNNER: &str = "no_runner";
 
+/// After the first root cancel, how long admitted cleanup gets before the driver
+/// feeds back `KillRequested` (§10, resolved decision 3).
+pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(120);
+
 /// Knobs, with the defaults from the handoff's table.
 #[derive(Clone, Debug)]
 pub struct RunConfig {
@@ -40,6 +44,9 @@ pub struct RunConfig {
     pub grace: Duration,
     /// How much longer than `grace` a step gets before the driver stops waiting.
     pub hard_deadline_slack: Duration,
+    /// Between the first root cancel and the `KillRequested` that ends whatever
+    /// cleanup is still running.
+    pub cleanup_grace: Duration,
     pub keep_workspaces: Retention,
     /// Echo step output to this process's stdout.
     pub echo_logs: bool,
@@ -51,6 +58,7 @@ impl RunConfig {
             run_dir: run_dir.into(),
             grace: executor::DEFAULT_GRACE,
             hard_deadline_slack: Duration::from_secs(5),
+            cleanup_grace: DEFAULT_CLEANUP_GRACE,
             keep_workspaces: Retention::default(),
             echo_logs: false,
         }
@@ -58,6 +66,11 @@ impl RunConfig {
 
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
+        self
+    }
+
+    pub fn with_cleanup_grace(mut self, cleanup_grace: Duration) -> Self {
+        self.cleanup_grace = cleanup_grace;
         self
     }
 
@@ -153,6 +166,12 @@ pub struct Driver {
     scope_failed: HashSet<ScopeId>,
     tasks: HashMap<FiringId, Task>,
     releases: Vec<JoinHandle<ReleaseReport>>,
+    /// How many root cancels have arrived. The first is polite; the second is a
+    /// kill. The driver never decides to stop the run by itself beyond this
+    /// count: it feeds events and the core decides.
+    root_cancels: u32,
+    /// Armed by the first root cancel; expiry feeds back `KillRequested`.
+    cleanup_timer: Option<JoinHandle<()>>,
     tx: mpsc::Sender<Signal>,
     rx: mpsc::Receiver<Signal>,
 }
@@ -180,6 +199,8 @@ impl Driver {
             scope_failed: HashSet::new(),
             tasks: HashMap::new(),
             releases: Vec::new(),
+            root_cancels: 0,
+            cleanup_timer: None,
             tx,
             rx,
         }
@@ -194,6 +215,9 @@ impl Driver {
                 break;
             };
             self.on_signal(signal).await;
+        }
+        if let Some(timer) = self.cleanup_timer.take() {
+            timer.abort();
         }
 
         // Release is best effort and never fails the run, but the run should not
@@ -221,6 +245,16 @@ impl Driver {
 
     async fn on_signal(&mut self, signal: Signal) {
         match signal {
+            Signal::Inject(Event::CancelRequested { scope })
+                if scope == ir::CancelScopeId::ROOT =>
+            {
+                self.on_root_cancel().await
+            }
+            Signal::Inject(Event::KillRequested { scope })
+                if scope == ir::CancelScopeId::ROOT =>
+            {
+                self.kill_root().await
+            }
             Signal::Inject(event) => self.feed(event).await,
             Signal::Progress { firing, event } => {
                 let event = self.mask_progress(firing, event).await;
@@ -246,6 +280,43 @@ impl Driver {
                 self.on_hard_deadline(firing, attempt).await
             }
         }
+    }
+
+    /// The two-tier stop wiring (§10). The first root cancel feeds
+    /// `CancelRequested` and arms the cleanup-grace timer; expiry, or another
+    /// root cancel (a CLI maps a second Ctrl-C to it), feeds `KillRequested`.
+    /// Both are ordinary External events, so the hard stop is in the log and
+    /// replay reproduces it.
+    async fn on_root_cancel(&mut self) {
+        self.root_cancels += 1;
+        if self.root_cancels > 1 {
+            self.kill_root().await;
+            return;
+        }
+        self.feed(Event::CancelRequested {
+            scope: ir::CancelScopeId::ROOT,
+        })
+        .await;
+        let grace = self.config.cleanup_grace;
+        let tx = self.tx.clone();
+        self.cleanup_timer = Some(tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            let _ = tx
+                .send(Signal::Inject(Event::KillRequested {
+                    scope: ir::CancelScopeId::ROOT,
+                }))
+                .await;
+        }));
+    }
+
+    async fn kill_root(&mut self) {
+        if let Some(timer) = self.cleanup_timer.take() {
+            timer.abort();
+        }
+        self.feed(Event::KillRequested {
+            scope: ir::CancelScopeId::ROOT,
+        })
+        .await;
     }
 
     /// Append-then-apply, then dispatch whatever the core asked for.
@@ -515,11 +586,22 @@ impl Driver {
         if task.reason.is_none() {
             task.reason = Some(reason);
         }
+        let kill = matches!(ctl, Control::Kill);
         let _ = task.control.send(ctl).await;
 
+        // A kill's deadline has no grace in it: the step was told to SIGKILL and
+        // return, so a deadline armed by an earlier polite cancel is re-armed
+        // zero-slack.
+        if kill && let Some(deadline) = task.deadline.take() {
+            deadline.abort();
+        }
         if task.deadline.is_none() {
             // No step kind, however buggy, may wedge a run.
-            let limit = self.config.grace + self.config.hard_deadline_slack;
+            let limit = if kill {
+                self.config.hard_deadline_slack
+            } else {
+                self.config.grace + self.config.hard_deadline_slack
+            };
             let attempt = task.attempt;
             let tx = self.tx.clone();
             task.deadline = Some(tokio::spawn(async move {
