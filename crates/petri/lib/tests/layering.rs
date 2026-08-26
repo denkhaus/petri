@@ -9,7 +9,7 @@
 //!    (anything that is not `core`) depends only on core and on its own component.
 //!    Components never depend on each other — anything two components need is
 //!    core — and never on the distribution, not even for tests.
-//! 3. Only the distribution (`petri`, `petri-cli`) may depend on component crates.
+//! 3. Only the distribution (`crates/petri/`) may depend on component crates.
 //!
 //! The check reads `cargo metadata`, so it sees what cargo sees, not what the
 //! manifests appear to say.
@@ -41,16 +41,14 @@ fn world(workspace_root: &Path, crate_dir: &Path) -> World {
         Some("crates"),
         "member outside crates/: {rel:?}"
     );
-    match (parts.len(), parts[1].as_str()) {
-        // crates/<name>: directly under crates/ is reserved for the distribution.
-        (2, "petri" | "petri-cli") => World::Distribution,
-        (2, other) => panic!(
-            "crate directly under crates/ is neither core nor the distribution: {other} \
-             — put it under crates/core/ or crates/<component>/"
-        ),
-        // crates/<group>/<name>: core or a component.
-        (_, "core") => World::Core,
-        (_, component) => World::Component(component.to_string()),
+    assert!(
+        parts.len() >= 3,
+        "every crate lives at crates/<group>/<name>; {rel:?} is directly under crates/"
+    );
+    match parts[1].as_str() {
+        "core" => World::Core,
+        "petri" => World::Distribution,
+        component => World::Component(component.to_string()),
     }
 }
 

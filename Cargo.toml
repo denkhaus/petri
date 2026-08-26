@@ -15,8 +15,8 @@ members = [
     "crates/core/testkit",
     "crates/github/frontend",
     "crates/github/acceptance",
-    "crates/petri",
-    "crates/petri-cli",
+    "crates/petri/lib",
+    "crates/petri/cli",
 ]
 
 [workspace.package]
@@ -37,7 +37,7 @@ frontend-gha = { package = "petri-frontend-gha", path = "crates/github/frontend"
 frontend-native = { package = "petri-frontend-native", path = "crates/core/frontend-native" }
 runtime = { package = "petri-runtime", path = "crates/core/runtime" }
 cli = { package = "petri-cli-core", path = "crates/core/cli" }
-petri = { path = "crates/petri" }
+petri = { path = "crates/petri/lib" }
 testkit = { package = "petri-testkit", path = "crates/core/testkit" }
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }

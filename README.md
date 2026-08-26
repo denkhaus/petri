@@ -14,13 +14,14 @@ crates/core/runtime    core assembled: the `Runtime` builder components register
 crates/core/cli        the command line, format-agnostic; the shipped binary hands it a runtime
 crates/core/testkit    the scaffolding the end-to-end batteries share
 crates/github          the GitHub Actions component: frontend, corpus, acceptance battery
-crates/petri           the distribution: core plus every component; petri-cli is the binary
+crates/petri/lib       the distribution: core plus every component
+crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
 ```
 
 Crate organization follows `.ai/plans/crate-organization.md`: packages are named
 `petri-*` and arrows point down. Core never depends on a component; components
 depend on core and never on each other; only the distribution names them all.
-`crates/petri/tests/layering.rs` enforces this from `cargo metadata`. The next
+`crates/petri/lib/tests/layering.rs` enforces this from `cargo metadata`. The next
 format (CircleCI, RWX, fabro) is a `crates/<component>/` directory and one
 registration in the distribution.
 
@@ -99,7 +100,7 @@ crates/core/frontend/tests/expr_grammar.rs   frontend §7 1-2: grammar, preceden
 crates/github/frontend/tests/lowering.rs     frontend §7 3-6, the pure half: what lowering produces
 crates/core/frontend-native/tests/native.rs  frontend §7 7, the pure half; invariant 8 hint
 crates/github/acceptance/tests/gha_e2e.rs    frontend §7 3-6, run for real: truth table, matrix, composites
-crates/petri/tests/native_e2e.rs             frontend §7 7: the cycle, run end to end
+crates/core/runtime/tests/native_e2e.rs      frontend §7 7: the cycle, run end to end
 crates/github/acceptance/tests/harness.rs    frontend §7 8: every corpus workflow lowers or is rejected specifically
 crates/github/acceptance/tests/e2e.rs        frontend §7 9: two real corpus workflows run on the executor
 ```
