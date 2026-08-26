@@ -19,7 +19,7 @@ use crate::ctx::{StepCtx, StepRunner};
 use crate::outputs::{BAD_OUTPUT_CLASS, parse};
 
 /// The step kind id the process step registers under.
-pub const PROCESS_KIND: StepKindId = StepKindId::new(1);
+pub const PROCESS_KIND: StepKindId = StepKindId::new_static("process");
 
 /// The environment variable naming the outputs file.
 pub const OUTPUT_ENV: &str = "CI_OUTPUT";

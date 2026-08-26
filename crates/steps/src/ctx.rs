@@ -62,11 +62,11 @@ impl RunnerRegistry {
 
     pub fn register(&mut self, runner: Arc<dyn StepRunner>) -> ir::StepKindId {
         let id = runner.kind();
-        self.runners.insert(id, runner);
+        self.runners.insert(id.clone(), runner);
         id
     }
 
-    pub fn get(&self, id: ir::StepKindId) -> Option<Arc<dyn StepRunner>> {
-        self.runners.get(&id).cloned()
+    pub fn get(&self, id: &ir::StepKindId) -> Option<Arc<dyn StepRunner>> {
+        self.runners.get(id).cloned()
     }
 }

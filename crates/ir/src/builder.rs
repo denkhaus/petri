@@ -100,7 +100,7 @@ impl GraphBuilder {
     }
 
     /// Add a node whose step is a bare kind with no config.
-    pub fn add_step(&mut self, name: &str, scope: ScopeId, kind: StepKindId) -> NodeId {
+    pub fn add_step(&mut self, name: &str, scope: ScopeId, kind: impl Into<StepKindId>) -> NodeId {
         self.add_node(name, scope, StepRef::new(kind, Value::Null))
     }
 

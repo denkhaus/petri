@@ -13,7 +13,7 @@ use ir::{
 };
 use serde_json::json;
 
-const NOOP: StepKindId = StepKindId::new(0);
+const NOOP: StepKindId = StepKindId::new_static("noop");
 
 fn errors(graph: &Graph) -> Vec<ValidationError> {
     validate(graph).expect_err("expected validation to fail")
@@ -346,14 +346,14 @@ fn structural_problems_are_reported() {
 fn unknown_step_kinds_are_reported() {
     let mut b = GraphBuilder::new();
     let scope = ScopeId::new(0);
-    b.add_step("a", scope, StepKindId::new(42));
+    b.add_step("a", scope, StepKindId::new("unregistered"));
     let graph = b.build();
 
     validate(&graph).expect("valid without a registry");
     let registry = ir::StepRegistry::new();
     assert!(
         ir::validate_with(&graph, Some(&registry))
-            .expect_err("kind 42 is not registered")
+            .expect_err("kind `unregistered` is not registered")
             .iter()
             .any(|e| matches!(e, ValidationError::UnknownStepKind { .. }))
     );

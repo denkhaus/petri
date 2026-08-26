@@ -184,8 +184,11 @@ pub struct StepRef {
 }
 
 impl StepRef {
-    pub fn new(kind: StepKindId, config: Value) -> Self {
-        Self { kind, config }
+    pub fn new(kind: impl Into<StepKindId>, config: Value) -> Self {
+        Self {
+            kind: kind.into(),
+            config,
+        }
     }
 }
 

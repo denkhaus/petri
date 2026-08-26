@@ -168,7 +168,7 @@ fn fingerprint_defaults_to_none() {
     struct Plain;
     impl StepKind for Plain {
         fn id(&self) -> StepKindId {
-            StepKindId::new(1)
+            StepKindId::new("plain")
         }
         fn name(&self) -> &str {
             "plain"
@@ -177,7 +177,7 @@ fn fingerprint_defaults_to_none() {
     struct Cacheable;
     impl StepKind for Cacheable {
         fn id(&self) -> StepKindId {
-            StepKindId::new(2)
+            StepKindId::new("cacheable")
         }
         fn name(&self) -> &str {
             "cacheable"

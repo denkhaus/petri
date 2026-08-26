@@ -9,7 +9,7 @@ use smol_str::SmolStr;
 
 use crate::expr::Expr;
 use crate::graph::{ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
-use crate::ids::{EdgeId, ExprId, NodeId, ScopeId};
+use crate::ids::{EdgeId, ExprId, NodeId, ScopeId, StepKindId};
 use crate::placeholder::placeholder_path;
 use crate::step::StepRegistry;
 
@@ -28,8 +28,8 @@ pub enum ValidationError {
         edge: EdgeId,
         to: NodeId,
     },
-    #[error("node {node:?} uses step kind {kind} which is not registered")]
-    UnknownStepKind { node: NodeId, kind: u32 },
+    #[error("node {node:?} uses step kind `{kind}` which is not registered")]
+    UnknownStepKind { node: NodeId, kind: StepKindId },
     #[error("node {node:?} has an invalid step config: {message}")]
     BadStepConfig { node: NodeId, message: String },
     #[error("the graph has no entry nodes")]
@@ -243,10 +243,10 @@ fn check_structure(
             });
         }
         if let Some(registry) = registry {
-            match registry.get(node.step.kind) {
+            match registry.get(&node.step.kind) {
                 None => errors.push(ValidationError::UnknownStepKind {
                     node: node.id,
-                    kind: node.step.kind.raw(),
+                    kind: node.step.kind.clone(),
                 }),
                 Some(kind) => {
                     if let Err(message) = kind.validate_config(&node.step.config) {

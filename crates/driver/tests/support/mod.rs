@@ -117,7 +117,7 @@ pub fn host_driver_full(
 /// hard deadline is the only thing that can end it.
 pub struct WedgedStep;
 
-pub const WEDGED_KIND: ir::StepKindId = ir::StepKindId::new(99);
+pub const WEDGED_KIND: ir::StepKindId = ir::StepKindId::new_static("wedged");
 
 #[async_trait::async_trait]
 impl steps::StepRunner for WedgedStep {

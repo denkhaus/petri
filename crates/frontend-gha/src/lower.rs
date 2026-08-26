@@ -15,7 +15,6 @@ use ir::{
 };
 use serde_json::{Map, json};
 use smol_str::SmolStr;
-use steps::{NOOP_KIND, PROCESS_KIND};
 
 use crate::composite::{self, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar};
@@ -113,13 +112,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let start = self.b.add_node(
             &format!("{}{SEP}start", job.id),
             scope,
-            StepRef::new(NOOP_KIND, json!({ "job": job.id, "phase": "start" })),
+            StepRef::new("noop", json!({ "job": job.id, "phase": "start" })),
         );
         self.spans.insert(start, job.span.clone());
         let done = self.b.add_node(
             &format!("{}{SEP}done", job.id),
             scope,
-            StepRef::new(NOOP_KIND, Value::Null),
+            StepRef::new("noop", Value::Null),
         );
         self.spans.insert(done, job.span.clone());
         self.jobs.insert(
@@ -472,7 +471,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // `done` folds its inputs — one for a plain job, one per leg for a matrix.
         let fold = self.done_config();
-        self.b.node_mut(done).step = StepRef::new(NOOP_KIND, fold);
+        self.b.node_mut(done).step = StepRef::new("noop", fold);
 
         if let Some(items) = matrix_items {
             let target = if last == start {
@@ -674,7 +673,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let id = self.b.add_node(
             &node_name,
             scope,
-            StepRef::new(PROCESS_KIND, Value::Object(config)),
+            StepRef::new("process", Value::Object(config)),
         );
         self.spans.insert(id, step.span.clone());
 

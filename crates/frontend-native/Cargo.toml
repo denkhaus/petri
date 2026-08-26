@@ -11,12 +11,12 @@ name = "frontend_native"
 
 [dependencies]
 ir = { workspace = true }
-steps = { workspace = true }
 frontend = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
 
 [dev-dependencies]
+steps = { workspace = true }
 engine = { workspace = true }
 driver = { workspace = true }
 executor = { workspace = true }

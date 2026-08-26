@@ -52,16 +52,16 @@ impl StepRegistry {
 
     pub fn register(&mut self, kind: Box<dyn StepKind>) -> StepKindId {
         let id = kind.id();
-        self.kinds.insert(id, kind);
+        self.kinds.insert(id.clone(), kind);
         id
     }
 
-    pub fn get(&self, id: StepKindId) -> Option<&dyn StepKind> {
-        self.kinds.get(&id).map(|k| k.as_ref())
+    pub fn get(&self, id: &StepKindId) -> Option<&dyn StepKind> {
+        self.kinds.get(id).map(|k| k.as_ref())
     }
 
-    pub fn contains(&self, id: StepKindId) -> bool {
-        self.kinds.contains_key(&id)
+    pub fn contains(&self, id: &StepKindId) -> bool {
+        self.kinds.contains_key(id)
     }
 
     pub fn is_empty(&self) -> bool {

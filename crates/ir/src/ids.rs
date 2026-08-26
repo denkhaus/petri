@@ -1,6 +1,7 @@
 //! Newtype identifiers used across the IR and the engine.
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
 macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident, $repr:ty) => {
@@ -69,10 +70,61 @@ id_newtype!(
     /// Loop-iteration counter carried by tokens; bumped by `back` edges.
     Generation, u32
 );
-id_newtype!(
-    /// Key into a [`StepRegistry`](crate::StepRegistry).
-    StepKindId, u32
-);
+/// The name of a step kind: `process`, `noop`, or a namespaced `vendor/kind` from
+/// another repository.
+///
+/// A name, not a number, so a serialized graph says what each node runs and two
+/// repositories never have to agree on a `u32`. Built-in kinds use bare names; kinds
+/// defined elsewhere use `<vendor>/<kind>`, and a registry rejects a duplicate. Names
+/// are what a [`StepRegistry`](crate::StepRegistry) is keyed by.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StepKindId(SmolStr);
+
+impl StepKindId {
+    pub fn new(name: &str) -> Self {
+        Self(SmolStr::new(name))
+    }
+
+    /// For constants: `const PROCESS: StepKindId = StepKindId::new_static("process")`.
+    pub const fn new_static(name: &'static str) -> Self {
+        Self(SmolStr::new_static(name))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for StepKindId {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for StepKindId {
+    fn from(name: String) -> Self {
+        Self(SmolStr::from(name))
+    }
+}
+
+impl AsRef<str> for StepKindId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for StepKindId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StepKindId({:?})", self.as_str())
+    }
+}
+
+impl std::fmt::Display for StepKindId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 id_newtype!(
     /// Which try this is, 1-based. A retry is **not** a loop iteration: it never
     /// touches [`Generation`]. The full identity of an execution attempt is

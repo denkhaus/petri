@@ -416,7 +416,7 @@ impl Driver {
             .engine
             .graph
             .node(node)
-            .and_then(|n| self.runners.get(n.step.kind))
+            .and_then(|n| self.runners.get(&n.step.kind))
         else {
             self.fail_now(firing, attempt, "no runner for this step kind", NO_RUNNER);
             return;

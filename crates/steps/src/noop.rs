@@ -13,7 +13,7 @@ use ir::{Outcome, StepKindId};
 use crate::ctx::{StepCtx, StepRunner};
 
 /// The step kind id the noop registers under.
-pub const NOOP_KIND: StepKindId = StepKindId::new(0);
+pub const NOOP_KIND: StepKindId = StepKindId::new_static("noop");
 
 pub struct NoopStep;
 

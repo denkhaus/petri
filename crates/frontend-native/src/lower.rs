@@ -10,12 +10,11 @@ use frontend::yaml::{Document, Mapping, Node};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, Backoff, Budget, ExpandTarget, ExprId, ExprOrValue, ExprTable, Fallthrough, GraphBuilder,
-    JoinPolicy, NodeId, RetryOn, RetryPolicy, RuntimeSpec, Scope, ScopeId, StatusKind, StepKindId,
-    StepRef, ValidationError, ValidationWarning, WorkspacePolicy,
+    JoinPolicy, NodeId, RetryOn, RetryPolicy, RuntimeSpec, Scope, ScopeId, StatusKind, StepRef,
+    ValidationError, ValidationWarning, WorkspacePolicy,
 };
 use serde_json::{Map, Value};
 use smol_str::SmolStr;
-use steps::{NOOP_KIND, PROCESS_KIND};
 
 use crate::duration;
 use crate::model::*;
@@ -103,7 +102,7 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
         let scope = ctx.scope_of(&mapping, name);
         let id = ctx
             .b
-            .add_node(name, scope, StepRef::new(NOOP_KIND, Value::Null));
+            .add_node(name, scope, StepRef::new("noop", Value::Null));
         ctx.ids.insert(name.to_string(), id);
         ctx.spans.insert(id, node.span());
     }
@@ -367,18 +366,18 @@ impl<'a> Ctx<'a> {
         // Step kind and config.
         let has_run = m.contains_key("run");
         let kind = match m.get("step").and_then(|n| n.as_str()) {
-            Some("noop") => NOOP_KIND,
-            Some("process") => PROCESS_KIND,
+            Some("noop") => "noop",
+            Some("process") => "process",
             Some(other) => {
                 self.diags.error(
                     "native.unknown_step",
                     m.get("step").map(|n| n.span()).unwrap_or_default(),
                     format!("unknown step kind `{other}`; known kinds are `noop` and `process`"),
                 );
-                NOOP_KIND
+                "noop"
             }
-            None if has_run => PROCESS_KIND,
-            None => NOOP_KIND,
+            None if has_run => "process",
+            None => "noop",
         };
         let mut config = match m.get("config") {
             Some(c) => match self.config_value(c, in_loop) {
@@ -397,7 +396,7 @@ impl<'a> Ctx<'a> {
         if let Some(shell) = m.get("shell") {
             config.insert("shell".into(), self.config_value(shell, in_loop));
         }
-        if kind == PROCESS_KIND && !config.contains_key("run") {
+        if kind == "process" && !config.contains_key("run") {
             self.diags.error(
                 "native.no_run",
                 m.span(),
@@ -409,7 +408,7 @@ impl<'a> Ctx<'a> {
         } else {
             Value::Object(config)
         };
-        self.b.node_mut(id).step = StepRef::new(StepKindId::new(kind.raw()), config);
+        self.b.node_mut(id).step = StepRef::new(kind, config);
 
         if let Some(join) = m.get("join") {
             let policy = self.join(join);

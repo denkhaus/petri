@@ -44,7 +44,7 @@ pub struct Noop;
 
 impl StepKind for Noop {
     fn id(&self) -> StepKindId {
-        StepKindId::new(0)
+        NOOP
     }
     fn name(&self) -> &str {
         "noop"
@@ -57,7 +57,7 @@ pub fn registry() -> StepRegistry {
     registry
 }
 
-pub const NOOP: StepKindId = StepKindId::new(0);
+pub const NOOP: StepKindId = StepKindId::new_static("noop");
 
 type Responder = Box<dyn FnMut(&StartInfo) -> Outcome>;
 
