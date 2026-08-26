@@ -67,6 +67,7 @@ pub struct Node {
     pub routing: Routing,
     pub budget: Budget,                    // max_firings (counts generations), timeout (per attempt)
     pub retry: RetryPolicy,
+    pub run_on_cancel: bool,               // §5: may fire inside a cancelled scope
     pub expand: Option<Expansion>,         // HIR only
 }
 
@@ -131,6 +132,8 @@ Rules (violations are review-blockers):
 **Firing rule.** Per (node, generation): satisfy join → check budget → evaluate
 `precondition` (false ⇒ synthesize `Skipped`; routing still runs) → emit
 `StartStep`. Token generation on emit = source generation, +1 per back edge.
+`Cancelled` joins the statuses that flow through routing (§5);
+`is_success_like` is untouched — it remains `Success | PartialSuccess`.
 
 **Retries.** Each firing starts at `Attempt(1)`; counters reset per firing (a
 later generation retries fresh). On a matching non-final failure the core emits
@@ -183,21 +186,80 @@ uniform: `All` over one seed edge = one seed token.
 `idx + 1 < len(items)` with an accumulating `map`, and an exit arm carrying the
 accumulator. Generations distinguish iterations; budgets cap runaway loops.
 
-**Cancel scopes** — dynamic sets of firings cancelled as a unit: the run root,
-each splice, job-level cancel-on-failure. Cancelling emits `DeliverControl
-{ Cancel }` for live firings and drops the scope's pending tokens. A
-hierarchical `SubgraphStep` (nested scheduler) remains rejected: loops and
+**Cancel scopes** — dynamic sets of firings cancellable as a unit: the run
+root, each splice, job-level cancel-on-failure. Stopping has two tiers, Cancel
+and Kill — the workflow-level analogue of `SIGTERM` and `SIGKILL`.
+
+**Cancel** (`Event::CancelRequested { scope }`) asks the scope to stop:
+
+1. Live firings get `DeliverControl { Cancel }`. A cancelled firing's final
+   outcome **routes like any other outcome**. Retry is still refused: the point
+   of cancelling is to stop the work.
+2. Pending tokens are **not** dropped. A node in a cancelled scope whose join
+   is satisfied completes `Cancelled` without executing — no `StartStep` —
+   unless it opted in via `Node.run_on_cancel`:
+   - `run_on_cancel` set → evaluate the precondition. Absent or true → the node
+     **fires for real**. False → complete `Cancelled`. An evaluation error
+     keeps the ordinary behavior — `RunError::Eval` plus a routed `Failure`
+     outcome — because cancellation must not convert a broken expression into a
+     clean cancellation.
+   - `run_on_cancel` unset → complete `Cancelled` without evaluating anything.
+     Un-marked work can never restart, whatever its gates say.
+   - An expansion node in a cancelled scope never expands; it completes
+     `Cancelled`. `run_on_cancel` on an expansion node is a validation warning
+     (ignored in v1).
+3. A firing **awaiting a retry backoff** has no work in flight and no driver
+   task to deliver to, so the core settles it at once instead of waiting out
+   the backoff: it records a `Cancelled` outcome and routes it (under Kill:
+   records without routing). Settling leaves a tombstone; the one matching late
+   `RetryElapsed` consumes it silently — the driver's sleeper cannot be
+   recalled, and replay must stay clean. Every other invalid `RetryElapsed` —
+   unknown firing, not awaiting, duplicate after the tombstone is consumed —
+   still raises `UnknownFiring` / `UnexpectedRetry`; the no-op is
+   cancellation-specific, never a blanket swallow of malformed input.
+
+**Kill** (`Event::KillRequested { scope }`) stops the scope: the forced tier,
+scope-addressed like `CancelRequested` (a kill of `ROOT` kills the run).
+Killing marks the scope closure killed (killed implies cancelled), drops its
+pending and deferred tokens, swallows tokens aimed inside it, records live
+firings' outcomes **without routing**, and admits nothing — `run_on_cancel`
+included. Delivery is `Control::Kill`, sent to **every** live firing in the
+closure, already-cancelling ones included; a step kind receiving it goes
+straight to `SIGKILL`, no ladder. No new `Status` or `RunStatus` variant: how a
+firing was stopped is a mode, not an outcome — a killed firing records
+`Cancelled`, and the logged `KillRequested` event carries the mode.
+
+Expressions see cancellation through two statics: `run.cancelled` (root-only,
+built from the folded run status) and `scope_cancelled` (true when the firing's
+node lies in a cancelled cancel-scope; a root cancel marks every scope, so it
+subsumes `run.cancelled` for gating). The upstream status fold has a
+`cancelled` arm — failure > cancelled > skipped > success — so the core
+`success()` guard is false and `cancelled()` true over a cancelled upstream.
+
+**Terminal scope release:** when the run finishes, the core emits
+`ReleaseScope` for every still-held scope and removes them from `held_scopes`
+in the same transition, before `FinishRun` — a finished serialized state claims
+no resources. Nothing can need an environment after `FinishRun`. (This also
+covers the parked-token leak that exists independently of cancellation: a token
+parked at an unsatisfiable join no longer holds its environment past the end of
+the run.)
+
+After a cancel the core routes and fires whatever `run_on_cancel` admits;
+**bounding** cleanup is the driver's job (§10): a cleanup that outlives the
+grace is ended by feeding back `KillRequested`.
+
+A hierarchical `SubgraphStep` (nested scheduler) remains rejected: loops and
 matrices always flatten into the one graph.
 
 ## 6. Engine interface, event log, ResolvedFiring
 
 Events: `RunStarted`, `TokenEmitted`, `StepStarted{firing, attempt}`,
 `StepProgress`, `StepFinished{firing, attempt, outcome}`, `RetryElapsed`,
-`NodeExpanded`, `CancelRequested{scope}`. Commands: `StartStep(ResolvedFiring)`,
-`DeliverControl`, `ScheduleRetry`, `ExpandNode` (reserved), `AcquireScope`,
-`ReleaseScope`, `FinishRun`.
+`NodeExpanded`, `CancelRequested{scope}`, `KillRequested{scope}`. Commands:
+`StartStep(ResolvedFiring)`, `DeliverControl`, `ScheduleRetry`, `ExpandNode`
+(reserved), `AcquireScope`, `ReleaseScope`, `FinishRun`.
 
-**Log v2 + EventSource.** Append-then-apply; every record carries
+**Log v3 + EventSource.** Append-then-apply; every record carries
 `EventSource::{External, Core}` (closed enum). Replay feeds back **External
 only**; the core must regenerate its own events byte-identically — that
 regeneration is the determinism assertion, not redundancy. Arrival order at the
@@ -293,6 +355,17 @@ jitter + sleep → `RetryElapsed`; hard deadline after `Control::Cancel` of
 `grace + 5s`, then task abort and synthesized `Cancelled` with
 `cancel_escalation: "cancel_forced"`. `release` never fails the run.
 
+**Two-tier stop wiring.** The driver never decides to stop the run by itself;
+it feeds events and the core decides. The first root `cancel` feeds
+`CancelRequested { ROOT }` and arms the cleanup-grace timer
+(`RunConfig.cleanup_grace`, default 2 minutes, per-run override). Timer expiry,
+or a second root `cancel` (a CLI maps a second Ctrl-C to it), feeds
+`KillRequested { ROOT }`. Both are ordinary External events, so the hard stop
+is in the log and replay reproduces it. After a Kill the core emits no further
+`StartStep`s; the driver's `DeliverControl { Kill }` reaches every live task —
+including ones already politely cancelling — and arms a zero-slack hard
+deadline as the backstop for a step kind that ignores it.
+
 **Process StepKind:** `bash -eo pipefail -c <run>` (or `sh`); env may contain
 secret refs; no step-level timeout (node budget governs). Outcome mapping: 0 →
 `Success`; N≠0 with `soft_fail` match → `PartialSuccess{underlying:
@@ -306,8 +379,21 @@ recorded); 64 KiB line cap with truncation marker; capture drains through
 cancellation until both streams close.
 
 **Cancellation (one ladder for cancel and timeout):** TERM to the **process
-group** → grace (default 10s, per-scope) → KILL to the group. Host: spawn with
-own pgid, signal via `killpg` only. Docker: `docker kill` reaches PID 1 only —
+group** → grace (default 10s, per-scope) → KILL to the group. `Control::Kill`
+skips the ladder: straight to KILL, no grace. Host: each spawn starts the group
+with a **sentinel** supervisor — the group leader, which runs the workload as a
+member of the same group, reports its exit status out of band, closes its
+inherited copies of the stdout/stderr pipes after the spawn (so the pipes reach
+EOF when the workload exits), ignores `SIGTERM` so the polite ladder passes
+through it, and stays alive until scope release. While the sentinel lives the
+group is never empty, so the kernel cannot recycle the pgid; the executor owns
+the sentinel's unreaped handle, so even a killed sentinel pins the id as a
+zombie. Release sends one `killpg(SIGKILL)` **while the id is still pinned**,
+reaps the sentinel, then performs only **non-signalling** bounded observation
+of group death (procfs on Linux, libproc on macOS) — never a signal after the
+reap frees the id, and never an `ESRCH` probe, which a zombie leader defeats. A
+group that outlives the deadline is a report entry, and no zombie outlives
+release. All other signalling stays `killpg` only. Docker: `docker kill` reaches PID 1 only —
 step-level signalling is `docker exec <c> kill -TERM -<PGID>` (**no `--`
 separator**: busybox `kill` rejects it and a rejected signal is a silent one;
 this corrects the original handoff text). The in-container wrapper records the
