@@ -136,9 +136,10 @@ struct DockerTeardown {
 #[async_trait]
 impl Executor for DockerExecutor {
     async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
-        let RuntimeTarget::Docker { image, args } = &scope.runtime.target else {
-            return Err(EnvError::Docker {
-                command: SmolStr::new("acquire"),
+        let RuntimeTarget::Container { image } = &scope.runtime.target else {
+            return Err(EnvError::Backend {
+                backend: SmolStr::new("docker"),
+                operation: SmolStr::new("acquire"),
                 message: "this scope does not ask for a container".into(),
             });
         };
@@ -175,9 +176,6 @@ impl Executor for DockerExecutor {
         for (key, value) in &scope.env {
             create.push("-e".into());
             create.push(format!("{key}={value}"));
-        }
-        for arg in args {
-            create.push(arg.to_string());
         }
         create.push(image.to_string());
         // A long-lived init command, so the container outlives any one step.
@@ -221,17 +219,19 @@ impl Executor for DockerExecutor {
         let grace_secs = grace.as_secs().max(1).to_string();
         let _ = run_docker(&["stop", "-t", &grace_secs, container]).await;
         match run_docker(&["rm", "-f", "-v", container]).await {
-            Ok(_) => report.container_removed = true,
+            Ok(_) => report = report.released(format!("container {container}")),
             Err(e) => report = report.problem(format!("could not remove {container}: {e}")),
         }
 
+        let workspace = format!("workspace {}", path.display());
         if retention.keeps(outcome) {
-            report.workspace_kept = Some(path.display().to_string());
-            return report;
+            return report.kept(workspace);
         }
         match tokio::fs::remove_dir_all(path).await {
-            Ok(()) => report.workspace_removed = true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.workspace_removed = true,
+            Ok(()) => report = report.released(workspace),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                report = report.released(workspace)
+            }
             Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
         }
         report
@@ -321,12 +321,39 @@ impl ExecEnv for DockerEnv {
         }))
     }
 
-    fn workspace(&self) -> &Path {
-        &self.workspace
+    fn workspace_path(&self) -> &str {
+        CONTAINER_WORKSPACE
     }
 
-    fn workspace_in_env(&self) -> &str {
-        CONTAINER_WORKSPACE
+    // The workspace is bind-mounted from the run directory, so the host filesystem
+    // answers for the container. A remote executor would go through its transport.
+    async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
+        match tokio::fs::read(self.workspace.join(relative)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
+        let path = self.workspace.join(relative);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| EnvError::Workspace {
+                    path: parent.display().to_string(),
+                    message: e.to_string(),
+                })?;
+        }
+        tokio::fs::write(&path, contents)
+            .await
+            .map_err(|e| EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: e.to_string(),
+            })
     }
 
     fn grace(&self) -> Duration {
@@ -481,15 +508,17 @@ async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
         .stdin(Stdio::null())
         .output()
         .await
-        .map_err(|e| EnvError::Docker {
-            command: SmolStr::new(args.first().copied().unwrap_or("docker")),
+        .map_err(|e| EnvError::Backend {
+            backend: SmolStr::new("docker"),
+            operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
             message: e.to_string(),
         })?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
-    Err(EnvError::Docker {
-        command: SmolStr::new(args.first().copied().unwrap_or("docker")),
+    Err(EnvError::Backend {
+        backend: SmolStr::new("docker"),
+        operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
         message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
 }

@@ -471,6 +471,45 @@ What the audit found and changed:
   `NoopStep`, `soft_fail`, the driver, the executor. Comments that cited GitHub as
   the *reason* for a rule were reworded to state the rule.
 
+### What the executor interface may know
+
+The same audit, for executors. There are two today — host and Docker — and there
+will be more; a cloud executor most likely. The rule mirrors the core's:
+
+> The `executor` crate is the interface. It names no executor, and neither does
+> anything above it: the IR describes the *kind* of environment a scope needs, step
+> kinds reach the workspace only through the interface, and the driver translates.
+> Each executor is its own crate, and adding one is adding a crate, not editing the
+> interface.
+
+What the audit found and changed:
+
+- **`RuntimeTarget::Docker { image, args }` named an executor in the IR**, and
+  `args` were Docker CLI flags. It is `RuntimeTarget::Container { image }` now: a
+  *kind* of environment several executors can provide. Engine flags, mounts and
+  limits are executor configuration, not something the graph carries.
+- **The step kind assumed the workspace was on this machine.** The process step
+  read and wrote its outputs file with `std::fs` on `ExecEnv::workspace()`, a
+  host-visible path — true for a host workspace and a bind-mounted container, false
+  for anything remote. `workspace()` is gone from the interface; `read_file` and
+  `write_file` take its place, and the two local executors answer from the
+  filesystem. A remote executor answers over its transport, and the step kind is
+  none the wiser.
+- **The shared error and report types had Docker fields.** `EnvError::Docker` is
+  `EnvError::Backend { backend, operation, message }`; `ReleaseReport` describes
+  what was released and kept as text rather than as `container_removed` /
+  `workspace_removed` booleans that would grow a field per executor.
+- **Already right when the audit ran:** the executors live in their own crates
+  (`executor-host`, `executor-docker`), each with a private teardown record the
+  interface carries as an opaque `Teardown` trait object and hands back untouched;
+  the output pump lives in the interface crate because every executor needs it and
+  the line cap must be decided once.
+- **Kept:** `Retention` (keep-on-failure) is generic — anything with a workspace has
+  the question. `Sig` is POSIX; a remote executor maps it. Placement labels stay
+  opaque in `RuntimeSpec.requirements`, and the set the GHA frontend accepts is
+  GitHub's hosted-runner vocabulary, which is GitHub knowledge in the GitHub crate;
+  which of those any executor honours is that executor's, and not yet plumbed.
+
 ### Departures from the frontend handoff
 
 30. **`Graph.params`** — see finding 1.

@@ -155,8 +155,9 @@ impl Executor for SelectivelyBroken {
         scope: &executor::ScopeSpec,
     ) -> Result<executor::EnvHandle, executor::EnvError> {
         if self.broken.contains(&scope.id) {
-            return Err(executor::EnvError::Docker {
-                command: smol_str::SmolStr::new("create"),
+            return Err(executor::EnvError::Backend {
+                backend: smol_str::SmolStr::new("test"),
+                operation: smol_str::SmolStr::new("acquire"),
                 message: self.message.clone(),
             });
         }

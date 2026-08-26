@@ -18,7 +18,7 @@ params:                      # defaults; a host overrides them per run
 
 scopes:
   main:
-    runtime: host            # or  runtime: { docker: { image: alpine:3.20 } }
+    runtime: host            # or  runtime: { container: { image: alpine:3.20 } }
     env:
       DEPLOY_ENV: staging
       REGION_COUNT: ${{ len(params.regions) }}     # scope env may read params only

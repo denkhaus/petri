@@ -663,7 +663,7 @@ jobs:
         )
         .unwrap();
     assert!(
-        matches!(&lint_scope.runtime.target, ir::RuntimeTarget::Docker { image, .. } if image == "alpine:3.20")
+        matches!(&lint_scope.runtime.target, ir::RuntimeTarget::Container { image } if image == "alpine:3.20")
     );
     assert_eq!(
         lint_scope.runtime.requirements,

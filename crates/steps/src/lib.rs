@@ -1,6 +1,6 @@
 //! Step kinds: the semantics of running one step.
 //!
-//! A step kind knows nothing about host-versus-Docker. It receives an
+//! A step kind knows nothing about where a process runs. It receives an
 //! [`ExecEnv`](executor::ExecEnv) capability and uses it, which is why the process
 //! step is written once and runs either way.
 

@@ -300,6 +300,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn runtime(&mut self, node: Node<'_>) -> RuntimeSpec {
+        const SHAPE: &str = "runtime must be `host` or `{ container: { image: … } }`";
         if let Some(text) = node.as_str() {
             return match text {
                 "host" => RuntimeSpec::host_process(),
@@ -307,7 +308,7 @@ impl<'a> Ctx<'a> {
                     self.diags.error(
                         "native.bad_runtime",
                         node.span(),
-                        format!("runtime must be `host` or `{{ docker: {{ image: … }} }}`, not `{other}`"),
+                        format!("{SHAPE}, not `{other}`"),
                     );
                     RuntimeSpec::host_process()
                 }
@@ -316,37 +317,25 @@ impl<'a> Ctx<'a> {
         let Some(mapping) = node.expect_mapping(&mut self.diags, "`runtime`") else {
             return RuntimeSpec::host_process();
         };
-        let Some(docker) = mapping.get("docker") else {
+        let Some(container) = mapping.get("container") else {
+            self.diags.error("native.bad_runtime", node.span(), SHAPE);
+            return RuntimeSpec::host_process();
+        };
+        let Some(container) = container.expect_mapping(&mut self.diags, "`container`") else {
+            return RuntimeSpec::host_process();
+        };
+        // Only the image: what runs the container, and with which flags, is the
+        // executor's configuration, not the workflow's.
+        container.reject_unknown_keys(&["image"], &mut self.diags, "`container`");
+        let Some(image) = container.get("image").and_then(|n| n.as_str()) else {
             self.diags.error(
                 "native.bad_runtime",
-                node.span(),
-                "runtime must be `host` or `{ docker: { image: … } }`",
+                container.span(),
+                "`container` needs an `image`",
             );
             return RuntimeSpec::host_process();
         };
-        let Some(docker) = docker.expect_mapping(&mut self.diags, "`docker`") else {
-            return RuntimeSpec::host_process();
-        };
-        let Some(image) = docker.get("image").and_then(|n| n.as_str()) else {
-            self.diags.error(
-                "native.bad_runtime",
-                docker.span(),
-                "`docker` needs an `image`",
-            );
-            return RuntimeSpec::host_process();
-        };
-        let mut spec = RuntimeSpec::docker(image);
-        if let (ir::RuntimeTarget::Docker { args, .. }, Some(list)) = (
-            &mut spec.target,
-            docker.get("args").and_then(|n| n.as_sequence()),
-        ) {
-            *args = list
-                .iter()
-                .filter_map(|a| a.as_str())
-                .map(SmolStr::new)
-                .collect();
-        }
-        spec
+        RuntimeSpec::container(image)
     }
 
     fn scope_of(&mut self, node: &Mapping<'_>, name: &str) -> ScopeId {

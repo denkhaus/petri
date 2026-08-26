@@ -124,7 +124,7 @@ async fn workspace_retention_follows_the_outcome() {
         "a failed scope's workspace is kept"
     );
     assert!(
-        report.releases.iter().any(|r| r.workspace_kept.is_some()),
+        report.releases.iter().any(|r| r.kept_any("workspace")),
         "and the release says so"
     );
 

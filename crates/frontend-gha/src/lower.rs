@@ -300,7 +300,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                             &format!("container.{other}"),
                             span,
                             format!("`container.{other}`"),
-                            "only `image` and `env` are mapped onto a Docker scope",
+                            "only `image` and `env` are mapped onto a container scope; `options` are engine flags, which the graph does not carry",
                         ),
                     }
                 }
@@ -320,7 +320,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 }
                 Some((image, _)) => {
                     let requirements = std::mem::take(&mut spec.requirements);
-                    spec = RuntimeSpec::docker(&image);
+                    spec = RuntimeSpec::container(&image);
                     spec.requirements = requirements;
                 }
                 None => self.diags.error(

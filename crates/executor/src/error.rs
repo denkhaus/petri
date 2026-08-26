@@ -12,8 +12,14 @@ pub enum EnvError {
     Signal(String),
     #[error("waiting on the process failed: {0}")]
     Wait(String),
-    #[error("docker {command} failed: {message}")]
-    Docker { command: SmolStr, message: String },
+    /// The executor's backing system refused or failed: a container engine, a cloud
+    /// API, a remote agent. `backend` names it; the interface does not know the list.
+    #[error("{backend} {operation} failed: {message}")]
+    Backend {
+        backend: SmolStr,
+        operation: SmolStr,
+        message: String,
+    },
     #[error("the environment is gone")]
     Gone,
 }
@@ -26,17 +32,30 @@ impl EnvError {
 
 /// What tearing an environment down actually managed to do.
 ///
-/// Release is best effort and never fails a run: a leaked container is a problem to
-/// report, not a reason to lose the run's result.
+/// Release is best effort and never fails a run: a leaked resource is a problem to
+/// report, not a reason to lose the run's result. The resources are described, not
+/// enumerated — a workspace, a container, an instance — so the report is the same
+/// shape for every executor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReleaseReport {
-    pub workspace_removed: bool,
-    pub workspace_kept: Option<String>,
-    pub container_removed: bool,
+    /// Resources that were torn down, described (`workspace /run/x`, `container c1`).
+    pub released: Vec<String>,
+    /// Resources deliberately left in place, described, with why implied by policy.
+    pub kept: Vec<String>,
     pub problems: Vec<String>,
 }
 
 impl ReleaseReport {
+    pub fn released(mut self, what: impl Into<String>) -> Self {
+        self.released.push(what.into());
+        self
+    }
+
+    pub fn kept(mut self, what: impl Into<String>) -> Self {
+        self.kept.push(what.into());
+        self
+    }
+
     pub fn problem(mut self, message: impl Into<String>) -> Self {
         self.problems.push(message.into());
         self
@@ -44,5 +63,14 @@ impl ReleaseReport {
 
     pub fn is_clean(&self) -> bool {
         self.problems.is_empty()
+    }
+
+    /// Whether anything matching `needle` was released — `"container"`, say.
+    pub fn released_any(&self, needle: &str) -> bool {
+        self.released.iter().any(|r| r.contains(needle))
+    }
+
+    pub fn kept_any(&self, needle: &str) -> bool {
+        self.kept.iter().any(|r| r.contains(needle))
     }
 }

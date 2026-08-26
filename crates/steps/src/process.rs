@@ -1,6 +1,7 @@
 //! The process step kind: run a script, capture its output, honour cancellation.
 //!
-//! Written once against [`ExecEnv`](executor::ExecEnv). It never mentions Docker.
+//! Written once against [`ExecEnv`](executor::ExecEnv). It never names an executor,
+//! and never assumes the workspace is on this machine.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -185,19 +186,20 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
         env.insert(key.clone(), resolved);
     }
 
-    // The outputs file lives on the workspace, so both host and container see it.
+    // The outputs file lives in the workspace, reached through the environment: the
+    // step kind never assumes the workspace is on this machine.
     let output_rel = format!(".ci/out/{}.env", ctx.firing.raw());
-    let output_host = ctx.env.workspace().join(&output_rel);
-    if let Some(parent) = output_host.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+    let output_rel_path = PathBuf::from(&output_rel);
+    ctx.env
+        .write_file(&output_rel_path, b"")
+        .await
+        .map_err(|e| {
             fail(
                 WORKSPACE_CLASS,
-                format!("could not create the outputs directory: {e}"),
+                format!("could not create the outputs file: {e}"),
             )
         })?;
-    }
-    let _ = tokio::fs::write(&output_host, "").await;
-    let output_path = SmolStr::new(format!("{}/{output_rel}", ctx.env.workspace_in_env()));
+    let output_path = SmolStr::new(format!("{}/{output_rel}", ctx.env.workspace_path()));
     env.insert(SmolStr::new(OUTPUT_ENV), output_path.clone());
     for alias in &config.output_env_aliases {
         env.insert(alias.clone(), output_path.clone());
@@ -232,7 +234,7 @@ async fn execute(mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
         let _ = tokio::time::timeout(DRAIN_LIMIT, drain).await;
     }
 
-    let mut output = match read_outputs(&output_host).await {
+    let mut output = match read_outputs(&*ctx.env, &output_rel_path).await {
         Ok(output) => output,
         Err(message) => return Err(fail(BAD_OUTPUT_CLASS, message)),
     };
@@ -340,11 +342,14 @@ async fn forward_lines(mut lines: executor::LineStream, out: mpsc::Sender<StepEv
     }
 }
 
-async fn read_outputs(path: &std::path::Path) -> Result<Map<String, Value>, String> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(text) => parse(&text).map_err(|e| e.to_string()),
+async fn read_outputs(
+    env: &dyn executor::ExecEnv,
+    path: &std::path::Path,
+) -> Result<Map<String, Value>, String> {
+    match env.read_file(path).await {
+        Ok(Some(bytes)) => parse(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string()),
         // No file is not an error: a step need not write outputs.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
+        Ok(None) => Ok(Map::new()),
         Err(e) => Err(format!("could not read the outputs file: {e}")),
     }
 }

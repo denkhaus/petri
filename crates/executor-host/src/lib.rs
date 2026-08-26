@@ -84,13 +84,15 @@ impl Executor for HostExecutor {
         let Some(HostTeardown { path, retention }) = env.teardown::<HostTeardown>() else {
             return report.problem("host executor was handed a foreign environment");
         };
+        let workspace = format!("workspace {}", path.display());
         if retention.keeps(outcome) {
-            report.workspace_kept = Some(path.display().to_string());
-            return report;
+            return report.kept(workspace);
         }
         match tokio::fs::remove_dir_all(path).await {
-            Ok(()) => report.workspace_removed = true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.workspace_removed = true,
+            Ok(()) => report = report.released(workspace),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                report = report.released(workspace)
+            }
             Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
         }
         report
@@ -158,12 +160,37 @@ impl ExecEnv for HostEnv {
         }))
     }
 
-    fn workspace(&self) -> &Path {
-        &self.workspace
+    fn workspace_path(&self) -> &str {
+        &self.workspace_str
     }
 
-    fn workspace_in_env(&self) -> &str {
-        &self.workspace_str
+    async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
+        match tokio::fs::read(self.workspace.join(relative)).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
+        let path = self.workspace.join(relative);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| EnvError::Workspace {
+                    path: parent.display().to_string(),
+                    message: e.to_string(),
+                })?;
+        }
+        tokio::fs::write(&path, contents)
+            .await
+            .map_err(|e| EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: e.to_string(),
+            })
     }
 
     fn grace(&self) -> Duration {

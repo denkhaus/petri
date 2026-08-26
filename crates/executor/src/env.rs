@@ -139,18 +139,26 @@ pub trait ProcessHandle: Send {
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError>;
 }
 
-/// The capability a step kind receives: somewhere to run a process, and a workspace.
+/// The capability a step kind receives: somewhere to run a process, and a workspace
+/// reached only through this interface.
+///
+/// Nothing here assumes the workspace is on the machine the driver runs on. A step
+/// kind that needs a file in the workspace asks the environment for it, and an
+/// executor whose workspace is remote — a cloud instance, an agent elsewhere — answers
+/// over whatever transport it has. The two local executors answer from the filesystem.
 #[async_trait]
 pub trait ExecEnv: Send + Sync {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError>;
 
-    /// Host-visible workspace path. For Docker this is the bind-mount source, so
-    /// artifacts and logs are handled the same way either side.
-    fn workspace(&self) -> &Path;
+    /// The workspace root as a process running in this environment sees it, for
+    /// building paths to hand to the process.
+    fn workspace_path(&self) -> &str;
 
-    /// The same location as the step sees it. Identical to [`ExecEnv::workspace`] on
-    /// the host; the in-container path under Docker.
-    fn workspace_in_env(&self) -> &str;
+    /// Read a workspace-relative file. `Ok(None)` when it does not exist.
+    async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError>;
+
+    /// Write a workspace-relative file, creating parent directories.
+    async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError>;
 
     /// How long a step gets between `SIGTERM` and `SIGKILL`.
     fn grace(&self) -> Duration;

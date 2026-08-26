@@ -508,25 +508,29 @@ pub enum ExprOrValue {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSpec {
     pub target: RuntimeTarget,
-    /// Uninterpreted placement labels, populated by frontends: GHA `runs-on`,
-    /// BuildKite agent tags.
+    /// Uninterpreted placement labels, populated by frontends from whatever their
+    /// format calls them (`runs-on`, agent tags, an instance class).
     ///
-    /// The core never reads these. The v1 local executor maps the labels it knows
-    /// (`ubuntu-latest` to its Docker image, say) and rejects unknown ones per label
-    /// with an unsupported-target message. No matching rules, queues or capability
-    /// types until there is a distributed agent system to consume them.
+    /// The core never reads these. Whichever executor runs the scope maps the labels
+    /// it knows and rejects unknown ones per label. No matching rules, queues or
+    /// capability types until there is a distributed agent system to consume them.
     #[serde(default)]
     pub requirements: Vec<SmolStr>,
 }
 
+/// The *kind* of environment a scope needs. Not an executor: several executors can
+/// provide the same kind. A process on some machine and a container from some image
+/// are the two kinds any CI format can ask for; where and how they are provided — this
+/// machine, a Docker daemon, a cloud API — is the executor's business and never named
+/// here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RuntimeTarget {
+    /// A process with the machine's own filesystem and tools.
     HostProcess,
-    Docker {
-        image: SmolStr,
-        #[serde(default)]
-        args: Vec<SmolStr>,
-    },
+    /// A process inside a container started from `image`. Anything beyond the image
+    /// — engine flags, resource limits, mounts — is an executor concern, carried by
+    /// [`RuntimeSpec::requirements`] or executor configuration, not by the graph.
+    Container { image: SmolStr },
 }
 
 impl Default for RuntimeSpec {
@@ -543,11 +547,10 @@ impl RuntimeSpec {
         Self::default()
     }
 
-    pub fn docker(image: &str) -> Self {
+    pub fn container(image: &str) -> Self {
         Self {
-            target: RuntimeTarget::Docker {
+            target: RuntimeTarget::Container {
                 image: SmolStr::new(image),
-                args: Vec::new(),
             },
             requirements: Vec::new(),
         }

@@ -39,7 +39,7 @@ async fn docker_ready() -> bool {
 fn docker_graph(name: &str, run: &str) -> ir::Graph {
     let mut b = GraphBuilder::bare();
     let mut scope = ir::Scope::new(ScopeId::new(0));
-    scope.runtime = RuntimeSpec::docker(IMAGE);
+    scope.runtime = RuntimeSpec::container(IMAGE);
     let scope = b.add_scope(scope);
     b.add_node(
         name,
@@ -169,7 +169,7 @@ async fn docker_release_leaves_no_container() {
     let report = driver.await_run().await;
     assert_eq!(report.status, RunStatus::Success);
     assert!(
-        report.releases.iter().any(|r| r.container_removed),
+        report.releases.iter().any(|r| r.released_any("container")),
         "the release reported removing the container: {:?}",
         report.releases
     );
@@ -222,7 +222,7 @@ async fn a_bad_image_fails_the_scope() {
     let dir = RunDir::new("docker-bad-image");
     let mut b = GraphBuilder::bare();
     let mut scope = ir::Scope::new(ScopeId::new(0));
-    scope.runtime = RuntimeSpec::docker("petri-nonexistent/definitely-not-real:v0");
+    scope.runtime = RuntimeSpec::container("petri-nonexistent/definitely-not-real:v0");
     let scope = b.add_scope(scope);
     b.add_node(
         "doomed",
