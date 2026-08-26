@@ -9,15 +9,20 @@ crates/core/engine     the sans-IO state machine: apply(state, event) -> (state,
 crates/core/executor   the environment interface; executor-host and executor-docker implement it
 crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
 crates/core/driver     the IO loop between the pure core and real processes
-crates/core/frontend   what every format shares; frontend-gha and frontend-native implement it
+crates/core/frontend   what every format shares; frontend-native is core's own format
+crates/core/runtime    core assembled: the `Runtime` builder components register onto
+crates/core/cli        the command line, format-agnostic; the shipped binary hands it a runtime
 crates/core/testkit    the scaffolding the end-to-end batteries share
-crates/github          everything GitHub Actions: the frontend, the corpus, the acceptance battery
-crates/petri           the facade and the assembly (`Runtime`); petri-cli is the binary
+crates/github          the GitHub Actions component: frontend, corpus, acceptance battery
+crates/petri           the distribution: core plus every component; petri-cli is the binary
 ```
 
 Crate organization follows `.ai/plans/crate-organization.md`: packages are named
-`petri-*`, arrows point down, the format side and the run side meet only in
-`crates/petri`.
+`petri-*` and arrows point down. Core never depends on a component; components
+depend on core and never on each other; only the distribution names them all.
+`crates/petri/tests/layering.rs` enforces this from `cargo metadata`. The next
+format (CircleCI, RWX, fabro) is a `crates/<component>/` directory and one
+registration in the distribution.
 
 A node fires when its **join policy** is satisfied by incoming tokens. On completion
 its **routing policy** emits tokens on outgoing edges. Routing is an AND of XORs:

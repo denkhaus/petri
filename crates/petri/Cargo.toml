@@ -8,3 +8,6 @@ description = "A token-flow workflow engine: core, plus every component it ships
 [dependencies]
 runtime = { workspace = true }
 frontend-gha = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
