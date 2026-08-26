@@ -7,8 +7,8 @@ use std::time::Duration;
 use driver::{Driver, RunConfig, RunReport};
 use executor::{MapSecrets, Retention};
 use executor_host::HostExecutor;
-use frontend::Diagnostic;
-use frontend_gha::{FileSource, MapFiles, NoFiles, load};
+use frontend::{Diagnostic, FileSource, MapFiles, NoFiles};
+use frontend_gha::load;
 use ir::Graph;
 use serde_json::json;
 

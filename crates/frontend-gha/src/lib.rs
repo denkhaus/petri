@@ -2,7 +2,8 @@
 //!
 //! Pure: text in, `Graph` and diagnostics out. The only IO is reading the workflow's
 //! local composite actions, and that goes through [`FileSource`] so the caller decides
-//! what "the repository" is — a directory, or a map in a test.
+//! what "the repository" is — a directory, or a map in a test. [`Gha`] is this format
+//! as a [`Frontend`].
 //!
 //! # What a job becomes
 //!
@@ -42,41 +43,9 @@ pub mod exprs;
 pub mod lower;
 pub mod model;
 
-use frontend::{Diagnostics, Lowered};
+use std::path::{Component, Path};
 
-/// Where the frontend reads a repository file from, by repository-relative path.
-pub trait FileSource {
-    fn read(&self, path: &str) -> Option<String>;
-}
-
-/// A repository with no readable files: every local action is missing.
-pub struct NoFiles;
-
-impl FileSource for NoFiles {
-    fn read(&self, _path: &str) -> Option<String> {
-        None
-    }
-}
-
-/// A repository rooted at a directory.
-pub struct DirFiles {
-    pub root: std::path::PathBuf,
-}
-
-impl FileSource for DirFiles {
-    fn read(&self, path: &str) -> Option<String> {
-        std::fs::read_to_string(self.root.join(path)).ok()
-    }
-}
-
-/// An in-memory repository, for tests.
-pub struct MapFiles(pub std::collections::BTreeMap<String, String>);
-
-impl FileSource for MapFiles {
-    fn read(&self, path: &str) -> Option<String> {
-        self.0.get(path.trim_start_matches("./")).cloned()
-    }
-}
+use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 
 /// Parse and lower a workflow file.
 pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
@@ -88,4 +57,28 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
         return Lowered::rejected(diags);
     };
     lower::lower(&workflow, files, diags)
+}
+
+/// GitHub Actions, as a [`Frontend`]: it claims anything under `.github/workflows/`.
+pub struct Gha;
+
+impl Frontend for Gha {
+    fn name(&self) -> &str {
+        "gha"
+    }
+
+    fn claims(&self, path: &Path) -> bool {
+        let parts: Vec<&str> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => s.to_str(),
+                _ => None,
+            })
+            .collect();
+        parts.windows(2).any(|w| w == [".github", "workflows"])
+    }
+
+    fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered {
+        load(file, text, files)
+    }
 }

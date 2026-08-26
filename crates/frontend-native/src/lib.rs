@@ -18,7 +18,9 @@ mod model;
 pub use lower::lower;
 pub use model::KNOWN_BINDINGS;
 
-use frontend::{Diagnostics, Lowered};
+use std::path::Path;
+
+use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 
 /// Parse and lower a native-format document. Pure: text in, graph and diagnostics
 /// out.
@@ -28,4 +30,22 @@ pub fn load(file: &str, text: &str) -> Lowered {
         return Lowered::rejected(diags);
     };
     lower(&doc, diags)
+}
+
+/// The native format, as a [`Frontend`]. It claims every path, so it goes last in any
+/// list of frontends and acts as the default.
+pub struct Native;
+
+impl Frontend for Native {
+    fn name(&self) -> &str {
+        "native"
+    }
+
+    fn claims(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fn load(&self, file: &str, text: &str, _files: &dyn FileSource) -> Lowered {
+        load(file, text)
+    }
 }

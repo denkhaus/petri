@@ -2,13 +2,19 @@
 //!
 //! A frontend is pure: file text in, a `Graph` and diagnostics out. This crate holds
 //! what that takes — [`diag`] for saying what went wrong and where, [`yaml`] for
-//! reading files with positions, [`expr`] for the `${{ }}` grammar and its two
-//! lowerings, and [`print`] for a stable text form of a lowered graph.
+//! reading files with positions, [`expr`] for the `${{ }}` grammar and the strict
+//! lowering, [`files`] for the local includes some formats have, [`print`] for a
+//! stable text form of a lowered graph — and [`Frontend`], the trait a format
+//! implements so the CLI can hold a list of them.
 
 pub mod diag;
 pub mod expr;
+pub mod files;
+pub mod format;
 pub mod print;
 pub mod yaml;
 
 pub use diag::{Diagnostic, Diagnostics, Lowered, Severity, Span};
+pub use files::{DirFiles, FileSource, MapFiles, NoFiles};
+pub use format::{Frontend, by_name, detect};
 pub use print::print_graph;

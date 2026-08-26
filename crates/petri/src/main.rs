@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
-use frontend::{Lowered, Severity};
+use clap::{Parser, Subcommand};
+use frontend::{DirFiles, Frontend, Lowered, Severity};
 
 #[derive(Parser)]
 #[command(name = "petri", version, about = "A token-flow workflow engine")]
@@ -23,10 +23,11 @@ enum Command {
     Check {
         /// The workflow file.
         file: PathBuf,
-        /// Which format the file is in. Guessed from its path when omitted: anything
-        /// under `.github/workflows/` is GitHub Actions, everything else is native.
-        #[arg(long, value_enum)]
-        format: Option<Format>,
+        /// Which format the file is in (`gha` or `native`). Guessed from its path when
+        /// omitted: anything under `.github/workflows/` is GitHub Actions, everything
+        /// else is native.
+        #[arg(long)]
+        format: Option<String>,
         /// Repository root, for resolving `uses: ./local/action`. Defaults to the
         /// nearest ancestor of the file containing `.github/`, else the file's dir.
         #[arg(long)]
@@ -40,10 +41,10 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-pub enum Format {
-    Gha,
-    Native,
+/// Every format this binary reads, in the order they are asked to claim a path. The
+/// native format claims everything, so it is last.
+fn frontends() -> [&'static dyn Frontend; 2] {
+    [&frontend_gha::Gha, &frontend_native::Native]
 }
 
 fn main() -> ExitCode {
@@ -77,17 +78,8 @@ fn guess_repo(file: &Path) -> PathBuf {
     }
 }
 
-fn guess_format(file: &Path) -> Format {
-    let text = file.to_string_lossy();
-    if text.contains(".github/workflows") || text.contains(".github\\workflows") {
-        Format::Gha
-    } else {
-        Format::Native
-    }
-}
-
-/// Lower one file with the given format. Shared with the corpus harness.
-pub fn lower_file(file: &Path, format: Format, repo: &Path) -> Result<Lowered, String> {
+/// Lower one file with the given frontend.
+pub fn lower_file(file: &Path, frontend: &dyn Frontend, repo: &Path) -> Result<Lowered, String> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| format!("could not read {}: {e}", file.display()))?;
     let name = file
@@ -95,28 +87,36 @@ pub fn lower_file(file: &Path, format: Format, repo: &Path) -> Result<Lowered, S
         .unwrap_or(file)
         .to_string_lossy()
         .into_owned();
-    Ok(match format {
-        Format::Gha => frontend_gha::load(
-            &name,
-            &text,
-            &frontend_gha::DirFiles {
-                root: repo.to_path_buf(),
-            },
-        ),
-        Format::Native => frontend_native::load(&name, &text),
-    })
+    let files = DirFiles {
+        root: repo.to_path_buf(),
+    };
+    Ok(frontend.load(&name, &text, &files))
 }
 
 fn check(
     file: &Path,
-    format: Option<Format>,
+    format: Option<String>,
     repo: Option<PathBuf>,
     print_graph: bool,
     json: bool,
 ) -> ExitCode {
-    let format = format.unwrap_or_else(|| guess_format(file));
+    let all = frontends();
+    let frontend = match &format {
+        Some(name) => match frontend::by_name(&all, name) {
+            Some(f) => f,
+            None => {
+                let known: Vec<&str> = all.iter().map(|f| f.name()).collect();
+                eprintln!(
+                    "error: unknown format `{name}`; known formats: {}",
+                    known.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => frontend::detect(&all, file).expect("the native frontend claims every path"),
+    };
     let repo = repo.unwrap_or_else(|| guess_repo(file));
-    let lowered = match lower_file(file, format, &repo) {
+    let lowered = match lower_file(file, frontend, &repo) {
         Ok(l) => l,
         Err(message) => {
             eprintln!("error: {message}");

@@ -1,9 +1,9 @@
 //! Local composite actions: `uses: ./path/to/action`.
 
+use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::{Document, Node};
 
-use crate::FileSource;
 use crate::model::Step;
 
 /// How deep composites may nest before the lowering reports rather than recurses.

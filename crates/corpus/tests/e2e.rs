@@ -26,7 +26,7 @@ fn lower(repo: &str, workflow: &str) -> Graph {
     let lowered = frontend_gha::load(
         &format!(".github/workflows/{workflow}"),
         &text,
-        &frontend_gha::DirFiles { root },
+        &frontend::DirFiles { root },
     );
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");

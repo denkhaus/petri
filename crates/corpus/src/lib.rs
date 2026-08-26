@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use frontend::{Diagnostic, Severity};
-use frontend_gha::DirFiles;
+use frontend::{Diagnostic, DirFiles, Frontend, Severity};
+use frontend_gha::Gha;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -128,7 +128,7 @@ pub fn check_one(repo: &str, repo_root: &Path, file: &Path) -> Outcome {
         root: repo_root.to_path_buf(),
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        frontend_gha::load(&rel, &text, &files)
+        Gha.load(&rel, &text, &files)
     }));
     match result {
         Err(payload) => {

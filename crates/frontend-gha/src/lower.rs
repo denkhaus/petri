@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+use frontend::FileSource;
 use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
 use frontend::expr::parse;
@@ -16,7 +17,6 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{NOOP_KIND, PROCESS_KIND};
 
-use crate::FileSource;
 use crate::composite::{self, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar};
 use crate::model::{Defaults, Job, KNOWN_RUNS_ON, Step, Workflow};
