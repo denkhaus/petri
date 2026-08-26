@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use executor::{ExitStatus, LogLine, ProcessSpec, Sig};
 use ir::placeholder::SECRET_REF_KEY;
-use ir::{FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
+use ir::{Control, FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::Map;
 use smol_str::SmolStr;
@@ -239,7 +239,9 @@ enum Ending {
     },
 }
 
-/// SIGTERM to the group, grace, then SIGKILL to the group.
+/// SIGTERM to the group, grace, then SIGKILL to the group. `Control::Kill` skips
+/// the ladder: straight to SIGKILL, no grace — whether it arrives first or while
+/// the polite ladder is already waiting.
 ///
 /// Idempotent by construction: once the ladder has started, further `Cancel`s are
 /// drained and ignored rather than restarting it.
@@ -250,31 +252,45 @@ async fn ladder(
 ) -> Ending {
     // First terminal wins. If the process exits before any signal lands, the outcome
     // is the natural one and the cancel is a no-op.
-    let natural = tokio::select! {
-        result = handle.wait() => Some(result),
-        _ = ctx.control.recv() => None,
+    let control = tokio::select! {
+        result = handle.wait() => {
+            return match result {
+                Ok(status) => Ending::Natural(status),
+                Err(_) => Ending::Natural(ExitStatus::code(-1)),
+            };
+        }
+        ctl = ctx.control.recv() => ctl,
     };
-    if let Some(result) = natural {
-        return match result {
-            Ok(status) => Ending::Natural(status),
-            Err(_) => Ending::Natural(ExitStatus::code(-1)),
-        };
-    }
 
-    let _ = handle.signal(Sig::Term).await;
-    match tokio::time::timeout(grace, handle.wait()).await {
-        Ok(result) => Ending::Signalled {
-            escalation: "sigterm",
-            status: result.ok(),
-        },
-        Err(_) => {
-            let _ = handle.signal(Sig::Kill).await;
-            let status = handle.wait().await.ok();
-            Ending::Signalled {
-                escalation: "sigkill",
-                status,
+    if !matches!(control, Some(Control::Kill)) {
+        let _ = handle.signal(Sig::Term).await;
+        let deadline = tokio::time::sleep(grace);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                result = handle.wait() => {
+                    return Ending::Signalled {
+                        escalation: "sigterm",
+                        status: result.ok(),
+                    };
+                }
+                ctl = ctx.control.recv() => {
+                    // A Kill joins mid-grace and escalates now; anything else
+                    // joins the ladder already in flight.
+                    if matches!(ctl, Some(Control::Kill)) {
+                        break;
+                    }
+                }
+                _ = &mut deadline => break,
             }
         }
+    }
+
+    let _ = handle.signal(Sig::Kill).await;
+    let status = handle.wait().await.ok();
+    Ending::Signalled {
+        escalation: "sigkill",
+        status,
     }
 }
 
