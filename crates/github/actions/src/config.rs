@@ -21,6 +21,11 @@ pub struct RunConfig {
     pub run: String,
     #[serde(default)]
     pub shell: Shell,
+    /// A custom shell template (`bash -el {0}`, `python {0}`): the step writes the
+    /// script to a file and substitutes its path for `{0}`, as GitHub does. When
+    /// set, `shell` is not used.
+    #[serde(default)]
+    pub shell_command: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<SmolStr, ValueOrSecretRef>,
     /// `working-directory`, relative to `GITHUB_WORKSPACE`.

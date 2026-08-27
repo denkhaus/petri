@@ -676,7 +676,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
             None => return Vec::new(),
         }
 
-        // Shell.
+        // Shell. `bash` and `sh` invoke directly; `python` and `pwsh` get GitHub's
+        // documented template; any custom template with a `{0}` is taken as
+        // written — the step writes the script to a file and substitutes its path,
+        // as GitHub does. Windows-only shells stay rejected.
         let shell = match inherited.shell {
             None => "bash",
             Some(node) => node.as_str().unwrap_or(""),
@@ -688,6 +691,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
             "sh" => {
                 config.insert("shell".into(), json!("sh"));
             }
+            "python" => {
+                config.insert("shell_command".into(), json!("python {0}"));
+            }
+            "pwsh" => {
+                config.insert("shell_command".into(), json!("pwsh -command \". '{0}'\""));
+            }
+            other if other.contains("{0}") && !other.contains("${{") => {
+                config.insert("shell_command".into(), json!(other));
+            }
             other => {
                 let kind = other.split_whitespace().next().unwrap_or(other);
                 self.diags.unsupported(
@@ -697,7 +709,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     ),
                     inherited.shell.map(|n| n.span()).unwrap_or_default(),
                     format!("`shell: {other}`"),
-                    "only `bash` and `sh` are available in v1",
+                    "`bash`, `sh`, `python`, `pwsh` and custom `{0}` templates are available; \
+                     Windows shells are not",
                 );
             }
         }

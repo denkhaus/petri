@@ -37,15 +37,23 @@ impl Step for RunStep {
             Some(dir) => PathBuf::from(REPO_DIR).join(dir),
             None => PathBuf::from(REPO_DIR),
         };
+        // With a custom shell the script rides in a file and the prologue joins
+        // the wrapper line instead; the session assembles both.
+        let run = match &config.shell_command {
+            Some(_) => config.run,
+            None => format!("{}{}", session.prologue(), config.run),
+        };
         let process = ProcessConfig {
-            run: format!("{}{}", session.prologue(), config.run),
+            run,
             shell: config.shell,
             env,
             working_dir: Some(working_dir),
             soft_fail: config.soft_fail,
             output_env_aliases: vec![SmolStr::new("GITHUB_OUTPUT")],
         };
-        let (outcome, effects) = session.run(process, ctx, allow_unsecure).await;
+        let (outcome, effects) = session
+            .run(process, config.shell_command, ctx, allow_unsecure)
+            .await;
         fold_into_outcome(outcome, effects, Map::new())
     }
 }

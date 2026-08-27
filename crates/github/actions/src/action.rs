@@ -98,7 +98,7 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
         soft_fail: config.soft_fail,
         output_env_aliases: vec![SmolStr::new("GITHUB_OUTPUT")],
     };
-    let (outcome, effects) = session.run(process, ctx, allow_unsecure).await;
+    let (outcome, effects) = session.run(process, None, ctx, allow_unsecure).await;
 
     // State accumulates across phases: what this phase inherited plus what it saved.
     let mut state: Map<String, Value> = config

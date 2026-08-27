@@ -479,11 +479,12 @@ in brackets.
    `[ … ]` value followed by a dedent is misread. Three cpython workflows. Both are
    library limitations, named as such.
 
-Common enough to shrink the rejection set next: `runs-on` expressions
-(4), custom `shell: bash …` invocations (8 workflows, `unsupported.shell.custom` — the
-difference from `bash -eo pipefail` is usually `-l` or `--noprofile`), and
-`concurrency:` (108 workflows — not shrinkable, D2 stands, but it is the second most
-common rejection).
+Custom shells are resolved: `python`, `pwsh` and any `{0}` template (`bash -el {0}`,
+`/usr/bin/env bash {0}`) lower now — the step writes the script to a file and runs
+the template over it, as GitHub does; only the Windows-only `cmd` and `powershell`
+stay rejected. Common enough to shrink the rejection set next: `runs-on`
+expressions (47 workflows), and `concurrency:` (108 workflows — not shrinkable, D2
+stands, but it is the second most common rejection).
 
 ### What the core may know
 

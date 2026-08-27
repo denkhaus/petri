@@ -33,6 +33,48 @@ jobs:
     assert_eq!(depth.severity, Severity::Error);
 }
 
+#[test]
+fn custom_shells_lower_to_a_template_and_windows_shells_stay_rejected() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo login
+        shell: bash -leo pipefail {0}
+      - run: print("hi")
+        shell: python
+      - run: Get-Location
+        shell: pwsh
+      - run: echo env
+        shell: /usr/bin/env bash {0}
+"#;
+    let graph = lower_ok(text);
+    let shell_command = |name: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .step
+            .config["shell_command"]
+            .clone()
+    };
+    assert_eq!(shell_command("j/step-1"), json!("bash -leo pipefail {0}"));
+    assert_eq!(shell_command("j/step-2"), json!("python {0}"));
+    assert_eq!(shell_command("j/step-3"), json!("pwsh -command \". '{0}'\""));
+    assert_eq!(shell_command("j/step-4"), json!("/usr/bin/env bash {0}"));
+
+    let diags = diagnostics(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        shell: cmd\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code == "unsupported.shell.cmd"),
+        "{diags:?}"
+    );
+}
+
 // ── §7 test 6: secrets ────────────────────────────────────────────────────
 
 #[test]
@@ -151,8 +193,9 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.action.remote",
         ),
         (
-            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        shell: pwsh\n",
-            "unsupported.shell.pwsh",
+            // `pwsh`, `python` and `{0}` templates lower now; Windows shells stay.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        shell: cmd\n",
+            "unsupported.shell.cmd",
         ),
         (
             // In `run:` a literal-pattern hashFiles lowers (the step resolves it);

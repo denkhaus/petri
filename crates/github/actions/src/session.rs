@@ -32,7 +32,7 @@ use frontend_gha::exprs::{has_secret_sentinel, replace_secret_sentinels};
 use ir::{LogStream, Outcome, StepEvent, Value};
 use serde_json::{Map, json};
 use smol_str::SmolStr;
-use steps::{ProcessConfig, ProcessStep, Step, StepCtx, StepFailure, ValueOrSecretRef};
+use steps::{ProcessConfig, ProcessStep, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
 use tokio::sync::mpsc;
 
 use crate::commands::{CommandEffects, CommandSink};
@@ -183,11 +183,36 @@ impl Session {
         format!("export PATH={joined}:\"$PATH\"\n")
     }
 
+    /// Write the resolved script to the step's `script` file and turn the process
+    /// into `sh` running the shell template over it.
+    async fn stage_script(
+        &self,
+        mut process: ProcessConfig,
+        template: &str,
+    ) -> Result<ProcessConfig, StepFailure> {
+        let script = self.files.env.with_file_name("script");
+        write(&*self.env, &script, process.run.as_bytes()).await?;
+        let path = self.absolute(&script);
+        process.run = format!(
+            "{}exec {}\n",
+            self.prologue(),
+            template.replace("{0}", &path)
+        );
+        process.shell = Shell::Sh;
+        Ok(process)
+    }
+
     /// Run `process` under this session: the process step does the work, the
     /// command sink watches its output, and the files are applied afterwards.
+    ///
+    /// With a `shell_command` template, `process.run` is the bare script: after
+    /// the sentinels resolve it is written to the step's `script` file, and the
+    /// process becomes `sh` running the prologue plus the template with `{0}`
+    /// substituted by the script's path — as GitHub invokes custom shells.
     pub async fn run(
         mut self,
         process: ProcessConfig,
+        shell_command: Option<String>,
         ctx: StepCtx,
         allow_unsecure: bool,
     ) -> (Outcome, Effects) {
@@ -217,6 +242,13 @@ impl Session {
         let process = match resolve_secret_sentinels(process, secrets.as_ref()) {
             Ok(process) => process,
             Err(failure) => return (failure.into(), Effects::default()),
+        };
+        let process = match shell_command {
+            Some(template) => match self.stage_script(process, &template).await {
+                Ok(process) => process,
+                Err(failure) => return (failure.into(), Effects::default()),
+            },
+            None => process,
         };
         let (tx, rx) = mpsc::channel(64);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
