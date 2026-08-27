@@ -374,7 +374,12 @@ with a working execution path.
     gets the hard stop for free and the mode of stopping is recorded, never
     inferred. The driver wires the tiers as cleanup grace and second-cancel; the
     host executor grew sentinel-pinned process groups so release can end
-    stragglers without ever signalling a recycled pgid. Log v2 → v3.
+    stragglers without ever signalling a recycled pgid. Log v2 → v3. (The GHA
+    frontend has since stopped choosing where the flag lands from condition
+    text: it sets `run_on_cancel` on every node it emits — matrix expansion
+    heads excepted — and lets each step's gate evaluate the condition against
+    the post-cancel state. The engine's structural rule is unchanged; the flag
+    just stopped being an admission *decision* in that frontend.)
 
 ## Frontends (package 03)
 
@@ -436,8 +441,12 @@ in brackets.
    call in `run:`, `env:` or `with:` lowers to a sentinel — the second permitted
    non-literal across the executor boundary, like `$secret` — which the GitHub step
    kinds replace at spawn with the hash, computed in the job environment
-   (`crates/github/actions/src/hashfiles.rs`). In a position the engine evaluates
-   (an `if:`, an output, a matrix) it stays rejected, and so do computed patterns.
+   (`crates/github/actions/src/hashfiles.rs`). Resolved for step-level conditions
+   too: an `if:` lowers to a config gate the step evaluates at spawn, and the
+   sentinel rides in the gate's literals (the React sizebot shape,
+   `if: hashFiles(...) != ''`, runs). In a position the engine evaluates — a job
+   `if:`, an output, a matrix, or under another function in a condition — it
+   stays rejected, and so do computed patterns.
 
 3. **Nothing ran after a cancel** — resolved; see departure 30 and spec §5.
    `if: cancelled()` and `if: always()` cleanup can now run: cancelled outcomes
@@ -454,9 +463,14 @@ in brackets.
 
 5. **Secrets in expressions** [`unsupported.secrets.expression`]. `if: ${{ secrets.X
    != '' }}` and `${{ secrets.A || secrets.B }}` are real idioms — 12 workflows. The
-   engine keeps secrets out of `EvalEnv` by construction, which is the right rule; a
-   sanctioned `secret_present('X')` builtin resolved at the boundary would cover the
-   common case without a value ever entering an expression.
+   engine keeps secrets out of `EvalEnv` by construction, and the docs' context
+   matrix gives conditions no `secrets` context either, so the rejection stands
+   (we adhere to the docs even where GitHub accidentally accepts more). The
+   sanctioned form works now: pass the secret through an environment variable and
+   test `env.NAME` in the step's `if:` — the gate resolves it at spawn,
+   step-side, so no value ever enters an expression the engine evaluates. A job
+   output that is a whole-value secret is dropped with a warning
+   (`ignored.secret_output`), as GitHub drops it.
 
 6. **Background steps** [`unsupported.step.background`]. facebook/react and
    vercel/next.js use `background: true` on a step and `wait: <id>` / `wait-all` later
@@ -603,12 +617,19 @@ What the audit found and changed:
     property.
 
 35. **Status functions expand per site, not to the core builtins.** A step's
-    `success()` means "no earlier step of this job failed", built as an expression
-    over the earlier steps' `nodes.*` records and conjoined with "the job started";
-    a job's means "every needed job's `done` reports success". The core's `success()`
-    builtin folds immediate upstream edges, which is not GitHub's job-status rule.
-    A step or job `if:` naming no status function gets `success() &&` in front, as
-    GitHub does; one that names any status function stands alone.
+    `success()` means "no earlier step of this job failed, and the job was not
+    cancelled out from under it", built as an expression over the earlier steps'
+    `nodes.*` records (plus the `scope_cancelled` static, waived when the job's
+    own gate admitted it *after* the cancel — cleanup jobs run their plain steps,
+    as GitHub's do) and conjoined with "the job started"; a job's means "every
+    needed job's `done` reports success and the run is not cancelled". The core's
+    `success()` builtin folds immediate upstream edges, which is not GitHub's
+    job-status rule. A step or job `if:` naming no status function gets
+    `success() &&` in front, as GitHub does; one that names any status function
+    stands alone. Job conditions stay engine preconditions; step conditions ride
+    as config gates the step evaluates at spawn (which is what lets them read
+    `env.*` — `GITHUB_ENV` appends included — and `hashFiles`), with the same
+    expressions inside as `$expr` leaves.
 
 36. **Jobs get `start` and `done` noop nodes.** `start` is the gate (`needs` + `if:`);
     `done` folds the job — `{ result, outputs }` — from the payload the last step's

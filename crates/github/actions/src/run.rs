@@ -23,6 +23,17 @@ impl Step for RunStep {
     }
 
     async fn run(&self, config: RunConfig, ctx: StepCtx) -> Outcome {
+        // The gate first: nothing is created and nothing spawns for a step whose
+        // condition is false. A false gate under a cancelled scope records
+        // `Cancelled`, as GitHub reports post-cancel non-cleanup steps.
+        if let Some(gate) = &config.gate {
+            match crate::gate::admitted(gate, &config.env, &ctx).await {
+                Ok(true) => {}
+                Ok(false) if config.cancelled => return Outcome::cancelled(),
+                Ok(false) => return Outcome::skipped(),
+                Err(failure) => return failure.into(),
+            }
+        }
         let session = match Session::begin(&ctx, &config.event).await {
             Ok(session) => session,
             Err(failure) => return failure.into(),

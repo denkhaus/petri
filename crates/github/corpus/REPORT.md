@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 276 references, 1
 | Result | Count | Share |
 |---|---|---|
 | lowered clean | 14 | 4% |
-| lowered with warnings | 111 | 35% |
-| rejected with a specific `unsupported.*` code | 191 | 60% |
+| lowered with warnings | 112 | 35% |
+| rejected with a specific `unsupported.*` code | 190 | 60% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -85,7 +85,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `step.background` | 2 |
 | `yaml.anchors` | 2 |
 | `action.remote` | 1 |
-| `expression.hashFiles` | 1 |
 | `yaml.multiline_flow` | 1 |
 
 ## Failures that are not specific rejections
@@ -222,7 +221,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | facebook/react | `runtime_eslint_plugin_e2e.yml` | warnings | 14 | — |
 | facebook/react | `runtime_fuzz_tests.yml` | warnings | 8 | — |
 | facebook/react | `runtime_release_from_ci.yml` | unsupported | — | `environment`, `inputs`, `workflow_dispatch.inputs` |
-| facebook/react | `runtime_sizebot_comment.yml` | unsupported | — | `expression.hashFiles` |
+| facebook/react | `runtime_sizebot_comment.yml` | warnings | 10 | — |
 | facebook/react | `shared_check_maintainer.yml` | unsupported | — | `inputs`, `workflow_call` |
 | facebook/react | `shared_cleanup_merged_branch_caches.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
 | facebook/react | `shared_cleanup_stale_branch_caches.yml` | warnings | 3 | — |

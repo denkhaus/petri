@@ -158,9 +158,12 @@ jobs:
     );
 }
 
-/// A cancel that lands with no step of the job cancelled: the dependent job's
-/// first step is gated on `cancelled()`, and no earlier step of that job carries a
-/// `Cancelled` record — only the `scope_cancelled` static can admit it.
+/// A cancel that lands with no step of the job cancelled: the cleanup job's
+/// first step is gated on `cancelled()`, and no earlier step of that job carries
+/// a `Cancelled` record — only the `scope_cancelled` static can make the gate
+/// true. The job itself opts in with `if: always()`; a dependent with no such
+/// gate never starts at all (GitHub cancels a queued job), and its steps record
+/// `Cancelled` rather than running.
 #[tokio::test]
 async fn a_cancelled_step_fires_via_scope_cancelled() {
     let text = r#"
@@ -172,11 +175,19 @@ jobs:
       - run: echo ready && sleep 30
   c:
     needs: w
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - id: witness
         if: cancelled()
         run: echo witness-ran
+  plain:
+    needs: w
+    steps:
+      - id: never
+        if: cancelled()
+        run: echo never-ran
+    runs-on: ubuntu-latest
 "#;
     let graph = lower_ok(text);
     let (report, _) = run_host_then_cancel(graph, "between-steps", "w/step-1").await;
@@ -185,6 +196,14 @@ jobs:
         log_lines(&report).contains(&"witness-ran".to_string()),
         "the first step of the job has no cancelled earlier step; scope_cancelled admits it: {:?}",
         log_lines(&report)
+    );
+    assert!(
+        !log_lines(&report).contains(&"never-ran".to_string()),
+        "a job cancelled before it started runs nothing, its cancelled() steps included"
+    );
+    assert_eq!(
+        status_of(&report, "plain/never").as_deref(),
+        Some("cancelled")
     );
 }
 
@@ -303,12 +322,12 @@ jobs:
     );
 }
 
-/// `fail_fast` plus `max-parallel`: a leg that was still deferred when the splice
-/// scope was cancelled runs its `if: cancelled()` step — admitted by
-/// `scope_cancelled`, since no step of that leg holds a `Cancelled` record — and
-/// its un-gated step records `Cancelled`.
+/// `fail_fast` plus `max-parallel`: a leg still deferred when the splice scope
+/// was cancelled never begins — GitHub cancels a queued `fail-fast` leg before
+/// any of its steps, `if: cancelled()` ones included. Every step of the leg
+/// records `Cancelled`.
 #[tokio::test]
-async fn a_deferred_legs_cancelled_step_runs_under_fail_fast() {
+async fn a_deferred_leg_never_starts_under_fail_fast() {
     let text = r#"
 on: push
 jobs:
@@ -334,10 +353,6 @@ jobs:
 
     let lines = log_lines(&report);
     assert!(
-        lines.contains(&"recover-2".to_string()),
-        "the deferred leg's cancelled() step ran: {lines:?}"
-    );
-    assert!(
         !lines.contains(&"recover-1".to_string()),
         "the failing leg's cancelled() step was evaluated before the cancel and skipped"
     );
@@ -345,11 +360,17 @@ jobs:
         status_of(&report, "test/recover#0").as_deref(),
         Some("skipped")
     );
-    assert_eq!(
-        status_of(&report, "test/work#1").as_deref(),
-        Some("cancelled"),
-        "the un-gated step of the cancelled leg records Cancelled"
+    assert!(
+        !lines.contains(&"recover-2".to_string()),
+        "the deferred leg was cancelled before it started; nothing of it runs: {lines:?}"
     );
+    for step in ["test/start#1", "test/recover#1", "test/work#1"] {
+        assert_eq!(
+            status_of(&report, step).as_deref(),
+            Some("cancelled"),
+            "{step} records why it did not run"
+        );
+    }
     assert!(
         !lines.contains(&"work-2".to_string()),
         "it never actually ran"
@@ -706,5 +727,132 @@ jobs:
         log_lines(&report).contains(&"testing app.tar".to_string()),
         "{:?}",
         log_lines(&report)
+    );
+}
+
+// ── Lazy step conditions: what only the step can resolve ──────────────────
+
+/// The React sizebot shape: a step gated on `hashFiles(...) != ''`, resolved
+/// against the workspace at spawn. Skips without `node`, which the hash helper
+/// runs on.
+#[tokio::test]
+async fn hashfiles_conditions_read_the_workspace() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("skipping: node is not on PATH");
+        return;
+    }
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: printf lock > yarn.lock
+      - id: with_lock
+        if: hashFiles('yarn.lock') != ''
+        run: echo have-lock
+      - id: without_lock
+        if: hashFiles('nope.lock') != ''
+        run: echo no-lock
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "hashfiles-if").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"have-lock".to_string()), "{lines:?}");
+    assert!(!lines.contains(&"no-lock".to_string()), "{lines:?}");
+    assert_eq!(
+        status_of(&report, "j/without_lock").as_deref(),
+        Some("skipped")
+    );
+}
+
+/// A condition over `env.*` sees what earlier steps appended through
+/// `GITHUB_ENV` — GitHub evaluates step conditions on the runner with that
+/// environment — while values declared in the workflow still resolve through
+/// the scope env.
+#[tokio::test]
+async fn conditions_read_the_step_environment() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    env:
+      FLAG: "off"
+      DECLARED: "yes"
+    steps:
+      - run: echo "FLAG=on" >> "$GITHUB_ENV"
+      - id: appended
+        if: env.FLAG == 'on'
+        run: echo saw-appended
+      - id: stale
+        if: env.FLAG == 'off'
+        run: echo saw-stale
+      - id: declared
+        if: env.DECLARED == 'yes'
+        run: echo saw-declared
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "env-if").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"saw-appended".to_string()), "{lines:?}");
+    assert!(lines.contains(&"saw-declared".to_string()), "{lines:?}");
+    assert!(!lines.contains(&"saw-stale".to_string()), "{lines:?}");
+    assert_eq!(status_of(&report, "j/stale").as_deref(), Some("skipped"));
+}
+
+/// The documented pattern for secrets and conditions: pass the secret through an
+/// environment variable and test it in the step. The gate resolves the secret at
+/// spawn, step-side, so nothing of it reaches the log.
+#[tokio::test]
+async fn a_secret_passed_through_env_gates_a_step() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: gated
+        if: env.HAS_TOKEN != ''
+        env:
+          HAS_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: echo deploying
+      - id: absent
+        if: env.NOT_SET != ''
+        run: echo never
+"#;
+    let graph = lower_ok(text);
+    let report =
+        run_host_with_secrets(graph, "secret-env-if", &[("DEPLOY_TOKEN", "t0ps3cret")]).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"deploying".to_string()), "{lines:?}");
+    assert!(!lines.contains(&"never".to_string()), "{lines:?}");
+    assert_eq!(status_of(&report, "j/absent").as_deref(), Some("skipped"));
+    assert!(
+        !lines.iter().any(|l| l.contains("t0ps3cret")),
+        "the secret stays out of the log"
     );
 }

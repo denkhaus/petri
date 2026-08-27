@@ -154,10 +154,48 @@ impl Site {
         Self::any_of(table, terms)
     }
 
-    /// The job was not skipped by its own gate.
+    /// The job really started: its `start` node ran. A start skipped by the
+    /// job's gate — or recorded `Cancelled` because the cancel landed before the
+    /// job began — reads as not started, so the job's steps do not run.
     pub fn job_started(&self, table: &mut ExprTable) -> ExprId {
-        let skipped = self.node_has_status(table, &self.start_node, "skipped");
-        table.unary(UnOp::Not, skipped)
+        self.node_has_status(table, &self.start_node, "success")
+    }
+
+    /// The job's `start` was cancelled before it could run, for the summary to
+    /// report `cancelled` rather than `skipped`.
+    pub fn start_cancelled(&self, table: &mut ExprTable) -> ExprId {
+        self.node_has_status(table, &self.start_node, "cancelled")
+    }
+
+    /// The job's own gate admitted it *while the run was already cancelled* — a
+    /// cleanup job (`if: always()` or `if: cancelled()`), whose interior steps
+    /// then evaluate normally. The `start` noop records the engine's
+    /// `scope_cancelled` static under `output.cancelled` when it fires.
+    fn start_admitted_under_cancel(&self, table: &mut ExprTable) -> ExprId {
+        let record = self.node_record(table, &self.start_node);
+        let output = table.field(record, "output");
+        let flag = table.field(output, "cancelled");
+        let yes = table.lit(true);
+        table.binary(BinOp::Eq, flag, yes)
+    }
+
+    /// The run was cancelled out from under this job: the scope is cancelled and
+    /// the job was not admitted as cleanup. This is what makes a plain step read
+    /// `success()` false after a cancel — GitHub's runner evaluates remaining
+    /// steps with the job status `Cancelled` — while the steps of a cleanup job
+    /// scheduled after the cancel evaluate normally.
+    ///
+    /// Composite inner steps skip the term: the caller's gate — evaluated at the
+    /// caller's site, where the term applies — speaks for the interrupt, and a
+    /// composite admitted by `always()` runs its inner steps as GitHub does.
+    fn cancel_interrupt(&self, table: &mut ExprTable) -> ExprId {
+        if self.action_inputs.is_some() {
+            return table.lit(false);
+        }
+        let scoped = table.var("scope_cancelled");
+        let admitted = self.start_admitted_under_cancel(table);
+        let not_admitted = table.unary(UnOp::Not, admitted);
+        table.binary(BinOp::And, scoped, not_admitted)
     }
 
     /// A needed job's result: `nodes["N/done"].output.result`.
@@ -209,7 +247,11 @@ impl Site {
     /// `cancelled()` also ORs in the engine's `scope_cancelled` static: a cancel
     /// that lands between steps cancels no step record, a not-yet-started job has
     /// no cancelled needs, and a `fail_fast` splice cancel is not a root cancel —
-    /// `scope_cancelled` covers all three.
+    /// `scope_cancelled` covers all three. `success()` is false under a cancel —
+    /// a step's, unless the job was admitted as cleanup after the cancel
+    /// ([`Self::cancel_interrupt`]); a job's, always — which is how a plain step
+    /// or job stops when the run is cancelled without any admission flag sniffing
+    /// condition text.
     pub fn status_function(&self, table: &mut ExprTable, name: &str, at_step: bool) -> ExprId {
         match (name, at_step) {
             ("always", _) => table.lit(true),
@@ -217,10 +259,17 @@ impl Site {
                 let failed = self.earlier_step_failed(table);
                 let cancelled = self.earlier_step_cancelled(table);
                 let bad = table.binary(BinOp::Or, failed, cancelled);
+                let interrupted = self.cancel_interrupt(table);
+                let bad = table.binary(BinOp::Or, bad, interrupted);
                 table.unary(UnOp::Not, bad)
             }
             ("failure", true) => self.earlier_step_failed(table),
-            ("success", false) => self.needs_succeeded(table),
+            ("success", false) => {
+                let ok = self.needs_succeeded(table);
+                let scoped = table.var("scope_cancelled");
+                let not_cancelled = table.unary(UnOp::Not, scoped);
+                table.binary(BinOp::And, ok, not_cancelled)
+            }
             ("failure", false) => self.needs_failed(table),
             ("cancelled", _) => {
                 let base = if at_step {
@@ -381,6 +430,8 @@ impl Roots for GhaRoots<'_> {
                 Some("status") => {
                     let failed = self.site.earlier_step_failed(table);
                     let cancelled = self.site.earlier_step_cancelled(table);
+                    let interrupted = self.site.cancel_interrupt(table);
+                    let cancelled = table.binary(BinOp::Or, cancelled, interrupted);
                     let f = table.lit("failure");
                     let c = table.lit("cancelled");
                     let s = table.lit("success");
@@ -685,6 +736,20 @@ pub fn lower_scalar(
         acc = table.binary(BinOp::Concat, acc, next);
     }
     Some(LoweredScalar::Expr(acc))
+}
+
+/// The secret `text` names when it is exactly one `${{ secrets.X }}` (or
+/// `${{ github.token }}`) reference and nothing else. For the positions that
+/// drop such a value with a warning — a job output — rather than rejecting it.
+pub fn whole_value_secret(text: &str) -> Option<String> {
+    let segments = split_template(text).ok()?;
+    if let [Segment::Expr { source, .. }] = segments.as_slice()
+        && let Ok(ast) = parse(source)
+        && let Some((root, path)) = ast.dotted_path()
+    {
+        return secret_name(root, &path);
+    }
+    None
 }
 
 /// The secret a whole-value reference names: `secrets.X` is `X`, and `github.token`

@@ -35,9 +35,22 @@ the job environment's business.
 **Expressions.** The GitHub expression grammar over the `github`, `env`, `vars`,
 `runner`, `matrix`, `needs`, `steps` and (in actions) `inputs` contexts, and the
 documented functions. `hashFiles(...)` with literal patterns works in step config
-(`run:`, `env:`, `with:`), resolved against the workspace at spawn with GitHub's
-hash. Secrets — `secrets.*` and `github.token` — may appear anywhere in step
-config; the value is spliced in at spawn and never enters the graph or the log.
+(`run:`, `env:`, `with:`) and in step-level conditions (`if:`, `pre-if`,
+`post-if`), resolved against the workspace at spawn with GitHub's hash. Secrets —
+`secrets.*` and `github.token` — may appear anywhere in step config; the value is
+spliced in at spawn and never enters the graph or the log.
+
+**Conditions.** The docs' context-availability matrix is the compatibility
+target. A step-level condition sees `github`, `needs`, `strategy`, `matrix`,
+`job`, `runner`, `env`, `vars`, `steps`, `inputs`, the status functions, and
+`hashFiles` — every step-level condition lowers to a gate the step evaluates at
+spawn, so `env.*` sees what earlier steps appended through `GITHUB_ENV`, as it
+does on GitHub's runner. A job-level `if:` sees `github`, `needs`, `vars`,
+`inputs` and the status functions, and is evaluated by the engine — the same
+role GitHub's server plays: no secrets, no workspace, no env files. The docs do
+not give conditions the `secrets` context at any level, and neither does this
+runner, even where GitHub accidentally accepts more; pass the secret through an
+environment variable and test `env.NAME` in the condition.
 
 **Runner contract.** `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`,
 `GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY` (heredoc syntax included), the `GITHUB_*`
@@ -61,6 +74,7 @@ real code and fail at the HTTP call — local stand-ins are planned, below.
 |---|---|
 | `ignored.concurrency` | `concurrency:` is cross-run mutual exclusion; a single local run has nothing to race. Cross-run semantics stay with a multi-run driver layer (decision D2). |
 | `ignored.permissions` | `permissions:` configures the GitHub-hosted token; it grants nothing locally. |
+| `ignored.secret_output` | A job output that would carry a secret is dropped, as GitHub drops it (with its "skip output" warning). |
 | `action.nested_lifecycle` | A nested action's `pre`/`post` inside a composite does not run (its `main` does), as a warning on the composite. |
 
 ## Planned
@@ -95,6 +109,6 @@ Rejected with an error, and staying that way.
 | `shell.cmd`, `shell.powershell` | Windows-only shells | Same. |
 | `runs_on.group` | `runs-on.group` runner groups | A GitHub-hosted concept; name a label instead. |
 | `runs_on.unknown` | Labels the executor cannot place (`self-hosted`, third-party pools) | Placing them is a driver decision, not a frontend guess. The known-label list can grow. |
-| `secrets.expression` | A secret in a position the engine evaluates (`if:`, outputs, matrix) | Secrets are absent from the expression environment by construction, so they can never reach the event log. In step config they are supported (above). |
-| `expression.hashFiles` | `hashFiles` in an engine-evaluated position, or with computed patterns | The engine is pure; only the step, at spawn, may read the workspace. |
+| `secrets.expression` | A secret in a condition (any level), inside a larger output expression, or in a matrix | The docs' availability table gives conditions no `secrets` context, and secrets are absent from the expression environment by construction, so they can never reach the event log. In step config they are supported, and a whole-value secret job output is dropped with `ignored.secret_output` (above). |
+| `expression.hashFiles` | `hashFiles` in a job `if:`, an output or a matrix; under another function in a condition; or with computed patterns | Only the step, at spawn, may read the workspace. In a step-level condition it works standing alone or under the comparison and boolean operators (above). |
 | `action.remote` | A remote action with no action source configured, or one the source cannot serve | Not a feature gap: configure an action source (the distribution ships one), or refresh the corpus snapshot. |

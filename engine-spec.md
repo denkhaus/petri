@@ -597,7 +597,16 @@ with `secret_unavailable`.
 
 **GHA** (exercises the degenerate subset — no back edges, no `Any`/`Quorum`,
 no multi-arm groups): job → Scope + chained step nodes; `needs` → `All` join;
-k dependents → k single-arm groups; `if:` → precondition; `strategy.matrix`
+k dependents → k single-arm groups; job `if:` → precondition on the job's
+`start` node (the engine plays GitHub's server: no secrets, no workspace, no
+env files); step-level conditions (`if:`, `pre-if`, `post-if`) → a **gate** in
+the step's config — an expression tree whose engine-evaluable subtrees ride as
+`$expr` placeholders and whose `env.*` / `hashFiles` leaves the step kind
+resolves at spawn, returning `Skipped` (or `Cancelled` under a cancelled
+scope) when it is false. Step nodes carry no precondition and set
+`run_on_cancel` across the board (matrix expansion heads excepted), so
+post-cancel behavior is decided by evaluating conditions, not by inspecting
+their text; `strategy.matrix`
 (+`fail-fast`/`max-parallel`) → `ForEach{Subgraph}`; `timeout-minutes` →
 budget; `continue-on-error` → `soft_fail` (context provider derives
 `outcome`/`conclusion` from `PartialSuccess.underlying`); `runs-on` →

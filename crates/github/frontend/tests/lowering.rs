@@ -232,9 +232,10 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.shell.cmd",
         ),
         (
-            // In `run:` a literal-pattern hashFiles lowers (the step resolves it);
-            // in a position the engine evaluates it stays rejected.
-            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        if: hashFiles('**/lock') != ''\n",
+            // A step's `if:` may call hashFiles (the step resolves it); a job's
+            // `if:` is evaluated by the engine, with no workspace — as on
+            // GitHub, whose job conditions have no hashFiles either.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    if: hashFiles('**/lock') != ''\n    steps:\n      - run: echo\n",
             "unsupported.expression.hashFiles",
         ),
         (
@@ -354,12 +355,15 @@ jobs:
     ir::validate(&graph).expect("valid");
 }
 
-// ── Cancellation flags ────────────────────────────────────────────────────
+// ── Cancellation flags and gates ──────────────────────────────────────────
 
-/// Where `run_on_cancel` lands (spec §5): on steps gated `always()` or
-/// `cancelled()`, on every node of a job so gated, on every inlined node of a
-/// composite so gated at the caller, and on every `done` unconditionally.
-/// Nothing else carries it.
+/// After a polite cancel, conditions decide: every node the lowering emits
+/// carries `run_on_cancel` (spec §5), fires, and its gate or precondition lands
+/// on GitHub's truth table — no condition text is sniffed for admission. The one
+/// exception is a matrix `start`, which carries the expansion: a cancelled scope
+/// never splices, so a leg not yet started stays cancelled, as GitHub cancels a
+/// queued `fail-fast` leg. Step nodes carry no engine precondition at all; their
+/// condition is the `gate` in their config.
 #[test]
 fn run_on_cancel_lands_exactly_where_github_keeps_going() {
     let action = r#"
@@ -395,32 +399,192 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo cleanup
+  legs:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo ${{ matrix.n }}
 "#;
     let files = files(&[(".github/actions/sweeper/action.yml", action)]);
     let graph = lower_ok_with(text, &files);
 
-    let flagged: Vec<&str> = graph
+    let unflagged: Vec<&str> = graph
         .nodes
         .iter()
-        .filter(|n| n.run_on_cancel)
+        .filter(|n| !n.run_on_cancel)
         .map(|n| n.name.as_str())
         .collect();
-    let mut expected = vec![
-        // done: always, both jobs.
-        "build/done",
-        "cleanup/done",
-        // step-level always()/cancelled(), composites inlined per node.
-        "build/tidy",
-        "build/sweep/step-1",
-        "build/sweep/step-2",
-        // job-level always(): every node of the job.
-        "cleanup/start",
-        "cleanup/step-1",
-    ];
-    let mut flagged_sorted = flagged.clone();
-    flagged_sorted.sort_unstable();
-    expected.sort_unstable();
-    assert_eq!(flagged_sorted, expected, "flags: {flagged:?}");
+    assert_eq!(
+        unflagged,
+        vec!["legs/start"],
+        "only the matrix expansion head stays unflagged"
+    );
+
+    for node in &graph.nodes {
+        let structural = node.name.ends_with("/start") || node.name.ends_with("/done");
+        if structural {
+            assert!(
+                node.step.config.get("gate").is_none(),
+                "{}: start and done carry no gate",
+                node.name
+            );
+            continue;
+        }
+        assert!(
+            node.precondition.is_none(),
+            "{}: step nodes carry no engine precondition",
+            node.name
+        );
+        assert!(
+            node.step.config.get("gate").is_some() && node.step.config.get("cancelled").is_some(),
+            "{}: the condition is the config gate",
+            node.name
+        );
+    }
+    // Job-level `if:` stays an engine precondition on `start`.
+    let cleanup_start = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "cleanup/start")
+        .unwrap();
+    assert!(cleanup_start.precondition.is_some());
+    // `start` records whether it fired under a cancel, for the steps' gates.
+    assert!(
+        cleanup_start.step.config["cancelled"]
+            .get("$expr")
+            .is_some(),
+        "start records the scope_cancelled static in its output"
+    );
+}
+
+// ── Step-condition gates ──────────────────────────────────────────────────
+
+/// What a step's `if:` lowers to, by shape: nothing only the step can resolve
+/// collapses to a single engine-expression leaf; `env.NAME` and literal-pattern
+/// `hashFiles` become step-resolved leaves under the GitHub operators.
+#[test]
+fn step_conditions_lower_to_gates() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: plain
+        if: github.ref == 'refs/heads/main'
+        run: echo plain
+      - id: envy
+        if: env.DEPLOY == '1'
+        run: echo envy
+      - id: hashy
+        if: hashFiles('**/Cargo.lock') != ''
+        run: echo hashy
+      - id: bare
+        run: echo bare
+"#;
+    let graph = lower_ok(text);
+    let gate = |name: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .step
+            .config["gate"]
+            .clone()
+    };
+
+    // The common case: one `$expr` leaf holding started && success && condition.
+    for name in ["j/plain", "j/bare"] {
+        let g = gate(name);
+        assert!(
+            g["lit"].get("$expr").is_some(),
+            "{name}: a fully engine-evaluable condition is one leaf: {g}"
+        );
+    }
+
+    // `env.DEPLOY == '1'`: the comparison is the step's, with an `$env` leaf
+    // carrying the engine's scope-env view as its fallback.
+    let envy = gate("j/envy");
+    assert_eq!(envy["op"], json!("&&"));
+    let cmp = envy["args"].as_array().unwrap().last().unwrap();
+    assert_eq!(cmp["op"], json!("=="));
+    assert_eq!(cmp["args"][0]["$env"], json!("DEPLOY"));
+    assert!(cmp["args"][0].get("or").is_some(), "{envy}");
+    assert_eq!(cmp["args"][1], json!({"lit": "1"}));
+
+    // `hashFiles(...) != ''`: the pattern rides as a sentinel string literal the
+    // step resolves against the workspace before comparing.
+    let hashy = gate("j/hashy");
+    let cmp = hashy["args"].as_array().unwrap().last().unwrap();
+    assert_eq!(cmp["op"], json!("!="));
+    let sentinel = cmp["args"][0]["lit"].as_str().unwrap();
+    assert!(
+        frontend_gha::exprs::has_hashfiles_sentinel(sentinel),
+        "{sentinel:?}"
+    );
+    // The steps' `cancelled` bit is the engine's scope_cancelled static.
+    let bare = graph.nodes.iter().find(|n| n.name == "j/bare").unwrap();
+    assert!(bare.step.config["cancelled"].get("$expr").is_some());
+    ir::validate(&graph).expect("valid");
+}
+
+/// The docs' context-availability matrix, encoded (checked 2026-08-27): a step
+/// `if:` sees `env` and `hashFiles` (the step resolves them); a job `if:` sees
+/// neither; secrets are absent from conditions at every level; a job output
+/// that would carry a secret is dropped with a warning, as GitHub drops it.
+#[test]
+fn conditions_follow_the_context_availability_matrix() {
+    // Step `if:` — env and hashFiles lower (no diagnostics).
+    let ok = diagnostics(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        if: env.X == '1' && hashFiles('**/lock') != ''\n",
+    );
+    assert!(ok.iter().all(|d| !d.is_error()), "{ok:?}");
+
+    // Job `if:` — hashFiles has no workspace to read.
+    let job_hash = diagnostics(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    if: hashFiles('**/lock') != ''\n    steps:\n      - run: echo\n",
+    );
+    assert!(
+        job_hash
+            .iter()
+            .any(|d| d.code == "unsupported.expression.hashFiles"),
+        "{job_hash:?}"
+    );
+
+    // Secrets stay out of conditions at both levels, under operators included.
+    for bad in [
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    if: secrets.X == 'y'\n    steps:\n      - run: echo\n",
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        if: secrets.X == 'y'\n",
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        if: env.A == '1' && secrets.X == 'y'\n",
+    ] {
+        let diags = diagnostics(bad);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "unsupported.secrets.expression"),
+            "{bad}: {diags:?}"
+        );
+    }
+
+    // A job output that is a secret: dropped, with a warning naming it.
+    let text = "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    outputs:\n      token: ${{ secrets.T }}\n    steps:\n      - run: echo\n";
+    let diags = diagnostics(text);
+    let warn = diags
+        .iter()
+        .find(|d| d.code == "ignored.secret_output")
+        .expect("the drop is loud");
+    assert!(!warn.is_error());
+    let graph = lower_ok(text);
+    assert!(
+        !serde_json::to_string(&graph)
+            .unwrap()
+            .contains("petri-secret"),
+        "the dropped output leaves no secret reference behind"
+    );
 }
 
 /// `cancelled()` ORs in the engine's `scope_cancelled` static, at step and job

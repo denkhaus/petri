@@ -20,24 +20,32 @@
 //! folds the legs. Every `needs.J.*` and `success()` downstream reads `J/done`'s
 //! record, never a template edge.
 //!
-//! Step preconditions carry GitHub's job-status semantics explicitly: `success()` in a
-//! step means "no earlier step of this job failed", built as an expression over the
-//! earlier steps' run-context records, and every step is additionally gated on the
-//! job having started. That is how a false job `if:` skips every step, and how
-//! `continue-on-error` (a `PartialSuccess`) does not fail the job.
+//! Step nodes carry no engine precondition: every step-level condition — an
+//! `if:`, a `pre-if`, a `post-if` — lowers into the step's config as a **gate**
+//! ([`gate`]) the step kind evaluates at spawn. The gate carries GitHub's
+//! job-status semantics explicitly: `success()` in a step means "no earlier step
+//! of this job failed and the job was not cancelled out from under it", built as
+//! an expression over the earlier steps' run-context records, and every step is
+//! additionally gated on the job having started. That is how a false job `if:`
+//! skips every step, and how `continue-on-error` (a `PartialSuccess`) does not
+//! fail the job. The gate is also what lets a condition read `hashFiles(...)` and
+//! `env.*` — including values earlier steps appended to `GITHUB_ENV` — which only
+//! the step, in the job environment, can resolve.
 //!
 //! # Cancellation
 //!
-//! GitHub runs `if: always()` and `if: cancelled()` work after a cancellation, and
-//! the engine admits post-cancel work only through the structural
-//! `Node.run_on_cancel` flag (spec §5). The lowering sets it where GitHub would
-//! keep going: on a step whose `if:` names `always()` or `cancelled()`; on every
-//! node of a job whose own `if:` does; on every inlined node of a local composite
-//! whose caller's `if:` does; and on every `done` node unconditionally, because a
-//! dependent's `needs.J.*` reads need a truthful summary in every cancel case.
-//! `cancelled()` also ORs in the `scope_cancelled` static, so a cancel that lands
-//! between steps — or a `fail_fast` scope cancel, which root-only `run.cancelled`
-//! cannot see — still reads as cancelled.
+//! GitHub runs `if: always()` and `if: cancelled()` work after a cancellation.
+//! Every node this frontend emits (except a matrix expansion head, which a
+//! cancelled scope never splices) sets the structural `Node.run_on_cancel` flag
+//! (spec §5), so after a polite cancel every remaining step fires and its gate
+//! decides against the real state: `cancelled()` is true, `success()` is false.
+//! Cleanup steps run; everything else self-skips, recording `Cancelled`. No
+//! condition text is sniffed to decide admission. A job whose own gate admitted
+//! it *after* the cancel — `if: always()` cleanup — records that on its `start`,
+//! and its interior steps then evaluate normally, as GitHub's do. `cancelled()`
+//! ORs in the `scope_cancelled` static, so a cancel that lands between steps — or
+//! a `fail_fast` scope cancel, which root-only `run.cancelled` cannot see — still
+//! reads as cancelled.
 //!
 //! # One thing the engine cannot do today
 //!
@@ -50,6 +58,7 @@ pub mod action;
 pub mod composite;
 pub mod expr_lower;
 pub mod exprs;
+pub mod gate;
 pub mod lower;
 pub mod model;
 

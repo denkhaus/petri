@@ -21,7 +21,10 @@ use crate::action::{
     RUN_KIND, STATE_OUTPUT_KEY,
 };
 use crate::composite::{self, NodeAction, Runs, Uses};
-use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
+use crate::exprs::{
+    LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel, whole_value_secret,
+};
+use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, KNOWN_RUNS_ON, Step, Workflow};
 
 /// GitHub's default job timeout.
@@ -157,11 +160,27 @@ impl<'w, 'a> Lowering<'w, 'a> {
     fn job_shell(&mut self, job: &Job<'a>) {
         let matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
         let scope = self.scope_for(job);
+        // `start` records whether it fired with its scope already cancelled: a
+        // cleanup job admitted after a cancel says so here, and its steps'
+        // `success()` reads it back (`Site::cancel_interrupt`).
+        let cancelled = self.scope_cancelled_config();
         let start = self.b.add_node(
             &format!("{}{SEP}start", job.id),
             scope,
-            StepRef::new("noop", json!({ "job": job.id, "phase": "start" })),
+            StepRef::new(
+                "noop",
+                json!({ "job": job.id, "phase": "start", "cancelled": cancelled }),
+            ),
         );
+        // Every node fires after a polite cancel and its gate or precondition
+        // decides — except an expansion head, which a cancelled scope never
+        // splices. A matrix `start` carries the expansion, so it stays unflagged,
+        // and so do its clones: a leg whose start had not fired when its scope
+        // was cancelled never begins, exactly as GitHub cancels a queued
+        // `fail-fast` leg before any of its steps.
+        if !matrix {
+            self.b.node_mut(start).run_on_cancel = true;
+        }
         self.spans.insert(start, job.span.clone());
         let done = self.b.add_node(
             &format!("{}{SEP}done", job.id),
@@ -551,18 +570,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
 
-        // A job whose own `if:` names `always()` or `cancelled()` is a cleanup job:
-        // GitHub admits the whole job after a cancel, so every node of it — start,
-        // steps, done (flagged already) — must be able to fire. The interior steps'
-        // own gates then keep their normal meaning, observed over this job's steps.
-        // Matrix legs are covered too: clones inherit the flag from these templates.
-        if names_cleanup(job.condition) {
-            self.b.node_mut(start).run_on_cancel = true;
-            for id in &chain {
-                self.b.node_mut(*id).run_on_cancel = true;
-            }
-        }
-
         let last = *chain.last().unwrap_or(&start);
         if let Some(j) = self.jobs.get_mut(&job.id) {
             j.last = last;
@@ -629,6 +636,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
     // ── Steps ──────────────────────────────────────────────────────────────
 
     /// Link `id` after `previous` and make it visible to the steps after it.
+    /// Every chained node runs on cancel: after a polite cancel it fires and its
+    /// gate decides, which is the whole cancellation story (no admission
+    /// sniffing). Matrix templates pass the flag to their clones.
     fn chain_node(
         &mut self,
         previous: &mut NodeId,
@@ -637,6 +647,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         site: &mut Site,
         id: NodeId,
     ) {
+        self.b.node_mut(id).run_on_cancel = true;
         self.b.link(*previous, id);
         chain.push(id);
         *previous = id;
@@ -847,19 +858,133 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     /// A main step's gate: the job started, and the step's own condition (default
-    /// `success()` over earlier steps). A step gated on `always()` or `cancelled()`
-    /// runs after a cancel in GitHub, so it opts in; its precondition then decides
-    /// as usual.
+    /// `success()` over earlier steps), attached to the node's config for the
+    /// step kind to evaluate at spawn. The node carries no engine precondition.
     fn gate_main_node(&mut self, id: NodeId, step: &Step<'_>, step_site: &Site) {
-        let cond = self.condition(step.condition, step_site, true, step.span.clone());
         let started = step_site.job_started(self.b.exprs());
-        let pre = match cond {
-            Some(c) => self.b.exprs().binary(BinOp::And, started, c),
-            None => started,
+        let gate = self.step_gate(step.condition, step_site, step.span.clone(), &[started]);
+        self.attach_gate(id, gate);
+    }
+
+    /// The step-level condition as a gate. `prereqs` are engine-side terms ANDed
+    /// in front — the job-started term, a post node's main-ran term.
+    ///
+    /// A condition with nothing only the step can resolve — no `env.*`, no
+    /// `hashFiles` — collapses with the prerequisites into a single engine
+    /// expression: one `$expr` leaf, the common case. Otherwise the condition
+    /// splits on its operators into a gate tree ([`gate::condition_tree`]).
+    fn step_gate(
+        &mut self,
+        node: Option<Node<'_>>,
+        site: &Site,
+        span: Span,
+        prereqs: &[ExprId],
+    ) -> Value {
+        if let Some(scalar) = node.and_then(|n| n.as_scalar())
+            && scalar.as_bool().is_none()
+            && let Ok(source) = if_expr_source(scalar.as_str())
+            && let Ok(ast) = parse(&source)
+            && gate::needs_lazy(&ast)
+        {
+            return self.lazy_gate(&ast, &source, site, span, prereqs);
+        }
+        let cond = self.condition(node, site, true, span);
+        self.collapse_gate(prereqs, cond)
+    }
+
+    /// [`Self::step_gate`] over bare condition text (a `pre-if`, a `post-if`).
+    fn step_gate_text(
+        &mut self,
+        source: &str,
+        site: &Site,
+        span: Span,
+        prereqs: &[ExprId],
+    ) -> Value {
+        if let Ok(ast) = parse(source)
+            && gate::needs_lazy(&ast)
+        {
+            return self.lazy_gate(&ast, source, site, span, prereqs);
+        }
+        let cond = self.condition_text(source, site, true, span);
+        self.collapse_gate(prereqs, cond)
+    }
+
+    /// The all-engine case: one `$expr` leaf holding `prereq && … && condition`.
+    fn collapse_gate(&mut self, prereqs: &[ExprId], cond: Option<ExprId>) -> Value {
+        let mut acc: Option<ExprId> = None;
+        for term in prereqs.iter().copied().chain(cond) {
+            acc = Some(match acc {
+                None => term,
+                Some(a) => self.b.exprs().binary(BinOp::And, a, term),
+            });
+        }
+        let id = acc.unwrap_or_else(|| self.b.exprs().lit(true));
+        Gate::expr(id).to_value()
+    }
+
+    /// The gate tree for a condition with step-resolved leaves: prerequisites and
+    /// the implicit `success()` (unless the condition names a status function) as
+    /// engine leaves, then the condition split on its operators. GitHub
+    /// truthiness lands at the root, in the step's evaluator.
+    fn lazy_gate(
+        &mut self,
+        ast: &frontend::expr::Expr,
+        source: &str,
+        site: &Site,
+        span: Span,
+        prereqs: &[ExprId],
+    ) -> Value {
+        let mut terms: Vec<Gate> = prereqs.iter().map(|id| Gate::expr(*id)).collect();
+        if !if_calls_any(source, &["success", "failure", "cancelled", "always"]) {
+            let success = site.status_function(self.b.exprs(), "success", true);
+            terms.push(Gate::expr(success));
+        }
+        if let Some(tree) = gate::condition_tree(ast, site, &span, self.b.exprs(), &mut self.diags)
+        {
+            terms.push(tree);
+        }
+        let gate = match terms.len() {
+            1 => terms.pop().expect("one term"),
+            _ => Gate::Op {
+                op: GateOp::And,
+                args: terms,
+            },
         };
-        self.b.set_precondition(id, pre);
-        if names_cleanup(step.condition) {
-            self.b.node_mut(id).run_on_cancel = true;
+        gate.to_value()
+    }
+
+    /// The engine's `scope_cancelled` static as a config placeholder: the bit that
+    /// turns a false gate into a `Cancelled` record rather than a `Skipped` one,
+    /// mirroring how the engine records a false precondition in a cancelled scope.
+    fn scope_cancelled_config(&mut self) -> Value {
+        let id = self.b.exprs().var("scope_cancelled");
+        json!({ EXPR_PLACEHOLDER_KEY: id.raw() })
+    }
+
+    /// Put the gate (and the cancelled bit) into a step node's config.
+    fn attach_gate(&mut self, id: NodeId, gate: Value) {
+        let cancelled = self.scope_cancelled_config();
+        let node = self.b.node_mut(id);
+        if let Value::Object(map) = &mut node.step.config {
+            map.insert("gate".into(), gate);
+            map.insert("cancelled".into(), cancelled);
+        }
+    }
+
+    /// AND a composite caller's gate in front of an inlined node's own.
+    fn wrap_gate(&mut self, id: NodeId, caller: &Value) {
+        let own = match self.b.graph().node(id).map(|n| &n.step.config) {
+            Some(Value::Object(map)) => map.get("gate").cloned(),
+            _ => None,
+        };
+        let Some(own) = own else { return };
+        let wrapped = json!({
+            gate::OP_KEY: GateOp::And.symbol(),
+            gate::ARGS_KEY: [caller.clone(), own],
+        });
+        let node = self.b.node_mut(id);
+        if let Value::Object(map) = &mut node.step.config {
+            map.insert("gate".into(), wrapped);
         }
     }
 
@@ -1031,22 +1156,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
         let state_from = (phase == Phase::Post).then(|| main_name.clone());
         let id = self.action_node(context, plan, phase, state_from.as_deref());
-        let cond = self.condition_text(source, site, true, span.clone());
-        let started = site.job_started(self.b.exprs());
-        let mut pre = match cond {
-            Some(c) => self.b.exprs().binary(BinOp::And, started, c),
-            None => started,
-        };
+        let mut prereqs = vec![site.job_started(self.b.exprs())];
         if phase == Phase::Post {
-            let ran = self.main_ran(site, &main_name);
-            pre = self.b.exprs().binary(BinOp::And, pre, ran);
-            // A post step is cleanup: GitHub runs it after a cancel unless its
-            // `post-if` says otherwise.
-            if if_calls_any(source, &["always", "cancelled"]) {
-                self.b.node_mut(id).run_on_cancel = true;
-            }
+            prereqs.push(self.main_ran(site, &main_name));
         }
-        self.b.set_precondition(id, pre);
+        let gate = self.step_gate_text(source, site, span.clone(), &prereqs);
+        self.attach_gate(id, gate);
         Some(id)
     }
 
@@ -1424,23 +1539,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
 
         // The caller's `if:` gates the whole inlined unit the way a job's gate
-        // does: there is no wrapper node, so it is ANDed into every inlined node's
-        // precondition (default: `success()` over the caller's earlier steps). And
-        // when it names `always()` or `cancelled()`, the composite is cleanup:
-        // every inlined node opts in, mirroring the cleanup-job rule.
-        let caller_gate = self.condition(step.condition, &caller_site, true, span.clone());
-        let cleanup = names_cleanup(step.condition);
+        // does: there is no wrapper node, so it is ANDed into every inlined
+        // node's gate (default: `success()` over the caller's earlier steps).
+        // The caller's site is where the cancel-interrupt term lives, so a
+        // composite admitted by `always()` after a cancel runs its inner steps
+        // normally, and an un-gated one shuts them all off — no flags, no
+        // condition-text sniffing.
+        let caller_gate = self.step_gate(step.condition, &caller_site, span.clone(), &[]);
         for id in &ids {
-            if let Some(gate) = caller_gate {
-                let pre = match self.b.graph().node(*id).and_then(|n| n.precondition) {
-                    Some(own) => self.b.exprs().binary(BinOp::And, gate, own),
-                    None => gate,
-                };
-                self.b.set_precondition(*id, pre);
-            }
-            if cleanup {
-                self.b.node_mut(*id).run_on_cancel = true;
-            }
+            self.wrap_gate(*id, &caller_gate);
         }
 
         // Outputs: expressions over the inner steps, visible to the caller as
@@ -1501,6 +1608,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             t.binary(BinOp::Or, earlier_cancelled, own_cancelled)
         };
         let started = site.job_started(t);
+        let start_cancelled = site.start_cancelled(t);
 
         let s_failure = t.lit("failure");
         let s_cancelled = t.lit("cancelled");
@@ -1508,12 +1616,26 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let s_skipped = t.lit("skipped");
         let inner = t.cond(cancelled, s_cancelled, s_success);
         let ran = t.cond(failed, s_failure, inner);
-        let result = t.cond(started, ran, s_skipped);
+        // A job that never began: cancelled before its start could fire, else
+        // skipped by its own gate — the distinction GitHub reports.
+        let never_ran = t.cond(start_cancelled, s_cancelled, s_skipped);
+        let result = t.cond(started, ran, never_ran);
 
-        // Job outputs, lowered where every step is visible.
+        // Job outputs, lowered where every step is visible. An output that would
+        // carry a secret is dropped with a warning, as GitHub drops it.
         let mut outputs: Vec<(String, ExprId)> = Vec::new();
         for (name, node) in &job.outputs {
             let text = node.as_str().unwrap_or("");
+            if whole_value_secret(text).is_some() {
+                self.diags.warning(
+                    "ignored.secret_output",
+                    node.span(),
+                    format!(
+                        "job output `{name}` would carry a secret; GitHub drops such an output, and so does this run"
+                    ),
+                );
+                continue;
+            }
             if let Some(lowered) = lower_scalar(
                 text,
                 node.span(),
@@ -1526,14 +1648,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 let id = match lowered {
                     LoweredScalar::Literal(v) => self.b.exprs().lit(v),
                     LoweredScalar::Expr(id) => id,
-                    LoweredScalar::Secret(_) => {
-                        self.diags.error(
-                            "secrets.misplaced",
-                            node.span(),
-                            "a job output cannot be a secret",
-                        );
-                        continue;
-                    }
+                    // Whole-value secrets were dropped above; `lower_scalar`
+                    // rejects an embedded one before returning this.
+                    LoweredScalar::Secret(_) => continue,
                 };
                 outputs.push((name.clone(), id));
             }
@@ -1869,8 +1986,9 @@ fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
     }
 }
 
-/// Whether the expression calls any of these functions. Parse problems read as
-/// false.
+/// Whether the expression calls any of these functions — GitHub's rule that a
+/// condition naming a status function does not get `success() &&` in front.
+/// Parse problems read as false.
 fn if_calls_any(source: &str, names: &[&str]) -> bool {
     parse(source)
         .map(|ast| {
@@ -1879,22 +1997,6 @@ fn if_calls_any(source: &str, names: &[&str]) -> bool {
                 .any(|c| names.contains(&c.to_lowercase().as_str()))
         })
         .unwrap_or(false)
-}
-
-/// Whether an `if:` names `always()` or `cancelled()` — the conditions GitHub
-/// still honours after a cancellation, and therefore where `run_on_cancel`
-/// belongs. Parse problems read as false; `condition` reports them.
-fn names_cleanup(node: Option<Node<'_>>) -> bool {
-    let Some(scalar) = node.and_then(|n| n.as_scalar()) else {
-        return false;
-    };
-    if scalar.as_bool().is_some() {
-        return false;
-    }
-    let Ok(source) = if_expr_source(scalar.as_str()) else {
-        return false;
-    };
-    if_calls_any(&source, &["always", "cancelled"])
 }
 
 fn variant(error: &ValidationError) -> &'static str {

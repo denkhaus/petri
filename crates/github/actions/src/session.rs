@@ -89,6 +89,21 @@ pub struct Effects {
     pub summary: String,
 }
 
+/// The job's accumulated `GITHUB_ENV`, read without creating any session files:
+/// what a gate's `env.NAME` leaf sees before the step commits to running.
+pub(crate) async fn read_job_env(
+    env: &dyn ExecEnv,
+) -> Result<BTreeMap<String, String>, StepFailure> {
+    Ok(read_json(env, Path::new(JOB_ENV_FILE))
+        .await?
+        .unwrap_or_default())
+}
+
+/// `GITHUB_WORKSPACE` as the job environment sees it, without a session.
+pub(crate) fn github_workspace_path(env: &dyn ExecEnv) -> String {
+    format!("{}/{REPO_DIR}", env.workspace_path())
+}
+
 impl Session {
     /// Create the step's files and read what the job has accumulated so far.
     pub async fn begin(ctx: &StepCtx, event: &Value) -> Result<Self, StepFailure> {

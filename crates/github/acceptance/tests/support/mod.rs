@@ -73,9 +73,19 @@ fn runtime(dir: &std::path::Path) -> Runtime {
 
 /// Run on the standard runtime, which verifies replay itself.
 pub async fn run_host(graph: Graph, label: &str) -> RunReportPlus {
+    run_host_with_secrets(graph, label, &[]).await
+}
+
+/// [`run_host`], with named secrets configured for the run.
+pub async fn run_host_with_secrets(
+    graph: Graph,
+    label: &str,
+    secrets: &[(&str, &str)],
+) -> RunReportPlus {
     let graph = with_params(graph);
     let dir = run_dir(label);
     let report = runtime(&dir)
+        .secrets(runtime::executor::MapSecrets::from_pairs(secrets))
         .run(graph)
         .await
         .expect("replay is byte-identical");
@@ -136,24 +146,17 @@ impl From<RunReport> for RunReportPlus {
     }
 }
 
+/// The nodes that actually ran their work. Every step node fires and evaluates
+/// its gate inside the step kind, so `StepStarted` no longer separates ran from
+/// self-skipped: the recorded status does. A step cancelled mid-run is not
+/// listed either; a test that cares reads its status directly.
 pub fn started(report: &RunReportPlus) -> Vec<String> {
     report
         .state
-        .log
-        .records()
+        .history()
         .iter()
-        .filter_map(|r| match &r.event {
-            engine::Event::StepStarted { firing, .. } => Some(*firing),
-            _ => None,
-        })
-        .filter_map(|firing| {
-            report
-                .state
-                .history()
-                .iter()
-                .find(|h| h.firing == firing)
-                .map(|h| h.name.to_string())
-        })
+        .filter(|h| !matches!(h.outcome.status.tag(), "skipped" | "cancelled"))
+        .map(|h| h.name.to_string())
         .collect()
 }
 

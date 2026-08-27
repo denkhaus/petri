@@ -20,6 +20,16 @@ use frontend_gha::action::validate_relative_action_path;
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
     pub run: String,
+    /// The step's condition, as the frontend's gate tree. The step evaluates it
+    /// before session files are created and before any process spawns; false
+    /// means `Outcome::skipped()` — or a cancelled outcome when `cancelled` is
+    /// set. Absent means run.
+    #[serde(default)]
+    pub gate: Option<Value>,
+    /// The engine's `scope_cancelled` static at firing time: a false gate then
+    /// records `Cancelled`, as GitHub reports post-cancel non-cleanup steps.
+    #[serde(default)]
+    pub cancelled: bool,
     #[serde(default)]
     pub shell: Shell,
     /// A custom shell template (`bash -el {0}`, `python {0}`): the step writes the
@@ -45,6 +55,11 @@ pub struct ActionConfig {
     pub action: ActionLocation,
     /// `runs.main`, `runs.pre` or `runs.post`, relative to the action directory.
     pub entry: String,
+    /// The phase's condition (`if:`, `pre-if`, `post-if`) as the frontend's gate
+    /// tree, evaluated before anything is staged or spawned. Absent means run.
+    pub gate: Option<Value>,
+    /// The engine's `scope_cancelled` static at firing time; see `RunConfig`.
+    pub cancelled: bool,
     /// Declared inputs with the caller's values or their defaults, plus undeclared
     /// `with:` keys. Each becomes `INPUT_<NAME>`.
     pub inputs: BTreeMap<String, ValueOrSecretRef>,
@@ -60,6 +75,10 @@ pub struct ActionConfig {
 struct RawActionConfig {
     action: ActionLocation,
     entry: String,
+    #[serde(default)]
+    gate: Option<Value>,
+    #[serde(default)]
+    cancelled: bool,
     #[serde(default)]
     inputs: BTreeMap<String, ValueOrSecretRef>,
     #[serde(default)]
@@ -85,6 +104,8 @@ impl<'de> Deserialize<'de> for ActionConfig {
         Ok(Self {
             action: raw.action,
             entry: raw.entry,
+            gate: raw.gate,
+            cancelled: raw.cancelled,
             inputs: raw.inputs,
             env: raw.env,
             state: raw.state,

@@ -150,8 +150,12 @@ jobs:
     );
     let a_post = graph.nodes.iter().find(|n| n.name == "j/a/post").unwrap();
     assert!(
-        !a_post.run_on_cancel,
-        "`post-if: success()` does not run after a cancel"
+        a_post.run_on_cancel && a_post.precondition.is_none(),
+        "a post node fires after a cancel and its gate decides; `post-if: success()` then reads false"
+    );
+    assert!(
+        a_post.step.config.get("gate").is_some(),
+        "the post-if is a config gate, not a precondition"
     );
 }
 

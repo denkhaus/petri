@@ -137,7 +137,7 @@ pub(crate) async fn resolve_hashfiles(
 }
 
 /// Every distinct `hashFiles(patterns…)` in one step, in one workspace walk.
-async fn compute(
+pub(crate) async fn compute(
     env: &dyn ExecEnv,
     github_workspace: &str,
     patterns: &[Vec<String>],
