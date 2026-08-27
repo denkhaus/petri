@@ -12,6 +12,7 @@ name = "frontend_gha"
 [dependencies]
 ir = { workspace = true }
 frontend = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }

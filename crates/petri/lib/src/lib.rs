@@ -48,10 +48,54 @@ pub mod steps {
     pub use runtime::steps::*;
 }
 
+/// The GitHub Actions component's run-time half: its step kinds and action source.
+pub mod github {
+    pub use github_actions::*;
+}
+
 /// The shipped configuration: core's standard runtime plus every in-tree component.
+///
+/// GitHub Actions comes with an action source that fetches from GitHub into
+/// [`github::default_cache_dir`], its two step kinds, and `GITHUB_TOKEN` as a secret
+/// when this machine has one (`$GITHUB_TOKEN`, else `gh auth token`).
 ///
 /// A consumer that wants a different set builds one itself — `Runtime::standard()`
 /// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
 pub fn runtime() -> Runtime {
-    Runtime::standard().frontend(frontend_gha::GitHubActions)
+    let actions: std::sync::Arc<dyn github::ActionSource> =
+        std::sync::Arc::new(github::GitActionSource::new(github::default_cache_dir()));
+    Runtime::standard()
+        .frontend(frontend_gha::GitHubActions::with_actions(
+            std::sync::Arc::clone(&actions),
+        ))
+        .step(github::RunStep)
+        .step(github::ActionStep)
+        .capability(github::ActionSourceCap(actions))
+        .secrets(github_secrets())
+}
+
+/// The run's secrets: `GITHUB_TOKEN` from the environment, else from `gh auth
+/// token` when `gh` is installed and logged in, else none. `github.token` in a
+/// workflow resolves to it at spawn time and never enters the graph or the log.
+fn github_secrets() -> executor::MapSecrets {
+    let token = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|t| !t.is_empty())
+        });
+    match token {
+        Some(token) => executor::MapSecrets::from_pairs(&[(
+            frontend_gha::exprs::GITHUB_TOKEN_SECRET,
+            token.as_str(),
+        )]),
+        None => executor::MapSecrets::empty(),
+    }
 }

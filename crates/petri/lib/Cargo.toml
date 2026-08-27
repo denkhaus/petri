@@ -8,6 +8,7 @@ description = "A token-flow workflow engine: core, plus every component it ships
 [dependencies]
 runtime = { workspace = true }
 frontend-gha = { workspace = true }
+github-actions = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

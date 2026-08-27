@@ -91,6 +91,8 @@ async fn run(graph: Graph, dir: &Path) -> RunReport {
     options.grace = Duration::from_secs(2);
     options.retention = Retention::Never;
     let rt = Runtime::standard()
+        .step(github_actions::RunStep)
+        .step(github_actions::ActionStep)
         .secrets(MapSecrets::from_pairs(&[(
             "GITHUB_TOKEN",
             "ghs_dummy_token_for_the_stub_0000",

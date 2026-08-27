@@ -460,9 +460,21 @@ impl Roots for GhaRoots<'_> {
                 }
                 None
             }
+            // A secret inside an expression lowers to its sentinel: the expression
+            // evaluates in the engine over the sentinel, never the value, and the
+            // step splices the value in at spawn. The caller decides whether this
+            // position may carry one at all.
             "secrets" => {
                 self.saw_secret = true;
-                Some(table.lit(Value::Null))
+                Some(match path {
+                    [name] => table.lit(secret_sentinel(name)),
+                    _ => table.lit(Value::Null),
+                })
+            }
+            // `github.token` is a secret, not a parameter: the same rule as `secrets.*`.
+            "github" if matches!(path, [token] if token.eq_ignore_ascii_case("token")) => {
+                self.saw_secret = true;
+                Some(table.lit(secret_sentinel(GITHUB_TOKEN_SECRET)))
             }
             _ => None,
         }
@@ -511,7 +523,14 @@ pub enum LoweredScalar {
 }
 
 /// Lower one scalar from the workflow: literal, templated string, or a whole
-/// expression. `env_shaped` says whether a bare `${{ secrets.X }}` is allowed here.
+/// expression.
+///
+/// `env_shaped` says whether secrets may appear here at all: in a step's config —
+/// `run:`, `env:`, `with:` — they may, because the step resolves them at spawn. A
+/// bare `${{ secrets.X }}` becomes a `$secret` reference; a secret inside a larger
+/// expression or string becomes its sentinel in the lowered text. Anywhere else —
+/// an `if:`, a job output, a matrix — a secret is rejected: the engine would be
+/// evaluating over the sentinel and calling it the value.
 pub fn lower_scalar(
     text: &str,
     span: Span,
@@ -536,19 +555,21 @@ pub fn lower_scalar(
     if let [Segment::Expr { source, .. }] = segments.as_slice()
         && let Ok(ast) = parse(source)
         && let Some((root, path)) = ast.dotted_path()
-        && root.eq_ignore_ascii_case("secrets")
-        && path.len() == 1
+        && let Some(name) = secret_name(root, &path)
     {
         if env_shaped {
-            return Some(LoweredScalar::Secret(path[0].to_string()));
+            return Some(LoweredScalar::Secret(name));
         }
         diags.unsupported(
-                        "secrets.expression",
-                        span,
-                        format!("`secrets.{}` used as an expression rather than as the whole value of an `env:` or `with:` entry", path[0]),
-                        "secrets are absent from the expression environment by construction, so they never reach the \
-                         event log; pass the secret through an environment variable and test it in the step",
-                    );
+            "secrets.expression",
+            span,
+            format!(
+                "`{}` used as an expression rather than as the whole value of an `env:` or `with:` entry",
+                source.trim()
+            ),
+            "secrets are absent from the expression environment by construction, so they never reach the \
+             event log; pass the secret through an environment variable and test it in the step",
+        );
         return None;
     }
 
@@ -595,13 +616,14 @@ pub fn lower_scalar(
                         return None;
                     }
                 };
-                if roots.saw_secret {
+                if roots.saw_secret && !env_shaped {
                     roots.diags.unsupported(
                         "secrets.expression",
                         span,
-                        "a `secrets.*` reference inside a larger expression or string",
+                        "a `secrets.*` or `github.token` reference in a position the engine evaluates",
                         "secrets are absent from the expression environment by construction, so they never reach the \
-                         event log; a secret may only be the entire value of an `env:` or `with:` entry",
+                         event log; a secret may appear in a step's `run:`, `env:` or `with:`, where the step \
+                         resolves it, but not in an `if:`, an output or a matrix",
                     );
                     return None;
                 }
@@ -621,11 +643,98 @@ pub fn lower_scalar(
     Some(LoweredScalar::Expr(acc))
 }
 
+/// The secret a whole-value reference names: `secrets.X` is `X`, and `github.token`
+/// is [`GITHUB_TOKEN_SECRET`] — the token is a secret the run's provider holds, never
+/// a run parameter, so it cannot reach the graph or the log.
+fn secret_name(root: &str, path: &[&str]) -> Option<String> {
+    match (root.to_ascii_lowercase().as_str(), path) {
+        ("secrets", [name]) => Some(name.to_string()),
+        ("github", [token]) if token.eq_ignore_ascii_case("token") => {
+            Some(GITHUB_TOKEN_SECRET.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The secret name `github.token` resolves to.
+pub const GITHUB_TOKEN_SECRET: &str = "GITHUB_TOKEN";
+
+const SENTINEL_OPEN: &str = "\u{E000}petri-secret:";
+const SENTINEL_CLOSE: &str = "\u{E001}";
+
+/// The stand-in for secret `name` inside a lowered string: what the graph, the
+/// resolved config and the event log carry in its place. The step kinds that run
+/// GitHub steps replace it with the value at spawn ([`replace_secret_sentinels`]).
+/// Private-use characters bracket it, so no workflow text collides.
+pub fn secret_sentinel(name: &str) -> String {
+    format!("{SENTINEL_OPEN}{name}{SENTINEL_CLOSE}")
+}
+
+/// Whether `text` carries a secret sentinel.
+pub fn has_secret_sentinel(text: &str) -> bool {
+    text.contains(SENTINEL_OPEN)
+}
+
+/// Replace every sentinel in `text` with what `resolve` returns for its name.
+pub fn replace_secret_sentinels<E>(
+    text: &str,
+    mut resolve: impl FnMut(&str) -> Result<String, E>,
+) -> Result<String, E> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(SENTINEL_OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + SENTINEL_OPEN.len()..];
+        match after.find(SENTINEL_CLOSE) {
+            Some(end) => {
+                out.push_str(&resolve(&after[..end])?);
+                rest = &after[end + SENTINEL_CLOSE.len()..];
+            }
+            None => {
+                // An opener with no closer is not ours; keep it as text.
+                out.push_str(&rest[start..start + SENTINEL_OPEN.len()]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// A config value from a lowered scalar: literal, `{"$expr": id}`, or `{"$secret": name}`.
 pub fn config_value(lowered: LoweredScalar) -> Value {
     match lowered {
         LoweredScalar::Literal(v) => v,
         LoweredScalar::Expr(id) => json!({ EXPR_PLACEHOLDER_KEY: id.raw() }),
         LoweredScalar::Secret(name) => json!({ SECRET_REF_KEY: name }),
+    }
+}
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+
+    #[test]
+    fn sentinels_round_trip_through_replacement() {
+        let text = format!(
+            "token {} and {}!",
+            secret_sentinel("GITHUB_TOKEN"),
+            secret_sentinel("OTHER")
+        );
+        assert!(has_secret_sentinel(&text));
+        let out = replace_secret_sentinels(&text, |name| -> Result<String, ()> {
+            Ok(format!("<{name}>"))
+        })
+        .unwrap();
+        assert_eq!(out, "token <GITHUB_TOKEN> and <OTHER>!");
+        assert!(!has_secret_sentinel("plain"));
+        assert_eq!(
+            replace_secret_sentinels("plain", |_| -> Result<String, ()> { unreachable!() })
+                .unwrap(),
+            "plain"
+        );
+        let failed: Result<String, &str> =
+            replace_secret_sentinels(&secret_sentinel("X"), |_| Err("missing"));
+        assert_eq!(failed, Err("missing"));
     }
 }

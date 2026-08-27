@@ -58,11 +58,17 @@ fn run_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
+/// The standard runtime plus the GitHub step kinds the frontend lowers to — what
+/// the distribution registers, assembled here because a component's tests may not
+/// depend on the distribution.
 fn runtime(dir: &std::path::Path) -> Runtime {
     let mut options = RunOptions::new(dir);
     options.grace = Duration::from_secs(1);
     options.retention = Retention::Never;
-    Runtime::standard().options(options)
+    Runtime::standard()
+        .options(options)
+        .step(github_actions::RunStep)
+        .step(github_actions::ActionStep)
 }
 
 /// Run on the standard runtime, which verifies replay itself.

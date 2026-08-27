@@ -91,7 +91,8 @@ jobs:
             "{bad}: {diags:?}"
         );
     }
-    // Inside a larger string, even in env position.
+    // Inside a larger string in step config it lowers: the step resolves the
+    // secret's sentinel at spawn, and the log never sees the value.
     let diags = diagnostics(
         r#"
 on: push
@@ -105,7 +106,7 @@ jobs:
 "#,
     );
     assert!(
-        diags
+        !diags
             .iter()
             .any(|d| d.code == "unsupported.secrets.expression"),
         "{diags:?}"

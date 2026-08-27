@@ -46,6 +46,7 @@
 //! - **`runs-on: ${{ matrix.os }}`.** Each matrix leg would need its own environment,
 //!   and the IR has one scope per job. Rejected as `unsupported.runs_on.expression`.
 
+pub mod action;
 pub mod composite;
 pub mod expr_lower;
 pub mod exprs;
@@ -53,13 +54,28 @@ pub mod lower;
 pub mod model;
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 use serde_json::Value;
 use smol_str::SmolStr;
 
-/// Parse and lower a workflow file.
+pub use action::{ACTION_KIND, ActionSource, RUN_KIND, STATE_OUTPUT_KEY};
+
+/// Parse and lower a workflow file, with no source for `uses: owner/repo@ref`
+/// actions: they are rejected as `unsupported.action.remote`.
 pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
+    load_with(file, text, files, None)
+}
+
+/// Parse and lower a workflow file. `actions` resolves `uses: owner/repo@ref`
+/// references while lowering, so the graph pins the commit each one runs.
+pub fn load_with(
+    file: &str,
+    text: &str,
+    files: &dyn FileSource,
+    actions: Option<&dyn ActionSource>,
+) -> Lowered {
     let mut diags = Diagnostics::new();
     let Some(doc) = frontend::yaml::Document::parse(file, text, &mut diags) else {
         return Lowered::rejected(diags);
@@ -67,11 +83,31 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
     let Some(workflow) = model::read(&doc, &mut diags) else {
         return Lowered::rejected(diags);
     };
-    lower::lower(&workflow, files, diags)
+    lower::lower(&workflow, files, actions, diags)
 }
 
 /// GitHub Actions, as a [`Frontend`]: it claims anything under `.github/workflows/`.
-pub struct GitHubActions;
+///
+/// Without an [`ActionSource`] it lowers `run:` steps and local composites and
+/// rejects actions from other repositories; with one, those resolve at load time.
+#[derive(Default)]
+pub struct GitHubActions {
+    actions: Option<Arc<dyn ActionSource>>,
+}
+
+impl GitHubActions {
+    /// The format with no way to reach other repositories' actions.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The format with `uses: owner/repo@ref` resolved through `actions`.
+    pub fn with_actions(actions: Arc<dyn ActionSource>) -> Self {
+        Self {
+            actions: Some(actions),
+        }
+    }
+}
 
 impl Frontend for GitHubActions {
     fn name(&self) -> &str {
@@ -90,7 +126,7 @@ impl Frontend for GitHubActions {
     }
 
     fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered {
-        load(file, text, files)
+        load_with(file, text, files, self.actions.as_deref())
     }
 
     /// The `github`, `runner` and `vars` contexts a runner would supply. Fixed
@@ -113,13 +149,16 @@ impl Frontend for GitHubActions {
                     "sha": "0000000000000000000000000000000000000000",
                     "run_id": "1",
                     "run_number": "1",
+                    "server_url": "https://github.com",
+                    "api_url": "https://api.github.com",
+                    "graphql_url": "https://api.github.com/graphql",
                 }),
             ),
             (
                 SmolStr::new("runner"),
                 serde_json::json!({
-                    "os": std::env::consts::OS,
-                    "arch": std::env::consts::ARCH,
+                    "os": runner_os(std::env::consts::OS),
+                    "arch": runner_arch(std::env::consts::ARCH),
                     "name": "local",
                 }),
             ),
@@ -131,19 +170,45 @@ impl Frontend for GitHubActions {
     /// nearest ancestor holding a `.github` directory — else the file's own
     /// directory, for a file that is not in a checkout at all.
     fn repo_root(&self, file: &Path) -> PathBuf {
-        let mut dir = file
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let start = dir.clone();
-        loop {
-            if dir.join(".github").is_dir() {
-                return dir;
-            }
-            match dir.parent() {
-                Some(parent) => dir = parent.to_path_buf(),
-                None => return start,
-            }
+        repo_root(file)
+    }
+}
+
+/// `runner.os` as GitHub spells it: `Linux`, `macOS`, `Windows`. Workflows compare
+/// against these literally, and actions read `RUNNER_OS`.
+pub fn runner_os(os: &str) -> &'static str {
+    match os {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        "windows" => "Windows",
+        _ => "Linux",
+    }
+}
+
+/// `runner.arch` as GitHub spells it: `X64`, `ARM64`, `X86`, `ARM`.
+pub fn runner_arch(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "X64",
+        "aarch64" => "ARM64",
+        "x86" => "X86",
+        "arm" => "ARM",
+        _ => "X64",
+    }
+}
+
+fn repo_root(file: &Path) -> PathBuf {
+    let mut dir = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let start = dir.clone();
+    loop {
+        if dir.join(".github").is_dir() {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return start,
         }
     }
 }

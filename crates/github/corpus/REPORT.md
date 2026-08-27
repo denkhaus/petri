@@ -12,7 +12,7 @@
 
 ## Remote actions, by frequency
 
-What package 04's shim layer should build first. `uses:` references across all workflows; a workflow using an action three times counts three.
+Which actions the runner meets most. `uses:` references across all workflows; a workflow using an action three times counts three.
 
 | Action | Uses |
 |---|---|
@@ -72,8 +72,6 @@ What package 04's shim layer should build first. `uses:` references across all w
 | `workflow_dispatch.inputs` | 46 |
 | `runs_on.unknown` | 23 |
 | `runs_on.windows` | 14 |
-| `secrets.expression` | 12 |
-| `action.javascript` | 8 |
 | `shell.bash` | 8 |
 | `shell.pwsh` | 7 |
 | `services` | 5 |
@@ -106,7 +104,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | actions/checkout | `codeql-analysis.yml` | unsupported | — | `action.remote` |
 | actions/checkout | `licensed.yml` | unsupported | — | `action.remote` |
 | actions/checkout | `publish-immutable-actions.yml` | unsupported | — | `action.remote` |
-| actions/checkout | `test.yml` | unsupported | — | `action.docker`, `action.javascript`, `action.local_missing`, `action.remote`, `container.options`, `runs_on.expression`, `services`, `shell.cmd` |
+| actions/checkout | `test.yml` | unsupported | — | `action.docker`, `action.local_missing`, `action.remote`, `container.options`, `runs_on.expression`, `services`, `shell.cmd` |
 | actions/checkout | `update-main-version.yml` | unsupported | — | `action.remote`, `workflow_dispatch.inputs` |
 | actions/checkout | `update-test-ubuntu-git.yml` | unsupported | — | `action.remote`, `inputs`, `workflow_dispatch.inputs` |
 | astral-sh/ruff | `build-binaries.yml` | unsupported | — | `action.remote`, `concurrency`, `runs_on.expression`, `runs_on.unknown`, `workflow_call` |
@@ -117,12 +115,12 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/ruff | `memory_report.yaml` | unsupported | — | `action.remote`, `concurrency`, `runs_on.expression` |
 | astral-sh/ruff | `notify-dependents.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
 | astral-sh/ruff | `publish-crates.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
-| astral-sh/ruff | `publish-docs.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `secrets.expression`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/ruff | `publish-mirror.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `secrets.expression`, `workflow_call` |
-| astral-sh/ruff | `publish-playground.yml` | unsupported | — | `action.remote`, `environment`, `secrets.expression`, `workflow_call` |
+| astral-sh/ruff | `publish-docs.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/ruff | `publish-mirror.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call` |
+| astral-sh/ruff | `publish-playground.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
 | astral-sh/ruff | `publish-pypi.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
-| astral-sh/ruff | `publish-ty-playground.yml` | unsupported | — | `action.remote`, `concurrency`, `environment`, `secrets.expression` |
-| astral-sh/ruff | `publish-versions.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `secrets.expression`, `workflow_call` |
+| astral-sh/ruff | `publish-ty-playground.yml` | unsupported | — | `action.remote`, `concurrency`, `environment` |
+| astral-sh/ruff | `publish-versions.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call` |
 | astral-sh/ruff | `publish-wasm.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call` |
 | astral-sh/ruff | `release.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `runs_on.unknown`, `workflow_call`, `workflow_dispatch.inputs` |
 | astral-sh/ruff | `sync_typeshed.yaml` | unsupported | — | `action.remote`, `runs_on.expression`, `runs_on.windows` |
@@ -149,9 +147,9 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `promote-pull-request.yml` | unsupported | — | `action.remote`, `concurrency`, `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
 | astral-sh/uv | `publish-crates.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
 | astral-sh/uv | `publish-docs.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `publish-mirror.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `secrets.expression`, `workflow_call` |
+| astral-sh/uv | `publish-mirror.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call` |
 | astral-sh/uv | `publish-pypi.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
-| astral-sh/uv | `publish-versions.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `secrets.expression`, `workflow_call` |
+| astral-sh/uv | `publish-versions.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call` |
 | astral-sh/uv | `pull-request-conflicts.yml` | unsupported | — | `action.remote`, `concurrency`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
 | astral-sh/uv | `pull-request-labels.yml` | unsupported | — | `action.remote`, `concurrency`, `environment`, `inputs`, `workflow_dispatch.inputs` |
 | astral-sh/uv | `pull-request-security-review.yml` | unsupported | — | `action.remote`, `environment`, `workflow_call` |
@@ -163,7 +161,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `sync-uv-dev.yml` | unsupported | — | `action.remote`, `concurrency`, `environment` |
 | astral-sh/uv | `sync-uv-security.yml` | unsupported | — | `action.remote`, `concurrency`, `environment` |
 | astral-sh/uv | `test-ecosystem.yml` | unsupported | — | `action.remote`, `workflow_call` |
-| astral-sh/uv | `test-integration.yml` | unsupported | — | `action.remote`, `environment`, `runs_on.expression`, `runs_on.unknown`, `runs_on.windows`, `secrets.expression`, `shell.bash`, `shell.nu`, `shell.pwsh`, `shell.python`, `shell.wsl-bash`, `workflow_call` |
+| astral-sh/uv | `test-integration.yml` | unsupported | — | `action.remote`, `environment`, `runs_on.expression`, `runs_on.unknown`, `runs_on.windows`, `shell.bash`, `shell.nu`, `shell.pwsh`, `shell.python`, `shell.wsl-bash`, `workflow_call` |
 | astral-sh/uv | `test-smoke.yml` | unsupported | — | `action.remote`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test-system.yml` | unsupported | — | `action.remote`, `container.expression`, `container.options`, `runs_on.expression`, `runs_on.windows`, `shell.bash`, `shell.pwsh`, `workflow_call` |
 | astral-sh/uv | `test-windows-trampolines.yml` | unsupported | — | `action.remote`, `inputs`, `runs_on.expression`, `runs_on.windows`, `workflow_call` |
@@ -174,17 +172,17 @@ None. Every workflow either lowered or was rejected with a specific code.
 | cli/cli | `bump-go.yml` | unsupported | — | `action.remote` |
 | cli/cli | `codeql.yml` | unsupported | — | `action.remote` |
 | cli/cli | `copilot-setup-steps.yml` | unsupported | — | `action.remote` |
-| cli/cli | `dependabot-triage.lock.yml` | unsupported | — | `action.remote`, `concurrency`, `secrets.expression`, `workflow_dispatch.inputs` |
+| cli/cli | `dependabot-triage.lock.yml` | unsupported | — | `action.remote`, `concurrency`, `workflow_dispatch.inputs` |
 | cli/cli | `deployment.yml` | unsupported | — | `action.remote`, `concurrency`, `environment`, `inputs`, `runs_on.windows`, `shell.pwsh`, `workflow_dispatch.inputs` |
 | cli/cli | `go.yml` | unsupported | — | `action.remote`, `runs_on.expression` |
 | cli/cli | `govulncheck.yml` | unsupported | — | `action.remote` |
-| cli/cli | `issue-triage.lock.yml` | unsupported | — | `action.remote`, `concurrency`, `secrets.expression`, `workflow_dispatch.inputs` |
+| cli/cli | `issue-triage.lock.yml` | unsupported | — | `action.remote`, `concurrency`, `workflow_dispatch.inputs` |
 | cli/cli | `lint.yml` | unsupported | — | `action.remote` |
 | cli/cli | `triage-issues.yml` | unsupported | — | `workflow_call` |
 | cli/cli | `triage-pull-requests.yml` | unsupported | — | `workflow_call` |
 | cli/cli | `triage-scheduled-tasks.yml` | unsupported | — | `workflow_call` |
 | denoland/deno | `cargo_publish.generated.yml` | unsupported | — | `action.remote`, `concurrency`, `runs_on.unknown` |
-| denoland/deno | `ci.generated.yml` | unsupported | — | `action.javascript`, `action.remote`, `concurrency`, `environment`, `runs_on.expression`, `runs_on.windows`, `shell.pwsh` |
+| denoland/deno | `ci.generated.yml` | unsupported | — | `action.remote`, `concurrency`, `environment`, `runs_on.expression`, `runs_on.windows`, `shell.pwsh` |
 | denoland/deno | `create_prerelease_tag.generated.yml` | unsupported | — | `action.remote`, `concurrency` |
 | denoland/deno | `ecosystem_compat_test.generated.yml` | unsupported | — | `action.remote`, `runs_on.expression` |
 | denoland/deno | `node_compat_test.generated.yml` | unsupported | — | `action.remote`, `runs_on.expression` |
@@ -281,7 +279,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `test-linux-quic.yml` | unsupported | — | `action.local_missing`, `action.remote`, `concurrency` |
 | nodejs/node | `test-linux.yml` | unsupported | — | `action.local_missing`, `action.remote`, `concurrency`, `runs_on.expression` |
 | nodejs/node | `test-macos.yml` | unsupported | — | `action.remote`, `concurrency` |
-| nodejs/node | `test-shared.yml` | unsupported | — | `action.remote`, `concurrency`, `secrets.expression`, `workflow_call` |
+| nodejs/node | `test-shared.yml` | unsupported | — | `action.remote`, `concurrency`, `workflow_call` |
 | nodejs/node | `timezone-update.yml` | unsupported | — | `action.remote` |
 | nodejs/node | `tools.yml` | unsupported | — | `action.remote`, `inputs`, `workflow_dispatch.inputs` |
 | nodejs/node | `update-openssl.yml` | unsupported | — | `action.remote` |
@@ -381,17 +379,17 @@ None. Every workflow either lowered or was rejected with a specific code.
 | vercel/next.js | `automated_code_review.yml` | unsupported | — | `action.remote`, `concurrency` |
 | vercel/next.js | `build_and_deploy.yml` | unsupported | — | `action.remote`, `concurrency`, `environment`, `runs_on.expression`, `runs_on.unknown`, `shell.bash` |
 | vercel/next.js | `build_and_test.yml` | unsupported | — | `action.remote`, `concurrency`, `workflow_call` |
-| vercel/next.js | `build_reusable.yml` | unsupported | — | `action.javascript`, `action.remote`, `inputs`, `runs_on.expression`, `shell.bash`, `step.background`, `timeout.expression`, `workflow_call` |
+| vercel/next.js | `build_reusable.yml` | unsupported | — | `action.remote`, `inputs`, `runs_on.expression`, `shell.bash`, `step.background`, `timeout.expression`, `workflow_call` |
 | vercel/next.js | `code_freeze.yml` | unsupported | — | `action.remote`, `environment`, `workflow_dispatch.inputs` |
 | vercel/next.js | `create_release_branch.yml` | unsupported | — | `action.remote`, `workflow_dispatch.inputs` |
-| vercel/next.js | `integration_tests_reusable.yml` | unsupported | — | `action.javascript`, `action.remote`, `inputs`, `runs_on.unknown`, `workflow_call` |
+| vercel/next.js | `integration_tests_reusable.yml` | unsupported | — | `action.remote`, `inputs`, `runs_on.unknown`, `workflow_call` |
 | vercel/next.js | `issue_lock.yml` | unsupported | — | `action.remote`, `concurrency` |
-| vercel/next.js | `issue_reopen.yml` | unsupported | — | `action.javascript`, `action.remote`, `concurrency` |
+| vercel/next.js | `issue_reopen.yml` | unsupported | — | `action.remote`, `concurrency` |
 | vercel/next.js | `issue_stale.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `issue_wrong_template.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `popular.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `pr_ci_comment.yml` | unsupported | — | `action.remote` |
-| vercel/next.js | `pr_stack_optimizer.yml` | unsupported | — | `action.remote`, `secrets.expression`, `workflow_call` |
+| vercel/next.js | `pr_stack_optimizer.yml` | unsupported | — | `action.remote`, `workflow_call` |
 | vercel/next.js | `pull_request_auto_label.yml` | unsupported | — | `action.remote`, `concurrency` |
 | vercel/next.js | `pull_request_stats.yml` | unsupported | — | `action.docker`, `action.remote`, `concurrency`, `runs_on.unknown`, `workflow_call` |
 | vercel/next.js | `release-next-rspack.yml` | unsupported | — | `action.remote`, `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
@@ -401,18 +399,18 @@ None. Every workflow either lowered or was rejected with a specific code.
 | vercel/next.js | `rspack-nextjs-dev-integration-tests.yml` | unsupported | — | `workflow_call` |
 | vercel/next.js | `rspack-update-tests-manifest.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `sync_backport_canary_release.yml` | unsupported | — | `action.remote`, `concurrency`, `inputs`, `workflow_dispatch.inputs` |
-| vercel/next.js | `test-turbopack-rust-bench-test.yml` | unsupported | — | `action.javascript`, `action.remote`, `inputs`, `runs_on.expression`, `workflow_call` |
+| vercel/next.js | `test-turbopack-rust-bench-test.yml` | unsupported | — | `action.remote`, `inputs`, `runs_on.expression`, `workflow_call` |
 | vercel/next.js | `test_e2e_deploy_release.yml` | unsupported | — | `action.remote`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
 | vercel/next.js | `test_e2e_project_reset_cron.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `test_examples.yml` | unsupported | — | `action.remote`, `inputs`, `workflow_dispatch.inputs` |
 | vercel/next.js | `triage.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `trigger_release.yml` | unsupported | — | `action.remote`, `inputs`, `workflow_dispatch.inputs` |
-| vercel/next.js | `turbopack-benchmark.yml` | unsupported | — | `action.javascript`, `action.remote`, `concurrency`, `runs_on.unknown` |
+| vercel/next.js | `turbopack-benchmark.yml` | unsupported | — | `action.remote`, `concurrency`, `runs_on.unknown` |
 | vercel/next.js | `turbopack-nextjs-build-integration-tests.yml` | unsupported | — | `workflow_call` |
 | vercel/next.js | `turbopack-nextjs-dev-integration-tests.yml` | unsupported | — | `workflow_call` |
 | vercel/next.js | `turbopack-update-tests-manifest.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `update_fonts_data.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `update_react.yml` | unsupported | — | `action.remote`, `inputs`, `workflow_dispatch.inputs` |
 | vercel/next.js | `update_react_poller.yml` | unsupported | — | `action.remote`, `concurrency` |
-| vercel/next.js | `upload-tests-manifest.yml` | unsupported | — | `action.javascript`, `action.remote` |
+| vercel/next.js | `upload-tests-manifest.yml` | unsupported | — | `action.remote` |
 | vercel/next.js | `upload_preview_tarballs.yml` | unsupported | — | `action.remote` |

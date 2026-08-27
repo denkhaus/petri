@@ -1,23 +1,26 @@
 //! Workflow → HIR, per spec §12.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use frontend::FileSource;
 use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
 use frontend::expr::parse;
-use frontend::yaml::Node;
+use frontend::yaml::{Document, Node};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     BinOp, Budget, ExpandTarget, ExprId, ExprOrValue, GraphBuilder, NodeId, RuntimeSpec, Scope,
-    ScopeId, StepRef, ValidationError, Value,
+    ScopeId, StepRef, UnOp, ValidationError, Value,
 };
 use serde_json::{Map, json};
 use smol_str::SmolStr;
 
-use crate::composite::{self, Uses};
-use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar};
+use crate::action::{
+    ACTION_KIND, ActionRef, ActionSource, PinnedAction, RUN_KIND, STATE_OUTPUT_KEY,
+};
+use crate::composite::{self, NodeAction, Runs, Uses};
+use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
 use crate::model::{Defaults, Job, KNOWN_RUNS_ON, Step, Workflow};
 
 /// GitHub's default job timeout.
@@ -37,16 +40,74 @@ pub struct Lowering<'w, 'a> {
     diags: Diagnostics,
     wf: &'w Workflow<'a>,
     files: &'w dyn FileSource,
+    /// Where `uses: owner/repo@ref` actions come from. `None` rejects them.
+    actions: Option<&'w dyn ActionSource>,
+    /// Remote actions resolved so far, by reference as written: the pin and the
+    /// manifest text, or why not. A reference used by several steps resolves once.
+    resolved: HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
     jobs: HashMap<String, JobNodes>,
     spans: HashMap<NodeId, Span>,
 }
 
-pub fn lower(wf: &Workflow<'_>, files: &dyn FileSource, diags: Diagnostics) -> Lowered {
+/// Why a remote action did not resolve.
+#[derive(Clone)]
+enum ResolveFailure {
+    /// No [`ActionSource`] was given: the format is running without one.
+    NoSource,
+    Failed(String),
+}
+
+/// A `uses:` step that is a JavaScript action, resolved once for the nodes it
+/// contributes: `pre` and `post` are placed away from the main one.
+struct ActionPlan {
+    location: ActionLocation,
+    node: NodeAction,
+    inputs: Vec<PlanInput>,
+}
+
+enum ActionLocation {
+    Pinned(PinnedAction),
+    /// `uses: ./path`: the action lives in the checked-out repository.
+    Local(String),
+}
+
+struct PlanInput {
+    name: String,
+    /// The default's text, expressions and all; lowered where the step is.
+    default: Option<String>,
+    required: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Pre,
+    Main,
+    Post,
+}
+
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Phase::Pre => "pre",
+            Phase::Main => "main",
+            Phase::Post => "post",
+        }
+    }
+}
+
+pub fn lower(
+    wf: &Workflow<'_>,
+    files: &dyn FileSource,
+    actions: Option<&dyn ActionSource>,
+    diags: Diagnostics,
+) -> Lowered {
     let mut lw = Lowering {
         b: GraphBuilder::bare(),
         diags,
         wf,
         files,
+        actions,
+        resolved: HashMap::new(),
         jobs: HashMap::new(),
         spans: HashMap::new(),
     };
@@ -176,7 +237,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
             "run_attempt",
             "server_url",
             "api_url",
-            "workspace",
             "base_ref",
             "head_ref",
         ] {
@@ -422,8 +482,27 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
         site.step_names = step_names;
 
+        // A JavaScript action with `pre` or `post` contributes nodes away from its
+        // own position: GitHub runs every `pre` before the first step and every
+        // `post` after the last, in reverse order. Resolved once, quietly; the main
+        // pass reports whatever is wrong with the reference.
+        let plans: Vec<Option<ActionPlan>> = job
+            .steps
+            .iter()
+            .map(|step| self.action_plan(step))
+            .collect();
+
         let mut previous = start;
         let mut chain: Vec<NodeId> = Vec::new();
+        for (step, plan) in job.steps.iter().zip(&plans) {
+            if let Some(plan) = plan
+                && plan.node.pre.is_some()
+                && let Some(id) =
+                    self.lifecycle_node(job, step, plan, Phase::Pre, scope, &site, &job_secret_env)
+            {
+                self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
+            }
+        }
         for step in &job.steps {
             let inherited = Defaults {
                 shell: step.shell.or(job.defaults.shell).or(self.wf.defaults.shell),
@@ -443,17 +522,16 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 0,
             );
             for id in nodes {
-                self.b.link(previous, id);
-                chain.push(id);
-                previous = id;
-                let name = self
-                    .b
-                    .graph()
-                    .node(id)
-                    .map(|n| n.name.to_string())
-                    .unwrap_or_default();
-                names_so_far.push(name);
-                site.earlier_steps = names_so_far.clone();
+                self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
+            }
+        }
+        for (step, plan) in job.steps.iter().zip(&plans).rev() {
+            if let Some(plan) = plan
+                && plan.node.post.is_some()
+                && let Some(id) =
+                    self.lifecycle_node(job, step, plan, Phase::Post, scope, &site, &job_secret_env)
+            {
+                self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
             }
         }
 
@@ -534,7 +612,30 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
     // ── Steps ──────────────────────────────────────────────────────────────
 
-    /// The node(s) for one step: one process node, or a composite's inlined chain.
+    /// Link `id` after `previous` and make it visible to the steps after it.
+    fn chain_node(
+        &mut self,
+        previous: &mut NodeId,
+        chain: &mut Vec<NodeId>,
+        names: &mut Vec<String>,
+        site: &mut Site,
+        id: NodeId,
+    ) {
+        self.b.link(*previous, id);
+        chain.push(id);
+        *previous = id;
+        let name = self
+            .b
+            .graph()
+            .node(id)
+            .map(|n| n.name.to_string())
+            .unwrap_or_default();
+        names.push(name);
+        site.earlier_steps = names.clone();
+    }
+
+    /// The node(s) for one step: one `github/run` node, one `github/action` node,
+    /// or a composite's inlined chain.
     #[allow(clippy::too_many_arguments)]
     fn step_nodes(
         &mut self,
@@ -553,7 +654,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         };
 
         if let Some((reference, span)) = &step.uses {
-            return self.composite_step(
+            return self.uses_step(
                 job,
                 step,
                 reference,
@@ -568,35 +669,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         let mut step_site = site.clone();
         step_site.earlier_steps = earlier.to_vec();
-        // Step env is visible to the step's own expressions.
-        let mut env_config = Map::new();
-        for (key, name) in job_secret_env {
-            env_config.insert(
-                key.clone(),
-                json!({ ir::placeholder::SECRET_REF_KEY: name }),
-            );
-        }
-        for (key, node) in &step.env {
-            match self.env_value(node, &step_site, true) {
-                Some(EnvValue::Plain(v)) => {
-                    step_site.step_env.insert(key.clone(), v.clone());
-                    env_config.insert(
-                        key.clone(),
-                        match v {
-                            ExprOrValue::Value(v) => v,
-                            ExprOrValue::Expr(id) => json!({ EXPR_PLACEHOLDER_KEY: id.raw() }),
-                        },
-                    );
-                }
-                Some(EnvValue::Secret(name)) => {
-                    env_config.insert(
-                        key.clone(),
-                        json!({ ir::placeholder::SECRET_REF_KEY: name }),
-                    );
-                }
-                None => {}
-            }
-        }
+        let env_config = self.step_env_config(step, &mut step_site, job_secret_env);
 
         let mut config = Map::new();
         let Some(run) = step.run else {
@@ -612,7 +685,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             run.span(),
             &step_site,
             true,
-            false,
+            true,
             self.b.exprs(),
             &mut self.diags,
         ) {
@@ -681,44 +754,421 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if !env_config.is_empty() {
             config.insert("env".into(), Value::Object(env_config));
         }
-        config.insert("output_env_aliases".into(), json!(["GITHUB_OUTPUT"]));
+        config.insert("event".into(), self.event_config());
 
         let id = self.b.add_node(
             &node_name,
             scope,
-            StepRef::new("process", Value::Object(config)),
+            StepRef::new(RUN_KIND, Value::Object(config)),
         );
         self.spans.insert(id, step.span.clone());
+        self.set_step_budget(id, job, step);
+        self.gate_main_node(id, step, &step_site);
+        vec![id]
+    }
 
-        // Timeout: step, else job, else GitHub's default.
+    /// The step's `env:` as config, secrets from the job pushed down first. Step env
+    /// is also made visible to the step's own expressions through `site`.
+    fn step_env_config(
+        &mut self,
+        step: &Step<'_>,
+        step_site: &mut Site,
+        job_secret_env: &[(String, String)],
+    ) -> Map<String, Value> {
+        let mut env_config = Map::new();
+        for (key, name) in job_secret_env {
+            env_config.insert(
+                key.clone(),
+                json!({ ir::placeholder::SECRET_REF_KEY: name }),
+            );
+        }
+        for (key, node) in &step.env {
+            match self.env_value(node, step_site, true) {
+                Some(EnvValue::Plain(v)) => {
+                    step_site.step_env.insert(key.clone(), v.clone());
+                    env_config.insert(
+                        key.clone(),
+                        match v {
+                            ExprOrValue::Value(v) => v,
+                            ExprOrValue::Expr(id) => json!({ EXPR_PLACEHOLDER_KEY: id.raw() }),
+                        },
+                    );
+                }
+                Some(EnvValue::Secret(name)) => {
+                    env_config.insert(
+                        key.clone(),
+                        json!({ ir::placeholder::SECRET_REF_KEY: name }),
+                    );
+                }
+                None => {}
+            }
+        }
+        env_config
+    }
+
+    /// Timeout: step, else job, else GitHub's default.
+    fn set_step_budget(&mut self, id: NodeId, job: &Job<'a>, step: &Step<'_>) {
         let timeout = self
             .minutes(step.timeout_minutes)
             .or_else(|| self.minutes(job.timeout_minutes))
             .unwrap_or(DEFAULT_TIMEOUT);
         self.b.set_budget(id, Budget::new(1, timeout));
+    }
 
-        // Precondition: the job started, and the step's own condition (default
-        // `success()` over earlier steps).
-        let cond = self.condition(step.condition, &step_site, true, step.span.clone());
+    /// A main step's gate: the job started, and the step's own condition (default
+    /// `success()` over earlier steps). A step gated on `always()` or `cancelled()`
+    /// runs after a cancel in GitHub, so it opts in; its precondition then decides
+    /// as usual.
+    fn gate_main_node(&mut self, id: NodeId, step: &Step<'_>, step_site: &Site) {
+        let cond = self.condition(step.condition, step_site, true, step.span.clone());
         let started = step_site.job_started(self.b.exprs());
         let pre = match cond {
             Some(c) => self.b.exprs().binary(BinOp::And, started, c),
             None => started,
         };
         self.b.set_precondition(id, pre);
-
-        // A step gated on `always()` or `cancelled()` runs after a cancel in
-        // GitHub, so it opts in; its precondition then decides as usual.
         if names_cleanup(step.condition) {
             self.b.node_mut(id).run_on_cancel = true;
         }
-        vec![id]
     }
 
-    /// `uses:` — a local composite is inlined; anything else is rejected with the
-    /// action named, so the corpus can count what package 04 should build first.
+    /// `github.event`, for `GITHUB_EVENT_PATH`.
+    fn event_config(&mut self) -> Value {
+        let t = self.b.exprs();
+        let github = t.var("github");
+        let key = t.lit("event");
+        let event = t.call("get_ci", vec![github, key]);
+        json!({ EXPR_PLACEHOLDER_KEY: event.raw() })
+    }
+
+    /// The state an earlier phase of the same action saved, read from its record.
+    fn state_config(&mut self, site: &Site, from: &str) -> Value {
+        let t = self.b.exprs();
+        let record = site.node_record(t, from);
+        let output = t.field(record, "output");
+        let key = t.lit(STATE_OUTPUT_KEY);
+        let state = t.index(output, key);
+        let empty = t.object(vec![]);
+        let state = t.call("default", vec![state, empty]);
+        json!({ EXPR_PLACEHOLDER_KEY: state.raw() })
+    }
+
+    /// `true` when the action's main node has a record other than `skipped`: the
+    /// condition for its `post` to run at all.
+    fn main_ran(&mut self, site: &Site, main: &str) -> ExprId {
+        let t = self.b.exprs();
+        let status = site.node_status(t, main);
+        let skipped = t.lit("skipped");
+        let status = t.call("default", vec![status, skipped]);
+        let is_skipped = t.binary(BinOp::Eq, status, skipped);
+        t.unary(UnOp::Not, is_skipped)
+    }
+
+    // ── `uses:` ────────────────────────────────────────────────────────────
+
+    /// Resolve `owner/repo@ref` to its commit and manifest, once per reference.
+    fn resolve_remote(&mut self, name: &str) -> Result<(PinnedAction, String), ResolveFailure> {
+        if let Some(cached) = self.resolved.get(name) {
+            return cached.clone();
+        }
+        let result = match self.actions {
+            None => Err(ResolveFailure::NoSource),
+            Some(source) => ActionRef::parse(name)
+                .map_err(|e| ResolveFailure::Failed(e.to_string()))
+                .and_then(|reference| {
+                    source
+                        .resolve(&reference)
+                        .map_err(|e| ResolveFailure::Failed(e.to_string()))
+                })
+                .and_then(|pinned| {
+                    source
+                        .manifest(&pinned)
+                        .map(|text| (pinned, text))
+                        .map_err(|e| ResolveFailure::Failed(e.to_string()))
+                }),
+        };
+        self.resolved.insert(name.to_string(), result.clone());
+        result
+    }
+
+    /// The `action.yml` document for a `uses:` reference, or the diagnostic saying
+    /// why there is none.
+    fn action_document(&mut self, reference: &str, span: &Span) -> Option<Document> {
+        match composite::classify(reference) {
+            Uses::Local(path) => composite::read_document(self.files, &path, span, &mut self.diags),
+            Uses::Docker(image) => {
+                self.diags.unsupported(
+                    "action.docker",
+                    span.clone(),
+                    format!("`uses: docker://{image}`"),
+                    "Docker actions run against the daemon, not through the job environment; not yet built",
+                );
+                None
+            }
+            Uses::Remote(name) => match self.resolve_remote(&name) {
+                Ok((pinned, text)) => Document::parse(
+                    &format!("{}/action.yml", pinned.reference),
+                    &text,
+                    &mut self.diags,
+                ),
+                Err(ResolveFailure::NoSource) => {
+                    self.diags.unsupported(
+                        "action.remote",
+                        span.clone(),
+                        name.to_string(),
+                        "no action source is configured, so actions from other repositories cannot be fetched",
+                    );
+                    None
+                }
+                Err(ResolveFailure::Failed(message)) => {
+                    self.diags.error(
+                        "action.unresolved",
+                        span.clone(),
+                        format!("`uses: {name}`: {message}"),
+                    );
+                    None
+                }
+            },
+        }
+    }
+
+    /// The plan for a `uses:` step that is a JavaScript action; `None` for anything
+    /// else, quietly — the main pass reports problems.
+    fn action_plan(&mut self, step: &Step<'_>) -> Option<ActionPlan> {
+        let (reference, span) = step.uses.as_ref()?;
+        let saved = std::mem::replace(&mut self.diags, Diagnostics::new());
+        let plan = self.action_plan_inner(reference, span);
+        self.diags = saved;
+        plan
+    }
+
+    fn action_plan_inner(&mut self, reference: &str, span: &Span) -> Option<ActionPlan> {
+        let location = match composite::classify(reference) {
+            Uses::Local(path) => ActionLocation::Local(path),
+            Uses::Docker(_) => return None,
+            Uses::Remote(name) => ActionLocation::Pinned(self.resolve_remote(&name).ok()?.0),
+        };
+        let doc = self.action_document(reference, span)?;
+        let manifest = composite::read_manifest(&doc, &mut self.diags)?;
+        let Runs::Node(node) = manifest.runs else {
+            return None;
+        };
+        let inputs = manifest
+            .inputs
+            .iter()
+            .map(|input| PlanInput {
+                name: input.name.clone(),
+                default: input.default.and_then(scalar_text_opt),
+                required: input.required,
+            })
+            .collect();
+        Some(ActionPlan {
+            location,
+            node,
+            inputs,
+        })
+    }
+
+    /// A `pre` or `post` node for a JavaScript action. `pre-if` and `post-if`
+    /// default to `always()`; a `post` also needs its main node to have run.
     #[allow(clippy::too_many_arguments)]
-    fn composite_step(
+    fn lifecycle_node(
+        &mut self,
+        job: &Job<'a>,
+        step: &Step<'_>,
+        plan: &ActionPlan,
+        phase: Phase,
+        scope: ScopeId,
+        site: &Site,
+        job_secret_env: &[(String, String)],
+    ) -> Option<NodeId> {
+        let (_, span) = step.uses.as_ref()?;
+        let source = match phase {
+            Phase::Pre => plan.node.pre_if.as_deref(),
+            Phase::Post => plan.node.post_if.as_deref(),
+            Phase::Main => return None,
+        }
+        .unwrap_or("always()");
+        let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
+        let state_from = (phase == Phase::Post).then(|| main_name.clone());
+        let step_site = site.clone();
+        let id = self.action_node(
+            job,
+            step,
+            plan,
+            phase,
+            scope,
+            &step_site,
+            job_secret_env,
+            state_from.as_deref(),
+        );
+        let cond = self.condition_text(source, &step_site, true, span.clone());
+        let started = step_site.job_started(self.b.exprs());
+        let mut pre = match cond {
+            Some(c) => self.b.exprs().binary(BinOp::And, started, c),
+            None => started,
+        };
+        if phase == Phase::Post {
+            let ran = self.main_ran(&step_site, &main_name);
+            pre = self.b.exprs().binary(BinOp::And, pre, ran);
+            // A post step is cleanup: GitHub runs it after a cancel unless its
+            // `post-if` says otherwise.
+            if if_calls_any(source, &["always", "cancelled"]) {
+                self.b.node_mut(id).run_on_cancel = true;
+            }
+        }
+        self.b.set_precondition(id, pre);
+        Some(id)
+    }
+
+    /// One `github/action` node: the action pinned, its phase and entry point, its
+    /// inputs and env lowered where the step is.
+    #[allow(clippy::too_many_arguments)]
+    fn action_node(
+        &mut self,
+        job: &Job<'a>,
+        step: &Step<'_>,
+        plan: &ActionPlan,
+        phase: Phase,
+        scope: ScopeId,
+        site: &Site,
+        job_secret_env: &[(String, String)],
+        state_from: Option<&str>,
+    ) -> NodeId {
+        let (uses, span) = step
+            .uses
+            .as_ref()
+            .map(|(u, s)| (u.as_str(), s.clone()))
+            .unwrap_or_default();
+        let entry = match phase {
+            Phase::Pre => plan.node.pre.clone(),
+            Phase::Main => Some(plan.node.main.clone()),
+            Phase::Post => plan.node.post.clone(),
+        }
+        .unwrap_or_default();
+        let suffix = match phase {
+            Phase::Pre => format!("{SEP}pre"),
+            Phase::Main => String::new(),
+            Phase::Post => format!("{SEP}post"),
+        };
+        let node_name = format!("{}{SEP}{}{suffix}", site.job_id, step.node_name());
+
+        let mut step_site = site.clone();
+        let env_config = self.step_env_config(step, &mut step_site, job_secret_env);
+
+        // Inputs: declared ones take the caller's `with:`, else their default;
+        // undeclared `with:` keys pass through as GitHub does (with a warning there).
+        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
+        for (k, v) in &step.with {
+            with.insert(k.to_lowercase(), *v);
+        }
+        let mut inputs = Map::new();
+        let mut declared: HashSet<String> = HashSet::new();
+        for input in &plan.inputs {
+            let key = input.name.to_lowercase();
+            declared.insert(key.clone());
+            let value = match with.get(&key) {
+                Some(node) => self.with_value(*node, &step_site),
+                None => match &input.default {
+                    Some(text) => self.text_value(text, span.clone(), &step_site),
+                    None => {
+                        if input.required && phase == Phase::Main {
+                            self.diags.error(
+                                "gha.missing_input",
+                                span.clone(),
+                                format!("`{uses}` requires input `{}`", input.name),
+                            );
+                        }
+                        None
+                    }
+                },
+            };
+            if let Some(value) = value {
+                inputs.insert(input.name.clone(), value);
+            }
+        }
+        for (key, node) in &step.with {
+            if !declared.contains(&key.to_lowercase())
+                && let Some(value) = self.with_value(*node, &step_site)
+            {
+                inputs.insert(key.clone(), value);
+            }
+        }
+
+        let mut config = Map::new();
+        config.insert(
+            "action".into(),
+            match &plan.location {
+                ActionLocation::Pinned(pinned) => {
+                    serde_json::to_value(pinned).expect("a pinned action serializes")
+                }
+                ActionLocation::Local(path) => json!({ "local": path }),
+            },
+        );
+        config.insert("phase".into(), json!(phase.as_str()));
+        config.insert("entry".into(), json!(entry));
+        config.insert("runtime".into(), json!(plan.node.runtime));
+        config.insert("inputs".into(), Value::Object(inputs));
+        if !env_config.is_empty() {
+            config.insert("env".into(), Value::Object(env_config));
+        }
+        config.insert("event".into(), self.event_config());
+        if let Some(from) = state_from {
+            config.insert("state".into(), self.state_config(site, from));
+        }
+        if let Some(coe) = step.continue_on_error {
+            match coe.as_scalar().and_then(|s| s.as_bool()) {
+                Some(true) => {
+                    config.insert("soft_fail".into(), json!(true));
+                }
+                Some(false) => {}
+                None if phase == Phase::Main => self.diags.unsupported(
+                    "continue_on_error.expression",
+                    coe.span(),
+                    "an expression-valued `continue-on-error`",
+                    "use a literal true or false",
+                ),
+                None => {}
+            }
+        }
+
+        let id = self.b.add_node(
+            &node_name,
+            scope,
+            StepRef::new(ACTION_KIND, Value::Object(config)),
+        );
+        self.spans.insert(id, step.span.clone());
+        self.set_step_budget(id, job, step);
+        id
+    }
+
+    /// A `with:` value: a string, possibly templated; anything else stringified.
+    fn with_value(&mut self, node: Node<'_>, site: &Site) -> Option<Value> {
+        match node.as_str() {
+            Some(text) => self.text_value(text, node.span(), site),
+            None => Some(Value::String(scalar_text(node))),
+        }
+    }
+
+    /// Text from the workflow or an action manifest as an input value: literal,
+    /// expression, or a whole-value secret.
+    fn text_value(&mut self, text: &str, span: Span, site: &Site) -> Option<Value> {
+        lower_scalar(
+            text,
+            span,
+            site,
+            true,
+            true,
+            self.b.exprs(),
+            &mut self.diags,
+        )
+        .map(config_value)
+    }
+
+    /// `uses:` — a composite (local or remote) is inlined; a JavaScript action
+    /// becomes a `github/action` node; a Docker action is rejected.
+    #[allow(clippy::too_many_arguments)]
+    fn uses_step(
         &mut self,
         job: &Job<'a>,
         step: &Step<'_>,
@@ -730,27 +1180,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
         job_secret_env: &[(String, String)],
         depth: usize,
     ) -> Vec<NodeId> {
-        let path = match composite::classify(reference) {
-            Uses::Local(path) => path,
-            Uses::Docker(image) => {
-                self.diags.unsupported(
-                    "action.docker",
-                    span.clone(),
-                    format!("`uses: docker://{image}`"),
-                    "Docker actions are v2",
-                );
-                return Vec::new();
-            }
-            Uses::Remote(name) => {
-                self.diags.unsupported(
-                    "action.remote",
-                    span.clone(),
-                    name.to_string(),
-                    "remote actions need the action shim layer (package 04); only `./local` composites run today",
-                );
-                return Vec::new();
-            }
-        };
         if depth >= composite::MAX_DEPTH {
             self.diags.error(
                 "gha.composite_depth",
@@ -762,12 +1191,72 @@ impl<'w, 'a> Lowering<'w, 'a> {
             );
             return Vec::new();
         }
-        let Some(doc) = composite::read_document(self.files, &path, span, &mut self.diags) else {
+        let Some(doc) = self.action_document(reference, span) else {
             return Vec::new();
         };
-        let Some(action) = composite::read(&doc, span, &mut self.diags) else {
+        let Some(manifest) = composite::read_manifest(&doc, &mut self.diags) else {
             return Vec::new();
         };
+        let action = match manifest.runs {
+            Runs::Composite(action) => action,
+            Runs::Node(_) => {
+                let Some(plan) = self.action_plan(step) else {
+                    return Vec::new();
+                };
+                if depth > 0 && (plan.node.pre.is_some() || plan.node.post.is_some()) {
+                    self.diags.warning(
+                        "action.nested_lifecycle",
+                        span.clone(),
+                        format!(
+                            "`{reference}` has `pre` or `post` steps, which do not run inside a composite action here; its main step does"
+                        ),
+                    );
+                }
+                let mut step_site = site.clone();
+                step_site.earlier_steps = earlier.to_vec();
+                let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
+                let state_from = plan
+                    .node
+                    .pre
+                    .is_some()
+                    .then(|| format!("{main_name}{SEP}pre"));
+                let id = self.action_node(
+                    job,
+                    step,
+                    &plan,
+                    Phase::Main,
+                    scope,
+                    &step_site,
+                    job_secret_env,
+                    state_from.as_deref(),
+                );
+                self.gate_main_node(id, step, &step_site);
+                return vec![id];
+            }
+            Runs::Docker => {
+                self.diags.unsupported(
+                    "action.docker",
+                    span.clone(),
+                    format!("`{reference}` is a Docker container action"),
+                    "Docker actions run against the daemon, not through the job environment; not yet built",
+                );
+                return Vec::new();
+            }
+        };
+        if matches!(composite::classify(reference), Uses::Remote(_))
+            && action
+                .steps
+                .iter()
+                .any(|s| matches!(&s.uses, Some((u, _)) if u.starts_with('.')))
+        {
+            self.diags.unsupported(
+                "action.nested_local",
+                span.clone(),
+                format!("`{reference}` uses a `./` action inside a remote composite"),
+                "a relative action inside a fetched composite resolves against that repository, which the lowering does not stage",
+            );
+            return Vec::new();
+        }
 
         // Inputs: the caller's `with`, lowered in the caller's site, else the default.
         let caller_site = {
@@ -804,13 +1293,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
                         Some(LoweredScalar::Expr(id)) => {
                             inputs.insert(input.name.clone(), id);
                         }
-                        Some(LoweredScalar::Secret(_)) => {
-                            self.diags.unsupported(
-                                "action.secret_input",
-                                n.span(),
-                                format!("a secret passed as composite input `{}`", input.name),
-                                "composite inputs are substituted into expressions; pass the secret through `env:` on the step instead",
-                            );
+                        Some(LoweredScalar::Secret(name)) => {
+                            // Into the inner steps' expressions it goes as its
+                            // sentinel; the step that receives it resolves it at spawn.
+                            let id = self.b.exprs().lit(secret_sentinel(&name));
+                            inputs.insert(input.name.clone(), id);
                         }
                         None => {}
                     }
@@ -1087,8 +1574,21 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 return None;
             }
         };
+        self.condition_text(&source, site, at_step, span)
+    }
+
+    /// One condition's expression text (the body of an `if:`, a `pre-if`, a
+    /// `post-if`) as a precondition: GitHub's truthiness, with `success() &&` in
+    /// front unless it names a status function.
+    fn condition_text(
+        &mut self,
+        source: &str,
+        site: &Site,
+        at_step: bool,
+        span: Span,
+    ) -> Option<ExprId> {
         let uses_status_function =
-            if_calls_any(&source, &["success", "failure", "cancelled", "always"]);
+            if_calls_any(source, &["success", "failure", "cancelled", "always"]);
         let lowered = lower_scalar(
             &format!("${{{{ {source} }}}}"),
             span,
@@ -1255,6 +1755,28 @@ impl<'w, 'a> Lowering<'w, 'a> {
 enum EnvValue {
     Plain(ExprOrValue),
     Secret(String),
+}
+
+/// A YAML scalar as the string GitHub would pass: text as written, other scalars
+/// stringified, null empty.
+fn scalar_text(node: Node<'_>) -> String {
+    scalar_text_opt(node).unwrap_or_default()
+}
+
+/// [`scalar_text`], with a YAML null as `None`: an input whose `default:` is null
+/// has no default, and GitHub leaves it unset rather than passing `"null"`.
+fn scalar_text_opt(node: Node<'_>) -> Option<String> {
+    if node.as_scalar().is_some_and(|s| s.is_null()) {
+        return None;
+    }
+    Some(match node.as_str() {
+        Some(text) => text.to_string(),
+        None => match node.to_json() {
+            Value::String(s) => s,
+            Value::Null => String::new(),
+            other => other.to_string(),
+        },
+    })
 }
 
 /// Why an `if:` text holds no single expression. `condition` turns these into

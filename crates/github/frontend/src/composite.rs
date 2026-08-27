@@ -1,4 +1,8 @@
-//! Local composite actions: `uses: ./path/to/action`.
+//! Action manifests: `action.yml`, read for a `uses:` step.
+//!
+//! A composite action is inlined into the job, so its steps are read here in full. A
+//! Node action becomes a `github/action` node, so only its entry points and inputs
+//! matter. Docker actions are recognised and rejected.
 
 use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
@@ -9,11 +13,38 @@ use crate::model::Step;
 /// How deep composites may nest before the lowering reports rather than recurses.
 pub const MAX_DEPTH: usize = 10;
 
+/// What `action.yml` declares.
+pub struct Manifest<'a> {
+    pub inputs: Vec<Input<'a>>,
+    pub runs: Runs<'a>,
+    pub span: Span,
+}
+
+pub enum Runs<'a> {
+    Composite(Action<'a>),
+    Node(NodeAction),
+    Docker,
+}
+
+/// A composite action's steps and outputs.
 pub struct Action<'a> {
     pub inputs: Vec<Input<'a>>,
     pub outputs: Vec<(String, Node<'a>)>,
     pub steps: Vec<Step<'a>>,
     pub span: Span,
+}
+
+/// A JavaScript action's entry points. Owned, so it outlives the document it came
+/// from: the pre and post nodes are placed away from the main one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeAction {
+    /// `node20`, `node24`, …
+    pub runtime: String,
+    pub main: String,
+    pub pre: Option<String>,
+    pub pre_if: Option<String>,
+    pub post: Option<String>,
+    pub post_if: Option<String>,
 }
 
 pub struct Input<'a> {
@@ -83,40 +114,38 @@ pub fn read_document(
     None
 }
 
-/// Read an action document as a composite. Anything else is rejected with where it
-/// is headed.
-pub fn read<'a>(
-    doc: &'a Document,
-    uses_span: &Span,
-    diags: &mut Diagnostics,
-) -> Option<Action<'a>> {
+/// Read an action document: its inputs and what `runs:` says it is.
+pub fn read_manifest<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Manifest<'a>> {
     let root = doc.root();
     let m = root.expect_mapping(diags, "an action")?;
     let Some(runs) = m.get("runs").and_then(|r| r.as_mapping()) else {
         diags.error("gha.bad_action", root.span(), "an action needs `runs:`");
         return None;
     };
+    let inputs = read_inputs(m.get("inputs"), diags);
     let using = runs.get("using").and_then(|u| u.as_str()).unwrap_or("");
-    match using {
-        "composite" => {}
+    let text = |key: &str| runs.get(key).and_then(|n| n.as_str()).map(str::to_string);
+    let runs = match using {
+        "composite" => Runs::Composite(read_composite(doc, diags)?),
         u if u.starts_with("node") => {
-            diags.unsupported(
-                "action.javascript",
-                uses_span.clone(),
-                format!("a JavaScript action (`runs.using: {u}`)"),
-                "the JS action host is package 04",
-            );
-            return None;
+            let Some(main) = text("main") else {
+                diags.error(
+                    "gha.bad_action",
+                    root.span(),
+                    format!("a `runs.using: {u}` action needs `runs.main`"),
+                );
+                return None;
+            };
+            Runs::Node(NodeAction {
+                runtime: u.to_string(),
+                main,
+                pre: text("pre"),
+                pre_if: text("pre-if"),
+                post: text("post"),
+                post_if: text("post-if"),
+            })
         }
-        "docker" => {
-            diags.unsupported(
-                "action.docker",
-                uses_span.clone(),
-                "a Docker container action",
-                "Docker actions are v2",
-            );
-            return None;
-        }
+        "docker" => Runs::Docker,
         other => {
             diags.error(
                 "gha.bad_action",
@@ -125,10 +154,17 @@ pub fn read<'a>(
             );
             return None;
         }
-    }
+    };
+    Some(Manifest {
+        inputs,
+        runs,
+        span: root.span(),
+    })
+}
 
+fn read_inputs<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Vec<Input<'a>> {
     let mut inputs = Vec::new();
-    if let Some(inputs_node) = m.get("inputs")
+    if let Some(inputs_node) = node
         && let Some(im) = inputs_node.expect_mapping(diags, "action `inputs`")
     {
         for (name, spec) in im.iter() {
@@ -149,6 +185,15 @@ pub fn read<'a>(
             });
         }
     }
+    inputs
+}
+
+/// Read a composite action's steps and outputs. `runs.using: composite` is known.
+fn read_composite<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Action<'a>> {
+    let root = doc.root();
+    let m = root.expect_mapping(diags, "an action")?;
+    let runs = m.get("runs").and_then(|r| r.as_mapping())?;
+    let inputs = read_inputs(m.get("inputs"), diags);
 
     let mut outputs = Vec::new();
     if let Some(outputs_node) = m.get("outputs")
@@ -197,4 +242,59 @@ pub fn read<'a>(
         steps,
         span: root.span(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> (Document, Diagnostics) {
+        let mut diags = Diagnostics::new();
+        let doc = Document::parse("action.yml", text, &mut diags).expect("parses");
+        (doc, diags)
+    }
+
+    #[test]
+    fn reads_a_node_action() {
+        let (doc, mut diags) = parse(
+            r#"
+name: Hello
+inputs:
+  who:
+    default: World
+  token:
+    required: true
+runs:
+  using: node20
+  main: dist/index.js
+  post: dist/post.js
+  post-if: success()
+"#,
+        );
+        let manifest = read_manifest(&doc, &mut diags).expect("a manifest");
+        assert!(diags.is_empty(), "{:?}", diags.into_vec());
+        assert_eq!(manifest.inputs.len(), 2);
+        assert!(manifest.inputs[1].required);
+        let Runs::Node(node) = manifest.runs else {
+            panic!("expected a node action");
+        };
+        assert_eq!(
+            node,
+            NodeAction {
+                runtime: "node20".into(),
+                main: "dist/index.js".into(),
+                pre: None,
+                pre_if: None,
+                post: Some("dist/post.js".into()),
+                post_if: Some("success()".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_node_action_needs_main() {
+        let (doc, mut diags) = parse("runs:\n  using: node20\n");
+        assert!(read_manifest(&doc, &mut diags).is_none());
+        assert!(diags.has_errors());
+    }
 }

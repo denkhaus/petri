@@ -3,7 +3,8 @@
 //! Runs every corpus workflow through the GHA frontend and classifies the result.
 //! The bar is not 100% lowering. It is: every workflow either lowers, or is rejected
 //! with a specific `unsupported.*` code — zero panics, zero generic errors. The report
-//! is the empirical answer to which action shims package 04 should build first.
+//! also counts which actions the corpus uses most, so the action runner's gaps are
+//! ranked by how much they block.
 //!
 //! The corpus data is not committed. `scripts/corpus-fetch.sh` downloads it, so on a
 //! fresh clone it is simply absent, and the corpus tests skip themselves rather than
@@ -151,7 +152,7 @@ pub fn check_one(repo: &str, repo_root: &Path, file: &Path) -> Outcome {
         root: repo_root.to_path_buf(),
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        GitHubActions.load(&rel, &text, &files)
+        GitHubActions::new().load(&rel, &text, &files)
     }));
     match result {
         Err(payload) => {
@@ -239,7 +240,7 @@ pub fn report(outcomes: &[Outcome]) -> String {
         );
     }
 
-    // The histogram package 04 reads.
+    // Which actions the runner meets most.
     let mut actions: BTreeMap<String, usize> = BTreeMap::new();
     let mut actions_versioned: BTreeMap<String, usize> = BTreeMap::new();
     for o in outcomes {
@@ -254,7 +255,7 @@ pub fn report(outcomes: &[Outcome]) -> String {
     let _ = writeln!(out, "\n## Remote actions, by frequency\n");
     let _ = writeln!(
         out,
-        "What package 04's shim layer should build first. `uses:` references across all workflows; a workflow using an action three times counts three.\n"
+        "Which actions the runner meets most. `uses:` references across all workflows; a workflow using an action three times counts three.\n"
     );
     let _ = writeln!(out, "| Action | Uses |");
     let _ = writeln!(out, "|---|---|");

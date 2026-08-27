@@ -1,0 +1,54 @@
+//! `github/run`: a `run:` step with GitHub's runner contract.
+
+use std::path::PathBuf;
+
+use ir::{Outcome, Value};
+use serde_json::Map;
+use smol_str::SmolStr;
+use steps::{ProcessConfig, Step, StepCtx, StepFailure, ValueOrSecretRef};
+
+use crate::config::RunConfig;
+use crate::session::{REPO_DIR, Session, env_truthy, fold_into_outcome};
+
+/// The process step, with the `GITHUB_*` files around it.
+pub struct RunStep;
+
+#[async_trait::async_trait]
+impl Step for RunStep {
+    const NAME: &'static str = frontend_gha::RUN_KIND;
+    type Config = RunConfig;
+
+    fn check_raw(&self, config: &Value) -> Result<(), StepFailure> {
+        match crate::misplaced_secret(config, &["env"]) {
+            Some(path) => Err(crate::secret_misplaced(path)),
+            None => Ok(()),
+        }
+    }
+
+    async fn run(&self, config: RunConfig, ctx: StepCtx) -> Outcome {
+        let session = match Session::begin(&ctx, &config.event).await {
+            Ok(session) => session,
+            Err(failure) => return failure.into(),
+        };
+        let mut env = config.env;
+        for (key, value) in session.env(&ctx.node) {
+            env.entry(key)
+                .or_insert_with(|| ValueOrSecretRef::Literal(Value::String(value.to_string())));
+        }
+        let allow_unsecure = env_truthy(&env, "ACTIONS_ALLOW_UNSECURE_COMMANDS");
+        let working_dir = match config.working_dir {
+            Some(dir) => PathBuf::from(REPO_DIR).join(dir),
+            None => PathBuf::from(REPO_DIR),
+        };
+        let process = ProcessConfig {
+            run: format!("{}{}", session.prologue(), config.run),
+            shell: config.shell,
+            env,
+            working_dir: Some(working_dir),
+            soft_fail: config.soft_fail,
+            output_env_aliases: vec![SmolStr::new("GITHUB_OUTPUT")],
+        };
+        let (outcome, effects) = session.run(process, ctx, allow_unsecure).await;
+        fold_into_outcome(outcome, effects, Map::new())
+    }
+}

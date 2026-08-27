@@ -14,6 +14,7 @@ members = [
     "crates/core/cli",
     "crates/core/testkit",
     "crates/github/frontend",
+    "crates/github/actions",
     "crates/github/acceptance",
     "crates/petri/lib",
     "crates/petri/cli",
@@ -34,6 +35,7 @@ steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 frontend = { package = "petri-frontend", path = "crates/core/frontend" }
 frontend-gha = { package = "petri-frontend-gha", path = "crates/github/frontend" }
+github-actions = { package = "petri-github-actions", path = "crates/github/actions" }
 frontend-native = { package = "petri-frontend-native", path = "crates/core/frontend-native" }
 runtime = { package = "petri-runtime", path = "crates/core/runtime" }
 cli = { package = "petri-cli-core", path = "crates/core/cli" }

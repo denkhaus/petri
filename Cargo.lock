@@ -370,6 +370,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "petri-frontend-gha",
+ "petri-github-actions",
  "petri-runtime",
  "petri-testkit",
  "serde",
@@ -484,6 +485,7 @@ dependencies = [
  "petri-frontend",
  "petri-ir",
  "proptest",
+ "serde",
  "serde_json",
  "smol_str",
  "thiserror",
@@ -505,10 +507,30 @@ version = "0.1.0"
 dependencies = [
  "petri-frontend",
  "petri-frontend-gha",
+ "petri-github-actions",
  "petri-ir",
  "petri-runtime",
  "petri-testkit",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "petri-github-actions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "petri-executor",
+ "petri-frontend",
+ "petri-frontend-gha",
+ "petri-ir",
+ "petri-runtime",
+ "petri-steps",
+ "petri-testkit",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "thiserror",
  "tokio",
 ]
 

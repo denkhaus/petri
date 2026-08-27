@@ -1,0 +1,228 @@
+//! Actions from other repositories: how a `uses: owner/repo@ref` is named, pinned
+//! and fetched.
+//!
+//! The frontend resolves a reference to a commit while lowering, so the graph
+//! carries what will run ([`PinnedAction`]) and the same file lowers to the same
+//! graph. It reads the action's manifest the same way. Fetching the tree is the
+//! step's business at run time, through the same [`ActionSource`].
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+
+/// The step kind a `run:` step lowers to: the core process step plus GitHub's
+/// env-file protocol. Defined by the `github_actions` crate; named here so the
+/// lowering and the step agree on one string.
+pub const RUN_KIND: &str = "github/run";
+
+/// The step kind a JavaScript action lowers to.
+pub const ACTION_KIND: &str = "github/action";
+
+/// The key under which an action node's output carries the state its `pre` or
+/// `main` saved (`GITHUB_STATE`, `::save-state::`), for the phases after it.
+pub const STATE_OUTPUT_KEY: &str = "github.state";
+
+/// `owner/repo[/path]@ref`, as written in `uses:`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ActionRef {
+    pub owner: SmolStr,
+    pub repo: SmolStr,
+    /// A subdirectory of the repository holding the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<SmolStr>,
+    /// The tag, branch or commit as written.
+    #[serde(rename = "ref")]
+    pub git_ref: SmolStr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RefError {
+    #[error("a `uses:` reference needs an `@ref`")]
+    NoRef,
+    #[error("a `uses:` reference is `owner/repo[/path]@ref`")]
+    Shape,
+}
+
+impl ActionRef {
+    pub fn parse(uses: &str) -> Result<Self, RefError> {
+        let (name, git_ref) = uses.split_once('@').ok_or(RefError::NoRef)?;
+        if git_ref.is_empty() || git_ref.contains(char::is_whitespace) {
+            return Err(RefError::NoRef);
+        }
+        let mut parts = name.splitn(3, '/');
+        let owner = parts
+            .next()
+            .filter(|s| !s.is_empty())
+            .ok_or(RefError::Shape)?;
+        let repo = parts
+            .next()
+            .filter(|s| !s.is_empty())
+            .ok_or(RefError::Shape)?;
+        if [owner, repo]
+            .iter()
+            .any(|s| s.contains(char::is_whitespace) || *s == "." || *s == "..")
+        {
+            return Err(RefError::Shape);
+        }
+        let path = parts
+            .next()
+            .map(|p| p.trim_matches('/'))
+            .filter(|p| !p.is_empty())
+            .map(SmolStr::new);
+        Ok(Self {
+            owner: SmolStr::new(owner),
+            repo: SmolStr::new(repo),
+            path,
+            git_ref: SmolStr::new(git_ref),
+        })
+    }
+
+    /// `owner/repo`.
+    pub fn repository(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+
+    /// Whether the reference is already a full commit id.
+    pub fn is_commit(&self) -> bool {
+        self.git_ref.len() == 40 && self.git_ref.chars().all(|c| c.is_ascii_hexdigit())
+    }
+}
+
+impl fmt::Display for ActionRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.owner, self.repo)?;
+        if let Some(path) = &self.path {
+            write!(f, "/{path}")?;
+        }
+        write!(f, "@{}", self.git_ref)
+    }
+}
+
+/// A reference resolved to a commit: what the graph carries. The reference stays
+/// alongside for messages and for `GITHUB_ACTION_REF`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PinnedAction {
+    pub reference: ActionRef,
+    pub sha: SmolStr,
+}
+
+impl fmt::Display for PinnedAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.reference, self.sha)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ActionSourceError {
+    /// The reference names nothing the source can find.
+    #[error("cannot resolve `{reference}`: {message}")]
+    Unresolvable { reference: String, message: String },
+    #[error("`{0}` has no `action.yml` or `action.yaml`")]
+    NoManifest(String),
+    #[error("cannot fetch `{action}`: {message}")]
+    Fetch { action: String, message: String },
+    #[error("this action source has no file trees")]
+    NoTree,
+}
+
+/// Where actions come from.
+///
+/// Synchronous and blocking by design: `Frontend::load` is synchronous, and the one
+/// run-time caller wraps [`ActionSource::tree`] in a blocking task.
+pub trait ActionSource: Send + Sync {
+    /// Resolve a tag, branch or commit to a commit.
+    fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError>;
+
+    /// The text of the action's `action.yml` (or `action.yaml`).
+    fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError>;
+
+    /// The action's directory on this machine, the reference's `path` already
+    /// applied.
+    fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError>;
+}
+
+/// An in-memory source for tests: manifests by reference, no trees.
+#[derive(Default)]
+pub struct MapActionSource {
+    manifests: Mutex<BTreeMap<String, (String, String)>>,
+}
+
+impl MapActionSource {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `uses` (as written, `owner/repo@ref`) as resolving to `sha` with
+    /// this manifest text.
+    pub fn with(self, uses: &str, sha: &str, manifest: &str) -> Self {
+        self.manifests
+            .lock()
+            .expect("map is not poisoned")
+            .insert(uses.to_string(), (sha.to_string(), manifest.to_string()));
+        self
+    }
+}
+
+impl ActionSource for MapActionSource {
+    fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
+        let key = reference.to_string();
+        let manifests = self.manifests.lock().expect("map is not poisoned");
+        match manifests.get(&key) {
+            Some((sha, _)) => Ok(PinnedAction {
+                reference: reference.clone(),
+                sha: SmolStr::new(sha),
+            }),
+            None => Err(ActionSourceError::Unresolvable {
+                reference: key,
+                message: "not in the map".into(),
+            }),
+        }
+    }
+
+    fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        let key = pinned.reference.to_string();
+        let manifests = self.manifests.lock().expect("map is not poisoned");
+        manifests
+            .get(&key)
+            .map(|(_, text)| text.clone())
+            .ok_or(ActionSourceError::NoManifest(key))
+    }
+
+    fn tree(&self, _pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
+        Err(ActionSourceError::NoTree)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_reference_shapes() {
+        let r = ActionRef::parse("actions/checkout@v4").unwrap();
+        assert_eq!((r.owner.as_str(), r.repo.as_str()), ("actions", "checkout"));
+        assert_eq!(r.path, None);
+        assert_eq!(r.git_ref, "v4");
+        assert_eq!(r.to_string(), "actions/checkout@v4");
+
+        let r = ActionRef::parse("owner/repo/sub/dir@main").unwrap();
+        assert_eq!(r.path.as_deref(), Some("sub/dir"));
+        assert_eq!(r.to_string(), "owner/repo/sub/dir@main");
+
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert!(ActionRef::parse(&format!("a/b@{sha}")).unwrap().is_commit());
+        assert!(!r.is_commit());
+    }
+
+    #[test]
+    fn rejects_the_malformed() {
+        assert_eq!(ActionRef::parse("actions/checkout"), Err(RefError::NoRef));
+        assert_eq!(ActionRef::parse("actions/checkout@"), Err(RefError::NoRef));
+        assert_eq!(ActionRef::parse("checkout@v4"), Err(RefError::Shape));
+        assert_eq!(ActionRef::parse("/checkout@v4"), Err(RefError::Shape));
+    }
+}
