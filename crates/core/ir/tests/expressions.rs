@@ -316,8 +316,45 @@ fn nodes_reads_the_run_context() {
 fn kv_reads_the_run_context() {
     let mut t = ExprTable::new();
     let value = t.path("kv", &["deploy_target"]);
+    let missing = t.path("kv", &["nope"]);
     let c = empty().with_kv("deploy_target", json!("staging"));
     assert_eq!(eval(&t, value, &c.env()).unwrap(), json!("staging"));
+    assert_eq!(eval(&t, missing, &c.env()).unwrap(), Value::Null);
+}
+
+/// `nodes.x` and `kv.x` read a single entry without materializing the whole map. The
+/// result must be exactly what indexing the whole map would give, including for an
+/// entry that is not there.
+#[test]
+fn single_entry_reads_match_the_whole_map() {
+    let mut t = ExprTable::new();
+    let all_nodes = t.var("nodes");
+    let one_node = t.path("nodes", &["build"]);
+    let no_node = t.path("nodes", &["nope"]);
+    let all_kv = t.var("kv");
+    let one_kv = t.path("kv", &["deploy_target"]);
+    let no_kv = t.path("kv", &["nope"]);
+
+    let c = empty()
+        .with_node(
+            "build",
+            ir::NodeRecord {
+                status: ir::Status::Success,
+                output: json!({"artifact": "app.tar"}),
+                generation: ir::Generation::ZERO,
+                attempts: 1,
+            },
+        )
+        .with_kv("deploy_target", json!("staging"));
+
+    let nodes = eval(&t, all_nodes, &c.env()).unwrap();
+    assert_eq!(eval(&t, one_node, &c.env()).unwrap(), nodes["build"]);
+    assert_eq!(eval(&t, no_node, &c.env()).unwrap(), nodes["nope"]);
+    assert_eq!(nodes["nope"], Value::Null);
+
+    let kv = eval(&t, all_kv, &c.env()).unwrap();
+    assert_eq!(eval(&t, one_kv, &c.env()).unwrap(), kv["deploy_target"]);
+    assert_eq!(eval(&t, no_kv, &c.env()).unwrap(), kv["nope"]);
 }
 
 /// `success()` is success-like, so it covers `PartialSuccess`. A guard that needs to

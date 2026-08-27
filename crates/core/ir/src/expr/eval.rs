@@ -149,6 +149,23 @@ pub(super) fn eval_at(
             .lookup(name)
             .ok_or_else(|| EvalError::UnboundVar(name.clone())),
         Expr::Field(base, name) => {
+            // `nodes.x` and `kv.x` read one entry from the run context directly:
+            // materializing the whole map first would clone every node's output to
+            // read one field. `nodes` and `kv` cannot be shadowed, so this is
+            // observationally the same as the general path.
+            if let Some(Expr::Var(var)) = table.get(*base) {
+                match var.as_str() {
+                    "nodes" => {
+                        return Ok(env
+                            .run
+                            .node(name)
+                            .map(|record| record.to_value())
+                            .unwrap_or(Value::Null));
+                    }
+                    "kv" => return Ok(env.run.get(name).cloned().unwrap_or(Value::Null)),
+                    _ => {}
+                }
+            }
             let base = eval_at(table, *base, env, d)?;
             Ok(base.get(name.as_str()).cloned().unwrap_or(Value::Null))
         }
