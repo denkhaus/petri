@@ -16,7 +16,23 @@
 
 use std::collections::BTreeSet;
 
-use crate::model::KNOWN_RUNS_ON;
+/// `runs-on` labels the local executor places out of the box.
+///
+/// These are GitHub-hosted labels the local executor places on this machine or a
+/// Linux container. Third-party and self-hosted labels (`depot-*`,
+/// `namespace-profile-*`, `self-hosted`) are rejected per label unless the
+/// host's [`RunnerMap`] maps them: whether such a label names a usable Linux
+/// environment is the host's call, not a frontend guess.
+pub const KNOWN_RUNS_ON: &[&str] = &[
+    "ubuntu-latest",
+    "ubuntu-slim",
+    "ubuntu-26.04",
+    "ubuntu-24.04",
+    "ubuntu-22.04",
+    "ubuntu-20.04",
+    "ubuntu-24.04-arm",
+    "ubuntu-22.04-arm",
+];
 
 /// The label map: built-ins plus whatever the host's configuration added.
 #[derive(Clone, Debug, Default)]
@@ -51,8 +67,12 @@ impl RunnerMap {
 
     /// Whether one label resolves, case-insensitively.
     pub fn knows(&self, label: &str) -> bool {
-        let lowered = label.to_lowercase();
-        KNOWN_RUNS_ON.contains(&lowered.as_str()) || self.extra.contains(&lowered)
+        self.knows_lowered(&label.to_lowercase())
+    }
+
+    /// [`Self::knows`], for a caller that already lowercased the label.
+    pub(crate) fn knows_lowered(&self, lowered: &str) -> bool {
+        KNOWN_RUNS_ON.contains(&lowered) || self.extra.contains(lowered)
     }
 
     /// Every label that resolves, built-ins first — the rejection hint's list.
@@ -71,11 +91,15 @@ mod tests {
 
     #[test]
     fn a_written_list_parses_and_labels_are_case_insensitive() {
-        let map = RunnerMap::builtin().allow_list(" depot-ubuntu-24.04-8, Self-Hosted\nlinux  x64,,");
+        let map =
+            RunnerMap::builtin().allow_list(" depot-ubuntu-24.04-8, Self-Hosted\nlinux  x64,,");
         for label in ["depot-ubuntu-24.04-8", "self-hosted", "LINUX", "x64"] {
             assert!(map.knows(label), "{label}");
         }
         assert!(map.knows("Ubuntu-Latest"), "built-ins stay");
-        assert!(!map.knows("namespace-profile-arm"), "unconfigured stays unknown");
+        assert!(
+            !map.knows("namespace-profile-arm"),
+            "unconfigured stays unknown"
+        );
     }
 }

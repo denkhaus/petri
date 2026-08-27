@@ -10,23 +10,22 @@
 //! expressions — is a specific diagnostic, not a guess.
 
 use frontend::diag::Span;
-use frontend::expr::lower::{LowerError, Roots, builtin};
-use frontend::expr::{Segment, parse, split_template};
+use frontend::expr::lower::{LowerError, Roots};
+use frontend::expr::{parse, split_template};
 use frontend::yaml::Node;
 use ir::expr::{EvalEnv, StaticCtx, eval};
 use ir::flow::RunContext;
-use ir::{BinOp, ExprId, ExprTable, Value};
+use ir::{ExprId, ExprTable, Value};
 
 /// The matrix's static legs: the literal matrix through the same expansion the
 /// engine runs at firing time, evaluated now. `None` when any value carries an
 /// expression — the legs are then unknown before the run.
 pub fn static_legs(matrix: Node<'_>) -> Option<Vec<Value>> {
-    let value = matrix.to_json();
-    if has_expression(&value) {
+    if has_expression(matrix) {
         return None;
     }
     let mut table = ExprTable::new();
-    let m = table.lit(value);
+    let m = table.lit(matrix.to_json());
     let legs = crate::expr_lower::matrix_legs(&mut table, m).ok()?;
     let run = RunContext::new();
     let statics = StaticCtx::new();
@@ -37,13 +36,14 @@ pub fn static_legs(matrix: Node<'_>) -> Option<Vec<Value>> {
     }
 }
 
-fn has_expression(value: &Value) -> bool {
-    match value {
-        Value::String(s) => s.contains("${{"),
-        Value::Array(items) => items.iter().any(has_expression),
-        Value::Object(map) => map.values().any(has_expression),
-        _ => false,
+fn has_expression(node: Node<'_>) -> bool {
+    if let Some(m) = node.as_mapping() {
+        return m.iter().any(|(_, v)| has_expression(v));
     }
+    if let Some(s) = node.as_sequence() {
+        return s.iter().any(has_expression);
+    }
+    node.as_str().is_some_and(|t| t.contains("${{"))
 }
 
 /// One label position of a `runs-on`, as the reader collected it: the text as
@@ -53,6 +53,17 @@ pub struct RawLabel {
     pub text: String,
     pub span: Span,
     pub whole: bool,
+}
+
+impl RawLabel {
+    /// The label at one node, when the node is a scalar.
+    pub fn from_node(node: Node<'_>, whole: bool) -> Option<Self> {
+        node.as_str().map(|s| Self {
+            text: s.to_string(),
+            span: node.span(),
+            whole,
+        })
+    }
 }
 
 /// Why a `runs-on` cannot resolve at lowering. Every case lands in one
@@ -106,48 +117,35 @@ pub fn compile(raw: &[RawLabel]) -> Result<Compiled, Failure> {
 }
 
 /// One scalar as an expression: a literal stays itself, a whole `${{ … }}`
-/// keeps its value, and a mixed template concatenates stringified pieces — the
-/// same shape `lower_scalar` gives the graph, here in the private table.
+/// keeps its value, and a mixed template concatenates stringified pieces —
+/// through the same fold ([`crate::exprs::fold_template`]) that shapes the
+/// graph's templates, here in the private table.
 fn compile_scalar(text: &str, span: &Span, table: &mut ExprTable) -> Result<ExprId, Failure> {
     let bad = |message: String| Failure::Bad {
         message,
         span: span.clone(),
     };
-    let segments = split_template(text).map_err(|_| bad("unterminated `${{`".into()))?;
     if !text.contains("${{") {
         return Ok(table.lit(text));
     }
-    let lower = |source: &str, table: &mut ExprTable| -> Result<ExprId, Failure> {
-        let ast = parse(source).map_err(|e| bad(format!("could not parse `{}`: {e}", source.trim())))?;
-        crate::expr_lower::gha(&ast, table, &mut MatrixOnly).map_err(|e| match e {
-            LowerError::UnknownIdent(name) => Failure::RunTimeContext {
-                name,
-                span: span.clone(),
-            },
-            other => bad(other.to_string()),
-        })
-    };
-    if let [Segment::Expr { source, .. }] = segments.as_slice() {
-        return lower(source, table);
-    }
-    let mut pieces = Vec::with_capacity(segments.len());
-    for segment in &segments {
-        match segment {
-            Segment::Text(t) => pieces.push(table.lit(t.clone())),
-            Segment::Expr { source, .. } => {
-                let id = lower(source, table)?;
-                let as_string = builtin(table, "loose_string", vec![id])
-                    .map_err(|e| bad(e.to_string()))?;
-                pieces.push(as_string);
-            }
-        }
-    }
-    let mut iter = pieces.into_iter();
-    let mut acc = iter.next().expect("a template has at least one segment");
-    for next in iter {
-        acc = table.binary(BinOp::Concat, acc, next);
-    }
-    Ok(acc)
+    let segments = split_template(text).map_err(|_| bad("unterminated `${{`".into()))?;
+    crate::exprs::fold_template(
+        &segments,
+        table,
+        |t| t.to_string(),
+        |source, table| {
+            let ast = parse(source)
+                .map_err(|e| bad(format!("could not parse `{}`: {e}", source.trim())))?;
+            crate::expr_lower::gha(&ast, table, &mut MatrixOnly).map_err(|e| match e {
+                LowerError::UnknownIdent(name) => Failure::RunTimeContext {
+                    name,
+                    span: span.clone(),
+                },
+                other => bad(other.to_string()),
+            })
+        },
+        &bad,
+    )
 }
 
 impl Compiled {

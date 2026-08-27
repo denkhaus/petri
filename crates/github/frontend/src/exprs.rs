@@ -649,6 +649,42 @@ pub(crate) fn lower_expr(
     })
 }
 
+/// The one shape a GHA string template takes as an expression: a lone
+/// `${{ … }}` keeps its value; a mixed template concatenates its pieces, each
+/// expression stringified through `loose_string`. Callers differ only in how a
+/// literal piece becomes text (`text_value`), how one expression source lowers
+/// (`lower_one`), and what a builtin failure maps to (`bad`) — the fold itself
+/// is written once, so template semantics cannot drift between positions.
+pub fn fold_template<E>(
+    segments: &[Segment],
+    table: &mut ExprTable,
+    mut text_value: impl FnMut(&str) -> String,
+    mut lower_one: impl FnMut(&str, &mut ExprTable) -> Result<ExprId, E>,
+    mut bad: impl FnMut(String) -> E,
+) -> Result<ExprId, E> {
+    if let [Segment::Expr { source, .. }] = segments {
+        return lower_one(source, table);
+    }
+    let mut pieces = Vec::with_capacity(segments.len());
+    for segment in segments {
+        match segment {
+            Segment::Text(t) => pieces.push(table.lit(text_value(t))),
+            Segment::Expr { source, .. } => {
+                let id = lower_one(source, table)?;
+                let as_string =
+                    builtin(table, "loose_string", vec![id]).map_err(|e| bad(e.to_string()))?;
+                pieces.push(as_string);
+            }
+        }
+    }
+    let mut iter = pieces.into_iter();
+    let mut acc = iter.next().expect("a template has at least one segment");
+    for next in iter {
+        acc = table.binary(BinOp::Concat, acc, next);
+    }
+    Ok(acc)
+}
+
 /// How a scalar lowered.
 pub enum LoweredScalar {
     /// A plain value, no expression in it.
@@ -677,13 +713,6 @@ pub fn lower_scalar(
     table: &mut ExprTable,
     diags: &mut Diagnostics,
 ) -> Option<LoweredScalar> {
-    let segments = match split_template(text) {
-        Ok(s) => s,
-        Err(_) => {
-            diags.error("expr.unterminated", span, "unterminated `${{`");
-            return None;
-        }
-    };
     if !text.contains("${{") {
         let text = if env_shaped {
             escape_sentinel_text(text)
@@ -692,6 +721,13 @@ pub fn lower_scalar(
         };
         return Some(LoweredScalar::Literal(Value::String(text)));
     }
+    let segments = match split_template(text) {
+        Ok(s) => s,
+        Err(_) => {
+            diags.error("expr.unterminated", span, "unterminated `${{`");
+            return None;
+        }
+    };
 
     // A whole-value secret reference is the one permitted form.
     if let [Segment::Expr { source, .. }] = segments.as_slice()
@@ -713,67 +749,52 @@ pub fn lower_scalar(
         return None;
     }
 
-    let whole = matches!(segments.as_slice(), [Segment::Expr { .. }]);
-    let mut pieces: Vec<ExprId> = Vec::new();
-    for segment in &segments {
-        match segment {
-            Segment::Text(t) => {
-                let text = if env_shaped {
-                    escape_sentinel_text(t)
-                } else {
-                    t.to_string()
-                };
-                let id = table.lit(text);
-                pieces.push(id);
+    let acc = fold_template(
+        &segments,
+        table,
+        |t| {
+            if env_shaped {
+                escape_sentinel_text(t)
+            } else {
+                t.to_string()
             }
-            Segment::Expr { source, .. } => {
-                let ast = match parse(source) {
-                    Ok(ast) => ast,
-                    Err(e) => {
-                        diags.error(
-                            "expr.parse",
-                            span,
-                            format!("could not parse `${{{{ {} }}}}`: {e}", source.trim()),
-                        );
-                        return None;
-                    }
-                };
-                let lowered = lower_expr(&ast, site, at_step, &span, table, diags)?;
-                if lowered.saw_secret && !env_shaped {
-                    diags.unsupported(
-                        "secrets.expression",
-                        span,
-                        "a `secrets.*` or `github.token` reference in a position the engine evaluates",
-                        "secrets are absent from the expression environment by construction, so they never reach the \
-                         event log; a secret may appear in a step's `run:`, `env:` or `with:`, where the step \
-                         resolves it, but not in an `if:`, an output or a matrix",
-                    );
-                    return None;
-                }
-                if lowered.saw_hashfiles && !env_shaped {
-                    diags.unsupported(
-                        "expression.hashFiles",
-                        span,
-                        "a `hashFiles()` call in a position the engine evaluates",
-                        "the step resolves `hashFiles` against the workspace at spawn, so it may \
-                         appear in a step's `run:`, `env:` or `with:`, but not in an `if:`, an \
-                         output or a matrix",
-                    );
-                    return None;
-                }
-                if whole {
-                    return Some(LoweredScalar::Expr(lowered.id));
-                }
-                let as_string = builtin(table, "loose_string", vec![lowered.id]).ok()?;
-                pieces.push(as_string);
+        },
+        |source, table| {
+            let ast = parse(source).map_err(|e| {
+                diags.error(
+                    "expr.parse",
+                    span.clone(),
+                    format!("could not parse `${{{{ {} }}}}`: {e}", source.trim()),
+                );
+            })?;
+            let lowered = lower_expr(&ast, site, at_step, &span, table, diags).ok_or(())?;
+            if lowered.saw_secret && !env_shaped {
+                diags.unsupported(
+                    "secrets.expression",
+                    span.clone(),
+                    "a `secrets.*` or `github.token` reference in a position the engine evaluates",
+                    "secrets are absent from the expression environment by construction, so they never reach the \
+                     event log; a secret may appear in a step's `run:`, `env:` or `with:`, where the step \
+                     resolves it, but not in an `if:`, an output or a matrix",
+                );
+                return Err(());
             }
-        }
-    }
-    let mut iter = pieces.into_iter();
-    let mut acc = iter.next()?;
-    for next in iter {
-        acc = table.binary(BinOp::Concat, acc, next);
-    }
+            if lowered.saw_hashfiles && !env_shaped {
+                diags.unsupported(
+                    "expression.hashFiles",
+                    span.clone(),
+                    "a `hashFiles()` call in a position the engine evaluates",
+                    "the step resolves `hashFiles` against the workspace at spawn, so it may \
+                     appear in a step's `run:`, `env:` or `with:`, but not in an `if:`, an \
+                     output or a matrix",
+                );
+                return Err(());
+            }
+            Ok(lowered.id)
+        },
+        |_| (),
+    )
+    .ok()?;
     Some(LoweredScalar::Expr(acc))
 }
 

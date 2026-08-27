@@ -225,35 +225,35 @@ impl SnapshotSource {
 }
 
 impl SnapshotSource {
-    /// The `Unavailable` answer for `key`: with the refresh's recorded error as
-    /// the reason when the reference failed, with none when it is simply absent.
-    fn unavailable(&self, key: String) -> ActionSourceError {
-        let reason = match self.entries.get(&key) {
+    /// The `Unavailable` answer for the entry a lookup found: with the refresh's
+    /// recorded error as the reason when the reference failed, with none when it
+    /// is simply absent.
+    fn unavailable(reference: String, entry: Option<&SnapshotEntry>) -> ActionSourceError {
+        let reason = match entry {
             Some(SnapshotEntry::Failed { error }) => Some(error.clone()),
             _ => None,
         };
-        ActionSourceError::Unavailable {
-            reference: key,
-            reason,
-        }
+        ActionSourceError::Unavailable { reference, reason }
     }
 }
 
 impl ActionSource for SnapshotSource {
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
-        match self.entries.get(&reference.to_string()) {
+        let key = reference.to_string();
+        match self.entries.get(&key) {
             Some(SnapshotEntry::Resolved { sha, .. }) => Ok(PinnedAction {
                 reference: reference.clone(),
                 sha: SmolStr::new(sha),
             }),
-            _ => Err(self.unavailable(reference.to_string())),
+            other => Err(Self::unavailable(key, other)),
         }
     }
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-        match self.entries.get(&pinned.reference.to_string()) {
+        let key = pinned.reference.to_string();
+        match self.entries.get(&key) {
             Some(SnapshotEntry::Resolved { manifest, .. }) => Ok(manifest.clone()),
-            _ => Err(self.unavailable(pinned.reference.to_string())),
+            other => Err(Self::unavailable(key, other)),
         }
     }
 }

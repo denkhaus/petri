@@ -47,18 +47,8 @@ impl Document {
                 }
                 Err(failure) => failure,
             };
-            let (mut line, mut column, message) = match failure {
-                loader::ParseFailure::Scan(scan) => (
-                    scan.marker().line() as u32,
-                    scan.marker().col() as u32 + 1,
-                    scan.to_string(),
-                ),
-                loader::ParseFailure::Shape {
-                    line,
-                    column,
-                    message,
-                } => (line, column, message),
-            };
+            let (mut line, mut column) = failure.position();
+            let message = failure.message();
             // Some errors carry their position only in the text.
             if line == 0
                 && let Some((l, c)) = position_in_message(&message)
@@ -148,34 +138,9 @@ fn pad_flow_close(text: &str, line: u32) -> Option<String> {
     if !(after.is_empty() || after.starts_with('#')) {
         return None;
     }
-    // Find the line that opened the collection: walk backwards from the closer,
-    // counting bracket depth. Brackets inside strings can miscount; the re-parse
-    // catches any repair that guessed wrong.
     let indent_of = |l: &str| l.len() - l.trim_start().len();
-    let mut depth = 0i32;
-    let mut opener = None;
-    'lines: for j in (0..=idx).rev() {
-        // On the closer's line, scan only up to the closer itself, not a comment.
-        let slice = if j == idx {
-            &current[..=indent_of(current)]
-        } else {
-            lines[j]
-        };
-        for c in slice.chars().rev() {
-            match c {
-                ']' | '}' => depth += 1,
-                '[' | '{' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        opener = Some(j);
-                        break 'lines;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let opener = opener?;
+    // On the closer's line, scan only up to the closer itself, not a comment.
+    let opener = flow_opener(&lines, idx, &current[..=indent_of(current)])?;
     if opener >= idx {
         return None;
     }
@@ -187,6 +152,32 @@ fn pad_flow_close(text: &str, line: u32) -> Option<String> {
     let padded = format!("{}{}", " ".repeat(target - indent_of(current)), current);
     out[idx] = &padded;
     Some(out.join("\n"))
+}
+
+/// The line that opened the flow collection whose closer sits on line `close`:
+/// walk backwards from there, counting bracket depth in reversed character
+/// order. `close_slice` is the part of the closing line to scan — a caller that
+/// knows where the closer sits can exclude what follows it. Brackets inside
+/// strings can miscount; every caller verifies (a re-parse, or only classifying
+/// a diagnostic).
+fn flow_opener(lines: &[&str], close: usize, close_slice: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for j in (0..=close).rev() {
+        let slice = if j == close { close_slice } else { lines[j] };
+        for c in slice.chars().rev() {
+            match c {
+                ']' | '}' => depth += 1,
+                '[' | '{' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Whether the lines before `line` close a flow collection that opened on an earlier
@@ -207,23 +198,10 @@ fn multiline_flow_before(text: &str, line: usize) -> bool {
             continue;
         }
         looked += 1;
-        if t.ends_with(']') || t.ends_with('}') {
-            // Find the opener on an earlier line.
-            let mut depth = 0i32;
-            for j in (0..=i).rev() {
-                for c in lines[j].chars().rev() {
-                    match c {
-                        ']' | '}' => depth += 1,
-                        '[' | '{' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                return j < i;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        if (t.ends_with(']') || t.ends_with('}'))
+            && let Some(j) = flow_opener(&lines, i, lines[i])
+        {
+            return j < i;
         }
     }
     false

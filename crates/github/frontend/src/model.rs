@@ -325,8 +325,10 @@ fn read_environment<'a>(
             );
         }
         let scalar = |key: &str, diags: &mut Diagnostics| {
-            m.get(key)
-                .and_then(|v| v.expect_scalar(diags, &format!("`environment.{key}`")).map(|_| v))
+            m.get(key).and_then(|v| {
+                v.expect_scalar(diags, &format!("`environment.{key}`"))
+                    .map(|_| v)
+            })
         };
         let url = scalar("url", diags);
         let deployment = scalar("deployment", diags);
@@ -502,24 +504,6 @@ fn reject_unsupported_triggers(on: Node<'_>, diags: &mut Diagnostics) {
         );
     }
 }
-
-/// `runs-on` labels the local executor places out of the box.
-///
-/// These are GitHub-hosted labels the local executor places on this machine or a
-/// Linux container. Third-party and self-hosted labels (`depot-*`,
-/// `namespace-profile-*`, `self-hosted`) are rejected per label unless the
-/// host's [`crate::runners::RunnerMap`] maps them: whether such a label names a
-/// usable Linux environment is the host's call, not a frontend guess.
-pub const KNOWN_RUNS_ON: &[&str] = &[
-    "ubuntu-latest",
-    "ubuntu-slim",
-    "ubuntu-26.04",
-    "ubuntu-24.04",
-    "ubuntu-22.04",
-    "ubuntu-20.04",
-    "ubuntu-24.04-arm",
-    "ubuntu-22.04-arm",
-];
 
 /// Convenience: is this mapping key present as any kind of node?
 pub fn has(m: &Mapping<'_>, key: &str) -> bool {

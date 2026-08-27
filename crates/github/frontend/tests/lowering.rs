@@ -242,7 +242,10 @@ jobs:
     for (bad, code) in [
         ("environment: [a, b]", "gha.bad_environment"),
         ("environment: { url: https://x }", "gha.bad_environment"),
-        ("environment: { name: p, on-failure: q }", "yaml.unknown_key"),
+        (
+            "environment: { name: p, on-failure: q }",
+            "yaml.unknown_key",
+        ),
     ] {
         let text = format!(
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    {bad}\n    steps:\n      - run: echo\n"
@@ -293,7 +296,10 @@ jobs:
         "each leg keeps its own result, through exclude and include"
     );
     let scope = graph.scope(start.scope).unwrap();
-    assert_eq!(scope.runtime.requirements, ["ubuntu-latest", "ubuntu-22.04"]);
+    assert_eq!(
+        scope.runtime.requirements,
+        ["ubuntu-latest", "ubuntu-22.04"]
+    );
 }
 
 /// The shapes the handoff names: a label list from `fromJSON`, a template
@@ -330,7 +336,12 @@ jobs:
             .iter()
             .find(|n| n.name == format!("{job}/start"))
             .unwrap();
-        graph.scope(start.scope).unwrap().runtime.requirements.clone()
+        graph
+            .scope(start.scope)
+            .unwrap()
+            .runtime
+            .requirements
+            .clone()
     };
     assert_eq!(requirements("list"), ["ubuntu-latest"]);
     assert_eq!(requirements("template"), ["ubuntu-latest"]);
@@ -392,8 +403,7 @@ fn unresolvable_runs_on_expressions_stay_rejected() {
             "not a label",
         ),
     ] {
-        let text =
-            format!("on: push\njobs:\n  j:\n{bad}    steps:\n      - run: echo\n");
+        let text = format!("on: push\njobs:\n  j:\n{bad}    steps:\n      - run: echo\n");
         let diags = diagnostics(&text);
         let d = diags
             .iter()
@@ -432,7 +442,13 @@ jobs:
       - run: echo
 "#;
     let configured = RunnerMap::builtin().allow_list("depot-ubuntu-24.04-8, self-hosted linux,x64");
-    let lowered = load_configured(".github/workflows/test.yml", text, &NoFiles, None, &configured);
+    let lowered = load_configured(
+        ".github/workflows/test.yml",
+        text,
+        &NoFiles,
+        None,
+        &configured,
+    );
     assert!(
         lowered.graph.is_some(),
         "{:?}",
@@ -456,8 +472,13 @@ jobs:
     // Windows and macOS remain specific errors even when the map claims them.
     let contradiction = RunnerMap::builtin().allow_list("windows-large macos-pool");
     let text = "on: push\njobs:\n  w:\n    runs-on: windows-large\n    steps:\n      - run: echo\n  m:\n    runs-on: macos-pool\n    steps:\n      - run: echo\n";
-    let lowered =
-        load_configured(".github/workflows/test.yml", text, &NoFiles, None, &contradiction);
+    let lowered = load_configured(
+        ".github/workflows/test.yml",
+        text,
+        &NoFiles,
+        None,
+        &contradiction,
+    );
     let diags = lowered.diagnostics.into_vec();
     for code in ["unsupported.runs_on.windows", "unsupported.runs_on.macos"] {
         assert!(diags.iter().any(|d| d.code == code), "{code}: {diags:?}");

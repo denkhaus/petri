@@ -71,7 +71,10 @@ fn anchored_mappings_and_scalars_resolve_too() {
     let root = doc.root().as_mapping().unwrap();
     let again = root.get("again").unwrap().as_mapping().unwrap();
     assert_eq!(again.get("shell").unwrap().as_str(), Some("bash"));
-    assert_eq!(again.get("working-directory").unwrap().as_str(), Some("sub"));
+    assert_eq!(
+        again.get("working-directory").unwrap().as_str(),
+        Some("sub")
+    );
     assert_eq!(root.get("alias").unwrap().as_str(), Some("ci"));
 }
 
@@ -125,11 +128,15 @@ fn a_flow_close_at_the_keys_indent_parses() {
 
     // A flow mapping, a trailing comment on the closer, and two collections
     // needing repair in one file.
-    let doc = parse(
-        "a:\n  b: {\n    k: \"v\",\n  } # done\nc:\n  d: [\n    \"1\",\n  ]\ne: f\n",
-    );
+    let doc = parse("a:\n  b: {\n    k: \"v\",\n  } # done\nc:\n  d: [\n    \"1\",\n  ]\ne: f\n");
     let root = doc.root().as_mapping().unwrap();
-    let b = root.get("a").unwrap().as_mapping().unwrap().get("b").unwrap();
+    let b = root
+        .get("a")
+        .unwrap()
+        .as_mapping()
+        .unwrap()
+        .get("b")
+        .unwrap();
     assert_eq!(
         b.as_mapping().unwrap().get("k").unwrap().as_str(),
         Some("v")

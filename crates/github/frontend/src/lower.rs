@@ -55,10 +55,11 @@ pub struct Lowering<'w, 'a> {
     resolved: HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
     jobs: HashMap<String, JobNodes>,
     spans: HashMap<NodeId, Span>,
-    /// Per-leg `runs-on` resolutions, by job id: what each matrix leg resolved
-    /// to, written by [`Lowering::expression_runs_on`] and preserved on the
-    /// job's `start` node meta by [`Lowering::job_shell`].
-    leg_runs_on: HashMap<String, Value>,
+    /// The job in flight's per-leg `runs-on` resolutions: what each matrix leg
+    /// resolved to, written by [`Lowering::expression_runs_on`] and taken back
+    /// within the same [`Lowering::job_shell`] call for the job's `start` node
+    /// meta. Never live across jobs.
+    leg_runs_on: Option<Value>,
 }
 
 /// Why a remote action did not resolve.
@@ -115,7 +116,7 @@ pub fn lower(
         resolved: HashMap::new(),
         jobs: HashMap::new(),
         spans: HashMap::new(),
-        leg_runs_on: HashMap::new(),
+        leg_runs_on: None,
     };
 
     // Every job's scope and gate first, so `needs` can wire to them in any order.
@@ -210,8 +211,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
             meta.insert("environment".into(), Value::Object(target));
         }
-        if let Some(legs) = self.leg_runs_on.get(&job.id) {
-            meta.insert("runs_on".into(), legs.clone());
+        if let Some(legs) = self.leg_runs_on.take() {
+            meta.insert("runs_on".into(), legs);
         }
         if !meta.is_empty() {
             self.b.set_meta(start, Value::Object(meta));
@@ -329,54 +330,38 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 );
             }
             Some(node) => {
-                let raw: Vec<runs_on::RawLabel> = if let Some(s) = node.as_str() {
-                    vec![runs_on::RawLabel {
-                        text: s.to_string(),
-                        span: node.span(),
-                        whole: true,
-                    }]
-                } else if let Some(seq) = node.as_sequence() {
-                    seq.iter()
-                        .filter_map(|n| {
-                            n.as_str().map(|s| runs_on::RawLabel {
-                                text: s.to_string(),
-                                span: n.span(),
-                                whole: false,
-                            })
-                        })
-                        .collect()
-                } else if let Some(m) = node.as_mapping() {
-                    // `runs-on: { group: …, labels: … }`
-                    let mut out = Vec::new();
-                    if let Some(labels) = m.get("labels") {
-                        if let Some(one) = labels.as_str() {
-                            out.push(runs_on::RawLabel {
-                                text: one.to_string(),
-                                span: labels.span(),
-                                whole: false,
-                            });
-                        } else if let Some(seq) = labels.as_sequence() {
-                            out.extend(seq.iter().filter_map(|n| {
-                                n.as_str().map(|s| runs_on::RawLabel {
-                                    text: s.to_string(),
-                                    span: n.span(),
-                                    whole: false,
-                                })
-                            }));
+                let raw: Vec<runs_on::RawLabel> =
+                    if let Some(label) = runs_on::RawLabel::from_node(node, true) {
+                        vec![label]
+                    } else if let Some(seq) = node.as_sequence() {
+                        seq.iter()
+                            .filter_map(|n| runs_on::RawLabel::from_node(n, false))
+                            .collect()
+                    } else if let Some(m) = node.as_mapping() {
+                        // `runs-on: { group: …, labels: … }`
+                        let mut out = Vec::new();
+                        if let Some(labels) = m.get("labels") {
+                            if let Some(one) = runs_on::RawLabel::from_node(labels, false) {
+                                out.push(one);
+                            } else if let Some(seq) = labels.as_sequence() {
+                                out.extend(
+                                    seq.iter()
+                                        .filter_map(|n| runs_on::RawLabel::from_node(n, false)),
+                                );
+                            }
                         }
-                    }
-                    if let Some(group) = m.get("group") {
-                        self.diags.unsupported(
-                            "runs_on.group",
-                            group.span(),
-                            "`runs-on.group` names a runner group",
-                            "runner groups are a GitHub-hosted concept; name a label instead",
-                        );
-                    }
-                    out
-                } else {
-                    Vec::new()
-                };
+                        if let Some(group) = m.get("group") {
+                            self.diags.unsupported(
+                                "runs_on.group",
+                                group.span(),
+                                "`runs-on.group` names a runner group",
+                                "runner groups are a GitHub-hosted concept; name a label instead",
+                            );
+                        }
+                        out
+                    } else {
+                        Vec::new()
+                    };
                 if raw.iter().any(|l| l.text.contains("${{")) {
                     self.expression_runs_on(job, node, &raw, &mut spec);
                 } else {
@@ -446,7 +431,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         raw: &[runs_on::RawLabel],
         spec: &mut RuntimeSpec,
     ) {
-        let legs = match job.strategy.as_ref().and_then(|s| s.matrix) {
+        let matrix = job.strategy.as_ref().and_then(|s| s.matrix);
+        let legs = match matrix {
             // No matrix: the expression still resolves, over an empty `matrix`.
             None => Some(vec![json!({})]),
             Some(matrix) => runs_on::static_legs(matrix),
@@ -476,7 +462,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             match compiled.labels_for(leg) {
                 Ok(labels) => {
                     let only: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
-                    let against = job.strategy.as_ref().and_then(|s| s.matrix).map(|_| leg);
+                    let against = matrix.is_some().then_some(leg);
                     for (label, span) in &labels {
                         self.check_label(spec, label, span.clone(), against);
                     }
@@ -486,8 +472,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 Err(failure) => self.runs_on_failure(job, failure, Some(leg)),
             }
         }
-        self.leg_runs_on
-            .insert(job.id.clone(), Value::Array(resolved));
+        self.leg_runs_on = Some(Value::Array(resolved));
     }
 
     /// One label through the placement policy — the same policy for labels
@@ -507,27 +492,34 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if spec.requirements.iter().any(|r| r == label) {
             return;
         }
-        let place = leg.map(|l| format!(" (matrix leg {l})")).unwrap_or_default();
+        // Built only on the diagnostic paths; the common path accepts the label.
+        let place = || {
+            leg.map(|l| format!(" (matrix leg {l})"))
+                .unwrap_or_default()
+        };
         let lowered = label.to_lowercase();
         if lowered.starts_with("windows") {
             self.diags.unsupported(
                 "runs_on.windows",
                 span,
-                format!("`runs-on: {label}`{place}"),
+                format!("`runs-on: {label}`{}", place()),
                 "Windows runners are out of scope; the local executor emulates Linux runners",
             );
         } else if lowered.starts_with("macos") {
             self.diags.unsupported(
                 "runs_on.macos",
                 span,
-                format!("`runs-on: {label}`{place}"),
+                format!("`runs-on: {label}`{}", place()),
                 "macOS runners are out of scope; the local executor emulates Linux runners",
             );
-        } else if !self.runners.knows(label) {
+        } else if !self.runners.knows_lowered(&lowered) {
             self.diags.unsupported(
                 "runs_on.unknown",
                 span,
-                format!("`runs-on: {label}`{place} is not a label the runner map knows"),
+                format!(
+                    "`runs-on: {label}`{} is not a label the runner map knows",
+                    place()
+                ),
                 &format!(
                     "labels this machine places: {}. A third-party or self-hosted label naming a \
                      usable Linux environment can be added to the runner map — \
@@ -611,7 +603,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Some(strategy) = job.strategy.as_ref().filter(|s| s.matrix.is_some()) {
             let matrix_node = strategy.matrix.expect("filtered");
             let matrix_expr = self.matrix_expr(matrix_node, &site);
-            site.matrix_total = self.static_matrix_total(matrix_node);
+            site.matrix_total = runs_on::static_legs(matrix_node).map(|legs| legs.len());
             site.fail_fast = match strategy
                 .fail_fast
                 .and_then(|n| n.as_scalar())
@@ -2053,30 +2045,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
             };
         }
         Some(self.b.exprs().lit(node.to_json()))
-    }
-
-    /// The leg count when the matrix is fully literal.
-    fn static_matrix_total(&self, node: Node<'_>) -> Option<usize> {
-        fn has_expr(n: Node<'_>) -> bool {
-            if let Some(m) = n.as_mapping() {
-                return m.iter().any(|(_, v)| has_expr(v));
-            }
-            if let Some(s) = n.as_sequence() {
-                return s.iter().any(has_expr);
-            }
-            n.as_str().is_some_and(|t| t.contains("${{"))
-        }
-        if has_expr(node) {
-            return None;
-        }
-        // The same composition the engine will run, evaluated here on the literal.
-        let mut table = ir::ExprTable::new();
-        let matrix = table.lit(node.to_json());
-        let legs = crate::expr_lower::matrix_legs(&mut table, matrix).ok()?;
-        let run = ir::RunContext::new();
-        let statics = ir::StaticCtx::new();
-        let env = ir::EvalEnv::new(&Value::Null, &run, &statics);
-        ir::eval(&table, legs, &env).ok()?.as_array().map(Vec::len)
     }
 
     fn span_for(&self, error: &ValidationError) -> Span {

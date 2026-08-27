@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use marked_yaml::Node as MarkedNode;
-use marked_yaml::types::{Marker, MarkedMappingNode, MarkedScalarNode, MarkedSequenceNode, Span};
+use marked_yaml::types::{MarkedMappingNode, MarkedScalarNode, MarkedSequenceNode, Marker, Span};
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
 use yaml_rust2::scanner::{Marker as YamlMarker, ScanError, TScalarStyle};
 
@@ -23,14 +23,47 @@ use yaml_rust2::scanner::{Marker as YamlMarker, ScanError, TScalarStyle};
 /// loader rejects, at the position it sits.
 pub enum ParseFailure {
     Scan(ScanError),
-    Shape { line: u32, column: u32, message: String },
+    Shape {
+        line: u32,
+        column: u32,
+        message: String,
+    },
+}
+
+impl ParseFailure {
+    /// Where the failure sits: line and column, 1-based as spans report them.
+    pub fn position(&self) -> (u32, u32) {
+        match self {
+            ParseFailure::Scan(scan) => {
+                let m = marker(*scan.marker());
+                (m.line() as u32, m.column() as u32)
+            }
+            ParseFailure::Shape { line, column, .. } => (*line, *column),
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            ParseFailure::Scan(scan) => scan.to_string(),
+            ParseFailure::Shape { message, .. } => message.clone(),
+        }
+    }
+}
+
+/// A `yaml_rust2` position as a `marked_yaml` one. The column shifts from the
+/// parser's 0-based convention to the 1-based one spans use — here and nowhere
+/// else, so loaded nodes and failure positions cannot disagree.
+fn marker(mark: YamlMarker) -> Marker {
+    Marker::new(0, mark.index(), mark.line(), mark.col() + 1)
 }
 
 /// Parse one YAML document into a positioned root node, resolving aliases.
 pub fn load(text: &str) -> Result<MarkedNode, ParseFailure> {
     let mut loader = Loader::default();
     let mut parser = Parser::new_from_str(text);
-    parser.load(&mut loader, false).map_err(ParseFailure::Scan)?;
+    parser
+        .load(&mut loader, false)
+        .map_err(ParseFailure::Scan)?;
     if let Some((span, message)) = loader.error {
         return Err(ParseFailure::Shape {
             line: span.start().map_or(0, |m| m.line() as u32),
@@ -38,6 +71,7 @@ pub fn load(text: &str) -> Result<MarkedNode, ParseFailure> {
             message,
         });
     }
+    // An empty document reads as an empty mapping, as it always has.
     Ok(loader
         .root
         .unwrap_or_else(|| MarkedNode::from(MarkedMappingNode::new_empty(Span::new_blank()))))
@@ -120,20 +154,13 @@ impl MarkedEventReceiver for Loader {
         if self.error.is_some() || self.root.is_some() {
             return;
         }
-        let mark = Marker::new(0, mark.index(), mark.line(), mark.col() + 1);
+        let mark = marker(mark);
         match event {
             Event::Nothing
             | Event::StreamStart
+            | Event::StreamEnd
             | Event::DocumentStart
             | Event::DocumentEnd => {}
-            Event::StreamEnd => {
-                // An empty document reads as an empty mapping, as it always has.
-                if self.frames.is_empty() {
-                    self.root = Some(MarkedNode::from(MarkedMappingNode::new_empty(
-                        Span::new_start(mark),
-                    )));
-                }
-            }
             Event::MappingStart(aid, tag) => {
                 if tag.is_some() {
                     self.fail(mark, "YAML tags are not supported");
