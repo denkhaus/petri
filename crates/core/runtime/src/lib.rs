@@ -45,8 +45,8 @@ pub mod steps {
     }
 }
 
+mod local;
 mod runtime;
-mod target;
 
+pub use local::LocalExecutor;
 pub use runtime::{RunOptions, Runtime};
-pub use target::TargetExecutor;

@@ -10,8 +10,8 @@ use engine::{
     apply,
 };
 use executor::{
-    EnvError, EnvHandle, Executor, ReleaseReport, Retention, ScopeOutcome, ScopeSpec,
-    SecretProvider,
+    AcquireContext, EnvError, EnvHandle, Executor, NoProgress, ProgressSink, ReleaseReport,
+    Retention, ScopeOutcome, ScopeSpec, SecretProvider,
 };
 use ir::{
     Attempt, Control, EvalEnv, ExprOrValue, FailureInfo, FiringId, Graph, NodeId, Outcome,
@@ -264,6 +264,7 @@ pub struct Driver {
     executor: Arc<dyn Executor>,
     runners: Arc<Registry>,
     secrets: Arc<dyn SecretProvider>,
+    progress: Arc<dyn ProgressSink>,
     sink: Arc<LogSink>,
     config: RunConfig,
     envs: HashMap<ScopeId, EnvHandle>,
@@ -350,6 +351,7 @@ impl Driver {
             executor,
             runners: Arc::new(runners),
             secrets,
+            progress: Arc::new(NoProgress),
             sink,
             config,
             envs: HashMap::new(),
@@ -376,6 +378,13 @@ impl Driver {
     /// The host services every step's `StepCtx` carries (default: none).
     pub fn with_capabilities(mut self, caps: Capabilities) -> Self {
         self.caps = caps;
+        self
+    }
+
+    /// Where live acquisition progress goes — image pulls, service health.
+    /// Wall-clock effects only; nothing of it enters the replay log.
+    pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -664,7 +673,8 @@ impl Driver {
             return;
         }
         let spec = self.scope_spec(scope);
-        match self.executor.acquire(&spec).await {
+        let ctx = AcquireContext::new(Arc::clone(&self.secrets), Arc::clone(&self.progress));
+        match self.executor.acquire(&spec, &ctx).await {
             Ok(handle) => {
                 self.envs.insert(scope, handle);
             }
@@ -704,18 +714,38 @@ impl Driver {
             params_only.set(key, value.clone());
         }
         let env_context = EvalEnv::new(&Value::Null, &empty_run, &params_only);
-        let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
-        for (key, value) in &definition.env {
-            let resolved = match value {
-                ExprOrValue::Value(v) => value_to_string(v),
-                ExprOrValue::Expr(id) => match eval(&self.engine.graph.exprs, *id, &env_context) {
-                    Ok(v) => value_to_string(&v),
-                    Err(_) => continue,
-                },
-            };
-            env.insert(key.clone(), SmolStr::new(resolved));
-        }
-        spec = spec.with_env(env).with_runtime(definition.runtime.clone());
+        let resolve = |entries: &BTreeMap<SmolStr, ExprOrValue>| -> BTreeMap<SmolStr, SmolStr> {
+            let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
+            for (key, value) in entries {
+                let resolved = match value {
+                    ExprOrValue::Value(v) => value_to_string(v),
+                    ExprOrValue::Expr(id) => {
+                        match eval(&self.engine.graph.exprs, *id, &env_context) {
+                            Ok(v) => value_to_string(&v),
+                            Err(_) => continue,
+                        }
+                    }
+                };
+                env.insert(key.clone(), SmolStr::new(resolved));
+            }
+            env
+        };
+        let services = definition
+            .services
+            .iter()
+            .map(|service| executor::ServiceSpec {
+                name: service.name.clone(),
+                image: service.image.clone(),
+                env: resolve(&service.env),
+                ports: service.ports.clone(),
+                options: service.options.clone(),
+                credentials: service.credentials.clone(),
+            })
+            .collect();
+        spec = spec
+            .with_env(resolve(&definition.env))
+            .with_runtime(definition.runtime.clone())
+            .with_services(services);
         spec
     }
 
@@ -757,7 +787,11 @@ impl Driver {
             return;
         }
 
-        let Some(env) = self.envs.get(&scope).map(|handle| handle.exec()) else {
+        let Some((env, container_runner)) = self
+            .envs
+            .get(&scope)
+            .map(|handle| (handle.exec(), handle.container_runner()))
+        else {
             self.fail_now(
                 firing,
                 attempt,
@@ -815,6 +849,7 @@ impl Driver {
             node: name.clone(),
             config: resolved.config().clone(),
             env,
+            runner: container_runner,
             secrets: Arc::clone(&self.secrets),
             caps: self.caps.clone(),
             logs: log_tx,

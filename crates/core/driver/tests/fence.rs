@@ -51,7 +51,7 @@ async fn settles(path: &Path) -> bool {
 async fn reacquire_fences_the_survivor_and_isolates_status() {
     let dir = RunDir::new("fence-survivor");
     let crashed = HostExecutor::new(dir.path());
-    let env = crashed.acquire(&spec()).await.expect("first acquire");
+    let env = crashed.acquire(&spec(), &executor::AcquireContext::bare()).await.expect("first acquire");
     let exec = env.exec();
 
     // Something already finished in the crashed run: its recorded status is the
@@ -77,7 +77,7 @@ async fn reacquire_fences_the_survivor_and_isolates_status() {
 
     let fresh = HostExecutor::new(dir.path());
     let env2 = fresh
-        .acquire(&spec())
+        .acquire(&spec(), &executor::AcquireContext::bare())
         .await
         .expect("the fence clears the way");
     assert!(
@@ -108,7 +108,7 @@ async fn reacquire_fences_the_survivor_and_isolates_status() {
 async fn a_prefenced_generation_never_starts_the_workload() {
     let dir = RunDir::new("fence-prefenced");
     let executor = HostExecutor::new(dir.path());
-    let env = executor.acquire(&spec()).await.expect("acquire");
+    let env = executor.acquire(&spec(), &executor::AcquireContext::bare()).await.expect("acquire");
 
     let gen_dirs = generations(&dir);
     assert_eq!(gen_dirs.len(), 1, "one generation per acquisition");
@@ -167,7 +167,7 @@ async fn an_unkillable_group_fails_acquire_without_a_signal() {
     std::fs::write(fake.join("0.group"), format!("{pgid}\n")).expect("record");
 
     let executor = HostExecutor::new(dir.path()).with_fence_drain(Duration::from_millis(300));
-    match executor.acquire(&spec()).await {
+    match executor.acquire(&spec(), &executor::AcquireContext::bare()).await {
         Err(EnvError::FenceLeaked { generation, .. }) => {
             assert_eq!(generation, "gone");
         }
@@ -193,7 +193,7 @@ async fn fencing_twice_is_a_noop() {
     let executor = HostExecutor::new(dir.path());
 
     for round in 0..3 {
-        let env = executor.acquire(&spec()).await.expect("acquire");
+        let env = executor.acquire(&spec(), &executor::AcquireContext::bare()).await.expect("acquire");
         let mut process = env
             .exec()
             .spawn(ProcessSpec::new("sh", &["-c", "exit 0"]))

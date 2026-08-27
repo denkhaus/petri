@@ -62,8 +62,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use executor::lines::pump;
 use executor::{
-    EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle, ProcessSpec,
-    ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
+    AcquireContext, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle,
+    ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
 };
 use smol_str::SmolStr;
 use tokio::io::AsyncReadExt;
@@ -203,7 +203,22 @@ struct HostTeardown {
 
 #[async_trait]
 impl Executor for HostExecutor {
-    async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
+    async fn acquire(
+        &self,
+        scope: &ScopeSpec,
+        _ctx: &AcquireContext,
+    ) -> Result<EnvHandle, EnvError> {
+        // This executor is deliberately Docker-free; a scope that declares
+        // sidecar services needs a composition that can realize them.
+        if !scope.services.is_empty() {
+            return Err(EnvError::Backend {
+                backend: SmolStr::new("host"),
+                operation: SmolStr::new("acquire"),
+                message: "this scope declares service containers, which the host executor \
+                          cannot realize; use the local executor"
+                    .into(),
+            });
+        }
         let workspace = self.workspace_for(&scope.instance);
         tokio::fs::create_dir_all(&workspace)
             .await

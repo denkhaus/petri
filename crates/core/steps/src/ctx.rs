@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use executor::{ExecEnv, SecretProvider};
+use executor::{CONTAINER_RUNTIME_CLASS, ContainerRunner, ExecEnv, SecretProvider};
 use ir::placeholder::contains_placeholder;
 use ir::{Attempt, Control, FiringId, Outcome, StepEvent, StepKind, StepKindId, StepKinds, Value};
 use serde::de::DeserializeOwned;
@@ -29,6 +29,10 @@ pub struct StepCtx {
     /// references, which are resolved here at spawn time and never written down.
     pub config: Value,
     pub env: Arc<dyn ExecEnv>,
+    /// The scope-bound one-shot container runner, when the scope's executor
+    /// provided one. Steps reach it through
+    /// [`StepCtx::require_container_runner`], never a daemon of their own.
+    pub runner: Option<Arc<dyn ContainerRunner>>,
     pub secrets: Arc<dyn SecretProvider>,
     /// Host services, looked up by type ([`StepCtx::capability`]). The core
     /// never names one.
@@ -61,6 +65,18 @@ impl StepCtx {
     /// `secret_unavailable`.
     pub fn require_capability<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, StepFailure> {
         self.caps.require::<T>()
+    }
+
+    /// The scope-bound container runner, or the routable `container_runtime`
+    /// failure when this scope's executor provided none — one clear error,
+    /// never a daemon found by other means.
+    pub fn require_container_runner(&self) -> Result<Arc<dyn ContainerRunner>, StepFailure> {
+        self.runner.clone().ok_or_else(|| StepFailure {
+            class: CONTAINER_RUNTIME_CLASS,
+            message: "this step runs a container, and the scope's executor provides no \
+                      container runtime"
+                .into(),
+        })
     }
 }
 

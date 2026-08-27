@@ -555,10 +555,77 @@ pub struct RuntimeSpec {
 pub enum RuntimeTarget {
     /// A process with the machine's own filesystem and tools.
     HostProcess,
-    /// A process inside a container started from `image`. Anything beyond the image
-    /// — engine flags, resource limits, mounts — is an executor concern, carried by
-    /// [`RuntimeSpec::requirements`] or executor configuration, not by the graph.
-    Container { image: SmolStr },
+    /// A process inside a container started from `image`.
+    Container {
+        image: SmolStr,
+        /// Raw engine flags, passed through to whatever runs the container. The
+        /// core never reads them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<SmolStr>,
+        /// Registry auth for pulling the image. Carries a secret *name*, never a
+        /// value: the graph stays serializable and plaintext exists only inside
+        /// the executor's acquire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<RegistryCredentials>,
+    },
+}
+
+/// Registry auth for pulling an image. The password is a secret name, resolved
+/// by the executor at the point of use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryCredentials {
+    pub username: SmolStr,
+    /// The name of the secret holding the password.
+    pub password_secret: SmolStr,
+}
+
+/// A sidecar container with its scope's lifetime: started at acquisition,
+/// reachable by its name, healthy before the scope's first step, torn down with
+/// the scope. Format-generic — "service container" is a concept, not a GitHub
+/// feature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ServiceSpec {
+    /// The alias other processes in the scope reach it by.
+    pub name: SmolStr,
+    pub image: SmolStr,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<SmolStr, ExprOrValue>,
+    /// Port publications, as written (`host:container` or `container`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<SmolStr>,
+    /// Raw engine flags, opaque to the core (health checks ride here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<SmolStr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<RegistryCredentials>,
+}
+
+impl ServiceSpec {
+    pub fn new(name: &str, image: &str) -> Self {
+        Self {
+            name: SmolStr::new(name),
+            image: SmolStr::new(image),
+            env: BTreeMap::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+            credentials: None,
+        }
+    }
+
+    pub fn with_env(mut self, key: &str, value: ExprOrValue) -> Self {
+        self.env.insert(SmolStr::new(key), value);
+        self
+    }
+
+    pub fn with_ports(mut self, ports: &[&str]) -> Self {
+        self.ports = ports.iter().map(|p| SmolStr::new(*p)).collect();
+        self
+    }
+
+    pub fn with_options(mut self, options: &[&str]) -> Self {
+        self.options = options.iter().map(|o| SmolStr::new(*o)).collect();
+        self
+    }
 }
 
 impl Default for RuntimeSpec {
@@ -579,6 +646,8 @@ impl RuntimeSpec {
         Self {
             target: RuntimeTarget::Container {
                 image: SmolStr::new(image),
+                options: Vec::new(),
+                credentials: None,
             },
             requirements: Vec::new(),
         }
@@ -607,6 +676,9 @@ pub struct Scope {
     pub env: BTreeMap<SmolStr, ExprOrValue>,
     pub runtime: RuntimeSpec,
     pub workspace: WorkspacePolicy,
+    /// Sidecar containers with this scope's lifetime, realized at acquisition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceSpec>,
 }
 
 impl Scope {
@@ -616,7 +688,13 @@ impl Scope {
             env: BTreeMap::new(),
             runtime: RuntimeSpec::default(),
             workspace: WorkspacePolicy::Shared,
+            services: Vec::new(),
         }
+    }
+
+    pub fn with_service(mut self, service: ServiceSpec) -> Self {
+        self.services.push(service);
+        self
     }
 
     pub fn with_env(mut self, key: &str, value: ExprOrValue) -> Self {

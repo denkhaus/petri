@@ -27,7 +27,7 @@
 //! # }
 //! ```
 
-pub use runtime::{RunOptions, Runtime, TargetExecutor};
+pub use runtime::{LocalExecutor, RunOptions, Runtime};
 pub use runtime::{driver, engine, ir};
 
 pub mod host;

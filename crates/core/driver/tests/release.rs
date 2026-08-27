@@ -165,7 +165,10 @@ async fn the_sentinel_pins_the_group_until_release() {
     let dir = RunDir::new("sentinel-pins");
     let executor = HostExecutor::new(dir.path());
     let env = executor
-        .acquire(&ScopeSpec::new(ScopeId::new(0), "scope-0"))
+        .acquire(
+            &ScopeSpec::new(ScopeId::new(0), "scope-0"),
+            &executor::AcquireContext::bare(),
+        )
         .await
         .expect("acquire");
 
@@ -217,7 +220,10 @@ async fn a_workload_that_kills_its_sentinel_cannot_free_the_group_id() {
     let dir = RunDir::new("hostile-workload");
     let executor = HostExecutor::new(dir.path());
     let env = executor
-        .acquire(&ScopeSpec::new(ScopeId::new(0), "scope-0"))
+        .acquire(
+            &ScopeSpec::new(ScopeId::new(0), "scope-0"),
+            &executor::AcquireContext::bare(),
+        )
         .await
         .expect("acquire");
 

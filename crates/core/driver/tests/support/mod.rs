@@ -72,6 +72,7 @@ impl Executor for SelectivelyBroken {
     async fn acquire(
         &self,
         scope: &executor::ScopeSpec,
+        ctx: &executor::AcquireContext,
     ) -> Result<executor::EnvHandle, executor::EnvError> {
         if self.broken.contains(&scope.id) {
             return Err(executor::EnvError::Backend {
@@ -80,7 +81,7 @@ impl Executor for SelectivelyBroken {
                 message: self.message.clone(),
             });
         }
-        self.inner.acquire(scope).await
+        self.inner.acquire(scope, ctx).await
     }
 
     async fn release(

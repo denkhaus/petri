@@ -719,9 +719,10 @@ impl executor::Executor for CountingExecutor {
     async fn acquire(
         &self,
         scope: &executor::ScopeSpec,
+        ctx: &executor::AcquireContext,
     ) -> Result<executor::EnvHandle, executor::EnvError> {
         self.acquires.fetch_add(1, Ordering::SeqCst);
-        self.inner.acquire(scope).await
+        self.inner.acquire(scope, ctx).await
     }
 
     async fn release(

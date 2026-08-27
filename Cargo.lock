@@ -562,6 +562,7 @@ dependencies = [
  "petri-frontend-native",
  "petri-ir",
  "petri-steps",
+ "petri-testkit",
  "smol_str",
  "tokio",
 ]

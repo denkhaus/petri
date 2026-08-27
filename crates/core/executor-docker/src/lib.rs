@@ -30,6 +30,8 @@
 //! trusting an early return. This makes the executor correct whichever way `setsid`
 //! behaves, instead of correct on the platforms that happen to suit it.
 
+mod oneshot;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -39,13 +41,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use executor::lines::pump;
 use executor::{
-    EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle, ProcessSpec,
-    ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
+    AcquireContext, ContainerRunner, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus,
+    LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec,
+    Sig,
 };
 use ir::RuntimeTarget;
 use smol_str::SmolStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, mpsc};
+
+use crate::oneshot::OneShotRunner;
 
 /// Where the workspace is mounted inside the container.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
@@ -138,13 +143,76 @@ impl DockerExecutor {
         Ok(format!("{}{sanitized}", self.container_prefix().await?))
     }
 
-    async fn ensure_image(&self, image: &str) -> Result<(), EnvError> {
-        let present = run_docker(&["image", "inspect", image]).await.is_ok();
-        match self.pull {
-            PullPolicy::Never => Ok(()),
-            PullPolicy::IfNotPresent if present => Ok(()),
-            _ => run_docker(&["pull", image]).await.map(|_| ()),
-        }
+    /// The workspace directory a scope instance gets, shared with the host
+    /// executor's layout so the composed executor can bind either.
+    fn workspace_for(&self, instance: &str) -> PathBuf {
+        self.run_dir
+            .join("scopes")
+            .join(instance)
+            .join("work")
+    }
+
+    /// The container-name prefix of a scope instance's one-shot containers, for
+    /// fencing and leak checks.
+    pub async fn one_shot_prefix(&self, instance: &str) -> Result<String, EnvError> {
+        Ok(format!("{}-s", self.container_name(instance).await?))
+    }
+
+    /// A one-shot runner bound to a scope this executor did *not* acquire — a
+    /// host scope under the composed local executor. Same run identity, image
+    /// cache and cleanup fence as this executor's own scopes. `network` is the
+    /// scope's network when it has one; `None` runs on the daemon default.
+    ///
+    /// Cheap and daemon-free: a missing daemon surfaces when the runner is
+    /// used, so a Docker-free run never fails for a runner it never touches.
+    pub async fn scope_runner(
+        &self,
+        scope: &ScopeSpec,
+        network: Option<String>,
+        ctx: &AcquireContext,
+    ) -> Result<Arc<dyn ContainerRunner>, EnvError> {
+        Ok(Arc::new(OneShotRunner {
+            prefix: self.one_shot_prefix(&scope.instance).await?,
+            workspace: self.workspace_for(&scope.instance),
+            network,
+            pull: self.pull,
+            scope: scope.id,
+            progress: Arc::clone(ctx.progress()),
+        }))
+    }
+}
+
+/// Make `image` available under the pull policy, announcing the pull when one
+/// happens.
+pub(crate) async fn prepare_registry_image(
+    image: &str,
+    pull: PullPolicy,
+    scope: ir::ScopeId,
+    progress: &Arc<dyn executor::ProgressSink>,
+) -> Result<(), EnvError> {
+    let present = run_docker(&["image", "inspect", image]).await.is_ok();
+    let pull_now = match pull {
+        PullPolicy::Never => false,
+        PullPolicy::IfNotPresent => !present,
+        PullPolicy::Always => true,
+    };
+    if pull_now {
+        progress.progress(
+            scope,
+            executor::Progress::PullingImage {
+                image: SmolStr::new(image),
+            },
+        );
+        run_docker(&["pull", image]).await?;
+    }
+    Ok(())
+}
+
+/// Remove every container whose name starts with `prefix`. Best effort, like
+/// the rest of the fence: a daemon that is down has nothing of ours to remove.
+pub async fn sweep_containers(prefix: &str) {
+    for name in list_containers(prefix).await {
+        let _ = run_docker(&["rm", "-f", "-v", &name]).await;
     }
 }
 
@@ -159,8 +227,17 @@ struct DockerTeardown {
 
 #[async_trait]
 impl Executor for DockerExecutor {
-    async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
-        let RuntimeTarget::Container { image } = &scope.runtime.target else {
+    async fn acquire(
+        &self,
+        scope: &ScopeSpec,
+        ctx: &AcquireContext,
+    ) -> Result<EnvHandle, EnvError> {
+        let RuntimeTarget::Container {
+            image,
+            options,
+            credentials: _,
+        } = &scope.runtime.target
+        else {
             return Err(EnvError::Backend {
                 backend: SmolStr::new("docker"),
                 operation: SmolStr::new("acquire"),
@@ -168,11 +245,7 @@ impl Executor for DockerExecutor {
             });
         };
 
-        let workspace = self
-            .run_dir
-            .join("scopes")
-            .join(scope.instance.as_str())
-            .join("work");
+        let workspace = self.workspace_for(&scope.instance);
         tokio::fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::Workspace {
@@ -180,16 +253,18 @@ impl Executor for DockerExecutor {
                 message: e.to_string(),
             })?;
 
-        self.ensure_image(image).await?;
+        prepare_registry_image(image, self.pull, scope.id, ctx.progress()).await?;
 
         let name = self.container_name(&scope.instance).await?;
         // The fence half of the acquire contract (§9): a previous acquisition —
-        // a crashed driver's included — left a container under this
-        // deterministic name; removing it ends whatever still runs inside and
-        // makes its status unreadable. The name carries the run id recorded in
+        // a crashed driver's included — left containers under these
+        // deterministic names; removing them ends whatever still runs inside and
+        // makes their status unreadable. The names carry the run id recorded in
         // the run dir, so a resuming process over the same run dir reaches the
-        // crashed run's containers.
+        // crashed run's containers. One-shot containers the crash left behind
+        // share the scope's prefix and go the same way.
         let _ = run_docker(&["rm", "-f", &name]).await;
+        sweep_containers(&format!("{name}-s")).await;
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", workspace.display());
         let mut create: Vec<String> = vec![
@@ -206,6 +281,8 @@ impl Executor for DockerExecutor {
             create.push("-e".into());
             create.push(format!("{key}={value}"));
         }
+        // The scope's raw engine flags, passed through as declared.
+        create.extend(options.iter().map(|o| o.to_string()));
         create.push(image.to_string());
         // A long-lived init command, so the container outlives any one step.
         create.extend(["sleep".to_string(), "infinity".to_string()]);
@@ -213,6 +290,18 @@ impl Executor for DockerExecutor {
         let refs: Vec<&str> = create.iter().map(String::as_str).collect();
         run_docker(&refs).await?;
         run_docker(&["start", &name]).await?;
+
+        // One-shot containers in this scope's world share the job container's
+        // network namespace, so a service reachable from the job is reachable
+        // from them under the same names.
+        let runner = OneShotRunner {
+            prefix: format!("{name}-s"),
+            workspace: workspace.clone(),
+            network: Some(format!("container:{name}")),
+            pull: self.pull,
+            scope: scope.id,
+            progress: Arc::clone(ctx.progress()),
+        };
 
         Ok(EnvHandle::new(
             scope.id,
@@ -228,7 +317,8 @@ impl Executor for DockerExecutor {
                 retention: self.retention,
                 grace: scope.grace,
             },
-        ))
+        )
+        .with_runner(Arc::new(runner)))
     }
 
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
@@ -242,6 +332,10 @@ impl Executor for DockerExecutor {
         else {
             return report.problem("docker executor was handed a foreign environment");
         };
+
+        // One-shot containers first: they may hang off the job container's
+        // network namespace, and everything of the scope is meant to stop.
+        sweep_containers(&format!("{container}-s")).await;
 
         // Container-level kill is exactly right here: everything inside is meant to
         // stop. `stop` sends TERM and waits, then `rm -f` guarantees no leak.
@@ -564,7 +658,7 @@ fn next_token() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
+pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
     let output = tokio::process::Command::new("docker")
         .args(args)
         .stdin(Stdio::null())

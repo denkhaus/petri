@@ -6,16 +6,50 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ir::{RuntimeSpec, ScopeId, WorkspacePolicy};
+use ir::{RegistryCredentials, RuntimeSpec, ScopeId, WorkspacePolicy};
 use smol_str::SmolStr;
 
+use crate::container::ContainerRunner;
 use crate::env::ExecEnv;
 use crate::error::{EnvError, ReleaseReport};
+use crate::progress::{NoProgress, ProgressSink};
+use crate::secrets::{MapSecrets, SecretProvider};
 
 /// The default time a step gets between `SIGTERM` and `SIGKILL`.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 
-/// What one scope instance needs in order to exist.
+/// A sidecar container the scope needs, with its env already resolved.
+/// Credentials stay a secret *name*; the executor resolves it inside acquire,
+/// at the point of use.
+#[derive(Clone, Debug)]
+pub struct ServiceSpec {
+    /// The alias other processes in the scope reach it by.
+    pub name: SmolStr,
+    pub image: SmolStr,
+    pub env: BTreeMap<SmolStr, SmolStr>,
+    /// Port publications, as written (`host:container` or `container`).
+    pub ports: Vec<SmolStr>,
+    /// Raw engine flags, passed through (health checks ride here).
+    pub options: Vec<SmolStr>,
+    pub credentials: Option<RegistryCredentials>,
+}
+
+impl ServiceSpec {
+    pub fn new(name: &str, image: &str) -> Self {
+        Self {
+            name: SmolStr::new(name),
+            image: SmolStr::new(image),
+            env: BTreeMap::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+            credentials: None,
+        }
+    }
+}
+
+/// What one scope instance needs in order to exist — the complete declarative
+/// request: environment, runtime, sidecar services. [`Executor::acquire`]
+/// realizes all of it; [`Executor::release`] tears all of it down.
 #[derive(Clone, Debug)]
 pub struct ScopeSpec {
     pub id: ScopeId,
@@ -26,6 +60,9 @@ pub struct ScopeSpec {
     pub env: BTreeMap<SmolStr, SmolStr>,
     pub runtime: RuntimeSpec,
     pub workspace: WorkspacePolicy,
+    /// Sidecar containers with this scope's lifetime, healthy before acquire
+    /// returns.
+    pub services: Vec<ServiceSpec>,
     pub grace: Duration,
 }
 
@@ -37,6 +74,7 @@ impl ScopeSpec {
             env: BTreeMap::new(),
             runtime: RuntimeSpec::host_process(),
             workspace: WorkspacePolicy::Shared,
+            services: Vec::new(),
             grace: DEFAULT_GRACE,
         }
     }
@@ -51,9 +89,46 @@ impl ScopeSpec {
         self
     }
 
+    pub fn with_services(mut self, services: Vec<ServiceSpec>) -> Self {
+        self.services = services;
+        self
+    }
+
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
         self
+    }
+}
+
+/// The effect services acquire may need, resolved at the exact effect boundary:
+/// credential references become plaintext only inside acquire, and live
+/// progress (pulls, service health) flows out without ever entering the replay
+/// log.
+#[derive(Clone)]
+pub struct AcquireContext {
+    secrets: Arc<dyn SecretProvider>,
+    progress: Arc<dyn ProgressSink>,
+}
+
+impl AcquireContext {
+    pub fn new(secrets: Arc<dyn SecretProvider>, progress: Arc<dyn ProgressSink>) -> Self {
+        Self { secrets, progress }
+    }
+
+    /// No secrets, no progress: tests and hosts with nothing to wire.
+    pub fn bare() -> Self {
+        Self {
+            secrets: Arc::new(MapSecrets::empty()),
+            progress: Arc::new(NoProgress),
+        }
+    }
+
+    pub fn secrets(&self) -> &Arc<dyn SecretProvider> {
+        &self.secrets
+    }
+
+    pub fn progress(&self) -> &Arc<dyn ProgressSink> {
+        &self.progress
     }
 }
 
@@ -103,6 +178,7 @@ pub struct EnvHandle {
     instance: SmolStr,
     env: Arc<dyn ExecEnv>,
     teardown: Arc<dyn Teardown>,
+    runner: Option<Arc<dyn ContainerRunner>>,
 }
 
 impl EnvHandle {
@@ -117,7 +193,16 @@ impl EnvHandle {
             instance,
             env,
             teardown: Arc::new(teardown),
+            runner: None,
         }
+    }
+
+    /// Bind a scope-bound one-shot container runner to this environment. An
+    /// executor that can run containers in this scope's world attaches one;
+    /// pure executors that cannot simply never call this.
+    pub fn with_runner(mut self, runner: Arc<dyn ContainerRunner>) -> Self {
+        self.runner = Some(runner);
+        self
     }
 
     pub fn scope(&self) -> ScopeId {
@@ -131,6 +216,11 @@ impl EnvHandle {
     /// The capability handed to step kinds.
     pub fn exec(&self) -> Arc<dyn ExecEnv> {
         Arc::clone(&self.env)
+    }
+
+    /// The scope-bound one-shot container runner, when the executor provided one.
+    pub fn container_runner(&self) -> Option<Arc<dyn ContainerRunner>> {
+        self.runner.clone()
     }
 
     /// The executor's own teardown record, when this handle was made by an executor
@@ -157,7 +247,10 @@ impl std::fmt::Debug for EnvHandle {
 /// Materializes environments. Knows nothing about what steps mean.
 #[async_trait]
 pub trait Executor: Send + Sync {
-    /// Materialize the scope's environment.
+    /// Materialize the scope's complete environment: workspace, env, sidecar
+    /// services — everything the [`ScopeSpec`] declares. `ctx` carries the
+    /// effect services: secrets resolve here, at the point of use, and live
+    /// progress flows through the sink without touching the replay log.
     ///
     /// **`acquire` fences prior work** (§9): when it returns, no process from a
     /// previous acquisition of this scope can still mutate the workspace or be
@@ -172,7 +265,8 @@ pub trait Executor: Send + Sync {
     /// the workspace only: side effects outside it (network calls, pushes) may
     /// have happened in the crashed attempt and happen again — resume is
     /// at-least-once for external side effects.
-    async fn acquire(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError>;
+    async fn acquire(&self, scope: &ScopeSpec, ctx: &AcquireContext)
+    -> Result<EnvHandle, EnvError>;
 
     /// Tear down. Idempotent, and never fails the run: problems are reported.
     ///

@@ -12,14 +12,23 @@
 //! [`lines`] is support for implementing the interface rather than part of it: the
 //! line-capped output pump every executor needs, kept here so it is written once.
 
+pub mod container;
 pub mod env;
 pub mod error;
 pub mod lines;
+pub mod progress;
 pub mod scope;
 pub mod secrets;
 
+pub use container::{
+    CONTAINER_RUNTIME_CLASS, ContainerImage, ContainerRunner, OneShotContainer,
+};
 pub use env::{ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSpec, Sig};
 pub use error::{EnvError, ReleaseReport};
 pub use lines::LINE_CAP;
-pub use scope::{DEFAULT_GRACE, EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec, Teardown};
+pub use progress::{NoProgress, Progress, ProgressSink};
+pub use scope::{
+    AcquireContext, DEFAULT_GRACE, EnvHandle, Executor, Retention, ScopeOutcome, ScopeSpec,
+    ServiceSpec, Teardown,
+};
 pub use secrets::{MASK, MIN_MASK_LENGTH, MapSecrets, Masker, Secret, SecretError, SecretProvider};

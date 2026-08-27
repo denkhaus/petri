@@ -24,3 +24,5 @@ smol_str = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+testkit = { workspace = true }
+smol_str = { workspace = true }

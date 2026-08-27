@@ -12,11 +12,13 @@ use std::time::Duration;
 
 use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunReport};
 use engine::{EventLog, ReplayMismatch};
-use executor::{DEFAULT_GRACE, Executor, MapSecrets, Masker, Retention, SecretProvider};
+use executor::{
+    DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
+};
 use frontend::{DirFiles, Frontend, Lowered, Span};
 use ir::Graph;
 
-use crate::target::TargetExecutor;
+use crate::local::LocalExecutor;
 
 /// The knobs a run gets, with the defaults the driver documents.
 #[derive(Clone, Debug)]
@@ -59,6 +61,7 @@ pub struct Runtime {
     executor: Option<Arc<dyn Executor>>,
     secrets: Arc<dyn SecretProvider>,
     observers: Vec<Arc<dyn EventObserver>>,
+    progress: Option<Arc<dyn ProgressSink>>,
     caps: ::steps::CapabilitiesBuilder,
     options: RunOptions,
 }
@@ -66,8 +69,8 @@ pub struct Runtime {
 impl Runtime {
     /// The standard configuration: the formats and step kinds core itself owns —
     /// the `native` frontend, the `noop` and `process` steps — no secrets, and,
-    /// unless [`Runtime::executors`] overrides it, a host executor and a Docker
-    /// executor dispatched by each scope's [`ir::RuntimeTarget`].
+    /// unless [`Runtime::executor`] overrides it, the composed [`LocalExecutor`]
+    /// dispatching by each scope's [`ir::RuntimeTarget`].
     ///
     /// A distribution or a consumer registers its own frontends on top with
     /// [`Runtime::frontend`]; each one goes to the front of the list, ahead of the
@@ -82,6 +85,7 @@ impl Runtime {
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
             observers: Vec::new(),
+            progress: None,
             caps: ::steps::Capabilities::builder(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
@@ -97,6 +101,7 @@ impl Runtime {
             executor: None,
             secrets: Arc::new(MapSecrets::empty()),
             observers: Vec::new(),
+            progress: None,
             caps: ::steps::Capabilities::builder(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
@@ -123,9 +128,9 @@ impl Runtime {
         self
     }
 
-    /// Route scopes by [`ir::RuntimeTarget`] through this dispatcher.
-    pub fn executors(mut self, executors: TargetExecutor) -> Self {
-        self.executor = Some(Arc::new(executors));
+    /// Route scopes through this composed local executor.
+    pub fn local_executor(mut self, executor: LocalExecutor) -> Self {
+        self.executor = Some(Arc::new(executor));
         self
     }
 
@@ -144,6 +149,14 @@ impl Runtime {
     /// every appended record, in seq order, with the post-apply state.
     pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
+        self
+    }
+
+    /// Register a progress sink on every driver this runtime builds: live
+    /// acquisition events — image pulls, service health — which never enter
+    /// the replay log.
+    pub fn progress(mut self, sink: Arc<dyn ProgressSink>) -> Self {
+        self.progress = Some(sink);
         self
     }
 
@@ -306,6 +319,9 @@ impl Runtime {
         for observer in &self.observers {
             driver = driver.observe(Arc::clone(observer));
         }
+        if let Some(progress) = &self.progress {
+            driver = driver.with_progress(Arc::clone(progress));
+        }
         driver
     }
 
@@ -340,20 +356,10 @@ impl Runtime {
         self.secrets.masker()
     }
 
-    /// Host and Docker executors over the run dir, dispatched by target. Both
-    /// take their identity from the run dir, so a resumed run's executors reach
-    /// the crashed run's environments.
+    /// The composed local executor over the run dir. It takes its identity from
+    /// the run dir, so a resumed run's executors reach the crashed run's
+    /// environments.
     fn default_executor(&self) -> Arc<dyn Executor> {
-        Arc::new(
-            TargetExecutor::new()
-                .host(
-                    executor_host::HostExecutor::new(&self.options.run_dir)
-                        .with_retention(self.options.retention),
-                )
-                .container(
-                    executor_docker::DockerExecutor::new(&self.options.run_dir)
-                        .with_retention(self.options.retention),
-                ),
-        )
+        Arc::new(LocalExecutor::new(&self.options.run_dir).with_retention(self.options.retention))
     }
 }

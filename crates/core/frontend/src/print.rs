@@ -37,7 +37,7 @@ pub fn print_graph(graph: &Graph) -> String {
     for scope in &graph.scopes {
         let runtime = match &scope.runtime.target {
             RuntimeTarget::HostProcess => "host".to_string(),
-            RuntimeTarget::Container { image } => format!("container {image}"),
+            RuntimeTarget::Container { image, .. } => format!("container {image}"),
         };
         let _ = write!(out, "  scope {}: {runtime}", scope.id);
         if !scope.runtime.requirements.is_empty() {
