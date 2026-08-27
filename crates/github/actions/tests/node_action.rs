@@ -6,7 +6,7 @@
 //!
 //! Needs `git` and `node` on this machine; skips otherwise.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,15 +128,6 @@ fn fixture_action(base: &Path) {
     git(&dir, &["tag", "v1"]);
 }
 
-fn fresh_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("petri-github-actions")
-        .join(format!("{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 fn with_params(mut graph: Graph) -> Graph {
     graph.params.insert(
         "github".into(),
@@ -173,7 +164,8 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         eprintln!("skipping: git and node are needed");
         return;
     }
-    let dir = fresh_dir("hello");
+    let run_dir = testkit::RunDir::new("gha-hello");
+    let dir = run_dir.path();
     let remotes = dir.join("remotes");
     fixture_action(&remotes);
     let source: Arc<dyn ActionSource> = Arc::new(
@@ -204,7 +196,7 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         .to_string();
     assert_eq!(sha.len(), 40, "{sha}");
 
-    let report = runtime(&dir, &source)
+    let report = runtime(dir, &source)
         .run(graph)
         .await
         .expect("replay is byte-identical");
@@ -306,8 +298,6 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         record.outcome.output[github_actions::STATE_OUTPUT_KEY],
         json!({ "token": "abc123", "saved": "yes" })
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `actions/checkout@v4` then `actions/setup-node@v4`, from GitHub, for real. Needs
@@ -326,7 +316,8 @@ async fn checkout_and_setup_node_run_for_real() {
     let Some(token) = token.filter(|t| !t.is_empty()) else {
         panic!("this test needs GITHUB_TOKEN or a logged-in gh");
     };
-    let dir = fresh_dir("real");
+    let run_dir = testkit::RunDir::new("gha-real");
+    let dir = run_dir.path();
     let source: Arc<dyn ActionSource> = Arc::new(GitActionSource::new(dir.join("cache")));
     let workflow = r#"
 on: push
@@ -354,7 +345,7 @@ jobs:
         eprintln!("{d}");
     }
     let graph = with_params(lowered.graph.expect("the workflow lowers"));
-    let report = runtime(&dir, &source)
+    let report = runtime(dir, &source)
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", &token)]))
         .run(graph)
         .await
@@ -374,5 +365,4 @@ jobs:
         lines.iter().any(|l| l == "readme=Hello World!"),
         "{lines:#?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

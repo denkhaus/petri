@@ -17,7 +17,8 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 
 use crate::action::{
-    ACTION_KIND, ActionRef, ActionSource, PinnedAction, RUN_KIND, STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionLocation, ActionRef, ActionSource, Phase, PinnedAction, RUN_KIND,
+    STATE_OUTPUT_KEY,
 };
 use crate::composite::{self, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
@@ -65,34 +66,11 @@ struct ActionPlan {
     inputs: Vec<PlanInput>,
 }
 
-enum ActionLocation {
-    Pinned(PinnedAction),
-    /// `uses: ./path`: the action lives in the checked-out repository.
-    Local(String),
-}
-
 struct PlanInput {
     name: String,
     /// The default's text, expressions and all; lowered where the step is.
     default: Option<String>,
     required: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    Pre,
-    Main,
-    Post,
-}
-
-impl Phase {
-    fn as_str(self) -> &'static str {
-        match self {
-            Phase::Pre => "pre",
-            Phase::Main => "main",
-            Phase::Post => "post",
-        }
-    }
 }
 
 pub fn lower(
@@ -943,30 +921,27 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     fn action_plan_inner(&mut self, reference: &str, span: &Span) -> Option<ActionPlan> {
-        let location = match composite::classify(reference) {
-            Uses::Local(path) => ActionLocation::Local(path),
-            Uses::Docker(_) => return None,
-            Uses::Remote(name) => ActionLocation::Pinned(self.resolve_remote(&name).ok()?.0),
-        };
+        let location = self.location_of(reference)?;
         let doc = self.action_document(reference, span)?;
         let manifest = composite::read_manifest(&doc, &mut self.diags)?;
         let Runs::Node(node) = manifest.runs else {
             return None;
         };
-        let inputs = manifest
-            .inputs
-            .iter()
-            .map(|input| PlanInput {
-                name: input.name.clone(),
-                default: input.default.and_then(scalar_text_opt),
-                required: input.required,
-            })
-            .collect();
         Some(ActionPlan {
             location,
             node,
-            inputs,
+            inputs: plan_inputs(&manifest.inputs),
         })
+    }
+
+    /// Where a `uses:` reference's files are found at run time; `None` when it
+    /// names no fetched or local tree.
+    fn location_of(&mut self, reference: &str) -> Option<ActionLocation> {
+        match composite::classify(reference) {
+            Uses::Local(path) => Some(ActionLocation::Local { local: path }),
+            Uses::Docker(_) => None,
+            Uses::Remote(name) => Some(ActionLocation::Pinned(self.resolve_remote(&name).ok()?.0)),
+        }
     }
 
     /// A `pre` or `post` node for a JavaScript action. `pre-if` and `post-if`
@@ -991,25 +966,24 @@ impl<'w, 'a> Lowering<'w, 'a> {
         .unwrap_or("always()");
         let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
         let state_from = (phase == Phase::Post).then(|| main_name.clone());
-        let step_site = site.clone();
         let id = self.action_node(
             job,
             step,
             plan,
             phase,
             scope,
-            &step_site,
+            site,
             job_secret_env,
             state_from.as_deref(),
         );
-        let cond = self.condition_text(source, &step_site, true, span.clone());
-        let started = step_site.job_started(self.b.exprs());
+        let cond = self.condition_text(source, site, true, span.clone());
+        let started = site.job_started(self.b.exprs());
         let mut pre = match cond {
             Some(c) => self.b.exprs().binary(BinOp::And, started, c),
             None => started,
         };
         if phase == Phase::Post {
-            let ran = self.main_ran(&step_site, &main_name);
+            let ran = self.main_ran(site, &main_name);
             pre = self.b.exprs().binary(BinOp::And, pre, ran);
             // A post step is cleanup: GitHub runs it after a cancel unless its
             // `post-if` says otherwise.
@@ -1098,12 +1072,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut config = Map::new();
         config.insert(
             "action".into(),
-            match &plan.location {
-                ActionLocation::Pinned(pinned) => {
-                    serde_json::to_value(pinned).expect("a pinned action serializes")
-                }
-                ActionLocation::Local(path) => json!({ "local": path }),
-            },
+            serde_json::to_value(&plan.location).expect("an action location serializes"),
         );
         config.insert("phase".into(), json!(phase.as_str()));
         config.insert("entry".into(), json!(entry));
@@ -1199,9 +1168,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
         };
         let action = match manifest.runs {
             Runs::Composite(action) => action,
-            Runs::Node(_) => {
-                let Some(plan) = self.action_plan(step) else {
+            Runs::Node(node) => {
+                // The manifest in hand is the plan; no need to read it again.
+                let Some(location) = self.location_of(reference) else {
                     return Vec::new();
+                };
+                let plan = ActionPlan {
+                    location,
+                    node,
+                    inputs: plan_inputs(&manifest.inputs),
                 };
                 if depth > 0 && (plan.node.pre.is_some() || plan.node.post.is_some()) {
                     self.diags.warning(
@@ -1755,6 +1730,18 @@ impl<'w, 'a> Lowering<'w, 'a> {
 enum EnvValue {
     Plain(ExprOrValue),
     Secret(String),
+}
+
+/// A manifest's declared inputs, owned, so the plan outlives the document.
+fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
+    inputs
+        .iter()
+        .map(|input| PlanInput {
+            name: input.name.clone(),
+            default: input.default.and_then(scalar_text_opt),
+            required: input.required,
+        })
+        .collect()
 }
 
 /// A YAML scalar as the string GitHub would pass: text as written, other scalars

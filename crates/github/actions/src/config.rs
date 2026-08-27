@@ -7,11 +7,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use frontend_gha::action::PinnedAction;
 use ir::Value;
 use serde::Deserialize;
 use smol_str::SmolStr;
 use steps::{Shell, SoftFail, ValueOrSecretRef};
+
+pub use frontend_gha::action::{ActionLocation, Phase};
 
 /// `github/run`: a `run:` step.
 #[derive(Debug, Deserialize)]
@@ -57,25 +58,6 @@ pub struct ActionConfig {
     pub soft_fail: SoftFail,
     #[serde(default)]
     pub event: Value,
-}
-
-/// Where an action's files are.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum ActionLocation {
-    /// Fetched from its repository at a commit, through the action source.
-    Pinned(PinnedAction),
-    /// `uses: ./path`: a directory of the checked-out repository, resolved against
-    /// `GITHUB_WORKSPACE` at run time as GitHub does.
-    Local { local: String },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Phase {
-    Pre,
-    Main,
-    Post,
 }
 
 #[cfg(test)]

@@ -26,6 +26,37 @@ pub const ACTION_KIND: &str = "github/action";
 /// `main` saved (`GITHUB_STATE`, `::save-state::`), for the phases after it.
 pub const STATE_OUTPUT_KEY: &str = "github.state";
 
+/// Which of an action's entry points a `github/action` node runs. Defined here so
+/// the lowering and the step agree on one wire value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Pre,
+    Main,
+    Post,
+}
+
+impl Phase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Pre => "pre",
+            Phase::Main => "main",
+            Phase::Post => "post",
+        }
+    }
+}
+
+/// Where an action's files are, as a `github/action` config carries it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionLocation {
+    /// Fetched from its repository at a commit, through the action source.
+    Pinned(PinnedAction),
+    /// `uses: ./path`: a directory of the checked-out repository, resolved against
+    /// `GITHUB_WORKSPACE` at run time as GitHub does.
+    Local { local: String },
+}
+
 /// `owner/repo[/path]@ref`, as written in `uses:`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActionRef {

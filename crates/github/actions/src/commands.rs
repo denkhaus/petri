@@ -140,7 +140,11 @@ impl CommandSink {
 
     async fn on_stdout(&mut self, line: String) {
         if let Some(token) = &self.stopped {
-            if line.trim() == format!("::{token}::") {
+            let resume = line
+                .trim()
+                .strip_prefix("::")
+                .and_then(|rest| rest.strip_suffix("::"));
+            if resume == Some(token.as_str()) {
                 self.stopped = None;
             } else {
                 self.forward(line).await;

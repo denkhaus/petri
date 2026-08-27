@@ -124,13 +124,7 @@ impl Step for ProcessStep {
     /// misplaced secret, not a malformed config, and would otherwise reach the
     /// process as literal JSON.
     fn check_raw(&self, config: &Value) -> Result<(), StepFailure> {
-        if let Some(path) = misplaced_secret(config) {
-            return Err(fail(
-                SECRET_MISPLACED_CLASS,
-                format!("`{SECRET_REF_KEY}` is only valid in `env`; found one at `{path}`"),
-            ));
-        }
-        Ok(())
+        check_misplaced_secret(config, &["env"])
     }
 
     async fn run(&self, config: ProcessConfig, ctx: StepCtx) -> Outcome {
@@ -368,35 +362,90 @@ fn fail(class: &'static str, message: impl Into<String>) -> StepFailure {
     }
 }
 
-/// Find a `$secret` reference outside `env`, and say where it is.
-fn misplaced_secret(config: &Value) -> Option<String> {
-    fn walk(value: &Value, path: &str, inside_env: bool) -> Option<String> {
+/// `check_raw` for a config whose secrets belong only in the given top-level maps:
+/// find a `{"$secret": …}` reference anywhere else and fail with where it is. For
+/// any step kind whose config is secret-shaped — the process step allows `env`;
+/// the GitHub step kinds add their own maps.
+pub fn check_misplaced_secret(config: &Value, allowed_maps: &[&str]) -> Result<(), StepFailure> {
+    let Some(path) = misplaced_secret(config, allowed_maps) else {
+        return Ok(());
+    };
+    let allowed = allowed_maps
+        .iter()
+        .map(|m| format!("`{m}`"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    Err(fail(
+        SECRET_MISPLACED_CLASS,
+        format!("`{SECRET_REF_KEY}` is only valid in {allowed}; found one at `{path}`"),
+    ))
+}
+
+/// Find a `$secret` reference outside the allowed maps, and say where it is. A
+/// direct entry of an allowed map may be a reference; anything deeper may not.
+fn misplaced_secret(config: &Value, allowed_maps: &[&str]) -> Option<String> {
+    fn walk(value: &Value, path: &str) -> Option<String> {
         match value {
             Value::Object(map) => {
-                if map.contains_key(SECRET_REF_KEY) && !inside_env {
-                    return Some(if path.is_empty() {
-                        "<root>".into()
-                    } else {
-                        path.into()
-                    });
+                if map.contains_key(SECRET_REF_KEY) {
+                    return Some(path.to_string());
                 }
-                map.iter().find_map(|(key, child)| {
-                    let next = if path.is_empty() {
-                        key.clone()
-                    } else {
-                        format!("{path}.{key}")
-                    };
-                    // Only the top-level `env` map is a secret-shaped position.
-                    let child_in_env = path.is_empty() && key == "env";
-                    walk(child, &next, child_in_env || (inside_env && path == "env"))
-                })
+                map.iter()
+                    .find_map(|(key, child)| walk(child, &format!("{path}.{key}")))
             }
             Value::Array(items) => items
                 .iter()
                 .enumerate()
-                .find_map(|(i, child)| walk(child, &format!("{path}[{i}]"), false)),
+                .find_map(|(i, child)| walk(child, &format!("{path}[{i}]"))),
             _ => None,
         }
     }
-    walk(config, "", false)
+    let top = config.as_object()?;
+    if top.contains_key(SECRET_REF_KEY) {
+        return Some("<root>".into());
+    }
+    top.iter().find_map(|(key, value)| {
+        if allowed_maps.contains(&key.as_str()) {
+            let Some(map) = value.as_object() else {
+                return walk(value, key);
+            };
+            map.iter().find_map(|(name, child)| {
+                let is_ref = child
+                    .as_object()
+                    .is_some_and(|m| m.contains_key(SECRET_REF_KEY));
+                if is_ref {
+                    None
+                } else {
+                    walk(child, &format!("{key}.{name}"))
+                }
+            })
+        } else {
+            walk(value, key)
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn secrets_are_fine_in_allowed_maps_and_nowhere_else() {
+        let ok = json!({ "env": { "TOKEN": { "$secret": "T" } }, "inputs": { "token": { "$secret": "T" } } });
+        assert_eq!(misplaced_secret(&ok, &["env", "inputs"]), None);
+        assert_eq!(
+            misplaced_secret(&ok, &["env"]),
+            Some("inputs.token".into())
+        );
+        let bad = json!({ "run": { "$secret": "T" } });
+        assert_eq!(misplaced_secret(&bad, &["env"]), Some("run".into()));
+        let nested = json!({ "env": { "X": { "nested": { "$secret": "T" } } } });
+        assert_eq!(
+            misplaced_secret(&nested, &["env"]),
+            Some("env.X.nested".into())
+        );
+        let root = json!({ "$secret": "T" });
+        assert_eq!(misplaced_secret(&root, &["env"]), Some("<root>".into()));
+    }
 }

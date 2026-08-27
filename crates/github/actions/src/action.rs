@@ -31,10 +31,7 @@ impl Step for ActionStep {
     type Config = ActionConfig;
 
     fn check_raw(&self, config: &Value) -> Result<(), StepFailure> {
-        match crate::misplaced_secret(config, &["env", "inputs"]) {
-            Some(path) => Err(crate::secret_misplaced(path)),
-            None => Ok(()),
-        }
+        steps::check_misplaced_secret(config, &["env", "inputs"])
     }
 
     async fn run(&self, config: ActionConfig, ctx: StepCtx) -> Outcome {
