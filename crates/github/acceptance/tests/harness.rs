@@ -7,6 +7,7 @@
 //! The corpus itself is fetched, not committed, so this skips when it is absent. See
 //! `acceptance::corpus_present`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use acceptance::{Class, SnapshotSource, check_all, corpus_present, report};
@@ -103,5 +104,42 @@ fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// Every rejection or ignore code the corpus run emits is declared in
+/// `crates/github/SUPPORT.md`, so the support doc cannot silently drift from
+/// what the code does.
+#[test]
+fn every_rejection_code_is_declared_in_support_md() {
+    let root = corpus_root();
+    if !corpus_present(&root) {
+        if std::env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()) {
+            panic!("PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched");
+        }
+        eprintln!("skipping: corpus not fetched; run scripts/corpus-fetch.sh");
+        return;
+    }
+    let support =
+        std::fs::read_to_string(root.join("../SUPPORT.md")).expect("crates/github/SUPPORT.md");
+
+    let source = SnapshotSource::load(&root).map(|s| Arc::new(s) as Arc<dyn ActionSource>);
+    let outcomes = check_all(&root, source.as_ref());
+    let mut codes: BTreeSet<String> = BTreeSet::new();
+    for outcome in &outcomes {
+        codes.extend(outcome.unsupported_features());
+        for diagnostic in &outcome.diagnostics {
+            if diagnostic.code.starts_with("ignored.") {
+                codes.insert(diagnostic.code.to_string());
+            }
+        }
+    }
+    let missing: Vec<&String> = codes
+        .iter()
+        .filter(|code| !support.contains(code.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the corpus emits codes SUPPORT.md does not declare: {missing:?}"
     );
 }

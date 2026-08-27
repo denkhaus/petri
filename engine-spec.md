@@ -602,10 +602,13 @@ k dependents → k single-arm groups; `if:` → precondition; `strategy.matrix`
 budget; `continue-on-error` → `soft_fail` (context provider derives
 `outcome`/`conclusion` from `PartialSuccess.underlying`); `runs-on` →
 `RuntimeSpec.requirements` (executor maps known labels, rejects unknown
-per-label); composite actions inline. **Rejected loudly, never
-parse-and-ignore** (shared `Unsupported{feature, hint}` diagnostic): GHA
-`concurrency:`, BuildKite `concurrency_group` (D2), and anything else
-unimplemented. Native format: `next:` → one group; `parallel:` → multiple
+per-label); composite actions inline. **Rejected loudly, or ignored loudly —
+never parse-and-drop** (the shared `Unsupported{feature, hint}` diagnostic, or
+an `ignored.*` warning naming what was dropped): GHA `concurrency:` and
+`permissions:` are ignored with a warning — one local run has nothing to race,
+and cross-run semantics stay with the driver layer (D2); BuildKite
+`concurrency_group` (D2) and anything else unimplemented are rejected.
+Native format: `next:` → one group; `parallel:` → multiple
 groups; `for_each` + `parallel: true|false` → `ForEach` vs cycle desugar.
 
 ## 13. Failure-class registry (grep anchor; extend here first)

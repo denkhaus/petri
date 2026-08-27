@@ -133,7 +133,7 @@ pub fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'
     top.reject_unknown_keys(TOP_KEYS, diags, "the workflow");
 
     if let Some(c) = top.get("concurrency") {
-        reject_concurrency(c, diags);
+        warn_concurrency(c, diags);
     }
     if let Some(p) = top.get("permissions") {
         diags.warning(
@@ -179,7 +179,7 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
 
     // The rejection set, each with where it is headed.
     if let Some(c) = m.get("concurrency") {
-        reject_concurrency(c, diags);
+        warn_concurrency(c, diags);
     }
     if let Some(s) = m.get("services") {
         diags.unsupported(
@@ -398,13 +398,15 @@ fn env_entries<'a>(
     m.iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
-fn reject_concurrency(node: Node<'_>, diags: &mut Diagnostics) {
-    diags.unsupported(
-        "concurrency",
+/// `concurrency:` is cross-run mutual exclusion — one run against another. A
+/// single local run has nothing to race, so the group is ignored, loudly: the rule
+/// is real on GitHub, and the log should say it did not apply here. Cross-run
+/// concurrency stays with the multi-run driver layer (decision D2).
+fn warn_concurrency(node: Node<'_>, diags: &mut Diagnostics) {
+    diags.warning(
+        "ignored.concurrency",
         node.span(),
-        "`concurrency` groups are cross-run mutual exclusion",
-        "cross-run concurrency lives in the multi-run driver layer (decision D2); it is never parsed and \
-         ignored, because silently dropping a mutual-exclusion rule changes what the workflow does",
+        "`concurrency` is ignored: cross-run mutual exclusion does not apply to a single local run",
     );
 }
 
@@ -445,11 +447,6 @@ pub const KNOWN_RUNS_ON: &[&str] = &[
     "ubuntu-20.04",
     "ubuntu-24.04-arm",
     "ubuntu-22.04-arm",
-    "macos-latest",
-    "macos-15",
-    "macos-15-intel",
-    "macos-14",
-    "macos-13",
 ];
 
 /// Convenience: is this mapping key present as any kind of node?

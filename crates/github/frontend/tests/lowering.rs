@@ -155,15 +155,46 @@ jobs:
     );
 }
 
+/// `concurrency:` lowers — the group is cross-run mutual exclusion, meaningless
+/// in a single local run — but never silently: a warning names what was ignored,
+/// at the workflow level and the job level alike.
+#[test]
+fn concurrency_lowers_with_a_warning() {
+    let text = "concurrency: group-a\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    concurrency: { group: g, cancel-in-progress: true }\n    steps:\n      - run: echo\n";
+    let graph = lower_ok(text);
+    assert!(!graph.nodes.is_empty());
+    let diags = diagnostics(text);
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.code == "ignored.concurrency")
+            .count(),
+        2,
+        "{diags:?}"
+    );
+}
+
+/// Windows and macOS runners are out of scope: the local executor emulates
+/// Linux runners only.
+#[test]
+fn windows_and_macos_runners_are_rejected() {
+    for (label, code) in [
+        ("windows-latest", "unsupported.runs_on.windows"),
+        ("macos-latest", "unsupported.runs_on.macos"),
+        ("macos-14", "unsupported.runs_on.macos"),
+    ] {
+        let diags = diagnostics(&format!(
+            "on: push\njobs:\n  j:\n    runs-on: {label}\n    steps:\n      - run: echo\n"
+        ));
+        assert!(diags.iter().any(|d| d.code == code), "{label}: {diags:?}");
+    }
+}
+
 // ── The rejection set ─────────────────────────────────────────────────────
 
 #[test]
 fn the_rejection_set_is_loud_and_specific() {
     let cases: &[(&str, &str)] = &[
-        (
-            "concurrency: group-a\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n",
-            "unsupported.concurrency",
-        ),
         (
             "on: { workflow_call: {} }\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n",
             "unsupported.workflow_call",

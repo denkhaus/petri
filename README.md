@@ -482,9 +482,14 @@ in brackets.
 Custom shells are resolved: `python`, `pwsh` and any `{0}` template (`bash -el {0}`,
 `/usr/bin/env bash {0}`) lower now — the step writes the script to a file and runs
 the template over it, as GitHub does; only the Windows-only `cmd` and `powershell`
-stay rejected. Common enough to shrink the rejection set next: `runs-on`
-expressions (47 workflows), and `concurrency:` (108 workflows — not shrinkable, D2
-stands, but it is the second most common rejection).
+stay rejected. `concurrency:` is ignored with a warning (`ignored.concurrency`):
+cross-run mutual exclusion has nothing to race in a single local run, and its
+cross-run semantics stay with the multi-run driver layer (D2). Windows and macOS
+runners are out of scope (`runs_on.windows`, `runs_on.macos`): the local executor
+emulates Linux runners only. The declared support matrix is
+`crates/github/SUPPORT.md`, held in sync with the corpus report by a harness test.
+Common enough to shrink the rejection set next: `workflow_call` (92 workflows) and
+`runs-on` expressions (47).
 
 ### What the core may know
 
@@ -640,6 +645,8 @@ What the audit found and changed:
     `matrix:` is legal, `uses: ./` is the repository root, and current GitHub-hosted
     labels (`ubuntu-slim`, `ubuntu-26.04`, `ubuntu-24.04-arm`, `macos-15`) are known.
     All four came from the corpus; each cost a real workflow a generic error before.
+    (macOS labels have since moved out of scope — `runs_on.macos`; the local executor
+    emulates Linux runners only.)
 
 44. **`KNOWN_RUNS_ON` lives in the frontend.** The handoff puts label mapping in the
     executor; `petri check` still needs to reject unknown labels without one, so the
@@ -679,7 +686,8 @@ optionally stdout; richer sinks come later.
 
 Deliberately out of scope, per the core handoff: outcome-driven splice (§3, deferred —
 `Expansion::ForEach` already ships the mechanism), cross-run concurrency groups (D2 —
-frontends must reject `concurrency:` rather than ignore it), and placement *semantics*
+the engine carries no concurrency semantics; the GHA frontend ignores `concurrency:`
+with a warning, a single local run having nothing to race), and placement *semantics*
 for `RuntimeSpec.requirements` (D3 — the labels are carried, uninterpreted).
 
 Still v2 in the design document: resume, content caching, remote scope placement, and

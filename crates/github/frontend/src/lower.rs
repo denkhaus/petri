@@ -314,7 +314,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
                             "runs_on.windows",
                             span,
                             format!("`runs-on: {label}`"),
-                            "Windows is v2",
+                            "Windows runners are out of scope; the local executor emulates Linux runners",
+                        );
+                    } else if lowered.starts_with("macos") {
+                        self.diags.unsupported(
+                            "runs_on.macos",
+                            span,
+                            format!("`runs-on: {label}`"),
+                            "macOS runners are out of scope; the local executor emulates Linux runners",
                         );
                     } else if lowered == "self-hosted" || !KNOWN_RUNS_ON.contains(&lowered.as_str())
                     {
