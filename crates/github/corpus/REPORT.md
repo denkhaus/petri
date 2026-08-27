@@ -1,14 +1,14 @@
 # Compatibility corpus report
 
-316 workflows from 21 repositories; 57 need a Windows or macOS runner or shell and are out of scope by policy, leaving **259 in scope**.
+316 workflows from 21 repositories; 59 need a Windows or macOS runner or shell and are out of scope by policy, leaving **257 in scope**.
 
 Remote `uses:` references resolve through the action snapshot: 305 references, 1 of them unavailable. Refresh with `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.
 
-| Result (of the in-scope 259) | Count | Share |
+| Result (of the in-scope 257) | Count | Share |
 |---|---|---|
-| lowered clean | 22 | 8% |
-| lowered with warnings | 196 | 76% |
-| rejected with a specific `unsupported.*` code | 41 | 16% |
+| lowered clean | 22 | 9% |
+| lowered with warnings | 199 | 77% |
+| rejected with a specific `unsupported.*` code | 36 | 14% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -65,10 +65,10 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 
 | Feature | Workflows |
 |---|---|
-| `runs_on.expression` | 19 |
+| `runs_on.expression` | 14 |
 | `action.docker` | 13 |
-| `action.local_missing` | 3 |
 | `services` | 3 |
+| `action.local_missing` | 2 |
 | `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
 | `action.remote` | 1 |
@@ -125,8 +125,8 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `check-zizmor.yml` | warnings | 6 | — |
 | astral-sh/uv | `ci.yml` | out of scope | — | — |
 | astral-sh/uv | `diagnose-workflow-failure.yml` | warnings | 32 | — |
-| astral-sh/uv | `fix-bug.yml` | unsupported | — | `runs_on.expression` |
-| astral-sh/uv | `issue-triage.yml` | unsupported | — | `runs_on.expression` |
+| astral-sh/uv | `fix-bug.yml` | warnings | 50 | — |
+| astral-sh/uv | `issue-triage.yml` | warnings | 163 | — |
 | astral-sh/uv | `plan.yml` | warnings | 5 | — |
 | astral-sh/uv | `promote-pull-request.yml` | warnings | 30 | — |
 | astral-sh/uv | `publish-crates.yml` | warnings | 8 | — |
@@ -140,7 +140,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `rebase-conflicted-pull-request.yml` | warnings | 39 | — |
 | astral-sh/uv | `release-prepare.yml` | warnings | 33 | — |
 | astral-sh/uv | `release.yml` | out of scope | — | — |
-| astral-sh/uv | `reproduce-bug.yml` | unsupported | — | `runs_on.expression` |
+| astral-sh/uv | `reproduce-bug.yml` | warnings | 69 | — |
 | astral-sh/uv | `sync-python-releases.yml` | warnings | 14 | — |
 | astral-sh/uv | `sync-uv-dev.yml` | warnings | 5 | — |
 | astral-sh/uv | `sync-uv-security.yml` | warnings | 6 | — |
@@ -258,7 +258,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `post-release.yml` | warnings | 4 | — |
 | nodejs/node | `scorecard.yml` | unsupported | — | `action.docker` |
 | nodejs/node | `stale.yml` | warnings | 3 | — |
-| nodejs/node | `stress-test.yml` | unsupported | — | `action.local_missing`, `runs_on.expression` |
+| nodejs/node | `stress-test.yml` | out of scope | — | — |
 | nodejs/node | `test-internet.yml` | warnings | 11 | — |
 | nodejs/node | `test-linux-quic.yml` | unsupported | — | `action.local_missing` |
 | nodejs/node | `test-linux.yml` | unsupported | — | `action.local_missing` |
@@ -327,7 +327,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `reusable-san.yml` | warnings | 19 | — |
 | python/cpython | `reusable-ubuntu.yml` | unsupported | — | `runs_on.expression` |
 | python/cpython | `reusable-wasi.yml` | warnings | 17 | — |
-| python/cpython | `reusable-windows.yml` | unsupported | — | `runs_on.expression` |
+| python/cpython | `reusable-windows.yml` | out of scope | — | — |
 | python/cpython | `stale.yml` | warnings | 3 | — |
 | python/cpython | `tail-call.yml` | out of scope | — | — |
 | python/cpython | `verify-ensurepip-wheels.yml` | warnings | 7 | — |

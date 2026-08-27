@@ -120,6 +120,9 @@ struct FrameCtx {
     /// The `inputs` context: a call's bound `with:`, or the root's typed
     /// run-parameter reads.
     inputs: Option<BTreeMap<String, ExprId>>,
+    /// The subset of `inputs` whose values are known at lowering — what the
+    /// per-leg `runs-on` resolver may read.
+    static_inputs: BTreeMap<String, Value>,
     /// How `secrets.*` names map to the provider's.
     secrets: SecretMap,
     /// Inside a callee: the call's `start` node, ANDed into every job gate of

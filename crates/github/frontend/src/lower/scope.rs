@@ -230,9 +230,24 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 return;
             }
         };
+        // The frame's `inputs`, as the resolver may read them: values known at
+        // lowering, with a marked placeholder for each run-time one so a label
+        // that absorbs it names its input instead of placing.
+        let ctx = &self.frame_ctx[self.current];
+        let mut inputs = serde_json::Map::new();
+        if let Some(bound) = &ctx.inputs {
+            for name in bound.keys() {
+                let value = match ctx.static_inputs.get(name) {
+                    Some(value) => value.clone(),
+                    None => Value::String(format!("{}{name}", runs_on::DYNAMIC_MARK)),
+                };
+                inputs.insert(name.clone(), value);
+            }
+        }
+        let inputs = Value::Object(inputs);
         let mut resolved = Vec::with_capacity(legs.len());
         for leg in &legs {
-            match compiled.labels_for(leg) {
+            match compiled.labels_for(leg, &inputs) {
                 Ok(labels) => {
                     let only: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
                     let against = matrix.is_some().then_some(leg);
@@ -328,8 +343,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     "job `{}`: `runs-on` reads `{name}`, which has no value before the run{for_leg}",
                     job.id
                 ),
-                "`runs-on` is resolved at lowering, where only `matrix` has a value; `github`, \
-                 `needs` and `inputs` are run-time contexts — use a fixed label or matrix values",
+                "`runs-on` is resolved at lowering, where `matrix` and `inputs` have values; \
+                 `github` and `needs` are run-time contexts — use a fixed label, matrix values, \
+                 or an input",
+            ),
+            runs_on::Failure::DynamicInput { name, span } => self.diags.unsupported(
+                "runs_on.expression",
+                span,
+                format!(
+                    "job `{}`: `runs-on` reads input `{name}`, whose value this call site \
+                     computes at run time{for_leg}",
+                    job.id
+                ),
+                "a `runs-on` input resolves at lowering from a literal `with:` value or the \
+                 declared default; pass a literal, or use a fixed label",
             ),
             runs_on::Failure::Bad { message, span } => self.diags.unsupported(
                 "runs_on.expression",

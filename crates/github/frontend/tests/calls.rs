@@ -282,6 +282,114 @@ jobs:
     );
 }
 
+/// `runs-on: ${{ inputs.runner }}` resolves per call site from the values the
+/// binding already knows: literal `with:` values and declared defaults. Two
+/// call sites place two ways; a computed value names its input and rejects.
+#[test]
+fn input_valued_runs_on_resolves_per_call_site() {
+    let callee = r#"
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        default: ubuntu-slim
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - run: echo
+"#;
+    let caller = r#"
+on: push
+jobs:
+  fast:
+    uses: ./.github/workflows/build.yml
+    with:
+      runner: depot-ubuntu-22.04-16
+  default:
+    uses: ./.github/workflows/build.yml
+"#;
+    let call_files = files(&[(".github/workflows/build.yml", callee)]);
+    let graph = lower_ok_with(caller, &call_files);
+    let requirements = |job: &str| {
+        let start = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == format!("{job}/start"))
+            .unwrap();
+        graph.scope(start.scope).unwrap().runtime.requirements.clone()
+    };
+    assert_eq!(requirements("fast/build"), ["depot-ubuntu-22.04-16"]);
+    assert_eq!(requirements("default/build"), ["ubuntu-slim"]);
+
+    // A computed value cannot place, and the rejection names the input.
+    let dynamic = r#"
+on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      r: ${{ steps.s.outputs.r }}
+    steps:
+      - id: s
+        run: echo "r=ubuntu-latest" >> "$GITHUB_OUTPUT"
+  call:
+    needs: plan
+    uses: ./.github/workflows/build.yml
+    with:
+      runner: ${{ needs.plan.outputs.r }}
+"#;
+    let diags = diagnostics_with(dynamic, &call_files);
+    let d = diags
+        .iter()
+        .find(|d| d.code == "unsupported.runs_on.expression")
+        .unwrap_or_else(|| panic!("{diags:?}"));
+    assert!(d.message.contains("input `runner`"), "{}", d.message);
+}
+
+/// A reusable file run directly places by its declared defaults — placement is
+/// a lowering decision, so that is what a bare run gets.
+#[test]
+fn a_standalone_reusable_file_places_by_its_defaults() {
+    let callee = r#"
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        default: ubuntu-24.04
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    steps:
+      - run: echo
+"#;
+    let lowered = frontend_gha::load(".github/workflows/build.yml", callee, &frontend::NoFiles);
+    for d in lowered.diagnostics.iter() {
+        eprintln!("{d}");
+    }
+    let graph = lowered.graph.expect("a graph");
+    let start = graph.nodes.iter().find(|n| n.name == "build/start").unwrap();
+    assert_eq!(
+        graph.scope(start.scope).unwrap().runtime.requirements,
+        ["ubuntu-24.04"]
+    );
+
+    // No default: nothing to place by; the rejection names the input.
+    let defaultless = callee.replace("        default: ubuntu-24.04\n", "");
+    let lowered =
+        frontend_gha::load(".github/workflows/build.yml", &defaultless, &frontend::NoFiles);
+    assert!(lowered.graph.is_none());
+    let diags = lowered.diagnostics.into_vec();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == "unsupported.runs_on.expression" && d.message.contains("input `os`")),
+        "{diags:?}"
+    );
+}
+
 /// A remote call resolves through the action source: pinned, fetched, inlined —
 /// and the pin lands on the call's start meta.
 #[test]

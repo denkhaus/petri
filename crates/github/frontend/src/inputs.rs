@@ -19,6 +19,16 @@ use ir::{ExprId, ExprTable, Value};
 use crate::exprs::{LoweredScalar, Site, escape_sentinel_text, lower_scalar};
 use crate::model::{InputDecl, InputType};
 
+/// One frame's bound inputs: the expressions the `inputs` context resolves to,
+/// and the subset whose values are already known at lowering — literal `with:`
+/// values and declared defaults — which the per-leg `runs-on` resolver may
+/// read.
+#[derive(Default)]
+pub struct BoundInputs {
+    pub exprs: BTreeMap<String, ExprId>,
+    pub statics: BTreeMap<String, Value>,
+}
+
 /// Bind a call's inputs: the caller's `with:` against the callee's
 /// declarations. `what` names the callee for diagnostics; `span` is the call
 /// site. Unknown `with:` keys are errors, as on GitHub.
@@ -30,7 +40,7 @@ pub fn bind_call_inputs(
     span: &Span,
     table: &mut ExprTable,
     diags: &mut Diagnostics,
-) -> BTreeMap<String, ExprId> {
+) -> BoundInputs {
     let mut given: BTreeMap<String, Node<'_>> = BTreeMap::new();
     for (key, value) in with {
         let lowered = key.to_lowercase();
@@ -44,9 +54,9 @@ pub fn bind_call_inputs(
         given.insert(lowered, *value);
     }
 
-    let mut bound = BTreeMap::new();
+    let mut bound = BoundInputs::default();
     for decl in decls {
-        let id = match given.get(&decl.name.to_lowercase()) {
+        let value = match given.get(&decl.name.to_lowercase()) {
             Some(node) => bind_value(decl, *node, caller_site, table, diags),
             None if decl.required => {
                 diags.error(
@@ -56,10 +66,13 @@ pub fn bind_call_inputs(
                 );
                 continue;
             }
-            None => default_value(decl, table, diags),
+            None => default_value(decl, table, diags).map(|(id, v)| (id, Some(v))),
         };
-        if let Some(id) = id {
-            bound.insert(decl.name.clone(), id);
+        if let Some((id, known)) = value {
+            bound.exprs.insert(decl.name.clone(), id);
+            if let Some(known) = known {
+                bound.statics.insert(decl.name.clone(), known);
+            }
         }
     }
     bound
@@ -73,22 +86,32 @@ pub fn bind_param_inputs(
     decls: &[&InputDecl<'_>],
     table: &mut ExprTable,
     diags: &mut Diagnostics,
-) -> BTreeMap<String, ExprId> {
+) -> BoundInputs {
     // `github.event.inputs`, once; each declaration reads one key off it.
     let params = ["event", "inputs"].iter().fold(table.var("github"), |acc, key| {
         let k = table.lit(*key);
         builtin(table, "get_ci", vec![acc, k]).expect("get_ci exists")
     });
-    let mut bound = BTreeMap::new();
+    let mut bound = BoundInputs::default();
     for decl in decls {
         let name_key = table.lit(decl.name.as_str());
         let raw = builtin(table, "get_ci", vec![params, name_key]).expect("get_ci exists");
         // `default(raw, fallback)` answers the absent case; the coercion then
         // types whatever value won.
-        let fallback = default_value(decl, table, diags)
-            .unwrap_or_else(|| table.lit(type_zero(&decl.ty)));
+        let (fallback, known) = match default_value(decl, table, diags) {
+            Some((id, v)) => (id, Some(v)),
+            None => (table.lit(type_zero(&decl.ty)), None),
+        };
         let value = table.call("default", vec![raw, fallback]);
-        bound.insert(decl.name.clone(), coerce_dynamic(decl, value, table));
+        bound
+            .exprs
+            .insert(decl.name.clone(), coerce_dynamic(decl, value, table));
+        // Placement is a lowering decision, so a directly run workflow places
+        // by its declared defaults — the value a bare run gets — and only by
+        // those: a defaultless input stays dynamic.
+        if let (Some(known), true) = (known, decl.default.is_some()) {
+            bound.statics.insert(decl.name.clone(), known);
+        }
     }
     bound
 }
@@ -101,20 +124,21 @@ fn bind_value(
     caller_site: &Site,
     table: &mut ExprTable,
     diags: &mut Diagnostics,
-) -> Option<ExprId> {
+) -> Option<(ExprId, Option<Value>)> {
     let text = node.as_str().unwrap_or("");
     if !text.contains("${{") {
         let value = coerce_static(decl, node, diags)?;
-        return Some(table.lit(value));
+        return Some((table.lit(value.clone()), Some(value)));
     }
     // Secrets are rejected here (`env_shaped: false`): a call passes secrets
     // through `secrets:`, never `with:`, exactly as GitHub requires.
     match lower_scalar(text, node.span(), caller_site, false, false, table, diags)? {
         LoweredScalar::Literal(Value::String(s)) => {
-            Some(table.lit(escape_sentinel_text(&s)))
+            let value = Value::String(escape_sentinel_text(&s));
+            Some((table.lit(value.clone()), Some(value)))
         }
-        LoweredScalar::Literal(v) => Some(table.lit(v)),
-        LoweredScalar::Expr(id) => Some(coerce_dynamic(decl, id, table)),
+        LoweredScalar::Literal(v) => Some((table.lit(v.clone()), Some(v))),
+        LoweredScalar::Expr(id) => Some((coerce_dynamic(decl, id, table), None)),
         // Unreachable with `env_shaped: false`; be safe rather than quiet.
         LoweredScalar::Secret(_) => None,
     }
@@ -126,14 +150,12 @@ fn default_value(
     decl: &InputDecl<'_>,
     table: &mut ExprTable,
     diags: &mut Diagnostics,
-) -> Option<ExprId> {
-    match decl.default {
-        Some(node) => {
-            let value = coerce_static(decl, node, diags)?;
-            Some(table.lit(value))
-        }
-        None => Some(table.lit(type_zero(&decl.ty))),
-    }
+) -> Option<(ExprId, Value)> {
+    let value = match decl.default {
+        Some(node) => coerce_static(decl, node, diags)?,
+        None => type_zero(&decl.ty),
+    };
+    Some((table.lit(value.clone()), value))
 }
 
 fn type_zero(ty: &InputType) -> Value {

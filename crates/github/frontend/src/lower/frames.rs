@@ -119,11 +119,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 decls.extend(interface.inputs.iter());
             }
             decls.extend(frame_wf.dispatch_inputs.iter());
-            let inputs = (!decls.is_empty())
+            let bound = (!decls.is_empty())
                 .then(|| inputs::bind_param_inputs(&decls, self.b.exprs(), &mut self.diags));
-            self.frame_ctx[i] = FrameCtx {
-                inputs,
-                ..Default::default()
+            self.frame_ctx[i] = match bound {
+                Some(bound) => FrameCtx {
+                    inputs: Some(bound.exprs),
+                    static_inputs: bound.statics,
+                    ..Default::default()
+                },
+                None => FrameCtx::default(),
             };
             return;
         };
@@ -138,7 +142,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let caller_site = self.base_site(call_job);
         let interface = frame_wf.call.as_ref();
         let decls = interface.map(|i| i.inputs.as_slice()).unwrap_or(&[]);
-        let inputs = inputs::bind_call_inputs(
+        let bound = inputs::bind_call_inputs(
             decls,
             &call.with,
             &caller_site,
@@ -150,7 +154,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let caller_secrets = self.frame_ctx[caller].secrets.clone();
         let secrets = self.bind_secrets(call, interface, &caller_secrets);
         self.frame_ctx[i] = FrameCtx {
-            inputs: Some(inputs),
+            inputs: Some(bound.exprs),
+            static_inputs: bound.statics,
             secrets,
             call_start: Some(format!("{}{SEP}start", call_job.id)),
             exit: None,
