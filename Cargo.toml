@@ -44,6 +44,9 @@ testkit = { package = "petri-testkit", path = "crates/core/testkit" }
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
 marked-yaml = "0.8"
+# The event parser under `marked-yaml`, used directly by the anchor-resolving
+# loader in `petri-frontend`; keep the version in step with `marked-yaml`'s.
+yaml-rust2 = "0.10"
 proptest = "1.11"
 libc = "0.2"
 # Full `regex`, not `regex-lite`: the `matches` builtin must accept every pattern

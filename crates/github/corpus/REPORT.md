@@ -18,13 +18,13 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 
 | Action | Uses |
 |---|---|
-| `actions/checkout` | 660 |
+| `actions/checkout` | 667 |
 | `actions/upload-artifact` | 251 |
 | `actions/download-artifact` | 207 |
 | `actions/setup-node` | 124 |
+| `actions/setup-python` | 113 |
 | `Swatinem/rust-cache` | 111 |
 | `actions/github-script` | 111 |
-| `actions/setup-python` | 107 |
 | `actions/cache/restore` | 91 |
 | `actions/cache` | 79 |
 | `dtolnay/rust-toolchain` | 70 |
@@ -67,7 +67,7 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 |---|---|
 | `workflow_call` | 92 |
 | `inputs` | 70 |
-| `runs_on.expression` | 47 |
+| `runs_on.expression` | 49 |
 | `workflow_dispatch.inputs` | 46 |
 | `runs_on.unknown` | 22 |
 | `action.docker` | 18 |
@@ -82,8 +82,8 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `container.expression` | 2 |
 | `container.options` | 2 |
 | `step.background` | 2 |
-| `yaml.anchors` | 2 |
 | `action.remote` | 1 |
+| `continue_on_error.expression` | 1 |
 | `yaml.multiline_flow` | 1 |
 
 ## Failures that are not specific rejections
@@ -323,7 +323,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | prometheus/prometheus | `stale.yml` | warnings | 3 | — |
 | python/cpython | `add-issue-header.yml` | warnings | 3 | — |
 | python/cpython | `build.yml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `workflow_call` |
-| python/cpython | `jit.yml` | unsupported | — | `yaml.anchors` |
+| python/cpython | `jit.yml` | unsupported | — | `continue_on_error.expression`, `runs_on.expression` |
 | python/cpython | `lint.yml` | warnings | 6 | — |
 | python/cpython | `mypy.yml` | unsupported | — | `yaml.multiline_flow` |
 | python/cpython | `new-bugs-announce-notifier.yml` | warnings | 6 | — |
@@ -341,7 +341,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `reusable-wasi.yml` | unsupported | — | `runs_on.unknown`, `workflow_call` |
 | python/cpython | `reusable-windows.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_call` |
 | python/cpython | `stale.yml` | warnings | 3 | — |
-| python/cpython | `tail-call.yml` | unsupported | — | `yaml.anchors` |
+| python/cpython | `tail-call.yml` | unsupported | — | `runs_on.expression` |
 | python/cpython | `verify-ensurepip-wheels.yml` | warnings | 7 | — |
 | python/cpython | `verify-expat.yml` | warnings | 5 | — |
 | rails/rails | `check-markdown-api.yml` | warnings | 6 | — |

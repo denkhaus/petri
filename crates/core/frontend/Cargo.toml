@@ -12,6 +12,7 @@ name = "frontend"
 [dependencies]
 ir = { workspace = true }
 marked-yaml = { workspace = true }
+yaml-rust2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }

@@ -476,6 +476,7 @@ dependencies = [
  "serde_json",
  "smol_str",
  "thiserror",
+ "yaml-rust2",
 ]
 
 [[package]]

@@ -5,12 +5,14 @@
 //! iterate sequences, read scalars as the type the format expects, and complain with
 //! a span when the shape is wrong.
 
+use marked_yaml::Node as MarkedNode;
 use marked_yaml::types::{MarkedMappingNode, MarkedScalarNode, MarkedSequenceNode};
-use marked_yaml::{LoadError, Node as MarkedNode};
 use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::diag::{Diagnostics, Span};
+
+mod loader;
 
 /// A parsed document, with the file name every span will carry.
 pub struct Document {
@@ -24,22 +26,26 @@ impl Document {
     ///
     /// Coercion prevention is on: a quoted scalar (`''`, `'true'`, `'123'`) stays a
     /// string, so [`Scalar::is_plain`] really means "written unquoted" and only
-    /// plain scalars type-infer.
+    /// plain scalars type-infer. Anchors and aliases resolve while loading, each
+    /// alias a copy of the anchored node that keeps the anchor site's spans.
     pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Document> {
-        let options = marked_yaml::LoaderOptions::default().prevent_coercion(true);
-        match marked_yaml::parse_yaml_with_options(0, text, options) {
+        match loader::load(text) {
             Ok(root) => Some(Document {
                 file: SmolStr::new(file),
                 root,
             }),
-            Err(error) => {
-                let (mut line, mut column, message) = match &error {
-                    LoadError::ScanError(marker, scan) => (
-                        marker.line() as u32,
-                        marker.column() as u32,
+            Err(failure) => {
+                let (mut line, mut column, message) = match failure {
+                    loader::ParseFailure::Scan(scan) => (
+                        scan.marker().line() as u32,
+                        scan.marker().col() as u32 + 1,
                         scan.to_string(),
                     ),
-                    other => (0, 0, other.to_string()),
+                    loader::ParseFailure::Shape {
+                        line,
+                        column,
+                        message,
+                    } => (line, column, message),
                 };
                 // Some errors carry their position only in the text.
                 if line == 0
@@ -61,13 +67,6 @@ impl Document {
                         "a multi-line `[…]` or `{…}` value followed by a dedent",
                         "the positional YAML reader does not accept this shape yet; write the list in block \
                          form (`- item` per line) or on one line",
-                    );
-                } else if message.contains("anchor") || message.contains("alias") {
-                    diags.unsupported(
-                        "yaml.anchors",
-                        Span::new(file, line, column),
-                        "YAML anchors and aliases (`&name` / `*name`)",
-                        "the positional YAML reader does not resolve anchors yet; expand the aliased content inline",
                     );
                 } else {
                     diags.error(
