@@ -270,37 +270,46 @@ impl<'w, 'a> Lowering<'w, 'a> {
             leg.map(|l| format!(" (matrix leg {l})"))
                 .unwrap_or_default()
         };
-        let lowered = label.to_lowercase();
-        if lowered.starts_with("windows") {
-            self.diags.unsupported(
+        match crate::runners::classify(label) {
+            crate::runners::LabelClass::Windows => self.diags.unsupported(
                 "runs_on.windows",
                 span,
                 format!("`runs-on: {label}`{}", place()),
                 "Windows runners are out of scope; the local executor emulates Linux runners",
-            );
-        } else if lowered.starts_with("macos") {
-            self.diags.unsupported(
+            ),
+            crate::runners::LabelClass::MacOs => self.diags.unsupported(
                 "runs_on.macos",
                 span,
                 format!("`runs-on: {label}`{}", place()),
                 "macOS runners are out of scope; the local executor emulates Linux runners",
-            );
-        } else if !self.runners.knows_lowered(&lowered) {
-            self.diags.unsupported(
-                "runs_on.unknown",
-                span,
-                format!(
-                    "`runs-on: {label}`{} is not a label the runner map knows",
-                    place()
-                ),
-                &format!(
-                    "labels this machine places: {}. A third-party or self-hosted label naming a \
-                     usable Linux environment can be added to the runner map — \
-                     `PETRI_RUNNER_LABELS` for the shipped CLI, `GitHubActions::with_runners` in \
-                     code",
-                    self.runners.known().join(", ")
-                ),
-            );
+            ),
+            // Named Linux by its own tokens: the environment the local executor
+            // stands in for, config not required.
+            crate::runners::LabelClass::Linux => {}
+            crate::runners::LabelClass::Opaque => {
+                if !self.runners.knows(label) {
+                    let configured = self.runners.configured();
+                    self.diags.unsupported(
+                        "runs_on.unknown",
+                        span,
+                        format!(
+                            "`runs-on: {label}`{} says nothing about its platform",
+                            place()
+                        ),
+                        &format!(
+                            "labels naming an Ubuntu or Linux environment place here by their own \
+                             text; an opaque pool label joins through the runner map \
+                             (`PETRI_RUNNER_LABELS` for the shipped CLI, \
+                             `GitHubActions::with_runners` in code){}",
+                            if configured.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; configured: {}", configured.join(", "))
+                            }
+                        ),
+                    );
+                }
+            }
         }
         spec.requirements.push(SmolStr::new(label));
     }

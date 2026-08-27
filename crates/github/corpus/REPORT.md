@@ -1,14 +1,14 @@
 # Compatibility corpus report
 
-316 workflows from 21 repositories; 53 need a Windows or macOS runner or shell and are out of scope by policy, leaving **263 in scope**.
+316 workflows from 21 repositories; 57 need a Windows or macOS runner or shell and are out of scope by policy, leaving **259 in scope**.
 
 Remote `uses:` references resolve through the action snapshot: 305 references, 1 of them unavailable. Refresh with `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.
 
-| Result (of the in-scope 263) | Count | Share |
+| Result (of the in-scope 259) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 8% |
-| lowered with warnings | 189 | 72% |
-| rejected with a specific `unsupported.*` code | 52 | 20% |
+| lowered with warnings | 196 | 76% |
+| rejected with a specific `unsupported.*` code | 41 | 16% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -66,11 +66,10 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | Feature | Workflows |
 |---|---|
 | `runs_on.expression` | 19 |
-| `runs_on.unknown` | 15 |
-| `action.docker` | 14 |
+| `action.docker` | 13 |
 | `action.local_missing` | 3 |
 | `services` | 3 |
-| `timeout.expression` | 2 |
+| `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
 | `action.remote` | 1 |
 | `step.background` | 1 |
@@ -92,7 +91,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | actions/checkout | `test.yml` | out of scope | — | — |
 | actions/checkout | `update-main-version.yml` | clean | 7 | — |
 | actions/checkout | `update-test-ubuntu-git.yml` | warnings | 10 | — |
-| astral-sh/ruff | `build-binaries.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown` |
+| astral-sh/ruff | `build-binaries.yml` | unsupported | — | `runs_on.expression` |
 | astral-sh/ruff | `build-docker.yml` | warnings | 48 | — |
 | astral-sh/ruff | `build-wasm.yml` | warnings | 11 | — |
 | astral-sh/ruff | `ci.yaml` | out of scope | — | — |
@@ -107,7 +106,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/ruff | `publish-ty-playground.yml` | warnings | 23 | — |
 | astral-sh/ruff | `publish-versions.yml` | warnings | 12 | — |
 | astral-sh/ruff | `publish-wasm.yml` | warnings | 7 | — |
-| astral-sh/ruff | `release.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown` |
+| astral-sh/ruff | `release.yml` | unsupported | — | `runs_on.expression` |
 | astral-sh/ruff | `sync_typeshed.yaml` | out of scope | — | — |
 | astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | unsupported | — | `runs_on.expression` |
 | astral-sh/ruff | `ty-ecosystem-report.yaml` | unsupported | — | `runs_on.expression` |
@@ -115,32 +114,32 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `bench.yml` | unsupported | — | `runs_on.unknown` |
 | astral-sh/uv | `build-dev-binaries.yml` | out of scope | — | — |
 | astral-sh/uv | `build-docker.yml` | warnings | 44 | — |
-| astral-sh/uv | `build-release-binaries.yml` | unsupported | — | `runs_on.unknown`, `timeout.expression` |
+| astral-sh/uv | `build-release-binaries.yml` | out of scope | — | — |
 | astral-sh/uv | `check-docs.yml` | warnings | 12 | — |
 | astral-sh/uv | `check-fmt.yml` | warnings | 18 | — |
 | astral-sh/uv | `check-generated-files.yml` | warnings | 14 | — |
-| astral-sh/uv | `check-lint.yml` | unsupported | — | `action.docker`, `runs_on.unknown` |
+| astral-sh/uv | `check-lint.yml` | out of scope | — | — |
 | astral-sh/uv | `check-lock.yml` | warnings | 8 | — |
-| astral-sh/uv | `check-publish.yml` | unsupported | — | `runs_on.unknown` |
+| astral-sh/uv | `check-publish.yml` | warnings | 7 | — |
 | astral-sh/uv | `check-release.yml` | clean | 6 | — |
 | astral-sh/uv | `check-zizmor.yml` | warnings | 6 | — |
 | astral-sh/uv | `ci.yml` | out of scope | — | — |
 | astral-sh/uv | `diagnose-workflow-failure.yml` | warnings | 32 | — |
 | astral-sh/uv | `fix-bug.yml` | unsupported | — | `runs_on.expression` |
 | astral-sh/uv | `issue-triage.yml` | unsupported | — | `runs_on.expression` |
-| astral-sh/uv | `plan.yml` | unsupported | — | `runs_on.unknown` |
+| astral-sh/uv | `plan.yml` | warnings | 5 | — |
 | astral-sh/uv | `promote-pull-request.yml` | warnings | 30 | — |
 | astral-sh/uv | `publish-crates.yml` | warnings | 8 | — |
 | astral-sh/uv | `publish-docs.yml` | warnings | 17 | — |
 | astral-sh/uv | `publish-mirror.yml` | warnings | 5 | — |
 | astral-sh/uv | `publish-pypi.yml` | warnings | 12 | — |
 | astral-sh/uv | `publish-versions.yml` | warnings | 12 | — |
-| astral-sh/uv | `pull-request-conflicts.yml` | unsupported | — | `runs_on.unknown` |
+| astral-sh/uv | `pull-request-conflicts.yml` | warnings | 50 | — |
 | astral-sh/uv | `pull-request-labels.yml` | warnings | 36 | — |
 | astral-sh/uv | `pull-request-security-review.yml` | warnings | 41 | — |
-| astral-sh/uv | `rebase-conflicted-pull-request.yml` | unsupported | — | `runs_on.unknown` |
+| astral-sh/uv | `rebase-conflicted-pull-request.yml` | warnings | 39 | — |
 | astral-sh/uv | `release-prepare.yml` | warnings | 33 | — |
-| astral-sh/uv | `release.yml` | unsupported | — | `runs_on.unknown`, `timeout.expression` |
+| astral-sh/uv | `release.yml` | out of scope | — | — |
 | astral-sh/uv | `reproduce-bug.yml` | unsupported | — | `runs_on.expression` |
 | astral-sh/uv | `sync-python-releases.yml` | warnings | 14 | — |
 | astral-sh/uv | `sync-uv-dev.yml` | warnings | 5 | — |
@@ -150,7 +149,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `test-smoke.yml` | out of scope | — | — |
 | astral-sh/uv | `test-system.yml` | out of scope | — | — |
 | astral-sh/uv | `test-windows-trampolines.yml` | out of scope | — | — |
-| astral-sh/uv | `test.yml` | unsupported | — | `runs_on.unknown` |
+| astral-sh/uv | `test.yml` | out of scope | — | — |
 | astral-sh/uv | `update-issue-context.yml` | warnings | 33 | — |
 | astral-sh/uv | `update-pull-request-parent.yml` | warnings | 6 | — |
 | cli/cli | `agentics-maintenance.yml` | warnings | 99 | — |
@@ -166,7 +165,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | cli/cli | `triage-issues.yml` | warnings | 64 | — |
 | cli/cli | `triage-pull-requests.yml` | warnings | 59 | — |
 | cli/cli | `triage-scheduled-tasks.yml` | warnings | 18 | — |
-| denoland/deno | `cargo_publish.generated.yml` | unsupported | — | `runs_on.unknown` |
+| denoland/deno | `cargo_publish.generated.yml` | warnings | 16 | — |
 | denoland/deno | `ci.generated.yml` | out of scope | — | — |
 | denoland/deno | `create_prerelease_tag.generated.yml` | warnings | 8 | — |
 | denoland/deno | `ecosystem_compat_test.generated.yml` | out of scope | — | — |
@@ -323,11 +322,11 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `reusable-context.yml` | warnings | 10 | — |
 | python/cpython | `reusable-docs.yml` | warnings | 52 | — |
 | python/cpython | `reusable-emscripten.yml` | warnings | 22 | — |
-| python/cpython | `reusable-install.yml` | unsupported | — | `runs_on.unknown` |
+| python/cpython | `reusable-install.yml` | warnings | 13 | — |
 | python/cpython | `reusable-macos.yml` | unsupported | — | `runs_on.expression` |
 | python/cpython | `reusable-san.yml` | warnings | 19 | — |
 | python/cpython | `reusable-ubuntu.yml` | unsupported | — | `runs_on.expression` |
-| python/cpython | `reusable-wasi.yml` | unsupported | — | `runs_on.unknown` |
+| python/cpython | `reusable-wasi.yml` | warnings | 17 | — |
 | python/cpython | `reusable-windows.yml` | unsupported | — | `runs_on.expression` |
 | python/cpython | `stale.yml` | warnings | 3 | — |
 | python/cpython | `tail-call.yml` | out of scope | — | — |

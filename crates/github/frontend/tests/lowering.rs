@@ -485,6 +485,43 @@ jobs:
     }
 }
 
+/// A label's own tokens decide its platform: Ubuntu/Linux pools place without
+/// configuration, Windows and macOS pools are their platforms' rejections
+/// wherever the token appears, and only genuinely opaque labels need the map.
+#[test]
+fn labels_place_by_their_own_tokens() {
+    let text = r#"
+on: push
+jobs:
+  depot:
+    runs-on: depot-ubuntu-22.04-16
+    steps:
+      - run: echo
+  xl:
+    runs-on: [ubuntu-24.04-xl, ubuntu-26.04-arm]
+    steps:
+      - run: echo
+"#;
+    let graph = lower_ok(text);
+    assert!(!graph.nodes.is_empty());
+    assert!(diagnostics(text).is_empty(), "{:?}", diagnostics(text));
+
+    for (label, code) in [
+        ("namespace-profile-macos-15", "unsupported.runs_on.macos"),
+        (
+            "namespace-profile-windows-2022-x86-64-4",
+            "unsupported.runs_on.windows",
+        ),
+        ("codspeed-macro", "unsupported.runs_on.unknown"),
+    ] {
+        let text = format!(
+            "on: push\njobs:\n  j:\n    runs-on: {label}\n    steps:\n      - run: echo\n"
+        );
+        let diags = diagnostics(&text);
+        assert!(diags.iter().any(|d| d.code == code), "{label}: {diags:?}");
+    }
+}
+
 /// Windows and macOS runners are out of scope: the local executor emulates
 /// Linux runners only.
 #[test]

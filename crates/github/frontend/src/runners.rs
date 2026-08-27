@@ -1,40 +1,56 @@
 //! Which `runs-on` labels the local executor can place.
 //!
-//! The built-in set is GitHub's `ubuntu-*` labels ([`KNOWN_RUNS_ON`]) — the
-//! environments the local executor emulates on this machine. Configuration adds
-//! labels that also describe usable Linux environments this machine can stand
-//! in for: a third-party pool (`depot-ubuntu-24.04-8`), a self-hosted set
-//! (`self-hosted`, `linux`, `x64`). A job places only when every label of its
-//! set resolves — GitHub requires all labels to match, and so does this map —
-//! and an unresolved label is an explicit `runs_on.unknown` rejection naming
-//! the label, never a silently skipped job.
+//! A runner label's own text is the only information anyone has about it, and
+//! pools are named so humans can read the platform: `ubuntu-24.04-arm`,
+//! `depot-ubuntu-22.04-16`, `namespace-profile-macos-15`. [`classify`] reads it
+//! the same way, by whole tokens: a label naming Ubuntu or Linux places on the
+//! local executor — the same claim `ubuntu-latest` has always made, an
+//! environment this machine stands in for — and a label naming Windows or
+//! macOS is that platform's specific out-of-scope rejection wherever the token
+//! appears, not just as a prefix. Labels that say nothing (`self-hosted`,
+//! `gpu`, `codspeed-macro`) answer to the host's [`RunnerMap`]: whether an
+//! opaque pool is a usable Linux environment is the host's call, not a
+//! frontend guess, and an unmapped one is an explicit `runs_on.unknown`
+//! rejection naming the label — never a silently skipped job.
 //!
-//! Windows and macOS labels stay specific errors whatever the configuration
-//! says: the local executor emulates Linux, and a label claiming otherwise is a
-//! contradiction to reject, not to map. Static and expression-derived labels
-//! alike pass through this map — both reach the lowering's one label check.
+//! A job places only when every label of its set resolves — GitHub requires
+//! all labels to match, and so does this policy. Static and expression-derived
+//! labels alike pass through the one label check.
 
 use std::collections::BTreeSet;
 
-/// `runs-on` labels the local executor places out of the box.
-///
-/// These are GitHub-hosted labels the local executor places on this machine or a
-/// Linux container. Third-party and self-hosted labels (`depot-*`,
-/// `namespace-profile-*`, `self-hosted`) are rejected per label unless the
-/// host's [`RunnerMap`] maps them: whether such a label names a usable Linux
-/// environment is the host's call, not a frontend guess.
-pub const KNOWN_RUNS_ON: &[&str] = &[
-    "ubuntu-latest",
-    "ubuntu-slim",
-    "ubuntu-26.04",
-    "ubuntu-24.04",
-    "ubuntu-22.04",
-    "ubuntu-20.04",
-    "ubuntu-24.04-arm",
-    "ubuntu-22.04-arm",
-];
+/// What a label's own text says about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelClass {
+    /// Names an Ubuntu or Linux environment: the local executor places it.
+    Linux,
+    /// Names a Windows runner.
+    Windows,
+    /// Names a macOS runner.
+    MacOs,
+    /// Says nothing about its platform: the runner map decides.
+    Opaque,
+}
 
-/// The label map: built-ins plus whatever the host's configuration added.
+/// Classify a label by its whole tokens (split on `-`, `_`, `.`), so
+/// `codspeed-macro` does not read as a Mac and `depot-ubuntu-24.04-16` reads
+/// as the Ubuntu pool it is. Windows and macOS win over a stray Linux token:
+/// a contradiction is rejected, not mapped.
+pub fn classify(label: &str) -> LabelClass {
+    let mut class = LabelClass::Opaque;
+    for token in label.to_lowercase().split(['-', '_', '.']) {
+        match token {
+            "windows" => return LabelClass::Windows,
+            "macos" | "osx" => return LabelClass::MacOs,
+            "ubuntu" | "linux" => class = LabelClass::Linux,
+            _ => {}
+        }
+    }
+    class
+}
+
+/// The host's map for opaque labels: which of them name a usable Linux
+/// environment on this machine.
 #[derive(Clone, Debug, Default)]
 pub struct RunnerMap {
     /// Configured labels, lowercased — labels are case-insensitive on GitHub.
@@ -42,7 +58,7 @@ pub struct RunnerMap {
 }
 
 impl RunnerMap {
-    /// The built-in `ubuntu-*` labels and nothing else.
+    /// The naming rule and nothing configured.
     pub fn builtin() -> Self {
         Self::default()
     }
@@ -65,23 +81,15 @@ impl RunnerMap {
         self
     }
 
-    /// Whether one label resolves, case-insensitively.
+    /// Whether one label resolves, case-insensitively: it names Linux, or the
+    /// host mapped it.
     pub fn knows(&self, label: &str) -> bool {
-        self.knows_lowered(&label.to_lowercase())
+        classify(label) == LabelClass::Linux || self.extra.contains(&label.to_lowercase())
     }
 
-    /// [`Self::knows`], for a caller that already lowercased the label.
-    pub(crate) fn knows_lowered(&self, lowered: &str) -> bool {
-        KNOWN_RUNS_ON.contains(&lowered) || self.extra.contains(lowered)
-    }
-
-    /// Every label that resolves, built-ins first — the rejection hint's list.
-    pub fn known(&self) -> Vec<&str> {
-        KNOWN_RUNS_ON
-            .iter()
-            .copied()
-            .chain(self.extra.iter().map(String::as_str))
-            .collect()
+    /// The configured labels, for the rejection hint.
+    pub fn configured(&self) -> Vec<&str> {
+        self.extra.iter().map(String::as_str).collect()
     }
 }
 
@@ -90,16 +98,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_written_list_parses_and_labels_are_case_insensitive() {
-        let map =
-            RunnerMap::builtin().allow_list(" depot-ubuntu-24.04-8, Self-Hosted\nlinux  x64,,");
-        for label in ["depot-ubuntu-24.04-8", "self-hosted", "LINUX", "x64"] {
+    fn labels_classify_by_their_own_tokens() {
+        for label in [
+            "ubuntu-latest",
+            "Ubuntu-26.04",
+            "ubuntu-24.04-arm",
+            "ubuntu-24.04-xl",
+            "depot-ubuntu-22.04-16",
+            "depot-ubuntu-24.04-arm-8",
+            "self-hosted-linux-x64",
+        ] {
+            assert_eq!(classify(label), LabelClass::Linux, "{label}");
+        }
+        for label in ["windows-latest", "windows-11-arm", "namespace-profile-windows-2022-x86-64-4"]
+        {
+            assert_eq!(classify(label), LabelClass::Windows, "{label}");
+        }
+        for label in ["macos-14", "macos-15-intel", "namespace-profile-macos-15"] {
+            assert_eq!(classify(label), LabelClass::MacOs, "{label}");
+        }
+        for label in ["self-hosted", "gpu", "codspeed-macro", "namespace-profile-default"] {
+            assert_eq!(classify(label), LabelClass::Opaque, "{label}");
+        }
+    }
+
+    #[test]
+    fn the_map_covers_opaque_labels_and_parses_lists() {
+        let map = RunnerMap::builtin().allow_list(" codspeed-macro, Self-Hosted\nx64,,");
+        for label in ["codspeed-macro", "self-hosted", "X64"] {
             assert!(map.knows(label), "{label}");
         }
-        assert!(map.knows("Ubuntu-Latest"), "built-ins stay");
-        assert!(
-            !map.knows("namespace-profile-arm"),
-            "unconfigured stays unknown"
-        );
+        assert!(map.knows("Ubuntu-Latest"), "the naming rule needs no config");
+        assert!(!map.knows("namespace-profile-default"), "opaque stays unknown");
     }
 }
