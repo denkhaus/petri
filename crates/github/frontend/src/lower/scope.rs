@@ -16,6 +16,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
     pub(super) fn scope_for(&mut self, job: &Job<'a>) -> ScopeId {
         let mut scope = Scope::new(ScopeId::new(0));
         scope.runtime = self.runtime_for(job);
+        scope.services = self.services_for(job);
 
         // Default environment GitHub gives every step, from the run parameters.
         let site = self.base_site(job);
@@ -187,6 +188,136 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
         spec
+    }
+
+    /// `services:` onto the scope: sidecar containers with the job's lifetime,
+    /// realized at acquisition. Images and ports are literal; env lowers like
+    /// scope env (resolved against the run's parameters); `options` splits into
+    /// the flags GitHub hands the engine, opaque from here on.
+    fn services_for(&mut self, job: &Job<'a>) -> Vec<ir::ServiceSpec> {
+        let Some(node) = job.services else {
+            return Vec::new();
+        };
+        let Some(m) = node.expect_mapping(&mut self.diags, "`services`") else {
+            return Vec::new();
+        };
+        let site = self.base_site(job);
+        let mut services = Vec::new();
+        for (alias, spec) in m.iter() {
+            if alias.is_empty()
+                || !alias
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                self.diags.error(
+                    "gha.bad_service",
+                    spec.span(),
+                    format!("service name `{alias}` is not a valid container alias"),
+                );
+                continue;
+            }
+            let mut service = ir::ServiceSpec::new(alias, "");
+            let image = if spec.is_scalar() {
+                Some(spec)
+            } else if let Some(sm) = spec.as_mapping() {
+                for (key, span) in sm.keys() {
+                    match key {
+                        "image" | "env" | "ports" | "options" => {}
+                        "credentials" => self.diags.unsupported(
+                            "container.credentials",
+                            span,
+                            format!("service `{alias}` uses registry credentials"),
+                            "registry auth for service images is not wired yet",
+                        ),
+                        "volumes" => self.diags.unsupported(
+                            "services.volumes",
+                            span,
+                            format!("service `{alias}` mounts volumes"),
+                            "service volumes name paths of the runner machine; not yet mapped",
+                        ),
+                        other => self.diags.error(
+                            "gha.bad_service",
+                            span,
+                            format!("unknown key `{other}` on service `{alias}`"),
+                        ),
+                    }
+                }
+                for (key, value) in sm.get("env").and_then(|e| e.as_mapping()).iter().flat_map(|em| em.iter()) {
+                    match self.env_value(&value, &site, false) {
+                        Some(EnvValue::Plain(v)) => {
+                            service.env.insert(SmolStr::new(key), v);
+                        }
+                        Some(EnvValue::Secret(_)) => self.diags.unsupported(
+                            "services.secret_env",
+                            value.span(),
+                            format!("service `{alias}` env `{key}` is a secret"),
+                            "secret-valued service env is not wired yet; use a literal value",
+                        ),
+                        None => {}
+                    }
+                }
+                if let Some(ports) = sm.get("ports") {
+                    let entries: Vec<Node<'_>> = match ports.as_sequence() {
+                        Some(seq) => seq.iter().collect(),
+                        None => vec![ports],
+                    };
+                    for entry in entries {
+                        let text = super::scalar_text(entry);
+                        if text.contains("${{") {
+                            self.diags.unsupported(
+                                "container.expression",
+                                entry.span(),
+                                format!("service `{alias}` has an expression-valued port"),
+                                "ports are fixed per scope; use literals",
+                            );
+                            continue;
+                        }
+                        service.ports.push(SmolStr::new(text));
+                    }
+                }
+                if let Some(options) = sm.get("options") {
+                    let text = options.as_str().unwrap_or_default();
+                    if text.contains("${{") {
+                        self.diags.unsupported(
+                            "container.expression",
+                            options.span(),
+                            format!("service `{alias}` has expression-valued options"),
+                            "options are fixed per scope; use literals",
+                        );
+                    } else {
+                        service.options = crate::split_shell_words(text)
+                            .into_iter()
+                            .map(SmolStr::new)
+                            .collect();
+                    }
+                }
+                sm.get("image")
+            } else {
+                None
+            };
+            match image.and_then(|i| i.as_str()) {
+                Some(image) if image.contains("${{") => {
+                    self.diags.unsupported(
+                        "container.expression",
+                        spec.span(),
+                        format!("service `{alias}` has an expression-valued image"),
+                        "the image is fixed per scope; use a literal",
+                    );
+                    continue;
+                }
+                Some(image) => service.image = SmolStr::new(image),
+                None => {
+                    self.diags.error(
+                        "gha.bad_service",
+                        spec.span(),
+                        format!("service `{alias}` needs an `image`"),
+                    );
+                    continue;
+                }
+            }
+            services.push(service);
+        }
+        services
     }
 
     /// `runs-on` carrying expressions: resolved now, once per matrix leg, as

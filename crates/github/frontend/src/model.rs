@@ -85,6 +85,7 @@ pub struct Job<'a> {
     pub condition: Option<Node<'a>>,
     pub runs_on: Option<Node<'a>>,
     pub container: Option<Node<'a>>,
+    pub services: Option<Node<'a>>,
     pub env: Vec<(String, Node<'a>)>,
     pub defaults: Defaults<'a>,
     pub strategy: Option<Strategy<'a>>,
@@ -383,14 +384,6 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
     if let Some(c) = m.get("concurrency") {
         warn_concurrency(c, diags);
     }
-    if let Some(s) = m.get("services") {
-        diags.unsupported(
-            "services",
-            s.span(),
-            format!("job `{id}` uses service containers"),
-            "service containers are v2; run the service from a step for now",
-        );
-    }
     let call = m.get("uses").and_then(|u| read_call(id, &m, u, diags));
     let environment = m
         .get("environment")
@@ -464,6 +457,7 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
         condition: m.get("if"),
         runs_on: m.get("runs-on"),
         container: m.get("container"),
+        services: m.get("services"),
         env: env_entries(m.get("env"), diags, &format!("job `{id}` env")),
         defaults: read_defaults(m.get("defaults"), diags),
         strategy,

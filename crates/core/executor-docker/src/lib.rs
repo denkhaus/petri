@@ -31,6 +31,9 @@
 //! behaves, instead of correct on the platforms that happen to suit it.
 
 mod oneshot;
+mod services;
+
+pub use services::SERVICE_HEALTH_WAIT;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -158,6 +161,28 @@ impl DockerExecutor {
         Ok(format!("{}-s", self.container_name(instance).await?))
     }
 
+    /// Realize `scope`'s sidecar services for an environment acquired
+    /// elsewhere — a host scope under the composed local executor. Ports
+    /// publish to the host, since the scope's steps reach services over
+    /// localhost. Returns the scope network for the runner to attach to,
+    /// `None` when the scope declares no services.
+    pub async fn realize_host_services(
+        &self,
+        scope: &ScopeSpec,
+        ctx: &AcquireContext,
+    ) -> Result<Option<String>, EnvError> {
+        let base = self.container_name(&scope.instance).await?;
+        services::realize(scope, &base, true, self.pull, ctx).await
+    }
+
+    /// Tear down (or fence away) a host scope's service world: its containers
+    /// by prefix, then its network. Best effort and idempotent.
+    pub async fn sweep_scope_services(&self, instance: &str) -> Result<(), EnvError> {
+        let base = self.container_name(instance).await?;
+        services::sweep(&base).await;
+        Ok(())
+    }
+
     /// A one-shot runner bound to a scope this executor did *not* acquire — a
     /// host scope under the composed local executor. Same run identity, image
     /// cache and cleanup fence as this executor's own scopes. `network` is the
@@ -224,6 +249,8 @@ struct DockerTeardown {
     path: PathBuf,
     retention: Retention,
     grace: Duration,
+    /// The scope has a service world (containers and a network) to tear down.
+    services: bool,
 }
 
 #[async_trait]
@@ -262,10 +289,17 @@ impl Executor for DockerExecutor {
         // deterministic names; removing them ends whatever still runs inside and
         // makes their status unreadable. The names carry the run id recorded in
         // the run dir, so a resuming process over the same run dir reaches the
-        // crashed run's containers. One-shot containers the crash left behind
-        // share the scope's prefix and go the same way.
+        // crashed run's containers. One-shot containers and the service world a
+        // crash left behind share the scope's prefixes and go the same way.
         let _ = run_docker(&["rm", "-f", &name]).await;
         sweep_containers(&format!("{name}-s")).await;
+        if !scope.services.is_empty() {
+            services::sweep(&name).await;
+        }
+
+        // The scope's services first: the job container joins their network at
+        // creation, and every service is healthy before any step can fire.
+        let network = services::realize(scope, &name, false, self.pull, ctx).await?;
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", workspace.display());
         let mut create: Vec<String> = vec![
@@ -278,6 +312,10 @@ impl Executor for DockerExecutor {
             "-w".into(),
             CONTAINER_WORKSPACE.into(),
         ];
+        if let Some(network) = &network {
+            create.push("--network".into());
+            create.push(network.clone());
+        }
         for (key, value) in &scope.env {
             create.push("-e".into());
             create.push(format!("{key}={value}"));
@@ -289,8 +327,20 @@ impl Executor for DockerExecutor {
         create.extend(["sleep".to_string(), "infinity".to_string()]);
 
         let refs: Vec<&str> = create.iter().map(String::as_str).collect();
-        run_docker(&refs).await?;
-        run_docker(&["start", &name]).await?;
+        let created = async {
+            run_docker(&refs).await?;
+            run_docker(&["start", &name]).await
+        }
+        .await;
+        if let Err(error) = created {
+            // A failed acquire leaks nothing: the services came up for a job
+            // container that will never exist.
+            let _ = run_docker(&["rm", "-f", &name]).await;
+            if network.is_some() {
+                services::sweep(&name).await;
+            }
+            return Err(error);
+        }
 
         // One-shot containers in this scope's world share the job container's
         // network namespace, so a service reachable from the job is reachable
@@ -318,6 +368,7 @@ impl Executor for DockerExecutor {
                 path: workspace,
                 retention: self.retention,
                 grace: scope.grace,
+                services: network.is_some(),
             },
         )
         .with_runner(Arc::new(runner)))
@@ -330,6 +381,7 @@ impl Executor for DockerExecutor {
             path,
             retention,
             grace,
+            services,
         }) = env.teardown::<DockerTeardown>()
         else {
             return report.problem("docker executor was handed a foreign environment");
@@ -346,6 +398,13 @@ impl Executor for DockerExecutor {
         match run_docker(&["rm", "-f", "-v", container]).await {
             Ok(_) => report = report.released(format!("container {container}")),
             Err(e) => report = report.problem(format!("could not remove {container}: {e}")),
+        }
+
+        // The service world goes with the scope — after the job container,
+        // which was attached to its network.
+        if *services {
+            services::sweep(container).await;
+            report = report.released(format!("services of {container}"));
         }
 
         let workspace = format!("workspace {}", path.display());

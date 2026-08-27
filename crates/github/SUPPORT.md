@@ -68,6 +68,16 @@ diagnostics. `workflow_dispatch` inputs — and a reusable file run directly —
 bind `inputs` from the run's parameters (`github.event.inputs`) through the
 same typed model.
 
+**Service containers.** `services:` on a job: sidecar containers with the
+job's lifetime, on a per-job network, each reachable by its service name —
+ports published to the host when the job runs on the host, container-to-
+container when the job is containerized. Image, `env`, `ports`, and `options`
+(raw engine flags, health checks included) map through; acquire waits for
+Docker-reported health — the image's `HEALTHCHECK`, or a `--health-cmd` in the
+options; a service with no check is ready when running — and a service that
+never gets healthy fails the job's environment routably, naming itself. Torn
+down with the job on success, failure, cancel, and crash.
+
 **Shells.** `bash`, `sh`, `python`, `pwsh`, and any custom template containing
 `{0}` (`bash -el {0}`, `/usr/bin/env bash {0}`): the script is written to a file
 and the template runs over it, as GitHub does. Whether the interpreter exists is
@@ -130,7 +140,8 @@ workflow counts in brackets rank the pressure.
 |---|---|---|
 | `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`, `inputs` and the checkout's `github` identity resolve per leg (above); what remains reads `needs`, an input the call site computes at run time, or a matrix that stays dynamic under those contexts. |
 | `workflow_call.matrix` | A matrix inside a matrix workflow call | The engine expands one region at a time; clones cannot expand again. Nested expansion is an engine feature to design, not a frontend gap. |
-| `services`, `container.expression`, `container.options` | The Docker tier's remainder [3] | Service containers and container config. Docker container actions are supported (above); services ride the same acquisition boundary, realized with the scope. |
+| `container.expression`, `container.options`, `container.credentials` | Container config [0] | Expression-valued images resolve at lowering through the placement contexts where static; `container.options` pass through as raw engine flags (service options already do); registry credentials resolve inside acquire, a secret name in the graph and plaintext only at the effect. |
+| `services.secret_env`, `services.volumes` | Service corners [0] | Secret-valued service env needs a resolution point inside acquire; volumes name runner-machine paths to map. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |

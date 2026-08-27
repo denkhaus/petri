@@ -239,6 +239,64 @@ pub fn runner_arch(arch: &str) -> &'static str {
     }
 }
 
+/// Split shell-ish text into words: whitespace separates, single and double
+/// quotes group, a backslash escapes outside single quotes. How GitHub reads
+/// `container.options`, `services.<id>.options` and a Docker step's
+/// `with.args` — one splitter, shared by the lowering and the step kinds.
+pub fn split_shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            '\'' => {
+                started = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    current.push(q);
+                }
+            }
+            '"' => {
+                started = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                current.push(escaped);
+                            }
+                        }
+                        other => current.push(other),
+                    }
+                }
+            }
+            '\\' => {
+                started = true;
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            other => {
+                started = true;
+                current.push(other);
+            }
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
+}
+
 fn repo_root(file: &Path) -> PathBuf {
     let mut dir = file
         .parent()
@@ -253,5 +311,24 @@ fn repo_root(file: &Path) -> PathBuf {
             Some(parent) => dir = parent.to_path_buf(),
             None => return start,
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_shell_words;
+
+    #[test]
+    fn words_split_like_a_shell() {
+        assert_eq!(split_shell_words("a b  c"), vec!["a", "b", "c"]);
+        assert_eq!(split_shell_words("'a b' c"), vec!["a b", "c"]);
+        assert_eq!(split_shell_words(r#""a \"b\"" c"#), vec![r#"a "b""#, "c"]);
+        assert_eq!(split_shell_words("one\\ arg"), vec!["one arg"]);
+        assert_eq!(split_shell_words("  "), Vec::<String>::new());
+        assert_eq!(split_shell_words("''"), vec![""]);
+        assert_eq!(
+            split_shell_words("--health-cmd pg_isready --health-interval 10s"),
+            vec!["--health-cmd", "pg_isready", "--health-interval", "10s"]
+        );
     }
 }

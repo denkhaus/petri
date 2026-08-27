@@ -143,7 +143,7 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
         None => None,
     };
     let args: Vec<SmolStr> = match &config.args_text {
-        Some(text) => split_args(&resolve(text)?)
+        Some(text) => frontend_gha::split_shell_words(&resolve(text)?)
             .into_iter()
             .map(SmolStr::new)
             .collect(),
@@ -418,62 +418,6 @@ impl TextResolver {
     }
 }
 
-/// Split a `with.args` string into arguments: whitespace separates, single and
-/// double quotes group, a backslash escapes inside double quotes and bare text.
-fn split_args(text: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut started = false;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            c if c.is_whitespace() => {
-                if started {
-                    args.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            '\'' => {
-                started = true;
-                for q in chars.by_ref() {
-                    if q == '\'' {
-                        break;
-                    }
-                    current.push(q);
-                }
-            }
-            '"' => {
-                started = true;
-                while let Some(q) = chars.next() {
-                    match q {
-                        '"' => break,
-                        '\\' => {
-                            if let Some(escaped) = chars.next() {
-                                current.push(escaped);
-                            }
-                        }
-                        other => current.push(other),
-                    }
-                }
-            }
-            '\\' => {
-                started = true;
-                if let Some(escaped) = chars.next() {
-                    current.push(escaped);
-                }
-            }
-            other => {
-                started = true;
-                current.push(other);
-            }
-        }
-    }
-    if started {
-        args.push(current);
-    }
-    args
-}
-
 fn exit_value(status: &executor::ExitStatus) -> Value {
     match (status.code, status.signal) {
         (Some(code), _) => Value::from(code),
@@ -485,16 +429,6 @@ fn exit_value(status: &executor::ExitStatus) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn args_split_like_a_shell() {
-        assert_eq!(split_args("a b  c"), vec!["a", "b", "c"]);
-        assert_eq!(split_args("'a b' c"), vec!["a b", "c"]);
-        assert_eq!(split_args(r#""a \"b\"" c"#), vec![r#"a "b""#, "c"]);
-        assert_eq!(split_args("one\\ arg"), vec!["one arg"]);
-        assert_eq!(split_args("  "), Vec::<String>::new());
-        assert_eq!(split_args("''"), vec![""]);
-    }
 
     #[test]
     fn tags_are_valid_and_stable() {

@@ -27,7 +27,10 @@ use smol_str::SmolStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Which {
-    Host,
+    Host {
+        /// The scope has a service world to tear down beside its processes.
+        services: bool,
+    },
     Container,
 }
 
@@ -88,19 +91,40 @@ impl Executor for LocalExecutor {
                 Ok(handle)
             }
             RuntimeTarget::HostProcess => {
-                // The fence covers this scope's one-shot containers too: a
-                // crashed run's Docker actions die before their names can be
-                // reused. Best effort, like the Docker fence — a daemon that is
-                // down has nothing of ours to remove.
+                // The fence covers this scope's one-shot containers and (when
+                // it declares any) its service world too: a crashed run's
+                // Docker side dies before its names can be reused. Best
+                // effort, like the Docker fence — a daemon that is down has
+                // nothing of ours to remove.
                 let prefix = self.docker.one_shot_prefix(&scope.instance).await?;
                 executor_docker::sweep_containers(&prefix).await;
+                let services = !scope.services.is_empty();
+                if services {
+                    self.docker.sweep_scope_services(&scope.instance).await?;
+                }
 
-                let handle = self.host.acquire(scope, ctx).await?;
+                // Services first — steps must find them healthy — realized by
+                // the Docker facilities; the host executor gets a spec with
+                // none (it is deliberately Docker-free and would refuse).
+                let network = self.docker.realize_host_services(scope, ctx).await?;
+                let mut host_scope = scope.clone();
+                host_scope.services = Vec::new();
+                let handle = match self.host.acquire(&host_scope, ctx).await {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        // A failed acquire leaks nothing.
+                        if services {
+                            let _ = self.docker.sweep_scope_services(&scope.instance).await;
+                        }
+                        return Err(error);
+                    }
+                };
                 // Docker actions in a host job run against the daemon, never
                 // through the job environment; the runner is bound here, at
-                // acquisition, and a missing daemon surfaces when it is used.
-                let runner = self.docker.scope_runner(scope, None, ctx).await?;
-                self.record(scope, Which::Host);
+                // acquisition — on the scope's network when it has one — and a
+                // missing daemon surfaces when it is used.
+                let runner = self.docker.scope_runner(scope, network, ctx).await?;
+                self.record(scope, Which::Host { services });
                 Ok(handle.with_runner(runner))
             }
         }
@@ -114,14 +138,23 @@ impl Executor for LocalExecutor {
             .remove(&(env.scope(), SmolStr::new(env.instance())));
         match which {
             Some(Which::Container) => self.docker.release(env, outcome).await,
-            Some(Which::Host) => {
+            Some(Which::Host { services }) => {
                 // One-shot leftovers first — a step aborted at its hard
                 // deadline can leave its container running — then the host's
-                // own process groups and workspace.
+                // own process groups and workspace, then the service world
+                // (nothing of the scope uses it any more).
                 if let Ok(prefix) = self.docker.one_shot_prefix(env.instance()).await {
                     executor_docker::sweep_containers(&prefix).await;
                 }
-                self.host.release(env, outcome).await
+                let instance = env.instance().to_string();
+                let mut report = self.host.release(env, outcome).await;
+                if services {
+                    report = match self.docker.sweep_scope_services(&instance).await {
+                        Ok(()) => report.released(format!("services of `{instance}`")),
+                        Err(e) => report.problem(format!("could not sweep services: {e}")),
+                    };
+                }
+                report
             }
             None => ReleaseReport::default().problem(format!(
                 "no executor is recorded for scope {} instance `{}`; nothing was released",

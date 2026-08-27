@@ -591,10 +591,6 @@ fn windows_and_macos_runners_are_rejected() {
 fn the_rejection_set_is_loud_and_specific() {
     let cases: &[(&str, &str)] = &[
         (
-            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    services: { db: { image: postgres } }\n    steps:\n      - run: echo\n",
-            "unsupported.services",
-        ),
-        (
             "on: push\njobs:\n  j:\n    runs-on: windows-latest\n    steps:\n      - run: echo\n",
             "unsupported.runs_on.windows",
         ),

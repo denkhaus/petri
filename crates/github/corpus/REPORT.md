@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 305 references, 1
 | Result (of the in-scope 253) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 215 | 85% |
-| rejected with a specific `unsupported.*` code | 16 | 6% |
+| lowered with warnings | 218 | 86% |
+| rejected with a specific `unsupported.*` code | 13 | 5% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -66,7 +66,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | Feature | Workflows |
 |---|---|
 | `runs_on.expression` | 6 |
-| `services` | 3 |
 | `action.local_missing` | 2 |
 | `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
@@ -177,16 +176,16 @@ None. Every workflow either lowered or was rejected with a specific code.
 | denoland/deno | `start_release.generated.yml` | clean | 8 | — |
 | denoland/deno | `version_bump.generated.yml` | warnings | 16 | — |
 | django/django | `benchmark.yml` | warnings | 10 | — |
-| django/django | `check-migrations.yml` | unsupported | — | `services` |
+| django/django | `check-migrations.yml` | warnings | 9 | — |
 | django/django | `check_commit_messages.yml` | warnings | 15 | — |
 | django/django | `check_pr_quality.yml` | warnings | 7 | — |
 | django/django | `coverage_comment.yml` | warnings | 4 | — |
-| django/django | `coverage_tests.yml` | unsupported | — | `services` |
+| django/django | `coverage_tests.yml` | warnings | 13 | — |
 | django/django | `docs.yml` | warnings | 11 | — |
 | django/django | `labels.yml` | warnings | 3 | — |
 | django/django | `linters.yml` | warnings | 35 | — |
 | django/django | `new_contributor_pr.yml` | warnings | 3 | — |
-| django/django | `playwright.yml` | unsupported | — | `services` |
+| django/django | `playwright.yml` | warnings | 23 | — |
 | django/django | `postgis.yml` | warnings | 12 | — |
 | django/django | `python_matrix.yml` | warnings | 15 | — |
 | django/django | `schedule_tests.yml` | out of scope | — | — |

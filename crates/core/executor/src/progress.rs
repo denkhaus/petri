@@ -19,8 +19,6 @@ pub enum Progress {
     ServiceStarted { name: SmolStr },
     /// A service reported healthy (or has no health check and is running).
     ServiceHealthy { name: SmolStr },
-    /// A service was torn down with its scope.
-    ServiceTornDown { name: SmolStr },
 }
 
 /// Where live acquisition events go. Handed to [`Executor::acquire`] through

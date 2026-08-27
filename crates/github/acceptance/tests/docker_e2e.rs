@@ -146,6 +146,49 @@ jobs:
     assert!(lines.iter().any(|l| l == "from-the-job"), "{lines:?}");
 }
 
+/// `services:` end to end, in both placements at once: the host job reaches
+/// its service over the published port on localhost, and the containerized job
+/// reaches its own by name — each healthy before the job's first step.
+#[tokio::test]
+async fn services_are_reachable_from_host_and_containerized_jobs() {
+    if !docker_ready().await {
+        return;
+    }
+    let text = r#"
+on: push
+jobs:
+  on-host:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 29812:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - run: 'exec 3<>/dev/tcp/localhost/29812 && echo service-reachable'
+  inside:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    services:
+      redis:
+        image: redis:7-alpine
+    steps:
+      - run: nslookup redis > /dev/null && echo service-resolved
+        shell: sh
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "services-e2e").await;
+    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    let lines = log_lines(&report);
+    assert!(lines.iter().any(|l| l == "service-reachable"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "service-resolved"), "{lines:?}");
+}
+
 fn errors(report: &RunReportPlus) -> Vec<String> {
     report
         .state
