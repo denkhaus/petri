@@ -1,5 +1,6 @@
 //! Workflow → HIR, per spec §12.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
@@ -18,13 +19,13 @@ use smol_str::SmolStr;
 
 use crate::action::{
     ACTION_KIND, ActionLocation, ActionRef, ActionSource, ActionSourceError, Phase, PinnedAction,
-    RUN_KIND, STATE_OUTPUT_KEY,
+    RUN_KIND, STATE_OUTPUT_KEY, unavailable_hint,
 };
 use crate::call::{self, CallGraph, CalleeSource};
 use crate::composite::{self, NodeAction, Runs, Uses};
 use crate::exprs::{
-    LoweredScalar, SEP, SecretMap, Site, config_value, lower_scalar, secret_sentinel,
-    whole_value_secret,
+    LoweredScalar, SEP, SecretMap, Site, config_value, lower_scalar, result_priority,
+    secret_sentinel, undeclared_secret, whole_value_secret,
 };
 use crate::gate::{self, Gate, GateOp};
 use crate::inputs;
@@ -48,6 +49,8 @@ pub struct Lowering<'w, 'a> {
     b: GraphBuilder,
     diags: Diagnostics,
     wf: &'w Workflow<'a>,
+    /// The planned frames — the root workflow and each inlined callee.
+    frames: Vec<Frame<'w, 'a>>,
     files: &'w dyn FileSource,
     /// Where `uses: owner/repo@ref` actions come from. `None` rejects them.
     actions: Option<&'w dyn ActionSource>,
@@ -89,16 +92,18 @@ struct Frame<'w, 'a> {
     depth: usize,
 }
 
+#[derive(Clone, Copy)]
 struct CallEdge {
     caller: usize,
     entry: usize,
 }
 
 /// One materialized job of the flat plan: which frame it belongs to, the job
-/// with its id and `needs` prefixed, and whether it is a workflow call.
-struct Entry<'a> {
+/// with its id and `needs` prefixed (borrowed as-is at the root, where there is
+/// no prefix), and whether it is a workflow call.
+struct Entry<'w, 'a> {
     frame: usize,
-    job: Job<'a>,
+    job: Cow<'w, Job<'a>>,
     kind: EntryKind,
 }
 
@@ -108,16 +113,15 @@ enum EntryKind {
     Call { callee: usize },
 }
 
-/// The lowered context a frame's jobs read, bound once, top-down.
+/// The lowered context a frame's jobs read, bound once, top-down. The frame's
+/// static facts (prefix, expansion-ness) stay on [`Frame`].
 #[derive(Default)]
 struct FrameCtx {
-    prefix: String,
     /// The `inputs` context: a call's bound `with:`, or the root's typed
     /// run-parameter reads.
     inputs: Option<BTreeMap<String, ExprId>>,
     /// How `secrets.*` names map to the provider's.
     secrets: SecretMap,
-    in_expansion: bool,
     /// Inside a callee: the call's `start` node, ANDed into every job gate of
     /// the frame — when the call was skipped, nothing of the callee runs.
     call_start: Option<String>,
@@ -131,19 +135,20 @@ struct FrameCtx {
 /// A job under its frame's prefix: the id and every `needs` entry prefixed, so
 /// names, `JobNodes` keys and wiring stay collision-free across inlined
 /// workflows. The as-written names live on in each `Site`, which strips the
-/// prefix for the `needs.*` context.
-fn materialize<'a>(job: &Job<'a>, prefix: &str) -> Job<'a> {
-    let mut out = job.clone();
+/// prefix for the `needs.*` context. With no prefix — the root frame, so the
+/// common case — the job is borrowed, not cloned.
+fn materialize<'w, 'a>(job: &'w Job<'a>, prefix: &str) -> Cow<'w, Job<'a>> {
     if prefix.is_empty() {
-        return out;
+        return Cow::Borrowed(job);
     }
+    let mut out = job.clone();
     out.id = format!("{prefix}{SEP}{}", job.id);
     out.needs = job
         .needs
         .iter()
         .map(|(need, span)| (format!("{prefix}{SEP}{need}"), span.clone()))
         .collect();
-    out
+    Cow::Owned(out)
 }
 
 /// Flatten the call graph into frames and materialized job entries, breadth
@@ -152,7 +157,7 @@ fn materialize<'a>(job: &Job<'a>, prefix: &str) -> Job<'a> {
 /// while the errors reject the workflow.
 fn plan<'w, 'a>(
     frames: &mut Vec<Frame<'w, 'a>>,
-    entries: &mut Vec<Entry<'a>>,
+    entries: &mut Vec<Entry<'w, 'a>>,
     calls: &'w CallGraph,
     models: &'w BTreeMap<String, (CalleeSource, Workflow<'a>)>,
     diags: &mut Diagnostics,
@@ -167,50 +172,38 @@ fn plan<'w, 'a>(
         for job in &wf.jobs {
             let materialized = materialize(job, &prefix);
             let has_matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
-            let Some(call) = &job.call else {
-                if has_matrix && in_expansion {
-                    nested_matrix(diags, &job.span);
-                }
-                entries.push(Entry {
-                    frame: i,
-                    job: materialized,
-                    kind: EntryKind::Job,
-                });
-                continue;
-            };
-            let callee = (depth < call::MAX_DEPTH)
-                .then(|| calls.callee(&source, &call.uses.0))
-                .flatten()
-                .and_then(|(identity, _)| models.get(&identity));
-            let Some((callee_source, callee_wf)) = callee else {
-                entries.push(Entry {
-                    frame: i,
-                    job: materialized,
-                    kind: EntryKind::Job,
-                });
-                continue;
-            };
             if has_matrix && in_expansion {
                 nested_matrix(diags, &job.span);
             }
-            let child_expansion = in_expansion || has_matrix;
-            frames.push(Frame {
-                wf: callee_wf,
-                source: callee_source.clone(),
-                prefix: materialized.id.clone(),
-                call: Some(CallEdge {
-                    caller: i,
-                    entry: entries.len(),
-                }),
-                in_expansion: child_expansion,
-                depth: depth + 1,
+            let callee = job.call.as_ref().and_then(|call| {
+                (depth < call::MAX_DEPTH)
+                    .then(|| calls.callee(&source, &call.uses.0))
+                    .flatten()
+                    .and_then(|(identity, _)| models.get(&identity))
             });
+            let kind = match callee {
+                Some((callee_source, callee_wf)) => {
+                    frames.push(Frame {
+                        wf: callee_wf,
+                        source: callee_source.clone(),
+                        prefix: materialized.id.clone(),
+                        call: Some(CallEdge {
+                            caller: i,
+                            entry: entries.len(),
+                        }),
+                        in_expansion: in_expansion || has_matrix,
+                        depth: depth + 1,
+                    });
+                    EntryKind::Call {
+                        callee: frames.len() - 1,
+                    }
+                }
+                None => EntryKind::Job,
+            };
             entries.push(Entry {
                 frame: i,
                 job: materialized,
-                kind: EntryKind::Call {
-                    callee: frames.len() - 1,
-                },
+                kind,
             });
         }
         i += 1;
@@ -286,13 +279,15 @@ pub fn lower(
         in_expansion: false,
         depth: 0,
     }];
-    let mut entries: Vec<Entry<'_>> = Vec::new();
+    let mut entries: Vec<Entry<'_, '_>> = Vec::new();
     plan(&mut frames, &mut entries, &calls, &models, &mut diags);
 
     let mut lw = Lowering {
         b: GraphBuilder::bare(),
         diags,
         wf,
+        frame_ctx: frames.iter().map(|_| FrameCtx::default()).collect(),
+        frames,
         files,
         actions,
         runners,
@@ -300,32 +295,31 @@ pub fn lower(
         jobs: HashMap::new(),
         spans: HashMap::new(),
         leg_runs_on: None,
-        frame_ctx: frames.iter().map(|_| FrameCtx::default()).collect(),
         current: 0,
     };
 
     // Frame contexts top-down: a caller's inputs bind before its callee reads
     // them, and `plan` orders parents before children.
-    for i in 0..frames.len() {
-        lw.bind_frame(i, &frames, &entries);
+    for i in 0..lw.frames.len() {
+        lw.bind_frame(i, &entries);
     }
     // Every job's scope and gate first, so `needs` can wire to them in any order.
     for e in &entries {
-        lw.enter(e.frame, &frames);
+        lw.enter(e.frame);
         match e.kind {
             EntryKind::Job => lw.job_shell(&e.job),
-            EntryKind::Call { callee } => lw.call_shell(e, callee, &frames),
+            EntryKind::Call { callee } => lw.call_shell(e, callee),
         }
     }
     for e in &entries {
-        lw.enter(e.frame, &frames);
+        lw.enter(e.frame);
         match e.kind {
             EntryKind::Job => lw.job_body(&e.job),
-            EntryKind::Call { callee } => lw.call_body(e, callee, &frames),
+            EntryKind::Call { callee } => lw.call_body(e, callee),
         }
     }
+    // Edge wiring reads each entry's own frame index; no `enter` needed.
     for e in &entries {
-        lw.enter(e.frame, &frames);
         lw.job_edges(e, &entries);
     }
 
@@ -364,14 +358,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// frame prefix is stripped — while the values keep the prefixed node names.
     fn base_site(&self, job: &Job<'a>) -> Site {
         let ctx = &self.frame_ctx[self.current];
+        let frame = &self.frames[self.current];
         let mut site = Site::new(&job.id);
         site.matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
         site.workflow_inputs = ctx.inputs.clone();
         site.secrets = ctx.secrets.clone();
-        site.in_expansion = ctx.in_expansion;
-        let strip = format!("{}{SEP}", ctx.prefix);
+        site.in_expansion = frame.in_expansion;
+        let strip = format!("{}{SEP}", frame.prefix);
         for (need, _) in &job.needs {
-            let key = match ctx.prefix.is_empty() {
+            let key = match frame.prefix.is_empty() {
                 true => need.clone(),
                 false => need.strip_prefix(&strip).unwrap_or(need).to_string(),
             };
@@ -381,44 +376,40 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     /// Make `frame` the one whose workflow the job passes read.
-    fn enter(&mut self, frame: usize, frames: &[Frame<'w, 'a>]) {
+    fn enter(&mut self, frame: usize) {
         self.current = frame;
-        self.wf = frames[frame].wf;
+        self.wf = self.frames[frame].wf;
     }
 
     /// Bind one frame's context: the root's inputs come from the run's
     /// parameters, a callee's from its call site — `with:` lowered in the
     /// caller's own site, `secrets:` folded through the caller's map so a
     /// nested `inherit` keeps renames intact.
-    fn bind_frame(&mut self, i: usize, frames: &[Frame<'w, 'a>], entries: &[Entry<'a>]) {
-        let frame = &frames[i];
-        let Some(CallEdge { caller, entry }) = frame.call else {
+    fn bind_frame(&mut self, i: usize, entries: &[Entry<'w, 'a>]) {
+        let frame_wf = self.frames[i].wf;
+        let Some(CallEdge { caller, entry }) = self.frames[i].call else {
             // The root: `workflow_call` and `workflow_dispatch` declarations
             // both bind from run parameters, through one typed path.
             let mut decls: Vec<&crate::model::InputDecl<'_>> = Vec::new();
-            if let Some(interface) = &frame.wf.call {
+            if let Some(interface) = &frame_wf.call {
                 decls.extend(interface.inputs.iter());
             }
-            decls.extend(frame.wf.dispatch_inputs.iter());
+            decls.extend(frame_wf.dispatch_inputs.iter());
             let inputs = (!decls.is_empty())
                 .then(|| inputs::bind_param_inputs(&decls, self.b.exprs(), &mut self.diags));
             self.frame_ctx[i] = FrameCtx {
-                prefix: String::new(),
                 inputs,
-                secrets: SecretMap::Inherit,
-                in_expansion: false,
-                call_start: None,
-                exit: None,
-                remote: false,
+                ..Default::default()
             };
             return;
         };
+        let frame_remote = matches!(self.frames[i].source, CalleeSource::Remote { .. });
         let call_job = &entries[entry].job;
         let call = call_job.call.as_ref().expect("a callee frame's entry is a call");
         // Bind in the caller's context.
-        self.enter(caller, frames);
+        self.enter(caller);
         let caller_site = self.base_site(call_job);
-        let interface = frame.wf.call.as_ref();
+        let interface = frame_wf.call.as_ref();
         let decls = interface.map(|i| i.inputs.as_slice()).unwrap_or(&[]);
         let inputs = inputs::bind_call_inputs(
             decls,
@@ -432,14 +423,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let caller_secrets = self.frame_ctx[caller].secrets.clone();
         let secrets = self.bind_secrets(call, interface, &caller_secrets);
         self.frame_ctx[i] = FrameCtx {
-            prefix: frame.prefix.clone(),
             inputs: Some(inputs),
             secrets,
-            in_expansion: frame.in_expansion,
             call_start: Some(format!("{}{SEP}start", call_job.id)),
             exit: None,
-            remote: matches!(frame.source, CalleeSource::Remote { .. })
-                || self.frame_ctx[caller].remote,
+            remote: frame_remote || self.frame_ctx[caller].remote,
         };
     }
 
@@ -460,7 +448,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         };
         let declared: Vec<(String, bool)> = interface.map(|i| i.secrets.clone()).unwrap_or_default();
         for (name, node) in &provided {
-            if !declared.iter().any(|(d, _)| d == &name.to_lowercase()) {
+            if !declared
+                .iter()
+                .any(|(d, _)| d.to_lowercase() == name.to_lowercase())
+            {
                 self.diags.error(
                     "gha.bad_call",
                     node.span(),
@@ -470,54 +461,43 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
         let mut map: BTreeMap<String, Option<String>> = BTreeMap::new();
         for (name, required) in &declared {
+            let lowered = name.to_lowercase();
             let value = provided
                 .iter()
-                .find(|(k, _)| k.to_lowercase() == *name)
+                .find(|(k, _)| k.to_lowercase() == lowered)
                 .map(|(_, v)| *v);
-            match value {
-                Some(node) => {
-                    let text = node.as_str().unwrap_or("");
-                    match whole_value_secret(text) {
-                        Some(provider) => match caller_secrets.resolve(&provider) {
-                            Ok(entry) => {
-                                map.insert(name.clone(), entry);
-                            }
-                            Err(crate::exprs::UndeclaredSecret) => {
-                                self.diags.error(
-                                    "gha.undeclared_secret",
-                                    node.span(),
-                                    format!(
-                                        "`secrets.{provider}` is not a secret this workflow call \
-                                         provides"
-                                    ),
-                                );
-                                map.insert(name.clone(), None);
-                            }
-                        },
-                        None => {
-                            self.diags.error(
-                                "gha.bad_call",
-                                node.span(),
-                                format!(
-                                    "secret `{name}` must be a whole `${{{{ secrets.NAME }}}}` \
-                                     reference"
-                                ),
-                            );
-                            map.insert(name.clone(), None);
-                        }
-                    }
-                }
-                None if *required => {
+            let Some(node) = value else {
+                if *required {
                     self.diags.error(
                         "gha.missing_secret",
                         call.uses.1.clone(),
                         format!("`{}` requires secret `{name}`", call.uses.0),
                     );
+                } else {
+                    map.insert(lowered, None);
                 }
+                continue;
+            };
+            let entry = match whole_value_secret(node.as_str().unwrap_or("")) {
                 None => {
-                    map.insert(name.clone(), None);
+                    self.diags.error(
+                        "gha.bad_call",
+                        node.span(),
+                        format!(
+                            "secret `{name}` must be a whole `${{{{ secrets.NAME }}}}` reference"
+                        ),
+                    );
+                    None
                 }
-            }
+                Some(provider) => match caller_secrets.resolve(&provider) {
+                    Ok(entry) => entry,
+                    Err(crate::exprs::UndeclaredSecret) => {
+                        undeclared_secret(&mut self.diags, node.span(), &provider);
+                        None
+                    }
+                },
+            };
+            map.insert(lowered, entry);
         }
         SecretMap::Explicit(map)
     }
@@ -613,7 +593,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// exactly like a job's so `needs.<call>.outputs.*` works unchanged). The
     /// callee's jobs land between `start` and `exit`, so a matrix call expands
     /// the whole inlined workflow per leg.
-    fn call_shell(&mut self, e: &Entry<'a>, callee: usize, frames: &[Frame<'w, 'a>]) {
+    fn call_shell(&mut self, e: &Entry<'w, 'a>, callee: usize) {
         let job = &e.job;
         let matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
         // The bracket's own scope: all three nodes are engine-side noops.
@@ -635,7 +615,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let call = job.call.as_ref().expect("a call entry");
         let mut target = Map::new();
         target.insert("uses".into(), json!(call.uses.0));
-        if let CalleeSource::Remote { pinned } = &frames[callee].source {
+        if let CalleeSource::Remote { pinned } = &self.frames[callee].source {
             target.insert("sha".into(), json!(pinned.sha.as_str()));
         }
         self.b.set_meta(start, json!({ "call": target }));
@@ -673,7 +653,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// (GitHub's call conclusion) plus the declared `workflow_call.outputs`,
     /// evaluated when every callee job of the leg is complete — and the matrix
     /// expansion over the whole bracket.
-    fn call_body(&mut self, e: &Entry<'a>, callee: usize, frames: &[Frame<'w, 'a>]) {
+    fn call_body(&mut self, e: &Entry<'w, 'a>, callee: usize) {
         let job = &e.job;
         let Some((start, done, exit)) = self
             .jobs
@@ -692,91 +672,60 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // The callee's jobs, by their prefixed done nodes; the exit's site reads
         // them — suffix-aware inside a matrix call — through the `jobs` context
-        // and the result terms below.
-        let ctx = &self.frame_ctx[callee];
+        // and the result terms below. The callee frame's expansion flag already
+        // includes the call's own matrix.
+        let callee_wf = self.frames[callee].wf;
         let mut exit_site = Site::new(&job.id);
-        exit_site.in_expansion = ctx.in_expansion || site.matrix;
-        exit_site.workflow_inputs = ctx.inputs.clone();
-        let mut dones = Vec::new();
-        for callee_job in &frames[callee].wf.jobs {
-            let done_name = format!("{}{SEP}{}{SEP}done", job.id, callee_job.id);
-            exit_site
-                .callee_jobs
-                .insert(callee_job.id.clone(), done_name.clone());
-            dones.push(done_name);
-        }
+        exit_site.in_expansion = self.frames[callee].in_expansion;
+        exit_site.workflow_inputs = self.frame_ctx[callee].inputs.clone();
+        exit_site.callee_jobs = Some(
+            callee_wf
+                .jobs
+                .iter()
+                .map(|j| (j.id.clone(), format!("{}{SEP}{}{SEP}done", job.id, j.id)))
+                .collect(),
+        );
 
-        // Any callee job with the given result. Results are already folded per
-        // job ('failure'/'cancelled'/'success'/'skipped'), so four tags suffice.
-        let any = |lw: &mut Self, tag: &str| -> ExprId {
+        // Each callee job's folded result, read once; the `any_*` terms below
+        // compare these shared reads against their tags. Results are already
+        // folded per job ('failure'/'cancelled'/'success'/'skipped').
+        let mut results = Vec::new();
+        for done_name in exit_site.callee_jobs.as_ref().expect("just set").values() {
+            let t = self.b.exprs();
+            results.push(exit_site.need_result(t, done_name));
+        }
+        let any = |t: &mut ir::ExprTable, tag: &str| -> ExprId {
+            let lit = t.lit(tag);
             let mut acc: Option<ExprId> = None;
-            for name in &dones {
-                let t = lw.b.exprs();
-                let result = exit_site.need_result(t, name);
-                let lit = t.lit(tag);
-                let is = t.binary(BinOp::Eq, result, lit);
+            for result in &results {
+                let is = t.binary(BinOp::Eq, *result, lit);
                 acc = Some(match acc {
-                    Some(a) => lw.b.exprs().binary(BinOp::Or, a, is),
+                    Some(a) => t.binary(BinOp::Or, a, is),
                     None => is,
                 });
             }
-            acc.unwrap_or_else(|| lw.b.exprs().lit(false))
+            acc.unwrap_or_else(|| t.lit(false))
         };
-        let any_failure = any(self, "failure");
-        let any_cancelled = any(self, "cancelled");
-        let any_success = any(self, "success");
         let t = self.b.exprs();
-        let f = t.lit("failure");
-        let c = t.lit("cancelled");
-        let s = t.lit("success");
-        let k = t.lit("skipped");
-        let inner2 = t.cond(any_success, s, k);
-        let inner1 = t.cond(any_cancelled, c, inner2);
-        let result = t.cond(any_failure, f, inner1);
+        let any_failure = any(t, "failure");
+        let any_cancelled = any(t, "cancelled");
+        let any_success = any(t, "success");
+        let result = result_priority(t, any_failure, any_cancelled, any_success);
 
         // Declared outputs, lowered over the `jobs.*` context.
-        let mut outputs: Vec<(String, ExprId)> = Vec::new();
-        if let Some(interface) = &frames[callee].wf.call {
-            for (name, node) in &interface.outputs {
-                let text = node.as_str().unwrap_or("");
-                if let Some(lowered) = lower_scalar(
-                    text,
-                    node.span(),
-                    &exit_site,
-                    false,
-                    false,
-                    self.b.exprs(),
-                    &mut self.diags,
-                ) {
-                    let id = match lowered {
-                        LoweredScalar::Literal(v) => self.b.exprs().lit(v),
-                        LoweredScalar::Expr(id) => id,
-                        LoweredScalar::Secret(_) => continue,
-                    };
-                    outputs.push((name.clone(), id));
-                }
-            }
-        }
-        let t = self.b.exprs();
-        let outputs_obj = t.object(outputs.iter().map(|(k, v)| (k.as_str(), *v)).collect());
-        let index = if site.matrix || exit_site.in_expansion {
-            t.var("index")
-        } else {
-            t.lit(0)
+        let outputs = match &callee_wf.call {
+            Some(interface) => self.lower_outputs(&interface.outputs, &exit_site, false),
+            None => Vec::new(),
         };
-        let summary = t.object(vec![
-            ("result", result),
-            ("outputs", outputs_obj),
-            ("index", index),
-        ]);
+        let expanded = exit_site.in_expansion;
+        let summary = self.summary_object(result, &outputs, expanded);
         self.b
             .select(exit, vec![ir::Arm::always(done).with_map(summary)]);
         let fold = self.done_config();
         self.b.node_mut(done).step = StepRef::new("noop", fold);
 
         // Scheduling: the callee's rootless jobs begin when the call does.
-        let roots: Vec<NodeId> = frames[callee]
-            .wf
+        let roots: Vec<NodeId> = callee_wf
             .jobs
             .iter()
             .filter(|j| j.needs.is_empty())
@@ -1336,11 +1285,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// `done` → each dependent's `start`.
     /// `done` → each dependent's `start`, within the entry's own frame — and,
     /// inside a called workflow, → the call's exit join, which counts every
     /// callee job.
-    fn job_edges(&mut self, e: &Entry<'a>, entries: &[Entry<'a>]) {
+    fn job_edges(&mut self, e: &Entry<'w, 'a>, entries: &[Entry<'w, 'a>]) {
         let job = &e.job;
         let Some(done) = self.jobs.get(&job.id).map(|j| j.done) else {
             return;
@@ -1826,22 +1774,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     None
                 }
                 Err(ResolveFailure::Unavailable(reason)) => {
-                    // Two different situations, one code: with no reason the
-                    // source simply does not cover the reference (refreshing it
-                    // may help); with one, upstream already said no (a private or
-                    // removed repository — refreshing will not).
-                    let hint = match reason {
-                        Some(reason) => format!(
-                            "the action source cannot serve it: {} — the repository is unavailable \
-                             upstream (private or removed), so refreshing the source will not help",
-                            reason.lines().collect::<Vec<_>>().join(" ")
-                        ),
-                        None => "the configured action source does not serve this reference; \
-                                 refreshing it (for a snapshot, the refresh test) may add it"
-                            .to_string(),
-                    };
-                    self.diags
-                        .unsupported("action.remote", span.clone(), name.to_string(), &hint);
+                    self.diags.unsupported(
+                        "action.remote",
+                        span.clone(),
+                        name.to_string(),
+                        &unavailable_hint(reason),
+                    );
                     None
                 }
                 Err(ResolveFailure::Failed(message)) => {
@@ -2379,10 +2317,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // Job outputs, lowered where every step is visible. An output that would
         // carry a secret is dropped with a warning, as GitHub drops it.
-        let mut outputs: Vec<(String, ExprId)> = Vec::new();
+        let mut kept: Vec<(String, Node<'_>)> = Vec::new();
         for (name, node) in &job.outputs {
-            let text = node.as_str().unwrap_or("");
-            if whole_value_secret(text).is_some() {
+            if whole_value_secret(node.as_str().unwrap_or("")).is_some() {
                 self.diags.warning(
                     "ignored.secret_output",
                     node.span(),
@@ -2392,11 +2329,29 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 );
                 continue;
             }
+            kept.push((name.clone(), *node));
+        }
+        let outputs = self.lower_outputs(&kept, site, true);
+        self.summary_object(result, &outputs, site.matrix)
+    }
+
+    /// Lower `name: value` output entries over `site`. A `Secret` never lands
+    /// here — the caller's rules dropped or rejected it — and is skipped
+    /// defensively.
+    fn lower_outputs(
+        &mut self,
+        entries: &[(String, Node<'_>)],
+        site: &Site,
+        at_step: bool,
+    ) -> Vec<(String, ExprId)> {
+        let mut outputs = Vec::new();
+        for (name, node) in entries {
+            let text = node.as_str().unwrap_or("");
             if let Some(lowered) = lower_scalar(
                 text,
                 node.span(),
                 site,
-                true,
+                at_step,
                 false,
                 self.b.exprs(),
                 &mut self.diags,
@@ -2404,20 +2359,26 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 let id = match lowered {
                     LoweredScalar::Literal(v) => self.b.exprs().lit(v),
                     LoweredScalar::Expr(id) => id,
-                    // Whole-value secrets were dropped above; `lower_scalar`
-                    // rejects an embedded one before returning this.
                     LoweredScalar::Secret(_) => continue,
                 };
                 outputs.push((name.clone(), id));
             }
         }
+        outputs
+    }
+
+    /// The `{ result, outputs, index }` summary a job's — or a call's — last
+    /// edge carries into `done`, where [`Lowering::done_config`] folds one per
+    /// leg into the record dependents read.
+    fn summary_object(
+        &mut self,
+        result: ExprId,
+        outputs: &[(String, ExprId)],
+        expanded: bool,
+    ) -> ExprId {
         let t = self.b.exprs();
         let outputs_obj = t.object(outputs.iter().map(|(k, v)| (k.as_str(), *v)).collect());
-        let index = if site.matrix {
-            t.var("index")
-        } else {
-            t.lit(0)
-        };
+        let index = if expanded { t.var("index") } else { t.lit(0) };
         t.object(vec![
             ("result", result),
             ("outputs", outputs_obj),
@@ -2438,13 +2399,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let any_failure = has(t, "failure");
         let any_cancelled = has(t, "cancelled");
         let any_success = has(t, "success");
-        let f = t.lit("failure");
-        let c = t.lit("cancelled");
-        let s = t.lit("success");
-        let k = t.lit("skipped");
-        let inner2 = t.cond(any_success, s, k);
-        let inner1 = t.cond(any_cancelled, c, inner2);
-        let result = t.cond(any_failure, f, inner1);
+        let result = result_priority(t, any_failure, any_cancelled, any_success);
 
         // Outputs from the last leg to report, by index.
         let index_key = t.lit("index");

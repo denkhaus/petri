@@ -20,7 +20,9 @@ use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::Document;
 
-use crate::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
+use crate::action::{
+    ActionRef, ActionSource, ActionSourceError, PinnedAction, unavailable_hint,
+};
 use crate::model::{self, Workflow};
 
 /// GitHub's nesting limit: a top-level workflow and up to three levels of
@@ -55,7 +57,7 @@ impl CallGraph {
     /// The callee a `uses:` names, resolved relative to the calling workflow's
     /// own source. `None` when resolution failed (already a diagnostic).
     pub fn callee(&self, caller: &CalleeSource, uses: &str) -> Option<(String, &Callee)> {
-        let identity = identity_of(caller, uses);
+        let identity = target_of(caller, uses).ok()?.identity();
         self.resolved.get(&identity).map(|c| (identity, c))
     }
 
@@ -79,41 +81,37 @@ fn same_repo(uses: &str) -> Option<&str> {
     uses.strip_prefix("./").or_else(|| uses.strip_prefix("$/"))
 }
 
-/// The map key — and the diagnostic name — for a `uses:` seen from `caller`.
-/// A local path is repo-relative; a remote reference is as written, so a
-/// pinned callee shared by many callers resolves once.
-fn identity_of(caller: &CalleeSource, uses: &str) -> String {
+/// What a `uses:` names before any fetch: the repository file to read, or the
+/// reference to resolve. Its identity is the [`CallGraph`] key and the
+/// diagnostic name — a local path repo-relative, a remote reference by its
+/// display form — so a pinned callee shared by many callers resolves once.
+enum CallTarget {
+    Local { path: String },
+    Remote { reference: ActionRef },
+}
+
+impl CallTarget {
+    fn identity(&self) -> String {
+        match self {
+            CallTarget::Local { path } => path.clone(),
+            CallTarget::Remote { reference } => reference.to_string(),
+        }
+    }
+}
+
+/// The target a `uses:` names, seen from `caller`.
+fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
     if let Some(rest) = same_repo(uses) {
-        return match caller {
-            CalleeSource::Root | CalleeSource::Local { .. } => rest.to_string(),
+        return Ok(match caller {
+            CalleeSource::Root | CalleeSource::Local { .. } => CallTarget::Local {
+                path: rest.to_string(),
+            },
             // A remote callee's `./` call names a file of its own repository,
             // at the same pin.
             CalleeSource::Remote { pinned } => {
                 let mut reference = pinned.reference.clone();
                 reference.path = Some(rest.into());
-                reference.to_string()
-            }
-        };
-    }
-    uses.to_string()
-}
-
-/// The source a resolved identity denotes, mirroring [`identity_of`].
-fn source_of(caller: &CalleeSource, uses: &str) -> Result<CalleeSource, String> {
-    if let Some(rest) = same_repo(uses) {
-        return Ok(match caller {
-            CalleeSource::Root | CalleeSource::Local { .. } => CalleeSource::Local {
-                path: rest.to_string(),
-            },
-            CalleeSource::Remote { pinned } => {
-                let mut reference = pinned.reference.clone();
-                reference.path = Some(rest.into());
-                CalleeSource::Remote {
-                    pinned: PinnedAction {
-                        reference,
-                        sha: pinned.sha.clone(),
-                    },
-                }
+                CallTarget::Remote { reference }
             }
         });
     }
@@ -127,14 +125,7 @@ fn source_of(caller: &CalleeSource, uses: &str) -> Result<CalleeSource, String> 
                     `owner/repo/.github/workflows/name.yml@ref`"
             .into());
     }
-    Ok(CalleeSource::Remote {
-        // The pin is filled in by the fetch; a placeholder never escapes
-        // `resolve` because fetching happens before the source is stored.
-        pinned: PinnedAction {
-            reference,
-            sha: Default::default(),
-        },
-    })
+    Ok(CallTarget::Remote { reference })
 }
 
 /// Resolve every workflow the root's call jobs reach. Errors — an unfetchable
@@ -177,7 +168,18 @@ fn walk(
         .filter_map(|j| j.call.as_ref().map(|c| c.uses.clone()))
         .collect();
     for (uses, span) in calls {
-        let identity = identity_of(source, &uses);
+        let target = match target_of(source, &uses) {
+            Ok(target) => target,
+            Err(message) => {
+                diags.error(
+                    "gha.bad_call",
+                    span.clone(),
+                    format!("`uses: {uses}`: {message}"),
+                );
+                continue;
+            }
+        };
+        let identity = target.identity();
         if stack.contains(&identity) {
             diags.error(
                 "gha.workflow_cycle",
@@ -206,19 +208,7 @@ fn walk(
             );
             continue;
         }
-        let callee_source = match source_of(source, &uses) {
-            Ok(s) => s,
-            Err(message) => {
-                diags.error(
-                    "gha.bad_call",
-                    span.clone(),
-                    format!("`uses: {uses}`: {message}"),
-                );
-                continue;
-            }
-        };
-        let Some((callee_source, text)) =
-            fetch(&callee_source, &identity, files, actions, &span, diags)
+        let Some((callee_source, text)) = fetch(&target, &identity, files, actions, &span, diags)
         else {
             continue;
         };
@@ -248,7 +238,6 @@ fn walk(
             );
             stack.pop();
         }
-        drop(wf_callee);
         graph.resolved.insert(
             identity,
             Callee {
@@ -263,16 +252,15 @@ fn walk(
 /// pin — with the same rejection story remote actions have when the source
 /// cannot serve it.
 fn fetch(
-    source: &CalleeSource,
+    target: &CallTarget,
     identity: &str,
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
     span: &Span,
     diags: &mut Diagnostics,
 ) -> Option<(CalleeSource, String)> {
-    match source {
-        CalleeSource::Root => None,
-        CalleeSource::Local { path } => match files.read(path) {
+    match target {
+        CallTarget::Local { path } => match files.read(path) {
             Some(text) => Some((CalleeSource::Local { path: path.clone() }, text)),
             None => {
                 diags.error(
@@ -283,7 +271,7 @@ fn fetch(
                 None
             }
         },
-        CalleeSource::Remote { pinned } => {
+        CallTarget::Remote { reference } => {
             let Some(actions) = actions else {
                 diags.unsupported(
                     "action.remote",
@@ -294,22 +282,17 @@ fn fetch(
                 return None;
             };
             let fetched = actions
-                .resolve(&pinned.reference)
+                .resolve(reference)
                 .and_then(|pinned| actions.file(&pinned).map(|text| (pinned, text)));
             match fetched {
                 Ok((pinned, text)) => Some((CalleeSource::Remote { pinned }, text)),
                 Err(ActionSourceError::Unavailable { reason, .. }) => {
-                    let hint = match reason {
-                        Some(reason) => format!(
-                            "the action source cannot serve it: {} — the repository is unavailable \
-                             upstream (private or removed), so refreshing the source will not help",
-                            reason.lines().collect::<Vec<_>>().join(" ")
-                        ),
-                        None => "the configured action source does not serve this reference; \
-                                 refreshing it (for a snapshot, the refresh test) may add it"
-                            .to_string(),
-                    };
-                    diags.unsupported("action.remote", span.clone(), identity.to_string(), &hint);
+                    diags.unsupported(
+                        "action.remote",
+                        span.clone(),
+                        identity.to_string(),
+                        &unavailable_hint(reason),
+                    );
                     None
                 }
                 Err(other) => {

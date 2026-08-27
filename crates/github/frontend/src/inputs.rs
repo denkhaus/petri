@@ -33,19 +33,15 @@ pub fn bind_call_inputs(
 ) -> BTreeMap<String, ExprId> {
     let mut given: BTreeMap<String, Node<'_>> = BTreeMap::new();
     for (key, value) in with {
-        given.insert(key.to_lowercase(), *value);
-    }
-    for (key, value) in with {
-        if !decls
-            .iter()
-            .any(|d| d.name.eq_ignore_ascii_case(key.as_str()))
-        {
+        let lowered = key.to_lowercase();
+        if !decls.iter().any(|d| d.name.to_lowercase() == lowered) {
             diags.error(
                 "gha.unknown_input",
                 value.span(),
                 format!("`{key}` is not an input `{what}` declares"),
             );
         }
+        given.insert(lowered, *value);
     }
 
     let mut bound = BTreeMap::new();
@@ -78,18 +74,15 @@ pub fn bind_param_inputs(
     table: &mut ExprTable,
     diags: &mut Diagnostics,
 ) -> BTreeMap<String, ExprId> {
+    // `github.event.inputs`, once; each declaration reads one key off it.
+    let params = ["event", "inputs"].iter().fold(table.var("github"), |acc, key| {
+        let k = table.lit(*key);
+        builtin(table, "get_ci", vec![acc, k]).expect("get_ci exists")
+    });
     let mut bound = BTreeMap::new();
     for decl in decls {
-        let raw = {
-            let github = table.var("github");
-            let event_key = table.lit("event");
-            let event = builtin(table, "get_ci", vec![github, event_key]).expect("get_ci exists");
-            let inputs_key = table.lit("inputs");
-            let inputs =
-                builtin(table, "get_ci", vec![event, inputs_key]).expect("get_ci exists");
-            let name_key = table.lit(decl.name.as_str());
-            builtin(table, "get_ci", vec![inputs, name_key]).expect("get_ci exists")
-        };
+        let name_key = table.lit(decl.name.as_str());
+        let raw = builtin(table, "get_ci", vec![params, name_key]).expect("get_ci exists");
         // `default(raw, fallback)` answers the absent case; the coercion then
         // types whatever value won.
         let fallback = default_value(decl, table, diags)

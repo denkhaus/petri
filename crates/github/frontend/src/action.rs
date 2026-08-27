@@ -259,6 +259,23 @@ pub enum ActionSourceError {
     Fetch { action: String, message: String },
 }
 
+/// The hint for an [`ActionSourceError::Unavailable`] rejection. Two different
+/// situations, one code: with no reason the source simply does not cover the
+/// reference (refreshing it may help); with one, upstream already said no (a
+/// private or removed repository — refreshing will not).
+pub(crate) fn unavailable_hint(reason: Option<String>) -> String {
+    match reason {
+        Some(reason) => format!(
+            "the action source cannot serve it: {} — the repository is unavailable \
+             upstream (private or removed), so refreshing the source will not help",
+            reason.lines().collect::<Vec<_>>().join(" ")
+        ),
+        None => "the configured action source does not serve this reference; \
+                 refreshing it (for a snapshot, the refresh test) may add it"
+            .to_string(),
+    }
+}
+
 /// Where actions come from.
 ///
 /// Synchronous and blocking by design: `Frontend::load` is synchronous.

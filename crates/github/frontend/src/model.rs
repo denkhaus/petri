@@ -25,7 +25,7 @@ pub struct CallInterface<'a> {
     pub inputs: Vec<InputDecl<'a>>,
     /// Output name → its `value` expression, over the `jobs.*` context.
     pub outputs: Vec<(String, Node<'a>)>,
-    /// Declared secret names (lowercased) with whether each is required.
+    /// Declared secret names, as written, with whether each is required.
     pub secrets: Vec<(String, bool)>,
 }
 
@@ -254,72 +254,76 @@ fn read_triggers<'a>(
     let Some(m) = on.and_then(|on| on.as_mapping()) else {
         return (None, Vec::new());
     };
-    let call = m.get("workflow_call").map(|wc| {
-        let (inputs, outputs, secrets) = match wc.as_mapping() {
-            None => (Vec::new(), Vec::new(), Vec::new()),
-            Some(wm) => {
-                wm.reject_unknown_keys(
-                    &["inputs", "outputs", "secrets"],
-                    diags,
-                    "`on.workflow_call`",
-                );
-                let outputs = wm
-                    .get("outputs")
-                    .and_then(|o| o.as_mapping())
-                    .map(|om| {
-                        om.iter()
-                            .filter_map(|(name, spec)| {
-                                match spec.as_mapping().and_then(|sm| sm.get("value")) {
-                                    Some(value) => Some((name.to_string(), value)),
-                                    None => {
-                                        diags.error(
-                                            "gha.bad_call_output",
-                                            spec.span(),
-                                            format!("workflow output `{name}` needs a `value`"),
-                                        );
-                                        None
-                                    }
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let secrets = wm
-                    .get("secrets")
-                    .and_then(|s| s.as_mapping())
-                    .map(|sm| {
-                        sm.iter()
-                            .map(|(name, spec)| {
-                                let required = spec
-                                    .as_mapping()
-                                    .and_then(|m| m.get("required"))
-                                    .and_then(|r| r.as_scalar())
-                                    .and_then(|s| s.as_bool())
-                                    .unwrap_or(false);
-                                (name.to_lowercase(), required)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (
-                    read_input_decls(wm.get("inputs"), diags),
-                    outputs,
-                    secrets,
-                )
-            }
-        };
-        CallInterface {
-            inputs,
-            outputs,
-            secrets,
-        }
-    });
+    let call = m
+        .get("workflow_call")
+        .map(|wc| read_call_interface(wc, diags));
     let dispatch_inputs = m
         .get("workflow_dispatch")
         .and_then(|wd| wd.as_mapping())
         .map(|dm| read_input_decls(dm.get("inputs"), diags))
         .unwrap_or_default();
     (call, dispatch_inputs)
+}
+
+/// The `on.workflow_call` interface: typed inputs, outputs (each a `value`
+/// expression over the `jobs.*` context), and declared secrets.
+fn read_call_interface<'a>(wc: Node<'a>, diags: &mut Diagnostics) -> CallInterface<'a> {
+    let Some(wm) = wc.as_mapping() else {
+        return CallInterface {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            secrets: Vec::new(),
+        };
+    };
+    wm.reject_unknown_keys(
+        &["inputs", "outputs", "secrets"],
+        diags,
+        "`on.workflow_call`",
+    );
+    let outputs = wm
+        .get("outputs")
+        .and_then(|o| o.as_mapping())
+        .map(|om| {
+            om.iter()
+                .filter_map(|(name, spec)| {
+                    match spec.as_mapping().and_then(|sm| sm.get("value")) {
+                        Some(value) => Some((name.to_string(), value)),
+                        None => {
+                            diags.error(
+                                "gha.bad_call_output",
+                                spec.span(),
+                                format!("workflow output `{name}` needs a `value`"),
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let secrets = wm
+        .get("secrets")
+        .and_then(|s| s.as_mapping())
+        .map(|sm| {
+            sm.iter()
+                .map(|(name, spec)| (name.to_string(), required_flag(spec)))
+                .collect()
+        })
+        .unwrap_or_default();
+    CallInterface {
+        inputs: read_input_decls(wm.get("inputs"), diags),
+        outputs,
+        secrets,
+    }
+}
+
+/// `true` when a declaration spec says `required: true`.
+fn required_flag(spec: Node<'_>) -> bool {
+    spec.as_mapping()
+        .and_then(|m| m.get("required"))
+        .and_then(|r| r.as_scalar())
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false)
 }
 
 /// `inputs:` under `workflow_call` or `workflow_dispatch`: name, type, whether
@@ -363,12 +367,7 @@ fn read_input_decls<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Vec<
             InputDecl {
                 name: name.to_string(),
                 ty,
-                required: sm
-                    .as_ref()
-                    .and_then(|sm| sm.get("required"))
-                    .and_then(|r| r.as_scalar())
-                    .and_then(|s| s.as_bool())
-                    .unwrap_or(false),
+                required: required_flag(spec),
                 default: sm.as_ref().and_then(|sm| sm.get("default")),
                 span: spec.span(),
             }
@@ -477,6 +476,20 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
     })
 }
 
+/// The job keys a call job may carry; every other [`JOB_KEYS`] entry is
+/// rejected below, so a job key added later fails closed on a call job.
+const CALL_JOB_KEYS: &[&str] = &[
+    "name",
+    "needs",
+    "if",
+    "uses",
+    "with",
+    "secrets",
+    "strategy",
+    "permissions",
+    "concurrency",
+];
+
 /// A job that is `uses: <workflow>@…`: the call reference, its `with:` and its
 /// `secrets:`. The keys a call job cannot carry — GitHub's own rule — are
 /// rejected here so a caller cannot half-configure a job that will never run
@@ -495,18 +508,7 @@ fn read_call<'a>(
         );
         return None;
     };
-    for key in [
-        "steps",
-        "runs-on",
-        "container",
-        "services",
-        "env",
-        "defaults",
-        "outputs",
-        "timeout-minutes",
-        "continue-on-error",
-        "environment",
-    ] {
+    for key in JOB_KEYS.iter().filter(|k| !CALL_JOB_KEYS.contains(k)) {
         if let Some(node) = m.get(key) {
             diags.error(
                 "gha.bad_call",

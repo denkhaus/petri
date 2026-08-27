@@ -118,9 +118,10 @@ pub struct Site {
     pub workflow_inputs: Option<BTreeMap<String, ExprId>>,
     /// How `secrets.*` names map to the provider's at this site.
     pub secrets: SecretMap,
-    /// Inside a called workflow: callee job id → its `done` node name, for the
-    /// `jobs.<id>.*` context that `on.workflow_call.outputs` values read.
-    pub callee_jobs: BTreeMap<String, String>,
+    /// Inside `on.workflow_call.outputs` values: callee job id → its `done`
+    /// node name, for the `jobs.<id>.*` context. `None` anywhere else — the
+    /// context is out of scope there, even for a callee with no jobs.
+    pub callee_jobs: Option<BTreeMap<String, String>>,
     /// The site sits inside an expansion region without being a matrix job
     /// itself — a called workflow's job under a matrix call. Node names take
     /// the `#index` suffix, but the `matrix` context stays empty.
@@ -146,7 +147,7 @@ impl Site {
             action_inputs: None,
             workflow_inputs: None,
             secrets: SecretMap::Inherit,
-            callee_jobs: BTreeMap::new(),
+            callee_jobs: None,
             in_expansion: false,
             composite_outputs: BTreeMap::new(),
             start_node: format!("{job_id}{SEP}start"),
@@ -405,7 +406,7 @@ impl Roots for GhaRoots<'_> {
             }
             "steps" | "needs" | "job" | "strategy" => Some(table.lit(Value::Null)),
             "jobs" => {
-                if self.site.callee_jobs.is_empty() {
+                if self.site.callee_jobs.is_none() {
                     self.diags.error(
                         "gha.jobs_context",
                         self.span.clone(),
@@ -482,19 +483,7 @@ impl Roots for GhaRoots<'_> {
                     return Some(table.lit(Value::Null));
                 };
                 let done = done.clone();
-                match what.to_lowercase().as_str() {
-                    "result" => Some(self.site.need_result(table, &done)),
-                    "outputs" => {
-                        let record = self.site.need_record(table, &done);
-                        let output = table.field(record, "output");
-                        let mut id = table.field(output, "outputs");
-                        for key in rest {
-                            id = table.field(id, key);
-                        }
-                        Some(id)
-                    }
-                    _ => Some(table.lit(Value::Null)),
-                }
+                Some(done_projection(self.site, table, &done, what, rest))
             }
             "job" => match path.first().map(|s| s.to_lowercase()).as_deref() {
                 Some("status") => {
@@ -576,11 +565,12 @@ impl Roots for GhaRoots<'_> {
             // Inside `on.workflow_call.outputs` values: `jobs.<id>.outputs.*` and
             // `jobs.<id>.result` read the (inlined) job's done record, exactly as
             // `needs.*` does.
-            "jobs" if !self.site.callee_jobs.is_empty() => {
+            "jobs" if self.site.callee_jobs.is_some() => {
+                let callee_jobs = self.site.callee_jobs.as_ref().expect("guarded");
                 let [job, what, rest @ ..] = path else {
                     return Some(table.lit(Value::Null));
                 };
-                let Some(done) = self.site.callee_jobs.get(*job) else {
+                let Some(done) = callee_jobs.get(*job) else {
                     self.diags.error(
                         "gha.jobs_unknown",
                         self.span.clone(),
@@ -589,19 +579,7 @@ impl Roots for GhaRoots<'_> {
                     return Some(table.lit(Value::Null));
                 };
                 let done = done.clone();
-                match what.to_lowercase().as_str() {
-                    "result" => Some(self.site.need_result(table, &done)),
-                    "outputs" => {
-                        let record = self.site.need_record(table, &done);
-                        let output = table.field(record, "output");
-                        let mut id = table.field(output, "outputs");
-                        for key in rest {
-                            id = table.field(id, key);
-                        }
-                        Some(id)
-                    }
-                    _ => Some(table.lit(Value::Null)),
-                }
+                Some(done_projection(self.site, table, &done, what, rest))
             }
             "env" => {
                 // A step's own env is visible to its expressions; otherwise the
@@ -632,15 +610,7 @@ impl Roots for GhaRoots<'_> {
                         // Declared but not provided: the value is empty, as on GitHub.
                         Ok(None) => table.lit(""),
                         Err(UndeclaredSecret) => {
-                            self.diags.error(
-                                "gha.undeclared_secret",
-                                self.span.clone(),
-                                format!(
-                                    "`secrets.{name}` is not a secret this workflow call provides; \
-                                     declare it under `on.workflow_call.secrets` and pass it (or \
-                                     use `secrets: inherit`)"
-                                ),
-                            );
+                            undeclared_secret(self.diags, self.span.clone(), name);
                             table.lit("")
                         }
                     },
@@ -689,6 +659,59 @@ impl Roots for GhaRoots<'_> {
             _ => None,
         }
     }
+}
+
+/// `<done>.result` or `<done>.outputs.…` off a job's done record — the shared
+/// projection behind the `needs.*` and `jobs.*` contexts.
+fn done_projection(
+    site: &Site,
+    table: &mut ExprTable,
+    done: &str,
+    what: &str,
+    rest: &[&str],
+) -> ExprId {
+    match what.to_lowercase().as_str() {
+        "result" => site.need_result(table, done),
+        "outputs" => {
+            let record = site.need_record(table, done);
+            let output = table.field(record, "output");
+            let mut id = table.field(output, "outputs");
+            for key in rest {
+                id = table.field(id, key);
+            }
+            id
+        }
+        _ => table.lit(Value::Null),
+    }
+}
+
+/// The error for a `secrets.*` name this workflow call never granted.
+pub(crate) fn undeclared_secret(diags: &mut Diagnostics, span: Span, name: &str) {
+    diags.error(
+        "gha.undeclared_secret",
+        span,
+        format!(
+            "`secrets.{name}` is not a secret this workflow call provides; declare it \
+             under `on.workflow_call.secrets` and pass it (or use `secrets: inherit`)"
+        ),
+    );
+}
+
+/// GitHub's combined-conclusion rule over a set of results: any failure wins,
+/// then any cancellation, then any success; nothing at all is `skipped`.
+pub(crate) fn result_priority(
+    t: &mut ExprTable,
+    any_failure: ExprId,
+    any_cancelled: ExprId,
+    any_success: ExprId,
+) -> ExprId {
+    let f = t.lit("failure");
+    let c = t.lit("cancelled");
+    let s = t.lit("success");
+    let k = t.lit("skipped");
+    let inner2 = t.cond(any_success, s, k);
+    let inner1 = t.cond(any_cancelled, c, inner2);
+    t.cond(any_failure, f, inner1)
 }
 
 /// The patterns of a `hashFiles(...)` call when every argument is a literal
@@ -862,14 +885,7 @@ pub fn lower_scalar(
                 // Declared but not provided: the value is empty, as on GitHub.
                 Ok(None) => LoweredScalar::Literal(Value::String(String::new())),
                 Err(UndeclaredSecret) => {
-                    diags.error(
-                        "gha.undeclared_secret",
-                        span,
-                        format!(
-                            "`secrets.{name}` is not a secret this workflow call provides; declare \
-                             it under `on.workflow_call.secrets` and pass it (or use `secrets: inherit`)"
-                        ),
-                    );
+                    undeclared_secret(diags, span, &name);
                     return None;
                 }
             });
