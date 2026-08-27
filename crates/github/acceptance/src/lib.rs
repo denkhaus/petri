@@ -44,6 +44,18 @@ pub struct Outcome {
     pub panic: Option<String>,
 }
 
+/// Features that put a workflow out of the corpus's scope entirely: Windows and
+/// macOS runners and their shells. The local executor emulates Linux, these
+/// workflows can never lower here by policy, and counting them as "rejected"
+/// reads as pressure where there is none — the report keeps them out of the
+/// compatibility denominator.
+pub const OUT_OF_SCOPE: &[&str] = &[
+    "runs_on.windows",
+    "runs_on.macos",
+    "shell.cmd",
+    "shell.powershell",
+];
+
 impl Outcome {
     /// Every `unsupported.*` feature this workflow hit, deduplicated.
     pub fn unsupported_features(&self) -> Vec<String> {
@@ -55,6 +67,14 @@ impl Outcome {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// The workflow needs a Windows or macOS runner or shell somewhere, so it is
+    /// out of this corpus's scope by policy, whatever else it would need.
+    pub fn out_of_scope(&self) -> bool {
+        self.unsupported_features()
+            .iter()
+            .any(|f| OUT_OF_SCOPE.contains(&f.as_str()))
     }
 
     /// Remote actions this workflow references, as `owner/repo@ref`.
@@ -364,17 +384,28 @@ pub fn check_all(corpus_root: &Path, actions: Option<&Arc<dyn ActionSource>>) ->
 pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let total = outcomes.len();
-    let count = |c: Class| outcomes.iter().filter(|o| o.class == c).count();
+    // Windows/macOS workflows are out of scope by policy: they leave the
+    // denominator entirely, so every share below measures what this runner
+    // could ever run.
+    let out_of_scope = outcomes.iter().filter(|o| o.out_of_scope()).count();
+    let in_scope: Vec<&Outcome> = outcomes.iter().filter(|o| !o.out_of_scope()).collect();
+    let total = in_scope.len();
+    let count = |c: Class| in_scope.iter().filter(|o| o.class == c).count();
     let _ = writeln!(out, "# Compatibility corpus report\n");
-    let _ = writeln!(out, "{total} workflows from {} repositories.\n", {
-        let mut repos: Vec<&str> = outcomes.iter().map(|o| o.repo.as_str()).collect();
-        repos.sort();
-        repos.dedup();
-        repos.len()
-    });
+    let _ = writeln!(
+        out,
+        "{} workflows from {} repositories; {out_of_scope} need a Windows or macOS runner \
+         or shell and are out of scope by policy, leaving **{total} in scope**.\n",
+        outcomes.len(),
+        {
+            let mut repos: Vec<&str> = outcomes.iter().map(|o| o.repo.as_str()).collect();
+            repos.sort();
+            repos.dedup();
+            repos.len()
+        }
+    );
     let _ = writeln!(out, "{actions_note}\n");
-    let _ = writeln!(out, "| Result | Count | Share |");
+    let _ = writeln!(out, "| Result (of the in-scope {total}) | Count | Share |");
     let _ = writeln!(out, "|---|---|---|");
     for (label, class) in [
         ("lowered clean", Class::Clean),
@@ -427,16 +458,21 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
         actions_versioned.len()
     );
 
-    // Every unsupported feature, by frequency (workflows, not occurrences).
+    // Every unsupported feature, by frequency (workflows, not occurrences) —
+    // counted over the in-scope workflows only, so a feature also blocking a
+    // Windows workflow is not inflated by pressure that could never pay off.
     let mut features: BTreeMap<String, usize> = BTreeMap::new();
-    for o in outcomes {
+    for o in &in_scope {
         for f in o.unsupported_features() {
             *features.entry(f).or_default() += 1;
         }
     }
     let mut ranked: Vec<(&String, &usize)> = features.iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-    let _ = writeln!(out, "\n## Unsupported features, by workflows affected\n");
+    let _ = writeln!(
+        out,
+        "\n## Unsupported features, by in-scope workflows affected\n"
+    );
     let _ = writeln!(out, "| Feature | Workflows |");
     let _ = writeln!(out, "|---|---|");
     for (name, n) in &ranked {
@@ -475,14 +511,24 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
     );
     let _ = writeln!(out, "|---|---|---|---|---|");
     for o in outcomes {
-        let class = match o.class {
-            Class::Clean => "clean",
-            Class::Warnings => "warnings",
-            Class::Unsupported => "unsupported",
-            Class::OtherError => "**other error**",
-            Class::Panicked => "**PANIC**",
+        // Out-of-scope rows keep their place in the inventory but carry no
+        // feature list: what else they would need is noise by policy.
+        let class = if o.out_of_scope() {
+            "out of scope"
+        } else {
+            match o.class {
+                Class::Clean => "clean",
+                Class::Warnings => "warnings",
+                Class::Unsupported => "unsupported",
+                Class::OtherError => "**other error**",
+                Class::Panicked => "**PANIC**",
+            }
         };
-        let features = o.unsupported_features();
+        let features = if o.out_of_scope() {
+            Vec::new()
+        } else {
+            o.unsupported_features()
+        };
         let _ = writeln!(
             out,
             "| {} | `{}` | {class} | {} | {} |",
