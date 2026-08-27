@@ -360,10 +360,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
         site.step_names = step_names;
 
-        // A JavaScript action with `pre` or `post` contributes nodes away from its
-        // own position: GitHub runs every `pre` before the first step and every
-        // `post` after the last, in reverse order. Resolved once, quietly; the main
-        // pass reports whatever is wrong with the reference.
+        // A JavaScript or Docker action with `pre` or `post` contributes nodes
+        // away from its own position: GitHub runs every `pre` before the first
+        // step and every `post` after the last, in reverse order. Resolved once,
+        // quietly; the main pass reports whatever is wrong with the reference.
         let plans: Vec<Option<ActionPlan>> = job
             .steps
             .iter()
@@ -374,7 +374,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut chain: Vec<NodeId> = Vec::new();
         for (step, plan) in job.steps.iter().zip(&plans) {
             if let Some(plan) = plan
-                && plan.node.pre.is_some()
+                && plan.has_pre()
                 && let Some(id) = self.lifecycle_node(
                     ActionContext {
                         job,
@@ -415,7 +415,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
         for (step, plan) in job.steps.iter().zip(&plans).rev() {
             if let Some(plan) = plan
-                && plan.node.post.is_some()
+                && plan.has_post()
                 && let Some(id) = self.lifecycle_node(
                     ActionContext {
                         job,

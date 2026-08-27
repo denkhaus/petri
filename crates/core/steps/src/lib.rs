@@ -15,7 +15,7 @@ pub use ctx::{BAD_CONFIG_CLASS, Registry, Step, StepCtx, StepFailure, StepRunner
 pub use noop::{NOOP_KIND, NoopStep};
 pub use outputs::{BAD_OUTPUT_CLASS, OutputError, parse as parse_outputs};
 pub use process::{
-    OUTPUT_ENV, PROCESS_KIND, ProcessConfig, ProcessStep, SECRET_MISPLACED_CLASS,
+    Ending, OUTPUT_ENV, PROCESS_KIND, ProcessConfig, ProcessStep, SECRET_MISPLACED_CLASS,
     SECRET_UNAVAILABLE_CLASS, SPAWN_CLASS, Shell, SoftFail, ValueOrSecretRef, WORKSPACE_CLASS,
-    check_misplaced_secret,
+    check_misplaced_secret, ladder, natural_outcome,
 };

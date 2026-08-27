@@ -15,6 +15,7 @@
 mod action;
 pub mod commands;
 pub mod config;
+mod docker;
 pub mod gate;
 pub mod hashfiles;
 mod run;
@@ -22,7 +23,8 @@ pub mod session;
 pub mod source;
 
 pub use action::{ActionSourceCap, ActionStep, ActionTreeSource};
+pub use docker::DockerActionStep;
 pub use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
-pub use frontend_gha::{ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY};
+pub use frontend_gha::{ACTION_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY};
 pub use run::RunStep;
 pub use source::{GitActionSource, default_cache_dir};

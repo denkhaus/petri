@@ -2,7 +2,8 @@
 //!
 //! A composite action is inlined into the job, so its steps are read here in full. A
 //! Node action becomes a `github/action` node, so only its entry points and inputs
-//! matter. Docker actions are recognised and rejected.
+//! matter. A Docker action becomes a `github/docker_action` node: its image,
+//! entrypoints and args are read here, raw, and lowered where the step is.
 
 use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
@@ -23,7 +24,25 @@ pub struct Manifest<'a> {
 pub enum Runs<'a> {
     Composite(Action<'a>),
     Node(NodeAction),
-    Docker,
+    Docker(DockerAction),
+}
+
+/// A Docker container action's `runs:`, raw: values may carry expressions,
+/// which lower where the step is. Owned, so the pre and post nodes can be
+/// placed away from the main one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockerAction {
+    /// `docker://image`, or a Dockerfile path relative to the action.
+    pub image: String,
+    pub entrypoint: Option<String>,
+    pub pre_entrypoint: Option<String>,
+    pub pre_if: Option<String>,
+    pub post_entrypoint: Option<String>,
+    pub post_if: Option<String>,
+    /// `runs.args`: one argument per entry.
+    pub args: Vec<String>,
+    /// `runs.env`.
+    pub env: Vec<(String, String)>,
 }
 
 /// A composite action's steps and outputs.
@@ -146,7 +165,47 @@ pub fn read_manifest<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<M
                 post_if: text("post-if"),
             })
         }
-        "docker" => Runs::Docker,
+        "docker" => {
+            let Some(image) = text("image") else {
+                diags.error(
+                    "gha.bad_action",
+                    root.span(),
+                    "a `runs.using: docker` action needs `runs.image`",
+                );
+                return None;
+            };
+            let args = runs
+                .get("args")
+                .and_then(|a| a.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .map(|item| match item.as_str() {
+                            Some(text) => text.to_string(),
+                            None => item.to_json().to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let env = runs
+                .get("env")
+                .and_then(|e| e.as_mapping())
+                .map(|em| {
+                    em.iter()
+                        .map(|(k, v)| (k.to_string(), v.as_str().unwrap_or_default().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Runs::Docker(DockerAction {
+                image,
+                entrypoint: text("entrypoint"),
+                pre_entrypoint: text("pre-entrypoint"),
+                pre_if: text("pre-if"),
+                post_entrypoint: text("post-entrypoint"),
+                post_if: text("post-if"),
+                args,
+                env,
+            })
+        }
         other => {
             diags.error(
                 "gha.bad_action",

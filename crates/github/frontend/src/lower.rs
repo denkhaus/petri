@@ -24,9 +24,9 @@ use frontend::expr::parse;
 use frontend::yaml::Node;
 use ir::{BinOp, ExprId, ExprOrValue, GraphBuilder, NodeId, ScopeId, ValidationError, Value};
 
-use crate::action::{ActionLocation, ActionSource, PinnedAction};
+use crate::action::{ActionLocation, ActionSource, Phase, PinnedAction};
 use crate::call::{self, CalleeSource};
-use crate::composite::NodeAction;
+use crate::composite::{DockerAction, NodeAction};
 use crate::exprs::{LoweredScalar, SEP, SecretMap, Site, lower_scalar};
 use crate::model::{Job, Step, Workflow};
 use crate::runners::RunnerMap;
@@ -139,12 +139,50 @@ struct FrameCtx {
     remote: bool,
 }
 
-/// A `uses:` step that is a JavaScript action, resolved once for the nodes it
-/// contributes: `pre` and `post` are placed away from the main one.
+/// A `uses:` step that contributes standalone nodes — a JavaScript action or a
+/// Docker container action — resolved once for everything it contributes:
+/// `pre` and `post` are placed away from the main node.
 struct ActionPlan {
-    location: ActionLocation,
-    node: NodeAction,
+    /// Where the action's files are. `None` for `uses: docker://…`, which has
+    /// no files at all.
+    location: Option<ActionLocation>,
+    kind: PlanKind,
     inputs: Vec<PlanInput>,
+}
+
+enum PlanKind {
+    Node(NodeAction),
+    Docker(DockerAction),
+}
+
+impl ActionPlan {
+    fn has_pre(&self) -> bool {
+        match &self.kind {
+            PlanKind::Node(node) => node.pre.is_some(),
+            PlanKind::Docker(docker) => docker.pre_entrypoint.is_some(),
+        }
+    }
+
+    fn has_post(&self) -> bool {
+        match &self.kind {
+            PlanKind::Node(node) => node.post.is_some(),
+            PlanKind::Docker(docker) => docker.post_entrypoint.is_some(),
+        }
+    }
+
+    /// The phase's condition source (`pre-if` / `post-if`); the caller defaults
+    /// an absent one to `always()`.
+    fn phase_if(&self, phase: Phase) -> Option<&str> {
+        let (pre_if, post_if) = match &self.kind {
+            PlanKind::Node(node) => (node.pre_if.as_deref(), node.post_if.as_deref()),
+            PlanKind::Docker(docker) => (docker.pre_if.as_deref(), docker.post_if.as_deref()),
+        };
+        match phase {
+            Phase::Pre => pre_if,
+            Phase::Post => post_if,
+            Phase::Main => None,
+        }
+    }
 }
 
 struct PlanInput {

@@ -30,6 +30,9 @@ pub(crate) struct OneShotRunner {
     pub(crate) prefix: String,
     /// The scope's workspace on the host, mounted at [`CONTAINER_WORKSPACE`].
     pub(crate) workspace: PathBuf,
+    /// The scope's resolved env: one-shots live in the scope's world, so they
+    /// see what every process of the scope sees. A spec's own env wins.
+    pub(crate) env: std::collections::BTreeMap<SmolStr, SmolStr>,
     /// `--network` value — the job container's namespace for a containerized
     /// scope, the scope's network for a host scope with services. `None` is the
     /// daemon default.
@@ -41,23 +44,36 @@ pub(crate) struct OneShotRunner {
 
 impl OneShotRunner {
     /// The image reference to run: a registry image pulled under the policy, or
-    /// a workspace Dockerfile built once per tag (the tag is the cache key, so
-    /// a rebuilt run reuses it).
+    /// a workspace Dockerfile built under its tag (content-addressed tags are
+    /// reused, across runs).
     async fn prepare(&self, image: &ContainerImage) -> Result<SmolStr, EnvError> {
         match image {
             ContainerImage::Registry { image } => {
                 prepare_registry_image(image, self.pull, self.scope, &self.progress).await?;
                 Ok(image.clone())
             }
-            ContainerImage::Build { context, tag } => {
-                if run_docker(&["image", "inspect", tag]).await.is_ok() {
+            ContainerImage::Build {
+                context,
+                dockerfile,
+                tag,
+                reuse,
+            } => {
+                if *reuse && run_docker(&["image", "inspect", tag]).await.is_ok() {
                     return Ok(tag.clone());
                 }
                 let context = self.workspace.join(context);
                 self.progress
                     .progress(self.scope, Progress::BuildingImage { tag: tag.clone() });
                 let context = context.display().to_string();
-                run_docker(&["build", "-t", tag, &context]).await?;
+                match dockerfile {
+                    Some(file) => {
+                        let file = format!("{context}/{file}");
+                        run_docker(&["build", "-t", tag, "-f", &file, &context]).await?;
+                    }
+                    None => {
+                        run_docker(&["build", "-t", tag, &context]).await?;
+                    }
+                }
                 Ok(tag.clone())
             }
         }
@@ -102,6 +118,11 @@ impl ContainerRunner for OneShotRunner {
         if let Some(entrypoint) = &spec.entrypoint {
             argv.push("--entrypoint".into());
             argv.push(entrypoint.to_string());
+        }
+        // The scope's env first, the spec's own on top.
+        for (key, value) in self.env.iter().filter(|(k, _)| !spec.env.contains_key(*k)) {
+            argv.push("-e".into());
+            argv.push(format!("{key}={value}"));
         }
         for (key, value) in &spec.env {
             argv.push("-e".into());

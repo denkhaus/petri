@@ -21,6 +21,10 @@ pub const RUN_KIND: &str = "github/run";
 /// The step kind a JavaScript action lowers to.
 pub const ACTION_KIND: &str = "github/action";
 
+/// The step kind a Docker container action lowers to: one container per phase
+/// invocation, run against the daemon through the scope's container runner.
+pub const DOCKER_ACTION_KIND: &str = "github/docker_action";
+
 /// The key under which an action node's output carries the state its `pre` or
 /// `main` saved (`GITHUB_STATE`, `::save-state::`), for the phases after it.
 pub const STATE_OUTPUT_KEY: &str = "github.state";

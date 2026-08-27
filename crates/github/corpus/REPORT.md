@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 305 references, 1
 | Result (of the in-scope 253) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 203 | 80% |
-| rejected with a specific `unsupported.*` code | 28 | 11% |
+| lowered with warnings | 215 | 85% |
+| rejected with a specific `unsupported.*` code | 16 | 6% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -65,13 +65,13 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 
 | Feature | Workflows |
 |---|---|
-| `action.docker` | 13 |
 | `runs_on.expression` | 6 |
 | `services` | 3 |
 | `action.local_missing` | 2 |
 | `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
 | `action.remote` | 1 |
+| `continue_on_error.expression` | 1 |
 | `step.background` | 1 |
 
 ## Failures that are not specific rejections
@@ -185,7 +185,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | django/django | `docs.yml` | warnings | 11 | — |
 | django/django | `labels.yml` | warnings | 3 | — |
 | django/django | `linters.yml` | warnings | 35 | — |
-| django/django | `new_contributor_pr.yml` | unsupported | — | `action.docker` |
+| django/django | `new_contributor_pr.yml` | warnings | 3 | — |
 | django/django | `playwright.yml` | unsupported | — | `services` |
 | django/django | `postgis.yml` | warnings | 12 | — |
 | django/django | `python_matrix.yml` | warnings | 15 | — |
@@ -249,14 +249,14 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `label-pr.yml` | warnings | 3 | — |
 | nodejs/node | `license-builder.yml` | warnings | 6 | — |
 | nodejs/node | `lint-release-proposal.yml` | warnings | 9 | — |
-| nodejs/node | `linters.yml` | unsupported | — | `action.docker` |
+| nodejs/node | `linters.yml` | warnings | 68 | — |
 | nodejs/node | `major-release.yml` | warnings | 6 | — |
 | nodejs/node | `nix-changes-comment.yml` | warnings | 5 | — |
 | nodejs/node | `nix-changes.yml` | out of scope | — | — |
-| nodejs/node | `notify-on-push.yml` | unsupported | — | `action.docker` |
-| nodejs/node | `notify-on-review-wanted.yml` | unsupported | — | `action.docker` |
+| nodejs/node | `notify-on-push.yml` | warnings | 19 | — |
+| nodejs/node | `notify-on-review-wanted.yml` | warnings | 9 | — |
 | nodejs/node | `post-release.yml` | warnings | 4 | — |
-| nodejs/node | `scorecard.yml` | unsupported | — | `action.docker` |
+| nodejs/node | `scorecard.yml` | warnings | 11 | — |
 | nodejs/node | `stale.yml` | warnings | 3 | — |
 | nodejs/node | `stress-test.yml` | out of scope | — | — |
 | nodejs/node | `test-internet.yml` | warnings | 11 | — |
@@ -273,7 +273,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | ohmyzsh/ohmyzsh | `installer.yml` | out of scope | — | — |
 | ohmyzsh/ohmyzsh | `main.yml` | warnings | 9 | — |
 | ohmyzsh/ohmyzsh | `project.yml` | warnings | 11 | — |
-| ohmyzsh/ohmyzsh | `scorecard.yml` | unsupported | — | `action.docker` |
+| ohmyzsh/ohmyzsh | `scorecard.yml` | warnings | 11 | — |
 | pola-rs/polars | `benchmark-remote.yml` | unsupported | — | `runs_on.unknown` |
 | pola-rs/polars | `benchmark.yml` | warnings | 21 | — |
 | pola-rs/polars | `changes-dsl-labeler.yml` | warnings | 6 | — |
@@ -301,13 +301,13 @@ None. Every workflow either lowered or was rejected with a specific code.
 | prometheus/prometheus | `check_release_notes.yml` | warnings | 5 | — |
 | prometheus/prometheus | `ci.yml` | out of scope | — | — |
 | prometheus/prometheus | `codeql-analysis.yml` | warnings | 9 | — |
-| prometheus/prometheus | `container_description.yml` | unsupported | — | `action.docker` |
+| prometheus/prometheus | `container_description.yml` | warnings | 13 | — |
 | prometheus/prometheus | `fuzzing.yml` | warnings | 12 | — |
 | prometheus/prometheus | `govulncheck.yml` | warnings | 8 | — |
 | prometheus/prometheus | `lock.yml` | warnings | 3 | — |
-| prometheus/prometheus | `prombench.yml` | unsupported | — | `action.docker` |
+| prometheus/prometheus | `prombench.yml` | warnings | 18 | — |
 | prometheus/prometheus | `repo_sync.yml` | warnings | 5 | — |
-| prometheus/prometheus | `scorecards.yml` | unsupported | — | `action.docker` |
+| prometheus/prometheus | `scorecards.yml` | warnings | 8 | — |
 | prometheus/prometheus | `stale.yml` | warnings | 3 | — |
 | python/cpython | `add-issue-header.yml` | warnings | 3 | — |
 | python/cpython | `build.yml` | out of scope | — | — |
@@ -318,7 +318,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `require-pr-label.yml` | warnings | 8 | — |
 | python/cpython | `reusable-check-c-api-docs.yml` | warnings | 7 | — |
 | python/cpython | `reusable-check-html-ids.yml` | warnings | 14 | — |
-| python/cpython | `reusable-cifuzz.yml` | unsupported | — | `action.docker` |
+| python/cpython | `reusable-cifuzz.yml` | warnings | 7 | — |
 | python/cpython | `reusable-context.yml` | warnings | 10 | — |
 | python/cpython | `reusable-docs.yml` | warnings | 52 | — |
 | python/cpython | `reusable-emscripten.yml` | warnings | 22 | — |
@@ -342,7 +342,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | rails/rails | `rails_releaser_tests.yml` | warnings | 7 | — |
 | rails/rails | `release.yml` | warnings | 12 | — |
 | rails/rails | `stale.yml` | warnings | 3 | — |
-| rust-lang/cargo | `audit.yml` | unsupported | — | `action.docker` |
+| rust-lang/cargo | `audit.yml` | unsupported | — | `continue_on_error.expression` |
 | rust-lang/cargo | `contrib.yml` | warnings | 13 | — |
 | rust-lang/cargo | `main.yml` | out of scope | — | — |
 | rust-lang/cargo | `release.yml` | warnings | 5 | — |
@@ -353,11 +353,11 @@ None. Every workflow either lowered or was rejected with a specific code.
 | tailwindlabs/tailwindcss | `integration-tests.yml` | out of scope | — | — |
 | tailwindlabs/tailwindcss | `prepare-release.yml` | out of scope | — | — |
 | tailwindlabs/tailwindcss | `release.yml` | out of scope | — | — |
-| tokio-rs/tokio | `audit.yml` | unsupported | — | `action.docker` |
+| tokio-rs/tokio | `audit.yml` | warnings | 5 | — |
 | tokio-rs/tokio | `ci.yml` | out of scope | — | — |
 | tokio-rs/tokio | `labeler.yml` | warnings | 3 | — |
 | tokio-rs/tokio | `loom.yml` | warnings | 120 | — |
-| tokio-rs/tokio | `pr-audit.yml` | unsupported | — | `action.docker` |
+| tokio-rs/tokio | `pr-audit.yml` | warnings | 5 | — |
 | tokio-rs/tokio | `stress-test.yml` | warnings | 23 | — |
 | tokio-rs/tokio | `uring-kernel-version-test.yml` | clean | 11 | — |
 | vercel/next.js | `automated_code_review.yml` | unsupported | — | `action.remote` |

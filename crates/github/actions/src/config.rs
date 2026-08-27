@@ -115,6 +115,63 @@ impl<'de> Deserialize<'de> for ActionConfig {
     }
 }
 
+/// `github/docker_action`: one phase of a Docker container action. One
+/// container per phase invocation, run through the scope's container runner.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerActionConfig {
+    pub image: DockerActionImage,
+    /// The phase's entrypoint (`runs.entrypoint`, a `with.entrypoint`, or the
+    /// phase's `pre-entrypoint`/`post-entrypoint`); the image's own when absent.
+    #[serde(default)]
+    pub entrypoint: Option<Value>,
+    /// `runs.args`, one argument per entry (main phase only).
+    #[serde(default)]
+    pub args: Vec<Value>,
+    /// A `uses: docker://` step's `with.args`: one string, shell-split after
+    /// expressions and secrets resolve, as GitHub does.
+    #[serde(default)]
+    pub args_text: Option<Value>,
+    /// The phase's condition as the frontend's gate tree; see [`RunConfig`].
+    #[serde(default)]
+    pub gate: Option<Value>,
+    /// The engine's `scope_cancelled` static at firing time; see [`RunConfig`].
+    #[serde(default)]
+    pub cancelled: bool,
+    /// Declared inputs with the caller's values or their defaults, plus
+    /// undeclared `with:` keys. Each becomes `INPUT_<NAME>`.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub env: BTreeMap<SmolStr, ValueOrSecretRef>,
+    /// State an earlier phase of this action saved; each entry becomes `STATE_<name>`.
+    #[serde(default)]
+    pub state: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub soft_fail: SoftFail,
+    #[serde(default)]
+    pub event: Value,
+}
+
+/// Where a Docker action's image comes from.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DockerActionImage {
+    /// A registry image (`docker://…`, prefix stripped).
+    Registry(String),
+    /// Built from the action's own Dockerfile.
+    Dockerfile(DockerfileImage),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerfileImage {
+    /// Where the action's tree is — the build context.
+    pub action: ActionLocation,
+    /// The Dockerfile, relative to the action (`runs.image` as written).
+    pub file: String,
+}
+
 /// Every string in a process config that can carry a lowered GitHub placeholder.
 pub(crate) fn process_texts(process: &ProcessConfig) -> impl Iterator<Item = &str> {
     std::iter::once(process.run.as_str()).chain(process.env.values().filter_map(

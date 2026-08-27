@@ -174,6 +174,7 @@ impl DockerExecutor {
         Ok(Arc::new(OneShotRunner {
             prefix: self.one_shot_prefix(&scope.instance).await?,
             workspace: self.workspace_for(&scope.instance),
+            env: scope.env.clone(),
             network,
             pull: self.pull,
             scope: scope.id,
@@ -297,6 +298,7 @@ impl Executor for DockerExecutor {
         let runner = OneShotRunner {
             prefix: format!("{name}-s"),
             workspace: workspace.clone(),
+            env: scope.env.clone(),
             network: Some(format!("container:{name}")),
             pull: self.pull,
             scope: scope.id,
@@ -383,8 +385,20 @@ impl ExecEnv for DockerEnv {
         let pgid_host = pgid_dir.join(&token);
         let pgid_in_container = format!("{CONTAINER_WORKSPACE}/.ci/pg/{token}");
 
+        // Create the working directory through the bind mount, the parity of
+        // the host executor's `create_dir_all`: `docker exec -w` refuses a
+        // directory that does not exist yet (`repo/` before the first checkout).
         let workdir = match &spec.cwd {
-            Some(rel) => format!("{CONTAINER_WORKSPACE}/{}", rel.display()),
+            Some(rel) => {
+                let host = self.workspace.join(rel);
+                tokio::fs::create_dir_all(&host)
+                    .await
+                    .map_err(|e| EnvError::Workspace {
+                        path: host.display().to_string(),
+                        message: e.to_string(),
+                    })?;
+                format!("{CONTAINER_WORKSPACE}/{}", rel.display())
+            }
             None => CONTAINER_WORKSPACE.to_string(),
         };
 

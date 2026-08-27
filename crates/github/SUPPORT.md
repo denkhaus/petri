@@ -36,9 +36,18 @@ workflow directly; `github.event` comes from the run's parameters.
 
 **Steps.** `run:` steps; `uses:` for JavaScript actions (fetched from their
 repositories, resolved to a pinned commit at load time, `pre`/`main`/`post`
-placed as GitHub orders them, state flowing between phases) and for composite
-actions (local and remote, inlined); `with:` inputs with declared defaults;
-step ids and `steps.<id>.outputs`.
+placed as GitHub orders them, state flowing between phases), for composite
+actions (local and remote, inlined), and for Docker container actions —
+`uses: docker://image`, and fetched or local actions whose manifest says
+`runs.using: docker` with a registry image or a Dockerfile (built once per
+pinned commit and cached; a local action's rebuilds once per job). One
+container per phase invocation against the runner's daemon, the job workspace
+mounted, declared inputs as `INPUT_*`, the manifest's `args`/`env`
+expression-interpolated over `inputs`, `entrypoint` and `with.args`/
+`with.entrypoint` overrides, `pre-entrypoint`/`post-entrypoint` placed exactly
+as JavaScript actions' phases; `with:` inputs with declared defaults; step ids
+and `steps.<id>.outputs`. A missing required action input warns and runs, as
+GitHub's runner does.
 
 **Reusable workflows.** A `uses:` job calls another workflow — local
 (`./.github/workflows/x.yml`, or GitHub's `$/` same-repository shorthand) or
@@ -94,7 +103,9 @@ environment or a logged-in `gh`.
 
 **Known deltas from GitHub.** The local executor emulates a Linux runner
 (`ubuntu-*` labels) on this machine; `runner.os` reports the actual host.
-JavaScript actions and `hashFiles` need `node` on `PATH`. Actions that call
+JavaScript actions and `hashFiles` need `node` on `PATH`; Docker container
+actions (and `container:` jobs) need a reachable Docker daemon — its absence is
+one routable failure on the step or scope, never a run abort. Actions that call
 GitHub's hosted backends (artifact upload/download, the cache service) run their
 real code and fail at the HTTP call — local stand-ins are planned, below.
 `shell: bash` invokes `bash -eo pipefail -c`, not GitHub's
@@ -119,7 +130,7 @@ workflow counts in brackets rank the pressure.
 |---|---|---|
 | `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`, `inputs` and the checkout's `github` identity resolve per leg (above); what remains reads `needs`, an input the call site computes at run time, or a matrix that stays dynamic under those contexts. |
 | `workflow_call.matrix` | A matrix inside a matrix workflow call | The engine expands one region at a time; clones cannot expand again. Nested expansion is an engine feature to design, not a frontend gap. |
-| `action.docker`, `services`, `container.expression`, `container.options` | The Docker tier [18, 5, 4] | Docker container actions, service containers, container options — shelling out to `docker` the way actions are fetched with `git`. |
+| `services`, `container.expression`, `container.options` | The Docker tier's remainder [3] | Service containers and container config. Docker container actions are supported (above); services ride the same acquisition boundary, realized with the scope. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |

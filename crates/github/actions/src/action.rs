@@ -131,7 +131,7 @@ pub fn input_variable(name: &str) -> String {
 
 /// Put the action's tree into the job environment, once per scope instance, and
 /// return where it went (relative to the workspace root).
-async fn stage(
+pub(crate) async fn stage(
     ctx: &StepCtx,
     source: &Arc<dyn ActionTreeSource>,
     pinned: &PinnedAction,

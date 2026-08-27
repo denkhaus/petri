@@ -81,7 +81,7 @@ use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 use serde_json::Value;
 use smol_str::SmolStr;
 
-pub use action::{ACTION_KIND, ActionSource, RUN_KIND, STATE_OUTPUT_KEY};
+pub use action::{ACTION_KIND, ActionSource, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY};
 pub use runners::RunnerMap;
 
 /// Parse and lower a workflow file, with no source for `uses: owner/repo@ref`

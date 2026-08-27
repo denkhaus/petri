@@ -69,6 +69,7 @@ fn runtime(dir: &std::path::Path) -> Runtime {
         .options(options)
         .step(github_actions::RunStep)
         .step(github_actions::ActionStep)
+        .step(github_actions::DockerActionStep)
 }
 
 /// Run on the standard runtime, which verifies replay itself.

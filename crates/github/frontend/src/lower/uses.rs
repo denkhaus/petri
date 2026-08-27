@@ -1,6 +1,5 @@
-//! `uses:` steps: remote references resolved and pinned, JavaScript actions
-//! planned and placed (`pre`, main, `post`), composites inlined, Docker
-//! actions rejected.
+//! `uses:` steps: remote references resolved and pinned, JavaScript and Docker
+//! actions planned and placed (`pre`, main, `post`), composites inlined.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -11,15 +10,17 @@ use ir::{BinOp, ExprId, NodeId, ScopeId, StepRef, UnOp, Value};
 use serde_json::{Map, json};
 
 use crate::action::{
-    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, Phase, PinnedAction,
-    STATE_OUTPUT_KEY, unavailable_hint,
+    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, DOCKER_ACTION_KIND, Phase,
+    PinnedAction, STATE_OUTPUT_KEY, unavailable_hint,
 };
-use crate::composite::{self, Runs, Uses};
+use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
 use crate::gate::{self, GateOp};
 use crate::model::{Defaults, Job, Step};
 
-use super::{ActionContext, ActionPlan, Lowering, PlanInput, scalar_text, scalar_text_opt};
+use super::{
+    ActionContext, ActionPlan, Lowering, PlanInput, PlanKind, scalar_text, scalar_text_opt,
+};
 
 /// Why a remote action did not resolve.
 #[derive(Clone)]
@@ -82,15 +83,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 }
                 composite::read_document(self.files, &path, span, &mut self.diags)
             }
-            Uses::Docker(image) => {
-                self.diags.unsupported(
-                    "action.docker",
-                    span.clone(),
-                    format!("`uses: docker://{image}`"),
-                    "Docker actions run against the daemon, not through the job environment; not yet built",
-                );
-                None
-            }
+            // `docker://` names an image, not files; the plan path handles it
+            // before any document is asked for.
+            Uses::Docker(_) => None,
             Uses::Remote(name) => match self.resolve_remote(&name) {
                 Ok((pinned, text)) => Document::parse(
                     &format!("{}/action.yml", pinned.reference),
@@ -127,8 +122,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// The plan for a `uses:` step that is a JavaScript action; `None` for anything
-    /// else, quietly — the main pass reports problems.
+    /// The plan for a `uses:` step that contributes standalone nodes — a
+    /// JavaScript or Docker action; `None` for anything else, quietly — the
+    /// main pass reports problems.
     pub(super) fn action_plan(&mut self, step: &Step<'_>) -> Option<ActionPlan> {
         let (reference, span) = step.uses.as_ref()?;
         let saved = std::mem::replace(&mut self.diags, Diagnostics::new());
@@ -141,15 +137,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     fn action_plan_inner(&mut self, reference: &str, span: &Span) -> Option<ActionPlan> {
+        if let Uses::Docker(image) = composite::classify(reference) {
+            return Some(docker_image_plan(&image));
+        }
         let location = self.location_of(reference)?;
         let doc = self.action_document(reference, span)?;
         let manifest = composite::read_manifest(&doc, &mut self.diags)?;
-        let Runs::Node(node) = manifest.runs else {
-            return None;
+        let kind = match manifest.runs {
+            Runs::Node(node) => PlanKind::Node(node),
+            Runs::Docker(docker) => PlanKind::Docker(docker),
+            Runs::Composite(_) => return None,
         };
         Some(ActionPlan {
-            location,
-            node,
+            location: Some(location),
+            kind,
             inputs: plan_inputs(&manifest.inputs),
         })
     }
@@ -164,8 +165,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// A `pre` or `post` node for a JavaScript action. `pre-if` and `post-if`
-    /// default to `always()`; a `post` also needs its main node to have run.
+    /// A `pre` or `post` node for a JavaScript or Docker action. `pre-if` and
+    /// `post-if` default to `always()`; a `post` also needs its main node to
+    /// have run.
     pub(super) fn lifecycle_node(
         &mut self,
         context: ActionContext<'_, 'a, '_>,
@@ -174,15 +176,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
     ) -> Option<NodeId> {
         let ActionContext { step, site, .. } = context;
         let (_, span) = step.uses.as_ref()?;
-        let source = match phase {
-            Phase::Pre => plan.node.pre_if.as_deref(),
-            Phase::Post => plan.node.post_if.as_deref(),
-            Phase::Main => return None,
+        if phase == Phase::Main {
+            return None;
         }
-        .unwrap_or("always()");
+        let source = plan.phase_if(phase).unwrap_or("always()");
         let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
         let state_from = (phase == Phase::Post).then(|| main_name.clone());
-        let id = self.action_node(context, plan, phase, state_from.as_deref());
+        let id = self.phase_node(context, plan, phase, state_from.as_deref());
         let mut prereqs = vec![site.job_started(self.b.exprs())];
         if phase == Phase::Post {
             prereqs.push(self.main_ran(site, &main_name));
@@ -192,12 +192,33 @@ impl<'w, 'a> Lowering<'w, 'a> {
         Some(id)
     }
 
+    /// One phase's node, whichever kind of action the plan holds.
+    fn phase_node(
+        &mut self,
+        context: ActionContext<'_, 'a, '_>,
+        plan: &ActionPlan,
+        phase: Phase,
+        state_from: Option<&str>,
+    ) -> NodeId {
+        match &plan.kind {
+            PlanKind::Node(node) => {
+                let node = node.clone();
+                self.action_node(context, plan, &node, phase, state_from)
+            }
+            PlanKind::Docker(docker) => {
+                let docker = docker.clone();
+                self.docker_action_node(context, plan, &docker, phase, state_from)
+            }
+        }
+    }
+
     /// One `github/action` node: the action pinned, its phase and entry point, its
     /// inputs and env lowered where the step is.
     fn action_node(
         &mut self,
         context: ActionContext<'_, 'a, '_>,
         plan: &ActionPlan,
+        action: &NodeAction,
         phase: Phase,
         state_from: Option<&str>,
     ) -> NodeId {
@@ -214,9 +235,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .map(|(u, s)| (u.as_str(), s.clone()))
             .unwrap_or_default();
         let entry = match phase {
-            Phase::Pre => plan.node.pre.clone(),
-            Phase::Main => Some(plan.node.main.clone()),
-            Phase::Post => plan.node.post.clone(),
+            Phase::Pre => action.pre.clone(),
+            Phase::Main => Some(action.main.clone()),
+            Phase::Post => action.post.clone(),
         }
         .unwrap_or_default();
         let suffix = match phase {
@@ -246,10 +267,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     Some(text) => self.text_value(text, span.clone(), &step_site),
                     None => {
                         if input.required && phase == Phase::Main {
-                            self.diags.error(
+                            // GitHub's runner warns and runs anyway; real
+                            // workflows rely on that.
+                            self.diags.warning(
                                 "gha.missing_input",
                                 span.clone(),
-                                format!("`{uses}` requires input `{}`", input.name),
+                                format!(
+                                    "`{uses}` declares required input `{}`, which this step                                      does not provide",
+                                    input.name
+                                ),
                             );
                         }
                         None
@@ -268,10 +294,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
 
+        let location = plan
+            .location
+            .as_ref()
+            .expect("a JavaScript action has files");
         let mut config = Map::new();
         config.insert(
             "action".into(),
-            serde_json::to_value(&plan.location).expect("an action location serializes"),
+            serde_json::to_value(location).expect("an action location serializes"),
         );
         config.insert("entry".into(), json!(entry));
         config.insert("inputs".into(), Value::Object(inputs));
@@ -308,6 +338,271 @@ impl<'w, 'a> Lowering<'w, 'a> {
         id
     }
 
+    /// One `github/docker_action` node: the image (registry or the action's
+    /// Dockerfile), the phase's entrypoint, and — for the main phase — its
+    /// args, with the action's declared inputs bound so the manifest's own
+    /// `args` and `env` expressions read them.
+    fn docker_action_node(
+        &mut self,
+        context: ActionContext<'_, 'a, '_>,
+        plan: &ActionPlan,
+        docker: &DockerAction,
+        phase: Phase,
+        state_from: Option<&str>,
+    ) -> NodeId {
+        let ActionContext {
+            job,
+            step,
+            scope,
+            site,
+            job_secret_env,
+        } = context;
+        let (uses, span) = step
+            .uses
+            .as_ref()
+            .map(|(u, s)| (u.as_str(), s.clone()))
+            .unwrap_or_default();
+        let suffix = match phase {
+            Phase::Pre => format!("{SEP}pre"),
+            Phase::Main => String::new(),
+            Phase::Post => format!("{SEP}post"),
+        };
+        let node_name = format!("{}{SEP}{}{suffix}", site.job_id, step.node_name());
+
+        let mut step_site = site.clone();
+        let mut env_config = self.step_env_config(step, &mut step_site, job_secret_env);
+
+        // Declared inputs (or their defaults) as expressions: the `INPUT_*`
+        // values, and the `inputs` context the manifest's own text lowers in.
+        let inputs = self.docker_action_inputs(plan, step, &step_site, span.clone(), uses, phase);
+        let mut manifest_site = step_site.clone();
+        manifest_site.action_inputs = Some(inputs.clone());
+
+        let mut config = Map::new();
+        match docker.image.strip_prefix("docker://") {
+            Some(registry) => {
+                config.insert("image".into(), json!({ "registry": registry }));
+            }
+            None => {
+                let location = plan
+                    .location
+                    .as_ref()
+                    .expect("a Dockerfile action has files");
+                config.insert(
+                    "image".into(),
+                    json!({ "dockerfile": {
+                        "action": serde_json::to_value(location)
+                            .expect("an action location serializes"),
+                        "file": docker.image,
+                    }}),
+                );
+            }
+        }
+
+        // `with.entrypoint` and `with.args` override the manifest for the main
+        // phase, as GitHub documents for Docker container actions; `pre` and
+        // `post` run their own entrypoints with no args.
+        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
+        for (k, v) in &step.with {
+            with.insert(k.to_lowercase(), *v);
+        }
+        let entrypoint = match phase {
+            Phase::Pre => docker
+                .pre_entrypoint
+                .as_ref()
+                .and_then(|t| self.sentinel_text_value(t, span.clone(), &manifest_site)),
+            Phase::Post => docker
+                .post_entrypoint
+                .as_ref()
+                .and_then(|t| self.sentinel_text_value(t, span.clone(), &manifest_site)),
+            Phase::Main => match with.get("entrypoint") {
+                Some(node) => self.sentinel_with_value(*node, &step_site),
+                None => docker
+                    .entrypoint
+                    .as_ref()
+                    .and_then(|t| self.sentinel_text_value(t, span.clone(), &manifest_site)),
+            },
+        };
+        if let Some(value) = entrypoint {
+            config.insert("entrypoint".into(), value);
+        }
+        if phase == Phase::Main {
+            match with.get("args") {
+                // One string, shell-split by the step after expressions and
+                // secrets resolve, as GitHub does.
+                Some(node) => {
+                    if let Some(value) = self.sentinel_with_value(*node, &step_site) {
+                        config.insert("args_text".into(), value);
+                    }
+                }
+                None if !docker.args.is_empty() => {
+                    let mut args = Vec::new();
+                    for arg in &docker.args {
+                        if let Some(value) =
+                            self.sentinel_text_value(arg, span.clone(), &manifest_site)
+                        {
+                            args.push(value);
+                        }
+                    }
+                    config.insert("args".into(), Value::Array(args));
+                }
+                None => {}
+            }
+        }
+
+        let mut inputs_config = Map::new();
+        for (name, id) in &inputs {
+            inputs_config.insert(name.clone(), json!({ EXPR_PLACEHOLDER_KEY: id.raw() }));
+        }
+        config.insert("inputs".into(), Value::Object(inputs_config));
+
+        // The manifest's `runs.env`, under the step's own `env:`.
+        for (key, text) in &docker.env {
+            if env_config.contains_key(key.as_str()) {
+                continue;
+            }
+            if let Some(lowered) = lower_scalar(
+                text,
+                span.clone(),
+                &manifest_site,
+                true,
+                true,
+                self.b.exprs(),
+                &mut self.diags,
+            ) {
+                env_config.insert(key.clone(), config_value(lowered));
+            }
+        }
+        if !env_config.is_empty() {
+            config.insert("env".into(), Value::Object(env_config));
+        }
+        config.insert("event".into(), self.event_config());
+        if let Some(from) = state_from {
+            config.insert("state".into(), self.state_config(site, from));
+        }
+        if let Some(coe) = step.continue_on_error {
+            match coe.as_scalar().and_then(|s| s.as_bool()) {
+                Some(true) => {
+                    config.insert("soft_fail".into(), json!(true));
+                }
+                Some(false) => {}
+                None if phase == Phase::Main => self.diags.unsupported(
+                    "continue_on_error.expression",
+                    coe.span(),
+                    "an expression-valued `continue-on-error`",
+                    "use a literal true or false",
+                ),
+                None => {}
+            }
+        }
+
+        let id = self.b.add_node(
+            &node_name,
+            scope,
+            StepRef::new(DOCKER_ACTION_KIND, Value::Object(config)),
+        );
+        self.spans.insert(id, step.span.clone());
+        self.set_step_budget(id, job, step);
+        id
+    }
+
+    /// A Docker action's inputs, each as an expression: the caller's `with:`
+    /// (or the declared default), plus undeclared `with:` keys, which pass
+    /// through as GitHub's do. A whole-value secret rides as its sentinel,
+    /// resolved by the step at spawn. Missing required inputs are reported on
+    /// the main phase only, like a JavaScript action's.
+    fn docker_action_inputs(
+        &mut self,
+        plan: &ActionPlan,
+        step: &Step<'_>,
+        site: &Site,
+        span: Span,
+        uses: &str,
+        phase: Phase,
+    ) -> BTreeMap<String, ExprId> {
+        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
+        for (k, v) in &step.with {
+            with.insert(k.to_lowercase(), *v);
+        }
+        let mut inputs: BTreeMap<String, ExprId> = BTreeMap::new();
+        let mut declared: HashSet<String> = HashSet::new();
+        for input in &plan.inputs {
+            let key = input.name.to_lowercase();
+            declared.insert(key.clone());
+            let id = match with.get(&key) {
+                Some(node) => self.input_expr_from_node(*node, site),
+                None => match &input.default {
+                    Some(text) => self.input_expr_from_text(text, span.clone(), site),
+                    None => {
+                        if input.required && phase == Phase::Main {
+                            // GitHub's runner warns and runs anyway; real
+                            // workflows rely on that.
+                            self.diags.warning(
+                                "gha.missing_input",
+                                span.clone(),
+                                format!(
+                                    "`{uses}` declares required input `{}`, which this step                                      does not provide",
+                                    input.name
+                                ),
+                            );
+                        }
+                        None
+                    }
+                },
+            };
+            if let Some(id) = id {
+                inputs.insert(input.name.clone(), id);
+            }
+        }
+        for (key, node) in &step.with {
+            if !declared.contains(&key.to_lowercase())
+                && let Some(id) = self.input_expr_from_node(*node, site)
+            {
+                inputs.insert(key.clone(), id);
+            }
+        }
+        inputs
+    }
+
+    fn input_expr_from_node(&mut self, node: Node<'_>, site: &Site) -> Option<ExprId> {
+        match node.as_str() {
+            Some(text) => self.input_expr_from_text(text, node.span(), site),
+            None => {
+                let text = scalar_text(node);
+                Some(self.b.exprs().lit(text))
+            }
+        }
+    }
+
+    fn input_expr_from_text(&mut self, text: &str, span: Span, site: &Site) -> Option<ExprId> {
+        match lower_scalar(text, span, site, true, true, self.b.exprs(), &mut self.diags)? {
+            LoweredScalar::Literal(v) => Some(self.b.exprs().lit(v)),
+            LoweredScalar::Expr(id) => Some(id),
+            LoweredScalar::Secret(name) => {
+                let sentinel = secret_sentinel(&name);
+                Some(self.b.exprs().lit(sentinel))
+            }
+        }
+    }
+
+    /// Lower text for a docker action's args or entrypoint, where a whole-value
+    /// secret rides as its sentinel — these positions are not env-shaped maps,
+    /// so a `$secret` reference has nowhere to live.
+    fn sentinel_text_value(&mut self, text: &str, span: Span, site: &Site) -> Option<Value> {
+        let lowered = lower_scalar(text, span, site, true, true, self.b.exprs(), &mut self.diags)?;
+        Some(match lowered {
+            LoweredScalar::Secret(name) => Value::String(secret_sentinel(&name)),
+            other => config_value(other),
+        })
+    }
+
+    fn sentinel_with_value(&mut self, node: Node<'_>, site: &Site) -> Option<Value> {
+        match node.as_str() {
+            Some(text) => self.sentinel_text_value(text, node.span(), site),
+            None => Some(Value::String(scalar_text(node))),
+        }
+    }
+
     fn main_action_node(
         &mut self,
         context: ActionContext<'_, 'a, '_>,
@@ -317,13 +612,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut step_site = context.site.clone();
         step_site.earlier_steps = earlier.to_vec();
         let main_name = format!("{}{SEP}{}", context.site.job_id, context.step.node_name());
-        let state_from = (context.site.action_inputs.is_none() && plan.node.pre.is_some())
+        let state_from = (context.site.action_inputs.is_none() && plan.has_pre())
             .then(|| format!("{main_name}{SEP}pre"));
         let main_context = ActionContext {
             site: &step_site,
             ..context
         };
-        let id = self.action_node(main_context, plan, Phase::Main, state_from.as_deref());
+        let id = self.phase_node(main_context, plan, Phase::Main, state_from.as_deref());
         self.gate_main_node(id, context.step, &step_site);
         vec![id]
     }
@@ -378,7 +673,17 @@ impl<'w, 'a> Lowering<'w, 'a> {
             );
             return Vec::new();
         }
-        if let Some(plan) = action_plan {
+        // Inside a composite, plans are not precomputed: a `docker://` step
+        // builds its plan inline, and a manifest-backed action builds one from
+        // the manifest below.
+        let inline_plan = match action_plan {
+            None => match composite::classify(reference) {
+                Uses::Docker(image) => Some(docker_image_plan(&image)),
+                _ => None,
+            },
+            Some(_) => None,
+        };
+        if let Some(plan) = action_plan.or(inline_plan.as_ref()) {
             return self.main_action_node(
                 ActionContext {
                     job,
@@ -399,17 +704,22 @@ impl<'w, 'a> Lowering<'w, 'a> {
         };
         let action = match manifest.runs {
             Runs::Composite(action) => action,
-            Runs::Node(node) => {
-                // The manifest in hand is the plan; no need to read it again.
+            // The manifest in hand is the plan; no need to read it again.
+            runs @ (Runs::Node(_) | Runs::Docker(_)) => {
                 let Some(location) = self.location_of(reference) else {
                     return Vec::new();
                 };
+                let kind = match runs {
+                    Runs::Node(node) => PlanKind::Node(node),
+                    Runs::Docker(docker) => PlanKind::Docker(docker),
+                    Runs::Composite(_) => unreachable!("matched above"),
+                };
                 let plan = ActionPlan {
-                    location,
-                    node,
+                    location: Some(location),
+                    kind,
                     inputs: plan_inputs(&manifest.inputs),
                 };
-                if depth > 0 && (plan.node.pre.is_some() || plan.node.post.is_some()) {
+                if depth > 0 && (plan.has_pre() || plan.has_post()) {
                     self.diags.warning(
                         "action.nested_lifecycle",
                         span.clone(),
@@ -429,15 +739,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     &plan,
                     earlier,
                 );
-            }
-            Runs::Docker => {
-                self.diags.unsupported(
-                    "action.docker",
-                    span.clone(),
-                    format!("`{reference}` is a Docker container action"),
-                    "Docker actions run against the daemon, not through the job environment; not yet built",
-                );
-                return Vec::new();
             }
         };
         if matches!(composite::classify(reference), Uses::Remote(_))
@@ -500,10 +801,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     }
                 }
                 None if input.required => {
-                    self.diags.error(
+                    // GitHub's runner warns and runs anyway.
+                    self.diags.warning(
                         "gha.missing_input",
                         span.clone(),
-                        format!("`{reference}` requires input `{}`", input.name),
+                        format!(
+                            "`{reference}` declares required input `{}`, which this step does                              not provide",
+                            input.name
+                        ),
                     );
                 }
                 None => {
@@ -641,6 +946,25 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let status = t.call("default", vec![status, skipped]);
         let is_skipped = t.binary(BinOp::Eq, status, skipped);
         t.unary(UnOp::Not, is_skipped)
+    }
+}
+
+/// The plan for `uses: docker://image`: no files, no manifest — the image as
+/// written, and whatever `with:` provides.
+fn docker_image_plan(image: &str) -> ActionPlan {
+    ActionPlan {
+        location: None,
+        kind: PlanKind::Docker(DockerAction {
+            image: format!("docker://{image}"),
+            entrypoint: None,
+            pre_entrypoint: None,
+            pre_if: None,
+            post_entrypoint: None,
+            post_if: None,
+            args: Vec::new(),
+            env: Vec::new(),
+        }),
+        inputs: Vec::new(),
     }
 }
 

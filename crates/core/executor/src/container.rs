@@ -30,9 +30,20 @@ pub const CONTAINER_RUNTIME_CLASS: &str = "container_runtime";
 pub enum ContainerImage {
     /// A registry image, pulled when absent.
     Registry { image: SmolStr },
-    /// Built from a Dockerfile under `context` (workspace-relative). `tag` is
-    /// the cache key: a tag already built is reused, across runs.
-    Build { context: PathBuf, tag: SmolStr },
+    /// Built from a Dockerfile under `context` (workspace-relative).
+    Build {
+        context: PathBuf,
+        /// The Dockerfile within the context; `None` is the context's own
+        /// `Dockerfile`.
+        dockerfile: Option<SmolStr>,
+        /// The image tag the build produces — the cache key.
+        tag: SmolStr,
+        /// Whether an image already carrying `tag` may be reused without
+        /// building. True for content-addressed tags (a pinned commit); false
+        /// when the context can change under the same tag (a local action's
+        /// first build of the run).
+        reuse: bool,
+    },
 }
 
 /// What one one-shot container runs. The runner supplies the scope's world —
@@ -67,7 +78,9 @@ impl OneShotContainer {
         Self {
             image: ContainerImage::Build {
                 context: context.into(),
+                dockerfile: None,
                 tag: SmolStr::new(tag),
+                reuse: true,
             },
             entrypoint: None,
             args: Vec::new(),

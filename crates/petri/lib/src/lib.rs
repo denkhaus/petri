@@ -74,6 +74,7 @@ pub fn runtime() -> Runtime {
         .frontend(frontend_gha::GitHubActions::with_actions(manifests).with_runners(runners))
         .step(github::RunStep)
         .step(github::ActionStep)
+        .step(github::DockerActionStep)
         .capability(github::ActionSourceCap(trees))
         .secrets(GithubSecrets::new())
 }

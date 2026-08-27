@@ -1,0 +1,163 @@
+//! Docker container actions end to end: `uses: docker://…` and a local
+//! Dockerfile action, run for real against the daemon — in a host job and in a
+//! containerized job. These skip when no daemon is reachable
+//! (`PETRI_REQUIRE_DOCKER` turns the skip into a failure).
+
+mod support;
+
+use runtime::ir::RunStatus;
+use runtime::{engine, frontend, ir};
+use support::*;
+
+async fn docker_ready() -> bool {
+    if testkit::docker_available().await {
+        return true;
+    }
+    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
+        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
+    }
+    eprintln!("skipping: no Docker daemon reachable");
+    false
+}
+
+fn output_of(report: &RunReportPlus, name: &str) -> ir::Value {
+    report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == name)
+        .map(|r| r.outcome.output.clone())
+        .unwrap_or(ir::Value::Null)
+}
+
+/// A `docker://` step runs in the daemon with the workspace mounted, sees the
+/// scope's `GITHUB_*` env and its `INPUT_*`, writes `GITHUB_OUTPUT`, and a
+/// later step of the (host) job reads the output back.
+#[tokio::test]
+async fn a_docker_url_action_runs_in_a_host_job() {
+    if !docker_ready().await {
+        return;
+    }
+    let text = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - id: box
+        uses: docker://alpine:3.20
+        with:
+          who: world
+          args: sh -c 'echo "hello $INPUT_WHO from $GITHUB_REPOSITORY"; echo "answer=42" >> "$GITHUB_OUTPUT"'
+      - run: echo "carried ${{ steps.box.outputs.answer }}"
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "docker-url-action").await;
+    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    let lines = log_lines(&report);
+    assert!(
+        lines.iter().any(|l| l == "hello world from example/repo"),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l == "carried 42"), "{lines:?}");
+    assert_eq!(output_of(&report, "build/box")["answer"], "42");
+}
+
+/// A local Dockerfile action builds from the checked-out repository and runs.
+/// The Dockerfile only has to exist at run time — GitHub resolves it against
+/// the workspace — so an earlier step writes it.
+#[tokio::test]
+async fn a_local_dockerfile_action_builds_and_runs() {
+    if !docker_ready().await {
+        return;
+    }
+    let files = files(&[(
+        ".github/actions/box/action.yml",
+        r#"
+inputs:
+  greeting:
+    default: built
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ inputs.greeting }}
+"#,
+    )]);
+    let text = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p .github/actions/box
+          printf 'FROM alpine:3.20\nENTRYPOINT ["/bin/echo", "dockerfile-action-ran:"]\n' > .github/actions/box/Dockerfile
+      - uses: ./.github/actions/box
+        with:
+          greeting: and-spoke
+"#;
+    let graph = lower_ok_with(text, &files);
+    let report = run_host(graph, "docker-local-action").await;
+    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    let lines = log_lines(&report);
+    assert!(
+        lines.iter().any(|l| l == "dockerfile-action-ran: and-spoke"),
+        // The entrypoint echoes its appended args: the manifest's one arg,
+        // bound to the caller's input.
+        "{lines:?}"
+    );
+}
+
+/// A `docker://` step inside a containerized job: the action container attaches
+/// to the job container's world and shares its workspace, so a file the job
+/// wrote is visible to the action and the action's output comes back.
+#[tokio::test]
+async fn a_docker_action_runs_beside_a_containerized_job() {
+    if !docker_ready().await {
+        return;
+    }
+    let text = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - run: echo from-the-job > note.txt
+      - id: box
+        uses: docker://alpine:3.20
+        with:
+          args: sh -c 'cat "$GITHUB_WORKSPACE/note.txt"'
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "docker-action-in-container-job").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}\n{:?}",
+        errors(&report),
+        log_lines(&report)
+    );
+    let lines = log_lines(&report);
+    assert!(lines.iter().any(|l| l == "from-the-job"), "{lines:?}");
+}
+
+fn errors(report: &RunReportPlus) -> Vec<String> {
+    report
+        .state
+        .history()
+        .iter()
+        .filter(|r| r.outcome.status.is_failure())
+        .map(|r| format!("{}: {:?}", r.name, r.outcome))
+        .collect()
+}
+
+// Quiet the unused-import lint when every test above skips without a daemon.
+#[allow(unused_imports)]
+use engine as _engine;
+#[allow(unused_imports)]
+use frontend as _frontend;

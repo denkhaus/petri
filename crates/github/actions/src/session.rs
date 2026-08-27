@@ -59,7 +59,7 @@ const COMMAND_FILE_LIMIT: usize = 1024 * 1024;
 /// How long to wait for the command sink after the process step returns. The
 /// process step itself stops draining output after its own limit, so a straggler
 /// holding stdout open cannot wedge the step here either.
-const SINK_LIMIT: Duration = Duration::from_secs(6);
+pub(crate) const SINK_LIMIT: Duration = Duration::from_secs(6);
 
 /// The step's own files, relative to the workspace root.
 struct StepFiles {
@@ -159,34 +159,36 @@ impl Session {
         github_workspace_path(&*self.env)
     }
 
-    fn absolute(&self, relative: &Path) -> String {
-        format!("{}/{}", self.workspace, relative.display())
-    }
-
     /// The environment every step gets on top of the scope's: the job's
     /// accumulated `GITHUB_ENV` first (a step's own `env:` wins over it), then the
     /// files and directories of the contract.
     pub fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
+        let workspace = self.workspace.clone();
+        self.env_rooted(node, &workspace)
+    }
+
+    /// [`Session::env`], with every path under `root` instead of this
+    /// environment's workspace path: what a process sees when the workspace is
+    /// mounted somewhere else — a one-shot action container's mount point.
+    pub fn env_rooted(&self, node: &str, root: &str) -> BTreeMap<SmolStr, SmolStr> {
         let mut out: BTreeMap<SmolStr, SmolStr> = self
             .job_env
             .iter()
             .map(|(k, v)| (SmolStr::new(k), SmolStr::new(v)))
             .collect();
+        let rooted = |relative: &Path| format!("{root}/{}", relative.display());
         let mut set = |key: &str, value: String| {
             out.insert(SmolStr::new(key), SmolStr::new(value));
         };
-        set("GITHUB_ENV", self.absolute(&self.files.env));
-        set("GITHUB_PATH", self.absolute(&self.files.path));
-        set("GITHUB_STATE", self.absolute(&self.files.state));
-        set("GITHUB_STEP_SUMMARY", self.absolute(&self.files.summary));
-        set("GITHUB_EVENT_PATH", self.absolute(Path::new(EVENT_FILE)));
-        set("GITHUB_WORKSPACE", self.github_workspace());
+        set("GITHUB_ENV", rooted(&self.files.env));
+        set("GITHUB_PATH", rooted(&self.files.path));
+        set("GITHUB_STATE", rooted(&self.files.state));
+        set("GITHUB_STEP_SUMMARY", rooted(&self.files.summary));
+        set("GITHUB_EVENT_PATH", rooted(Path::new(EVENT_FILE)));
+        set("GITHUB_WORKSPACE", format!("{root}/{REPO_DIR}"));
         set("GITHUB_ACTION", node.to_string());
-        set("RUNNER_TEMP", self.absolute(Path::new(TEMP_DIR)));
-        set(
-            "RUNNER_TOOL_CACHE",
-            self.absolute(Path::new(TOOL_CACHE_DIR)),
-        );
+        set("RUNNER_TEMP", rooted(Path::new(TEMP_DIR)));
+        set("RUNNER_TOOL_CACHE", rooted(Path::new(TOOL_CACHE_DIR)));
         out
     }
 
@@ -330,7 +332,7 @@ impl Session {
 
     /// Read the files back and apply them: env and path to the job, state and
     /// outputs to the caller.
-    async fn finish(&mut self, commands: CommandEffects) -> Result<Effects, StepFailure> {
+    pub(crate) async fn finish(&mut self, commands: CommandEffects) -> Result<Effects, StepFailure> {
         let (env_text, state_text, path_text, summary) = tokio::try_join!(
             read_text(&*self.env, &self.files.env),
             read_text(&*self.env, &self.files.state),

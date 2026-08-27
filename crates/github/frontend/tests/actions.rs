@@ -160,7 +160,7 @@ jobs:
 }
 
 #[test]
-fn a_required_input_without_a_value_is_an_error() {
+fn a_required_input_without_a_value_warns_and_lowers() {
     let source = MapActionSource::new().with(
         "acme/needs@v1",
         TEST_SHA,
@@ -175,12 +175,15 @@ jobs:
       - uses: acme/needs@v1
 "#;
     let lowered = lower(text, &source);
-    assert!(lowered.graph.is_none());
+    // GitHub's runner warns about a missing required action input and runs
+    // anyway; real workflows rely on that. (A workflow_call input stays an
+    // error — GitHub fails those.)
+    assert!(lowered.graph.is_some());
     assert!(
         lowered
             .diagnostics
-            .errors()
-            .any(|d| d.to_string().contains("requires input `who`")),
+            .iter()
+            .any(|d| d.code == "gha.missing_input"),
         "{:?}",
         lowered.diagnostics.into_vec()
     );
@@ -223,12 +226,14 @@ jobs:
       - uses: acme/nully@v1
 "#;
     let lowered = lower(text, &source);
-    assert!(lowered.graph.is_none());
+    // A null default does not satisfy the input; the runner-faithful warning
+    // still names it.
+    assert!(lowered.graph.is_some());
     assert!(
         lowered
             .diagnostics
-            .errors()
-            .any(|d| d.to_string().contains("requires input `who`")),
+            .iter()
+            .any(|d| d.code == "gha.missing_input"),
         "{:?}",
         lowered.diagnostics.into_vec()
     );

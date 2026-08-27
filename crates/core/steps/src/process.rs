@@ -192,7 +192,7 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         .map(|lines| tokio::spawn(forward_lines(lines, ctx.logs.clone())));
 
     let grace = ctx.env.grace();
-    let ending = ladder(&mut *handle, &mut ctx, grace).await;
+    let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
 
     if let Some(drain) = drain {
         let _ = tokio::time::timeout(DRAIN_LIMIT, drain).await;
@@ -226,7 +226,8 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     })
 }
 
-enum Ending {
+/// How a waited-on process ended: naturally, or because the ladder stopped it.
+pub enum Ending {
     Natural(ExitStatus),
     Signalled {
         escalation: &'static str,
@@ -239,16 +240,19 @@ enum Ending {
 /// the polite ladder is already waiting.
 ///
 /// Idempotent by construction: once the ladder has started, further `Cancel`s are
-/// drained and ignored rather than restarting it. A `Deliver` is not a stop: the
-/// process step has nothing to hand a value to, so it is dropped and the wait goes on.
-async fn ladder(
+/// drained and ignored rather than restarting it. A `Deliver` is not a stop: a
+/// process has nothing to hand a value to, so it is dropped and the wait goes on.
+///
+/// Public: every step kind that waits on a [`ProcessHandle`](executor::ProcessHandle)
+/// honours cancellation through this one ladder.
+pub async fn ladder(
     handle: &mut dyn executor::ProcessHandle,
-    ctx: &mut StepCtx,
+    control: &mut mpsc::Receiver<Control>,
     grace: Duration,
 ) -> Ending {
     // First terminal wins. If the process exits before any signal lands, the outcome
     // is the natural one and the cancel is a no-op.
-    let control = loop {
+    let stop = loop {
         tokio::select! {
             result = handle.wait() => {
                 return match result {
@@ -256,14 +260,14 @@ async fn ladder(
                     Err(_) => Ending::Natural(ExitStatus::code(-1)),
                 };
             }
-            ctl = ctx.control.recv() => match ctl {
+            ctl = control.recv() => match ctl {
                 Some(Control::Deliver(_)) => continue,
                 stop => break stop,
             },
         }
     };
 
-    if !matches!(control, Some(Control::Kill)) {
+    if !matches!(stop, Some(Control::Kill)) {
         let _ = handle.signal(Sig::Term).await;
         let deadline = tokio::time::sleep(grace);
         tokio::pin!(deadline);
@@ -275,7 +279,7 @@ async fn ladder(
                         status: result.ok(),
                     };
                 }
-                ctl = ctx.control.recv() => {
+                ctl = control.recv() => {
                     // A Kill joins mid-grace and escalates now; anything else
                     // joins the ladder already in flight.
                     if matches!(ctl, Some(Control::Kill)) {
@@ -295,7 +299,10 @@ async fn ladder(
     }
 }
 
-fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output: Value) -> Outcome {
+/// The outcome of a process that ended on its own: exit 0 is success, a foreign
+/// signal is a `signal:N` failure, and a non-zero exit is a failure unless
+/// `soft_fail` claims the code.
+pub fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output: Value) -> Outcome {
     if status.success() {
         return Outcome::new(Status::Success, output);
     }
