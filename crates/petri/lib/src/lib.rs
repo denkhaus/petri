@@ -53,5 +53,5 @@ pub mod steps {
 /// A consumer that wants a different set builds one itself — `Runtime::standard()`
 /// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
 pub fn runtime() -> Runtime {
-    Runtime::standard().frontend(frontend_gha::Gha)
+    Runtime::standard().frontend(frontend_gha::GitHubActions)
 }

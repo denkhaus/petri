@@ -2,8 +2,8 @@
 //!
 //! Pure: text in, `Graph` and diagnostics out. The only IO is reading the workflow's
 //! local composite actions, and that goes through [`FileSource`] so the caller decides
-//! what "the repository" is — a directory, or a map in a test. [`Gha`] is this format
-//! as a [`Frontend`].
+//! what "the repository" is — a directory, or a map in a test. [`GitHubActions`] is
+//! this format as a [`Frontend`].
 //!
 //! # What a job becomes
 //!
@@ -71,9 +71,9 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
 }
 
 /// GitHub Actions, as a [`Frontend`]: it claims anything under `.github/workflows/`.
-pub struct Gha;
+pub struct GitHubActions;
 
-impl Frontend for Gha {
+impl Frontend for GitHubActions {
     fn name(&self) -> &str {
         "gha"
     }

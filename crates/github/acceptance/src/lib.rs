@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use frontend::{Diagnostic, DirFiles, Frontend, Severity};
-use frontend_gha::Gha;
+use frontend_gha::GitHubActions;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -151,7 +151,7 @@ pub fn check_one(repo: &str, repo_root: &Path, file: &Path) -> Outcome {
         root: repo_root.to_path_buf(),
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Gha.load(&rel, &text, &files)
+        GitHubActions.load(&rel, &text, &files)
     }));
     match result {
         Err(payload) => {
