@@ -62,10 +62,12 @@
 //! per job, which remains a spec finding for that day.
 
 pub mod action;
+pub mod call;
 pub mod composite;
 pub mod expr_lower;
 pub mod exprs;
 pub mod gate;
+pub mod inputs;
 pub mod lower;
 pub mod model;
 pub mod runners;

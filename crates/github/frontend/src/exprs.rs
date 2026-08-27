@@ -52,6 +52,46 @@ fn remap_status(table: &mut ExprTable, status: ExprId, pairs: &[(&str, &str)]) -
     acc
 }
 
+/// How `secrets.NAME` maps to the provider's names at this site.
+///
+/// The map is a pure rename decided at lowering: no secret value — or even a
+/// provider name the caller did not grant — reaches a callee's expressions.
+/// `Inherit` is the root and `secrets: inherit`; `Explicit` is a call's
+/// `secrets:` block, where a declared-but-not-provided optional secret reads as
+/// the empty string (as on GitHub) and an undeclared name is a diagnostic.
+#[derive(Clone, Default)]
+pub enum SecretMap {
+    /// Names pass through unchanged.
+    #[default]
+    Inherit,
+    /// Callee name (lowercased) → the provider's name, or `None` for a declared
+    /// optional secret the caller did not provide.
+    Explicit(BTreeMap<String, Option<String>>),
+}
+
+/// The name is not one this workflow call granted.
+pub struct UndeclaredSecret;
+
+impl SecretMap {
+    /// The provider name for a callee's `secrets.NAME`: `Ok(Some)` to reference,
+    /// `Ok(None)` for a declared-but-absent optional (the value is empty), and
+    /// `Err` for a name this call never granted. `GITHUB_TOKEN` is the runner's
+    /// token, not a caller-granted secret: it crosses every call boundary
+    /// unmapped, as on GitHub.
+    pub fn resolve(&self, name: &str) -> Result<Option<String>, UndeclaredSecret> {
+        if name.eq_ignore_ascii_case(GITHUB_TOKEN_SECRET) {
+            return Ok(Some(GITHUB_TOKEN_SECRET.to_string()));
+        }
+        match self {
+            SecretMap::Inherit => Ok(Some(name.to_string())),
+            SecretMap::Explicit(map) => match map.get(&name.to_lowercase()) {
+                Some(provider) => Ok(provider.clone()),
+                None => Err(UndeclaredSecret),
+            },
+        }
+    }
+}
+
 /// Where an expression sits.
 #[derive(Clone)]
 pub struct Site {
@@ -72,6 +112,19 @@ pub struct Site {
     pub step_env: BTreeMap<String, ExprOrValue>,
     /// Composite action inputs in scope: input name → already-lowered value.
     pub action_inputs: Option<BTreeMap<String, ExprId>>,
+    /// Workflow-scope inputs — a called workflow's bound `with:`, or a directly
+    /// run workflow's typed run-parameter reads. `action_inputs` shadows this
+    /// inside a composite body, where `inputs` means the action's own.
+    pub workflow_inputs: Option<BTreeMap<String, ExprId>>,
+    /// How `secrets.*` names map to the provider's at this site.
+    pub secrets: SecretMap,
+    /// Inside a called workflow: callee job id → its `done` node name, for the
+    /// `jobs.<id>.*` context that `on.workflow_call.outputs` values read.
+    pub callee_jobs: BTreeMap<String, String>,
+    /// The site sits inside an expansion region without being a matrix job
+    /// itself — a called workflow's job under a matrix call. Node names take
+    /// the `#index` suffix, but the `matrix` context stays empty.
+    pub in_expansion: bool,
     /// Composite action outputs the caller can see: step id → (output name → expr).
     pub composite_outputs: BTreeMap<String, BTreeMap<String, ExprId>>,
     /// The job's own `start` node name (its gate).
@@ -91,6 +144,10 @@ impl Site {
             max_parallel: None,
             step_env: BTreeMap::new(),
             action_inputs: None,
+            workflow_inputs: None,
+            secrets: SecretMap::Inherit,
+            callee_jobs: BTreeMap::new(),
+            in_expansion: false,
             composite_outputs: BTreeMap::new(),
             start_node: format!("{job_id}{SEP}start"),
         }
@@ -100,7 +157,7 @@ impl Site {
     /// plain job, `nodes[name + '#' + index]` inside a matrix clone.
     pub fn node_record(&self, table: &mut ExprTable, name: &str) -> ExprId {
         let nodes = table.var("nodes");
-        if self.matrix {
+        if self.matrix || self.in_expansion {
             let prefix = table.lit(format!("{name}#"));
             let index = table.var("index");
             let key = table.binary(BinOp::Add, prefix, index);
@@ -198,10 +255,22 @@ impl Site {
         table.binary(BinOp::And, scoped, not_admitted)
     }
 
+    /// The record of a needed job's `done`. A matrix job's needs live *outside*
+    /// its expansion region, so they read statically even when the job's own
+    /// nodes take a `#index` suffix; inside an expanded call, sibling jobs are
+    /// cloned together, so a needed done is suffixed like everything else.
+    pub fn need_record(&self, table: &mut ExprTable, done_node: &str) -> ExprId {
+        if self.in_expansion {
+            self.node_record(table, done_node)
+        } else {
+            let nodes = table.var("nodes");
+            table.field(nodes, done_node)
+        }
+    }
+
     /// A needed job's result: `nodes["N/done"].output.result`.
     pub fn need_result(&self, table: &mut ExprTable, done_node: &str) -> ExprId {
-        let nodes = table.var("nodes");
-        let record = table.field(nodes, done_node);
+        let record = self.need_record(table, done_node);
         let output = table.field(record, "output");
         table.field(output, "result")
     }
@@ -320,27 +389,29 @@ impl Roots for GhaRoots<'_> {
                 // Lowered to a marker the caller checks for; it never evaluates.
                 Some(table.lit(Value::Null))
             }
-            "inputs" => match &self.site.action_inputs {
-                Some(_) => Some(table.lit(Value::Null)),
-                None => {
-                    self.diags.unsupported(
-                        "inputs",
+            "inputs" => {
+                if self.site.action_inputs.is_none() && self.site.workflow_inputs.is_none() {
+                    // No composite and no workflow_call/dispatch declaration in
+                    // scope: GitHub evaluates the context as empty, and so does
+                    // this run — loudly, since it is almost always a mistake.
+                    self.diags.warning(
+                        "gha.inputs_undeclared",
                         self.span.clone(),
-                        "the `inputs` context is only populated for `workflow_dispatch` and `workflow_call`",
-                        "both are v2",
+                        "the `inputs` context is empty here: this workflow declares no \
+                         `workflow_call` or `workflow_dispatch` inputs",
                     );
-                    // Lower to null so the rejection above is the one diagnostic.
-                    Some(table.lit(Value::Null))
                 }
-            },
+                Some(table.lit(Value::Null))
+            }
             "steps" | "needs" | "job" | "strategy" => Some(table.lit(Value::Null)),
             "jobs" => {
-                self.diags.unsupported(
-                    "jobs_context",
-                    self.span.clone(),
-                    "the `jobs` context exists only in reusable workflows",
-                    "reusable workflows are v2",
-                );
+                if self.site.callee_jobs.is_empty() {
+                    self.diags.error(
+                        "gha.jobs_context",
+                        self.span.clone(),
+                        "the `jobs` context exists only in `on.workflow_call.outputs` values",
+                    );
+                }
                 Some(table.lit(Value::Null))
             }
             _ => None,
@@ -414,8 +485,7 @@ impl Roots for GhaRoots<'_> {
                 match what.to_lowercase().as_str() {
                     "result" => Some(self.site.need_result(table, &done)),
                     "outputs" => {
-                        let nodes = table.var("nodes");
-                        let record = table.field(nodes, &done);
+                        let record = self.site.need_record(table, &done);
                         let output = table.field(record, "output");
                         let mut id = table.field(output, "outputs");
                         for key in rest {
@@ -487,7 +557,12 @@ impl Roots for GhaRoots<'_> {
                 Some(id)
             }
             "inputs" => {
-                let inputs = self.site.action_inputs.as_ref()?;
+                // A composite body's own inputs shadow the workflow's.
+                let inputs = self
+                    .site
+                    .action_inputs
+                    .as_ref()
+                    .or(self.site.workflow_inputs.as_ref())?;
                 let Some(name) = path.first() else {
                     return Some(table.lit(Value::Null));
                 };
@@ -497,6 +572,36 @@ impl Roots for GhaRoots<'_> {
                     .find(|(k, _)| k.to_lowercase() == lowered)
                     .map(|(_, v)| *v);
                 Some(found.unwrap_or_else(|| table.lit(Value::Null)))
+            }
+            // Inside `on.workflow_call.outputs` values: `jobs.<id>.outputs.*` and
+            // `jobs.<id>.result` read the (inlined) job's done record, exactly as
+            // `needs.*` does.
+            "jobs" if !self.site.callee_jobs.is_empty() => {
+                let [job, what, rest @ ..] = path else {
+                    return Some(table.lit(Value::Null));
+                };
+                let Some(done) = self.site.callee_jobs.get(*job) else {
+                    self.diags.error(
+                        "gha.jobs_unknown",
+                        self.span.clone(),
+                        format!("`jobs.{job}` does not name a job of this workflow"),
+                    );
+                    return Some(table.lit(Value::Null));
+                };
+                let done = done.clone();
+                match what.to_lowercase().as_str() {
+                    "result" => Some(self.site.need_result(table, &done)),
+                    "outputs" => {
+                        let record = self.site.need_record(table, &done);
+                        let output = table.field(record, "output");
+                        let mut id = table.field(output, "outputs");
+                        for key in rest {
+                            id = table.field(id, key);
+                        }
+                        Some(id)
+                    }
+                    _ => Some(table.lit(Value::Null)),
+                }
             }
             "env" => {
                 // A step's own env is visible to its expressions; otherwise the
@@ -517,11 +622,28 @@ impl Roots for GhaRoots<'_> {
             // A secret inside an expression lowers to its sentinel: the expression
             // evaluates in the engine over the sentinel, never the value, and the
             // step splices the value in at spawn. The caller decides whether this
-            // position may carry one at all.
+            // position may carry one at all. Inside a called workflow the name
+            // maps through the call's `secrets:` first — a pure rename.
             "secrets" => {
                 self.saw_secret = true;
                 Some(match path {
-                    [name] => table.lit(secret_sentinel(name)),
+                    [name] => match self.site.secrets.resolve(name) {
+                        Ok(Some(provider)) => table.lit(secret_sentinel(&provider)),
+                        // Declared but not provided: the value is empty, as on GitHub.
+                        Ok(None) => table.lit(""),
+                        Err(UndeclaredSecret) => {
+                            self.diags.error(
+                                "gha.undeclared_secret",
+                                self.span.clone(),
+                                format!(
+                                    "`secrets.{name}` is not a secret this workflow call provides; \
+                                     declare it under `on.workflow_call.secrets` and pass it (or \
+                                     use `secrets: inherit`)"
+                                ),
+                            );
+                            table.lit("")
+                        }
+                    },
                     _ => table.lit(Value::Null),
                 })
             }
@@ -729,12 +851,28 @@ pub fn lower_scalar(
         }
     };
 
-    // A whole-value secret reference is the one permitted form.
+    // A whole-value secret reference is the one permitted form. The name maps
+    // through the site's call `secrets:` first — a pure rename.
     if let [Segment::Expr { source, .. }] = segments.as_slice()
         && let Some(name) = secret_expr_name(source)
     {
         if env_shaped {
-            return Some(LoweredScalar::Secret(name));
+            return Some(match site.secrets.resolve(&name) {
+                Ok(Some(provider)) => LoweredScalar::Secret(provider),
+                // Declared but not provided: the value is empty, as on GitHub.
+                Ok(None) => LoweredScalar::Literal(Value::String(String::new())),
+                Err(UndeclaredSecret) => {
+                    diags.error(
+                        "gha.undeclared_secret",
+                        span,
+                        format!(
+                            "`secrets.{name}` is not a secret this workflow call provides; declare \
+                             it under `on.workflow_call.secrets` and pass it (or use `secrets: inherit`)"
+                        ),
+                    );
+                    return None;
+                }
+            });
         }
         diags.unsupported(
             "secrets.expression",

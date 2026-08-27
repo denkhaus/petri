@@ -52,17 +52,27 @@ impl ActionSource for Recording {
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
         let result = self.inner.manifest(pinned);
-        let entry = match &result {
-            Ok(text) => SnapshotEntry::Resolved {
-                sha: pinned.sha.to_string(),
-                manifest: text.clone(),
-            },
-            Err(e) => SnapshotEntry::Failed {
-                error: e.to_string(),
-            },
-        };
-        self.record(pinned.reference.to_string(), entry);
+        self.record(pinned.reference.to_string(), entry_for(pinned, &result));
         result
+    }
+
+    /// Called workflows fetch whole files; recorded exactly like manifests.
+    fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        let result = self.inner.file(pinned);
+        self.record(pinned.reference.to_string(), entry_for(pinned, &result));
+        result
+    }
+}
+
+fn entry_for(pinned: &PinnedAction, result: &Result<String, ActionSourceError>) -> SnapshotEntry {
+    match result {
+        Ok(text) => SnapshotEntry::Resolved {
+            sha: pinned.sha.to_string(),
+            manifest: text.clone(),
+        },
+        Err(e) => SnapshotEntry::Failed {
+            error: e.to_string(),
+        },
     }
 }
 

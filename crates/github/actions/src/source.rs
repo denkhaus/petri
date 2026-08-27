@@ -246,6 +246,25 @@ impl ActionSource for GitActionSource {
         }
         Err(ActionSourceError::NoManifest(pinned.reference.to_string()))
     }
+
+    /// The one file the reference's path names, at the pinned commit — a
+    /// remote called workflow's YAML.
+    fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        let Some(path) = pinned.reference.path.as_deref() else {
+            return Err(ActionSourceError::Fetch {
+                action: pinned.reference.to_string(),
+                message: "the reference names no file path".into(),
+            });
+        };
+        let lock = self.repo_lock(&pinned.reference);
+        let _guard = lock.lock().expect("repository lock is not poisoned");
+        let bare = self.fetch(pinned)?;
+        let spec = format!("{}:{path}", pinned.sha);
+        git(&["show", &spec], Some(&bare)).map_err(|message| ActionSourceError::Fetch {
+            action: pinned.reference.to_string(),
+            message,
+        })
+    }
 }
 
 impl ActionTreeSource for GitActionSource {

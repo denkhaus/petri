@@ -20,12 +20,15 @@ use crate::action::{
     ACTION_KIND, ActionLocation, ActionRef, ActionSource, ActionSourceError, Phase, PinnedAction,
     RUN_KIND, STATE_OUTPUT_KEY,
 };
+use crate::call::{self, CallGraph, CalleeSource};
 use crate::composite::{self, NodeAction, Runs, Uses};
 use crate::exprs::{
-    LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel, whole_value_secret,
+    LoweredScalar, SEP, SecretMap, Site, config_value, lower_scalar, secret_sentinel,
+    whole_value_secret,
 };
 use crate::gate::{self, Gate, GateOp};
-use crate::model::{Defaults, Job, Step, Workflow};
+use crate::inputs;
+use crate::model::{CallInterface, Defaults, Job, SecretsArg, Step, Workflow, WorkflowCall};
 use crate::runners::RunnerMap;
 use crate::runs_on;
 
@@ -60,6 +63,171 @@ pub struct Lowering<'w, 'a> {
     /// within the same [`Lowering::job_shell`] call for the job's `start` node
     /// meta. Never live across jobs.
     leg_runs_on: Option<Value>,
+    /// One context per frame — the root workflow and each inlined callee —
+    /// bound top-down before any node exists ([`Lowering::bind_frame`]).
+    frame_ctx: Vec<FrameCtx>,
+    /// The frame whose workflow `self.wf` currently is ([`Lowering::enter`]).
+    current: usize,
+}
+
+/// One workflow being lowered: the root, or a callee inlined under a call job.
+struct Frame<'w, 'a> {
+    wf: &'w Workflow<'a>,
+    /// Where this workflow's text came from — its own `./` references resolve
+    /// against this.
+    source: CalleeSource,
+    /// `""` at the root; the call job's materialized id for a callee frame, so
+    /// every node of the frame lives under `prefix/…`.
+    prefix: String,
+    /// The call that brought the frame in: (caller frame, its entry index).
+    call: Option<CallEdge>,
+    /// The frame sits inside a matrix call's expansion region: node names take
+    /// `#index` suffixes, and further expansion heads cannot nest.
+    in_expansion: bool,
+    /// Callees below the root. Planning stops at [`call::MAX_DEPTH`] — the
+    /// resolver already reported the cycle or the too-deep nest.
+    depth: usize,
+}
+
+struct CallEdge {
+    caller: usize,
+    entry: usize,
+}
+
+/// One materialized job of the flat plan: which frame it belongs to, the job
+/// with its id and `needs` prefixed, and whether it is a workflow call.
+struct Entry<'a> {
+    frame: usize,
+    job: Job<'a>,
+    kind: EntryKind,
+}
+
+enum EntryKind {
+    Job,
+    /// A `uses:` job whose callee resolved: the frame its jobs were planned into.
+    Call { callee: usize },
+}
+
+/// The lowered context a frame's jobs read, bound once, top-down.
+#[derive(Default)]
+struct FrameCtx {
+    prefix: String,
+    /// The `inputs` context: a call's bound `with:`, or the root's typed
+    /// run-parameter reads.
+    inputs: Option<BTreeMap<String, ExprId>>,
+    /// How `secrets.*` names map to the provider's.
+    secrets: SecretMap,
+    in_expansion: bool,
+    /// Inside a callee: the call's `start` node, ANDed into every job gate of
+    /// the frame — when the call was skipped, nothing of the callee runs.
+    call_start: Option<String>,
+    /// Inside a callee: the call's exit join, which every job's `done` feeds.
+    exit: Option<NodeId>,
+    /// The frame's workflow was fetched from another repository, so its `./`
+    /// step actions cannot resolve against this one.
+    remote: bool,
+}
+
+/// A job under its frame's prefix: the id and every `needs` entry prefixed, so
+/// names, `JobNodes` keys and wiring stay collision-free across inlined
+/// workflows. The as-written names live on in each `Site`, which strips the
+/// prefix for the `needs.*` context.
+fn materialize<'a>(job: &Job<'a>, prefix: &str) -> Job<'a> {
+    let mut out = job.clone();
+    if prefix.is_empty() {
+        return out;
+    }
+    out.id = format!("{prefix}{SEP}{}", job.id);
+    out.needs = job
+        .needs
+        .iter()
+        .map(|(need, span)| (format!("{prefix}{SEP}{need}"), span.clone()))
+        .collect();
+    out
+}
+
+/// Flatten the call graph into frames and materialized job entries, breadth
+/// first from the root. A call whose callee failed to resolve (already a
+/// diagnostic) becomes a plain empty job so its `needs` wiring stays intact
+/// while the errors reject the workflow.
+fn plan<'w, 'a>(
+    frames: &mut Vec<Frame<'w, 'a>>,
+    entries: &mut Vec<Entry<'a>>,
+    calls: &'w CallGraph,
+    models: &'w BTreeMap<String, (CalleeSource, Workflow<'a>)>,
+    diags: &mut Diagnostics,
+) {
+    let mut i = 0;
+    while i < frames.len() {
+        let wf = frames[i].wf;
+        let source = frames[i].source.clone();
+        let prefix = frames[i].prefix.clone();
+        let in_expansion = frames[i].in_expansion;
+        let depth = frames[i].depth;
+        for job in &wf.jobs {
+            let materialized = materialize(job, &prefix);
+            let has_matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
+            let Some(call) = &job.call else {
+                if has_matrix && in_expansion {
+                    nested_matrix(diags, &job.span);
+                }
+                entries.push(Entry {
+                    frame: i,
+                    job: materialized,
+                    kind: EntryKind::Job,
+                });
+                continue;
+            };
+            let callee = (depth < call::MAX_DEPTH)
+                .then(|| calls.callee(&source, &call.uses.0))
+                .flatten()
+                .and_then(|(identity, _)| models.get(&identity));
+            let Some((callee_source, callee_wf)) = callee else {
+                entries.push(Entry {
+                    frame: i,
+                    job: materialized,
+                    kind: EntryKind::Job,
+                });
+                continue;
+            };
+            if has_matrix && in_expansion {
+                nested_matrix(diags, &job.span);
+            }
+            let child_expansion = in_expansion || has_matrix;
+            frames.push(Frame {
+                wf: callee_wf,
+                source: callee_source.clone(),
+                prefix: materialized.id.clone(),
+                call: Some(CallEdge {
+                    caller: i,
+                    entry: entries.len(),
+                }),
+                in_expansion: child_expansion,
+                depth: depth + 1,
+            });
+            entries.push(Entry {
+                frame: i,
+                job: materialized,
+                kind: EntryKind::Call {
+                    callee: frames.len() - 1,
+                },
+            });
+        }
+        i += 1;
+    }
+}
+
+/// An expansion head inside an expansion region loses its own expansion — the
+/// engine's clones never expand again — so a matrix under a matrix call is a
+/// specific rejection rather than a wrong graph.
+fn nested_matrix(diags: &mut Diagnostics, span: &Span) {
+    diags.unsupported(
+        "workflow_call.matrix",
+        span.clone(),
+        "a matrix inside a matrix workflow call",
+        "the engine expands one region at a time: a matrix call's clones cannot expand again; \
+         move the matrix to one side of the call",
+    );
 }
 
 /// Why a remote action did not resolve.
@@ -104,8 +272,23 @@ pub fn lower(
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
     runners: &RunnerMap,
-    diags: Diagnostics,
+    mut diags: Diagnostics,
 ) -> Lowered {
+    // Reusable workflows first: every callee fetched, parsed and cycle-checked
+    // before a single node exists, so the passes below never fetch a workflow.
+    let calls = call::resolve(wf, files, actions, &mut diags);
+    let models = calls.models();
+    let mut frames: Vec<Frame<'_, '_>> = vec![Frame {
+        wf,
+        source: CalleeSource::Root,
+        prefix: String::new(),
+        call: None,
+        in_expansion: false,
+        depth: 0,
+    }];
+    let mut entries: Vec<Entry<'_>> = Vec::new();
+    plan(&mut frames, &mut entries, &calls, &models, &mut diags);
+
     let mut lw = Lowering {
         b: GraphBuilder::bare(),
         diags,
@@ -117,17 +300,33 @@ pub fn lower(
         jobs: HashMap::new(),
         spans: HashMap::new(),
         leg_runs_on: None,
+        frame_ctx: frames.iter().map(|_| FrameCtx::default()).collect(),
+        current: 0,
     };
 
+    // Frame contexts top-down: a caller's inputs bind before its callee reads
+    // them, and `plan` orders parents before children.
+    for i in 0..frames.len() {
+        lw.bind_frame(i, &frames, &entries);
+    }
     // Every job's scope and gate first, so `needs` can wire to them in any order.
-    for job in &wf.jobs {
-        lw.job_shell(job);
+    for e in &entries {
+        lw.enter(e.frame, &frames);
+        match e.kind {
+            EntryKind::Job => lw.job_shell(&e.job),
+            EntryKind::Call { callee } => lw.call_shell(e, callee, &frames),
+        }
     }
-    for job in &wf.jobs {
-        lw.job_body(job);
+    for e in &entries {
+        lw.enter(e.frame, &frames);
+        match e.kind {
+            EntryKind::Job => lw.job_body(&e.job),
+            EntryKind::Call { callee } => lw.call_body(e, callee, &frames),
+        }
     }
-    for job in &wf.jobs {
-        lw.job_edges(job);
+    for e in &entries {
+        lw.enter(e.frame, &frames);
+        lw.job_edges(e, &entries);
     }
 
     if lw.diags.has_errors() {
@@ -159,16 +358,184 @@ pub fn lower(
 impl<'w, 'a> Lowering<'w, 'a> {
     // ── Jobs ───────────────────────────────────────────────────────────────
 
-    /// The scope, `start` and `done` nodes for a job.
-    /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs` known,
-    /// matrix-ness known, no steps yet.
+    /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs`
+    /// known, matrix-ness known, the frame's inputs and secret map in scope, no
+    /// steps yet. The `needs.*` context keys are the names as written — the
+    /// frame prefix is stripped — while the values keep the prefixed node names.
     fn base_site(&self, job: &Job<'a>) -> Site {
+        let ctx = &self.frame_ctx[self.current];
         let mut site = Site::new(&job.id);
         site.matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
+        site.workflow_inputs = ctx.inputs.clone();
+        site.secrets = ctx.secrets.clone();
+        site.in_expansion = ctx.in_expansion;
+        let strip = format!("{}{SEP}", ctx.prefix);
         for (need, _) in &job.needs {
-            site.needs.insert(need.clone(), format!("{need}{SEP}done"));
+            let key = match ctx.prefix.is_empty() {
+                true => need.clone(),
+                false => need.strip_prefix(&strip).unwrap_or(need).to_string(),
+            };
+            site.needs.insert(key, format!("{need}{SEP}done"));
         }
         site
+    }
+
+    /// Make `frame` the one whose workflow the job passes read.
+    fn enter(&mut self, frame: usize, frames: &[Frame<'w, 'a>]) {
+        self.current = frame;
+        self.wf = frames[frame].wf;
+    }
+
+    /// Bind one frame's context: the root's inputs come from the run's
+    /// parameters, a callee's from its call site — `with:` lowered in the
+    /// caller's own site, `secrets:` folded through the caller's map so a
+    /// nested `inherit` keeps renames intact.
+    fn bind_frame(&mut self, i: usize, frames: &[Frame<'w, 'a>], entries: &[Entry<'a>]) {
+        let frame = &frames[i];
+        let Some(CallEdge { caller, entry }) = frame.call else {
+            // The root: `workflow_call` and `workflow_dispatch` declarations
+            // both bind from run parameters, through one typed path.
+            let mut decls: Vec<&crate::model::InputDecl<'_>> = Vec::new();
+            if let Some(interface) = &frame.wf.call {
+                decls.extend(interface.inputs.iter());
+            }
+            decls.extend(frame.wf.dispatch_inputs.iter());
+            let inputs = (!decls.is_empty())
+                .then(|| inputs::bind_param_inputs(&decls, self.b.exprs(), &mut self.diags));
+            self.frame_ctx[i] = FrameCtx {
+                prefix: String::new(),
+                inputs,
+                secrets: SecretMap::Inherit,
+                in_expansion: false,
+                call_start: None,
+                exit: None,
+                remote: false,
+            };
+            return;
+        };
+        let call_job = &entries[entry].job;
+        let call = call_job.call.as_ref().expect("a callee frame's entry is a call");
+        // Bind in the caller's context.
+        self.enter(caller, frames);
+        let caller_site = self.base_site(call_job);
+        let interface = frame.wf.call.as_ref();
+        let decls = interface.map(|i| i.inputs.as_slice()).unwrap_or(&[]);
+        let inputs = inputs::bind_call_inputs(
+            decls,
+            &call.with,
+            &caller_site,
+            &call.uses.0,
+            &call.uses.1,
+            self.b.exprs(),
+            &mut self.diags,
+        );
+        let caller_secrets = self.frame_ctx[caller].secrets.clone();
+        let secrets = self.bind_secrets(call, interface, &caller_secrets);
+        self.frame_ctx[i] = FrameCtx {
+            prefix: frame.prefix.clone(),
+            inputs: Some(inputs),
+            secrets,
+            in_expansion: frame.in_expansion,
+            call_start: Some(format!("{}{SEP}start", call_job.id)),
+            exit: None,
+            remote: matches!(frame.source, CalleeSource::Remote { .. })
+                || self.frame_ctx[caller].remote,
+        };
+    }
+
+    /// The callee's secret map: `inherit` keeps the caller's map (so renames
+    /// survive nesting); an explicit block maps each declared name through the
+    /// caller's values — every provided name must be declared, every value a
+    /// whole `${{ secrets.NAME }}`, and a missing required secret is an error.
+    fn bind_secrets(
+        &mut self,
+        call: &WorkflowCall<'a>,
+        interface: Option<&CallInterface<'a>>,
+        caller_secrets: &SecretMap,
+    ) -> SecretMap {
+        let provided = match &call.secrets {
+            SecretsArg::Inherit => return caller_secrets.clone(),
+            SecretsArg::None => Vec::new(),
+            SecretsArg::Map(entries) => entries.clone(),
+        };
+        let declared: Vec<(String, bool)> = interface.map(|i| i.secrets.clone()).unwrap_or_default();
+        for (name, node) in &provided {
+            if !declared.iter().any(|(d, _)| d == &name.to_lowercase()) {
+                self.diags.error(
+                    "gha.bad_call",
+                    node.span(),
+                    format!("secret `{name}` is not declared by the called workflow"),
+                );
+            }
+        }
+        let mut map: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for (name, required) in &declared {
+            let value = provided
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == *name)
+                .map(|(_, v)| *v);
+            match value {
+                Some(node) => {
+                    let text = node.as_str().unwrap_or("");
+                    match whole_value_secret(text) {
+                        Some(provider) => match caller_secrets.resolve(&provider) {
+                            Ok(entry) => {
+                                map.insert(name.clone(), entry);
+                            }
+                            Err(crate::exprs::UndeclaredSecret) => {
+                                self.diags.error(
+                                    "gha.undeclared_secret",
+                                    node.span(),
+                                    format!(
+                                        "`secrets.{provider}` is not a secret this workflow call \
+                                         provides"
+                                    ),
+                                );
+                                map.insert(name.clone(), None);
+                            }
+                        },
+                        None => {
+                            self.diags.error(
+                                "gha.bad_call",
+                                node.span(),
+                                format!(
+                                    "secret `{name}` must be a whole `${{{{ secrets.NAME }}}}` \
+                                     reference"
+                                ),
+                            );
+                            map.insert(name.clone(), None);
+                        }
+                    }
+                }
+                None if *required => {
+                    self.diags.error(
+                        "gha.missing_secret",
+                        call.uses.1.clone(),
+                        format!("`{}` requires secret `{name}`", call.uses.0),
+                    );
+                }
+                None => {
+                    map.insert(name.clone(), None);
+                }
+            }
+        }
+        SecretMap::Explicit(map)
+    }
+
+    /// Inside a called workflow, every job gate carries the call's own
+    /// admission: when the call was skipped or cancelled, nothing of the
+    /// callee runs — not even `if: always()` — exactly as on GitHub.
+    fn wrap_call_admission(&mut self, gate: Option<ExprId>, site: &Site) -> Option<ExprId> {
+        let Some(call_start) = self.frame_ctx[self.current].call_start.clone() else {
+            return gate;
+        };
+        let gate = gate?;
+        let t = self.b.exprs();
+        let record = site.need_record(t, &call_start);
+        let status = t.field(record, "status");
+        let ok = t.lit("success");
+        let admitted = t.binary(BinOp::Eq, status, ok);
+        Some(t.binary(BinOp::And, admitted, gate))
     }
 
     fn job_shell(&mut self, job: &Job<'a>) {
@@ -238,6 +605,201 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 matrix,
             },
         );
+    }
+
+    /// A workflow call's bracket: `start` (the caller-side gate, and the
+    /// expansion head when the call has a matrix), `exit` (the join every
+    /// callee job's `done` feeds), and `done` (the fold dependents read, shaped
+    /// exactly like a job's so `needs.<call>.outputs.*` works unchanged). The
+    /// callee's jobs land between `start` and `exit`, so a matrix call expands
+    /// the whole inlined workflow per leg.
+    fn call_shell(&mut self, e: &Entry<'a>, callee: usize, frames: &[Frame<'w, 'a>]) {
+        let job = &e.job;
+        let matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
+        // The bracket's own scope: all three nodes are engine-side noops.
+        let scope = self.b.add_scope(Scope::new(ScopeId::new(0)));
+        let cancelled = self.scope_cancelled_config();
+        let start = self.b.add_node(
+            &format!("{}{SEP}start", job.id),
+            scope,
+            StepRef::new(
+                "noop",
+                json!({ "job": job.id, "phase": "start", "cancelled": cancelled }),
+            ),
+        );
+        if !matrix {
+            self.b.node_mut(start).run_on_cancel = true;
+        }
+        // What the call is, preserved on its start: the reference as written,
+        // and the commit it pinned to.
+        let call = job.call.as_ref().expect("a call entry");
+        let mut target = Map::new();
+        target.insert("uses".into(), json!(call.uses.0));
+        if let CalleeSource::Remote { pinned } = &frames[callee].source {
+            target.insert("sha".into(), json!(pinned.sha.as_str()));
+        }
+        self.b.set_meta(start, json!({ "call": target }));
+        self.spans.insert(start, job.span.clone());
+
+        let exit = self.b.add_node(
+            &format!("{}{SEP}exit", job.id),
+            scope,
+            StepRef::new("noop", Value::Null),
+        );
+        self.b.node_mut(exit).run_on_cancel = true;
+        self.spans.insert(exit, job.span.clone());
+        let done = self.b.add_node(
+            &format!("{}{SEP}done", job.id),
+            scope,
+            StepRef::new("noop", Value::Null),
+        );
+        self.b.node_mut(done).run_on_cancel = true;
+        self.spans.insert(done, job.span.clone());
+        self.jobs.insert(
+            job.id.clone(),
+            JobNodes {
+                scope,
+                start,
+                done,
+                last: exit,
+                matrix,
+            },
+        );
+        self.frame_ctx[callee].exit = Some(exit);
+    }
+
+    /// The call's behavior: the caller-side gate on `start`, the summary the
+    /// `exit` join carries into `done` — the callee jobs' combined result
+    /// (GitHub's call conclusion) plus the declared `workflow_call.outputs`,
+    /// evaluated when every callee job of the leg is complete — and the matrix
+    /// expansion over the whole bracket.
+    fn call_body(&mut self, e: &Entry<'a>, callee: usize, frames: &[Frame<'w, 'a>]) {
+        let job = &e.job;
+        let Some((start, done, exit)) = self
+            .jobs
+            .get(&job.id)
+            .map(|j| (j.start, j.done, j.last))
+        else {
+            return;
+        };
+        let mut site = self.base_site(job);
+        let items = self.apply_strategy(job, &mut site);
+        let gate = self.condition(job.condition, &site, false, job.span.clone());
+        let gate = self.wrap_call_admission(gate, &site);
+        if let Some(gate) = gate {
+            self.b.set_precondition(start, gate);
+        }
+
+        // The callee's jobs, by their prefixed done nodes; the exit's site reads
+        // them — suffix-aware inside a matrix call — through the `jobs` context
+        // and the result terms below.
+        let ctx = &self.frame_ctx[callee];
+        let mut exit_site = Site::new(&job.id);
+        exit_site.in_expansion = ctx.in_expansion || site.matrix;
+        exit_site.workflow_inputs = ctx.inputs.clone();
+        let mut dones = Vec::new();
+        for callee_job in &frames[callee].wf.jobs {
+            let done_name = format!("{}{SEP}{}{SEP}done", job.id, callee_job.id);
+            exit_site
+                .callee_jobs
+                .insert(callee_job.id.clone(), done_name.clone());
+            dones.push(done_name);
+        }
+
+        // Any callee job with the given result. Results are already folded per
+        // job ('failure'/'cancelled'/'success'/'skipped'), so four tags suffice.
+        let any = |lw: &mut Self, tag: &str| -> ExprId {
+            let mut acc: Option<ExprId> = None;
+            for name in &dones {
+                let t = lw.b.exprs();
+                let result = exit_site.need_result(t, name);
+                let lit = t.lit(tag);
+                let is = t.binary(BinOp::Eq, result, lit);
+                acc = Some(match acc {
+                    Some(a) => lw.b.exprs().binary(BinOp::Or, a, is),
+                    None => is,
+                });
+            }
+            acc.unwrap_or_else(|| lw.b.exprs().lit(false))
+        };
+        let any_failure = any(self, "failure");
+        let any_cancelled = any(self, "cancelled");
+        let any_success = any(self, "success");
+        let t = self.b.exprs();
+        let f = t.lit("failure");
+        let c = t.lit("cancelled");
+        let s = t.lit("success");
+        let k = t.lit("skipped");
+        let inner2 = t.cond(any_success, s, k);
+        let inner1 = t.cond(any_cancelled, c, inner2);
+        let result = t.cond(any_failure, f, inner1);
+
+        // Declared outputs, lowered over the `jobs.*` context.
+        let mut outputs: Vec<(String, ExprId)> = Vec::new();
+        if let Some(interface) = &frames[callee].wf.call {
+            for (name, node) in &interface.outputs {
+                let text = node.as_str().unwrap_or("");
+                if let Some(lowered) = lower_scalar(
+                    text,
+                    node.span(),
+                    &exit_site,
+                    false,
+                    false,
+                    self.b.exprs(),
+                    &mut self.diags,
+                ) {
+                    let id = match lowered {
+                        LoweredScalar::Literal(v) => self.b.exprs().lit(v),
+                        LoweredScalar::Expr(id) => id,
+                        LoweredScalar::Secret(_) => continue,
+                    };
+                    outputs.push((name.clone(), id));
+                }
+            }
+        }
+        let t = self.b.exprs();
+        let outputs_obj = t.object(outputs.iter().map(|(k, v)| (k.as_str(), *v)).collect());
+        let index = if site.matrix || exit_site.in_expansion {
+            t.var("index")
+        } else {
+            t.lit(0)
+        };
+        let summary = t.object(vec![
+            ("result", result),
+            ("outputs", outputs_obj),
+            ("index", index),
+        ]);
+        self.b
+            .select(exit, vec![ir::Arm::always(done).with_map(summary)]);
+        let fold = self.done_config();
+        self.b.node_mut(done).step = StepRef::new("noop", fold);
+
+        // Scheduling: the callee's rootless jobs begin when the call does.
+        let roots: Vec<NodeId> = frames[callee]
+            .wf
+            .jobs
+            .iter()
+            .filter(|j| j.needs.is_empty())
+            .filter_map(|j| {
+                self.jobs
+                    .get(&format!("{}{SEP}{}", job.id, j.id))
+                    .map(|n| n.start)
+            })
+            .collect();
+        if !roots.is_empty() {
+            self.b.fan_out(start, &roots);
+        }
+
+        if let Some(items) = items {
+            ir::parallel_for_each(
+                &mut self.b,
+                start,
+                items,
+                ExpandTarget::Subgraph { entry: start, exit },
+                site.max_parallel,
+                site.fail_fast,
+            );
+        }
     }
 
     fn scope_for(&mut self, job: &Job<'a>) -> ScopeId {
@@ -321,7 +883,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut spec = RuntimeSpec::host_process();
 
         match job.runs_on {
-            None if job.reusable => {}
+            None if job.call.is_some() => {}
             None => {
                 self.diags.error(
                     "gha.no_runs_on",
@@ -571,6 +1133,51 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
+    /// `strategy:` onto the site — `fail-fast`, `max-parallel`, the static leg
+    /// count — and the expansion's items expression, shared by plain jobs and
+    /// workflow calls.
+    fn apply_strategy(&mut self, job: &Job<'a>, site: &mut Site) -> Option<ExprId> {
+        let strategy = job.strategy.as_ref().filter(|s| s.matrix.is_some())?;
+        let matrix_node = strategy.matrix.expect("filtered");
+        let matrix_expr = self.matrix_expr(matrix_node, site);
+        site.matrix_total = runs_on::static_legs(matrix_node).map(|legs| legs.len());
+        site.fail_fast = match strategy
+            .fail_fast
+            .and_then(|n| n.as_scalar())
+            .map(|s| (s.as_bool(), s.as_str().to_string()))
+        {
+            None => true,
+            Some((Some(b), _)) => b,
+            Some((None, text)) => {
+                self.diags.unsupported(
+                    "strategy.fail_fast.expression",
+                    strategy.fail_fast.map(|n| n.span()).unwrap_or_default(),
+                    format!("`fail-fast: {text}`"),
+                    "use a literal true or false",
+                );
+                true
+            }
+        };
+        site.max_parallel = match strategy
+            .max_parallel
+            .and_then(|n| n.as_scalar())
+            .map(|s| (s.as_i64(), s.as_str().to_string()))
+        {
+            None => None,
+            Some((Some(n), _)) if n >= 1 => Some(n as u32),
+            Some((_, text)) => {
+                self.diags.unsupported(
+                    "strategy.max_parallel.expression",
+                    strategy.max_parallel.map(|n| n.span()).unwrap_or_default(),
+                    format!("`max-parallel: {text}`"),
+                    "use a literal integer",
+                );
+                None
+            }
+        };
+        matrix_expr.and_then(|m| crate::expr_lower::matrix_legs(self.b.exprs(), m).ok())
+    }
+
     /// Steps, preconditions, config, and the matrix expansion.
     fn job_body(&mut self, job: &Job<'a>) {
         let shell = self
@@ -599,52 +1206,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let _ = matrix;
 
         // Matrix.
-        let mut matrix_items: Option<ExprId> = None;
-        if let Some(strategy) = job.strategy.as_ref().filter(|s| s.matrix.is_some()) {
-            let matrix_node = strategy.matrix.expect("filtered");
-            let matrix_expr = self.matrix_expr(matrix_node, &site);
-            site.matrix_total = runs_on::static_legs(matrix_node).map(|legs| legs.len());
-            site.fail_fast = match strategy
-                .fail_fast
-                .and_then(|n| n.as_scalar())
-                .map(|s| (s.as_bool(), s.as_str().to_string()))
-            {
-                None => true,
-                Some((Some(b), _)) => b,
-                Some((None, text)) => {
-                    self.diags.unsupported(
-                        "strategy.fail_fast.expression",
-                        strategy.fail_fast.map(|n| n.span()).unwrap_or_default(),
-                        format!("`fail-fast: {text}`"),
-                        "use a literal true or false",
-                    );
-                    true
-                }
-            };
-            site.max_parallel = match strategy
-                .max_parallel
-                .and_then(|n| n.as_scalar())
-                .map(|s| (s.as_i64(), s.as_str().to_string()))
-            {
-                None => None,
-                Some((Some(n), _)) if n >= 1 => Some(n as u32),
-                Some((_, text)) => {
-                    self.diags.unsupported(
-                        "strategy.max_parallel.expression",
-                        strategy.max_parallel.map(|n| n.span()).unwrap_or_default(),
-                        format!("`max-parallel: {text}`"),
-                        "use a literal integer",
-                    );
-                    None
-                }
-            };
-            if let Some(m) = matrix_expr {
-                matrix_items = crate::expr_lower::matrix_legs(self.b.exprs(), m).ok();
-            }
-        }
+        let matrix_items = self.apply_strategy(job, &mut site);
 
-        // The gate: needs + the job's own if.
+        // The gate: needs + the job's own if — and, inside a called workflow,
+        // the call's own admission.
         let gate = self.condition(job.condition, &site, false, job.span.clone());
+        let gate = self.wrap_call_admission(gate, &site);
         if let Some(gate) = gate {
             self.b.set_precondition(start, gate);
         }
@@ -770,16 +1337,19 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     /// `done` → each dependent's `start`.
-    fn job_edges(&mut self, job: &Job<'a>) {
+    /// `done` → each dependent's `start`, within the entry's own frame — and,
+    /// inside a called workflow, → the call's exit join, which counts every
+    /// callee job.
+    fn job_edges(&mut self, e: &Entry<'a>, entries: &[Entry<'a>]) {
+        let job = &e.job;
         let Some(done) = self.jobs.get(&job.id).map(|j| j.done) else {
             return;
         };
-        let dependents: Vec<NodeId> = self
-            .wf
-            .jobs
+        let mut targets: Vec<NodeId> = entries
             .iter()
-            .filter(|other| other.needs.iter().any(|(n, _)| n == &job.id))
-            .filter_map(|other| self.jobs.get(&other.id).map(|j| j.start))
+            .filter(|other| other.frame == e.frame)
+            .filter(|other| other.job.needs.iter().any(|(n, _)| n == &job.id))
+            .filter_map(|other| self.jobs.get(&other.job.id).map(|j| j.start))
             .collect();
         for (need, span) in &job.needs {
             if !self.jobs.contains_key(need) {
@@ -790,8 +1360,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 );
             }
         }
-        if !dependents.is_empty() {
-            self.b.fan_out(done, &dependents);
+        if let Some(exit) = self.frame_ctx[e.frame].exit {
+            targets.push(exit);
+        }
+        if !targets.is_empty() {
+            self.b.fan_out(done, &targets);
         }
     }
 
@@ -1213,7 +1786,21 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// why there is none.
     fn action_document(&mut self, reference: &str, span: &Span) -> Option<Document> {
         match composite::classify(reference) {
-            Uses::Local(path) => composite::read_document(self.files, &path, span, &mut self.diags),
+            Uses::Local(path) => {
+                // Inside a workflow fetched from another repository, `./` names a
+                // file of that repository — which the lowering does not stage.
+                if self.frame_ctx[self.current].remote {
+                    self.diags.unsupported(
+                        "action.nested_local",
+                        span.clone(),
+                        format!("`uses: ./{path}` inside a remote called workflow"),
+                        "a relative action inside a fetched workflow resolves against that \
+                         repository, which the lowering does not stage",
+                    );
+                    return None;
+                }
+                composite::read_document(self.files, &path, span, &mut self.diags)
+            }
             Uses::Docker(image) => {
                 self.diags.unsupported(
                     "action.docker",

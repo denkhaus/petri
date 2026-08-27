@@ -507,14 +507,6 @@ fn windows_and_macos_runners_are_rejected() {
 fn the_rejection_set_is_loud_and_specific() {
     let cases: &[(&str, &str)] = &[
         (
-            "on: { workflow_call: {} }\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n",
-            "unsupported.workflow_call",
-        ),
-        (
-            "on: { workflow_dispatch: { inputs: { x: { type: string } } } }\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n",
-            "unsupported.workflow_dispatch.inputs",
-        ),
-        (
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    services: { db: { image: postgres } }\n    steps:\n      - run: echo\n",
             "unsupported.services",
         ),
@@ -548,8 +540,10 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.expression.hashFiles",
         ),
         (
+            // A remote workflow call with no action source: the same rejection
+            // remote actions get.
             "on: push\njobs:\n  j:\n    uses: org/repo/.github/workflows/x.yml@main\n",
-            "unsupported.workflow_call",
+            "unsupported.action.remote",
         ),
     ];
     for (text, code) in cases {

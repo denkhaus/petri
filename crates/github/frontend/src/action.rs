@@ -268,6 +268,17 @@ pub trait ActionSource: Send + Sync {
 
     /// The text of the action's `action.yml` (or `action.yaml`).
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError>;
+
+    /// The text of the one file `reference.path` names at the pinned commit —
+    /// a remote called workflow's YAML
+    /// (`uses: owner/repo/.github/workflows/x.yml@ref` puts the file in the
+    /// path). Sources that cannot serve files decline as unavailable.
+    fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        Err(ActionSourceError::Unavailable {
+            reference: pinned.reference.to_string(),
+            reason: None,
+        })
+    }
 }
 
 /// An in-memory source for tests: manifests by reference, no trees.
@@ -315,6 +326,11 @@ impl ActionSource for MapActionSource {
             .get(&key)
             .map(|(_, text)| text.clone())
             .ok_or(ActionSourceError::NoManifest(key))
+    }
+
+    /// For tests, a registered "manifest" doubles as the file at the path.
+    fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        self.manifest(pinned)
     }
 }
 

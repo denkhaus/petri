@@ -256,6 +256,12 @@ impl ActionSource for SnapshotSource {
             other => Err(Self::unavailable(key, other)),
         }
     }
+
+    /// A remote called workflow's text: the refresh records it in the same
+    /// `manifest` slot, keyed by the full reference.
+    fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        self.manifest(pinned)
+    }
 }
 
 /// Lower one workflow, catching panics so a crash is a classified result rather than

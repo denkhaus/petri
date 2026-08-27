@@ -509,6 +509,261 @@ jobs:
     );
 }
 
+// ── Reusable workflows ────────────────────────────────────────────────────
+
+/// A local workflow call, end to end: inputs bind, the callee's jobs run in
+/// order under the call's prefix, outputs map through `workflow_call.outputs`,
+/// and the caller's dependent reads them as `needs.<call>.outputs.*`.
+#[tokio::test]
+async fn a_workflow_call_runs_end_to_end() {
+    let callee = r#"
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    outputs:
+      artifact:
+        value: ${{ jobs.build.outputs.artifact }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.pack.outputs.name }}
+    steps:
+      - id: pack
+        run: echo "name=app-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+  check:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "checking ${{ needs.build.outputs.artifact }}"
+"#;
+    let caller = r#"
+on: push
+jobs:
+  release:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: "1.2"
+  announce:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "released ${{ needs.release.outputs.artifact }} (${{ needs.release.result }})"
+"#;
+    let files = files(&[(".github/workflows/build.yml", callee)]);
+    let graph = lower_ok_with(caller, &files);
+    let report = run_host(graph, "call-basic").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"checking app-1.2".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"released app-1.2 (success)".to_string()),
+        "{lines:?}"
+    );
+}
+
+/// A skipped call skips the whole callee — even its `always()` jobs — and the
+/// caller's dependents read `skipped`, exactly as GitHub concludes.
+#[tokio::test]
+async fn a_skipped_call_skips_the_callee() {
+    let callee = r#"
+on:
+  workflow_call: {}
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "callee ran"
+  cleanup:
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "callee cleanup ran"
+"#;
+    let caller = r#"
+on: push
+jobs:
+  gated:
+    if: github.ref == 'refs/heads/never'
+    uses: ./.github/workflows/inner.yml
+  after:
+    needs: gated
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "call result=${{ needs.gated.result }}"
+"#;
+    let files = files(&[(".github/workflows/inner.yml", callee)]);
+    let graph = lower_ok_with(caller, &files);
+    let report = run_host(graph, "call-skipped").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(
+        !lines.iter().any(|l| l.contains("callee")),
+        "nothing of the callee runs: {lines:?}"
+    );
+    assert!(
+        lines.contains(&"call result=skipped".to_string()),
+        "{lines:?}"
+    );
+}
+
+/// A matrix on the call fans the whole callee out per leg, `with:` evaluated
+/// per leg from the caller's matrix.
+#[tokio::test]
+async fn a_matrix_call_fans_out_the_callee() {
+    let callee = r#"
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "building ${{ inputs.version }}"
+"#;
+    let caller = r#"
+on: push
+jobs:
+  fan:
+    strategy:
+      matrix:
+        v: ["1", "2"]
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ matrix.v }}
+  after:
+    needs: fan
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "fanned=${{ needs.fan.result }}"
+"#;
+    let files = files(&[(".github/workflows/build.yml", callee)]);
+    let graph = lower_ok_with(caller, &files);
+    let report = run_host(graph, "call-matrix").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"building 1".to_string()), "{lines:?}");
+    assert!(lines.contains(&"building 2".to_string()), "{lines:?}");
+    assert!(lines.contains(&"fanned=success".to_string()), "{lines:?}");
+}
+
+/// Secrets cross the call boundary by name only: an explicit `secrets:` block
+/// renames at lowering, and the value still enters nowhere but the process.
+#[tokio::test]
+async fn call_secrets_map_through_the_boundary() {
+    let callee = r#"
+on:
+  workflow_call:
+    secrets:
+      deploy_key:
+        required: true
+jobs:
+  use:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "len=${#KEY}"
+        env:
+          KEY: ${{ secrets.deploy_key }}
+"#;
+    let caller = r#"
+on: push
+jobs:
+  ship:
+    uses: ./.github/workflows/inner.yml
+    secrets:
+      deploy_key: ${{ secrets.REAL_KEY }}
+"#;
+    let files = files(&[(".github/workflows/inner.yml", callee)]);
+    let graph = lower_ok_with(caller, &files);
+    let encoded = serde_json::to_string(&graph).unwrap();
+    assert!(
+        !encoded.contains("REAL_KEY_VALUE"),
+        "no secret value in the graph"
+    );
+    let report = run_host_with_secrets(graph, "call-secrets", &[("REAL_KEY", "s3cret-value")]).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"len=12".to_string()), "{lines:?}");
+}
+
+/// Dispatch inputs come from the run's parameters through the typed model:
+/// provided values win, declared defaults fill the gaps, booleans are real.
+#[tokio::test]
+async fn dispatch_inputs_bind_from_run_parameters() {
+    let text = r#"
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        type: string
+        default: nowhere
+      dry-run:
+        type: boolean
+        default: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ !inputs.dry-run }}
+        run: echo "deploying to ${{ inputs.target }}"
+      - if: ${{ inputs.dry-run }}
+        run: echo "dry run for ${{ inputs.target }}"
+"#;
+    let mut graph = lower_ok(text);
+    graph.params.insert(
+        "github".into(),
+        serde_json::json!({
+            "sha": "0123456789abcdef", "ref": "refs/heads/main", "ref_name": "main",
+            "repository": "example/repo", "actor": "tester",
+            "event_name": "workflow_dispatch", "run_id": "1", "run_number": "1",
+            "event": { "inputs": { "target": "staging", "dry-run": "false" } },
+        }),
+    );
+    let report = run_host(graph, "dispatch-inputs").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(
+        lines.contains(&"deploying to staging".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("dry run")),
+        "the boolean coerced: {lines:?}"
+    );
+}
+
 /// `runs-on: ${{ matrix.os }}`: the labels resolve at lowering per leg, and the
 /// legs the engine expands at run time are the same legs — the job runs.
 #[tokio::test]

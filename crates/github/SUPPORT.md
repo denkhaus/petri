@@ -32,13 +32,32 @@ placed as GitHub orders them, state flowing between phases) and for composite
 actions (local and remote, inlined); `with:` inputs with declared defaults;
 step ids and `steps.<id>.outputs`.
 
+**Reusable workflows.** A `uses:` job calls another workflow — local
+(`./.github/workflows/x.yml`, or GitHub's `$/` same-repository shorthand) or
+pinned remote (`owner/repo/.github/workflows/x.yml@ref`, fetched through the
+action source) — and the callee's jobs inline under the call's name, each with
+its own scope and placement. Typed inputs (`string`, `boolean`, `number`,
+`choice`, `environment`) validate statically where the value is literal and
+coerce with the engine's builtins where it is not; `required` and declared
+defaults are enforced; unknown `with:` keys and undeclared secrets are errors,
+as on GitHub. `secrets: inherit` and explicit `secrets:` maps are pure renames
+at lowering — no value, and no ungranted name, crosses the boundary; the log
+never sees either. `GITHUB_TOKEN` crosses every boundary unmapped, as on
+GitHub. `workflow_call.outputs` lower over the `jobs.*` context and surface to
+the caller as `needs.<call>.outputs.*`; a skipped call skips the whole callee,
+`always()` jobs included; a matrix on the call fans the entire callee out per
+leg, `with:` evaluated per leg. Calls nest to GitHub's depth limit with cycle
+diagnostics. `workflow_dispatch` inputs — and a reusable file run directly —
+bind `inputs` from the run's parameters (`github.event.inputs`) through the
+same typed model.
+
 **Shells.** `bash`, `sh`, `python`, `pwsh`, and any custom template containing
 `{0}` (`bash -el {0}`, `/usr/bin/env bash {0}`): the script is written to a file
 and the template runs over it, as GitHub does. Whether the interpreter exists is
 the job environment's business.
 
 **Expressions.** The GitHub expression grammar over the `github`, `env`, `vars`,
-`runner`, `matrix`, `needs`, `steps` and (in actions) `inputs` contexts, and the
+`runner`, `matrix`, `needs`, `steps` and `inputs` contexts, and the
 documented functions. `hashFiles(...)` with literal patterns works in step config
 (`run:`, `env:`, `with:`) and in step-level conditions (`if:`, `pre-if`,
 `post-if`), resolved against the workspace at spawn with GitHub's hash. Secrets —
@@ -90,14 +109,13 @@ workflow counts in brackets rank the pressure.
 
 | Code | Feature | Shape of the plan |
 |---|---|---|
-| `workflow_call` | Reusable workflows [92] | Resolve and inline the called workflow, as remote composites are inlined today. |
-| `inputs`, `workflow_dispatch.inputs` | `inputs` context, dispatch inputs [70, 46] | Falls out of reusable-workflow support plus run parameters. |
-| `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`-valued expressions resolve per leg now (above); what remains reads run-time contexts (`github`, `needs`, `inputs`) or a dynamic matrix. `inputs` falls out of reusable-workflow support; the rest are run parameters no lowering can know. |
+| `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`-valued expressions resolve per leg (above); what remains reads `inputs` (statically known for a literal call — extending the per-leg resolver to it is the next step), run-time contexts (`github`, `needs`), or a dynamic matrix. |
+| `workflow_call.matrix` | A matrix inside a matrix workflow call | The engine expands one region at a time; clones cannot expand again. Nested expansion is an engine feature to design, not a frontend gap. |
 | `action.docker`, `services`, `container.expression`, `container.options` | The Docker tier [18, 5, 4] | Docker container actions, service containers, container options — shelling out to `docker` the way actions are fetched with `git`. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |
-| `action.nested_local` | `./` actions inside a fetched composite [2] | Stage the composite's repository so relative references resolve. |
+| `action.nested_local` | `./` actions inside a fetched composite or called workflow [2] | Stage the fetched repository so relative references resolve. |
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |
 
 Planned on the runtime side (no rejection code — lowered workflows fail at run

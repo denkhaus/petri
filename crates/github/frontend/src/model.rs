@@ -13,7 +13,61 @@ pub struct Workflow<'a> {
     pub env: Vec<(String, Node<'a>)>,
     pub defaults: Defaults<'a>,
     pub jobs: Vec<Job<'a>>,
+    /// `on.workflow_call`: the file is reusable, with this call interface.
+    pub call: Option<CallInterface<'a>>,
+    /// `on.workflow_dispatch.inputs`, typed like call inputs.
+    pub dispatch_inputs: Vec<InputDecl<'a>>,
     pub span: Span,
+}
+
+/// What `on.workflow_call` declares: the contract a caller binds against.
+pub struct CallInterface<'a> {
+    pub inputs: Vec<InputDecl<'a>>,
+    /// Output name → its `value` expression, over the `jobs.*` context.
+    pub outputs: Vec<(String, Node<'a>)>,
+    /// Declared secret names (lowercased) with whether each is required.
+    pub secrets: Vec<(String, bool)>,
+}
+
+/// One typed input — the same declaration for `workflow_call` and
+/// `workflow_dispatch`, so both feed one validation path.
+pub struct InputDecl<'a> {
+    pub name: String,
+    pub ty: InputType,
+    pub required: bool,
+    pub default: Option<Node<'a>>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputType {
+    String,
+    Boolean,
+    Number,
+    /// `choice`, with its declared options.
+    Choice(Vec<String>),
+    /// A deployment-environment name: locally, a string.
+    Environment,
+}
+
+/// The caller's half of a reusable-workflow call: a job that is `uses:` plus
+/// `with:` plus `secrets:`.
+#[derive(Clone)]
+pub struct WorkflowCall<'a> {
+    pub uses: (String, Span),
+    pub with: Vec<(String, Node<'a>)>,
+    pub secrets: SecretsArg<'a>,
+}
+
+#[derive(Clone, Default)]
+pub enum SecretsArg<'a> {
+    /// No `secrets:` at all: only declared-optional secrets exist, empty.
+    #[default]
+    None,
+    /// `secrets: inherit` — the callee sees the provider's names unchanged.
+    Inherit,
+    /// An explicit map: callee name → caller value (a `${{ secrets.X }}`).
+    Map(Vec<(String, Node<'a>)>),
 }
 
 #[derive(Default, Clone, Copy)]
@@ -22,6 +76,7 @@ pub struct Defaults<'a> {
     pub working_directory: Option<Node<'a>>,
 }
 
+#[derive(Clone)]
 pub struct Job<'a> {
     pub id: String,
     pub span: Span,
@@ -38,9 +93,8 @@ pub struct Job<'a> {
     pub outputs: Vec<(String, Node<'a>)>,
     pub environment: Option<Environment<'a>>,
     pub steps: Vec<Step<'a>>,
-    /// The job calls a reusable workflow (`uses:`). Already rejected; the rest of the
-    /// reader stays quiet about what such a job is missing.
-    pub reusable: bool,
+    /// The job calls a reusable workflow instead of running steps.
+    pub call: Option<WorkflowCall<'a>>,
 }
 
 /// The deployment environment a job targets. Its enforcement — approvals,
@@ -49,12 +103,14 @@ pub struct Job<'a> {
 /// `deployment` flag are kept so the graph can say what the job would have
 /// deployed to. Any value may be an expression, which stays as written: an
 /// ignored field is never evaluated.
+#[derive(Clone, Copy)]
 pub struct Environment<'a> {
     pub name: Node<'a>,
     pub url: Option<Node<'a>>,
     pub deployment: Option<Node<'a>>,
 }
 
+#[derive(Clone, Copy)]
 pub struct Strategy<'a> {
     /// Absent when `strategy:` only sets `fail-fast` or `max-parallel`, which is legal.
     pub matrix: Option<Node<'a>>,
@@ -62,6 +118,7 @@ pub struct Strategy<'a> {
     pub max_parallel: Option<Node<'a>>,
 }
 
+#[derive(Clone)]
 pub struct Step<'a> {
     /// Position in the job, 0-based. Steps without an `id` are named from it.
     pub index: usize,
@@ -155,9 +212,7 @@ pub fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'
             "`permissions` configures the GitHub token and has no effect on a local run",
         );
     }
-    if let Some(on) = top.get("on") {
-        reject_unsupported_triggers(on, diags);
-    }
+    let (call, dispatch_inputs) = read_triggers(top.get("on"), diags);
 
     let name = top.get("name").and_then(|n| n.as_str()).map(str::to_string);
     let env = env_entries(top.get("env"), diags, "workflow `env`");
@@ -182,8 +237,143 @@ pub fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'
         env,
         defaults,
         jobs,
+        call,
+        dispatch_inputs,
         span: root.span(),
     })
+}
+
+/// The two triggers that declare inputs: `workflow_call` (the reusable-workflow
+/// interface) and `workflow_dispatch`. Every other trigger stays metadata — a
+/// local run fires the workflow directly.
+#[allow(clippy::type_complexity)]
+fn read_triggers<'a>(
+    on: Option<Node<'a>>,
+    diags: &mut Diagnostics,
+) -> (Option<CallInterface<'a>>, Vec<InputDecl<'a>>) {
+    let Some(m) = on.and_then(|on| on.as_mapping()) else {
+        return (None, Vec::new());
+    };
+    let call = m.get("workflow_call").map(|wc| {
+        let (inputs, outputs, secrets) = match wc.as_mapping() {
+            None => (Vec::new(), Vec::new(), Vec::new()),
+            Some(wm) => {
+                wm.reject_unknown_keys(
+                    &["inputs", "outputs", "secrets"],
+                    diags,
+                    "`on.workflow_call`",
+                );
+                let outputs = wm
+                    .get("outputs")
+                    .and_then(|o| o.as_mapping())
+                    .map(|om| {
+                        om.iter()
+                            .filter_map(|(name, spec)| {
+                                match spec.as_mapping().and_then(|sm| sm.get("value")) {
+                                    Some(value) => Some((name.to_string(), value)),
+                                    None => {
+                                        diags.error(
+                                            "gha.bad_call_output",
+                                            spec.span(),
+                                            format!("workflow output `{name}` needs a `value`"),
+                                        );
+                                        None
+                                    }
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let secrets = wm
+                    .get("secrets")
+                    .and_then(|s| s.as_mapping())
+                    .map(|sm| {
+                        sm.iter()
+                            .map(|(name, spec)| {
+                                let required = spec
+                                    .as_mapping()
+                                    .and_then(|m| m.get("required"))
+                                    .and_then(|r| r.as_scalar())
+                                    .and_then(|s| s.as_bool())
+                                    .unwrap_or(false);
+                                (name.to_lowercase(), required)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (
+                    read_input_decls(wm.get("inputs"), diags),
+                    outputs,
+                    secrets,
+                )
+            }
+        };
+        CallInterface {
+            inputs,
+            outputs,
+            secrets,
+        }
+    });
+    let dispatch_inputs = m
+        .get("workflow_dispatch")
+        .and_then(|wd| wd.as_mapping())
+        .map(|dm| read_input_decls(dm.get("inputs"), diags))
+        .unwrap_or_default();
+    (call, dispatch_inputs)
+}
+
+/// `inputs:` under `workflow_call` or `workflow_dispatch`: name, type, whether
+/// required, and the default as written.
+fn read_input_decls<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Vec<InputDecl<'a>> {
+    let Some(m) = node.and_then(|n| n.as_mapping()) else {
+        return Vec::new();
+    };
+    m.iter()
+        .map(|(name, spec)| {
+            let sm = spec.as_mapping();
+            let ty = match sm
+                .as_ref()
+                .and_then(|sm| sm.get("type"))
+                .and_then(|t| t.as_str())
+            {
+                None | Some("string") => InputType::String,
+                Some("boolean") => InputType::Boolean,
+                Some("number") => InputType::Number,
+                Some("environment") => InputType::Environment,
+                Some("choice") => InputType::Choice(
+                    sm.as_ref()
+                        .and_then(|sm| sm.get("options"))
+                        .and_then(|o| o.as_sequence())
+                        .map(|seq| {
+                            seq.iter()
+                                .filter_map(|n| n.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
+                Some(other) => {
+                    diags.error(
+                        "gha.bad_input",
+                        spec.span(),
+                        format!("input `{name}` has unknown type `{other}`"),
+                    );
+                    InputType::String
+                }
+            };
+            InputDecl {
+                name: name.to_string(),
+                ty,
+                required: sm
+                    .as_ref()
+                    .and_then(|sm| sm.get("required"))
+                    .and_then(|r| r.as_scalar())
+                    .and_then(|s| s.as_bool())
+                    .unwrap_or(false),
+                default: sm.as_ref().and_then(|sm| sm.get("default")),
+                span: spec.span(),
+            }
+        })
+        .collect()
 }
 
 fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job<'a>> {
@@ -202,14 +392,7 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
             "service containers are v2; run the service from a step for now",
         );
     }
-    if let Some(u) = m.get("uses") {
-        diags.unsupported(
-            "workflow_call",
-            u.span(),
-            format!("job `{id}` calls a reusable workflow"),
-            "reusable workflows are v2; inline the called workflow's jobs",
-        );
-    }
+    let call = m.get("uses").and_then(|u| read_call(id, &m, u, diags));
     let environment = m
         .get("environment")
         .and_then(|e| read_environment(id, e, diags));
@@ -290,7 +473,67 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
         outputs: env_entries(m.get("outputs"), diags, &format!("job `{id}` outputs")),
         environment,
         steps,
-        reusable: m.contains_key("uses"),
+        call,
+    })
+}
+
+/// A job that is `uses: <workflow>@…`: the call reference, its `with:` and its
+/// `secrets:`. The keys a call job cannot carry — GitHub's own rule — are
+/// rejected here so a caller cannot half-configure a job that will never run
+/// steps of its own.
+fn read_call<'a>(
+    id: &str,
+    m: &Mapping<'a>,
+    uses: Node<'a>,
+    diags: &mut Diagnostics,
+) -> Option<WorkflowCall<'a>> {
+    let Some(reference) = uses.as_str() else {
+        diags.error(
+            "gha.bad_call",
+            uses.span(),
+            format!("job `{id}`: `uses` must be a workflow reference string"),
+        );
+        return None;
+    };
+    for key in [
+        "steps",
+        "runs-on",
+        "container",
+        "services",
+        "env",
+        "defaults",
+        "outputs",
+        "timeout-minutes",
+        "continue-on-error",
+        "environment",
+    ] {
+        if let Some(node) = m.get(key) {
+            diags.error(
+                "gha.bad_call",
+                node.span(),
+                format!("job `{id}` calls a reusable workflow, so it cannot have `{key}`"),
+            );
+        }
+    }
+    let secrets = match m.get("secrets") {
+        None => SecretsArg::None,
+        Some(s) if s.as_str() == Some("inherit") => SecretsArg::Inherit,
+        Some(s) => match s.as_mapping() {
+            Some(sm) => SecretsArg::Map(sm.iter().map(|(k, v)| (k.to_string(), v)).collect()),
+            None => {
+                diags.error(
+                    "gha.bad_call",
+                    s.span(),
+                    format!("job `{id}`: `secrets` must be `inherit` or a mapping"),
+                );
+                SecretsArg::None
+            }
+        },
+    };
+    Some(WorkflowCall {
+        uses: (reference.to_string(), uses.span()),
+        with: env_entries(m.get("with"), diags, &format!("job `{id}` with")),
+        secrets,
     })
 }
 
@@ -481,28 +724,6 @@ fn warn_concurrency(node: Node<'_>, diags: &mut Diagnostics) {
         node.span(),
         "`concurrency` is ignored: cross-run mutual exclusion does not apply to a single local run",
     );
-}
-
-fn reject_unsupported_triggers(on: Node<'_>, diags: &mut Diagnostics) {
-    let Some(m) = on.as_mapping() else { return };
-    if let Some(wc) = m.get("workflow_call") {
-        diags.unsupported(
-            "workflow_call",
-            wc.span(),
-            "this workflow is reusable (`on: workflow_call`)",
-            "reusable workflows are v2",
-        );
-    }
-    if let Some(wd) = m.get("workflow_dispatch")
-        && wd.as_mapping().is_some_and(|d| d.contains_key("inputs"))
-    {
-        diags.unsupported(
-            "workflow_dispatch.inputs",
-            wd.span(),
-            "`workflow_dispatch` inputs",
-            "dispatch inputs are v2; the `inputs` context cannot be populated for a local run",
-        );
-    }
 }
 
 /// Convenience: is this mapping key present as any kind of node?
