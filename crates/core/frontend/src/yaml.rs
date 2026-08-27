@@ -28,56 +28,80 @@ impl Document {
     /// string, so [`Scalar::is_plain`] really means "written unquoted" and only
     /// plain scalars type-infer. Anchors and aliases resolve while loading, each
     /// alias a copy of the anchored node that keeps the anchor site's spans.
+    ///
+    /// One scanner strictness is repaired rather than reported: a multi-line flow
+    /// collection whose closing `]`/`}` sits at its key's indentation — which
+    /// GitHub accepts — is re-indented (whitespace only, so nothing moves but the
+    /// bracket) and parsed again. See [`pad_flow_close`].
     pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Document> {
-        match loader::load(text) {
-            Ok(root) => Some(Document {
-                file: SmolStr::new(file),
-                root,
-            }),
-            Err(failure) => {
-                let (mut line, mut column, message) = match failure {
-                    loader::ParseFailure::Scan(scan) => (
-                        scan.marker().line() as u32,
-                        scan.marker().col() as u32 + 1,
-                        scan.to_string(),
-                    ),
-                    loader::ParseFailure::Shape {
-                        line,
-                        column,
-                        message,
-                    } => (line, column, message),
-                };
-                // Some errors carry their position only in the text.
-                if line == 0
-                    && let Some((l, c)) = position_in_message(&message)
-                {
-                    line = l;
-                    column = c;
+        let mut current = std::borrow::Cow::Borrowed(text);
+        // Bounded: each repair pads one closer line, and a file has finitely many;
+        // the bound only caps pathological input.
+        for _ in 0..16 {
+            let failure = match loader::load(&current) {
+                Ok(root) => {
+                    return Some(Document {
+                        file: SmolStr::new(file),
+                        root,
+                    });
                 }
-                if message.contains("invalid indentation")
-                    && multiline_flow_before(text, line as usize)
-                {
-                    // The underlying reader rejects a multi-line `[…]` or `{…}` value
-                    // followed by a dedent, which GitHub accepts. A known limitation of
-                    // the positional YAML library, named as such rather than blamed on
-                    // the file.
-                    diags.unsupported(
-                        "yaml.multiline_flow",
-                        Span::new(file, line, column),
-                        "a multi-line `[…]` or `{…}` value followed by a dedent",
-                        "the positional YAML reader does not accept this shape yet; write the list in block \
-                         form (`- item` per line) or on one line",
-                    );
-                } else {
-                    diags.error(
-                        "yaml.syntax",
-                        Span::new(file, line, column),
-                        format!("could not parse YAML: {message}"),
-                    );
-                }
-                None
+                Err(failure) => failure,
+            };
+            let (mut line, mut column, message) = match failure {
+                loader::ParseFailure::Scan(scan) => (
+                    scan.marker().line() as u32,
+                    scan.marker().col() as u32 + 1,
+                    scan.to_string(),
+                ),
+                loader::ParseFailure::Shape {
+                    line,
+                    column,
+                    message,
+                } => (line, column, message),
+            };
+            // Some errors carry their position only in the text.
+            if line == 0
+                && let Some((l, c)) = position_in_message(&message)
+            {
+                line = l;
+                column = c;
             }
+            if message.contains("invalid indentation")
+                && let Some(repaired) = pad_flow_close(&current, line)
+            {
+                current = std::borrow::Cow::Owned(repaired);
+                continue;
+            }
+            if message.contains("invalid indentation")
+                && multiline_flow_before(&current, line as usize)
+            {
+                // The underlying reader rejects a multi-line `[…]` or `{…}` value
+                // followed by a dedent, which GitHub accepts. The closer-only shape
+                // is repaired above; what reaches here is an under-indented flow
+                // item — a known limitation of the positional YAML library, named
+                // as such rather than blamed on the file.
+                diags.unsupported(
+                    "yaml.multiline_flow",
+                    Span::new(file, line, column),
+                    "a multi-line `[…]` or `{…}` value followed by a dedent",
+                    "the positional YAML reader does not accept this shape yet; write the list in block \
+                     form (`- item` per line) or on one line",
+                );
+            } else {
+                diags.error(
+                    "yaml.syntax",
+                    Span::new(file, line, column),
+                    format!("could not parse YAML: {message}"),
+                );
+            }
+            return None;
         }
+        diags.error(
+            "yaml.syntax",
+            Span::new(file, 0, 0),
+            "could not parse YAML: flow-collection repair did not converge",
+        );
+        None
     }
 
     pub fn root(&self) -> Node<'_> {
@@ -103,6 +127,66 @@ fn position_in_message(message: &str) -> Option<(u32, u32)> {
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
     Some((line, column))
+}
+
+/// The scanner rejects a multi-line flow collection whose closing `]`/`}` line
+/// sits at (or left of) the opening line's indentation — but only after a quoted
+/// item, and GitHub accepts the shape everywhere. When the "invalid indentation"
+/// error points at such a line, return the text with that one line re-indented
+/// past its opener. Whitespace only: nothing moves but the bracket, so every
+/// other span in the document stays put, and the caller re-parses to verify.
+/// `None` when the error line is anything but a lone closer — a real error.
+fn pad_flow_close(text: &str, line: u32) -> Option<String> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let idx = (line as usize).checked_sub(1)?;
+    let current = *lines.get(idx)?;
+    // Only a line that is nothing but the closer (with an optional comma or
+    // comment after it) is a candidate; the scanner cannot be mid-scalar there.
+    let body = current.trim();
+    let after = body.strip_prefix([']', '}'])?;
+    let after = after.strip_prefix(',').unwrap_or(after).trim_start();
+    if !(after.is_empty() || after.starts_with('#')) {
+        return None;
+    }
+    // Find the line that opened the collection: walk backwards from the closer,
+    // counting bracket depth. Brackets inside strings can miscount; the re-parse
+    // catches any repair that guessed wrong.
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut depth = 0i32;
+    let mut opener = None;
+    'lines: for j in (0..=idx).rev() {
+        // On the closer's line, scan only up to the closer itself, not a comment.
+        let slice = if j == idx {
+            &current[..=indent_of(current)]
+        } else {
+            lines[j]
+        };
+        for c in slice.chars().rev() {
+            match c {
+                ']' | '}' => depth += 1,
+                '[' | '{' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        opener = Some(j);
+                        break 'lines;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let opener = opener?;
+    if opener >= idx {
+        return None;
+    }
+    let target = indent_of(lines[opener]) + 2;
+    if indent_of(current) >= target {
+        return None;
+    }
+    let mut out = lines;
+    let padded = format!("{}{}", " ".repeat(target - indent_of(current)), current);
+    out[idx] = &padded;
+    Some(out.join("\n"))
 }
 
 /// Whether the lines before `line` close a flow collection that opened on an earlier

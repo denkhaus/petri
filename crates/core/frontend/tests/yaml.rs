@@ -91,6 +91,65 @@ fn coercion_positions_and_duplicates_are_unchanged() {
     assert_eq!((b.line, b.column), (2, 4));
 }
 
+/// The corpus shape that motivated the flow repair: a multi-line `[…]` of quoted
+/// strings whose closing `]` sits at the key's indentation. GitHub accepts it;
+/// the scanner alone does not. The repair pads only the closer line, so every
+/// other position holds.
+#[test]
+fn a_flow_close_at_the_keys_indent_parses() {
+    let doc = parse(
+        "strategy:\n  matrix:\n    target: [\n      \"Lib/_pyrepl\",\n      \"Tools/build\",\n    ]\nsteps: x\n",
+    );
+    let root = doc.root().as_mapping().unwrap();
+    let target = root
+        .get("strategy")
+        .unwrap()
+        .as_mapping()
+        .unwrap()
+        .get("matrix")
+        .unwrap()
+        .as_mapping()
+        .unwrap()
+        .get("target")
+        .unwrap();
+    let items: Vec<&str> = target
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert_eq!(items, ["Lib/_pyrepl", "Tools/build"]);
+    let first = target.as_sequence().unwrap().iter().next().unwrap().span();
+    assert_eq!((first.line, first.column), (4, 7), "positions hold");
+    assert_eq!(root.get("steps").unwrap().as_str(), Some("x"));
+
+    // A flow mapping, a trailing comment on the closer, and two collections
+    // needing repair in one file.
+    let doc = parse(
+        "a:\n  b: {\n    k: \"v\",\n  } # done\nc:\n  d: [\n    \"1\",\n  ]\ne: f\n",
+    );
+    let root = doc.root().as_mapping().unwrap();
+    let b = root.get("a").unwrap().as_mapping().unwrap().get("b").unwrap();
+    assert_eq!(
+        b.as_mapping().unwrap().get("k").unwrap().as_str(),
+        Some("v")
+    );
+    assert_eq!(root.get("e").unwrap().as_str(), Some("f"));
+}
+
+/// The repair is a lone-closer fix, not a licence to accept every dedent: an
+/// under-indented flow *item* is still an error.
+#[test]
+fn under_indented_flow_items_still_fail() {
+    let diags = parse_error("a:\n  b:\n    c: [\n      \"x\",\n    \"y\",\n    ]\nz: y\n");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == "yaml.syntax" || d.code == "unsupported.yaml.multiline_flow"),
+        "{diags:?}"
+    );
+}
+
 #[test]
 fn malformed_documents_stay_loud() {
     for (text, wants) in [

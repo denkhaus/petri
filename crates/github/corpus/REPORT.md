@@ -2,13 +2,13 @@
 
 316 workflows from 21 repositories.
 
-Remote `uses:` references resolve through the action snapshot: 276 references, 1 of them unavailable. Refresh with `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.
+Remote `uses:` references resolve through the action snapshot: 277 references, 1 of them unavailable. Refresh with `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.
 
 | Result | Count | Share |
 |---|---|---|
 | lowered clean | 14 | 4% |
-| lowered with warnings | 121 | 38% |
-| rejected with a specific `unsupported.*` code | 181 | 57% |
+| lowered with warnings | 122 | 39% |
+| rejected with a specific `unsupported.*` code | 180 | 57% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -18,7 +18,7 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 
 | Action | Uses |
 |---|---|
-| `actions/checkout` | 667 |
+| `actions/checkout` | 668 |
 | `actions/upload-artifact` | 251 |
 | `actions/download-artifact` | 207 |
 | `actions/setup-node` | 124 |
@@ -29,8 +29,8 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `actions/cache` | 79 |
 | `dtolnay/rust-toolchain` | 70 |
 | `actions/cache/save` | 50 |
+| `astral-sh/setup-uv` | 50 |
 | `taiki-e/install-action` | 50 |
-| `astral-sh/setup-uv` | 49 |
 | `PyO3/maturin-action` | 35 |
 | `dsherret/rust-toolchain-file` | 34 |
 | `denoland/setup-deno` | 29 |
@@ -59,7 +59,7 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `docker/metadata-action` | 6 |
 | `github/codeql-action/upload-sarif` | 6 |
 
-152 distinct actions (250 distinct pinned refs).
+152 distinct actions (251 distinct pinned refs).
 
 ## Unsupported features, by workflows affected
 
@@ -84,7 +84,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `step.background` | 2 |
 | `action.remote` | 1 |
 | `continue_on_error.expression` | 1 |
-| `yaml.multiline_flow` | 1 |
 
 ## Failures that are not specific rejections
 
@@ -325,7 +324,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `build.yml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `workflow_call` |
 | python/cpython | `jit.yml` | unsupported | — | `continue_on_error.expression`, `runs_on.expression` |
 | python/cpython | `lint.yml` | warnings | 6 | — |
-| python/cpython | `mypy.yml` | unsupported | — | `yaml.multiline_flow` |
+| python/cpython | `mypy.yml` | warnings | 9 | — |
 | python/cpython | `new-bugs-announce-notifier.yml` | warnings | 6 | — |
 | python/cpython | `require-pr-label.yml` | warnings | 8 | — |
 | python/cpython | `reusable-check-c-api-docs.yml` | unsupported | — | `workflow_call` |

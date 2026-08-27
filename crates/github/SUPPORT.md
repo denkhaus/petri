@@ -93,7 +93,7 @@ workflow counts in brackets rank the pressure.
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |
 | `action.nested_local` | `./` actions inside a fetched composite [2] | Stage the composite's repository so relative references resolve. |
-| `yaml.multiline_flow` | YAML reader gap [1] | Library limitation of the positional reader: a multi-line flow collection ending at a dedent. Anchors and aliases resolve since the reader grew its own loader. |
+| `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |
 
 Planned on the runtime side (no rejection code — lowered workflows fail at run
 time instead): local stand-ins for the artifact and cache services, and
