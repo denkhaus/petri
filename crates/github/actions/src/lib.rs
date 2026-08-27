@@ -15,6 +15,7 @@
 mod action;
 pub mod commands;
 pub mod config;
+pub mod hashfiles;
 mod run;
 pub mod session;
 pub mod source;

@@ -12,7 +12,7 @@ use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::{LowerError, Roots, builtin};
 
 use crate::expr_lower::gha;
-use frontend::expr::{Expr, Segment, parse, split_template};
+use frontend::expr::{Expr, Literal, Segment, parse, split_template};
 use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{BinOp, ExprId, ExprOrValue, ExprTable, UnOp, Value};
 use serde_json::json;
@@ -245,6 +245,9 @@ pub struct GhaRoots<'s> {
     /// Set when a `secrets.*` reference was seen; the caller decides whether the
     /// position allowed it.
     pub saw_secret: bool,
+    /// Set when a `hashFiles(...)` call lowered to its sentinel; the caller decides
+    /// whether the position allowed it.
+    pub saw_hashfiles: bool,
 }
 
 /// Contexts that come from the run's parameters, looked up case-insensitively.
@@ -498,14 +501,33 @@ impl Roots for GhaRoots<'_> {
                 Some(Ok(self.site.status_function(table, n, self.at_step)))
             }
             "hashfiles" => {
-                self.diags.unsupported(
-                    "expression.hashFiles",
-                    self.span.clone(),
-                    "`hashFiles()` reads the workspace at run time",
-                    "no pure expression can do that; it needs a resolution-time placeholder like `$secret`, \
-                     which is a spec finding rather than a frontend feature",
-                );
-                Some(Err(LowerError::Custom("hashFiles is not supported".into())))
+                // Literal patterns lower to a sentinel the step resolves against
+                // the workspace at spawn — the expression evaluates over the
+                // sentinel, never the hash. The caller decides whether this
+                // position may carry one (`run:`, `env:`, `with:`) at all.
+                let patterns: Option<Vec<String>> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        Expr::Literal(Literal::Str(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                match patterns.filter(|p| !p.is_empty()) {
+                    Some(patterns) => {
+                        self.saw_hashfiles = true;
+                        Some(Ok(table.lit(hashfiles_sentinel(&patterns))))
+                    }
+                    None => {
+                        self.diags.unsupported(
+                            "expression.hashFiles",
+                            self.span.clone(),
+                            "`hashFiles()` with computed patterns",
+                            "the step resolves `hashFiles` against the workspace at spawn, so its \
+                             patterns must be literal strings in the workflow",
+                        );
+                        Some(Err(LowerError::Custom("hashFiles is not supported".into())))
+                    }
+                }
             }
             _ => None,
         }
@@ -599,6 +621,7 @@ pub fn lower_scalar(
                     diags,
                     span: span.clone(),
                     saw_secret: false,
+                    saw_hashfiles: false,
                 };
                 let id = match gha(&ast, table, &mut roots) {
                     Ok(id) => id,
@@ -624,6 +647,17 @@ pub fn lower_scalar(
                         "secrets are absent from the expression environment by construction, so they never reach the \
                          event log; a secret may appear in a step's `run:`, `env:` or `with:`, where the step \
                          resolves it, but not in an `if:`, an output or a matrix",
+                    );
+                    return None;
+                }
+                if roots.saw_hashfiles && !env_shaped {
+                    roots.diags.unsupported(
+                        "expression.hashFiles",
+                        span,
+                        "a `hashFiles()` call in a position the engine evaluates",
+                        "the step resolves `hashFiles` against the workspace at spawn, so it may \
+                         appear in a step's `run:`, `env:` or `with:`, but not in an `if:`, an \
+                         output or a matrix",
                     );
                     return None;
                 }
@@ -660,6 +694,7 @@ fn secret_name(root: &str, path: &[&str]) -> Option<String> {
 pub const GITHUB_TOKEN_SECRET: &str = "GITHUB_TOKEN";
 
 const SENTINEL_OPEN: &str = "\u{E000}petri-secret:";
+const HASHFILES_OPEN: &str = "\u{E000}petri-hashfiles:";
 const SENTINEL_CLOSE: &str = "\u{E001}";
 
 /// The stand-in for secret `name` inside a lowered string: what the graph, the
@@ -675,16 +710,70 @@ pub fn has_secret_sentinel(text: &str) -> bool {
     text.contains(SENTINEL_OPEN)
 }
 
-/// Replace every sentinel in `text` with what `resolve` returns for its name.
+/// Replace every secret sentinel in `text` with what `resolve` returns for its name.
 pub fn replace_secret_sentinels<E>(
     text: &str,
     mut resolve: impl FnMut(&str) -> Result<String, E>,
 ) -> Result<String, E> {
+    replace_marked(text, SENTINEL_OPEN, &mut resolve)
+}
+
+/// The stand-in for `hashFiles(patterns…)` inside a lowered string, like
+/// [`secret_sentinel`]: the step kinds that run GitHub steps replace it with the
+/// hash at spawn ([`replace_hashfiles_sentinels`]), computed against the workspace.
+pub fn hashfiles_sentinel(patterns: &[String]) -> String {
+    let payload = serde_json::to_string(patterns).expect("strings encode");
+    format!("{HASHFILES_OPEN}{payload}{SENTINEL_CLOSE}")
+}
+
+/// Whether `text` carries a hashFiles sentinel.
+pub fn has_hashfiles_sentinel(text: &str) -> bool {
+    text.contains(HASHFILES_OPEN)
+}
+
+/// Every pattern list named by a hashFiles sentinel in `text`, in order of
+/// appearance. A run-time caller computes each hash asynchronously, then splices
+/// the results in with [`replace_hashfiles_sentinels`].
+pub fn hashfiles_calls(text: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let ok: Result<String, std::convert::Infallible> =
+        replace_marked(text, HASHFILES_OPEN, &mut |payload| {
+            if let Ok(patterns) = serde_json::from_str::<Vec<String>>(payload) {
+                out.push(patterns);
+            }
+            Ok(String::new())
+        });
+    let _ = ok;
+    out
+}
+
+/// Replace every hashFiles sentinel in `text` with what `resolve` returns for its
+/// pattern list.
+pub fn replace_hashfiles_sentinels<E>(
+    text: &str,
+    mut resolve: impl FnMut(&[String]) -> Result<String, E>,
+) -> Result<String, E> {
+    replace_marked(text, HASHFILES_OPEN, &mut |payload| {
+        match serde_json::from_str::<Vec<String>>(payload) {
+            Ok(patterns) => resolve(&patterns),
+            // Not a payload this crate wrote; keep it as text.
+            Err(_) => Ok(format!("{HASHFILES_OPEN}{payload}{SENTINEL_CLOSE}")),
+        }
+    })
+}
+
+/// Replace every `<open>payload\u{E001}` marker in `text` with what `resolve`
+/// returns for its payload.
+fn replace_marked<E>(
+    text: &str,
+    open: &str,
+    resolve: &mut dyn FnMut(&str) -> Result<String, E>,
+) -> Result<String, E> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find(SENTINEL_OPEN) {
+    while let Some(start) = rest.find(open) {
         out.push_str(&rest[..start]);
-        let after = &rest[start + SENTINEL_OPEN.len()..];
+        let after = &rest[start + open.len()..];
         match after.find(SENTINEL_CLOSE) {
             Some(end) => {
                 out.push_str(&resolve(&after[..end])?);
@@ -692,7 +781,7 @@ pub fn replace_secret_sentinels<E>(
             }
             None => {
                 // An opener with no closer is not ours; keep it as text.
-                out.push_str(&rest[start..start + SENTINEL_OPEN.len()]);
+                out.push_str(&rest[start..start + open.len()]);
                 rest = after;
             }
         }
@@ -736,5 +825,25 @@ mod sentinel_tests {
         let failed: Result<String, &str> =
             replace_secret_sentinels(&secret_sentinel("X"), |_| Err("missing"));
         assert_eq!(failed, Err("missing"));
+    }
+
+    #[test]
+    fn hashfiles_sentinels_carry_their_patterns() {
+        let patterns = vec!["**/Cargo.lock".to_string(), "rust-toolchain*".to_string()];
+        let text = format!("key-{}-v1", hashfiles_sentinel(&patterns));
+        assert!(has_hashfiles_sentinel(&text));
+        assert!(!has_secret_sentinel(&text));
+        assert_eq!(hashfiles_calls(&text), vec![patterns.clone()]);
+        let out = replace_hashfiles_sentinels(&text, |p| -> Result<String, ()> {
+            assert_eq!(p, patterns.as_slice());
+            Ok("abc123".into())
+        })
+        .unwrap();
+        assert_eq!(out, "key-abc123-v1");
+        // The two sentinel kinds pass each other by.
+        let mixed = format!("{} {}", secret_sentinel("T"), hashfiles_sentinel(&patterns));
+        let out = replace_secret_sentinels(&mixed, |_| -> Result<String, ()> { Ok("s".into()) })
+            .unwrap();
+        assert!(has_hashfiles_sentinel(&out));
     }
 }

@@ -432,10 +432,12 @@ in brackets.
    live elsewhere, it is a small swap.
 
 2. **`hashFiles()` cannot be a total builtin** [`unsupported.expression.hashFiles`].
-   It reads the workspace at run time. It needs a resolution-time placeholder like
-   `$secret` — the second permitted non-literal across the executor boundary.
-   Rare in the corpus (1 workflow) because it mostly appears inside `actions/cache`
-   inputs, which are rejected first.
+   It reads the workspace at run time. Resolved for step config: a literal-pattern
+   call in `run:`, `env:` or `with:` lowers to a sentinel — the second permitted
+   non-literal across the executor boundary, like `$secret` — which the GitHub step
+   kinds replace at spawn with the hash, computed in the job environment
+   (`crates/github/actions/src/hashfiles.rs`). In a position the engine evaluates
+   (an `if:`, an output, a matrix) it stays rejected, and so do computed patterns.
 
 3. **Nothing ran after a cancel** — resolved; see departure 30 and spec §5.
    `if: cancelled()` and `if: always()` cleanup can now run: cancelled outcomes

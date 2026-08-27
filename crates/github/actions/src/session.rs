@@ -191,6 +191,18 @@ impl Session {
         ctx: StepCtx,
         allow_unsecure: bool,
     ) -> (Outcome, Effects) {
+        // `hashFiles` sentinels first: the hash is computed in the job
+        // environment against the workspace, before any secret enters the config.
+        let process = match crate::hashfiles::resolve_hashfiles(
+            process,
+            &*ctx.env,
+            &self.github_workspace(),
+        )
+        .await
+        {
+            Ok(process) => process,
+            Err(failure) => return (failure.into(), Effects::default()),
+        };
         let StepCtx {
             firing,
             attempt,

@@ -255,7 +255,8 @@ pub const GHA_FUNCTIONS: &[&str] = &[
 /// GitHub functions the engine cannot express as a total builtin, with why.
 pub const GHA_FUNCTIONS_UNSUPPORTED: &[(&str, &str)] = &[(
     "hashFiles",
-    "reads the workspace at run time, which no pure builtin can; it needs a resolution-time placeholder like `$secret`",
+    "reads the workspace at run time, which no pure builtin can; the frontend intercepts literal-pattern \
+     calls in step config and lowers them to a sentinel the step resolves at spawn",
 )];
 
 /// GitHub's `strategy.matrix`, as a composition of the engine's record combinators.

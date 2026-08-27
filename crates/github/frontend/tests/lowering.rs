@@ -155,7 +155,9 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.shell.pwsh",
         ),
         (
-            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ hashFiles('**/lock') }}\n",
+            // In `run:` a literal-pattern hashFiles lowers (the step resolves it);
+            // in a position the engine evaluates it stays rejected.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        if: hashFiles('**/lock') != ''\n",
             "unsupported.expression.hashFiles",
         ),
         (
