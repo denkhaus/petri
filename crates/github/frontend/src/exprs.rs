@@ -556,33 +556,97 @@ impl Roots for GhaRoots<'_> {
                 // the workspace at spawn — the expression evaluates over the
                 // sentinel, never the hash. The caller decides whether this
                 // position may carry one (`run:`, `env:`, `with:`) at all.
-                let patterns: Option<Vec<String>> = args
-                    .iter()
-                    .map(|arg| match arg {
-                        Expr::Literal(Literal::Str(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                match patterns.filter(|p| !p.is_empty()) {
+                match literal_hashfiles_patterns(args, &self.span, self.diags) {
                     Some(patterns) => {
                         self.saw_hashfiles = true;
                         Some(Ok(table.lit(hashfiles_sentinel(&patterns))))
                     }
-                    None => {
-                        self.diags.unsupported(
-                            "expression.hashFiles",
-                            self.span.clone(),
-                            "`hashFiles()` with computed patterns",
-                            "the step resolves `hashFiles` against the workspace at spawn, so its \
-                             patterns must be literal strings in the workflow",
-                        );
-                        Some(Err(LowerError::Custom("hashFiles is not supported".into())))
-                    }
+                    None => Some(Err(LowerError::Custom("hashFiles is not supported".into()))),
                 }
             }
             _ => None,
         }
     }
+}
+
+/// The patterns of a `hashFiles(...)` call when every argument is a literal
+/// string (and there is at least one). Anything else — computed patterns, no
+/// patterns — gets the one shared diagnostic: the rule and its wording live
+/// here, for every position that lowers the call to a sentinel.
+pub(crate) fn literal_hashfiles_patterns(
+    args: &[Expr],
+    span: &Span,
+    diags: &mut Diagnostics,
+) -> Option<Vec<String>> {
+    let patterns: Option<Vec<String>> = args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Literal(Literal::Str(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    match patterns.filter(|p| !p.is_empty()) {
+        Some(patterns) => Some(patterns),
+        None => {
+            diags.unsupported(
+                "expression.hashFiles",
+                span.clone(),
+                "`hashFiles()` with computed patterns",
+                "the step resolves `hashFiles` against the workspace at spawn, so its \
+                 patterns must be literal strings in the workflow",
+            );
+            None
+        }
+    }
+}
+
+/// One parsed expression lowered through the GHA roots, with the flags a caller
+/// needs for its position-specific rules.
+pub(crate) struct LoweredExpr {
+    pub id: ExprId,
+    pub saw_secret: bool,
+    pub saw_hashfiles: bool,
+}
+
+/// Lower one parsed expression through [`GhaRoots`], mapping lowering failures
+/// to their diagnostics. `None` means a diagnostic was reported.
+pub(crate) fn lower_expr(
+    ast: &Expr,
+    site: &Site,
+    at_step: bool,
+    span: &Span,
+    table: &mut ExprTable,
+    diags: &mut Diagnostics,
+) -> Option<LoweredExpr> {
+    let mut roots = GhaRoots {
+        site,
+        at_step,
+        diags,
+        span: span.clone(),
+        saw_secret: false,
+        saw_hashfiles: false,
+    };
+    let id = match gha(ast, table, &mut roots) {
+        Ok(id) => id,
+        Err(LowerError::UnknownIdent(name)) => {
+            roots.diags.error(
+                "expr.unknown_context",
+                span.clone(),
+                format!("`{name}` is not a GitHub Actions context"),
+            );
+            return None;
+        }
+        Err(LowerError::Custom(_)) => return None,
+        Err(e) => {
+            roots.diags.error("expr.lower", span.clone(), e.to_string());
+            return None;
+        }
+    };
+    Some(LoweredExpr {
+        id,
+        saw_secret: roots.saw_secret,
+        saw_hashfiles: roots.saw_hashfiles,
+    })
 }
 
 /// How a scalar lowered.
@@ -631,9 +695,7 @@ pub fn lower_scalar(
 
     // A whole-value secret reference is the one permitted form.
     if let [Segment::Expr { source, .. }] = segments.as_slice()
-        && let Ok(ast) = parse(source)
-        && let Some((root, path)) = ast.dotted_path()
-        && let Some(name) = secret_name(root, &path)
+        && let Some(name) = secret_expr_name(source)
     {
         if env_shaped {
             return Some(LoweredScalar::Secret(name));
@@ -676,32 +738,9 @@ pub fn lower_scalar(
                         return None;
                     }
                 };
-                let mut roots = GhaRoots {
-                    site,
-                    at_step,
-                    diags,
-                    span: span.clone(),
-                    saw_secret: false,
-                    saw_hashfiles: false,
-                };
-                let id = match gha(&ast, table, &mut roots) {
-                    Ok(id) => id,
-                    Err(LowerError::UnknownIdent(name)) => {
-                        roots.diags.error(
-                            "expr.unknown_context",
-                            span,
-                            format!("`{name}` is not a GitHub Actions context"),
-                        );
-                        return None;
-                    }
-                    Err(LowerError::Custom(_)) => return None,
-                    Err(e) => {
-                        roots.diags.error("expr.lower", span, e.to_string());
-                        return None;
-                    }
-                };
-                if roots.saw_secret && !env_shaped {
-                    roots.diags.unsupported(
+                let lowered = lower_expr(&ast, site, at_step, &span, table, diags)?;
+                if lowered.saw_secret && !env_shaped {
+                    diags.unsupported(
                         "secrets.expression",
                         span,
                         "a `secrets.*` or `github.token` reference in a position the engine evaluates",
@@ -711,8 +750,8 @@ pub fn lower_scalar(
                     );
                     return None;
                 }
-                if roots.saw_hashfiles && !env_shaped {
-                    roots.diags.unsupported(
+                if lowered.saw_hashfiles && !env_shaped {
+                    diags.unsupported(
                         "expression.hashFiles",
                         span,
                         "a `hashFiles()` call in a position the engine evaluates",
@@ -723,9 +762,9 @@ pub fn lower_scalar(
                     return None;
                 }
                 if whole {
-                    return Some(LoweredScalar::Expr(id));
+                    return Some(LoweredScalar::Expr(lowered.id));
                 }
-                let as_string = builtin(table, "loose_string", vec![id]).ok()?;
+                let as_string = builtin(table, "loose_string", vec![lowered.id]).ok()?;
                 pieces.push(as_string);
             }
         }
@@ -742,14 +781,19 @@ pub fn lower_scalar(
 /// `${{ github.token }}`) reference and nothing else. For the positions that
 /// drop such a value with a warning — a job output — rather than rejecting it.
 pub fn whole_value_secret(text: &str) -> Option<String> {
-    let segments = split_template(text).ok()?;
-    if let [Segment::Expr { source, .. }] = segments.as_slice()
-        && let Ok(ast) = parse(source)
-        && let Some((root, path)) = ast.dotted_path()
-    {
-        return secret_name(root, &path);
+    match split_template(text).ok()?.as_slice() {
+        [Segment::Expr { source, .. }] => secret_expr_name(source),
+        _ => None,
     }
-    None
+}
+
+/// The secret one expression source names when it is exactly `secrets.X` or
+/// `github.token` — the shared definition behind [`whole_value_secret`] and
+/// [`lower_scalar`]'s whole-value check.
+fn secret_expr_name(source: &str) -> Option<String> {
+    let ast = parse(source).ok()?;
+    let (root, path) = ast.dotted_path()?;
+    secret_name(root, &path)
 }
 
 /// The secret a whole-value reference names: `secrets.X` is `X`, and `github.token`

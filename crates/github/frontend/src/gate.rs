@@ -33,14 +33,13 @@
 //! an unwrapped object could not be told apart from an operator node.
 
 use frontend::diag::{Diagnostics, Span};
-use frontend::expr::lower::LowerError;
-use frontend::expr::{Expr, Literal, UnaryOp};
+use frontend::expr::lower::literal_value;
+use frontend::expr::{Expr, UnaryOp};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{ExprTable, Value};
 use serde_json::json;
 
-use crate::expr_lower::gha;
-use crate::exprs::{GhaRoots, Site, hashfiles_sentinel};
+use crate::exprs::{Site, hashfiles_sentinel, literal_hashfiles_patterns, lower_expr};
 
 /// Config key for an interior node's operator.
 pub const OP_KEY: &str = "op";
@@ -349,14 +348,7 @@ pub fn condition_tree(
     diags: &mut Diagnostics,
 ) -> Option<Gate> {
     if let Expr::Literal(lit) = ast {
-        return Some(Gate::Lit(match lit {
-            Literal::Null => Value::Null,
-            Literal::Bool(b) => Value::Bool(*b),
-            Literal::Number(n) => serde_json::Number::from_f64(*n)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-            Literal::Str(s) => Value::String(s.clone()),
-        }));
+        return Some(Gate::Lit(literal_value(lit)));
     }
     if !needs_lazy(ast) {
         return engine_leaf(ast, site, span, table, diags);
@@ -388,26 +380,8 @@ pub fn condition_tree(
             })
         }
         Expr::Call(name, args) if name.eq_ignore_ascii_case("hashfiles") => {
-            let patterns: Option<Vec<String>> = args
-                .iter()
-                .map(|arg| match arg {
-                    Expr::Literal(Literal::Str(s)) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect();
-            match patterns.filter(|p| !p.is_empty()) {
-                Some(patterns) => Some(Gate::Lit(Value::String(hashfiles_sentinel(&patterns)))),
-                None => {
-                    diags.unsupported(
-                        "expression.hashFiles",
-                        span.clone(),
-                        "`hashFiles()` with computed patterns",
-                        "the step resolves `hashFiles` against the workspace at spawn, so its \
-                         patterns must be literal strings in the workflow",
-                    );
-                    None
-                }
-            }
+            let patterns = literal_hashfiles_patterns(args, span, diags)?;
+            Some(Gate::Lit(Value::String(hashfiles_sentinel(&patterns))))
         }
         // Something lazy sits under a non-operator (`contains(env.X, 'y')`,
         // `format('{0}', hashFiles(...))`). The engine-leaf path decides: `env`
@@ -440,32 +414,9 @@ fn engine_leaf(
     table: &mut ExprTable,
     diags: &mut Diagnostics,
 ) -> Option<Gate> {
-    let mut roots = GhaRoots {
-        site,
-        at_step: true,
-        diags,
-        span: span.clone(),
-        saw_secret: false,
-        saw_hashfiles: false,
-    };
-    let id = match gha(ast, table, &mut roots) {
-        Ok(id) => id,
-        Err(LowerError::UnknownIdent(name)) => {
-            roots.diags.error(
-                "expr.unknown_context",
-                span.clone(),
-                format!("`{name}` is not a GitHub Actions context"),
-            );
-            return None;
-        }
-        Err(LowerError::Custom(_)) => return None,
-        Err(e) => {
-            roots.diags.error("expr.lower", span.clone(), e.to_string());
-            return None;
-        }
-    };
-    if roots.saw_secret {
-        roots.diags.unsupported(
+    let lowered = lower_expr(ast, site, true, span, table, diags)?;
+    if lowered.saw_secret {
+        diags.unsupported(
             "secrets.expression",
             span.clone(),
             "a `secrets.*` or `github.token` reference in a condition",
@@ -475,8 +426,8 @@ fn engine_leaf(
         );
         return None;
     }
-    if roots.saw_hashfiles {
-        roots.diags.unsupported(
+    if lowered.saw_hashfiles {
+        diags.unsupported(
             "expression.hashFiles",
             span.clone(),
             "a `hashFiles()` call under a function the engine evaluates",
@@ -486,7 +437,7 @@ fn engine_leaf(
         );
         return None;
     }
-    Some(Gate::expr(id))
+    Some(Gate::expr(lowered.id))
 }
 
 #[cfg(test)]

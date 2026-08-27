@@ -51,13 +51,11 @@ impl Step for ActionStep {
 
 async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // The gate first: a phase whose condition is false stages nothing and spawns
-    // nothing. See `RunStep` for the skipped/cancelled split.
-    if let Some(gate) = &config.gate {
-        match crate::gate::admitted(gate, &config.env, &ctx).await? {
-            true => {}
-            false if config.cancelled => return Ok(Outcome::cancelled()),
-            false => return Ok(Outcome::skipped()),
-        }
+    // nothing.
+    if let Some(outcome) =
+        crate::gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
+    {
+        return Ok(outcome);
     }
     let session = Session::begin(&ctx, &config.event).await?;
 

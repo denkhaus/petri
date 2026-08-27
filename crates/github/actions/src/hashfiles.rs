@@ -100,34 +100,13 @@ pub(crate) async fn resolve_hashfiles(
     env: &dyn ExecEnv,
     github_workspace: &str,
 ) -> Result<ProcessConfig, StepFailure> {
-    let mut calls: BTreeMap<Vec<String>, String> = BTreeMap::new();
-    for text in process_texts(&process) {
-        for patterns in hashfiles_calls(text) {
-            calls.entry(patterns).or_default();
-        }
-    }
+    let calls = resolved_calls(process_texts(&process), env, github_workspace).await?;
     if calls.is_empty() {
         return Ok(process);
     }
-
-    let patterns: Vec<Vec<String>> = calls.keys().cloned().collect();
-    let hashes = compute(env, github_workspace, &patterns).await?;
-    for (patterns, hash) in patterns.into_iter().zip(hashes) {
-        calls.insert(patterns, hash);
-    }
-
-    let splice = |text: &str| -> String {
-        replace_hashfiles_sentinels(
-            text,
-            |patterns| -> Result<String, std::convert::Infallible> {
-                Ok(calls.get(patterns).cloned().unwrap_or_default())
-            },
-        )
-        .expect("the resolver is infallible")
-    };
     try_map_process_texts(&mut process, |text| {
         if has_hashfiles_sentinel(text) {
-            Ok::<_, std::convert::Infallible>(Some(splice(text)))
+            Ok::<_, std::convert::Infallible>(Some(splice(text, &calls)))
         } else {
             Ok(None)
         }
@@ -136,8 +115,45 @@ pub(crate) async fn resolve_hashfiles(
     Ok(process)
 }
 
+/// The hash of every distinct `hashFiles(patterns…)` call across `texts`, in
+/// one workspace walk. Empty when no text carries a sentinel. Shared by the
+/// config path and the gate path, so both hash the same way.
+pub(crate) async fn resolved_calls<'a>(
+    texts: impl Iterator<Item = &'a str>,
+    env: &dyn ExecEnv,
+    github_workspace: &str,
+) -> Result<BTreeMap<Vec<String>, String>, StepFailure> {
+    let mut calls: BTreeMap<Vec<String>, String> = BTreeMap::new();
+    for text in texts {
+        for patterns in hashfiles_calls(text) {
+            calls.entry(patterns).or_default();
+        }
+    }
+    if calls.is_empty() {
+        return Ok(calls);
+    }
+    let patterns: Vec<Vec<String>> = calls.keys().cloned().collect();
+    let hashes = compute(env, github_workspace, &patterns).await?;
+    for (patterns, hash) in patterns.into_iter().zip(hashes) {
+        calls.insert(patterns, hash);
+    }
+    Ok(calls)
+}
+
+/// One text with its sentinels replaced by the resolved hashes; a call the map
+/// does not hold reads as the empty string, GitHub's "nothing matched".
+pub(crate) fn splice(text: &str, calls: &BTreeMap<Vec<String>, String>) -> String {
+    replace_hashfiles_sentinels(
+        text,
+        |patterns| -> Result<String, std::convert::Infallible> {
+            Ok(calls.get(patterns).cloned().unwrap_or_default())
+        },
+    )
+    .expect("the resolver is infallible")
+}
+
 /// Every distinct `hashFiles(patterns…)` in one step, in one workspace walk.
-pub(crate) async fn compute(
+async fn compute(
     env: &dyn ExecEnv,
     github_workspace: &str,
     patterns: &[Vec<String>],

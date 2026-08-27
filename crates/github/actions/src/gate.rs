@@ -20,10 +20,10 @@
 
 use std::collections::BTreeMap;
 
-use frontend_gha::exprs::{has_hashfiles_sentinel, hashfiles_calls, replace_hashfiles_sentinels};
-use frontend_gha::gate::{Gate, eval};
-use ir::Value;
+use frontend_gha::exprs::has_hashfiles_sentinel;
+use frontend_gha::gate::{Gate, GateOp, eval};
 use ir::expr::builtins::loose;
+use ir::{Outcome, Value};
 use smol_str::SmolStr;
 use steps::{StepCtx, StepFailure, ValueOrSecretRef};
 
@@ -32,9 +32,30 @@ use crate::session::{github_workspace_path, read_job_env};
 /// The step's gate could not be read or evaluated.
 pub const GATE_CLASS: &str = "gate";
 
+/// Evaluate a step's gate and decide what a refused step records instead of
+/// running: `None` means run; a false gate is `Cancelled` when the scope was
+/// cancelled at firing — as GitHub reports post-cancel non-cleanup steps —
+/// else `Skipped`. No gate means run.
+pub(crate) async fn refusal(
+    gate: Option<&Value>,
+    cancelled: bool,
+    env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    ctx: &StepCtx,
+) -> Result<Option<Outcome>, StepFailure> {
+    let Some(gate) = gate else { return Ok(None) };
+    if admitted(gate, env_config, ctx).await? {
+        return Ok(None);
+    }
+    Ok(Some(if cancelled {
+        Outcome::cancelled()
+    } else {
+        Outcome::skipped()
+    }))
+}
+
 /// Evaluate a step's gate: `true` means run. `env_config` is the step's own
 /// `env:` from its config, which wins over the job's accumulated `GITHUB_ENV`.
-pub(crate) async fn admitted(
+async fn admitted(
     gate: &Value,
     env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
     ctx: &StepCtx,
@@ -43,6 +64,15 @@ pub(crate) async fn admitted(
         class: GATE_CLASS,
         message: format!("the step's gate is not one this runner wrote: {message}"),
     })?;
+
+    // The engine-resolved prefix can refuse on its own: the prereq terms (job
+    // started, the implicit `success()`) ride as leading `&&` literals, and
+    // evaluation would short-circuit on a false one before reaching anything
+    // step-resolved — so a step that will not run anyway skips the workspace
+    // hash and the env-file read.
+    if refused_before_resolution(&gate) {
+        return Ok(false);
+    }
 
     resolve_hashfiles(&mut gate, ctx).await?;
 
@@ -53,20 +83,30 @@ pub(crate) async fn admitted(
         BTreeMap::new()
     };
 
-    let mut failure: Option<StepFailure> = None;
-    let mut lookup = |name: &str| -> Result<Option<Value>, ()> {
-        match env_value(name, env_config, &job_env, ctx) {
-            Ok(found) => Ok(found),
-            Err(e) => {
-                failure = Some(e);
-                Err(())
-            }
-        }
-    };
-    let value = eval(&gate, &mut lookup);
-    match value {
-        Ok(value) => Ok(loose::truthy(&value)),
-        Err(()) => Err(failure.expect("the lookup that failed recorded why")),
+    let value = eval(&gate, &mut |name| {
+        env_value(name, env_config, &job_env, ctx)
+    })?;
+    Ok(loose::truthy(&value))
+}
+
+/// Whether the gate's literal prefix — the root, or the leading operands of a
+/// root `&&` up to the first step-resolved leaf — already lands on a falsy
+/// value. Exactly what evaluation would short-circuit on without resolving
+/// anything: an unresolved sentinel string is non-empty, so never falsy.
+fn refused_before_resolution(gate: &Gate) -> bool {
+    match gate {
+        Gate::Lit(v) => !loose::truthy(v),
+        Gate::Op {
+            op: GateOp::And,
+            args,
+        } => args
+            .iter()
+            .map_while(|arg| match arg {
+                Gate::Lit(v) => Some(v),
+                _ => None,
+            })
+            .any(|v| !loose::truthy(v)),
+        _ => false,
     }
 }
 
@@ -111,33 +151,14 @@ fn ci_find<'a, T>(mut entries: impl Iterator<Item = (&'a str, T)>, name: &str) -
 /// Resolve every `hashFiles` sentinel in the gate's string literals, in one
 /// workspace walk, before evaluation compares anything.
 async fn resolve_hashfiles(gate: &mut Gate, ctx: &StepCtx) -> Result<(), StepFailure> {
-    let mut calls: BTreeMap<Vec<String>, String> = BTreeMap::new();
-    for text in gate.texts() {
-        for patterns in hashfiles_calls(text) {
-            calls.entry(patterns).or_default();
-        }
-    }
+    let workspace = github_workspace_path(&*ctx.env);
+    let calls =
+        crate::hashfiles::resolved_calls(gate.texts().into_iter(), &*ctx.env, &workspace).await?;
     if calls.is_empty() {
         return Ok(());
     }
-    let patterns: Vec<Vec<String>> = calls.keys().cloned().collect();
-    let workspace = github_workspace_path(&*ctx.env);
-    let hashes = crate::hashfiles::compute(&*ctx.env, &workspace, &patterns).await?;
-    for (patterns, hash) in patterns.into_iter().zip(hashes) {
-        calls.insert(patterns, hash);
-    }
     gate.map_texts(&mut |text| {
-        if !has_hashfiles_sentinel(text) {
-            return None;
-        }
-        let resolved = replace_hashfiles_sentinels(
-            text,
-            |patterns| -> Result<String, std::convert::Infallible> {
-                Ok(calls.get(patterns).cloned().unwrap_or_default())
-            },
-        )
-        .expect("the resolver is infallible");
-        Some(resolved)
+        has_hashfiles_sentinel(text).then(|| crate::hashfiles::splice(text, &calls))
     });
     Ok(())
 }

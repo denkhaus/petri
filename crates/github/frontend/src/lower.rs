@@ -883,10 +883,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Some(scalar) = node.and_then(|n| n.as_scalar())
             && scalar.as_bool().is_none()
             && let Ok(source) = if_expr_source(scalar.as_str())
-            && let Ok(ast) = parse(&source)
-            && gate::needs_lazy(&ast)
         {
-            return self.lazy_gate(&ast, &source, site, span, prereqs);
+            return self.step_gate_text(&source, site, span, prereqs);
         }
         let cond = self.condition(node, site, true, span);
         self.collapse_gate(prereqs, cond)
@@ -903,7 +901,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Ok(ast) = parse(source)
             && gate::needs_lazy(&ast)
         {
-            return self.lazy_gate(&ast, source, site, span, prereqs);
+            return self.lazy_gate(&ast, site, span, prereqs);
         }
         let cond = self.condition_text(source, site, true, span);
         self.collapse_gate(prereqs, cond)
@@ -929,13 +927,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
     fn lazy_gate(
         &mut self,
         ast: &frontend::expr::Expr,
-        source: &str,
         site: &Site,
         span: Span,
         prereqs: &[ExprId],
     ) -> Value {
         let mut terms: Vec<Gate> = prereqs.iter().map(|id| Gate::expr(*id)).collect();
-        if !if_calls_any(source, &["success", "failure", "cancelled", "always"]) {
+        if !names_status_function(ast) {
             let success = site.status_function(self.b.exprs(), "success", true);
             terms.push(Gate::expr(success));
         }
@@ -1760,8 +1757,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
         at_step: bool,
         span: Span,
     ) -> Option<ExprId> {
-        let uses_status_function =
-            if_calls_any(source, &["success", "failure", "cancelled", "always"]);
+        let uses_status_function = parse(source)
+            .map(|ast| names_status_function(&ast))
+            .unwrap_or(false);
         let lowered = lower_scalar(
             &format!("${{{{ {source} }}}}"),
             span,
@@ -1986,17 +1984,15 @@ fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
     }
 }
 
-/// Whether the expression calls any of these functions — GitHub's rule that a
-/// condition naming a status function does not get `success() &&` in front.
-/// Parse problems read as false.
-fn if_calls_any(source: &str, names: &[&str]) -> bool {
-    parse(source)
-        .map(|ast| {
-            ast.calls()
-                .iter()
-                .any(|c| names.contains(&c.to_lowercase().as_str()))
-        })
-        .unwrap_or(false)
+/// The status functions — GitHub's rule that a condition naming one does not
+/// get `success() &&` in front, encoded once for the eager and lazy paths.
+const STATUS_FUNCTIONS: &[&str] = &["success", "failure", "cancelled", "always"];
+
+/// Whether the expression calls any status function.
+fn names_status_function(ast: &frontend::expr::Expr) -> bool {
+    ast.calls()
+        .iter()
+        .any(|c| STATUS_FUNCTIONS.contains(&c.to_lowercase().as_str()))
 }
 
 fn variant(error: &ValidationError) -> &'static str {

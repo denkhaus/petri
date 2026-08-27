@@ -66,17 +66,24 @@ impl Roots for EngineBindings {
 
 /// Lower a literal. Shared by every lowering.
 pub fn literal(table: &mut ExprTable, lit: &Literal) -> ExprId {
+    let value = literal_value(lit);
+    table.lit(value)
+}
+
+/// A literal's value — the one rule for how a parsed literal (integral numbers
+/// included) becomes JSON, shared by every lowering.
+pub fn literal_value(lit: &Literal) -> Value {
     match lit {
-        Literal::Null => table.lit(Value::Null),
-        Literal::Bool(b) => table.lit(*b),
+        Literal::Null => Value::Null,
+        Literal::Bool(b) => Value::Bool(*b),
         Literal::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 9.0e15 {
-                table.lit(*n as i64)
+                Value::from(*n as i64)
             } else {
-                table.lit(serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number))
+                serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number)
             }
         }
-        Literal::Str(s) => table.lit(s.as_str()),
+        Literal::Str(s) => Value::String(s.clone()),
     }
 }
 

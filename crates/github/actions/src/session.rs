@@ -156,7 +156,7 @@ impl Session {
 
     /// `GITHUB_WORKSPACE`.
     pub fn github_workspace(&self) -> String {
-        format!("{}/{REPO_DIR}", self.workspace)
+        github_workspace_path(&*self.env)
     }
 
     fn absolute(&self, relative: &Path) -> String {
