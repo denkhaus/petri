@@ -17,8 +17,8 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 
 use crate::action::{
-    ACTION_KIND, ActionLocation, ActionRef, ActionSource, Phase, PinnedAction, RUN_KIND,
-    STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionLocation, ActionRef, ActionSource, ActionSourceError, Phase, PinnedAction,
+    RUN_KIND, STATE_OUTPUT_KEY,
 };
 use crate::composite::{self, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
@@ -55,6 +55,9 @@ pub struct Lowering<'w, 'a> {
 enum ResolveFailure {
     /// No [`ActionSource`] was given: the format is running without one.
     NoSource,
+    /// The source said [`ActionSourceError::Unavailable`]: it does not serve this
+    /// reference. Rejected like `NoSource`, scoped to the one reference.
+    Unavailable,
     Failed(String),
 }
 
@@ -849,20 +852,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Some(cached) = self.resolved.get(name) {
             return cached.clone();
         }
+        let source_failure = |e: ActionSourceError| match e {
+            ActionSourceError::Unavailable(_) => ResolveFailure::Unavailable,
+            other => ResolveFailure::Failed(other.to_string()),
+        };
         let result = match self.actions {
             None => Err(ResolveFailure::NoSource),
             Some(source) => ActionRef::parse(name)
                 .map_err(|e| ResolveFailure::Failed(e.to_string()))
-                .and_then(|reference| {
-                    source
-                        .resolve(&reference)
-                        .map_err(|e| ResolveFailure::Failed(e.to_string()))
-                })
+                .and_then(|reference| source.resolve(&reference).map_err(source_failure))
                 .and_then(|pinned| {
                     source
                         .manifest(&pinned)
                         .map(|text| (pinned, text))
-                        .map_err(|e| ResolveFailure::Failed(e.to_string()))
+                        .map_err(source_failure)
                 }),
         };
         self.resolved.insert(name.to_string(), result.clone());
@@ -895,6 +898,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
                         span.clone(),
                         name.to_string(),
                         "no action source is configured, so actions from other repositories cannot be fetched",
+                    );
+                    None
+                }
+                Err(ResolveFailure::Unavailable) => {
+                    self.diags.unsupported(
+                        "action.remote",
+                        span.clone(),
+                        name.to_string(),
+                        "the configured action source does not serve this reference, so it cannot be fetched from here",
                     );
                     None
                 }
@@ -1733,12 +1745,17 @@ enum EnvValue {
 }
 
 /// A manifest's declared inputs, owned, so the plan outlives the document.
+///
+/// A `default:` key that is present satisfies the input, even written as `''` or
+/// left empty: the YAML reader cannot tell a quoted empty string from a null
+/// (see `Scalar::is_plain`), and the run-time difference — `INPUT_X` set to the
+/// empty string versus unset — is invisible to the toolkit's `getInput`.
 fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
     inputs
         .iter()
         .map(|input| PlanInput {
             name: input.name.clone(),
-            default: input.default.and_then(scalar_text_opt),
+            default: input.default.map(scalar_text),
             required: input.required,
         })
         .collect()
@@ -1747,23 +1764,14 @@ fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
 /// A YAML scalar as the string GitHub would pass: text as written, other scalars
 /// stringified, null empty.
 fn scalar_text(node: Node<'_>) -> String {
-    scalar_text_opt(node).unwrap_or_default()
-}
-
-/// [`scalar_text`], with a YAML null as `None`: an input whose `default:` is null
-/// has no default, and GitHub leaves it unset rather than passing `"null"`.
-fn scalar_text_opt(node: Node<'_>) -> Option<String> {
-    if node.as_scalar().is_some_and(|s| s.is_null()) {
-        return None;
-    }
-    Some(match node.as_str() {
+    match node.as_str() {
         Some(text) => text.to_string(),
         None => match node.to_json() {
             Value::String(s) => s,
             Value::Null => String::new(),
             other => other.to_string(),
         },
-    })
+    }
 }
 
 /// Why an `if:` text holds no single expression. `condition` turns these into

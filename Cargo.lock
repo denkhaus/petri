@@ -512,6 +512,7 @@ dependencies = [
  "petri-runtime",
  "petri-testkit",
  "serde_json",
+ "smol_str",
  "tokio",
 ]
 

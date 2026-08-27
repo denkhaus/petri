@@ -12,9 +12,12 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use frontend::{Diagnostic, DirFiles, Frontend, Severity};
 use frontend_gha::GitHubActions;
+use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
+use smol_str::SmolStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -123,9 +126,131 @@ pub fn workflows(corpus_root: &Path) -> Vec<(String, PathBuf, PathBuf)> {
     out
 }
 
+/// One reference in the action snapshot: resolved to a commit and its manifest, or
+/// the error the refresh hit.
+pub enum SnapshotEntry {
+    Resolved { sha: String, manifest: String },
+    Failed { error: String },
+}
+
+/// The offline action source for the corpus: every `uses:` reference the corpus
+/// makes, resolved once over the network by the refresh test
+/// (`--test snapshot -- --ignored`) and read back here with none. A reference the
+/// snapshot lacks — or one whose refresh failed — answers `Unavailable`, so the
+/// workflow classifies exactly as it would with no source at all:
+/// `unsupported.action.remote`.
+pub struct SnapshotSource {
+    entries: BTreeMap<String, SnapshotEntry>,
+}
+
+impl SnapshotSource {
+    /// The snapshot's file name under the corpus root. Gitignored with the rest of
+    /// the corpus data: fetched, not vendored.
+    pub const FILE: &'static str = "actions-snapshot.json";
+
+    /// Load `<corpus>/actions-snapshot.json`. `None` when it has not been written;
+    /// a malformed file is a loud failure, not a quiet no-source run.
+    pub fn load(corpus_root: &Path) -> Option<Self> {
+        let path = corpus_root.join(Self::FILE);
+        let text = std::fs::read_to_string(&path).ok()?;
+        let top: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&text).expect("the action snapshot is a JSON object");
+        let entries = top
+            .into_iter()
+            .map(|(uses, value)| {
+                let entry = match (value.get("sha"), value.get("manifest"), value.get("error")) {
+                    (Some(sha), Some(manifest), None) => SnapshotEntry::Resolved {
+                        sha: sha.as_str().expect("a sha is a string").to_string(),
+                        manifest: manifest
+                            .as_str()
+                            .expect("a manifest is a string")
+                            .to_string(),
+                    },
+                    (None, None, Some(error)) => SnapshotEntry::Failed {
+                        error: error.as_str().expect("an error is a string").to_string(),
+                    },
+                    _ => panic!("snapshot entry for `{uses}` is neither resolved nor failed"),
+                };
+                (uses, entry)
+            })
+            .collect();
+        Some(Self { entries })
+    }
+
+    /// How many references the snapshot holds.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// How many of them failed to resolve when the snapshot was written.
+    pub fn failed(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|e| matches!(e, SnapshotEntry::Failed { .. }))
+            .count()
+    }
+
+    /// Write `<corpus>/actions-snapshot.json` — the refresh test's half of the
+    /// format. Returns where it went.
+    pub fn write(
+        corpus_root: &Path,
+        entries: &BTreeMap<String, SnapshotEntry>,
+    ) -> std::io::Result<PathBuf> {
+        let mut top = serde_json::Map::new();
+        for (uses, entry) in entries {
+            let value = match entry {
+                SnapshotEntry::Resolved { sha, manifest } => {
+                    serde_json::json!({ "sha": sha, "manifest": manifest })
+                }
+                SnapshotEntry::Failed { error } => serde_json::json!({ "error": error }),
+            };
+            top.insert(uses.clone(), value);
+        }
+        let path = corpus_root.join(Self::FILE);
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(top))
+            .expect("the snapshot encodes");
+        std::fs::write(&path, text)?;
+        Ok(path)
+    }
+}
+
+impl ActionSource for SnapshotSource {
+    fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
+        match self.entries.get(&reference.to_string()) {
+            Some(SnapshotEntry::Resolved { sha, .. }) => Ok(PinnedAction {
+                reference: reference.clone(),
+                sha: SmolStr::new(sha),
+            }),
+            _ => Err(ActionSourceError::Unavailable(reference.to_string())),
+        }
+    }
+
+    fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+        match self.entries.get(&pinned.reference.to_string()) {
+            Some(SnapshotEntry::Resolved { manifest, .. }) => Ok(manifest.clone()),
+            _ => Err(ActionSourceError::Unavailable(pinned.reference.to_string())),
+        }
+    }
+
+    /// The snapshot holds manifests, not trees; lowering never asks for one.
+    fn tree(&self, _pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
+        Err(ActionSourceError::NoTree)
+    }
+}
+
 /// Lower one workflow, catching panics so a crash is a classified result rather than
-/// a dead harness.
-pub fn check_one(repo: &str, repo_root: &Path, file: &Path) -> Outcome {
+/// a dead harness. `actions` resolves `uses: owner/repo@ref`; without it they are
+/// rejected as `action.remote`.
+pub fn check_one(
+    repo: &str,
+    repo_root: &Path,
+    file: &Path,
+    actions: Option<&Arc<dyn ActionSource>>,
+) -> Outcome {
     let rel = file
         .strip_prefix(repo_root)
         .unwrap_or(file)
@@ -151,8 +276,12 @@ pub fn check_one(repo: &str, repo_root: &Path, file: &Path) -> Outcome {
     let files = DirFiles {
         root: repo_root.to_path_buf(),
     };
+    let format = match actions {
+        Some(actions) => GitHubActions::with_actions(Arc::clone(actions)),
+        None => GitHubActions::new(),
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        GitHubActions::new().load(&rel, &text, &files)
+        format.load(&rel, &text, &files)
     }));
     match result {
         Err(payload) => {
@@ -196,15 +325,21 @@ pub fn check_one(repo: &str, repo_root: &Path, file: &Path) -> Outcome {
     }
 }
 
-pub fn check_all(corpus_root: &Path) -> Vec<Outcome> {
+pub fn check_all(corpus_root: &Path, actions: Option<&Arc<dyn ActionSource>>) -> Vec<Outcome> {
     workflows(corpus_root)
         .into_iter()
-        .map(|(repo, root, file)| check_one(&repo, &root, &file))
+        .map(|(repo, root, file)| check_one(&repo, &root, &file, actions))
         .collect()
 }
 
 /// The report, as Markdown.
-pub fn report(outcomes: &[Outcome]) -> String {
+///
+/// `census` is a run of the same corpus with no action source: its
+/// `action.remote` rejections name every remote `uses:` reference, which is where
+/// the actions-by-frequency table comes from. With no snapshot the two runs are the
+/// same and callers pass `outcomes` twice. `actions_note` says how remote actions
+/// were resolved for this report.
+pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let total = outcomes.len();
@@ -216,6 +351,7 @@ pub fn report(outcomes: &[Outcome]) -> String {
         repos.dedup();
         repos.len()
     });
+    let _ = writeln!(out, "{actions_note}\n");
     let _ = writeln!(out, "| Result | Count | Share |");
     let _ = writeln!(out, "|---|---|---|");
     for (label, class) in [
@@ -240,10 +376,10 @@ pub fn report(outcomes: &[Outcome]) -> String {
         );
     }
 
-    // Which actions the runner meets most.
+    // Which actions the runner meets most, counted from the sourceless census.
     let mut actions: BTreeMap<String, usize> = BTreeMap::new();
     let mut actions_versioned: BTreeMap<String, usize> = BTreeMap::new();
-    for o in outcomes {
+    for o in census {
         for a in o.remote_actions() {
             *actions_versioned.entry(a.clone()).or_default() += 1;
             let bare = a.split('@').next().unwrap_or(&a).to_string();

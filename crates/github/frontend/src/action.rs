@@ -152,6 +152,11 @@ pub enum ActionSourceError {
     /// The reference names nothing the source can find.
     #[error("cannot resolve `{reference}`: {message}")]
     Unresolvable { reference: String, message: String },
+    /// The source does not serve this reference — an offline or partial source,
+    /// such as a snapshot. The lowering rejects the step as `unsupported.action.remote`,
+    /// exactly as it would with no source at all, rather than as an error.
+    #[error("`{0}` is not available from this action source")]
+    Unavailable(String),
     #[error("`{0}` has no `action.yml` or `action.yaml`")]
     NoManifest(String),
     #[error("cannot fetch `{action}`: {message}")]

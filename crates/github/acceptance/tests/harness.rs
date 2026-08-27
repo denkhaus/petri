@@ -7,7 +7,10 @@
 //! The corpus itself is fetched, not committed, so this skips when it is absent. See
 //! `acceptance::corpus_present`.
 
-use acceptance::{Class, check_all, corpus_present, report};
+use std::sync::Arc;
+
+use acceptance::{Class, SnapshotSource, check_all, corpus_present, report};
+use frontend_gha::ActionSource;
 
 fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
@@ -24,14 +27,36 @@ fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
         return;
     }
 
-    let outcomes = check_all(&root);
+    // The sourceless run is the census of remote `uses:` references; with a
+    // snapshot present, the classification run resolves them through it.
+    let census = check_all(&root, None);
+    let (outcomes, note) = match SnapshotSource::load(&root) {
+        Some(snapshot) => {
+            let note = format!(
+                "Remote `uses:` references resolve through the action snapshot: \
+                 {} references, {} of them unavailable. Refresh with \
+                 `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.",
+                snapshot.len(),
+                snapshot.failed()
+            );
+            let source: Arc<dyn ActionSource> = Arc::new(snapshot);
+            (check_all(&root, Some(&source)), note)
+        }
+        None => (
+            census.clone(),
+            "No action snapshot: remote `uses:` references are rejected as \
+             `action.remote`. Write one with \
+             `cargo test -p petri-github-acceptance --test snapshot -- --ignored`."
+                .to_string(),
+        ),
+    };
     assert!(
         outcomes.len() > 100,
         "the corpus is fetched: {} workflows",
         outcomes.len()
     );
 
-    let markdown = report(&outcomes);
+    let markdown = report(&outcomes, &census, &note);
     std::fs::write(root.join("REPORT.md"), &markdown).expect("write the report");
 
     let panics: Vec<_> = outcomes

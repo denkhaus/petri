@@ -184,6 +184,27 @@ jobs:
 }
 
 #[test]
+fn a_required_input_with_an_empty_default_is_satisfied() {
+    let source = MapActionSource::new().with(
+        "acme/needy@v1",
+        "dddd",
+        "inputs:\n  github_token:\n    description: 'a token'\n    required: true\n    default: ''\nruns:\n  using: node20\n  main: index.js\n",
+    );
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: acme/needy@v1
+"#;
+    let lowered = lower(text, &source);
+    let graph = lowered.graph.expect("an empty default satisfies the input");
+    let node = graph.nodes.iter().find(|n| n.name == "j/step-1").unwrap();
+    assert_eq!(node.step.config["inputs"]["github_token"], "");
+}
+
+#[test]
 fn without_a_source_remote_actions_stay_unsupported() {
     let text = r#"
 on: push
@@ -194,6 +215,44 @@ jobs:
       - uses: actions/checkout@v4
 "#;
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
+    assert!(lowered.graph.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|d| d.unsupported_feature() == Some("action.remote")),
+        "{:?}",
+        lowered.diagnostics.into_vec()
+    );
+}
+
+#[test]
+fn an_unavailable_reference_is_unsupported_like_having_no_source() {
+    use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
+
+    /// A partial source — a snapshot, say — that serves nothing.
+    struct Offline;
+    impl frontend_gha::ActionSource for Offline {
+        fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
+            Err(ActionSourceError::Unavailable(reference.to_string()))
+        }
+        fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
+            Err(ActionSourceError::Unavailable(pinned.reference.to_string()))
+        }
+        fn tree(&self, _: &PinnedAction) -> Result<std::path::PathBuf, ActionSourceError> {
+            Err(ActionSourceError::NoTree)
+        }
+    }
+
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"#;
+    let lowered = load_with(".github/workflows/ci.yml", text, &NoFiles, Some(&Offline));
     assert!(lowered.graph.is_none());
     assert!(
         lowered
