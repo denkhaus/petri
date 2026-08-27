@@ -467,17 +467,17 @@ in brackets.
    `uses: ./node/.github/actions/x` name directories that exist only after a checkout
    step. Static lowering cannot see them. 4 workflows.
 
-8. **`GITHUB_ENV` and `GITHUB_PATH` are unset.** A step that appends to them fails
-   loudly (an ambiguous redirect), never silently. Propagating them is job-scoped
-   mutable env across steps; `kv` plus a process-step hook is the natural shape, and
-   it belongs with the shims in package 04.
+8. **`GITHUB_ENV` and `GITHUB_PATH`** are job-scoped mutable env across steps.
+   Resolved: the `github/run` and `github/action` step kinds (`crates/github/actions`)
+   accumulate them in files in the job's workspace and apply them to every later
+   step, with no core support — see `.ai/plans/github-actions-runner.md`.
 
 9. **The positional YAML reader has two gaps** [`unsupported.yaml.anchors`,
    `unsupported.yaml.multiline_flow`]: no anchors or aliases, and a multi-line
    `[ … ]` value followed by a dedent is misread. Three cpython workflows. Both are
    library limitations, named as such.
 
-Common enough to shrink the rejection set before package 04: `runs-on` expressions
+Common enough to shrink the rejection set next: `runs-on` expressions
 (4), custom `shell: bash …` invocations (8 workflows, `unsupported.shell.custom` — the
 difference from `bash -eo pipefail` is usually `-l` or `--noprofile`), and
 `concurrency:` (108 workflows — not shrinkable, D2 stands, but it is the second most
