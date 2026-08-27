@@ -205,6 +205,33 @@ jobs:
 }
 
 #[test]
+fn a_required_input_with_a_null_default_is_still_missing() {
+    let source = MapActionSource::new().with(
+        "acme/nully@v1",
+        "eeee",
+        "inputs:\n  who:\n    required: true\n    default:\nruns:\n  using: node20\n  main: index.js\n",
+    );
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: acme/nully@v1
+"#;
+    let lowered = lower(text, &source);
+    assert!(lowered.graph.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .errors()
+            .any(|d| d.to_string().contains("requires input `who`")),
+        "{:?}",
+        lowered.diagnostics.into_vec()
+    );
+}
+
+#[test]
 fn without_a_source_remote_actions_stay_unsupported() {
     let text = r#"
 on: push

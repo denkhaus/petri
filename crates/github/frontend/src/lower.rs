@@ -1758,17 +1758,12 @@ enum EnvValue {
 }
 
 /// A manifest's declared inputs, owned, so the plan outlives the document.
-///
-/// A `default:` key that is present satisfies the input, even written as `''` or
-/// left empty: the YAML reader cannot tell a quoted empty string from a null
-/// (see `Scalar::is_plain`), and the run-time difference — `INPUT_X` set to the
-/// empty string versus unset — is invisible to the toolkit's `getInput`.
 fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
     inputs
         .iter()
         .map(|input| PlanInput {
             name: input.name.clone(),
-            default: input.default.map(scalar_text),
+            default: input.default.and_then(scalar_text_opt),
             required: input.required,
         })
         .collect()
@@ -1777,14 +1772,24 @@ fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
 /// A YAML scalar as the string GitHub would pass: text as written, other scalars
 /// stringified, null empty.
 fn scalar_text(node: Node<'_>) -> String {
-    match node.as_str() {
+    scalar_text_opt(node).unwrap_or_default()
+}
+
+/// [`scalar_text`], with a YAML null as `None`: an input whose `default:` is null
+/// (or missing a value) has no default, and GitHub leaves it unset rather than
+/// passing `"null"` — while an explicit `default: ''` is the empty string.
+fn scalar_text_opt(node: Node<'_>) -> Option<String> {
+    if node.as_scalar().is_some_and(|s| s.is_null()) {
+        return None;
+    }
+    Some(match node.as_str() {
         Some(text) => text.to_string(),
         None => match node.to_json() {
             Value::String(s) => s,
             Value::Null => String::new(),
             other => other.to_string(),
         },
-    }
+    })
 }
 
 /// Why an `if:` text holds no single expression. `condition` turns these into

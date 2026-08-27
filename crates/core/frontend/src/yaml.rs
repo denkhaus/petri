@@ -21,8 +21,13 @@ pub struct Document {
 impl Document {
     /// Parse a file's text. A syntax error becomes a `yaml.syntax` diagnostic rather
     /// than a panic or a bare `Err`.
+    ///
+    /// Coercion prevention is on: a quoted scalar (`''`, `'true'`, `'123'`) stays a
+    /// string, so [`Scalar::is_plain`] really means "written unquoted" and only
+    /// plain scalars type-infer.
     pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Document> {
-        match marked_yaml::parse_yaml(0, text) {
+        let options = marked_yaml::LoaderOptions::default().prevent_coercion(true);
+        match marked_yaml::parse_yaml_with_options(0, text, options) {
             Ok(root) => Some(Document {
                 file: SmolStr::new(file),
                 root,
