@@ -13,7 +13,7 @@ use driver::{CONTROL_CHANNEL_CAPACITY, DeliverDisposition, RunConfig, RunHandle}
 use executor::{MapSecrets, SecretProvider};
 use ir::{Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId, Value};
 use serde_json::json;
-use steps::Registry;
+use steps::{PROCESS_KIND, Registry};
 use support::*;
 
 // ── Test step kinds ───────────────────────────────────────────────────────
@@ -312,6 +312,62 @@ async fn a_delivery_arms_no_hard_deadline() {
         json!("carry on"),
         "the step ran past grace + slack and returned normally"
     );
+}
+
+/// A delivery into a running process step is not a stop. The step has nothing to
+/// hand the value to, so it drops it and the script runs to its natural end:
+/// `Success`, with no `cancel_escalation` — not `Cancelled` after a SIGTERM.
+#[tokio::test]
+async fn a_delivery_does_not_terminate_a_process_step() {
+    let dir = RunDir::new("deliver-process");
+    let workspace = dir.workspace();
+    let graph = single_node(
+        PROCESS_KIND,
+        script(
+            r#"
+echo ready > ready
+while [ ! -f go ]; do sleep 0.05; done
+echo "saw=go" > "$CI_OUTPUT"
+"#,
+        ),
+    );
+    let driver = host_driver_with(
+        graph.clone(),
+        &dir,
+        MapSecrets::empty(),
+        RunConfig::new(dir.path()),
+    );
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+
+    assert!(
+        wait_for_file(&workspace.join("ready"), Duration::from_secs(10)).await,
+        "the script never started"
+    );
+    assert_eq!(
+        deliver(&handle, FIRST, json!("not for you")).await,
+        DeliverDisposition::Delivered
+    );
+    // The script is still waiting on us: it was not signalled by the delivery.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!run.is_finished(), "the step ended before it was released");
+    std::fs::write(workspace.join("go"), b"go").expect("go file");
+
+    let report = run.await.expect("the run task");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let output = output_of(&report, "gate");
+    assert_eq!(output["saw"], json!("go"), "the script ran to its end");
+    assert_eq!(output["exit_status"], json!(0));
+    assert!(
+        output.get("cancel_escalation").is_none(),
+        "the delivery started the ladder: {output}"
+    );
+    assert_replay_identical(&graph, &report);
 }
 
 const SECRET: &str = "hunter2-but-long-enough-to-mask";

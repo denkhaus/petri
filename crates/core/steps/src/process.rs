@@ -245,7 +245,8 @@ enum Ending {
 /// the polite ladder is already waiting.
 ///
 /// Idempotent by construction: once the ladder has started, further `Cancel`s are
-/// drained and ignored rather than restarting it.
+/// drained and ignored rather than restarting it. A `Deliver` is not a stop: the
+/// process step has nothing to hand a value to, so it is dropped and the wait goes on.
 async fn ladder(
     handle: &mut dyn executor::ProcessHandle,
     ctx: &mut StepCtx,
@@ -253,14 +254,19 @@ async fn ladder(
 ) -> Ending {
     // First terminal wins. If the process exits before any signal lands, the outcome
     // is the natural one and the cancel is a no-op.
-    let control = tokio::select! {
-        result = handle.wait() => {
-            return match result {
-                Ok(status) => Ending::Natural(status),
-                Err(_) => Ending::Natural(ExitStatus::code(-1)),
-            };
+    let control = loop {
+        tokio::select! {
+            result = handle.wait() => {
+                return match result {
+                    Ok(status) => Ending::Natural(status),
+                    Err(_) => Ending::Natural(ExitStatus::code(-1)),
+                };
+            }
+            ctl = ctx.control.recv() => match ctl {
+                Some(Control::Deliver(_)) => continue,
+                stop => break stop,
+            },
         }
-        ctl = ctx.control.recv() => ctl,
     };
 
     if !matches!(control, Some(Control::Kill)) {
