@@ -10,20 +10,20 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 use smol_str::SmolStr;
+
+use crate::ActionTreeSource;
 
 pub struct GitActionSource {
     cache: PathBuf,
     /// `https://github.com` — or a `file://` directory of repositories in tests.
     remote_base: String,
-    /// References resolved in this process; a tag is asked about once per run.
-    resolved: Mutex<HashMap<String, PinnedAction>>,
-    /// Fetches and extractions are serialized: two steps staging the same action
-    /// must not write the same cache entry at once.
-    lock: Mutex<()>,
+    /// Fetches and extractions serialize per repository. Independent actions do
+    /// not block each other, while two steps cannot write one cache entry at once.
+    locks: Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
 }
 
 impl GitActionSource {
@@ -31,8 +31,7 @@ impl GitActionSource {
         Self {
             cache: cache.into(),
             remote_base: "https://github.com".into(),
-            resolved: Mutex::new(HashMap::new()),
-            lock: Mutex::new(()),
+            locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -58,15 +57,35 @@ impl GitActionSource {
             .join(format!("{}.git", reference.repo))
     }
 
-    fn tree_dir(&self, pinned: &PinnedAction) -> PathBuf {
-        self.cache
+    fn tree_entry_dir(&self, pinned: &PinnedAction) -> PathBuf {
+        let root = self
+            .cache
             .join("trees")
             .join(pinned.reference.owner.as_str())
             .join(pinned.reference.repo.as_str())
-            .join(pinned.sha.as_str())
+            .join(pinned.sha.as_str());
+        match &pinned.reference.path {
+            Some(path) => root.join("path").join(path.as_str()),
+            None => root.join("root"),
+        }
+    }
+
+    fn repo_lock(&self, reference: &ActionRef) -> Arc<Mutex<()>> {
+        let key = self.bare_dir(reference);
+        let mut locks = self.locks.lock().expect("lock map is not poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
     }
 
     fn ensure_bare(&self, reference: &ActionRef) -> Result<PathBuf, ActionSourceError> {
+        reference
+            .validate()
+            .map_err(|e| fetch_error(reference, e.to_string()))?;
         let dir = self.bare_dir(reference);
         if !dir.join("HEAD").is_file() {
             std::fs::create_dir_all(&dir).map_err(|e| fetch_error(reference, e.to_string()))?;
@@ -85,6 +104,9 @@ impl GitActionSource {
 
     /// Make sure the pinned commit is in the bare repository.
     fn fetch(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
+        pinned
+            .validate()
+            .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
         let reference = &pinned.reference;
         let bare = self.ensure_bare(reference)?;
         if Self::has_commit(&bare, &pinned.sha) {
@@ -150,6 +172,12 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
 
 impl ActionSource for GitActionSource {
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
+        reference
+            .validate()
+            .map_err(|e| ActionSourceError::Unresolvable {
+                reference: reference.to_string(),
+                message: e.to_string(),
+            })?;
         if reference.is_commit() {
             return Ok(PinnedAction {
                 reference: reference.clone(),
@@ -157,9 +185,6 @@ impl ActionSource for GitActionSource {
             });
         }
         let key = reference.to_string();
-        if let Some(pinned) = self.resolved.lock().expect("not poisoned").get(&key) {
-            return Ok(pinned.clone());
-        }
         let url = self.url(reference);
         let listing = git(
             &[
@@ -200,15 +225,12 @@ impl ActionSource for GitActionSource {
             reference: reference.clone(),
             sha,
         };
-        self.resolved
-            .lock()
-            .expect("not poisoned")
-            .insert(key, pinned.clone());
         Ok(pinned)
     }
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-        let _guard = self.lock.lock().expect("not poisoned");
+        let lock = self.repo_lock(&pinned.reference);
+        let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
         let prefix = pinned
             .reference
@@ -224,32 +246,49 @@ impl ActionSource for GitActionSource {
         }
         Err(ActionSourceError::NoManifest(pinned.reference.to_string()))
     }
+}
 
+impl ActionTreeSource for GitActionSource {
     fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
-        let _guard = self.lock.lock().expect("not poisoned");
+        let lock = self.repo_lock(&pinned.reference);
+        let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
-        let dir = self.tree_dir(pinned);
-        let complete = dir.join(".complete");
-        if !complete.is_file() {
+        let dir = self.tree_entry_dir(pinned);
+        let action_dir = match &pinned.reference.path {
+            Some(path) => dir.join(path.trim_matches('/')),
+            None => dir.clone(),
+        };
+        let complete = match &pinned.reference.path {
+            Some(_) => dir.join(".complete"),
+            None => dir.with_extension("complete"),
+        };
+        if !complete.is_file() || !action_dir.is_dir() {
+            let _ = std::fs::remove_file(&complete);
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)
                 .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
-            extract(&bare, pinned.sha.as_str(), &dir)
-                .map_err(|e| fetch_error(&pinned.reference, e))?;
+            extract(
+                &bare,
+                pinned.sha.as_str(),
+                pinned.reference.path.as_deref(),
+                &dir,
+            )
+            .map_err(|e| fetch_error(&pinned.reference, e))?;
             std::fs::write(&complete, b"")
                 .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
         }
-        Ok(match &pinned.reference.path {
-            Some(path) => dir.join(path.trim_matches('/')),
-            None => dir,
-        })
+        Ok(action_dir)
     }
 }
 
 /// `git archive <sha> | tar -x -C <dir>`.
-fn extract(bare: &Path, sha: &str, dir: &Path) -> Result<(), String> {
-    let mut archive = Command::new("git")
-        .args(["archive", "--format=tar", sha])
+fn extract(bare: &Path, sha: &str, path: Option<&str>, dir: &Path) -> Result<(), String> {
+    let mut command = Command::new("git");
+    command.args(["archive", "--format=tar", sha]);
+    if let Some(path) = path {
+        command.args(["--", path]);
+    }
+    let mut archive = command
         .current_dir(bare)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

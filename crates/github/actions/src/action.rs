@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use frontend_gha::action::{ActionSource, PinnedAction};
+use frontend_gha::action::{ActionSourceError, PinnedAction};
 use ir::{Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
@@ -19,8 +19,15 @@ pub const FETCH_CLASS: &str = "action_fetch";
 /// The action's files could not be put into the job environment.
 pub const STAGE_CLASS: &str = "action_stage";
 
-/// The action source, as a step finds it: `ctx.require_capability::<ActionSourceCap>()`.
-pub struct ActionSourceCap(pub Arc<dyn ActionSource>);
+/// The runtime half of an action source. Manifest-only sources used by the
+/// frontend do not need to invent a host tree.
+pub trait ActionTreeSource: Send + Sync {
+    fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError>;
+}
+
+/// The action tree source, as a step finds it:
+/// `ctx.require_capability::<ActionSourceCap>()`.
+pub struct ActionSourceCap(pub Arc<dyn ActionTreeSource>);
 
 /// Runs `node <entry>` of a staged action with the runner contract in place.
 pub struct ActionStep;
@@ -119,7 +126,7 @@ pub fn input_variable(name: &str) -> String {
 /// return where it went (relative to the workspace root).
 async fn stage(
     ctx: &StepCtx,
-    source: &Arc<dyn ActionSource>,
+    source: &Arc<dyn ActionTreeSource>,
     pinned: &PinnedAction,
 ) -> Result<PathBuf, StepFailure> {
     let reference = &pinned.reference;
@@ -152,7 +159,30 @@ async fn stage(
             class: FETCH_CLASS,
             message: e.to_string(),
         })?;
-    let files = tokio::task::spawn_blocking(move || collect_files(&host_dir))
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let producer = tokio::task::spawn_blocking(move || stream_files(&host_dir, tx));
+    let mut writes = tokio::task::JoinSet::new();
+    let action = pinned.to_string();
+    while let Some((path, bytes)) = rx.recv().await {
+        if writes.len() >= 8 {
+            finish_write(&mut writes).await?;
+        }
+        let env = Arc::clone(&ctx.env);
+        let destination = relative.join(&path);
+        let action = action.clone();
+        writes.spawn(async move {
+            env.write_file(&destination, &bytes)
+                .await
+                .map_err(|e| StepFailure {
+                    class: STAGE_CLASS,
+                    message: format!("could not stage `{}` of `{action}`: {e}", path.display()),
+                })
+        });
+    }
+    while !writes.is_empty() {
+        finish_write(&mut writes).await?;
+    }
+    producer
         .await
         .map_err(|e| StepFailure {
             class: STAGE_CLASS,
@@ -162,15 +192,6 @@ async fn stage(
             class: STAGE_CLASS,
             message: format!("could not read the fetched `{pinned}`: {e}"),
         })?;
-    for (path, bytes) in files {
-        ctx.env
-            .write_file(&relative.join(&path), &bytes)
-            .await
-            .map_err(|e| StepFailure {
-                class: STAGE_CLASS,
-                message: format!("could not stage `{}` of `{pinned}`: {e}", path.display()),
-            })?;
-    }
     ctx.env
         .write_file(&marker, b"")
         .await
@@ -181,9 +202,30 @@ async fn stage(
     Ok(relative)
 }
 
-/// Every regular file under `root`, by path relative to it, `.git` excluded.
-fn collect_files(root: &Path) -> std::io::Result<Vec<(PathBuf, Vec<u8>)>> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) -> std::io::Result<()> {
+async fn finish_write(
+    writes: &mut tokio::task::JoinSet<Result<(), StepFailure>>,
+) -> Result<(), StepFailure> {
+    writes
+        .join_next()
+        .await
+        .expect("the write set is not empty")
+        .map_err(|e| StepFailure {
+            class: STAGE_CLASS,
+            message: format!("staging an action file did not complete: {e}"),
+        })?
+}
+
+/// Stream every regular file under `root`, by relative path, through a bounded
+/// channel. The action size does not become one in-memory `Vec`.
+fn stream_files(
+    root: &Path,
+    tx: tokio::sync::mpsc::Sender<(PathBuf, Vec<u8>)>,
+) -> std::io::Result<()> {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        tx: &tokio::sync::mpsc::Sender<(PathBuf, Vec<u8>)>,
+    ) -> std::io::Result<()> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
@@ -191,18 +233,22 @@ fn collect_files(root: &Path) -> std::io::Result<Vec<(PathBuf, Vec<u8>)>> {
             if path.file_name().is_some_and(|n| n == ".git") {
                 continue;
             }
-            if path.is_dir() {
-                walk(&path, root, out)?;
-            } else if path.is_file() {
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                walk(&path, root, tx)?;
+            } else if kind.is_file() {
                 let relative = path.strip_prefix(root).expect("under root").to_path_buf();
-                out.push((relative, std::fs::read(&path)?));
+                if tx.blocking_send((relative, std::fs::read(&path)?)).is_err() {
+                    return Ok(());
+                }
             }
         }
         Ok(())
     }
-    let mut out = Vec::new();
-    walk(root, root, &mut out)?;
-    Ok(out)
+    walk(root, root, &tx)
 }
 
 #[cfg(test)]
@@ -214,5 +260,24 @@ mod tests {
         assert_eq!(input_variable("node-version"), "INPUT_NODE-VERSION");
         assert_eq!(input_variable("fetch depth"), "INPUT_FETCH_DEPTH");
         assert_eq!(input_variable("Token"), "INPUT_TOKEN");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_does_not_follow_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let run = testkit::RunDir::new("action-staging-symlink");
+        let root = run.path().join("action");
+        std::fs::create_dir_all(&root).expect("action directory");
+        std::fs::write(root.join("index.js"), "safe").expect("action file");
+        std::fs::write(run.path().join("outside"), "secret").expect("outside file");
+        symlink(run.path().join("outside"), root.join("linked")).expect("symbolic link");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        stream_files(&root, tx).expect("stream action files");
+        let files: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        assert_eq!(files, vec![(PathBuf::from("index.js"), b"safe".to_vec())]);
     }
 }

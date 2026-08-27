@@ -63,7 +63,10 @@ jobs:
     };
     assert_eq!(shell_command("j/step-1"), json!("bash -leo pipefail {0}"));
     assert_eq!(shell_command("j/step-2"), json!("python {0}"));
-    assert_eq!(shell_command("j/step-3"), json!("pwsh -command \". '{0}'\""));
+    assert_eq!(
+        shell_command("j/step-3"),
+        json!("pwsh -command \". '{0}'\"")
+    );
     assert_eq!(shell_command("j/step-4"), json!("/usr/bin/env bash {0}"));
 
     let diags = diagnostics(

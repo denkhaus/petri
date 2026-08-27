@@ -76,6 +76,15 @@ struct PlanInput {
     required: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ActionContext<'s, 'job, 'step> {
+    job: &'s Job<'job>,
+    step: &'s Step<'step>,
+    scope: ScopeId,
+    site: &'s Site,
+    job_secret_env: &'s [(String, String)],
+}
+
 pub fn lower(
     wf: &Workflow<'_>,
     files: &dyn FileSource,
@@ -485,13 +494,22 @@ impl<'w, 'a> Lowering<'w, 'a> {
         for (step, plan) in job.steps.iter().zip(&plans) {
             if let Some(plan) = plan
                 && plan.node.pre.is_some()
-                && let Some(id) =
-                    self.lifecycle_node(job, step, plan, Phase::Pre, scope, &site, &job_secret_env)
+                && let Some(id) = self.lifecycle_node(
+                    ActionContext {
+                        job,
+                        step,
+                        scope,
+                        site: &site,
+                        job_secret_env: &job_secret_env,
+                    },
+                    plan,
+                    Phase::Pre,
+                )
             {
                 self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
             }
         }
-        for step in &job.steps {
+        for (step, plan) in job.steps.iter().zip(&plans) {
             let inherited = Defaults {
                 shell: step.shell.or(job.defaults.shell).or(self.wf.defaults.shell),
                 working_directory: step
@@ -508,6 +526,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 &job_secret_env,
                 inherited,
                 0,
+                plan.as_ref(),
             );
             for id in nodes {
                 self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
@@ -516,8 +535,17 @@ impl<'w, 'a> Lowering<'w, 'a> {
         for (step, plan) in job.steps.iter().zip(&plans).rev() {
             if let Some(plan) = plan
                 && plan.node.post.is_some()
-                && let Some(id) =
-                    self.lifecycle_node(job, step, plan, Phase::Post, scope, &site, &job_secret_env)
+                && let Some(id) = self.lifecycle_node(
+                    ActionContext {
+                        job,
+                        step,
+                        scope,
+                        site: &site,
+                        job_secret_env: &job_secret_env,
+                    },
+                    plan,
+                    Phase::Post,
+                )
             {
                 self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
             }
@@ -635,6 +663,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         job_secret_env: &[(String, String)],
         inherited: Defaults<'_>,
         depth: usize,
+        action_plan: Option<&ActionPlan>,
     ) -> Vec<NodeId> {
         let node_name = match site.action_inputs.is_some() {
             true => format!("{}{SEP}{}", site.job_id, step.node_name()),
@@ -652,6 +681,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 earlier,
                 job_secret_env,
                 depth,
+                action_plan,
             );
         }
 
@@ -882,6 +912,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 .map_err(|e| ResolveFailure::Failed(e.to_string()))
                 .and_then(|reference| source.resolve(&reference).map_err(source_failure))
                 .and_then(|pinned| {
+                    pinned
+                        .validate()
+                        .map_err(|e| ResolveFailure::Failed(e.to_string()))?;
                     source
                         .manifest(&pinned)
                         .map(|text| (pinned, text))
@@ -948,7 +981,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let (reference, span) = step.uses.as_ref()?;
         let saved = std::mem::replace(&mut self.diags, Diagnostics::new());
         let plan = self.action_plan_inner(reference, span);
-        self.diags = saved;
+        let plan_diags = std::mem::replace(&mut self.diags, saved);
+        if plan.is_some() {
+            self.diags.extend(plan_diags);
+        }
         plan
     }
 
@@ -978,17 +1014,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
     /// A `pre` or `post` node for a JavaScript action. `pre-if` and `post-if`
     /// default to `always()`; a `post` also needs its main node to have run.
-    #[allow(clippy::too_many_arguments)]
     fn lifecycle_node(
         &mut self,
-        job: &Job<'a>,
-        step: &Step<'_>,
+        context: ActionContext<'_, 'a, '_>,
         plan: &ActionPlan,
         phase: Phase,
-        scope: ScopeId,
-        site: &Site,
-        job_secret_env: &[(String, String)],
     ) -> Option<NodeId> {
+        let ActionContext { step, site, .. } = context;
         let (_, span) = step.uses.as_ref()?;
         let source = match phase {
             Phase::Pre => plan.node.pre_if.as_deref(),
@@ -998,16 +1030,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         .unwrap_or("always()");
         let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
         let state_from = (phase == Phase::Post).then(|| main_name.clone());
-        let id = self.action_node(
-            job,
-            step,
-            plan,
-            phase,
-            scope,
-            site,
-            job_secret_env,
-            state_from.as_deref(),
-        );
+        let id = self.action_node(context, plan, phase, state_from.as_deref());
         let cond = self.condition_text(source, site, true, span.clone());
         let started = site.job_started(self.b.exprs());
         let mut pre = match cond {
@@ -1029,18 +1052,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
     /// One `github/action` node: the action pinned, its phase and entry point, its
     /// inputs and env lowered where the step is.
-    #[allow(clippy::too_many_arguments)]
     fn action_node(
         &mut self,
-        job: &Job<'a>,
-        step: &Step<'_>,
+        context: ActionContext<'_, 'a, '_>,
         plan: &ActionPlan,
         phase: Phase,
-        scope: ScopeId,
-        site: &Site,
-        job_secret_env: &[(String, String)],
         state_from: Option<&str>,
     ) -> NodeId {
+        let ActionContext {
+            job,
+            step,
+            scope,
+            site,
+            job_secret_env,
+        } = context;
         let (uses, span) = step
             .uses
             .as_ref()
@@ -1106,9 +1131,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             "action".into(),
             serde_json::to_value(&plan.location).expect("an action location serializes"),
         );
-        config.insert("phase".into(), json!(phase.as_str()));
         config.insert("entry".into(), json!(entry));
-        config.insert("runtime".into(), json!(plan.node.runtime));
         config.insert("inputs".into(), Value::Object(inputs));
         if !env_config.is_empty() {
             config.insert("env".into(), Value::Object(env_config));
@@ -1141,6 +1164,26 @@ impl<'w, 'a> Lowering<'w, 'a> {
         self.spans.insert(id, step.span.clone());
         self.set_step_budget(id, job, step);
         id
+    }
+
+    fn main_action_node(
+        &mut self,
+        context: ActionContext<'_, 'a, '_>,
+        plan: &ActionPlan,
+        earlier: &[String],
+    ) -> Vec<NodeId> {
+        let mut step_site = context.site.clone();
+        step_site.earlier_steps = earlier.to_vec();
+        let main_name = format!("{}{SEP}{}", context.site.job_id, context.step.node_name());
+        let state_from = (context.site.action_inputs.is_none() && plan.node.pre.is_some())
+            .then(|| format!("{main_name}{SEP}pre"));
+        let main_context = ActionContext {
+            site: &step_site,
+            ..context
+        };
+        let id = self.action_node(main_context, plan, Phase::Main, state_from.as_deref());
+        self.gate_main_node(id, context.step, &step_site);
+        vec![id]
     }
 
     /// A `with:` value: a string, possibly templated; anything else stringified.
@@ -1180,6 +1223,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         earlier: &[String],
         job_secret_env: &[(String, String)],
         depth: usize,
+        action_plan: Option<&ActionPlan>,
     ) -> Vec<NodeId> {
         if depth >= composite::MAX_DEPTH {
             self.diags.error(
@@ -1191,6 +1235,19 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 ),
             );
             return Vec::new();
+        }
+        if let Some(plan) = action_plan {
+            return self.main_action_node(
+                ActionContext {
+                    job,
+                    step,
+                    scope,
+                    site,
+                    job_secret_env,
+                },
+                plan,
+                earlier,
+            );
         }
         let Some(doc) = self.action_document(reference, span) else {
             return Vec::new();
@@ -1219,26 +1276,17 @@ impl<'w, 'a> Lowering<'w, 'a> {
                         ),
                     );
                 }
-                let mut step_site = site.clone();
-                step_site.earlier_steps = earlier.to_vec();
-                let main_name = format!("{}{SEP}{}", site.job_id, step.node_name());
-                let state_from = plan
-                    .node
-                    .pre
-                    .is_some()
-                    .then(|| format!("{main_name}{SEP}pre"));
-                let id = self.action_node(
-                    job,
-                    step,
+                return self.main_action_node(
+                    ActionContext {
+                        job,
+                        step,
+                        scope,
+                        site,
+                        job_secret_env,
+                    },
                     &plan,
-                    Phase::Main,
-                    scope,
-                    &step_site,
-                    job_secret_env,
-                    state_from.as_deref(),
+                    earlier,
                 );
-                self.gate_main_node(id, step, &step_site);
-                return vec![id];
             }
             Runs::Docker => {
                 self.diags.unsupported(
@@ -1360,6 +1408,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 job_secret_env,
                 inherited,
                 depth + 1,
+                None,
             );
             for id in nodes {
                 let name = self
@@ -1624,13 +1673,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
             Some(t) => t.to_string(),
             None => {
                 // Non-string env values (numbers, booleans) are stringified.
-                return Some(EnvValue::Plain(ExprOrValue::Value(match node.to_json() {
-                    Value::String(s) => Value::String(s),
-                    other => Value::String(match other {
-                        Value::Null => String::new(),
-                        v => v.to_string(),
-                    }),
-                })));
+                return Some(EnvValue::Plain(ExprOrValue::Value(Value::String(
+                    scalar_text(*node),
+                ))));
             }
         };
         match lower_scalar(

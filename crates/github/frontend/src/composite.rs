@@ -38,8 +38,6 @@ pub struct Action<'a> {
 /// from: the pre and post nodes are placed away from the main one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeAction {
-    /// `node20`, `node24`, …
-    pub runtime: String,
     pub main: String,
     pub pre: Option<String>,
     pub pre_if: Option<String>,
@@ -66,7 +64,7 @@ pub enum Uses {
 pub fn classify(reference: &str) -> Uses {
     if let Some(rest) = reference.strip_prefix("docker://") {
         Uses::Docker(rest.to_string())
-    } else if reference.starts_with("./") || reference.starts_with('.') {
+    } else if reference.starts_with("./") {
         Uses::Local(
             reference
                 .trim_start_matches("./")
@@ -86,6 +84,10 @@ pub fn read_document(
     span: &Span,
     diags: &mut Diagnostics,
 ) -> Option<Document> {
+    if let Err(error) = crate::action::validate_relative_action_path(path, true) {
+        diags.error("gha.bad_action_path", span.clone(), error.to_string());
+        return None;
+    }
     // `uses: ./` is the repository root itself.
     let prefix = if path.is_empty() {
         String::new()
@@ -137,7 +139,6 @@ pub fn read_manifest<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<M
                 return None;
             };
             Runs::Node(NodeAction {
-                runtime: u.to_string(),
                 main,
                 pre: text("pre"),
                 pre_if: text("pre-if"),
@@ -281,7 +282,6 @@ runs:
         assert_eq!(
             node,
             NodeAction {
-                runtime: "node20".into(),
                 main: "dist/index.js".into(),
                 pre: None,
                 pre_if: None,

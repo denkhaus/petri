@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use frontend::NoFiles;
 use frontend_gha::load_with;
-use github_actions::{ActionSource, ActionSourceCap, ActionStep, GitActionSource, RunStep};
+use github_actions::{
+    ActionRef, ActionSourceCap, ActionStep, ActionTreeSource, GitActionSource, RunStep,
+};
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime, engine, ir};
@@ -146,15 +148,16 @@ fn with_params(mut graph: Graph) -> Graph {
     graph
 }
 
-fn runtime(dir: &Path, source: &Arc<dyn ActionSource>) -> Runtime {
+fn runtime(dir: &Path, source: &Arc<GitActionSource>) -> Runtime {
     let mut options = RunOptions::new(dir.join("run"));
     options.grace = Duration::from_secs(1);
     options.retention = Retention::Never;
+    let trees: Arc<dyn ActionTreeSource> = source.clone();
     Runtime::standard()
         .options(options)
         .step(RunStep)
         .step(ActionStep)
-        .capability(ActionSourceCap(Arc::clone(source)))
+        .capability(ActionSourceCap(trees))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", FIXTURE_TOKEN)]))
 }
 
@@ -168,7 +171,7 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
     let dir = run_dir.path();
     let remotes = dir.join("remotes");
     fixture_action(&remotes);
-    let source: Arc<dyn ActionSource> = Arc::new(
+    let source = Arc::new(
         GitActionSource::new(dir.join("cache"))
             .with_remote_base(format!("file://{}", remotes.display())),
     );
@@ -177,7 +180,7 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         ".github/workflows/ci.yml",
         WORKFLOW,
         &NoFiles,
-        Some(&*source),
+        Some(source.as_ref()),
     );
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
@@ -300,6 +303,42 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
     );
 }
 
+#[test]
+fn a_moving_reference_is_resolved_again_for_a_later_load() {
+    if !have("git") {
+        eprintln!("skipping: git is needed");
+        return;
+    }
+    let run_dir = testkit::RunDir::new("gha-moving-ref");
+    let remotes = run_dir.path().join("remotes");
+    fixture_action(&remotes);
+    let repo = remotes.join("acme/hello");
+    git(&repo, &["branch", "-M", "main"]);
+    let source = GitActionSource::new(run_dir.path().join("cache"))
+        .with_remote_base(format!("file://{}", remotes.display()));
+    let reference = ActionRef::parse("acme/hello@main").unwrap();
+    let first = github_actions::ActionSource::resolve(&source, &reference).unwrap();
+
+    std::fs::write(repo.join("dist/index.js"), "console.log('changed');\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "move main",
+        ],
+    );
+
+    let second = github_actions::ActionSource::resolve(&source, &reference).unwrap();
+    assert_ne!(first.sha, second.sha);
+}
+
 /// `actions/checkout@v4` then `actions/setup-node@v4`, from GitHub, for real. Needs
 /// the network and a `GITHUB_TOKEN` (or `gh auth token`); run with `--ignored`.
 #[tokio::test]
@@ -318,7 +357,7 @@ async fn checkout_and_setup_node_run_for_real() {
     };
     let run_dir = testkit::RunDir::new("gha-real");
     let dir = run_dir.path();
-    let source: Arc<dyn ActionSource> = Arc::new(GitActionSource::new(dir.join("cache")));
+    let source = Arc::new(GitActionSource::new(dir.join("cache")));
     let workflow = r#"
 on: push
 jobs:
@@ -339,7 +378,7 @@ jobs:
         ".github/workflows/ci.yml",
         workflow,
         &NoFiles,
-        Some(&*source),
+        Some(source.as_ref()),
     );
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");

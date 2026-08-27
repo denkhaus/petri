@@ -570,7 +570,12 @@ pub fn lower_scalar(
         }
     };
     if !text.contains("${{") {
-        return Some(LoweredScalar::Literal(Value::String(text.to_string())));
+        let text = if env_shaped {
+            escape_sentinel_text(text)
+        } else {
+            text.to_string()
+        };
+        return Some(LoweredScalar::Literal(Value::String(text)));
     }
 
     // A whole-value secret reference is the one permitted form.
@@ -600,7 +605,12 @@ pub fn lower_scalar(
     for segment in &segments {
         match segment {
             Segment::Text(t) => {
-                let id = table.lit(t.as_str());
+                let text = if env_shaped {
+                    escape_sentinel_text(t)
+                } else {
+                    t.to_string()
+                };
+                let id = table.lit(text);
                 pieces.push(id);
             }
             Segment::Expr { source, .. } => {
@@ -696,11 +706,56 @@ pub const GITHUB_TOKEN_SECRET: &str = "GITHUB_TOKEN";
 const SENTINEL_OPEN: &str = "\u{E000}petri-secret:";
 const HASHFILES_OPEN: &str = "\u{E000}petri-hashfiles:";
 const SENTINEL_CLOSE: &str = "\u{E001}";
+const SENTINEL_ESCAPE: char = '\u{E002}';
+
+/// Escape private-use marker characters in literal workflow text. Generated
+/// placeholders are added after this step, so literal text cannot impersonate one.
+pub fn escape_sentinel_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{E000}' => out.push_str("\u{E002}0"),
+            '\u{E001}' => out.push_str("\u{E002}1"),
+            '\u{E002}' => out.push_str("\u{E002}2"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+pub fn has_sentinel_escape(text: &str) -> bool {
+    text.contains(SENTINEL_ESCAPE)
+}
+
+/// Restore text escaped by [`escape_sentinel_text`] after generated placeholders
+/// have been resolved.
+pub fn unescape_sentinel_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != SENTINEL_ESCAPE {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => out.push('\u{E000}'),
+            Some('1') => out.push('\u{E001}'),
+            Some('2') => out.push(SENTINEL_ESCAPE),
+            Some(other) => {
+                out.push(SENTINEL_ESCAPE);
+                out.push(other);
+            }
+            None => out.push(SENTINEL_ESCAPE),
+        }
+    }
+    out
+}
 
 /// The stand-in for secret `name` inside a lowered string: what the graph, the
 /// resolved config and the event log carry in its place. The step kinds that run
 /// GitHub steps replace it with the value at spawn ([`replace_secret_sentinels`]).
-/// Private-use characters bracket it, so no workflow text collides.
+/// Private-use characters bracket it. Literal workflow text escapes those
+/// characters before generated placeholders are added.
 pub fn secret_sentinel(name: &str) -> String {
     format!("{SENTINEL_OPEN}{name}{SENTINEL_CLOSE}")
 }
@@ -722,7 +777,9 @@ pub fn replace_secret_sentinels<E>(
 /// [`secret_sentinel`]: the step kinds that run GitHub steps replace it with the
 /// hash at spawn ([`replace_hashfiles_sentinels`]), computed against the workspace.
 pub fn hashfiles_sentinel(patterns: &[String]) -> String {
-    let payload = serde_json::to_string(patterns).expect("strings encode");
+    let payload = serde_json::to_string(patterns)
+        .expect("strings encode")
+        .replace(SENTINEL_CLOSE, "\\uE001");
     format!("{HASHFILES_OPEN}{payload}{SENTINEL_CLOSE}")
 }
 
@@ -735,15 +792,24 @@ pub fn has_hashfiles_sentinel(text: &str) -> bool {
 /// appearance. A run-time caller computes each hash asynchronously, then splices
 /// the results in with [`replace_hashfiles_sentinels`].
 pub fn hashfiles_calls(text: &str) -> Vec<Vec<String>> {
+    if !has_hashfiles_sentinel(text) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
-    let ok: Result<String, std::convert::Infallible> =
-        replace_marked(text, HASHFILES_OPEN, &mut |payload| {
-            if let Ok(patterns) = serde_json::from_str::<Vec<String>>(payload) {
-                out.push(patterns);
+    let mut rest = text;
+    while let Some(start) = rest.find(HASHFILES_OPEN) {
+        let after = &rest[start + HASHFILES_OPEN.len()..];
+        match after.find(SENTINEL_CLOSE) {
+            Some(end) => {
+                let payload = &after[..end];
+                if let Ok(patterns) = serde_json::from_str::<Vec<String>>(payload) {
+                    out.push(patterns);
+                }
+                rest = &after[end + SENTINEL_CLOSE.len()..];
             }
-            Ok(String::new())
-        });
-    let _ = ok;
+            None => break,
+        }
+    }
     out
 }
 
@@ -825,6 +891,11 @@ mod sentinel_tests {
         let failed: Result<String, &str> =
             replace_secret_sentinels(&secret_sentinel("X"), |_| Err("missing"));
         assert_eq!(failed, Err("missing"));
+
+        let literal = format!("{SENTINEL_OPEN}X{SENTINEL_CLOSE}{SENTINEL_ESCAPE}");
+        let escaped = escape_sentinel_text(&literal);
+        assert!(!has_secret_sentinel(&escaped));
+        assert_eq!(unescape_sentinel_text(&escaped), literal);
     }
 
     #[test]
@@ -842,8 +913,12 @@ mod sentinel_tests {
         assert_eq!(out, "key-abc123-v1");
         // The two sentinel kinds pass each other by.
         let mixed = format!("{} {}", secret_sentinel("T"), hashfiles_sentinel(&patterns));
-        let out = replace_secret_sentinels(&mixed, |_| -> Result<String, ()> { Ok("s".into()) })
-            .unwrap();
+        let out =
+            replace_secret_sentinels(&mixed, |_| -> Result<String, ()> { Ok("s".into()) }).unwrap();
         assert!(has_hashfiles_sentinel(&out));
+
+        let patterns = vec![format!("a{SENTINEL_CLOSE}b")];
+        let marker = hashfiles_sentinel(&patterns);
+        assert_eq!(hashfiles_calls(&marker), vec![patterns]);
     }
 }

@@ -34,6 +34,8 @@ runs:
   post-if: success()
 "#;
 
+const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
 fn lower(text: &str, source: &MapActionSource) -> frontend::Lowered {
     let lowered = load_with(".github/workflows/ci.yml", text, &NoFiles, Some(source));
     for d in lowered.diagnostics.iter() {
@@ -55,7 +57,7 @@ fn chain(graph: &ir::Graph) -> Vec<&str> {
 
 #[test]
 fn a_node_action_lowers_to_a_main_node_and_a_trailing_post_node() {
-    let source = MapActionSource::new().with("actions/checkout@v4", "0123abcd0123abcd", CHECKOUT);
+    let source = MapActionSource::new().with("actions/checkout@v4", TEST_SHA, CHECKOUT);
     let text = r#"
 on: push
 jobs:
@@ -80,10 +82,8 @@ jobs:
         .unwrap();
     assert_eq!(main.step.kind.to_string(), ACTION_KIND);
     let config = &main.step.config;
-    assert_eq!(config["phase"], "main");
     assert_eq!(config["entry"], "dist/index.js");
-    assert_eq!(config["runtime"], "node20");
-    assert_eq!(config["action"]["sha"], "0123abcd0123abcd");
+    assert_eq!(config["action"]["sha"], TEST_SHA);
     assert_eq!(config["action"]["reference"]["owner"], "actions");
     assert_eq!(config["action"]["reference"]["ref"], "v4");
     // The caller's value wins over the default; a number is passed as text.
@@ -103,7 +103,6 @@ jobs:
         .find(|n| n.name == "build/step-1/post")
         .unwrap();
     assert_eq!(post.step.kind.to_string(), ACTION_KIND);
-    assert_eq!(post.step.config["phase"], "post");
     assert_eq!(post.step.config["entry"], "dist/cleanup.js");
     assert!(
         post.step.config["state"].get("$expr").is_some(),
@@ -125,8 +124,8 @@ jobs:
 #[test]
 fn pre_nodes_come_first_and_post_nodes_last_in_reverse() {
     let source = MapActionSource::new()
-        .with("acme/prepost@v1", "aaaa", WITH_PRE)
-        .with("actions/checkout@v4", "bbbb", CHECKOUT);
+        .with("acme/prepost@v1", TEST_SHA, WITH_PRE)
+        .with("actions/checkout@v4", TEST_SHA, CHECKOUT);
     let text = r#"
 on: push
 jobs:
@@ -160,7 +159,7 @@ jobs:
 fn a_required_input_without_a_value_is_an_error() {
     let source = MapActionSource::new().with(
         "acme/needs@v1",
-        "cccc",
+        TEST_SHA,
         "inputs:\n  who:\n    required: true\nruns:\n  using: node20\n  main: index.js\n",
     );
     let text = r#"
@@ -187,7 +186,7 @@ jobs:
 fn a_required_input_with_an_empty_default_is_satisfied() {
     let source = MapActionSource::new().with(
         "acme/needy@v1",
-        "dddd",
+        TEST_SHA,
         "inputs:\n  github_token:\n    description: 'a token'\n    required: true\n    default: ''\nruns:\n  using: node20\n  main: index.js\n",
     );
     let text = r#"
@@ -208,7 +207,7 @@ jobs:
 fn a_required_input_with_a_null_default_is_still_missing() {
     let source = MapActionSource::new().with(
         "acme/nully@v1",
-        "eeee",
+        TEST_SHA,
         "inputs:\n  who:\n    required: true\n    default:\nruns:\n  using: node20\n  main: index.js\n",
     );
     let text = r#"
@@ -265,9 +264,6 @@ fn an_unavailable_reference_is_unsupported_like_having_no_source() {
         }
         fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
             Err(ActionSourceError::Unavailable(pinned.reference.to_string()))
-        }
-        fn tree(&self, _: &PinnedAction) -> Result<std::path::PathBuf, ActionSourceError> {
-            Err(ActionSourceError::NoTree)
         }
     }
 

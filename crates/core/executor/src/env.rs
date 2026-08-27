@@ -157,6 +157,26 @@ pub trait ExecEnv: Send + Sync {
     /// Read a workspace-relative file. `Ok(None)` when it does not exist.
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError>;
 
+    /// Read at most `limit` bytes from a workspace-relative file. Implementations
+    /// should stop reading once the limit is exceeded. The default preserves
+    /// compatibility for remote executors and still rejects an oversized result.
+    async fn read_file_limited(
+        &self,
+        relative: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, EnvError> {
+        let Some(bytes) = self.read_file(relative).await? else {
+            return Ok(None);
+        };
+        if bytes.len() > limit {
+            return Err(EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: format!("file exceeds the {limit}-byte read limit"),
+            });
+        }
+        Ok(Some(bytes))
+    }
+
     /// Write a workspace-relative file, creating parent directories.
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError>;
 

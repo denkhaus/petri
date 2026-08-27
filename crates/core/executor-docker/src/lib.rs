@@ -44,7 +44,7 @@ use executor::{
 };
 use ir::RuntimeTarget;
 use smol_str::SmolStr;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, mpsc};
 
 /// Where the workspace is mounted inside the container.
@@ -365,6 +365,39 @@ impl ExecEnv for DockerEnv {
                 message: e.to_string(),
             }),
         }
+    }
+
+    async fn read_file_limited(
+        &self,
+        relative: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, EnvError> {
+        let path = self.workspace.join(relative);
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(EnvError::Workspace {
+                    path: relative.display().to_string(),
+                    message: e.to_string(),
+                });
+            }
+        };
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: e.to_string(),
+            })?;
+        if bytes.len() > limit {
+            return Err(EnvError::Workspace {
+                path: relative.display().to_string(),
+                message: format!("file exceeds the {limit}-byte read limit"),
+            });
+        }
+        Ok(Some(bytes))
     }
 
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {

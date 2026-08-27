@@ -128,9 +128,43 @@ pub fn workflows(corpus_root: &Path) -> Vec<(String, PathBuf, PathBuf)> {
 
 /// One reference in the action snapshot: resolved to a commit and its manifest, or
 /// the error the refresh hit.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
 pub enum SnapshotEntry {
     Resolved { sha: String, manifest: String },
     Failed { error: String },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum RawSnapshotEntry {
+    Resolved(ResolvedSnapshotEntry),
+    Failed(FailedSnapshotEntry),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolvedSnapshotEntry {
+    sha: String,
+    manifest: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailedSnapshotEntry {
+    error: String,
+}
+
+impl<'de> serde::Deserialize<'de> for SnapshotEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match RawSnapshotEntry::deserialize(deserializer)? {
+            RawSnapshotEntry::Resolved(entry) => SnapshotEntry::Resolved {
+                sha: entry.sha,
+                manifest: entry.manifest,
+            },
+            RawSnapshotEntry::Failed(entry) => SnapshotEntry::Failed { error: entry.error },
+        })
+    }
 }
 
 /// The offline action source for the corpus: every `uses:` reference the corpus
@@ -153,27 +187,8 @@ impl SnapshotSource {
     pub fn load(corpus_root: &Path) -> Option<Self> {
         let path = corpus_root.join(Self::FILE);
         let text = std::fs::read_to_string(&path).ok()?;
-        let top: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&text).expect("the action snapshot is a JSON object");
-        let entries = top
-            .into_iter()
-            .map(|(uses, value)| {
-                let entry = match (value.get("sha"), value.get("manifest"), value.get("error")) {
-                    (Some(sha), Some(manifest), None) => SnapshotEntry::Resolved {
-                        sha: sha.as_str().expect("a sha is a string").to_string(),
-                        manifest: manifest
-                            .as_str()
-                            .expect("a manifest is a string")
-                            .to_string(),
-                    },
-                    (None, None, Some(error)) => SnapshotEntry::Failed {
-                        error: error.as_str().expect("an error is a string").to_string(),
-                    },
-                    _ => panic!("snapshot entry for `{uses}` is neither resolved nor failed"),
-                };
-                (uses, entry)
-            })
-            .collect();
+        let entries = serde_json::from_str(&text)
+            .expect("the action snapshot is a map of resolved or failed references");
         Some(Self { entries })
     }
 
@@ -200,19 +215,8 @@ impl SnapshotSource {
         corpus_root: &Path,
         entries: &BTreeMap<String, SnapshotEntry>,
     ) -> std::io::Result<PathBuf> {
-        let mut top = serde_json::Map::new();
-        for (uses, entry) in entries {
-            let value = match entry {
-                SnapshotEntry::Resolved { sha, manifest } => {
-                    serde_json::json!({ "sha": sha, "manifest": manifest })
-                }
-                SnapshotEntry::Failed { error } => serde_json::json!({ "error": error }),
-            };
-            top.insert(uses.clone(), value);
-        }
         let path = corpus_root.join(Self::FILE);
-        let text = serde_json::to_string_pretty(&serde_json::Value::Object(top))
-            .expect("the snapshot encodes");
+        let text = serde_json::to_string_pretty(entries).expect("the snapshot encodes");
         std::fs::write(&path, text)?;
         Ok(path)
     }
@@ -234,11 +238,6 @@ impl ActionSource for SnapshotSource {
             Some(SnapshotEntry::Resolved { manifest, .. }) => Ok(manifest.clone()),
             _ => Err(ActionSourceError::Unavailable(pinned.reference.to_string())),
         }
-    }
-
-    /// The snapshot holds manifests, not trees; lowering never asks for one.
-    fn tree(&self, _pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
-        Err(ActionSourceError::NoTree)
     }
 }
 
@@ -491,4 +490,22 @@ pub fn run_only_candidates(outcomes: &[Outcome]) -> Vec<&Outcome> {
         .iter()
         .filter(|o| matches!(o.class, Class::Clean | Class::Warnings))
         .collect()
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_entries_have_one_exact_shape() {
+        let resolved: SnapshotEntry =
+            serde_json::from_str(r#"{"sha":"abc","manifest":"runs: {}"}"#).unwrap();
+        assert!(matches!(resolved, SnapshotEntry::Resolved { .. }));
+        assert!(
+            serde_json::from_str::<SnapshotEntry>(
+                r#"{"sha":"abc","manifest":"runs: {}","error":"also failed"}"#
+            )
+            .is_err()
+        );
+    }
 }

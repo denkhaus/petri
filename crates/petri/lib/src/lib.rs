@@ -62,40 +62,94 @@ pub mod github {
 /// A consumer that wants a different set builds one itself — `Runtime::standard()`
 /// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
 pub fn runtime() -> Runtime {
-    let actions: std::sync::Arc<dyn github::ActionSource> =
-        std::sync::Arc::new(github::GitActionSource::new(github::default_cache_dir()));
+    let actions = std::sync::Arc::new(github::GitActionSource::new(github::default_cache_dir()));
+    let manifests: std::sync::Arc<dyn github::ActionSource> = actions.clone();
+    let trees: std::sync::Arc<dyn github::ActionTreeSource> = actions;
     Runtime::standard()
-        .frontend(frontend_gha::GitHubActions::with_actions(
-            std::sync::Arc::clone(&actions),
-        ))
+        .frontend(frontend_gha::GitHubActions::with_actions(manifests))
         .step(github::RunStep)
         .step(github::ActionStep)
-        .capability(github::ActionSourceCap(actions))
-        .secrets(github_secrets())
+        .capability(github::ActionSourceCap(trees))
+        .secrets(GithubSecrets::new())
 }
 
-/// The run's secrets: `GITHUB_TOKEN` from the environment, else from `gh auth
-/// token` when `gh` is installed and logged in, else none. `github.token` in a
-/// workflow resolves to it at spawn time and never enters the graph or the log.
-fn github_secrets() -> executor::MapSecrets {
-    let token = std::env::var("GITHUB_TOKEN")
-        .ok()
-        .filter(|t| !t.trim().is_empty())
-        .or_else(|| {
-            std::process::Command::new("gh")
-                .args(["auth", "token"])
-                .stderr(std::process::Stdio::null())
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|t| !t.is_empty())
-        });
-    match token {
-        Some(token) => executor::MapSecrets::from_pairs(&[(
-            frontend_gha::exprs::GITHUB_TOKEN_SECRET,
-            token.as_str(),
-        )]),
-        None => executor::MapSecrets::empty(),
+/// A runtime-registerable secret map plus a lazily loaded `GITHUB_TOKEN`.
+struct GithubSecrets {
+    registered: executor::MapSecrets,
+    token: std::sync::OnceLock<Option<String>>,
+}
+
+impl GithubSecrets {
+    fn new() -> Self {
+        Self {
+            registered: executor::MapSecrets::empty(),
+            token: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn load_token() -> Option<String> {
+        std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .or_else(gh_auth_token)
+    }
+}
+
+impl executor::SecretProvider for GithubSecrets {
+    fn resolve(&self, name: &str) -> Result<executor::Secret, executor::SecretError> {
+        match self.registered.resolve(name) {
+            Ok(secret) => return Ok(secret),
+            Err(executor::SecretError::Unknown(_)) => {}
+            Err(error) => return Err(error),
+        }
+        if name != frontend_gha::exprs::GITHUB_TOKEN_SECRET {
+            return Err(executor::SecretError::Unknown(name.into()));
+        }
+        let value = self
+            .token
+            .get_or_init(Self::load_token)
+            .as_deref()
+            .ok_or_else(|| executor::SecretError::Unknown(name.into()))?;
+        self.registered.masker().register(value);
+        Ok(executor::Secret::new(value.into()))
+    }
+
+    fn register(&self, name: &str, value: &str) -> Result<(), executor::SecretError> {
+        self.registered.register(name, value)
+    }
+
+    fn masker(&self) -> executor::Masker {
+        self.registered.masker()
+    }
+}
+
+/// Ask `gh` for a token without letting a broken credential helper block forever.
+fn gh_auth_token() -> Option<String> {
+    let mut child = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().ok()?;
+                return output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .filter(|token| !token.is_empty());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
 }

@@ -100,7 +100,9 @@ async fn a_custom_shell_template_runs_the_script_from_a_file() {
         eprintln!("skipping: bash is needed");
         return;
     }
-    let lines = run("gha-custom-shell", WORKFLOW).await;
+    // The run directory deliberately contains shell metacharacters. The runner
+    // passes the script path through an environment variable, not command text.
+    let lines = run("gha custom $shell", WORKFLOW).await;
     // The script really ran from a file, under the template's interpreter.
     assert!(
         lines

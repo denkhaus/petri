@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -28,22 +27,11 @@ pub const STATE_OUTPUT_KEY: &str = "github.state";
 
 /// Which of an action's entry points a `github/action` node runs. Defined here so
 /// the lowering and the step agree on one wire value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Pre,
     Main,
     Post,
-}
-
-impl Phase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Phase::Pre => "pre",
-            Phase::Main => "main",
-            Phase::Post => "post",
-        }
-    }
 }
 
 /// Where an action's files are, as a `github/action` config carries it.
@@ -76,6 +64,82 @@ pub enum RefError {
     NoRef,
     #[error("a `uses:` reference is `owner/repo[/path]@ref`")]
     Shape,
+    #[error(transparent)]
+    UnsafePath(#[from] ActionPathError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unsafe action path `{path}`: {reason}")]
+pub struct ActionPathError {
+    path: String,
+    reason: &'static str,
+}
+
+fn path_error(path: &str, reason: &'static str) -> ActionPathError {
+    ActionPathError {
+        path: path.to_string(),
+        reason,
+    }
+}
+
+fn validate_repository_component(value: &str) -> Result<(), ActionPathError> {
+    if value.is_empty() || value == "." || value == ".." {
+        return Err(path_error(value, "expected one repository-name component"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(path_error(
+            value,
+            "repository names use letters, digits, `-`, `_`, or `.`",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_git_ref(value: &str) -> Result<(), ActionPathError> {
+    let invalid_char = |c: char| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c);
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.ends_with('.')
+        || value.contains("..")
+        || value.contains("@{")
+        || value.chars().any(invalid_char)
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+    {
+        return Err(path_error(value, "the git reference is not safe or valid"));
+    }
+    Ok(())
+}
+
+/// Validate a path before it is joined to an action cache or workspace root.
+/// GitHub action paths use `/` on every host.
+pub fn validate_relative_action_path(path: &str, allow_empty: bool) -> Result<(), ActionPathError> {
+    if path.is_empty() {
+        return if allow_empty {
+            Ok(())
+        } else {
+            Err(path_error(path, "the path is empty"))
+        };
+    }
+    if path.starts_with('/') || path.starts_with('\\') || path.contains('\0') {
+        return Err(path_error(path, "the path must be relative"));
+    }
+    if path
+        .split(['/', '\\'])
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(path_error(
+            path,
+            "every path component must be a normal name",
+        ));
+    }
+    Ok(())
 }
 
 impl ActionRef {
@@ -84,6 +148,7 @@ impl ActionRef {
         if git_ref.is_empty() || git_ref.contains(char::is_whitespace) {
             return Err(RefError::NoRef);
         }
+        validate_git_ref(git_ref)?;
         let mut parts = name.splitn(3, '/');
         let owner = parts
             .next()
@@ -93,17 +158,16 @@ impl ActionRef {
             .next()
             .filter(|s| !s.is_empty())
             .ok_or(RefError::Shape)?;
-        if [owner, repo]
-            .iter()
-            .any(|s| s.contains(char::is_whitespace) || *s == "." || *s == "..")
-        {
-            return Err(RefError::Shape);
-        }
+        validate_repository_component(owner)?;
+        validate_repository_component(repo)?;
         let path = parts
             .next()
             .map(|p| p.trim_matches('/'))
             .filter(|p| !p.is_empty())
             .map(SmolStr::new);
+        if let Some(path) = &path {
+            validate_relative_action_path(path, false)?;
+        }
         Ok(Self {
             owner: SmolStr::new(owner),
             repo: SmolStr::new(repo),
@@ -120,6 +184,16 @@ impl ActionRef {
     /// Whether the reference is already a full commit id.
     pub fn is_commit(&self) -> bool {
         self.git_ref.len() == 40 && self.git_ref.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    pub fn validate(&self) -> Result<(), ActionPathError> {
+        validate_repository_component(&self.owner)?;
+        validate_repository_component(&self.repo)?;
+        validate_git_ref(&self.git_ref)?;
+        if let Some(path) = &self.path {
+            validate_relative_action_path(path, false)?;
+        }
+        Ok(())
     }
 }
 
@@ -147,6 +221,19 @@ impl fmt::Display for PinnedAction {
     }
 }
 
+impl PinnedAction {
+    pub fn validate(&self) -> Result<(), ActionPathError> {
+        self.reference.validate()?;
+        if self.sha.len() != 40 || !self.sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(path_error(
+                &self.sha,
+                "a pinned action needs a 40-digit hexadecimal commit",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ActionSourceError {
     /// The reference names nothing the source can find.
@@ -161,24 +248,17 @@ pub enum ActionSourceError {
     NoManifest(String),
     #[error("cannot fetch `{action}`: {message}")]
     Fetch { action: String, message: String },
-    #[error("this action source has no file trees")]
-    NoTree,
 }
 
 /// Where actions come from.
 ///
-/// Synchronous and blocking by design: `Frontend::load` is synchronous, and the one
-/// run-time caller wraps [`ActionSource::tree`] in a blocking task.
+/// Synchronous and blocking by design: `Frontend::load` is synchronous.
 pub trait ActionSource: Send + Sync {
     /// Resolve a tag, branch or commit to a commit.
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError>;
 
     /// The text of the action's `action.yml` (or `action.yaml`).
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError>;
-
-    /// The action's directory on this machine, the reference's `path` already
-    /// applied.
-    fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError>;
 }
 
 /// An in-memory source for tests: manifests by reference, no trees.
@@ -227,10 +307,6 @@ impl ActionSource for MapActionSource {
             .map(|(_, text)| text.clone())
             .ok_or(ActionSourceError::NoManifest(key))
     }
-
-    fn tree(&self, _pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
-        Err(ActionSourceError::NoTree)
-    }
 }
 
 #[cfg(test)]
@@ -260,5 +336,8 @@ mod tests {
         assert_eq!(ActionRef::parse("actions/checkout@"), Err(RefError::NoRef));
         assert_eq!(ActionRef::parse("checkout@v4"), Err(RefError::Shape));
         assert_eq!(ActionRef::parse("/checkout@v4"), Err(RefError::Shape));
+        assert!(ActionRef::parse("owner/repo/../../outside@v1").is_err());
+        assert!(ActionRef::parse("owner/repo/path//child@v1").is_err());
+        assert!(ActionRef::parse("owner/repo@--upload-pack=evil").is_err());
     }
 }

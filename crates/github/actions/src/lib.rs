@@ -20,7 +20,7 @@ mod run;
 pub mod session;
 pub mod source;
 
-pub use action::{ActionSourceCap, ActionStep};
+pub use action::{ActionSourceCap, ActionStep, ActionTreeSource};
 pub use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 pub use frontend_gha::{ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY};
 pub use run::RunStep;

@@ -64,10 +64,6 @@ impl ActionSource for Recording {
         self.record(pinned.reference.to_string(), entry);
         result
     }
-
-    fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
-        self.inner.tree(pinned)
-    }
 }
 
 #[test]

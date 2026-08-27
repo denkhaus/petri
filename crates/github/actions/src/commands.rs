@@ -78,8 +78,6 @@ pub struct CommandEffects {
     pub env: Map<String, Value>,
     /// `::add-path::dir`, only when unsecure commands are allowed.
     pub path: Vec<String>,
-    /// `::error::`, `::warning::`, `::notice::` messages, by level.
-    pub annotations: Vec<(String, String)>,
 }
 
 /// The sink one step's log events pass through.
@@ -197,9 +195,6 @@ impl CommandSink {
                 "debug" | "add-matcher" | "remove-matcher" | "endgroup" => None,
                 "group" => Some(format!("▶ {}", cmd.message)),
                 level @ ("notice" | "warning" | "error") => {
-                    effects
-                        .annotations
-                        .push((level.to_string(), cmd.message.clone()));
                     let label = match level {
                         "notice" => "Notice",
                         "warning" => "Warning",
@@ -307,10 +302,6 @@ mod tests {
         assert_eq!(effects.state["k"], "v");
         assert_eq!(effects.outputs["o"], "out");
         assert!(effects.env.is_empty(), "set-env is disabled by default");
-        assert_eq!(
-            effects.annotations,
-            vec![("error".to_string(), "bad".to_string())]
-        );
         assert_eq!(masker.mask("got hunter2-long"), "got ***");
     }
 }

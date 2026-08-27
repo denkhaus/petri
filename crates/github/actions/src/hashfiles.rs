@@ -16,9 +16,10 @@ use std::collections::BTreeMap;
 
 use executor::{ExecEnv, ProcessSpec};
 use frontend_gha::exprs::{has_hashfiles_sentinel, hashfiles_calls, replace_hashfiles_sentinels};
-use ir::Value;
 use smol_str::SmolStr;
-use steps::{ProcessConfig, StepFailure, ValueOrSecretRef};
+use steps::{ProcessConfig, StepFailure};
+
+use crate::config::{process_texts, try_map_process_texts};
 
 /// The step could not compute a `hashFiles` value.
 pub const HASHFILES_CLASS: &str = "hashfiles";
@@ -30,7 +31,7 @@ const MARKER: &str = "petri-hashfiles=";
 const HELPER_JS: &str = r#"
 const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const root=process.env.PETRI_HASHFILES_ROOT;
-const patterns=JSON.parse(process.env.PETRI_HASHFILES);
+const calls=JSON.parse(process.env.PETRI_HASHFILES);
 function segMatch(seg,pat){
   let i=0,j=0,star=-1,mark=0;
   while(i<seg.length){
@@ -56,11 +57,15 @@ function matches(parts,pats){
   }
   return go(0,0);
 }
-const pos=[],neg=[];
-for(const p of patterns){
-  const bang=p.startsWith('!');
-  (bang?neg:pos).push((bang?p.slice(1):p).split('/').filter(s=>s.length));
+function compile(patterns){
+  const pos=[],neg=[];
+  for(const p of patterns){
+    const bang=p.startsWith('!');
+    (bang?neg:pos).push((bang?p.slice(1):p).split('/').filter(s=>s.length));
+  }
+  return {pos,neg,outer:crypto.createHash('sha256'),any:false};
 }
+const specs=calls.map(compile);
 const files=[];
 (function walk(dir,rel){
   let entries=[];
@@ -73,18 +78,18 @@ const files=[];
   }
 })(root,'');
 files.sort();
-const outer=crypto.createHash('sha256');
-let any=false;
 for(const f of files){
   const parts=f.split('/');
-  if(!pos.some(p=>matches(parts,p)))continue;
-  if(neg.some(p=>matches(parts,p)))continue;
+  const selected=specs.filter(s=>
+    s.pos.some(p=>matches(parts,p))&&!s.neg.some(p=>matches(parts,p)));
+  if(selected.length===0)continue;
   const h=crypto.createHash('sha256');
   h.update(fs.readFileSync(path.join(root,f)));
-  outer.update(h.digest());
-  any=true;
+  const digest=h.digest();
+  for(const spec of selected){spec.outer.update(digest);spec.any=true;}
 }
-console.log('petri-hashfiles='+(any?outer.digest('hex'):''));
+console.log('petri-hashfiles='+JSON.stringify(
+  specs.map(s=>s.any?s.outer.digest('hex'):'')));
 "#;
 
 /// Replace every hashFiles sentinel in the config's `run` and env values with the
@@ -96,51 +101,52 @@ pub(crate) async fn resolve_hashfiles(
     github_workspace: &str,
 ) -> Result<ProcessConfig, StepFailure> {
     let mut calls: BTreeMap<Vec<String>, String> = BTreeMap::new();
-    let mut collect = |text: &str| {
+    for text in process_texts(&process) {
         for patterns in hashfiles_calls(text) {
             calls.entry(patterns).or_default();
-        }
-    };
-    collect(&process.run);
-    for value in process.env.values() {
-        if let ValueOrSecretRef::Literal(Value::String(text)) = value {
-            collect(text);
         }
     }
     if calls.is_empty() {
         return Ok(process);
     }
 
-    for (patterns, hash) in &mut calls {
-        *hash = compute(env, github_workspace, patterns).await?;
+    let patterns: Vec<Vec<String>> = calls.keys().cloned().collect();
+    let hashes = compute(env, github_workspace, &patterns).await?;
+    for (patterns, hash) in patterns.into_iter().zip(hashes) {
+        calls.insert(patterns, hash);
     }
 
     let splice = |text: &str| -> String {
-        replace_hashfiles_sentinels(text, |patterns| -> Result<String, std::convert::Infallible> {
-            Ok(calls.get(patterns).cloned().unwrap_or_default())
-        })
+        replace_hashfiles_sentinels(
+            text,
+            |patterns| -> Result<String, std::convert::Infallible> {
+                Ok(calls.get(patterns).cloned().unwrap_or_default())
+            },
+        )
         .expect("the resolver is infallible")
     };
-    if has_hashfiles_sentinel(&process.run) {
-        process.run = splice(&process.run);
-    }
-    for value in process.env.values_mut() {
-        if let ValueOrSecretRef::Literal(Value::String(text)) = value
-            && has_hashfiles_sentinel(text)
-        {
-            *text = splice(text);
+    try_map_process_texts(&mut process, |text| {
+        if has_hashfiles_sentinel(text) {
+            Ok::<_, std::convert::Infallible>(Some(splice(text)))
+        } else {
+            Ok(None)
         }
-    }
+    })
+    .expect("the resolver is infallible");
     Ok(process)
 }
 
-/// One `hashFiles(patterns…)`, in the job environment.
+/// Every distinct `hashFiles(patterns…)` in one step, in one workspace walk.
 async fn compute(
     env: &dyn ExecEnv,
     github_workspace: &str,
-    patterns: &[String],
-) -> Result<String, StepFailure> {
-    let display = patterns.join(", ");
+    patterns: &[Vec<String>],
+) -> Result<Vec<String>, StepFailure> {
+    let display = patterns
+        .iter()
+        .map(|call| call.join(", "))
+        .collect::<Vec<_>>()
+        .join("; ");
     let fail = |message: String| StepFailure {
         class: HASHFILES_CLASS,
         message,
@@ -165,12 +171,12 @@ async fn compute(
             "computing `hashFiles({display})` needs `node` in the job environment: {e}"
         ))
     })?;
-    let mut result: Option<String> = None;
+    let mut result: Option<Vec<String>> = None;
     let mut tail: Vec<String> = Vec::new();
     if let Some(mut lines) = handle.lines() {
         while let Some(line) = lines.recv().await {
-            if let Some(hash) = line.line.strip_prefix(MARKER) {
-                result = Some(hash.to_string());
+            if let Some(hashes) = line.line.strip_prefix(MARKER) {
+                result = serde_json::from_str(hashes).ok();
             } else {
                 if tail.len() >= 5 {
                     tail.remove(0);
@@ -189,5 +195,17 @@ async fn compute(
             tail.join(" / ")
         )));
     }
-    result.ok_or_else(|| fail(format!("the `hashFiles({display})` helper printed no result")))
+    let result = result.ok_or_else(|| {
+        fail(format!(
+            "the `hashFiles({display})` helper printed no result"
+        ))
+    })?;
+    if result.len() != patterns.len() {
+        return Err(fail(format!(
+            "the `hashFiles({display})` helper returned {} results for {} calls",
+            result.len(),
+            patterns.len()
+        )));
+    }
+    Ok(result)
 }

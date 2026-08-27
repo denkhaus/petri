@@ -434,10 +434,7 @@ mod tests {
     fn secrets_are_fine_in_allowed_maps_and_nowhere_else() {
         let ok = json!({ "env": { "TOKEN": { "$secret": "T" } }, "inputs": { "token": { "$secret": "T" } } });
         assert_eq!(misplaced_secret(&ok, &["env", "inputs"]), None);
-        assert_eq!(
-            misplaced_secret(&ok, &["env"]),
-            Some("inputs.token".into())
-        );
+        assert_eq!(misplaced_secret(&ok, &["env"]), Some("inputs.token".into()));
         let bad = json!({ "run": { "$secret": "T" } });
         assert_eq!(misplaced_secret(&bad, &["env"]), Some("run".into()));
         let nested = json!({ "env": { "X": { "nested": { "$secret": "T" } } } });

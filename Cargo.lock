@@ -511,6 +511,7 @@ dependencies = [
  "petri-ir",
  "petri-runtime",
  "petri-testkit",
+ "serde",
  "serde_json",
  "smol_str",
  "tokio",

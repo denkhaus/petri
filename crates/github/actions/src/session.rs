@@ -28,7 +28,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use executor::{ExecEnv, SecretProvider};
-use frontend_gha::exprs::{has_secret_sentinel, replace_secret_sentinels};
+use frontend_gha::exprs::{
+    escape_sentinel_text, has_secret_sentinel, has_sentinel_escape, replace_secret_sentinels,
+    unescape_sentinel_text,
+};
 use ir::{LogStream, Outcome, StepEvent, Value};
 use serde_json::{Map, json};
 use smol_str::SmolStr;
@@ -36,6 +39,7 @@ use steps::{ProcessConfig, ProcessStep, Shell, Step, StepCtx, StepFailure, Value
 use tokio::sync::mpsc;
 
 use crate::commands::{CommandEffects, CommandSink};
+use crate::config::try_map_process_texts;
 
 /// The runner's own directory, relative to the workspace root.
 pub const RUNNER_DIR: &str = ".ci/github";
@@ -49,6 +53,8 @@ const JOB_PATH_FILE: &str = ".ci/github/job-path.json";
 const EVENT_FILE: &str = ".ci/github/event.json";
 const TEMP_DIR: &str = ".ci/temp";
 const TOOL_CACHE_DIR: &str = ".ci/toolcache";
+/// GitHub command files are control input, not general artifact storage.
+const COMMAND_FILE_LIMIT: usize = 1024 * 1024;
 
 /// How long to wait for the command sink after the process step returns. The
 /// process step itself stops draining output after its own limit, so a straggler
@@ -97,27 +103,28 @@ impl Session {
             state: dir.join("state"),
             summary: dir.join("summary"),
         };
-        for file in [&files.env, &files.path, &files.state, &files.summary] {
-            write(&*env, file, b"").await?;
-        }
+        tokio::try_join!(
+            write(&*env, &files.env, b""),
+            write(&*env, &files.path, b""),
+            write(&*env, &files.state, b""),
+            write(&*env, &files.summary, b""),
+        )?;
         let event = match event {
             Value::Null => json!({}),
             other => other.clone(),
         };
         let event_bytes = serde_json::to_vec(&event).unwrap_or_else(|_| b"{}".to_vec());
-        write(&*env, Path::new(EVENT_FILE), &event_bytes).await?;
-        for dir in [TEMP_DIR, TOOL_CACHE_DIR] {
-            let keep = Path::new(dir).join(".keep");
-            if read(&*env, &keep).await?.is_none() {
-                write(&*env, &keep, b"").await?;
-            }
-        }
-        let job_env: BTreeMap<String, String> = read_json(&*env, Path::new(JOB_ENV_FILE))
-            .await?
-            .unwrap_or_default();
-        let job_path: Vec<String> = read_json(&*env, Path::new(JOB_PATH_FILE))
-            .await?
-            .unwrap_or_default();
+        let temp_keep = Path::new(TEMP_DIR).join(".keep");
+        let tool_keep = Path::new(TOOL_CACHE_DIR).join(".keep");
+        let (_, _, _, job_env, job_path) = tokio::try_join!(
+            write(&*env, Path::new(EVENT_FILE), &event_bytes),
+            write(&*env, &temp_keep, b""),
+            write(&*env, &tool_keep, b""),
+            read_json(&*env, Path::new(JOB_ENV_FILE)),
+            read_json(&*env, Path::new(JOB_PATH_FILE)),
+        )?;
+        let job_env: BTreeMap<String, String> = job_env.unwrap_or_default();
+        let job_path: Vec<String> = job_path.unwrap_or_default();
         Ok(Self {
             env,
             workspace,
@@ -190,13 +197,23 @@ impl Session {
         mut process: ProcessConfig,
         template: &str,
     ) -> Result<ProcessConfig, StepFailure> {
-        let script = self.files.env.with_file_name("script");
+        let step_id = self
+            .files
+            .env
+            .parent()
+            .and_then(Path::file_name)
+            .expect("step files have a firing directory");
+        let script_arg = PathBuf::from(".petri").join(step_id).join("script");
+        let script = process
+            .working_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new(""))
+            .join(&script_arg);
         write(&*self.env, &script, process.run.as_bytes()).await?;
-        let path = self.absolute(&script);
         process.run = format!(
             "{}exec {}\n",
             self.prologue(),
-            template.replace("{0}", &path)
+            template.replace("{0}", &script_arg.to_string_lossy())
         );
         process.shell = Shell::Sh;
         Ok(process)
@@ -218,16 +235,13 @@ impl Session {
     ) -> (Outcome, Effects) {
         // `hashFiles` sentinels first: the hash is computed in the job
         // environment against the workspace, before any secret enters the config.
-        let process = match crate::hashfiles::resolve_hashfiles(
-            process,
-            &*ctx.env,
-            &self.github_workspace(),
-        )
-        .await
-        {
-            Ok(process) => process,
-            Err(failure) => return (failure.into(), Effects::default()),
-        };
+        let process =
+            match crate::hashfiles::resolve_hashfiles(process, &*ctx.env, &self.github_workspace())
+                .await
+            {
+                Ok(process) => process,
+                Err(failure) => return (failure.into(), Effects::default()),
+            };
         let StepCtx {
             firing,
             attempt,
@@ -253,7 +267,7 @@ impl Session {
         let (tx, rx) = mpsc::channel(64);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
         let collected = sink.effects();
-        let sink_task = tokio::spawn(sink.run(rx));
+        let mut sink_task = tokio::spawn(sink.run(rx));
         let delegate = StepCtx {
             firing,
             attempt,
@@ -266,7 +280,13 @@ impl Session {
             control,
         };
         let outcome = Step::run(&ProcessStep, process, delegate).await;
-        let _ = tokio::time::timeout(SINK_LIMIT, sink_task).await;
+        if tokio::time::timeout(SINK_LIMIT, &mut sink_task)
+            .await
+            .is_err()
+        {
+            sink_task.abort();
+            let _ = sink_task.await;
+        }
         let commands = std::mem::take(&mut *collected.lock().expect("effects are not poisoned"));
 
         let effects = match self.finish(commands).await {
@@ -294,10 +314,12 @@ impl Session {
     /// Read the files back and apply them: env and path to the job, state and
     /// outputs to the caller.
     async fn finish(&mut self, commands: CommandEffects) -> Result<Effects, StepFailure> {
-        let env_text = read_text(&*self.env, &self.files.env).await?;
-        let state_text = read_text(&*self.env, &self.files.state).await?;
-        let path_text = read_text(&*self.env, &self.files.path).await?;
-        let summary = read_text(&*self.env, &self.files.summary).await?;
+        let (env_text, state_text, path_text, summary) = tokio::try_join!(
+            read_text(&*self.env, &self.files.env),
+            read_text(&*self.env, &self.files.state),
+            read_text(&*self.env, &self.files.path),
+            read_text(&*self.env, &self.files.summary),
+        )?;
 
         let mut env = parse_env_file(&env_text, "GITHUB_ENV")?;
         env.extend(commands.env);
@@ -315,18 +337,12 @@ impl Session {
             self.job_path.retain(|p| p != &path);
             self.job_path.insert(0, path);
         }
-        write(
-            &*self.env,
-            Path::new(JOB_ENV_FILE),
-            &serde_json::to_vec(&self.job_env).expect("a string map encodes"),
-        )
-        .await?;
-        write(
-            &*self.env,
-            Path::new(JOB_PATH_FILE),
-            &serde_json::to_vec(&self.job_path).expect("a string list encodes"),
-        )
-        .await?;
+        let job_env = serde_json::to_vec(&self.job_env).expect("a string map encodes");
+        let job_path = serde_json::to_vec(&self.job_path).expect("a string list encodes");
+        tokio::try_join!(
+            write(&*self.env, Path::new(JOB_ENV_FILE), &job_env),
+            write(&*self.env, Path::new(JOB_PATH_FILE), &job_path),
+        )?;
 
         let mut state = parse_env_file(&state_text, "GITHUB_STATE")?;
         state.extend(commands.state);
@@ -349,22 +365,24 @@ fn resolve_secret_sentinels(
     let mut resolve = |name: &str| -> Result<String, StepFailure> {
         secrets
             .resolve(name)
-            .map(|secret| secret.expose().to_string())
+            .map(|secret| escape_sentinel_text(&secret.expose()))
             .map_err(|e| StepFailure {
                 class: steps::SECRET_UNAVAILABLE_CLASS,
                 message: e.to_string(),
             })
     };
-    if has_secret_sentinel(&process.run) {
-        process.run = replace_secret_sentinels(&process.run, &mut resolve)?;
-    }
-    for value in process.env.values_mut() {
-        if let ValueOrSecretRef::Literal(Value::String(text)) = value
-            && has_secret_sentinel(text)
-        {
-            *text = replace_secret_sentinels(text, &mut resolve)?;
+    try_map_process_texts(&mut process, |text| {
+        let has_secret = has_secret_sentinel(text);
+        if !has_secret && !has_sentinel_escape(text) {
+            return Ok(None);
         }
-    }
+        let resolved = if has_secret {
+            replace_secret_sentinels(text, &mut resolve)?
+        } else {
+            text.to_string()
+        };
+        Ok(Some(unescape_sentinel_text(&resolved)))
+    })?;
     Ok(process)
 }
 
@@ -434,15 +452,8 @@ async fn write(env: &dyn ExecEnv, relative: &Path, contents: &[u8]) -> Result<()
         })
 }
 
-async fn read(env: &dyn ExecEnv, relative: &Path) -> Result<Option<Vec<u8>>, StepFailure> {
-    env.read_file(relative).await.map_err(|e| StepFailure {
-        class: RUNNER_FILES_CLASS,
-        message: format!("could not read `{}`: {e}", relative.display()),
-    })
-}
-
 async fn read_text(env: &dyn ExecEnv, relative: &Path) -> Result<String, StepFailure> {
-    Ok(read(env, relative)
+    Ok(read_limited(env, relative)
         .await?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default())
@@ -452,7 +463,7 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     env: &dyn ExecEnv,
     relative: &Path,
 ) -> Result<Option<T>, StepFailure> {
-    let Some(bytes) = read(env, relative).await? else {
+    let Some(bytes) = read_limited(env, relative).await? else {
         return Ok(None);
     };
     serde_json::from_slice(&bytes)
@@ -463,6 +474,15 @@ async fn read_json<T: serde::de::DeserializeOwned>(
                 "`{}` is not what this runner wrote: {e}",
                 relative.display()
             ),
+        })
+}
+
+async fn read_limited(env: &dyn ExecEnv, relative: &Path) -> Result<Option<Vec<u8>>, StepFailure> {
+    env.read_file_limited(relative, COMMAND_FILE_LIMIT)
+        .await
+        .map_err(|e| StepFailure {
+            class: RUNNER_FILES_CLASS,
+            message: format!("could not read `{}`: {e}", relative.display()),
         })
 }
 
@@ -486,5 +506,28 @@ mod tests {
         assert!(env_truthy(&env, "A"));
         assert!(!env_truthy(&env, "B"));
         assert!(!env_truthy(&env, "C"));
+    }
+
+    #[test]
+    fn literal_markers_do_not_resolve_and_secret_values_round_trip() {
+        use frontend_gha::exprs::{escape_sentinel_text, secret_sentinel};
+
+        let literal = "\u{E000}petri-secret:NOT_A_SECRET\u{E001}";
+        let secret_value = "value-\u{E002}-\u{E000}-\u{E001}";
+        let process = ProcessConfig {
+            run: format!(
+                "{} {}",
+                escape_sentinel_text(literal),
+                secret_sentinel("REAL")
+            ),
+            shell: Shell::Sh,
+            env: BTreeMap::new(),
+            working_dir: None,
+            soft_fail: steps::SoftFail::default(),
+            output_env_aliases: Vec::new(),
+        };
+        let secrets = executor::MapSecrets::from_pairs(&[("REAL", secret_value)]);
+        let resolved = resolve_secret_sentinels(process, &secrets).expect("resolves");
+        assert_eq!(resolved.run, format!("{literal} {secret_value}"));
     }
 }
