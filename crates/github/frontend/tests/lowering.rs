@@ -257,6 +257,152 @@ jobs:
     }
 }
 
+/// `runs-on: ${{ matrix.os }}` resolves at lowering, once per leg, as GitHub
+/// resolves it at queue time — the legs come from the same combinators the
+/// engine expands with. Each leg's labels are preserved on the job's `start`
+/// node, and their union becomes the scope's placement requirements.
+#[test]
+fn expression_runs_on_resolves_per_matrix_leg() {
+    let text = r#"
+on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04]
+        exclude:
+          - os: ubuntu-24.04
+        include:
+          - os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo
+"#;
+    let graph = lower_ok(text);
+    let start = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "test/start")
+        .expect("test/start");
+    assert_eq!(
+        start.meta["runs_on"],
+        json!([
+            { "leg": { "os": "ubuntu-latest" }, "labels": ["ubuntu-latest"] },
+            { "leg": { "os": "ubuntu-22.04" }, "labels": ["ubuntu-22.04"] },
+        ]),
+        "each leg keeps its own result, through exclude and include"
+    );
+    let scope = graph.scope(start.scope).unwrap();
+    assert_eq!(scope.runtime.requirements, ["ubuntu-latest", "ubuntu-22.04"]);
+}
+
+/// The shapes the handoff names: a label list from `fromJSON`, a template
+/// around a matrix value, and a nested matrix object property.
+#[test]
+fn expression_runs_on_supports_lists_templates_and_nested_values() {
+    let text = r#"
+on: push
+jobs:
+  list:
+    runs-on: ${{ fromJSON('["ubuntu-latest"]') }}
+    steps:
+      - run: echo
+  template:
+    strategy:
+      matrix:
+        os: [ubuntu]
+    runs-on: ${{ matrix.os }}-latest
+    steps:
+      - run: echo
+  nested:
+    strategy:
+      matrix:
+        runner:
+          - os: ubuntu-24.04
+    runs-on: ${{ matrix.runner.os }}
+    steps:
+      - run: echo
+"#;
+    let graph = lower_ok(text);
+    let requirements = |job: &str| {
+        let start = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == format!("{job}/start"))
+            .unwrap();
+        graph.scope(start.scope).unwrap().runtime.requirements.clone()
+    };
+    assert_eq!(requirements("list"), ["ubuntu-latest"]);
+    assert_eq!(requirements("template"), ["ubuntu-latest"]);
+    assert_eq!(requirements("nested"), ["ubuntu-24.04"]);
+}
+
+/// A leg that resolves to an unsupported runner rejects with that runner's own
+/// code, named per leg — and does not stop the supported legs from resolving.
+#[test]
+fn unsupported_legs_are_named_and_do_not_corrupt_supported_ones() {
+    let text = r#"
+on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo
+"#;
+    let diags = diagnostics(text);
+    let windows = diags
+        .iter()
+        .find(|d| d.code == "unsupported.runs_on.windows")
+        .expect("the windows leg rejects with the windows code");
+    assert!(
+        windows.message.contains("windows-latest") && windows.message.contains("matrix leg"),
+        "{}",
+        windows.message
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == "unsupported.runs_on.expression"),
+        "resolution succeeded; the rejection is about the runner: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("ubuntu-latest")),
+        "the supported leg is not the problem: {diags:?}"
+    );
+}
+
+/// What cannot be resolved before the run stays a specific rejection: a
+/// run-time context, a dynamic matrix, a value that is not a label.
+#[test]
+fn unresolvable_runs_on_expressions_stay_rejected() {
+    for (bad, wants) in [
+        (
+            "    runs-on: ${{ needs.plan.outputs.runner }}\n",
+            "no value before the run",
+        ),
+        (
+            "    strategy: { matrix: { os: \"${{ fromJSON(inputs.list) }}\" } }\n    runs-on: ${{ matrix.os }}\n",
+            "not static",
+        ),
+        (
+            "    strategy: { matrix: { os: [ubuntu-latest] } }\n    runs-on: ${{ matrix.missing }}\n",
+            "not a label",
+        ),
+    ] {
+        let text =
+            format!("on: push\njobs:\n  j:\n{bad}    steps:\n      - run: echo\n");
+        let diags = diagnostics(&text);
+        let d = diags
+            .iter()
+            .find(|d| d.code == "unsupported.runs_on.expression")
+            .unwrap_or_else(|| panic!("{bad}: {diags:?}"));
+        assert!(d.message.contains(wants), "{bad}: {}", d.message);
+    }
+}
+
 /// Windows and macOS runners are out of scope: the local executor emulates
 /// Linux runners only.
 #[test]
@@ -299,7 +445,8 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.runs_on.unknown",
         ),
         (
-            "on: push\njobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy: { matrix: { os: [a] } }\n    steps:\n      - run: echo\n",
+            // `matrix.os` resolves per leg now; a run-time context does not.
+            "on: push\njobs:\n  j:\n    runs-on: ${{ github.repository == 'a/b' && 'ubuntu-latest' || 'ubuntu-22.04' }}\n    steps:\n      - run: echo\n",
             "unsupported.runs_on.expression",
         ),
         (

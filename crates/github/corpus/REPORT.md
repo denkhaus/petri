@@ -67,12 +67,12 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 |---|---|
 | `workflow_call` | 92 |
 | `inputs` | 70 |
-| `runs_on.expression` | 49 |
 | `workflow_dispatch.inputs` | 46 |
-| `runs_on.unknown` | 22 |
+| `runs_on.macos` | 31 |
+| `runs_on.windows` | 31 |
+| `runs_on.unknown` | 25 |
+| `runs_on.expression` | 21 |
 | `action.docker` | 18 |
-| `runs_on.macos` | 14 |
-| `runs_on.windows` | 14 |
 | `shell.powershell` | 11 |
 | `services` | 5 |
 | `action.local_missing` | 4 |
@@ -93,13 +93,13 @@ None. Every workflow either lowered or was rejected with a specific code.
 
 | Repository | Workflow | Result | Nodes | Unsupported |
 |---|---|---|---|---|
-| BurntSushi/ripgrep | `ci.yml` | unsupported | — | `runs_on.expression` |
-| BurntSushi/ripgrep | `release.yml` | unsupported | — | `runs_on.expression` |
+| BurntSushi/ripgrep | `ci.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows` |
+| BurntSushi/ripgrep | `release.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows` |
 | actions/checkout | `check-dist.yml` | warnings | 10 | — |
 | actions/checkout | `codeql-analysis.yml` | warnings | 11 | — |
 | actions/checkout | `licensed.yml` | clean | 6 | — |
 | actions/checkout | `publish-immutable-actions.yml` | warnings | 5 | — |
-| actions/checkout | `test.yml` | unsupported | — | `action.docker`, `action.local_missing`, `container.options`, `runs_on.expression`, `services`, `shell.cmd` |
+| actions/checkout | `test.yml` | unsupported | — | `action.docker`, `action.local_missing`, `container.options`, `runs_on.macos`, `runs_on.windows`, `services`, `shell.cmd` |
 | actions/checkout | `update-main-version.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | actions/checkout | `update-test-ubuntu-git.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
 | astral-sh/ruff | `build-binaries.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown`, `workflow_call` |
@@ -125,7 +125,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `bench.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
 | astral-sh/uv | `build-dev-binaries.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `build-docker.yml` | unsupported | — | `inputs`, `workflow_call` |
-| astral-sh/uv | `build-release-binaries.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown`, `timeout.expression`, `workflow_call` |
+| astral-sh/uv | `build-release-binaries.yml` | unsupported | — | `runs_on.unknown`, `timeout.expression`, `workflow_call` |
 | astral-sh/uv | `check-docs.yml` | unsupported | — | `workflow_call` |
 | astral-sh/uv | `check-fmt.yml` | unsupported | — | `workflow_call` |
 | astral-sh/uv | `check-generated-files.yml` | unsupported | — | `inputs`, `workflow_call` |
@@ -156,10 +156,10 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `sync-uv-dev.yml` | warnings | 5 | — |
 | astral-sh/uv | `sync-uv-security.yml` | warnings | 6 | — |
 | astral-sh/uv | `test-ecosystem.yml` | unsupported | — | `inputs`, `workflow_call` |
-| astral-sh/uv | `test-integration.yml` | unsupported | — | `inputs`, `runs_on.expression`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
+| astral-sh/uv | `test-integration.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test-smoke.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
-| astral-sh/uv | `test-system.yml` | unsupported | — | `container.expression`, `container.options`, `inputs`, `runs_on.expression`, `runs_on.macos`, `runs_on.windows`, `workflow_call` |
-| astral-sh/uv | `test-windows-trampolines.yml` | unsupported | — | `inputs`, `runs_on.expression`, `runs_on.windows`, `workflow_call` |
+| astral-sh/uv | `test-system.yml` | unsupported | — | `container.expression`, `container.options`, `inputs`, `runs_on.macos`, `runs_on.windows`, `workflow_call` |
+| astral-sh/uv | `test-windows-trampolines.yml` | unsupported | — | `inputs`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
 | astral-sh/uv | `update-issue-context.yml` | warnings | 33 | — |
 | astral-sh/uv | `update-pull-request-parent.yml` | unsupported | — | `inputs`, `workflow_call` |
@@ -169,7 +169,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | cli/cli | `copilot-setup-steps.yml` | warnings | 6 | — |
 | cli/cli | `dependabot-triage.lock.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | cli/cli | `deployment.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
-| cli/cli | `go.yml` | unsupported | — | `runs_on.expression` |
+| cli/cli | `go.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows` |
 | cli/cli | `govulncheck.yml` | warnings | 9 | — |
 | cli/cli | `issue-triage.lock.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
 | cli/cli | `lint.yml` | warnings | 17 | — |
@@ -179,9 +179,9 @@ None. Every workflow either lowered or was rejected with a specific code.
 | denoland/deno | `cargo_publish.generated.yml` | unsupported | — | `runs_on.unknown` |
 | denoland/deno | `ci.generated.yml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `runs_on.windows`, `shell.powershell` |
 | denoland/deno | `create_prerelease_tag.generated.yml` | warnings | 8 | — |
-| denoland/deno | `ecosystem_compat_test.generated.yml` | unsupported | — | `runs_on.expression` |
-| denoland/deno | `node_compat_test.generated.yml` | unsupported | — | `runs_on.expression` |
-| denoland/deno | `npm_publish.generated.yml` | unsupported | — | `inputs`, `runs_on.expression`, `shell.cmd`, `workflow_dispatch.inputs` |
+| denoland/deno | `ecosystem_compat_test.generated.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows` |
+| denoland/deno | `node_compat_test.generated.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows` |
+| denoland/deno | `npm_publish.generated.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.windows`, `shell.cmd`, `workflow_dispatch.inputs` |
 | denoland/deno | `post_publish.generated.yml` | clean | 11 | — |
 | denoland/deno | `pr.generated.yml` | clean | 5 | — |
 | denoland/deno | `promote_to_release.generated.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
@@ -229,7 +229,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | facebook/react | `shared_stale.yml` | warnings | 3 | — |
 | hashicorp/terraform | `backport.yml` | warnings | 3 | — |
 | hashicorp/terraform | `build-terraform-cli.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_call` |
-| hashicorp/terraform | `build.yml` | unsupported | — | `action.docker`, `runs_on.expression`, `shell.cmd`, `shell.powershell`, `workflow_call` |
+| hashicorp/terraform | `build.yml` | unsupported | — | `action.docker`, `runs_on.macos`, `runs_on.windows`, `shell.cmd`, `shell.powershell`, `workflow_call` |
 | hashicorp/terraform | `changelog-validation.yml` | warnings | 5 | — |
 | hashicorp/terraform | `checks.yml` | warnings | 43 | — |
 | hashicorp/terraform | `enforce-changelog.yml` | warnings | 6 | — |
@@ -239,7 +239,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | hashicorp/terraform | `issue-comment-created.yml` | warnings | 3 | — |
 | hashicorp/terraform | `lock.yml` | warnings | 3 | — |
 | nodejs/node | `auto-start-ci.yml` | warnings | 10 | — |
-| nodejs/node | `benchmark.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_dispatch.inputs` |
+| nodejs/node | `benchmark.yml` | unsupported | — | `inputs`, `runs_on.macos`, `workflow_dispatch.inputs` |
 | nodejs/node | `build-shared.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_call` |
 | nodejs/node | `build-tarball.yml` | warnings | 21 | — |
 | nodejs/node | `close-stalled.yml` | warnings | 3 | — |
@@ -263,7 +263,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `linters.yml` | unsupported | — | `action.docker` |
 | nodejs/node | `major-release.yml` | warnings | 6 | — |
 | nodejs/node | `nix-changes-comment.yml` | warnings | 5 | — |
-| nodejs/node | `nix-changes.yml` | unsupported | — | `runs_on.expression` |
+| nodejs/node | `nix-changes.yml` | unsupported | — | `runs_on.macos` |
 | nodejs/node | `notify-on-push.yml` | unsupported | — | `action.docker` |
 | nodejs/node | `notify-on-review-wanted.yml` | unsupported | — | `action.docker` |
 | nodejs/node | `post-release.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
@@ -272,7 +272,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `stress-test.yml` | unsupported | — | `action.local_missing`, `inputs`, `runs_on.expression`, `workflow_dispatch.inputs` |
 | nodejs/node | `test-internet.yml` | warnings | 11 | — |
 | nodejs/node | `test-linux-quic.yml` | unsupported | — | `action.local_missing` |
-| nodejs/node | `test-linux.yml` | unsupported | — | `action.local_missing`, `runs_on.expression` |
+| nodejs/node | `test-linux.yml` | unsupported | — | `action.local_missing` |
 | nodejs/node | `test-macos.yml` | unsupported | — | `runs_on.macos` |
 | nodejs/node | `test-shared.yml` | unsupported | — | `workflow_call` |
 | nodejs/node | `timezone-update.yml` | warnings | 12 | — |
@@ -281,7 +281,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `update-v8.yml` | warnings | 12 | — |
 | nodejs/node | `update-wpt.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | ohmyzsh/ohmyzsh | `dependencies.yml` | warnings | 12 | — |
-| ohmyzsh/ohmyzsh | `installer.yml` | unsupported | — | `runs_on.expression` |
+| ohmyzsh/ohmyzsh | `installer.yml` | unsupported | — | `runs_on.macos` |
 | ohmyzsh/ohmyzsh | `main.yml` | warnings | 9 | — |
 | ohmyzsh/ohmyzsh | `project.yml` | warnings | 11 | — |
 | ohmyzsh/ohmyzsh | `scorecard.yml` | unsupported | — | `action.docker` |
@@ -298,13 +298,13 @@ None. Every workflow either lowered or was rejected with a specific code.
 | pola-rs/polars | `lint-rust.yml` | warnings | 38 | — |
 | pola-rs/polars | `pr-labeler.yml` | warnings | 5 | — |
 | pola-rs/polars | `release-drafter.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
-| pola-rs/polars | `release-python.yml` | unsupported | — | `action.nested_local`, `inputs`, `runs_on.expression`, `shell.powershell`, `workflow_dispatch.inputs` |
+| pola-rs/polars | `release-python.yml` | unsupported | — | `action.nested_local`, `inputs`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `shell.powershell`, `workflow_dispatch.inputs` |
 | pola-rs/polars | `release-rust.yml` | clean | 4 | — |
 | pola-rs/polars | `test-bytecode-parser.yml` | warnings | 8 | — |
 | pola-rs/polars | `test-coverage.yml` | unsupported | — | `runs_on.macos` |
 | pola-rs/polars | `test-pyodide.yml` | warnings | 8 | — |
-| pola-rs/polars | `test-python.yml` | unsupported | — | `runs_on.expression`, `shell.powershell` |
-| pola-rs/polars | `test-rust.yml` | unsupported | — | `runs_on.expression` |
+| pola-rs/polars | `test-python.yml` | unsupported | — | `runs_on.windows`, `shell.powershell` |
+| pola-rs/polars | `test-rust.yml` | unsupported | — | `runs_on.windows` |
 | prometheus/prometheus | `approve-workflows.yml` | warnings | 3 | — |
 | prometheus/prometheus | `automerge-dependabot.yml` | warnings | 4 | — |
 | prometheus/prometheus | `buf-lint.yml` | warnings | 7 | — |
@@ -321,8 +321,8 @@ None. Every workflow either lowered or was rejected with a specific code.
 | prometheus/prometheus | `scorecards.yml` | unsupported | — | `action.docker` |
 | prometheus/prometheus | `stale.yml` | warnings | 3 | — |
 | python/cpython | `add-issue-header.yml` | warnings | 3 | — |
-| python/cpython | `build.yml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `workflow_call` |
-| python/cpython | `jit.yml` | unsupported | — | `continue_on_error.expression`, `runs_on.expression` |
+| python/cpython | `build.yml` | unsupported | — | `runs_on.macos`, `workflow_call` |
+| python/cpython | `jit.yml` | unsupported | — | `continue_on_error.expression`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows` |
 | python/cpython | `lint.yml` | warnings | 6 | — |
 | python/cpython | `mypy.yml` | warnings | 9 | — |
 | python/cpython | `new-bugs-announce-notifier.yml` | warnings | 6 | — |
@@ -340,7 +340,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `reusable-wasi.yml` | unsupported | — | `runs_on.unknown`, `workflow_call` |
 | python/cpython | `reusable-windows.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_call` |
 | python/cpython | `stale.yml` | warnings | 3 | — |
-| python/cpython | `tail-call.yml` | unsupported | — | `runs_on.expression` |
+| python/cpython | `tail-call.yml` | unsupported | — | `runs_on.macos`, `runs_on.unknown` |
 | python/cpython | `verify-ensurepip-wheels.yml` | warnings | 7 | — |
 | python/cpython | `verify-expat.yml` | warnings | 5 | — |
 | rails/rails | `check-markdown-api.yml` | warnings | 6 | — |
@@ -355,17 +355,17 @@ None. Every workflow either lowered or was rejected with a specific code.
 | rails/rails | `stale.yml` | warnings | 3 | — |
 | rust-lang/cargo | `audit.yml` | unsupported | — | `action.docker` |
 | rust-lang/cargo | `contrib.yml` | warnings | 13 | — |
-| rust-lang/cargo | `main.yml` | unsupported | — | `runs_on.expression` |
+| rust-lang/cargo | `main.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows` |
 | rust-lang/cargo | `release.yml` | warnings | 5 | — |
-| serde-rs/serde | `ci.yml` | unsupported | — | `runs_on.expression`, `runs_on.windows` |
-| sharkdp/bat | `CICD.yml` | unsupported | — | `runs_on.expression`, `shell.powershell` |
+| serde-rs/serde | `ci.yml` | unsupported | — | `runs_on.windows` |
+| sharkdp/bat | `CICD.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows`, `shell.powershell` |
 | sharkdp/bat | `require-changelog-for-PRs.yml` | clean | 7 | — |
 | tailwindlabs/tailwindcss | `ci.yml` | unsupported | — | `runs_on.expression` |
 | tailwindlabs/tailwindcss | `integration-tests.yml` | unsupported | — | `runs_on.expression` |
-| tailwindlabs/tailwindcss | `prepare-release.yml` | unsupported | — | `inputs`, `runs_on.expression`, `runs_on.macos`, `workflow_dispatch.inputs` |
-| tailwindlabs/tailwindcss | `release.yml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `workflow_dispatch.inputs` |
+| tailwindlabs/tailwindcss | `prepare-release.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
+| tailwindlabs/tailwindcss | `release.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
 | tokio-rs/tokio | `audit.yml` | unsupported | — | `action.docker` |
-| tokio-rs/tokio | `ci.yml` | unsupported | — | `runs_on.expression`, `workflow_call` |
+| tokio-rs/tokio | `ci.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows`, `workflow_call` |
 | tokio-rs/tokio | `labeler.yml` | warnings | 3 | — |
 | tokio-rs/tokio | `loom.yml` | warnings | 120 | — |
 | tokio-rs/tokio | `pr-audit.yml` | unsupported | — | `action.docker` |

@@ -509,6 +509,34 @@ jobs:
     );
 }
 
+/// `runs-on: ${{ matrix.os }}`: the labels resolve at lowering per leg, and the
+/// legs the engine expands at run time are the same legs — the job runs.
+#[tokio::test]
+async fn expression_runs_on_matrix_runs_end_to_end() {
+    let text = r#"
+on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo "on-${{ matrix.os }}"
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "matrix-runs-on").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"on-ubuntu-latest".to_string()), "{lines:?}");
+    assert!(lines.contains(&"on-ubuntu-24.04".to_string()), "{lines:?}");
+}
+
 /// An expression-valued matrix stays unevaluated in HIR and expands at run time.
 #[tokio::test]
 async fn expression_matrix_expands_at_runtime() {

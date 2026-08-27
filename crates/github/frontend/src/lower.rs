@@ -26,6 +26,7 @@ use crate::exprs::{
 };
 use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, KNOWN_RUNS_ON, Step, Workflow};
+use crate::runs_on;
 
 /// GitHub's default job timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(360 * 60);
@@ -51,6 +52,10 @@ pub struct Lowering<'w, 'a> {
     resolved: HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
     jobs: HashMap<String, JobNodes>,
     spans: HashMap<NodeId, Span>,
+    /// Per-leg `runs-on` resolutions, by job id: what each matrix leg resolved
+    /// to, written by [`Lowering::expression_runs_on`] and preserved on the
+    /// job's `start` node meta by [`Lowering::job_shell`].
+    leg_runs_on: HashMap<String, Value>,
 }
 
 /// Why a remote action did not resolve.
@@ -105,6 +110,7 @@ pub fn lower(
         resolved: HashMap::new(),
         jobs: HashMap::new(),
         spans: HashMap::new(),
+        leg_runs_on: HashMap::new(),
     };
 
     // Every job's scope and gate first, so `needs` can wire to them in any order.
@@ -183,11 +189,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if !matrix {
             self.b.node_mut(start).run_on_cancel = true;
         }
-        // The deployment target, preserved: the run ignores it (the reader warned),
-        // but the graph still says what the job would have deployed to. Values stay
-        // as written — an ignored field's expressions are never evaluated.
+        // Frontend facts preserved on `start`: the deployment target the run
+        // ignores (the reader warned; values stay as written — an ignored field's
+        // expressions are never evaluated), and what each matrix leg's `runs-on`
+        // resolved to.
+        let mut meta = Map::new();
         if let Some(environment) = &job.environment {
-            let mut target = serde_json::Map::new();
+            let mut target = Map::new();
             target.insert("name".into(), json!(scalar_text(environment.name)));
             if let Some(url) = environment.url {
                 target.insert("url".into(), json!(scalar_text(url)));
@@ -195,7 +203,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
             if let Some(deployment) = environment.deployment {
                 target.insert("deployment".into(), json!(scalar_text(deployment)));
             }
-            self.b.set_meta(start, json!({ "environment": target }));
+            meta.insert("environment".into(), Value::Object(target));
+        }
+        if let Some(legs) = self.leg_runs_on.get(&job.id) {
+            meta.insert("runs_on".into(), legs.clone());
+        }
+        if !meta.is_empty() {
+            self.b.set_meta(start, Value::Object(meta));
         }
         self.spans.insert(start, job.span.clone());
         let done = self.b.add_node(
@@ -310,23 +324,40 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 );
             }
             Some(node) => {
-                let labels: Vec<(String, Span)> = if let Some(s) = node.as_str() {
-                    vec![(s.to_string(), node.span())]
+                let raw: Vec<runs_on::RawLabel> = if let Some(s) = node.as_str() {
+                    vec![runs_on::RawLabel {
+                        text: s.to_string(),
+                        span: node.span(),
+                        whole: true,
+                    }]
                 } else if let Some(seq) = node.as_sequence() {
                     seq.iter()
-                        .filter_map(|n| n.as_str().map(|s| (s.to_string(), n.span())))
+                        .filter_map(|n| {
+                            n.as_str().map(|s| runs_on::RawLabel {
+                                text: s.to_string(),
+                                span: n.span(),
+                                whole: false,
+                            })
+                        })
                         .collect()
                 } else if let Some(m) = node.as_mapping() {
                     // `runs-on: { group: …, labels: … }`
                     let mut out = Vec::new();
                     if let Some(labels) = m.get("labels") {
                         if let Some(one) = labels.as_str() {
-                            out.push((one.to_string(), labels.span()));
+                            out.push(runs_on::RawLabel {
+                                text: one.to_string(),
+                                span: labels.span(),
+                                whole: false,
+                            });
                         } else if let Some(seq) = labels.as_sequence() {
-                            out.extend(
-                                seq.iter()
-                                    .filter_map(|n| n.as_str().map(|s| (s.to_string(), n.span()))),
-                            );
+                            out.extend(seq.iter().filter_map(|n| {
+                                n.as_str().map(|s| runs_on::RawLabel {
+                                    text: s.to_string(),
+                                    span: n.span(),
+                                    whole: false,
+                                })
+                            }));
                         }
                     }
                     if let Some(group) = m.get("group") {
@@ -341,42 +372,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 } else {
                     Vec::new()
                 };
-                for (label, span) in labels {
-                    if label.contains("${{") {
-                        self.diags.unsupported(
-                            "runs_on.expression",
-                            span,
-                            format!("`runs-on: {label}` is an expression"),
-                            "each matrix leg would need its own environment, and the IR has one scope per job \
-                             (a spec finding); use a fixed label, or one job per OS",
-                        );
-                        continue;
+                if raw.iter().any(|l| l.text.contains("${{")) {
+                    self.expression_runs_on(job, node, &raw, &mut spec);
+                } else {
+                    for label in raw {
+                        self.check_label(&mut spec, &label.text, label.span, None);
                     }
-                    let lowered = label.to_lowercase();
-                    if lowered.starts_with("windows") {
-                        self.diags.unsupported(
-                            "runs_on.windows",
-                            span,
-                            format!("`runs-on: {label}`"),
-                            "Windows runners are out of scope; the local executor emulates Linux runners",
-                        );
-                    } else if lowered.starts_with("macos") {
-                        self.diags.unsupported(
-                            "runs_on.macos",
-                            span,
-                            format!("`runs-on: {label}`"),
-                            "macOS runners are out of scope; the local executor emulates Linux runners",
-                        );
-                    } else if lowered == "self-hosted" || !KNOWN_RUNS_ON.contains(&lowered.as_str())
-                    {
-                        self.diags.unsupported(
-                            "runs_on.unknown",
-                            span,
-                            format!("`runs-on: {label}` is not a label the local executor knows"),
-                            &format!("known labels: {}", KNOWN_RUNS_ON.join(", ")),
-                        );
-                    }
-                    spec.requirements.push(SmolStr::new(label));
                 }
             }
         }
@@ -423,6 +424,145 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
         spec
+    }
+
+    /// `runs-on` carrying expressions: resolved now, once per matrix leg, as
+    /// GitHub resolves it at queue time with that leg's `matrix` in scope. The
+    /// legs come from the same combinators the engine expands with, so the leg
+    /// set here and the leg set at run time cannot disagree. Each leg's labels
+    /// go through the same placement policy as literal labels — a rejected leg
+    /// names itself, and does not stop the others from resolving — and their
+    /// union becomes the scope's requirements. Per-leg results are preserved on
+    /// the job's `start` node ([`Self::job_shell`]).
+    fn expression_runs_on(
+        &mut self,
+        job: &Job<'a>,
+        node: Node<'_>,
+        raw: &[runs_on::RawLabel],
+        spec: &mut RuntimeSpec,
+    ) {
+        let legs = match job.strategy.as_ref().and_then(|s| s.matrix) {
+            // No matrix: the expression still resolves, over an empty `matrix`.
+            None => Some(vec![json!({})]),
+            Some(matrix) => runs_on::static_legs(matrix),
+        };
+        let Some(legs) = legs else {
+            self.diags.unsupported(
+                "runs_on.expression",
+                node.span(),
+                format!(
+                    "job `{}`: `runs-on` is an expression and the matrix is not static",
+                    job.id
+                ),
+                "the matrix carries expressions, so its legs — and each leg's `runs-on` — are \
+                 unknown before the run; use literal matrix values or a fixed label",
+            );
+            return;
+        };
+        let compiled = match runs_on::compile(raw) {
+            Ok(compiled) => compiled,
+            Err(failure) => {
+                self.runs_on_failure(job, failure, None);
+                return;
+            }
+        };
+        let mut resolved = Vec::with_capacity(legs.len());
+        for leg in &legs {
+            match compiled.labels_for(leg) {
+                Ok(labels) => {
+                    let only: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
+                    let against = job.strategy.as_ref().and_then(|s| s.matrix).map(|_| leg);
+                    for (label, span) in &labels {
+                        self.check_label(spec, label, span.clone(), against);
+                    }
+                    resolved.push(json!({ "leg": leg, "labels": only }));
+                }
+                // One leg failing to resolve does not stop the others.
+                Err(failure) => self.runs_on_failure(job, failure, Some(leg)),
+            }
+        }
+        self.leg_runs_on
+            .insert(job.id.clone(), Value::Array(resolved));
+    }
+
+    /// One label through the placement policy: Windows and macOS are out of
+    /// scope, an unknown label is a driver decision, and whatever passes joins
+    /// the scope's requirements — each label once, so a label shared by many
+    /// legs is checked and reported once.
+    fn check_label(
+        &mut self,
+        spec: &mut RuntimeSpec,
+        label: &str,
+        span: Span,
+        leg: Option<&Value>,
+    ) {
+        if spec.requirements.iter().any(|r| r == label) {
+            return;
+        }
+        let place = leg.map(|l| format!(" (matrix leg {l})")).unwrap_or_default();
+        let lowered = label.to_lowercase();
+        if lowered.starts_with("windows") {
+            self.diags.unsupported(
+                "runs_on.windows",
+                span,
+                format!("`runs-on: {label}`{place}"),
+                "Windows runners are out of scope; the local executor emulates Linux runners",
+            );
+        } else if lowered.starts_with("macos") {
+            self.diags.unsupported(
+                "runs_on.macos",
+                span,
+                format!("`runs-on: {label}`{place}"),
+                "macOS runners are out of scope; the local executor emulates Linux runners",
+            );
+        } else if lowered == "self-hosted" || !KNOWN_RUNS_ON.contains(&lowered.as_str()) {
+            self.diags.unsupported(
+                "runs_on.unknown",
+                span,
+                format!("`runs-on: {label}`{place} is not a label the local executor knows"),
+                &format!("known labels: {}", KNOWN_RUNS_ON.join(", ")),
+            );
+        }
+        spec.requirements.push(SmolStr::new(label));
+    }
+
+    /// Why a `runs-on` did not resolve at lowering, as the one
+    /// `runs_on.expression` rejection with the specifics in the message.
+    fn runs_on_failure(&mut self, job: &Job<'a>, failure: runs_on::Failure, leg: Option<&Value>) {
+        let for_leg = leg
+            .map(|l| format!(" for matrix leg {l}"))
+            .unwrap_or_default();
+        match failure {
+            runs_on::Failure::RunTimeContext { name, span } => self.diags.unsupported(
+                "runs_on.expression",
+                span,
+                format!(
+                    "job `{}`: `runs-on` reads `{name}`, which has no value before the run{for_leg}",
+                    job.id
+                ),
+                "`runs-on` is resolved at lowering, where only `matrix` has a value; `github`, \
+                 `needs` and `inputs` are run-time contexts — use a fixed label or matrix values",
+            ),
+            runs_on::Failure::Bad { message, span } => self.diags.unsupported(
+                "runs_on.expression",
+                span,
+                format!(
+                    "job `{}`: `runs-on` cannot be resolved at lowering{for_leg}: {message}",
+                    job.id
+                ),
+                "`runs-on` is resolved at lowering, per matrix leg; use matrix values, literals, \
+                 and the documented functions over them",
+            ),
+            runs_on::Failure::NotLabels { got, span } => self.diags.unsupported(
+                "runs_on.expression",
+                span,
+                format!(
+                    "job `{}`: `runs-on` evaluated to {got}{for_leg}, not a label or list of labels",
+                    job.id
+                ),
+                "each leg's `runs-on` must resolve to a string or a list of strings",
+            ),
+        }
     }
 
     /// Steps, preconditions, config, and the matrix expansion.

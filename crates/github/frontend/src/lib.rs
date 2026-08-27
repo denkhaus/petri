@@ -47,12 +47,19 @@
 //! a `fail_fast` scope cancel, which root-only `run.cancelled` cannot see — still
 //! reads as cancelled.
 //!
-//! # One thing the engine cannot do today
+//! # `runs-on: ${{ matrix.os }}`
 //!
-//! Reported as a spec finding rather than worked around:
-//!
-//! - **`runs-on: ${{ matrix.os }}`.** Each matrix leg would need its own environment,
-//!   and the IR has one scope per job. Rejected as `unsupported.runs_on.expression`.
+//! Resolved at lowering, once per leg ([`runs_on`]): the static matrix expands
+//! through the same combinators the engine runs, each leg's labels go through
+//! the same placement policy as literal labels, and the union becomes the
+//! scope's requirements — sound because every supported label names a Linux
+//! environment the one local executor provides, so the legs share a scope. The
+//! per-leg results are preserved on the job's `start` node meta. What has no
+//! value before the run — `github`, `needs`, `inputs`, a matrix whose legs are
+//! themselves expressions — stays rejected as `unsupported.runs_on.expression`.
+//! When labels can map to *different* environments (a configurable resolver),
+//! legs whose labels differ will need their own scopes; the IR has one scope
+//! per job, which remains a spec finding for that day.
 
 pub mod action;
 pub mod composite;
@@ -61,6 +68,7 @@ pub mod exprs;
 pub mod gate;
 pub mod lower;
 pub mod model;
+pub mod runs_on;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;

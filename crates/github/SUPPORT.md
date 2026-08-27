@@ -17,9 +17,14 @@ specific code and a hint. `gha.*` codes are malformed-file errors (a missing
 functions (`success`, `failure`, `always`, `cancelled` — cleanup steps really run
 after a cancel), `env` at workflow/job/step level, `defaults.run`, job `outputs`,
 `timeout-minutes`, `continue-on-error` (literal), `strategy.matrix` with
-`include`/`exclude`, `fail-fast` and `max-parallel`. `on:` is accepted as
-metadata — a local run fires the workflow directly; `github.event` comes from the
-run's parameters.
+`include`/`exclude`, `fail-fast` and `max-parallel`. `runs-on: ${{ matrix.os }}`
+— and any `runs-on` over `matrix` values, `fromJSON`, templates and the
+documented functions — resolves at lowering, once per leg, through the same
+matrix expansion the engine runs; each leg's labels face the same placement
+policy as literal labels (Linux labels the executor knows), a rejected leg names
+itself without stopping the others, and the per-leg results are preserved on the
+job's `start` node. `on:` is accepted as metadata — a local run fires the
+workflow directly; `github.event` comes from the run's parameters.
 
 **Steps.** `run:` steps; `uses:` for JavaScript actions (fetched from their
 repositories, resolved to a pinned commit at load time, `pre`/`main`/`post`
@@ -87,7 +92,7 @@ workflow counts in brackets rank the pressure.
 |---|---|---|
 | `workflow_call` | Reusable workflows [92] | Resolve and inline the called workflow, as remote composites are inlined today. |
 | `inputs`, `workflow_dispatch.inputs` | `inputs` context, dispatch inputs [70, 46] | Falls out of reusable-workflow support plus run parameters. |
-| `runs_on.expression` | `runs-on: ${{ matrix.os }}` [47] | Split the matrix into one job per leg in the frontend. |
+| `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`-valued expressions resolve per leg now (above); what remains reads run-time contexts (`github`, `needs`, `inputs`) or a dynamic matrix. `inputs` falls out of reusable-workflow support; the rest are run parameters no lowering can know. |
 | `action.docker`, `services`, `container.expression`, `container.options` | The Docker tier [18, 5, 4] | Docker container actions, service containers, container options — shelling out to `docker` the way actions are fetched with `git`. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
