@@ -73,6 +73,7 @@ workflow counts in brackets rank the pressure.
 | `workflow_call` | Reusable workflows [92] | Resolve and inline the called workflow, as remote composites are inlined today. |
 | `inputs`, `workflow_dispatch.inputs` | `inputs` context, dispatch inputs [70, 46] | Falls out of reusable-workflow support plus run parameters. |
 | `runs_on.expression` | `runs-on: ${{ matrix.os }}` [47] | Split the matrix into one job per leg in the frontend. |
+| `environment` | Deployment environments [46] | Undecided — likely ignored with a warning, like `permissions`: protection rules are a GitHub server feature, and environment-scoped secrets would come from the run's secret provider. Rejected until that call is made. |
 | `action.docker`, `services`, `container.expression`, `container.options` | The Docker tier [18, 5, 4] | Docker container actions, service containers, container options — shelling out to `docker` the way actions are fetched with `git`. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |

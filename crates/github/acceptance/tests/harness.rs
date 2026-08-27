@@ -134,9 +134,11 @@ fn every_rejection_code_is_declared_in_support_md() {
             }
         }
     }
+    // A code counts as declared only written as a code — backticked — so prose
+    // that happens to contain the word does not.
     let missing: Vec<&String> = codes
         .iter()
-        .filter(|code| !support.contains(code.as_str()))
+        .filter(|code| !support.contains(&format!("`{code}`")))
         .collect();
     assert!(
         missing.is_empty(),
