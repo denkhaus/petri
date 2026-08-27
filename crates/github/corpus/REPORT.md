@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 276 references, 1
 | Result | Count | Share |
 |---|---|---|
 | lowered clean | 14 | 4% |
-| lowered with warnings | 112 | 35% |
-| rejected with a specific `unsupported.*` code | 190 | 60% |
+| lowered with warnings | 121 | 38% |
+| rejected with a specific `unsupported.*` code | 181 | 57% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -68,7 +68,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `workflow_call` | 92 |
 | `inputs` | 70 |
 | `runs_on.expression` | 47 |
-| `environment` | 46 |
 | `workflow_dispatch.inputs` | 46 |
 | `runs_on.unknown` | 22 |
 | `action.docker` | 18 |
@@ -105,28 +104,28 @@ None. Every workflow either lowered or was rejected with a specific code.
 | actions/checkout | `update-main-version.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | actions/checkout | `update-test-ubuntu-git.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
 | astral-sh/ruff | `build-binaries.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown`, `workflow_call` |
-| astral-sh/ruff | `build-docker.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
+| astral-sh/ruff | `build-docker.yml` | unsupported | — | `inputs`, `workflow_call` |
 | astral-sh/ruff | `build-wasm.yml` | unsupported | — | `workflow_call` |
 | astral-sh/ruff | `ci.yaml` | unsupported | — | `runs_on.expression`, `runs_on.unknown`, `shell.powershell`, `timeout.expression` |
 | astral-sh/ruff | `daily_fuzz.yaml` | warnings | 15 | — |
 | astral-sh/ruff | `memory_report.yaml` | unsupported | — | `runs_on.expression` |
-| astral-sh/ruff | `notify-dependents.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/ruff | `publish-crates.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/ruff | `publish-docs.yml` | unsupported | — | `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/ruff | `publish-mirror.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
-| astral-sh/ruff | `publish-playground.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/ruff | `publish-pypi.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/ruff | `publish-ty-playground.yml` | unsupported | — | `environment` |
-| astral-sh/ruff | `publish-versions.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
-| astral-sh/ruff | `publish-wasm.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
-| astral-sh/ruff | `release.yml` | unsupported | — | `environment`, `inputs`, `runs_on.unknown`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/ruff | `notify-dependents.yml` | unsupported | — | `workflow_call` |
+| astral-sh/ruff | `publish-crates.yml` | unsupported | — | `workflow_call` |
+| astral-sh/ruff | `publish-docs.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/ruff | `publish-mirror.yml` | unsupported | — | `inputs`, `workflow_call` |
+| astral-sh/ruff | `publish-playground.yml` | unsupported | — | `workflow_call` |
+| astral-sh/ruff | `publish-pypi.yml` | unsupported | — | `workflow_call` |
+| astral-sh/ruff | `publish-ty-playground.yml` | warnings | 23 | — |
+| astral-sh/ruff | `publish-versions.yml` | unsupported | — | `inputs`, `workflow_call` |
+| astral-sh/ruff | `publish-wasm.yml` | unsupported | — | `inputs`, `workflow_call` |
+| astral-sh/ruff | `release.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call`, `workflow_dispatch.inputs` |
 | astral-sh/ruff | `sync_typeshed.yaml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `runs_on.windows` |
 | astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | unsupported | — | `runs_on.expression` |
 | astral-sh/ruff | `ty-ecosystem-report.yaml` | unsupported | — | `runs_on.expression` |
 | astral-sh/ruff | `typing_conformance.yaml` | unsupported | — | `runs_on.expression` |
 | astral-sh/uv | `bench.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
 | astral-sh/uv | `build-dev-binaries.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
-| astral-sh/uv | `build-docker.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
+| astral-sh/uv | `build-docker.yml` | unsupported | — | `inputs`, `workflow_call` |
 | astral-sh/uv | `build-release-binaries.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown`, `timeout.expression`, `workflow_call` |
 | astral-sh/uv | `check-docs.yml` | unsupported | — | `workflow_call` |
 | astral-sh/uv | `check-fmt.yml` | unsupported | — | `workflow_call` |
@@ -136,41 +135,41 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/uv | `check-publish.yml` | unsupported | — | `runs_on.unknown`, `workflow_call` |
 | astral-sh/uv | `check-release.yml` | unsupported | — | `workflow_call` |
 | astral-sh/uv | `check-zizmor.yml` | unsupported | — | `workflow_call` |
-| astral-sh/uv | `ci.yml` | unsupported | — | `action.nested_local`, `environment`, `workflow_call` |
-| astral-sh/uv | `diagnose-workflow-failure.yml` | unsupported | — | `environment`, `inputs`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `fix-bug.yml` | unsupported | — | `environment`, `inputs`, `runs_on.expression`, `workflow_call` |
-| astral-sh/uv | `issue-triage.yml` | unsupported | — | `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `ci.yml` | unsupported | — | `action.nested_local`, `workflow_call` |
+| astral-sh/uv | `diagnose-workflow-failure.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `fix-bug.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_call` |
+| astral-sh/uv | `issue-triage.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
 | astral-sh/uv | `plan.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
-| astral-sh/uv | `promote-pull-request.yml` | unsupported | — | `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `publish-crates.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/uv | `publish-docs.yml` | unsupported | — | `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `publish-mirror.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
-| astral-sh/uv | `publish-pypi.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/uv | `publish-versions.yml` | unsupported | — | `environment`, `inputs`, `workflow_call` |
+| astral-sh/uv | `promote-pull-request.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `publish-crates.yml` | unsupported | — | `workflow_call` |
+| astral-sh/uv | `publish-docs.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `publish-mirror.yml` | unsupported | — | `inputs`, `workflow_call` |
+| astral-sh/uv | `publish-pypi.yml` | unsupported | — | `workflow_call` |
+| astral-sh/uv | `publish-versions.yml` | unsupported | — | `inputs`, `workflow_call` |
 | astral-sh/uv | `pull-request-conflicts.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `pull-request-labels.yml` | unsupported | — | `environment`, `inputs`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `pull-request-security-review.yml` | unsupported | — | `environment`, `workflow_call` |
-| astral-sh/uv | `rebase-conflicted-pull-request.yml` | unsupported | — | `environment`, `inputs`, `runs_on.unknown`, `workflow_call` |
-| astral-sh/uv | `release-prepare.yml` | unsupported | — | `environment`, `inputs`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `release.yml` | unsupported | — | `environment`, `inputs`, `runs_on.unknown`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `reproduce-bug.yml` | unsupported | — | `environment`, `inputs`, `runs_on.expression`, `workflow_call`, `workflow_dispatch.inputs` |
-| astral-sh/uv | `sync-python-releases.yml` | unsupported | — | `environment` |
-| astral-sh/uv | `sync-uv-dev.yml` | unsupported | — | `environment` |
-| astral-sh/uv | `sync-uv-security.yml` | unsupported | — | `environment` |
+| astral-sh/uv | `pull-request-labels.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `pull-request-security-review.yml` | unsupported | — | `workflow_call` |
+| astral-sh/uv | `rebase-conflicted-pull-request.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
+| astral-sh/uv | `release-prepare.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `release.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `reproduce-bug.yml` | unsupported | — | `inputs`, `runs_on.expression`, `workflow_call`, `workflow_dispatch.inputs` |
+| astral-sh/uv | `sync-python-releases.yml` | warnings | 14 | — |
+| astral-sh/uv | `sync-uv-dev.yml` | warnings | 5 | — |
+| astral-sh/uv | `sync-uv-security.yml` | warnings | 6 | — |
 | astral-sh/uv | `test-ecosystem.yml` | unsupported | — | `inputs`, `workflow_call` |
-| astral-sh/uv | `test-integration.yml` | unsupported | — | `environment`, `inputs`, `runs_on.expression`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
+| astral-sh/uv | `test-integration.yml` | unsupported | — | `inputs`, `runs_on.expression`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test-smoke.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.unknown`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test-system.yml` | unsupported | — | `container.expression`, `container.options`, `inputs`, `runs_on.expression`, `runs_on.macos`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test-windows-trampolines.yml` | unsupported | — | `inputs`, `runs_on.expression`, `runs_on.windows`, `workflow_call` |
 | astral-sh/uv | `test.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
-| astral-sh/uv | `update-issue-context.yml` | unsupported | — | `environment` |
+| astral-sh/uv | `update-issue-context.yml` | warnings | 33 | — |
 | astral-sh/uv | `update-pull-request-parent.yml` | unsupported | — | `inputs`, `workflow_call` |
 | cli/cli | `agentics-maintenance.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
 | cli/cli | `bump-go.yml` | warnings | 7 | — |
 | cli/cli | `codeql.yml` | warnings | 13 | — |
 | cli/cli | `copilot-setup-steps.yml` | warnings | 6 | — |
 | cli/cli | `dependabot-triage.lock.yml` | unsupported | — | `workflow_dispatch.inputs` |
-| cli/cli | `deployment.yml` | unsupported | — | `environment`, `inputs`, `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
+| cli/cli | `deployment.yml` | unsupported | — | `inputs`, `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
 | cli/cli | `go.yml` | unsupported | — | `runs_on.expression` |
 | cli/cli | `govulncheck.yml` | warnings | 9 | — |
 | cli/cli | `issue-triage.lock.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
@@ -179,14 +178,14 @@ None. Every workflow either lowered or was rejected with a specific code.
 | cli/cli | `triage-pull-requests.yml` | unsupported | — | `workflow_call` |
 | cli/cli | `triage-scheduled-tasks.yml` | unsupported | — | `workflow_call` |
 | denoland/deno | `cargo_publish.generated.yml` | unsupported | — | `runs_on.unknown` |
-| denoland/deno | `ci.generated.yml` | unsupported | — | `environment`, `runs_on.expression`, `runs_on.macos`, `runs_on.windows`, `shell.powershell` |
+| denoland/deno | `ci.generated.yml` | unsupported | — | `runs_on.expression`, `runs_on.macos`, `runs_on.windows`, `shell.powershell` |
 | denoland/deno | `create_prerelease_tag.generated.yml` | warnings | 8 | — |
 | denoland/deno | `ecosystem_compat_test.generated.yml` | unsupported | — | `runs_on.expression` |
 | denoland/deno | `node_compat_test.generated.yml` | unsupported | — | `runs_on.expression` |
 | denoland/deno | `npm_publish.generated.yml` | unsupported | — | `inputs`, `runs_on.expression`, `shell.cmd`, `workflow_dispatch.inputs` |
 | denoland/deno | `post_publish.generated.yml` | clean | 11 | — |
 | denoland/deno | `pr.generated.yml` | clean | 5 | — |
-| denoland/deno | `promote_to_release.generated.yml` | unsupported | — | `environment`, `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
+| denoland/deno | `promote_to_release.generated.yml` | unsupported | — | `runs_on.macos`, `runs_on.windows`, `workflow_dispatch.inputs` |
 | denoland/deno | `start_release.generated.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | denoland/deno | `version_bump.generated.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | django/django | `benchmark.yml` | warnings | 10 | — |
@@ -203,7 +202,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | django/django | `postgis.yml` | warnings | 12 | — |
 | django/django | `python_matrix.yml` | warnings | 15 | — |
 | django/django | `schedule_tests.yml` | unsupported | — | `runs_on.windows`, `services` |
-| django/django | `schedules.yml` | unsupported | — | `environment` |
+| django/django | `schedules.yml` | warnings | 3 | — |
 | django/django | `screenshots.yml` | warnings | 17 | — |
 | django/django | `tests.yml` | unsupported | — | `runs_on.windows` |
 | facebook/react | `compiler_discord_notify.yml` | unsupported | — | `workflow_call` |
@@ -220,7 +219,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | facebook/react | `runtime_discord_notify.yml` | unsupported | — | `workflow_call` |
 | facebook/react | `runtime_eslint_plugin_e2e.yml` | warnings | 14 | — |
 | facebook/react | `runtime_fuzz_tests.yml` | warnings | 8 | — |
-| facebook/react | `runtime_release_from_ci.yml` | unsupported | — | `environment`, `inputs`, `workflow_dispatch.inputs` |
+| facebook/react | `runtime_release_from_ci.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
 | facebook/react | `runtime_sizebot_comment.yml` | warnings | 10 | — |
 | facebook/react | `shared_check_maintainer.yml` | unsupported | — | `inputs`, `workflow_call` |
 | facebook/react | `shared_cleanup_merged_branch_caches.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
@@ -283,7 +282,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | nodejs/node | `update-v8.yml` | warnings | 12 | — |
 | nodejs/node | `update-wpt.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | ohmyzsh/ohmyzsh | `dependencies.yml` | warnings | 12 | — |
-| ohmyzsh/ohmyzsh | `installer.yml` | unsupported | — | `environment`, `runs_on.expression` |
+| ohmyzsh/ohmyzsh | `installer.yml` | unsupported | — | `runs_on.expression` |
 | ohmyzsh/ohmyzsh | `main.yml` | warnings | 9 | — |
 | ohmyzsh/ohmyzsh | `project.yml` | warnings | 11 | — |
 | ohmyzsh/ohmyzsh | `scorecard.yml` | unsupported | — | `action.docker` |
@@ -300,7 +299,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | pola-rs/polars | `lint-rust.yml` | warnings | 38 | — |
 | pola-rs/polars | `pr-labeler.yml` | warnings | 5 | — |
 | pola-rs/polars | `release-drafter.yml` | unsupported | — | `inputs`, `workflow_dispatch.inputs` |
-| pola-rs/polars | `release-python.yml` | unsupported | — | `action.nested_local`, `environment`, `inputs`, `runs_on.expression`, `shell.powershell`, `workflow_dispatch.inputs` |
+| pola-rs/polars | `release-python.yml` | unsupported | — | `action.nested_local`, `inputs`, `runs_on.expression`, `shell.powershell`, `workflow_dispatch.inputs` |
 | pola-rs/polars | `release-rust.yml` | clean | 4 | — |
 | pola-rs/polars | `test-bytecode-parser.yml` | warnings | 8 | — |
 | pola-rs/polars | `test-coverage.yml` | unsupported | — | `runs_on.macos` |
@@ -353,12 +352,12 @@ None. Every workflow either lowered or was rejected with a specific code.
 | rails/rails | `rail_inspector.yml` | warnings | 7 | — |
 | rails/rails | `rails-new-docker.yml` | warnings | 13 | — |
 | rails/rails | `rails_releaser_tests.yml` | warnings | 7 | — |
-| rails/rails | `release.yml` | unsupported | — | `environment` |
+| rails/rails | `release.yml` | warnings | 12 | — |
 | rails/rails | `stale.yml` | warnings | 3 | — |
 | rust-lang/cargo | `audit.yml` | unsupported | — | `action.docker` |
-| rust-lang/cargo | `contrib.yml` | unsupported | — | `environment` |
+| rust-lang/cargo | `contrib.yml` | warnings | 13 | — |
 | rust-lang/cargo | `main.yml` | unsupported | — | `runs_on.expression` |
-| rust-lang/cargo | `release.yml` | unsupported | — | `environment` |
+| rust-lang/cargo | `release.yml` | warnings | 5 | — |
 | serde-rs/serde | `ci.yml` | unsupported | — | `runs_on.expression`, `runs_on.windows` |
 | sharkdp/bat | `CICD.yml` | unsupported | — | `runs_on.expression`, `shell.powershell` |
 | sharkdp/bat | `require-changelog-for-PRs.yml` | clean | 7 | — |
@@ -374,10 +373,10 @@ None. Every workflow either lowered or was rejected with a specific code.
 | tokio-rs/tokio | `stress-test.yml` | warnings | 23 | — |
 | tokio-rs/tokio | `uring-kernel-version-test.yml` | unsupported | — | `inputs`, `workflow_call` |
 | vercel/next.js | `automated_code_review.yml` | unsupported | — | `action.remote` |
-| vercel/next.js | `build_and_deploy.yml` | unsupported | — | `environment`, `runs_on.expression`, `runs_on.unknown`, `shell.powershell` |
+| vercel/next.js | `build_and_deploy.yml` | unsupported | — | `runs_on.expression`, `runs_on.unknown`, `shell.powershell` |
 | vercel/next.js | `build_and_test.yml` | unsupported | — | `workflow_call` |
 | vercel/next.js | `build_reusable.yml` | unsupported | — | `inputs`, `runs_on.expression`, `shell.powershell`, `step.background`, `timeout.expression`, `workflow_call` |
-| vercel/next.js | `code_freeze.yml` | unsupported | — | `environment`, `workflow_dispatch.inputs` |
+| vercel/next.js | `code_freeze.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | vercel/next.js | `create_release_branch.yml` | unsupported | — | `workflow_dispatch.inputs` |
 | vercel/next.js | `integration_tests_reusable.yml` | unsupported | — | `inputs`, `runs_on.unknown`, `workflow_call` |
 | vercel/next.js | `issue_lock.yml` | warnings | 3 | — |
@@ -389,7 +388,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | vercel/next.js | `pr_stack_optimizer.yml` | unsupported | — | `workflow_call` |
 | vercel/next.js | `pull_request_auto_label.yml` | warnings | 3 | — |
 | vercel/next.js | `pull_request_stats.yml` | unsupported | — | `action.docker`, `runs_on.unknown`, `workflow_call` |
-| vercel/next.js | `release-next-rspack.yml` | unsupported | — | `environment`, `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
+| vercel/next.js | `release-next-rspack.yml` | unsupported | — | `inputs`, `workflow_call`, `workflow_dispatch.inputs` |
 | vercel/next.js | `retry_deploy_test.yml` | warnings | 6 | — |
 | vercel/next.js | `retry_test.yml` | warnings | 8 | — |
 | vercel/next.js | `rspack-nextjs-build-integration-tests.yml` | unsupported | — | `workflow_call` |

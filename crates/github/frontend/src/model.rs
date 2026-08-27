@@ -36,10 +36,23 @@ pub struct Job<'a> {
     pub continue_on_error: Option<Node<'a>>,
     pub timeout_minutes: Option<Node<'a>>,
     pub outputs: Vec<(String, Node<'a>)>,
+    pub environment: Option<Environment<'a>>,
     pub steps: Vec<Step<'a>>,
     /// The job calls a reusable workflow (`uses:`). Already rejected; the rest of the
     /// reader stays quiet about what such a job is missing.
     pub reusable: bool,
+}
+
+/// The deployment environment a job targets. Its enforcement — approvals,
+/// protection rules, wait timers, environment-scoped secrets — lives on GitHub's
+/// servers, so a local run ignores it with a warning; the name, URL and
+/// `deployment` flag are kept so the graph can say what the job would have
+/// deployed to. Any value may be an expression, which stays as written: an
+/// ignored field is never evaluated.
+pub struct Environment<'a> {
+    pub name: Node<'a>,
+    pub url: Option<Node<'a>>,
+    pub deployment: Option<Node<'a>>,
 }
 
 pub struct Strategy<'a> {
@@ -197,14 +210,9 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
             "reusable workflows are v2; inline the called workflow's jobs",
         );
     }
-    if let Some(e) = m.get("environment") {
-        diags.unsupported(
-            "environment",
-            e.span(),
-            format!("job `{id}` targets a deployment environment"),
-            "environment protection rules and secrets are a GitHub server feature; remove `environment:` to run locally",
-        );
-    }
+    let environment = m
+        .get("environment")
+        .and_then(|e| read_environment(id, e, diags));
     if let Some(p) = m.get("permissions") {
         diags.warning(
             "ignored.permissions",
@@ -280,9 +288,72 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
         continue_on_error: m.get("continue-on-error"),
         timeout_minutes: m.get("timeout-minutes"),
         outputs: env_entries(m.get("outputs"), diags, &format!("job `{id}` outputs")),
+        environment,
         steps,
         reusable: m.contains_key("uses"),
     })
+}
+
+/// `environment:` — a name, or a `{name, url}` mapping. The shape is validated
+/// (a malformed value is still an error), the target is kept, and the job lowers
+/// with a warning naming the semantics a local run does not have. Secrets scoped
+/// to the environment stay unavailable: the secret provider has no environment
+/// scope to serve them from.
+fn read_environment<'a>(
+    job: &str,
+    node: Node<'a>,
+    diags: &mut Diagnostics,
+) -> Option<Environment<'a>> {
+    let environment = if node.is_scalar() {
+        Some(Environment {
+            name: node,
+            url: None,
+            deployment: None,
+        })
+    } else if let Some(m) = node.as_mapping() {
+        m.reject_unknown_keys(
+            &["name", "url", "deployment"],
+            diags,
+            &format!("job `{job}` environment"),
+        );
+        let name = m.get("name");
+        if name.is_none() {
+            diags.error(
+                "gha.bad_environment",
+                node.span(),
+                format!("job `{job}`: an `environment` mapping needs a `name`"),
+            );
+        }
+        let scalar = |key: &str, diags: &mut Diagnostics| {
+            m.get(key)
+                .and_then(|v| v.expect_scalar(diags, &format!("`environment.{key}`")).map(|_| v))
+        };
+        let url = scalar("url", diags);
+        let deployment = scalar("deployment", diags);
+        name.and_then(|n| n.expect_scalar(diags, "`environment.name`").map(|_| n))
+            .map(|name| Environment {
+                name,
+                url,
+                deployment,
+            })
+    } else {
+        diags.error(
+            "gha.bad_environment",
+            node.span(),
+            format!("job `{job}`: `environment` must be a name or a `{{name, url}}` mapping"),
+        );
+        None
+    };
+    if environment.is_some() {
+        diags.warning(
+            "ignored.environment",
+            node.span(),
+            "`environment` is ignored: approvals, protection rules, wait timers, and \
+             environment-scoped secrets and variables are GitHub server features and do not \
+             apply to a local run",
+        );
+    }
+    environment
 }
 
 pub fn read_step<'a>(

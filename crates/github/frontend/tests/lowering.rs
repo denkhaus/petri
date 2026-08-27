@@ -177,6 +177,86 @@ fn concurrency_lowers_with_a_warning() {
     );
 }
 
+/// `environment:` lowers — approvals, protection rules and environment-scoped
+/// secrets are GitHub server features a local run cannot enforce — but never
+/// silently, and the target survives on the job's `start` node so the graph says
+/// what the job would have deployed to. Expression-valued names stay as written:
+/// an ignored field is never evaluated.
+#[test]
+fn environment_lowers_with_a_warning_and_the_target_is_preserved() {
+    let text = r#"
+on: push
+jobs:
+  simple:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo
+  full:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+      deployment: true
+    steps:
+      - run: echo
+"#;
+    let graph = lower_ok(text);
+    let meta = |name: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .meta
+            .clone()
+    };
+    assert_eq!(
+        meta("simple/start"),
+        json!({ "environment": { "name": "production" } })
+    );
+    assert_eq!(
+        meta("full/start"),
+        json!({ "environment": {
+            "name": "${{ inputs.environment }}",
+            "url": "${{ steps.deploy.outputs.url }}",
+            "deployment": "true",
+        } })
+    );
+    let diags = diagnostics(text);
+    let warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == "ignored.environment")
+        .collect();
+    assert_eq!(warnings.len(), 2, "{diags:?}");
+    for w in warnings {
+        assert_eq!(w.severity, Severity::Warning);
+        assert!(
+            w.message.contains("protection rules") && w.message.contains("secrets"),
+            "the warning names what a local run does not have: {}",
+            w.message
+        );
+    }
+
+    // Malformed values still fail: a list, a mapping with no name, a stray key.
+    for (bad, code) in [
+        ("environment: [a, b]", "gha.bad_environment"),
+        ("environment: { url: https://x }", "gha.bad_environment"),
+        ("environment: { name: p, on-failure: q }", "yaml.unknown_key"),
+    ] {
+        let text = format!(
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    {bad}\n    steps:\n      - run: echo\n"
+        );
+        let diags = diagnostics(&text);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == code && d.severity == Severity::Error),
+            "{bad}: {diags:?}"
+        );
+    }
+}
+
 /// Windows and macOS runners are out of scope: the local executor emulates
 /// Linux runners only.
 #[test]

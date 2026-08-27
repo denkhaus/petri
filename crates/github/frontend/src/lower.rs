@@ -181,6 +181,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if !matrix {
             self.b.node_mut(start).run_on_cancel = true;
         }
+        // The deployment target, preserved: the run ignores it (the reader warned),
+        // but the graph still says what the job would have deployed to. Values stay
+        // as written — an ignored field's expressions are never evaluated.
+        if let Some(environment) = &job.environment {
+            let mut target = serde_json::Map::new();
+            target.insert("name".into(), json!(scalar_text(environment.name)));
+            if let Some(url) = environment.url {
+                target.insert("url".into(), json!(scalar_text(url)));
+            }
+            if let Some(deployment) = environment.deployment {
+                target.insert("deployment".into(), json!(scalar_text(deployment)));
+            }
+            self.b.set_meta(start, json!({ "environment": target }));
+        }
         self.spans.insert(start, job.span.clone());
         let done = self.b.add_node(
             &format!("{}{SEP}done", job.id),
