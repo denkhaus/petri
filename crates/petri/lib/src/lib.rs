@@ -57,7 +57,10 @@ pub mod github {
 ///
 /// GitHub Actions comes with an action source that fetches from GitHub into
 /// [`github::default_cache_dir`], its two step kinds, and `GITHUB_TOKEN` as a secret
-/// when this machine has one (`$GITHUB_TOKEN`, else `gh auth token`).
+/// when this machine has one (`$GITHUB_TOKEN`, else `gh auth token`). Its runner
+/// map knows the `ubuntu-*` labels; `PETRI_RUNNER_LABELS` (labels separated by
+/// commas or whitespace) adds third-party or self-hosted labels that name Linux
+/// environments this machine can stand in for.
 ///
 /// A consumer that wants a different set builds one itself — `Runtime::standard()`
 /// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
@@ -65,8 +68,10 @@ pub fn runtime() -> Runtime {
     let actions = std::sync::Arc::new(github::GitActionSource::new(github::default_cache_dir()));
     let manifests: std::sync::Arc<dyn github::ActionSource> = actions.clone();
     let trees: std::sync::Arc<dyn github::ActionTreeSource> = actions;
+    let runners = frontend_gha::RunnerMap::builtin()
+        .allow_list(&std::env::var("PETRI_RUNNER_LABELS").unwrap_or_default());
     Runtime::standard()
-        .frontend(frontend_gha::GitHubActions::with_actions(manifests))
+        .frontend(frontend_gha::GitHubActions::with_actions(manifests).with_runners(runners))
         .step(github::RunStep)
         .step(github::ActionStep)
         .capability(github::ActionSourceCap(trees))

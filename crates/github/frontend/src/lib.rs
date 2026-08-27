@@ -68,6 +68,7 @@ pub mod exprs;
 pub mod gate;
 pub mod lower;
 pub mod model;
+pub mod runners;
 pub mod runs_on;
 
 use std::path::{Component, Path, PathBuf};
@@ -78,6 +79,7 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 pub use action::{ACTION_KIND, ActionSource, RUN_KIND, STATE_OUTPUT_KEY};
+pub use runners::RunnerMap;
 
 /// Parse and lower a workflow file, with no source for `uses: owner/repo@ref`
 /// actions: they are rejected as `unsupported.action.remote`.
@@ -86,12 +88,25 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
 }
 
 /// Parse and lower a workflow file. `actions` resolves `uses: owner/repo@ref`
-/// references while lowering, so the graph pins the commit each one runs.
+/// references while lowering, so the graph pins the commit each one runs. The
+/// runner map is the built-in one; [`load_configured`] takes the host's.
 pub fn load_with(
     file: &str,
     text: &str,
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
+) -> Lowered {
+    load_configured(file, text, files, actions, &RunnerMap::builtin())
+}
+
+/// [`load_with`], with the host's [`RunnerMap`] deciding which `runs-on` labels
+/// place on this machine.
+pub fn load_configured(
+    file: &str,
+    text: &str,
+    files: &dyn FileSource,
+    actions: Option<&dyn ActionSource>,
+    runners: &RunnerMap,
 ) -> Lowered {
     let mut diags = Diagnostics::new();
     let Some(doc) = frontend::yaml::Document::parse(file, text, &mut diags) else {
@@ -100,16 +115,19 @@ pub fn load_with(
     let Some(workflow) = model::read(&doc, &mut diags) else {
         return Lowered::rejected(diags);
     };
-    lower::lower(&workflow, files, actions, diags)
+    lower::lower(&workflow, files, actions, runners, diags)
 }
 
 /// GitHub Actions, as a [`Frontend`]: it claims anything under `.github/workflows/`.
 ///
 /// Without an [`ActionSource`] it lowers `run:` steps and local composites and
 /// rejects actions from other repositories; with one, those resolve at load time.
+/// The [`RunnerMap`] starts as the built-in `ubuntu-*` labels;
+/// [`Self::with_runners`] installs the host's configuration.
 #[derive(Default)]
 pub struct GitHubActions {
     actions: Option<Arc<dyn ActionSource>>,
+    runners: RunnerMap,
 }
 
 impl GitHubActions {
@@ -122,7 +140,14 @@ impl GitHubActions {
     pub fn with_actions(actions: Arc<dyn ActionSource>) -> Self {
         Self {
             actions: Some(actions),
+            runners: RunnerMap::builtin(),
         }
+    }
+
+    /// The host's runner-label map: which `runs-on` labels place here.
+    pub fn with_runners(mut self, runners: RunnerMap) -> Self {
+        self.runners = runners;
+        self
     }
 }
 
@@ -143,7 +168,7 @@ impl Frontend for GitHubActions {
     }
 
     fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered {
-        load_with(file, text, files, self.actions.as_deref())
+        load_configured(file, text, files, self.actions.as_deref(), &self.runners)
     }
 
     /// The `github`, `runner` and `vars` contexts a runner would supply. Fixed

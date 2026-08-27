@@ -503,12 +503,13 @@ fn reject_unsupported_triggers(on: Node<'_>, diags: &mut Diagnostics) {
     }
 }
 
-/// `runs-on` labels the v1 local executor knows how to place.
+/// `runs-on` labels the local executor places out of the box.
 ///
 /// These are GitHub-hosted labels the local executor places on this machine or a
-/// Linux container. Third-party runner labels (`depot-*`, `namespace-profile-*`,
-/// `*-16-core-*`) are rejected per label: placing them is a driver decision, not a
-/// frontend guess.
+/// Linux container. Third-party and self-hosted labels (`depot-*`,
+/// `namespace-profile-*`, `self-hosted`) are rejected per label unless the
+/// host's [`crate::runners::RunnerMap`] maps them: whether such a label names a
+/// usable Linux environment is the host's call, not a frontend guess.
 pub const KNOWN_RUNS_ON: &[&str] = &[
     "ubuntu-latest",
     "ubuntu-slim",

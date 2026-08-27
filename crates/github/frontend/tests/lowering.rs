@@ -403,6 +403,67 @@ fn unresolvable_runs_on_expressions_stay_rejected() {
     }
 }
 
+/// The runner map: configuration adds third-party and self-hosted labels that
+/// name Linux environments this machine can stand in for. Static and
+/// expression-derived labels answer to the same map; all of a job's labels must
+/// resolve; Windows and macOS stay specific errors whatever the map says.
+#[test]
+fn the_runner_map_places_configured_labels() {
+    use frontend::NoFiles;
+    use frontend_gha::{RunnerMap, load_configured};
+
+    let text = r#"
+on: push
+jobs:
+  hosted:
+    runs-on: depot-ubuntu-24.04-8
+    steps:
+      - run: echo
+  self-hosted:
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - run: echo
+  derived:
+    strategy:
+      matrix:
+        pool: [depot-ubuntu-24.04-8]
+    runs-on: ${{ matrix.pool }}
+    steps:
+      - run: echo
+"#;
+    let configured = RunnerMap::builtin().allow_list("depot-ubuntu-24.04-8, self-hosted linux,x64");
+    let lowered = load_configured(".github/workflows/test.yml", text, &NoFiles, None, &configured);
+    assert!(
+        lowered.graph.is_some(),
+        "{:?}",
+        lowered.diagnostics.into_vec()
+    );
+
+    // All labels must match: one unmapped label in the set is that label's own
+    // explicit rejection.
+    let partial = RunnerMap::builtin().allow_list("self-hosted linux");
+    let text = "on: push\njobs:\n  j:\n    runs-on: [self-hosted, linux, x64]\n    steps:\n      - run: echo\n";
+    let lowered = load_configured(".github/workflows/test.yml", text, &NoFiles, None, &partial);
+    assert!(lowered.graph.is_none());
+    let diags = lowered.diagnostics.into_vec();
+    let unknown: Vec<&frontend::Diagnostic> = diags
+        .iter()
+        .filter(|d| d.code == "unsupported.runs_on.unknown")
+        .collect();
+    assert_eq!(unknown.len(), 1, "{diags:?}");
+    assert!(unknown[0].message.contains("x64"), "{}", unknown[0].message);
+
+    // Windows and macOS remain specific errors even when the map claims them.
+    let contradiction = RunnerMap::builtin().allow_list("windows-large macos-pool");
+    let text = "on: push\njobs:\n  w:\n    runs-on: windows-large\n    steps:\n      - run: echo\n  m:\n    runs-on: macos-pool\n    steps:\n      - run: echo\n";
+    let lowered =
+        load_configured(".github/workflows/test.yml", text, &NoFiles, None, &contradiction);
+    let diags = lowered.diagnostics.into_vec();
+    for code in ["unsupported.runs_on.windows", "unsupported.runs_on.macos"] {
+        assert!(diags.iter().any(|d| d.code == code), "{code}: {diags:?}");
+    }
+}
+
 /// Windows and macOS runners are out of scope: the local executor emulates
 /// Linux runners only.
 #[test]

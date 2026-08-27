@@ -25,7 +25,8 @@ use crate::exprs::{
     LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel, whole_value_secret,
 };
 use crate::gate::{self, Gate, GateOp};
-use crate::model::{Defaults, Job, KNOWN_RUNS_ON, Step, Workflow};
+use crate::model::{Defaults, Job, Step, Workflow};
+use crate::runners::RunnerMap;
 use crate::runs_on;
 
 /// GitHub's default job timeout.
@@ -47,6 +48,8 @@ pub struct Lowering<'w, 'a> {
     files: &'w dyn FileSource,
     /// Where `uses: owner/repo@ref` actions come from. `None` rejects them.
     actions: Option<&'w dyn ActionSource>,
+    /// Which `runs-on` labels place on this machine.
+    runners: &'w RunnerMap,
     /// Remote actions resolved so far, by reference as written: the pin and the
     /// manifest text, or why not. A reference used by several steps resolves once.
     resolved: HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
@@ -99,6 +102,7 @@ pub fn lower(
     wf: &Workflow<'_>,
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
+    runners: &RunnerMap,
     diags: Diagnostics,
 ) -> Lowered {
     let mut lw = Lowering {
@@ -107,6 +111,7 @@ pub fn lower(
         wf,
         files,
         actions,
+        runners,
         resolved: HashMap::new(),
         jobs: HashMap::new(),
         spans: HashMap::new(),
@@ -485,8 +490,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .insert(job.id.clone(), Value::Array(resolved));
     }
 
-    /// One label through the placement policy: Windows and macOS are out of
-    /// scope, an unknown label is a driver decision, and whatever passes joins
+    /// One label through the placement policy — the same policy for labels
+    /// written literally and labels an expression resolved to. Windows and
+    /// macOS are specific errors whatever the runner map says; every other
+    /// label answers to the map ([`RunnerMap`]), and an unmapped one is an
+    /// explicit rejection, never a silently skipped job. Whatever passes joins
     /// the scope's requirements — each label once, so a label shared by many
     /// legs is checked and reported once.
     fn check_label(
@@ -515,12 +523,18 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 format!("`runs-on: {label}`{place}"),
                 "macOS runners are out of scope; the local executor emulates Linux runners",
             );
-        } else if lowered == "self-hosted" || !KNOWN_RUNS_ON.contains(&lowered.as_str()) {
+        } else if !self.runners.knows(label) {
             self.diags.unsupported(
                 "runs_on.unknown",
                 span,
-                format!("`runs-on: {label}`{place} is not a label the local executor knows"),
-                &format!("known labels: {}", KNOWN_RUNS_ON.join(", ")),
+                format!("`runs-on: {label}`{place} is not a label the runner map knows"),
+                &format!(
+                    "labels this machine places: {}. A third-party or self-hosted label naming a \
+                     usable Linux environment can be added to the runner map — \
+                     `PETRI_RUNNER_LABELS` for the shipped CLI, `GitHubActions::with_runners` in \
+                     code",
+                    self.runners.known().join(", ")
+                ),
             );
         }
         spec.requirements.push(SmolStr::new(label));
