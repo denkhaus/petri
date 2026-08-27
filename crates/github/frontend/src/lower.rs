@@ -59,8 +59,10 @@ enum ResolveFailure {
     /// No [`ActionSource`] was given: the format is running without one.
     NoSource,
     /// The source said [`ActionSourceError::Unavailable`]: it does not serve this
-    /// reference. Rejected like `NoSource`, scoped to the one reference.
-    Unavailable,
+    /// reference. Rejected like `NoSource`, scoped to the one reference; the
+    /// reason, when the source knows one, tells the hint whether refreshing the
+    /// source could ever help.
+    Unavailable(Option<String>),
     Failed(String),
 }
 
@@ -1039,7 +1041,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             return cached.clone();
         }
         let source_failure = |e: ActionSourceError| match e {
-            ActionSourceError::Unavailable(_) => ResolveFailure::Unavailable,
+            ActionSourceError::Unavailable { reason, .. } => ResolveFailure::Unavailable(reason),
             other => ResolveFailure::Failed(other.to_string()),
         };
         let result = match self.actions {
@@ -1090,13 +1092,23 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     );
                     None
                 }
-                Err(ResolveFailure::Unavailable) => {
-                    self.diags.unsupported(
-                        "action.remote",
-                        span.clone(),
-                        name.to_string(),
-                        "the configured action source does not serve this reference, so it cannot be fetched from here",
-                    );
+                Err(ResolveFailure::Unavailable(reason)) => {
+                    // Two different situations, one code: with no reason the
+                    // source simply does not cover the reference (refreshing it
+                    // may help); with one, upstream already said no (a private or
+                    // removed repository — refreshing will not).
+                    let hint = match reason {
+                        Some(reason) => format!(
+                            "the action source cannot serve it: {} — the repository is unavailable \
+                             upstream (private or removed), so refreshing the source will not help",
+                            reason.lines().collect::<Vec<_>>().join(" ")
+                        ),
+                        None => "the configured action source does not serve this reference; \
+                                 refreshing it (for a snapshot, the refresh test) may add it"
+                            .to_string(),
+                    };
+                    self.diags
+                        .unsupported("action.remote", span.clone(), name.to_string(), &hint);
                     None
                 }
                 Err(ResolveFailure::Failed(message)) => {

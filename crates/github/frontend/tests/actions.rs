@@ -256,18 +256,31 @@ jobs:
     );
 }
 
+/// Both ways a source declines to serve a reference reject as `action.remote`,
+/// and the hint says which happened: an uncovered reference points at a refresh,
+/// a recorded upstream failure (a private or removed repository) says a refresh
+/// will not help and carries the recorded error.
 #[test]
-fn an_unavailable_reference_is_unsupported_like_having_no_source() {
+fn an_unavailable_reference_is_unsupported_and_the_hint_says_why() {
     use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 
-    /// A partial source — a snapshot, say — that serves nothing.
-    struct Offline;
+    /// A partial source — a snapshot, say — that serves nothing, with or without
+    /// a recorded reason.
+    struct Offline(Option<&'static str>);
+    impl Offline {
+        fn decline(&self, reference: String) -> ActionSourceError {
+            ActionSourceError::Unavailable {
+                reference,
+                reason: self.0.map(str::to_string),
+            }
+        }
+    }
     impl frontend_gha::ActionSource for Offline {
         fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
-            Err(ActionSourceError::Unavailable(reference.to_string()))
+            Err(self.decline(reference.to_string()))
         }
         fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-            Err(ActionSourceError::Unavailable(pinned.reference.to_string()))
+            Err(self.decline(pinned.reference.to_string()))
         }
     }
 
@@ -279,16 +292,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 "#;
-    let lowered = load_with(".github/workflows/ci.yml", text, &NoFiles, Some(&Offline));
-    assert!(lowered.graph.is_none());
-    assert!(
-        lowered
-            .diagnostics
+    for (reason, wants) in [
+        (None, "refreshing it"),
+        (
+            Some("remote: Repository not found."),
+            "refreshing the source will not help",
+        ),
+    ] {
+        let lowered = load_with(
+            ".github/workflows/ci.yml",
+            text,
+            &NoFiles,
+            Some(&Offline(reason)),
+        );
+        assert!(lowered.graph.is_none());
+        let diags = lowered.diagnostics.into_vec();
+        let d = diags
             .iter()
-            .any(|d| d.unsupported_feature() == Some("action.remote")),
-        "{:?}",
-        lowered.diagnostics.into_vec()
-    );
+            .find(|d| d.unsupported_feature() == Some("action.remote"))
+            .unwrap_or_else(|| panic!("{diags:?}"));
+        let hint = d.hint.as_deref().unwrap_or_default();
+        assert!(hint.contains(wants), "{hint}");
+        if let Some(reason) = reason {
+            assert!(hint.contains(reason), "{hint}");
+        }
+    }
 }
 
 #[test]

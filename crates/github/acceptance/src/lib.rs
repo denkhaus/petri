@@ -170,9 +170,11 @@ impl<'de> serde::Deserialize<'de> for SnapshotEntry {
 /// The offline action source for the corpus: every `uses:` reference the corpus
 /// makes, resolved once over the network by the refresh test
 /// (`--test snapshot -- --ignored`) and read back here with none. A reference the
-/// snapshot lacks — or one whose refresh failed — answers `Unavailable`, so the
-/// workflow classifies exactly as it would with no source at all:
-/// `unsupported.action.remote`.
+/// snapshot lacks answers `Unavailable` with no reason (a refresh may add it);
+/// one whose refresh failed answers `Unavailable` carrying the recorded upstream
+/// error (a private or removed repository — a refresh will not help). Either way
+/// the workflow classifies exactly as it would with no source at all:
+/// `unsupported.action.remote`, with a hint that now says which case it is.
 pub struct SnapshotSource {
     entries: BTreeMap<String, SnapshotEntry>,
 }
@@ -222,6 +224,21 @@ impl SnapshotSource {
     }
 }
 
+impl SnapshotSource {
+    /// The `Unavailable` answer for `key`: with the refresh's recorded error as
+    /// the reason when the reference failed, with none when it is simply absent.
+    fn unavailable(&self, key: String) -> ActionSourceError {
+        let reason = match self.entries.get(&key) {
+            Some(SnapshotEntry::Failed { error }) => Some(error.clone()),
+            _ => None,
+        };
+        ActionSourceError::Unavailable {
+            reference: key,
+            reason,
+        }
+    }
+}
+
 impl ActionSource for SnapshotSource {
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
         match self.entries.get(&reference.to_string()) {
@@ -229,14 +246,14 @@ impl ActionSource for SnapshotSource {
                 reference: reference.clone(),
                 sha: SmolStr::new(sha),
             }),
-            _ => Err(ActionSourceError::Unavailable(reference.to_string())),
+            _ => Err(self.unavailable(reference.to_string())),
         }
     }
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
         match self.entries.get(&pinned.reference.to_string()) {
             Some(SnapshotEntry::Resolved { manifest, .. }) => Ok(manifest.clone()),
-            _ => Err(ActionSourceError::Unavailable(pinned.reference.to_string())),
+            _ => Err(self.unavailable(pinned.reference.to_string())),
         }
     }
 }
