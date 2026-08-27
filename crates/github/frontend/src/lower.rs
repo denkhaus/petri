@@ -64,6 +64,10 @@ pub struct Lowering<'w, 'a> {
     /// within the same [`Lowering::job_shell`] call for the job's `start` node
     /// meta. Never live across jobs.
     leg_runs_on: Option<Value>,
+    /// The checkout's declared `github` identity — the repository slug from the
+    /// origin remote where one exists — which placement guards evaluate
+    /// against ([`crate::identity`]).
+    github_identity: Value,
     /// One context per frame — the root workflow and each inlined callee —
     /// bound top-down before any node exists ([`Lowering::bind_frame`]).
     frame_ctx: Vec<FrameCtx>,
@@ -194,6 +198,9 @@ pub fn lower(
         jobs: HashMap::new(),
         spans: HashMap::new(),
         leg_runs_on: None,
+        github_identity: crate::identity::github_context(
+            crate::identity::repository_slug(files).as_deref(),
+        ),
         current: 0,
     };
 
@@ -270,6 +277,24 @@ impl<'w, 'a> Lowering<'w, 'a> {
             site.needs.insert(key, format!("{need}{SEP}done"));
         }
         site
+    }
+
+    /// The frame's `inputs` as the placement resolver may read them: values
+    /// known at lowering, with a marked placeholder for each run-time one so a
+    /// label that absorbs it names its input instead of placing.
+    pub(crate) fn placement_inputs(&self) -> Value {
+        let ctx = &self.frame_ctx[self.current];
+        let mut inputs = serde_json::Map::new();
+        if let Some(bound) = &ctx.inputs {
+            for name in bound.keys() {
+                let value = match ctx.static_inputs.get(name) {
+                    Some(value) => value.clone(),
+                    None => Value::String(format!("{}{name}", crate::runs_on::DYNAMIC_MARK)),
+                };
+                inputs.insert(name.clone(), value);
+            }
+        }
+        Value::Object(inputs)
     }
 
     /// Make `frame` the one whose workflow the job passes read.

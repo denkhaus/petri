@@ -21,33 +21,79 @@ use ir::expr::{EvalEnv, StaticCtx, eval};
 use ir::flow::RunContext;
 use ir::{ExprId, ExprTable, Value};
 
-/// The matrix's static legs: the literal matrix through the same expansion the
-/// engine runs at firing time, evaluated now. `None` when any value carries an
-/// expression — the legs are then unknown before the run.
-pub fn static_legs(matrix: Node<'_>) -> Option<Vec<Value>> {
-    if has_expression(matrix) {
-        return None;
-    }
+/// The matrix's static legs: the matrix through the same expansion the engine
+/// runs at firing time, evaluated now. A value carrying an expression resolves
+/// against the same static contexts `runs-on` reads — the frame's known
+/// `inputs` and the checkout's `github` identity — so a matrix axis guarded on
+/// the repository is as static as a literal one. `None` when a value stays
+/// unknown before the run: the legs are then dynamic.
+pub fn static_legs(matrix: Node<'_>, inputs: &Value, github: &Value) -> Option<Vec<Value>> {
     let mut table = ExprTable::new();
-    let m = table.lit(matrix.to_json());
+    let value = static_value(matrix, &mut table, inputs, github)?;
+    let m = table.lit(value);
     let legs = crate::expr_lower::matrix_legs(&mut table, m).ok()?;
+    let env_statics = statics(inputs, github, &Value::Null);
     let run = RunContext::new();
-    let statics = StaticCtx::new();
-    let env = EvalEnv::new(&Value::Null, &run, &statics);
+    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
     match eval(&table, legs, &env) {
         Ok(Value::Array(legs)) => Some(legs),
         _ => None,
     }
 }
 
-fn has_expression(node: Node<'_>) -> bool {
+/// One matrix node as a value: literals as themselves, expressions evaluated
+/// over the static contexts. `None` — dynamic — when an expression fails to
+/// resolve or resolves through a run-time input's placeholder.
+fn static_value(
+    node: Node<'_>,
+    table: &mut ExprTable,
+    inputs: &Value,
+    github: &Value,
+) -> Option<Value> {
     if let Some(m) = node.as_mapping() {
-        return m.iter().any(|(_, v)| has_expression(v));
+        let mut out = serde_json::Map::new();
+        for (key, value) in m.iter() {
+            out.insert(key.to_string(), static_value(value, table, inputs, github)?);
+        }
+        return Some(Value::Object(out));
     }
-    if let Some(s) = node.as_sequence() {
-        return s.iter().any(has_expression);
+    if let Some(seq) = node.as_sequence() {
+        return seq
+            .iter()
+            .map(|item| static_value(item, table, inputs, github))
+            .collect::<Option<Vec<Value>>>()
+            .map(Value::Array);
     }
-    node.as_str().is_some_and(|t| t.contains("${{"))
+    let Some(text) = node.as_str() else {
+        return Some(node.to_json());
+    };
+    if !text.contains("${{") {
+        return Some(node.to_json());
+    }
+    let id = compile_scalar(text, &node.span(), table).ok()?;
+    let env_statics = statics(inputs, github, &Value::Null);
+    let run = RunContext::new();
+    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
+    let value = eval(table, id, &env).ok()?;
+    (!carries_mark(&value)).then_some(value)
+}
+
+/// The evaluation bindings every static resolution shares.
+fn statics(inputs: &Value, github: &Value, leg: &Value) -> StaticCtx {
+    StaticCtx::new()
+        .bind("matrix", leg.clone())
+        .bind("inputs", inputs.clone())
+        .bind("github", github.clone())
+}
+
+/// Whether a value absorbed a run-time input's placeholder anywhere.
+fn carries_mark(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s.contains(DYNAMIC_MARK),
+        Value::Array(items) => items.iter().any(carries_mark),
+        Value::Object(map) => map.values().any(carries_mark),
+        _ => false,
+    }
 }
 
 /// One label position of a `runs-on`, as the reader collected it: the text as
@@ -103,13 +149,13 @@ struct Entry {
 }
 
 /// The contexts a `runs-on` expression may read before the run: the leg's
-/// `matrix`, and the frame's `inputs`.
+/// `matrix`, the frame's `inputs`, and the checkout's `github` identity.
 struct StaticContexts;
 
 impl Roots for StaticContexts {
     fn root(&mut self, name: &str, table: &mut ExprTable) -> Option<ExprId> {
         let lowered = name.to_lowercase();
-        matches!(lowered.as_str(), "matrix" | "inputs").then(|| table.var(&lowered))
+        matches!(lowered.as_str(), "matrix" | "inputs" | "github").then(|| table.var(&lowered))
     }
 }
 
@@ -165,13 +211,17 @@ impl Compiled {
     /// The labels one leg resolves to, each with the span of the position that
     /// produced it. `inputs` is the frame's statically-known values, with
     /// [`DYNAMIC_MARK`] placeholders standing in for run-time ones — a label
-    /// that absorbed a placeholder names its input instead of placing.
-    pub fn labels_for(&self, leg: &Value, inputs: &Value) -> Result<Vec<(String, Span)>, Failure> {
-        let statics = StaticCtx::new()
-            .bind("matrix", leg.clone())
-            .bind("inputs", inputs.clone());
+    /// that absorbed a placeholder names its input instead of placing — and
+    /// `github` is the checkout's declared identity.
+    pub fn labels_for(
+        &self,
+        leg: &Value,
+        inputs: &Value,
+        github: &Value,
+    ) -> Result<Vec<(String, Span)>, Failure> {
+        let env_statics = statics(inputs, github, leg);
         let run = RunContext::new();
-        let env = EvalEnv::new(&Value::Null, &run, &statics);
+        let env = EvalEnv::new(&Value::Null, &run, &env_statics);
         let mut labels = Vec::new();
         for entry in &self.entries {
             let value = eval(&self.table, entry.id, &env).map_err(|e| Failure::Bad {

@@ -204,11 +204,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
         raw: &[runs_on::RawLabel],
         spec: &mut RuntimeSpec,
     ) {
+        let inputs = self.placement_inputs();
+        let github = self.github_identity.clone();
         let matrix = job.strategy.as_ref().and_then(|s| s.matrix);
         let legs = match matrix {
             // No matrix: the expression still resolves, over an empty `matrix`.
             None => Some(vec![json!({})]),
-            Some(matrix) => runs_on::static_legs(matrix),
+            Some(matrix) => runs_on::static_legs(matrix, &inputs, &github),
         };
         let Some(legs) = legs else {
             self.diags.unsupported(
@@ -230,24 +232,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 return;
             }
         };
-        // The frame's `inputs`, as the resolver may read them: values known at
-        // lowering, with a marked placeholder for each run-time one so a label
-        // that absorbs it names its input instead of placing.
-        let ctx = &self.frame_ctx[self.current];
-        let mut inputs = serde_json::Map::new();
-        if let Some(bound) = &ctx.inputs {
-            for name in bound.keys() {
-                let value = match ctx.static_inputs.get(name) {
-                    Some(value) => value.clone(),
-                    None => Value::String(format!("{}{name}", runs_on::DYNAMIC_MARK)),
-                };
-                inputs.insert(name.clone(), value);
-            }
-        }
-        let inputs = Value::Object(inputs);
         let mut resolved = Vec::with_capacity(legs.len());
         for leg in &legs {
-            match compiled.labels_for(leg, &inputs) {
+            match compiled.labels_for(leg, &inputs, &github) {
                 Ok(labels) => {
                     let only: Vec<&str> = labels.iter().map(|(l, _)| l.as_str()).collect();
                     let against = matrix.is_some().then_some(leg);
@@ -343,9 +330,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     "job `{}`: `runs-on` reads `{name}`, which has no value before the run{for_leg}",
                     job.id
                 ),
-                "`runs-on` is resolved at lowering, where `matrix` and `inputs` have values; \
-                 `github` and `needs` are run-time contexts — use a fixed label, matrix values, \
-                 or an input",
+                "`runs-on` is resolved at lowering, where `matrix`, `inputs` and the checkout's \
+                 `github` identity have values; `needs` is a run-time context — use a fixed \
+                 label, matrix values, or an input",
             ),
             runs_on::Failure::DynamicInput { name, span } => self.diags.unsupported(
                 "runs_on.expression",

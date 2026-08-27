@@ -271,7 +271,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let strategy = job.strategy.as_ref().filter(|s| s.matrix.is_some())?;
         let matrix_node = strategy.matrix.expect("filtered");
         let matrix_expr = self.matrix_expr(matrix_node, site);
-        site.matrix_total = runs_on::static_legs(matrix_node).map(|legs| legs.len());
+        let inputs = self.placement_inputs();
+        site.matrix_total = runs_on::static_legs(matrix_node, &inputs, &self.github_identity)
+            .map(|legs| legs.len());
         site.fail_fast = match strategy
             .fail_fast
             .and_then(|n| n.as_scalar())

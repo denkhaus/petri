@@ -395,7 +395,7 @@ fn unresolvable_runs_on_expressions_stay_rejected() {
             "no value before the run",
         ),
         (
-            "    strategy: { matrix: { os: \"${{ fromJSON(inputs.list) }}\" } }\n    runs-on: ${{ matrix.os }}\n",
+            "    strategy: { matrix: { os: \"${{ fromJSON(needs.plan.outputs.legs) }}\" } }\n    runs-on: ${{ matrix.os }}\n",
             "not static",
         ),
         (
@@ -485,6 +485,53 @@ jobs:
     }
 }
 
+/// A `github.*` guard resolves against the checkout's declared identity: the
+/// origin remote's slug where one exists, the fallback branch everywhere else.
+/// In the named checkout the guard honestly selects its hosted pool — which is
+/// then the runner map's question, not a mystery expression.
+#[test]
+fn github_guards_resolve_against_the_checkout_identity() {
+    let text = "on: push\njobs:\n  j:\n    runs-on: ${{ github.repository == 'astral-sh/ruff' && 'depot-fast-32' || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n";
+    // No checkout: the guard takes its fallback and lowers.
+    let graph = lower_ok(text);
+    let start = graph.nodes.iter().find(|n| n.name == "j/start").unwrap();
+    assert_eq!(
+        graph.scope(start.scope).unwrap().runtime.requirements,
+        ["ubuntu-latest"]
+    );
+
+    // The named checkout: the guard selects the opaque pool, and the runner
+    // map's rejection names it.
+    let checkout = files(&[(
+        ".git/config",
+        "[remote \"origin\"]\n\turl = git@github.com:astral-sh/ruff.git\n",
+    )]);
+    let diags = diagnostics_with(text, &checkout);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == "unsupported.runs_on.unknown" && d.message.contains("depot-fast-32")),
+        "{diags:?}"
+    );
+
+    // A matrix axis guarded the same way is as static as a literal one.
+    let matrix = r#"
+on: push
+jobs:
+  j:
+    strategy:
+      matrix:
+        big: ["${{ github.ref == 'refs/heads/main' }}"]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo
+"#;
+    let graph = lower_ok(matrix);
+    assert!(!graph.nodes.is_empty());
+    assert!(diagnostics(matrix).is_empty(), "{:?}", diagnostics(matrix));
+}
+
 /// A label's own tokens decide its platform: Ubuntu/Linux pools place without
 /// configuration, Windows and macOS pools are their platforms' rejections
 /// wherever the token appears, and only genuinely opaque labels need the map.
@@ -556,8 +603,9 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.runs_on.unknown",
         ),
         (
-            // `matrix.os` resolves per leg now; a run-time context does not.
-            "on: push\njobs:\n  j:\n    runs-on: ${{ github.repository == 'a/b' && 'ubuntu-latest' || 'ubuntu-22.04' }}\n    steps:\n      - run: echo\n",
+            // `matrix`, `inputs` and the checkout identity resolve at lowering;
+            // `needs` never can.
+            "on: push\njobs:\n  j:\n    runs-on: ${{ needs.plan.outputs.runner }}\n    steps:\n      - run: echo\n",
             "unsupported.runs_on.expression",
         ),
         (

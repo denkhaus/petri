@@ -67,6 +67,7 @@ pub mod composite;
 pub mod expr_lower;
 pub mod exprs;
 pub mod gate;
+pub mod identity;
 pub mod inputs;
 pub mod lower;
 pub mod model;
@@ -175,28 +176,26 @@ impl Frontend for GitHubActions {
 
     /// The `github`, `runner` and `vars` contexts a runner would supply. Fixed
     /// values — a local run is not a real GitHub event — so the same file lowers to
-    /// the same graph every time and a saved log replays against it.
+    /// the same graph every time and a saved log replays against it. The one
+    /// read value is the repository slug, from the checkout's `origin` remote
+    /// (stable across commits; never HEAD): the same identity the lowering's
+    /// placement guards evaluate against, so the two can never disagree. With
+    /// no checkout, the directory's name stands in.
     fn default_params(&self, repo: &Path) -> Vec<(SmolStr, Value)> {
-        let name = repo
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "repo".to_string());
+        let slug = std::fs::read_to_string(repo.join(".git").join("config"))
+            .ok()
+            .and_then(|config| identity::slug_from_config(&config))
+            .unwrap_or_else(|| {
+                let name = repo
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "repo".to_string());
+                format!("local/{name}")
+            });
         vec![
             (
                 SmolStr::new("github"),
-                serde_json::json!({
-                    "repository": format!("local/{name}"),
-                    "event_name": "workflow_dispatch",
-                    "actor": "petri",
-                    "ref": "refs/heads/main",
-                    "ref_name": "main",
-                    "sha": "0000000000000000000000000000000000000000",
-                    "run_id": "1",
-                    "run_number": "1",
-                    "server_url": "https://github.com",
-                    "api_url": "https://api.github.com",
-                    "graphql_url": "https://api.github.com/graphql",
-                }),
+                identity::github_context(Some(&slug)),
             ),
             (
                 SmolStr::new("runner"),

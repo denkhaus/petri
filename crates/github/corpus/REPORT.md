@@ -1,14 +1,14 @@
 # Compatibility corpus report
 
-316 workflows from 21 repositories; 59 need a Windows or macOS runner or shell and are out of scope by policy, leaving **257 in scope**.
+316 workflows from 21 repositories; 63 need a Windows or macOS runner or shell and are out of scope by policy, leaving **253 in scope**.
 
 Remote `uses:` references resolve through the action snapshot: 305 references, 1 of them unavailable. Refresh with `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.
 
-| Result (of the in-scope 257) | Count | Share |
+| Result (of the in-scope 253) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 199 | 77% |
-| rejected with a specific `unsupported.*` code | 36 | 14% |
+| lowered with warnings | 203 | 80% |
+| rejected with a specific `unsupported.*` code | 28 | 11% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -65,8 +65,8 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 
 | Feature | Workflows |
 |---|---|
-| `runs_on.expression` | 14 |
 | `action.docker` | 13 |
+| `runs_on.expression` | 6 |
 | `services` | 3 |
 | `action.local_missing` | 2 |
 | `runs_on.unknown` | 2 |
@@ -91,12 +91,12 @@ None. Every workflow either lowered or was rejected with a specific code.
 | actions/checkout | `test.yml` | out of scope | — | — |
 | actions/checkout | `update-main-version.yml` | clean | 7 | — |
 | actions/checkout | `update-test-ubuntu-git.yml` | warnings | 10 | — |
-| astral-sh/ruff | `build-binaries.yml` | unsupported | — | `runs_on.expression` |
+| astral-sh/ruff | `build-binaries.yml` | out of scope | — | — |
 | astral-sh/ruff | `build-docker.yml` | warnings | 48 | — |
 | astral-sh/ruff | `build-wasm.yml` | warnings | 11 | — |
 | astral-sh/ruff | `ci.yaml` | out of scope | — | — |
 | astral-sh/ruff | `daily_fuzz.yaml` | warnings | 15 | — |
-| astral-sh/ruff | `memory_report.yaml` | unsupported | — | `runs_on.expression` |
+| astral-sh/ruff | `memory_report.yaml` | warnings | 15 | — |
 | astral-sh/ruff | `notify-dependents.yml` | warnings | 3 | — |
 | astral-sh/ruff | `publish-crates.yml` | warnings | 8 | — |
 | astral-sh/ruff | `publish-docs.yml` | warnings | 16 | — |
@@ -106,11 +106,11 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/ruff | `publish-ty-playground.yml` | warnings | 23 | — |
 | astral-sh/ruff | `publish-versions.yml` | warnings | 12 | — |
 | astral-sh/ruff | `publish-wasm.yml` | warnings | 7 | — |
-| astral-sh/ruff | `release.yml` | unsupported | — | `runs_on.expression` |
+| astral-sh/ruff | `release.yml` | out of scope | — | — |
 | astral-sh/ruff | `sync_typeshed.yaml` | out of scope | — | — |
-| astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | unsupported | — | `runs_on.expression` |
-| astral-sh/ruff | `ty-ecosystem-report.yaml` | unsupported | — | `runs_on.expression` |
-| astral-sh/ruff | `typing_conformance.yaml` | unsupported | — | `runs_on.expression` |
+| astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | warnings | 29 | — |
+| astral-sh/ruff | `ty-ecosystem-report.yaml` | warnings | 12 | — |
+| astral-sh/ruff | `typing_conformance.yaml` | warnings | 15 | — |
 | astral-sh/uv | `bench.yml` | unsupported | — | `runs_on.unknown` |
 | astral-sh/uv | `build-dev-binaries.yml` | out of scope | — | — |
 | astral-sh/uv | `build-docker.yml` | warnings | 44 | — |
@@ -349,8 +349,8 @@ None. Every workflow either lowered or was rejected with a specific code.
 | serde-rs/serde | `ci.yml` | out of scope | — | — |
 | sharkdp/bat | `CICD.yml` | out of scope | — | — |
 | sharkdp/bat | `require-changelog-for-PRs.yml` | clean | 7 | — |
-| tailwindlabs/tailwindcss | `ci.yml` | unsupported | — | `runs_on.expression` |
-| tailwindlabs/tailwindcss | `integration-tests.yml` | unsupported | — | `runs_on.expression` |
+| tailwindlabs/tailwindcss | `ci.yml` | out of scope | — | — |
+| tailwindlabs/tailwindcss | `integration-tests.yml` | out of scope | — | — |
 | tailwindlabs/tailwindcss | `prepare-release.yml` | out of scope | — | — |
 | tailwindlabs/tailwindcss | `release.yml` | out of scope | — | — |
 | tokio-rs/tokio | `audit.yml` | unsupported | — | `action.docker` |

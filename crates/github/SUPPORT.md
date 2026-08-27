@@ -20,9 +20,15 @@ after a cancel), `env` at workflow/job/step level, `defaults.run`, job `outputs`
 `include`/`exclude`, `fail-fast` and `max-parallel`. `runs-on: ${{ matrix.os }}`
 — and any `runs-on` over `matrix` values, `inputs` (a literal call site's
 `with:`, or the declared default, which is also how a directly run reusable
-file places), `fromJSON`, templates and the documented functions — resolves at
-lowering, once per leg and per call site, through the same matrix expansion
-the engine runs; each leg's labels face the same placement
+file places), the checkout's `github` identity, `fromJSON`, templates and the
+documented functions — resolves at lowering, once per leg and per call site,
+through the same matrix expansion the engine runs. The identity is the
+repository slug from the checkout's `origin` remote — stable across commits,
+deliberately never HEAD, and the same value `default_params` hands the run, so
+a guard's branch choice and a step's `github.repository` cannot disagree;
+without a checkout, guards take their fallback branch. Matrix values resolve
+against the same contexts, so a repository-guarded axis is as static as a
+literal one; each leg's labels face the same placement
 policy as literal labels (Linux labels the executor knows), a rejected leg names
 itself without stopping the others, and the per-leg results are preserved on the
 job's `start` node. `on:` is accepted as metadata — a local run fires the
@@ -111,7 +117,7 @@ workflow counts in brackets rank the pressure.
 
 | Code | Feature | Shape of the plan |
 |---|---|---|
-| `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`- and `inputs`-valued expressions resolve per leg (above); what remains reads run-time contexts (`github`, `needs`), an input the call site computes at run time, or a dynamic matrix. |
+| `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`, `inputs` and the checkout's `github` identity resolve per leg (above); what remains reads `needs`, an input the call site computes at run time, or a matrix that stays dynamic under those contexts. |
 | `workflow_call.matrix` | A matrix inside a matrix workflow call | The engine expands one region at a time; clones cannot expand again. Nested expansion is an engine feature to design, not a frontend gap. |
 | `action.docker`, `services`, `container.expression`, `container.options` | The Docker tier [18, 5, 4] | Docker container actions, service containers, container options — shelling out to `docker` the way actions are fetched with `git`. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
