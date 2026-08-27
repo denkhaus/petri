@@ -243,8 +243,7 @@ impl steps::StepRunner for LeakyStep {
             .secrets
             .resolve("DEPLOY_TOKEN")
             .expect("configured")
-            .expose()
-            .to_string();
+            .expose();
         let _ = ctx
             .logs
             .send(ir::StepEvent::Artifact {

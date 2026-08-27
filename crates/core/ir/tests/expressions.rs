@@ -51,6 +51,16 @@ impl Env {
     }
 }
 
+/// A completed `build` node: a success with one output field.
+fn build_record(attempts: u32) -> ir::NodeRecord {
+    ir::NodeRecord {
+        status: ir::Status::Success,
+        output: json!({"artifact": "app.tar"}),
+        generation: ir::Generation::ZERO,
+        attempts,
+    }
+}
+
 #[test]
 fn literals_and_variables() {
     let mut t = ExprTable::new();
@@ -293,15 +303,7 @@ fn nodes_reads_the_run_context() {
     let attempts = t.path("nodes", &["build", "attempts"]);
     let missing = t.path("nodes", &["nope", "status"]);
 
-    let c = empty().with_node(
-        "build",
-        ir::NodeRecord {
-            status: ir::Status::Success,
-            output: json!({"artifact": "app.tar"}),
-            generation: ir::Generation::ZERO,
-            attempts: 3,
-        },
-    );
+    let c = empty().with_node("build", build_record(3));
     assert_eq!(eval(&t, status, &c.env()).unwrap(), json!("success"));
     assert_eq!(
         eval(&t, output, &c.env()).unwrap(),
@@ -316,44 +318,49 @@ fn nodes_reads_the_run_context() {
 fn kv_reads_the_run_context() {
     let mut t = ExprTable::new();
     let value = t.path("kv", &["deploy_target"]);
-    let missing = t.path("kv", &["nope"]);
     let c = empty().with_kv("deploy_target", json!("staging"));
     assert_eq!(eval(&t, value, &c.env()).unwrap(), json!("staging"));
-    assert_eq!(eval(&t, missing, &c.env()).unwrap(), Value::Null);
 }
 
-/// `nodes.x` and `kv.x` read a single entry without materializing the whole map. The
-/// result must be exactly what indexing the whole map would give, including for an
-/// entry that is not there.
+/// `nodes.x`, `nodes["x"]`, `kv.x` and `kv["x"]` read a single entry without
+/// materializing the whole map. The result must be exactly what indexing the whole
+/// map would give: for an entry that is there, one that is not, and an index that is
+/// not a string.
 #[test]
 fn single_entry_reads_match_the_whole_map() {
     let mut t = ExprTable::new();
     let all_nodes = t.var("nodes");
     let one_node = t.path("nodes", &["build"]);
     let no_node = t.path("nodes", &["nope"]);
+    let build = t.lit("build");
+    let one_node_indexed = t.index(all_nodes, build);
+    let zero = t.lit(0);
+    let non_string_index = t.index(all_nodes, zero);
     let all_kv = t.var("kv");
     let one_kv = t.path("kv", &["deploy_target"]);
     let no_kv = t.path("kv", &["nope"]);
+    let deploy_target = t.lit("deploy_target");
+    let one_kv_indexed = t.index(all_kv, deploy_target);
 
     let c = empty()
-        .with_node(
-            "build",
-            ir::NodeRecord {
-                status: ir::Status::Success,
-                output: json!({"artifact": "app.tar"}),
-                generation: ir::Generation::ZERO,
-                attempts: 1,
-            },
-        )
+        .with_node("build", build_record(1))
         .with_kv("deploy_target", json!("staging"));
 
     let nodes = eval(&t, all_nodes, &c.env()).unwrap();
     assert_eq!(eval(&t, one_node, &c.env()).unwrap(), nodes["build"]);
+    assert_eq!(
+        eval(&t, one_node_indexed, &c.env()).unwrap(),
+        nodes["build"]
+    );
     assert_eq!(eval(&t, no_node, &c.env()).unwrap(), nodes["nope"]);
-    assert_eq!(nodes["nope"], Value::Null);
+    assert_eq!(eval(&t, non_string_index, &c.env()).unwrap(), Value::Null);
 
     let kv = eval(&t, all_kv, &c.env()).unwrap();
     assert_eq!(eval(&t, one_kv, &c.env()).unwrap(), kv["deploy_target"]);
+    assert_eq!(
+        eval(&t, one_kv_indexed, &c.env()).unwrap(),
+        kv["deploy_target"]
+    );
     assert_eq!(eval(&t, no_kv, &c.env()).unwrap(), kv["nope"]);
 }
 

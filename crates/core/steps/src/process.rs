@@ -146,13 +146,11 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     for (key, value) in &config.env {
         let resolved = match value {
-            ValueOrSecretRef::Secret { name } => {
-                let secret = ctx
-                    .secrets
-                    .resolve(name)
-                    .map_err(|e| fail(SECRET_UNAVAILABLE_CLASS, e.to_string()))?;
-                SmolStr::new(secret.expose())
-            }
+            ValueOrSecretRef::Secret { name } => ctx
+                .secrets
+                .resolve(name)
+                .map_err(|e| fail(SECRET_UNAVAILABLE_CLASS, e.to_string()))?
+                .expose(),
             ValueOrSecretRef::Literal(literal) => SmolStr::new(stringify(literal)),
         };
         env.insert(key.clone(), resolved);

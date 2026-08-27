@@ -9,7 +9,7 @@ use smol_str::SmolStr;
 
 use super::builtins::eval_call;
 use super::{BinOp, Expr, ExprTable, UnOp};
-use crate::flow::RunContext;
+use crate::flow::{NodeRecord, RunContext};
 use crate::ids::ExprId;
 
 /// Per-firing bindings that are neither the token payload nor run-scoped state.
@@ -50,11 +50,52 @@ impl<'a> EvalEnv<'a> {
     }
 
     pub(super) fn lookup(&self, name: &str) -> Option<Value> {
+        if let Some(map) = RunMap::named(name) {
+            return Some(self.run_map(map));
+        }
         match name {
-            "nodes" => Some(self.run.nodes_value()),
-            "kv" => Some(self.run.kv_value()),
             "token" | "input" => Some(self.token.clone()),
             other => self.statics.get(other).cloned(),
+        }
+    }
+
+    /// A whole run-context map, as expressions see it.
+    fn run_map(&self, map: RunMap) -> Value {
+        match map {
+            RunMap::Nodes => self.run.nodes_value(),
+            RunMap::Kv => self.run.kv_value(),
+        }
+    }
+
+    /// One entry of a run-context map, read without materializing the map: going
+    /// through [`Self::run_map`] would clone every node's output to reach one. Equal
+    /// to indexing the whole map, `Null` for a missing entry included.
+    fn run_entry(&self, map: RunMap, key: &str) -> Value {
+        match map {
+            RunMap::Nodes => self
+                .run
+                .node(key)
+                .map(NodeRecord::to_value)
+                .unwrap_or(Value::Null),
+            RunMap::Kv => self.run.get(key).cloned().unwrap_or(Value::Null),
+        }
+    }
+}
+
+/// The maps of [`RunContext`] that expressions read by name. [`EvalEnv::lookup`]
+/// resolves these before the statics, so neither name can be shadowed.
+#[derive(Clone, Copy)]
+enum RunMap {
+    Nodes,
+    Kv,
+}
+
+impl RunMap {
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "nodes" => Some(Self::Nodes),
+            "kv" => Some(Self::Kv),
+            _ => None,
         }
     }
 }
@@ -149,27 +190,27 @@ pub(super) fn eval_at(
             .lookup(name)
             .ok_or_else(|| EvalError::UnboundVar(name.clone())),
         Expr::Field(base, name) => {
-            // `nodes.x` and `kv.x` read one entry from the run context directly:
-            // materializing the whole map first would clone every node's output to
-            // read one field. `nodes` and `kv` cannot be shadowed, so this is
-            // observationally the same as the general path.
-            if let Some(Expr::Var(var)) = table.get(*base) {
-                match var.as_str() {
-                    "nodes" => {
-                        return Ok(env
-                            .run
-                            .node(name)
-                            .map(|record| record.to_value())
-                            .unwrap_or(Value::Null));
-                    }
-                    "kv" => return Ok(env.run.get(name).cloned().unwrap_or(Value::Null)),
-                    _ => {}
-                }
+            // `nodes.x` / `kv.x`: read the one entry, not the whole map.
+            if let Some(Expr::Var(root)) = table.get(*base)
+                && let Some(map) = RunMap::named(root)
+            {
+                return Ok(env.run_entry(map, name));
             }
             let base = eval_at(table, *base, env, d)?;
             Ok(base.get(name.as_str()).cloned().unwrap_or(Value::Null))
         }
         Expr::Index(base, idx) => {
+            // `nodes[key]` / `kv[key]`: the same read, in the form a matrix clone's
+            // record needs (`nodes["build#2"]`).
+            if let Some(Expr::Var(root)) = table.get(*base)
+                && let Some(map) = RunMap::named(root)
+            {
+                return Ok(match eval_at(table, *idx, env, d)? {
+                    Value::String(key) => env.run_entry(map, &key),
+                    // As `index_into`: an object indexed by anything else is `Null`.
+                    _ => Value::Null,
+                });
+            }
             let base = eval_at(table, *base, env, d)?;
             let idx = eval_at(table, *idx, env, d)?;
             Ok(index_into(&base, &idx))

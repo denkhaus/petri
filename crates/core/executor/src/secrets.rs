@@ -4,8 +4,7 @@
 //! `{"$secret": "NAME"}` references, and the value is fetched at spawn time and put
 //! straight into the child's environment. Resolving a secret also registers its value
 //! for masking, so the two cannot get out of step: anything that was resolved is
-//! masked, by construction. A resolved value is a [`Secret`], whose plaintext leaves
-//! only through an explicit [`Secret::expose`].
+//! masked, by construction. A resolved value is a [`Secret`].
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -40,17 +39,18 @@ pub enum SecretError {
 /// explicit call at the boundary that needs the value — the child's environment, a
 /// `Deliver` payload. `Debug` redacts and there is no `Display`, so a resolved value
 /// cannot ride into an error message or a log line by accident.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Secret(SmolStr);
 
 impl Secret {
-    pub fn new(value: impl Into<SmolStr>) -> Self {
-        Self(value.into())
+    pub fn new(value: SmolStr) -> Self {
+        Self(value)
     }
 
-    /// The plaintext. Call it where the value is consumed, never to build a message.
-    pub fn expose(&self) -> &str {
-        &self.0
+    /// The plaintext, moved out of the wrapper. Call it where the value is consumed,
+    /// never to build a message.
+    pub fn expose(self) -> SmolStr {
+        self.0
     }
 }
 
