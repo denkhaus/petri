@@ -68,6 +68,20 @@ diagnostics. `workflow_dispatch` inputs — and a reusable file run directly —
 bind `inputs` from the run's parameters (`github.event.inputs`) through the
 same typed model.
 
+**Containers.** `container:` on a job runs its steps in a container from the
+image, with the workspace bind-mounted. `container.env` configures the
+container (job and step env win over it; a secret there pushes down into the
+steps like a job-env secret). `container.options` — and a service's — pass
+through to the engine as raw flags, split as GitHub splits them.
+`container.credentials` (and a service's): the username resolves at lowering,
+the password must be a whole `${{ secrets.NAME }}` reference — the graph
+carries the *name*, and the executor logs in inside acquire with an isolated
+Docker config, so no value enters the graph, the log, or the user's own
+credential store. An expression-valued image or username resolves at lowering
+through the static contexts (`inputs`, the checkout's `github` identity);
+`matrix` cannot vary a per-job image — every leg shares the scope — and stays
+the `container.expression` rejection with the reason named.
+
 **Service containers.** `services:` on a job: sidecar containers with the
 job's lifetime, on a per-job network, each reachable by its service name —
 ports published to the host when the job runs on the host, container-to-
@@ -140,8 +154,9 @@ workflow counts in brackets rank the pressure.
 |---|---|---|
 | `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`, `inputs` and the checkout's `github` identity resolve per leg (above); what remains reads `needs`, an input the call site computes at run time, or a matrix that stays dynamic under those contexts. |
 | `workflow_call.matrix` | A matrix inside a matrix workflow call | The engine expands one region at a time; clones cannot expand again. Nested expansion is an engine feature to design, not a frontend gap. |
-| `container.expression`, `container.options`, `container.credentials` | Container config [0] | Expression-valued images resolve at lowering through the placement contexts where static; `container.options` pass through as raw engine flags (service options already do); registry credentials resolve inside acquire, a secret name in the graph and plaintext only at the effect. |
-| `services.secret_env`, `services.volumes` | Service corners [0] | Secret-valued service env needs a resolution point inside acquire; volumes name runner-machine paths to map. |
+| `container.expression` | A container or service value the static contexts cannot resolve [0] | `inputs` and the checkout's `github` identity resolve at lowering (above); what remains reads `matrix` (per-scope values cannot vary per leg), a run-time context, or a dynamic input. |
+| `container.credentials` | A registry password that is not a `${{ secrets.* }}` reference [0] | Only a secret name may cross into the graph; a computed password would need a resolution seam inside acquire. |
+| `container.ports`, `container.volumes`, `services.secret_env`, `services.volumes` | Container and service corners [0] | Job-container port mappings and volumes name runner-machine resources to map; secret-valued service env needs a resolution point inside acquire. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |

@@ -14,7 +14,7 @@ use std::time::Duration;
 use executor::{AcquireContext, EnvError, Progress, ScopeSpec};
 use smol_str::SmolStr;
 
-use crate::{PullPolicy, prepare_registry_image, run_docker, sweep_containers};
+use crate::{PullPolicy, prepare_image, run_docker, sweep_containers};
 
 /// The backstop for a health check that never leaves `starting`: Docker's own
 /// retry budget bounds the common case, this bounds a misconfigured one.
@@ -66,7 +66,14 @@ async fn realize_inner(
 ) -> Result<(), EnvError> {
     run_docker(&["network", "create", base]).await?;
     for service in &scope.services {
-        prepare_registry_image(&service.image, pull, scope.id, ctx.progress()).await?;
+        prepare_image(
+            &service.image,
+            service.credentials.as_ref(),
+            pull,
+            scope.id,
+            ctx,
+        )
+        .await?;
         let name = format!("{}{}", service_prefix(base), service.name);
         let mut create: Vec<String> = vec![
             "create".into(),

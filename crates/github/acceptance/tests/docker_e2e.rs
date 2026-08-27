@@ -146,6 +146,40 @@ jobs:
     assert!(lines.iter().any(|l| l == "from-the-job"), "{lines:?}");
 }
 
+/// `container.options` pass through to the engine as raw flags: an env flag in
+/// the options is visible to every step of the containerized job, and an
+/// expression-valued image resolves at lowering through the static contexts.
+#[tokio::test]
+async fn container_options_and_a_static_image_expression_apply() {
+    if !docker_ready().await {
+        return;
+    }
+    let text = r#"
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        default: alpine
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ inputs.base }}:3.20
+      options: -e PETRI_FROM_OPTIONS=carried
+    steps:
+      - run: echo "options say $PETRI_FROM_OPTIONS on $(cat /etc/alpine-release >/dev/null && echo alpine)"
+        shell: sh
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "container-options").await;
+    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    let lines = log_lines(&report);
+    assert!(
+        lines.iter().any(|l| l == "options say carried on alpine"),
+        "{lines:?}"
+    );
+}
+
 /// `services:` end to end, in both placements at once: the host job reaches
 /// its service over the published port on localhost, and the containerized job
 /// reaches its own by name — each healthy before the job's first step.

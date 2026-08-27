@@ -159,6 +159,55 @@ impl Roots for StaticContexts {
     }
 }
 
+/// The contexts a per-*scope* value may read: `inputs` and `github`, but never
+/// `matrix` — a scope is shared by every leg, so a leg-varying value has no one
+/// place to land.
+struct ScopeContexts;
+
+impl Roots for ScopeContexts {
+    fn root(&mut self, name: &str, table: &mut ExprTable) -> Option<ExprId> {
+        let lowered = name.to_lowercase();
+        matches!(lowered.as_str(), "inputs" | "github").then(|| table.var(&lowered))
+    }
+}
+
+/// One scalar resolved against the frame's static `inputs` and the checkout's
+/// `github` identity — the resolution a per-scope value gets (a container
+/// image, a registry username). `matrix` is deliberately out of reach, and a
+/// run-time input's placeholder fails as [`Failure::DynamicInput`] rather than
+/// leaking into the value.
+pub fn static_scalar(
+    text: &str,
+    span: &Span,
+    inputs: &Value,
+    github: &Value,
+) -> Result<String, Failure> {
+    let mut table = ExprTable::new();
+    let id = compile_with(text, span, &mut table, &mut ScopeContexts)?;
+    let env_statics = statics(inputs, github, &Value::Null);
+    let run = RunContext::new();
+    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
+    let value = eval(&table, id, &env).map_err(|e| Failure::Bad {
+        message: e.to_string(),
+        span: span.clone(),
+    })?;
+    let text = match value {
+        Value::String(s) => s,
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    if let Some(name) = text.split(DYNAMIC_MARK).nth(1) {
+        return Err(Failure::DynamicInput {
+            name: name
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+                .collect(),
+            span: span.clone(),
+        });
+    }
+    Ok(text)
+}
+
 /// Lower every label position. Fails on the first expression that reads past
 /// `matrix` — that verdict is per job, not per leg.
 pub fn compile(raw: &[RawLabel]) -> Result<Compiled, Failure> {
@@ -180,6 +229,15 @@ pub fn compile(raw: &[RawLabel]) -> Result<Compiled, Failure> {
 /// through the same fold ([`crate::exprs::fold_template`]) that shapes the
 /// graph's templates, here in the private table.
 fn compile_scalar(text: &str, span: &Span, table: &mut ExprTable) -> Result<ExprId, Failure> {
+    compile_with(text, span, table, &mut StaticContexts)
+}
+
+fn compile_with(
+    text: &str,
+    span: &Span,
+    table: &mut ExprTable,
+    roots: &mut dyn Roots,
+) -> Result<ExprId, Failure> {
     let bad = |message: String| Failure::Bad {
         message,
         span: span.clone(),
@@ -195,7 +253,7 @@ fn compile_scalar(text: &str, span: &Span, table: &mut ExprTable) -> Result<Expr
         |source, table| {
             let ast = parse(source)
                 .map_err(|e| bad(format!("could not parse `{}`: {e}", source.trim())))?;
-            crate::expr_lower::gha(&ast, table, &mut StaticContexts).map_err(|e| match e {
+            crate::expr_lower::gha(&ast, table, roots).map_err(|e| match e {
                 LowerError::UnknownIdent(name) => Failure::RunTimeContext {
                     name,
                     span: span.clone(),

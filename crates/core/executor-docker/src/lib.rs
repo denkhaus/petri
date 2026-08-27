@@ -234,6 +234,95 @@ pub(crate) async fn prepare_registry_image(
     Ok(())
 }
 
+/// Make `image` available under the pull policy, with or without registry
+/// credentials at the exact effect boundary.
+pub(crate) async fn prepare_image(
+    image: &str,
+    credentials: Option<&ir::RegistryCredentials>,
+    pull: PullPolicy,
+    scope: ir::ScopeId,
+    ctx: &AcquireContext,
+) -> Result<(), EnvError> {
+    match credentials {
+        Some(credentials) => pull_with_credentials(image, credentials, pull, scope, ctx).await,
+        None => prepare_registry_image(image, pull, scope, ctx.progress()).await,
+    }
+}
+
+/// Pull `image` as `credentials` — an isolated Docker config dir (the user's
+/// own login is never touched), a login whose password travels stdin only, the
+/// pull, and the config dir removed whatever happened. The password resolves
+/// here, at the point of use; resolving registers it with the run's masker.
+async fn pull_with_credentials(
+    image: &str,
+    credentials: &ir::RegistryCredentials,
+    pull: PullPolicy,
+    scope: ir::ScopeId,
+    ctx: &AcquireContext,
+) -> Result<(), EnvError> {
+    let present = run_docker(&["image", "inspect", image]).await.is_ok();
+    let pull_now = match pull {
+        PullPolicy::Never => false,
+        PullPolicy::IfNotPresent => !present,
+        PullPolicy::Always => true,
+    };
+    if !pull_now {
+        return Ok(());
+    }
+    ctx.progress().progress(
+        scope,
+        executor::Progress::PullingImage {
+            image: SmolStr::new(image),
+        },
+    );
+    let password =
+        ctx.secrets()
+            .resolve(&credentials.password_secret)
+            .map_err(|e| EnvError::Backend {
+                backend: SmolStr::new("docker"),
+                operation: SmolStr::new("login"),
+                message: e.to_string(),
+            })?;
+    let config_dir = std::env::temp_dir().join(format!(
+        "petri-docker-login-{}-{}",
+        std::process::id(),
+        next_token()
+    ));
+    tokio::fs::create_dir_all(&config_dir)
+        .await
+        .map_err(|e| EnvError::Workspace {
+            path: config_dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+    let config = config_dir.display().to_string();
+    let mut login: Vec<&str> = vec![
+        "--config",
+        &config,
+        "login",
+        "--username",
+        credentials.username.as_str(),
+        "--password-stdin",
+    ];
+    if let Some(host) = registry_host(image) {
+        login.push(host);
+    }
+    let result = match run_docker_stdin("login", &login, password.expose().as_bytes()).await {
+        Ok(_) => run_docker(&["--config", &config, "pull", image]).await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+    let _ = tokio::fs::remove_dir_all(&config_dir).await;
+    result
+}
+
+/// The registry host of an image reference, when it names one — the first
+/// component when it looks like a host (a dot, a port, or `localhost`);
+/// otherwise Docker Hub, which `docker login` takes with no server argument.
+fn registry_host(image: &str) -> Option<&str> {
+    let first = image.split('/').next()?;
+    let is_host = first.contains('.') || first.contains(':') || first == "localhost";
+    (image.contains('/') && is_host).then_some(first)
+}
+
 /// Remove every container whose name starts with `prefix`. Best effort, like
 /// the rest of the fence: a daemon that is down has nothing of ours to remove.
 pub async fn sweep_containers(prefix: &str) {
@@ -263,7 +352,7 @@ impl Executor for DockerExecutor {
         let RuntimeTarget::Container {
             image,
             options,
-            credentials: _,
+            credentials,
         } = &scope.runtime.target
         else {
             return Err(EnvError::Backend {
@@ -281,7 +370,7 @@ impl Executor for DockerExecutor {
                 message: e.to_string(),
             })?;
 
-        prepare_registry_image(image, self.pull, scope.id, ctx.progress()).await?;
+        prepare_image(image, credentials.as_ref(), self.pull, scope.id, ctx).await?;
 
         let name = self.container_name(&scope.instance).await?;
         // The fence half of the acquire contract (§9): a previous acquisition —
@@ -752,6 +841,40 @@ pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
     })
 }
 
+/// [`run_docker`], with `input` written to the child's stdin — how a login's
+/// password travels without ever being an argument.
+async fn run_docker_stdin(operation: &str, args: &[&str], input: &[u8]) -> Result<String, EnvError> {
+    let operation = SmolStr::new(operation);
+    let backend_error = |message: String| EnvError::Backend {
+        backend: SmolStr::new("docker"),
+        operation: operation.clone(),
+        message,
+    };
+    let mut child = tokio::process::Command::new("docker")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| backend_error(e.to_string()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input)
+            .await
+            .map_err(|e| backend_error(e.to_string()))?;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| backend_error(e.to_string()))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    Err(backend_error(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
 /// The run dir's recorded run id, or a fresh one recorded now — on disk before
 /// any container carries it, so a crash can never leave a container whose name
 /// no later process can rebuild. One executor per run dir is the rule
@@ -801,6 +924,23 @@ fn fresh_run_id() -> String {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registry_host;
+
+    #[test]
+    fn registry_hosts_parse_from_image_references() {
+        assert_eq!(registry_host("alpine:3.20"), None);
+        assert_eq!(registry_host("library/alpine"), None);
+        assert_eq!(registry_host("ghcr.io/acme/tool:1"), Some("ghcr.io"));
+        assert_eq!(
+            registry_host("localhost:5000/acme/tool"),
+            Some("localhost:5000")
+        );
+        assert_eq!(registry_host("localhost/acme/tool"), Some("localhost"));
+    }
 }
 
 /// Containers this run left behind, for leak checks in tests.

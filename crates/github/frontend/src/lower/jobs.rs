@@ -321,15 +321,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
             return;
         };
 
-        // Secrets at workflow/job level are pushed down into every step.
+        // Secrets at container/workflow/job level are pushed down into every step.
         let mut site = self.base_site(job);
         let mut job_secret_env: Vec<(String, String)> = Vec::new();
-        for (key, node) in self.wf.env.iter().chain(job.env.iter()) {
+        let container_env = super::scope::container_env(job);
+        for (key, node) in container_env
+            .iter()
+            .map(|(k, n)| (k, *n))
+            .chain(self.wf.env.iter().chain(job.env.iter()).map(|(k, n)| (k, *n)))
+        {
             // Lowered once already for the scope; here only to find the secrets, whose
             // diagnostics (if any) were reported then.
             let mut scratch = Diagnostics::new();
             let saved = std::mem::replace(&mut self.diags, scratch);
-            let value = self.env_value(node, &site, false);
+            let value = self.env_value(&node, &site, false);
             scratch = std::mem::replace(&mut self.diags, saved);
             let _ = scratch;
             if let Some(EnvValue::Secret(name)) = value {

@@ -12,6 +12,18 @@ use crate::runs_on;
 
 use super::{EnvValue, Lowering};
 
+/// The job container's `env:` entries, when the job has a container mapping.
+/// Read here for the scope and again by `job_body`'s secret scan, so a secret
+/// in container env is pushed down into every step like a job-env secret.
+pub(super) fn container_env<'x>(job: &Job<'x>) -> Vec<(String, Node<'x>)> {
+    job.container
+        .and_then(|c| c.as_mapping())
+        .and_then(|m| m.get("env"))
+        .and_then(|e| e.as_mapping())
+        .map(|em| em.iter().map(|(k, v)| (k.to_string(), v)).collect())
+        .unwrap_or_default()
+}
+
 impl<'w, 'a> Lowering<'w, 'a> {
     pub(super) fn scope_for(&mut self, job: &Job<'a>) -> ScopeId {
         let mut scope = Scope::new(ScopeId::new(0));
@@ -74,11 +86,18 @@ impl<'w, 'a> Lowering<'w, 'a> {
             );
         }
 
-        // Workflow env, then job env on top. Secret refs cannot live in scope env
-        // (there is nowhere for them to go but the process), so they are pushed down
-        // into every step's env instead; `job_body` reads them back from `site`.
-        for (key, node) in self.wf.env.iter().chain(job.env.iter()) {
-            match self.env_value(node, &site, false) {
+        // Container env first (lowest precedence — it configures the container,
+        // and per-step env wins inside it), then workflow env, then job env on
+        // top. Secret refs cannot live in scope env (there is nowhere for them
+        // to go but the process), so they are pushed down into every step's env
+        // instead; `job_body` reads them back from `site`.
+        let container_env = container_env(job);
+        for (key, node) in container_env
+            .iter()
+            .map(|(k, n)| (k, *n))
+            .chain(self.wf.env.iter().chain(job.env.iter()).map(|(k, n)| (k, *n)))
+        {
+            match self.env_value(&node, &site, false) {
                 Some(EnvValue::Plain(v)) => {
                     scope.env.insert(SmolStr::new(key), v);
                 }
@@ -147,38 +166,48 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
 
         if let Some(container) = job.container {
-            let image = if let Some(s) = container.as_str() {
-                Some((s.to_string(), container.span()))
+            let mut image_node = None;
+            let mut options: Vec<SmolStr> = Vec::new();
+            let mut credentials = None;
+            if container.as_str().is_some() {
+                image_node = Some(container);
             } else if let Some(m) = container.as_mapping() {
                 for (key, span) in m.keys() {
                     match key {
-                        "image" | "env" => {}
+                        "image" | "env" | "options" | "credentials" => {}
                         other => self.diags.unsupported(
                             &format!("container.{other}"),
                             span,
                             format!("`container.{other}`"),
-                            "only `image` and `env` are mapped onto a container scope; `options` are engine flags, which the graph does not carry",
+                            "`image`, `env`, `options` and `credentials` map onto a container \
+                             scope",
                         ),
                     }
                 }
-                m.get("image")
-                    .and_then(|i| i.as_str().map(|s| (s.to_string(), i.span())))
-            } else {
-                None
-            };
-            match image {
-                Some((image, span)) if image.contains("${{") => {
-                    self.diags.unsupported(
-                        "container.expression",
-                        span,
-                        "an expression-valued container image",
-                        "the image is fixed per scope; use a literal",
-                    );
+                image_node = m.get("image");
+                if let Some(node) = m.get("options") {
+                    options = self.engine_flags(node, "container");
                 }
-                Some((image, _)) => {
-                    let requirements = std::mem::take(&mut spec.requirements);
-                    spec = RuntimeSpec::container(&image);
-                    spec.requirements = requirements;
+                if let Some(node) = m.get("credentials") {
+                    credentials = self.registry_credentials(node, "container");
+                }
+            }
+            match image_node.and_then(|n| n.as_str().map(|s| (s.to_string(), n.span()))) {
+                Some((text, span)) => {
+                    if let Some(image) = self.static_scope_text(&text, span, "container image") {
+                        let requirements = std::mem::take(&mut spec.requirements);
+                        spec = RuntimeSpec::container(&image);
+                        spec.requirements = requirements;
+                        if let ir::RuntimeTarget::Container {
+                            options: target_options,
+                            credentials: target_credentials,
+                            ..
+                        } = &mut spec.target
+                        {
+                            *target_options = options;
+                            *target_credentials = credentials;
+                        }
+                    }
                 }
                 None => self.diags.error(
                     "gha.bad_container",
@@ -188,6 +217,114 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
         spec
+    }
+
+    /// A per-scope text — a container image, a registry username: literal, or
+    /// an expression over the static contexts (the frame's known `inputs` and
+    /// the checkout's `github` identity, never `matrix`: every leg shares the
+    /// scope). `None` reports the specific rejection.
+    fn static_scope_text(&mut self, text: &str, span: Span, what: &str) -> Option<String> {
+        if !text.contains("${{") {
+            return Some(text.to_string());
+        }
+        let inputs = self.placement_inputs();
+        let resolved = runs_on::static_scalar(text, &span, &inputs, &self.github_identity);
+        match resolved {
+            Ok(value) => Some(value),
+            Err(failure) => {
+                let why = match failure {
+                    runs_on::Failure::RunTimeContext { name, .. } => {
+                        format!("it reads `{name}`, which has no value before the run")
+                    }
+                    runs_on::Failure::DynamicInput { name, .. } => format!(
+                        "it reads input `{name}`, whose value this call site computes at run time"
+                    ),
+                    runs_on::Failure::Bad { message, .. } => message,
+                    runs_on::Failure::NotLabels { got, .. } => {
+                        format!("it evaluated to {got}, not text")
+                    }
+                };
+                self.diags.unsupported(
+                    "container.expression",
+                    span,
+                    format!("the {what} cannot be resolved at lowering: {why}"),
+                    "a per-scope value resolves at lowering from `inputs` and the checkout's \
+                     `github` identity; `matrix` and run-time contexts cannot vary it — use a \
+                     literal",
+                );
+                None
+            }
+        }
+    }
+
+    /// `options:` — raw engine flags, split the way GitHub hands them to the
+    /// engine. Opaque from here on: the graph carries them, executors pass
+    /// them through.
+    fn engine_flags(&mut self, node: Node<'_>, what: &str) -> Vec<SmolStr> {
+        let text = node.as_str().unwrap_or_default();
+        if text.contains("${{") {
+            self.diags.unsupported(
+                "container.expression",
+                node.span(),
+                format!("`{what}` options carry an expression"),
+                "options are fixed per scope; use literals",
+            );
+            return Vec::new();
+        }
+        crate::split_shell_words(text)
+            .into_iter()
+            .map(SmolStr::new)
+            .collect()
+    }
+
+    /// `credentials:` — registry auth. The username resolves at lowering (a
+    /// literal, or a static expression); the password must be a whole
+    /// `${{ secrets.NAME }}` reference — the graph carries the *name*, and the
+    /// executor resolves it inside acquire, so no value ever enters the graph
+    /// or the log.
+    fn registry_credentials(
+        &mut self,
+        node: Node<'_>,
+        what: &str,
+    ) -> Option<ir::RegistryCredentials> {
+        let Some(m) = node.as_mapping() else {
+            self.diags.error(
+                "gha.bad_container",
+                node.span(),
+                format!("`{what}` credentials need `username` and `password`"),
+            );
+            return None;
+        };
+        let mut field = |key: &str| -> Option<(String, Span)> {
+            match m.get(key) {
+                Some(n) => n.as_str().map(|s| (s.to_string(), n.span())),
+                None => {
+                    self.diags.error(
+                        "gha.bad_container",
+                        node.span(),
+                        format!("`{what}` credentials need `{key}`"),
+                    );
+                    None
+                }
+            }
+        };
+        let (username_text, username_span) = field("username")?;
+        let (password_text, password_span) = field("password")?;
+        let username = self.static_scope_text(&username_text, username_span, "registry username")?;
+        let Some(password_secret) = crate::exprs::whole_value_secret(&password_text) else {
+            self.diags.unsupported(
+                "container.credentials",
+                password_span,
+                format!("`{what}` credentials carry a password that is not a secret reference"),
+                "the password must be a whole `${{ secrets.NAME }}` reference; a value never \
+                 enters the graph",
+            );
+            return None;
+        };
+        Some(ir::RegistryCredentials {
+            username: SmolStr::new(username),
+            password_secret: SmolStr::new(password_secret),
+        })
     }
 
     /// `services:` onto the scope: sidecar containers with the job's lifetime,
@@ -222,13 +359,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             } else if let Some(sm) = spec.as_mapping() {
                 for (key, span) in sm.keys() {
                     match key {
-                        "image" | "env" | "ports" | "options" => {}
-                        "credentials" => self.diags.unsupported(
-                            "container.credentials",
-                            span,
-                            format!("service `{alias}` uses registry credentials"),
-                            "registry auth for service images is not wired yet",
-                        ),
+                        "image" | "env" | "ports" | "options" | "credentials" => {}
                         "volumes" => self.diags.unsupported(
                             "services.volumes",
                             span,
@@ -241,6 +372,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
                             format!("unknown key `{other}` on service `{alias}`"),
                         ),
                     }
+                }
+                if let Some(node) = sm.get("credentials") {
+                    service.credentials = self.registry_credentials(node, "service");
                 }
                 for (key, value) in sm.get("env").and_then(|e| e.as_mapping()).iter().flat_map(|em| em.iter()) {
                     match self.env_value(&value, &site, false) {
@@ -276,36 +410,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     }
                 }
                 if let Some(options) = sm.get("options") {
-                    let text = options.as_str().unwrap_or_default();
-                    if text.contains("${{") {
-                        self.diags.unsupported(
-                            "container.expression",
-                            options.span(),
-                            format!("service `{alias}` has expression-valued options"),
-                            "options are fixed per scope; use literals",
-                        );
-                    } else {
-                        service.options = crate::split_shell_words(text)
-                            .into_iter()
-                            .map(SmolStr::new)
-                            .collect();
-                    }
+                    service.options = self.engine_flags(options, "service");
                 }
                 sm.get("image")
             } else {
                 None
             };
-            match image.and_then(|i| i.as_str()) {
-                Some(image) if image.contains("${{") => {
-                    self.diags.unsupported(
-                        "container.expression",
-                        spec.span(),
-                        format!("service `{alias}` has an expression-valued image"),
-                        "the image is fixed per scope; use a literal",
-                    );
-                    continue;
+            match image.and_then(|i| i.as_str().map(|s| (s.to_string(), i.span()))) {
+                Some((text, span)) => {
+                    let what = format!("service `{alias}` image");
+                    let Some(image) = self.static_scope_text(&text, span, &what) else {
+                        continue;
+                    };
+                    service.image = SmolStr::new(image);
                 }
-                Some(image) => service.image = SmolStr::new(image),
                 None => {
                     self.diags.error(
                         "gha.bad_service",
