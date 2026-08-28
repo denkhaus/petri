@@ -56,6 +56,17 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "shell.powershell",
 ];
 
+/// A reusable file whose sole blocker, standalone, is a runner input only a
+/// caller provides. Not a gap: every call site resolves it (its in-repo
+/// callers lower), and no standalone lowering could ever place it. Leaves the
+/// denominator the way Windows/macOS workflows do.
+pub const CALLEE_ONLY: &[&str] = &["runs_on.callee_input"];
+
+/// The referenced repository is gone upstream (private or removed, recorded at
+/// snapshot refresh): the workflow is broken on GitHub itself, so it measures
+/// nothing about this runner. Leaves the denominator.
+pub const BROKEN_UPSTREAM: &[&str] = &["action.upstream_gone"];
+
 impl Outcome {
     /// Every `unsupported.*` feature this workflow hit, deduplicated.
     pub fn unsupported_features(&self) -> Vec<String> {
@@ -75,6 +86,24 @@ impl Outcome {
         self.unsupported_features()
             .iter()
             .any(|f| OUT_OF_SCOPE.contains(&f.as_str()))
+    }
+
+    /// Every rejection is [`CALLEE_ONLY`]: a reusable file only its callers can
+    /// place. "Every", not "any" — a file with another blocker besides is a
+    /// real rejection and stays one.
+    pub fn callee_only(&self) -> bool {
+        let features = self.unsupported_features();
+        self.class == Class::Unsupported
+            && !features.is_empty()
+            && features.iter().all(|f| CALLEE_ONLY.contains(&f.as_str()))
+    }
+
+    /// The workflow references a repository that is gone upstream
+    /// ([`BROKEN_UPSTREAM`]): broken on GitHub itself, whatever else it needs.
+    pub fn broken_upstream(&self) -> bool {
+        self.unsupported_features()
+            .iter()
+            .any(|f| BROKEN_UPSTREAM.contains(&f.as_str()))
     }
 
     /// Remote actions this workflow references, as `owner/repo@ref`.
@@ -384,18 +413,35 @@ pub fn check_all(corpus_root: &Path, actions: Option<&Arc<dyn ActionSource>>) ->
 pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    // Windows/macOS workflows are out of scope by policy: they leave the
-    // denominator entirely, so every share below measures what this runner
-    // could ever run.
+    // Three exclusions leave the denominator entirely, so every share below
+    // measures what this runner could ever run: Windows/macOS workflows (out
+    // of scope by policy), reusable-only files whose runner a caller provides
+    // (nothing standalone to place), and workflows whose referenced repository
+    // is gone upstream (broken on GitHub itself). Precedence in that order, so
+    // a file lands in exactly one class.
     let out_of_scope = outcomes.iter().filter(|o| o.out_of_scope()).count();
-    let in_scope: Vec<&Outcome> = outcomes.iter().filter(|o| !o.out_of_scope()).collect();
+    let broken_upstream = outcomes
+        .iter()
+        .filter(|o| !o.out_of_scope() && o.broken_upstream())
+        .count();
+    let callee_only = outcomes
+        .iter()
+        .filter(|o| !o.out_of_scope() && !o.broken_upstream() && o.callee_only())
+        .count();
+    let in_scope: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|o| !o.out_of_scope() && !o.broken_upstream() && !o.callee_only())
+        .collect();
     let total = in_scope.len();
     let count = |c: Class| in_scope.iter().filter(|o| o.class == c).count();
     let _ = writeln!(out, "# Compatibility corpus report\n");
     let _ = writeln!(
         out,
-        "{} workflows from {} repositories; {out_of_scope} need a Windows or macOS runner \
-         or shell and are out of scope by policy, leaving **{total} in scope**.\n",
+        "{} workflows from {} repositories. Out of the denominator by policy: \
+         {out_of_scope} need a Windows or macOS runner or shell, {callee_only} are \
+         reusable-only files whose runner a caller provides (callee-only), and \
+         {broken_upstream} reference a repository gone upstream (broken on GitHub \
+         itself) — leaving **{total} in scope**.\n",
         outcomes.len(),
         {
             let mut repos: Vec<&str> = outcomes.iter().map(|o| o.repo.as_str()).collect();
@@ -511,10 +557,15 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
     );
     let _ = writeln!(out, "|---|---|---|---|---|");
     for o in outcomes {
-        // Out-of-scope rows keep their place in the inventory but carry no
+        // Excluded rows keep their place in the inventory but carry no
         // feature list: what else they would need is noise by policy.
+        let excluded = o.out_of_scope() || o.broken_upstream() || o.callee_only();
         let class = if o.out_of_scope() {
             "out of scope"
+        } else if o.broken_upstream() {
+            "broken upstream"
+        } else if o.callee_only() {
+            "callee only"
         } else {
             match o.class {
                 Class::Clean => "clean",
@@ -524,7 +575,7 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
                 Class::Panicked => "**PANIC**",
             }
         };
-        let features = if o.out_of_scope() {
+        let features = if excluded {
             Vec::new()
         } else {
             o.unsupported_features()

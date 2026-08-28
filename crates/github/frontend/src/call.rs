@@ -287,12 +287,13 @@ fn fetch(
             match fetched {
                 Ok((pinned, text)) => Some((CalleeSource::Remote { pinned }, text)),
                 Err(ActionSourceError::Unavailable { reason, .. }) => {
-                    diags.unsupported(
-                        "action.remote",
-                        span.clone(),
-                        identity.to_string(),
-                        &unavailable_hint(reason),
-                    );
+                    // Same split as a `uses:` step's: a recorded upstream
+                    // refusal is the workflow broken on GitHub itself.
+                    let code = match reason {
+                        Some(_) => "action.upstream_gone",
+                        None => "action.remote",
+                    };
+                    diags.unsupported(code, span.clone(), identity.to_string(), &unavailable_hint(reason));
                     None
                 }
                 Err(other) => {

@@ -376,7 +376,8 @@ jobs:
         ["ubuntu-24.04"]
     );
 
-    // No default: nothing to place by; the rejection names the input.
+    // No default: nothing standalone could ever place this file — only a
+    // caller can. Its own class, so the corpus never reads it as a gap.
     let defaultless = callee.replace("        default: ubuntu-24.04\n", "");
     let lowered =
         frontend_gha::load(".github/workflows/build.yml", &defaultless, &frontend::NoFiles);
@@ -385,7 +386,8 @@ jobs:
     assert!(
         diags
             .iter()
-            .any(|d| d.code == "unsupported.runs_on.expression" && d.message.contains("input `os`")),
+            .any(|d| d.code == "unsupported.runs_on.callee_input"
+                && d.message.contains("input `os`")),
         "{diags:?}"
     );
 }

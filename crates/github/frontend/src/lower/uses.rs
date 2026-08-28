@@ -101,9 +101,17 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     );
                     None
                 }
+                // A recorded upstream refusal — the repository is private or
+                // removed — is its own class: the workflow is broken on GitHub
+                // itself, and no refresh will change that. A reference the
+                // source merely does not cover stays `action.remote`.
                 Err(ResolveFailure::Unavailable(reason)) => {
+                    let code = match reason {
+                        Some(_) => "action.upstream_gone",
+                        None => "action.remote",
+                    };
                     self.diags.unsupported(
-                        "action.remote",
+                        code,
                         span.clone(),
                         name.to_string(),
                         &unavailable_hint(reason),

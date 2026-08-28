@@ -565,6 +565,29 @@ impl<'w, 'a> Lowering<'w, 'a> {
         spec.requirements.push(SmolStr::new(label));
     }
 
+    /// Whether `name` is an input only a caller can provide: this frame is the
+    /// file itself (not an inlined callee), `on.workflow_call` declares the
+    /// input with no default, and no `workflow_dispatch` declaration offers a
+    /// standalone way to run the file with it.
+    fn callee_only_input(&self, name: &str) -> bool {
+        if self.frames[self.current].call.is_some() {
+            return false;
+        }
+        let lowered = name.to_lowercase();
+        let declared_defaultless = self.wf.call.as_ref().is_some_and(|interface| {
+            interface
+                .inputs
+                .iter()
+                .any(|d| d.name.to_lowercase() == lowered && d.default.is_none())
+        });
+        let dispatchable = self
+            .wf
+            .dispatch_inputs
+            .iter()
+            .any(|d| d.name.to_lowercase() == lowered);
+        declared_defaultless && !dispatchable
+    }
+
     /// Why a `runs-on` did not resolve at lowering, as the one
     /// `runs_on.expression` rejection with the specifics in the message.
     fn runs_on_failure(&mut self, job: &Job<'a>, failure: runs_on::Failure, leg: Option<&Value>) {
@@ -583,17 +606,38 @@ impl<'w, 'a> Lowering<'w, 'a> {
                  `github` identity have values; `needs` is a run-time context — use a fixed \
                  label, matrix values, or an input",
             ),
-            runs_on::Failure::DynamicInput { name, span } => self.diags.unsupported(
-                "runs_on.expression",
-                span,
-                format!(
-                    "job `{}`: `runs-on` reads input `{name}`, whose value this call site \
-                     computes at run time{for_leg}",
-                    job.id
-                ),
-                "a `runs-on` input resolves at lowering from a literal `with:` value or the \
-                 declared default; pass a literal, or use a fixed label",
-            ),
+            runs_on::Failure::DynamicInput { name, span } => {
+                // A reusable file, lowered standalone, whose runner input has no
+                // default: only a caller can place it, and every call site does
+                // (per-call-site resolution above). Its own class, so a corpus
+                // count never reads "cannot place by construction" as a gap.
+                if self.callee_only_input(&name) {
+                    self.diags.unsupported(
+                        "runs_on.callee_input",
+                        span,
+                        format!(
+                            "job `{}`: `runs-on` reads input `{name}`, which only a caller \
+                             provides",
+                            job.id
+                        ),
+                        "this file is reusable: `on.workflow_call` declares the input with no \
+                         default, so a standalone lowering has no runner to place — its callers \
+                         bind one per call site",
+                    );
+                } else {
+                    self.diags.unsupported(
+                        "runs_on.expression",
+                        span,
+                        format!(
+                            "job `{}`: `runs-on` reads input `{name}`, whose value this call \
+                             site computes at run time{for_leg}",
+                            job.id
+                        ),
+                        "a `runs-on` input resolves at lowering from a literal `with:` value or \
+                         the declared default; pass a literal, or use a fixed label",
+                    );
+                }
+            }
             runs_on::Failure::Bad { message, span } => self.diags.unsupported(
                 "runs_on.expression",
                 span,

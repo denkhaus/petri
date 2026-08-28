@@ -1,14 +1,14 @@
 # Compatibility corpus report
 
-316 workflows from 21 repositories; 63 need a Windows or macOS runner or shell and are out of scope by policy, leaving **253 in scope**.
+316 workflows from 21 repositories. Out of the denominator by policy: 63 need a Windows or macOS runner or shell, 4 are reusable-only files whose runner a caller provides (callee-only), and 1 reference a repository gone upstream (broken on GitHub itself) — leaving **248 in scope**.
 
 Remote `uses:` references resolve through the action snapshot: 305 references, 1 of them unavailable. Refresh with `cargo test -p petri-github-acceptance --test snapshot -- --ignored`.
 
-| Result (of the in-scope 253) | Count | Share |
+| Result (of the in-scope 248) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 218 | 86% |
-| rejected with a specific `unsupported.*` code | 13 | 5% |
+| lowered with warnings | 218 | 88% |
+| rejected with a specific `unsupported.*` code | 8 | 3% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -65,11 +65,10 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 
 | Feature | Workflows |
 |---|---|
-| `runs_on.expression` | 6 |
 | `action.local_missing` | 2 |
+| `runs_on.expression` | 2 |
 | `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
-| `action.remote` | 1 |
 | `continue_on_error.expression` | 1 |
 | `step.background` | 1 |
 
@@ -216,7 +215,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | facebook/react | `shared_lint.yml` | warnings | 44 | — |
 | facebook/react | `shared_stale.yml` | warnings | 3 | — |
 | hashicorp/terraform | `backport.yml` | warnings | 3 | — |
-| hashicorp/terraform | `build-terraform-cli.yml` | unsupported | — | `runs_on.expression` |
+| hashicorp/terraform | `build-terraform-cli.yml` | callee only | — | — |
 | hashicorp/terraform | `build.yml` | out of scope | — | — |
 | hashicorp/terraform | `changelog-validation.yml` | warnings | 5 | — |
 | hashicorp/terraform | `checks.yml` | warnings | 43 | — |
@@ -228,7 +227,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | hashicorp/terraform | `lock.yml` | warnings | 3 | — |
 | nodejs/node | `auto-start-ci.yml` | warnings | 10 | — |
 | nodejs/node | `benchmark.yml` | out of scope | — | — |
-| nodejs/node | `build-shared.yml` | unsupported | — | `runs_on.expression` |
+| nodejs/node | `build-shared.yml` | callee only | — | — |
 | nodejs/node | `build-tarball.yml` | warnings | 21 | — |
 | nodejs/node | `close-stalled.yml` | warnings | 3 | — |
 | nodejs/node | `codeql.yml` | warnings | 9 | — |
@@ -322,9 +321,9 @@ None. Every workflow either lowered or was rejected with a specific code.
 | python/cpython | `reusable-docs.yml` | warnings | 52 | — |
 | python/cpython | `reusable-emscripten.yml` | warnings | 22 | — |
 | python/cpython | `reusable-install.yml` | warnings | 13 | — |
-| python/cpython | `reusable-macos.yml` | unsupported | — | `runs_on.expression` |
+| python/cpython | `reusable-macos.yml` | callee only | — | — |
 | python/cpython | `reusable-san.yml` | warnings | 19 | — |
-| python/cpython | `reusable-ubuntu.yml` | unsupported | — | `runs_on.expression` |
+| python/cpython | `reusable-ubuntu.yml` | callee only | — | — |
 | python/cpython | `reusable-wasi.yml` | warnings | 17 | — |
 | python/cpython | `reusable-windows.yml` | out of scope | — | — |
 | python/cpython | `stale.yml` | warnings | 3 | — |
@@ -359,7 +358,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | tokio-rs/tokio | `pr-audit.yml` | warnings | 5 | — |
 | tokio-rs/tokio | `stress-test.yml` | warnings | 23 | — |
 | tokio-rs/tokio | `uring-kernel-version-test.yml` | clean | 11 | — |
-| vercel/next.js | `automated_code_review.yml` | unsupported | — | `action.remote` |
+| vercel/next.js | `automated_code_review.yml` | broken upstream | — | — |
 | vercel/next.js | `build_and_deploy.yml` | out of scope | — | — |
 | vercel/next.js | `build_and_test.yml` | out of scope | — | — |
 | vercel/next.js | `build_reusable.yml` | out of scope | — | — |

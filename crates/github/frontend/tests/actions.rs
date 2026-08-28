@@ -261,10 +261,10 @@ jobs:
     );
 }
 
-/// Both ways a source declines to serve a reference reject as `action.remote`,
-/// and the hint says which happened: an uncovered reference points at a refresh,
-/// a recorded upstream failure (a private or removed repository) says a refresh
-/// will not help and carries the recorded error.
+/// The two ways a source declines to serve a reference get their own codes: an
+/// uncovered reference is `action.remote` and points at a refresh; a recorded
+/// upstream failure (a private or removed repository) is `action.upstream_gone`
+/// — the workflow is broken on GitHub itself — and carries the recorded error.
 #[test]
 fn an_unavailable_reference_is_unsupported_and_the_hint_says_why() {
     use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
@@ -297,10 +297,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 "#;
-    for (reason, wants) in [
-        (None, "refreshing it"),
+    for (reason, code, wants) in [
+        (None, "action.remote", "refreshing it"),
         (
             Some("remote: Repository not found."),
+            "action.upstream_gone",
             "refreshing the source will not help",
         ),
     ] {
@@ -314,7 +315,7 @@ jobs:
         let diags = lowered.diagnostics.into_vec();
         let d = diags
             .iter()
-            .find(|d| d.unsupported_feature() == Some("action.remote"))
+            .find(|d| d.unsupported_feature() == Some(code))
             .unwrap_or_else(|| panic!("{diags:?}"));
         let hint = d.hint.as_deref().unwrap_or_default();
         assert!(hint.contains(wants), "{hint}");
