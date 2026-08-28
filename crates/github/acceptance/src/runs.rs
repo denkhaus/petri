@@ -231,8 +231,12 @@ fn reads_another_run(pinned: &PinnedAction, config: &Value) -> bool {
         .is_some_and(|inputs| inputs.contains_key("run-id"))
 }
 
-/// Actions whose work is inseparable from a hosted service: no local runner can
-/// fix a failure here, so the sweep classifies it as expected rather than a gap.
+/// Actions whose work is inseparable from a hosted service — OIDC issuers,
+/// GitHub App credentials, SaaS backends, and **mutating actions**, whose whole
+/// job is a write to github.com: a local run with write permission would
+/// mutate the real repository (the API stance), so the sweep, which must never
+/// mutate, can never see them pass. No local runner can fix a failure here,
+/// so the sweep classifies it as expected rather than a gap.
 pub const SERVER_COUPLED: &[(&str, &str)] = &[
     ("actions/attest-build-provenance", "OIDC attestation"),
     ("open-security-tools/ost-simple-sts", "OIDC token exchange"),
@@ -247,6 +251,33 @@ pub const SERVER_COUPLED: &[(&str, &str)] = &[
     ("codecov/codecov-action", "third-party SaaS upload"),
     ("coverallsapp/github-action", "third-party SaaS upload"),
     ("CodSpeedHQ/action", "third-party SaaS upload"),
+    ("rust-lang/crates-io-auth-action", "OIDC token exchange"),
+    (
+        "rubygems/configure-rubygems-credentials",
+        "OIDC token exchange",
+    ),
+    ("dessant/lock-threads", "mutates issues over the API"),
+    ("github/issue-labeler", "mutates issues over the API"),
+    (
+        "release-drafter/release-drafter",
+        "mutates releases over the API",
+    ),
+    (
+        "gr2m/create-or-update-pull-request-action",
+        "mutates pull requests over the API",
+    ),
+    (
+        "JamesIves/github-pages-deploy-action",
+        "pushes a deployment branch",
+    ),
+    (
+        "actions/publish-immutable-action",
+        "publishes to GitHub's registry",
+    ),
+    (
+        "mheap/github-action-required-labels",
+        "reads the triggering pull request (no local event)",
+    ),
 ];
 
 /// The step-kind class a step reports when a `$secret` reference has no value.
@@ -655,6 +686,16 @@ mod tests {
         assert_eq!(
             expected_reason(&oidc, "exit_status:1", false),
             Some("OIDC attestation".to_string())
+        );
+        // A mutating action is expected whatever the credential: the sweep
+        // must never see its write succeed.
+        let mutating = StepIdentity::Action {
+            bare: "dessant/lock-threads".to_string(),
+            cross_run: false,
+        };
+        assert_eq!(
+            expected_reason(&mutating, "exit_status:1", true),
+            Some("mutates issues over the API".to_string())
         );
         // The real checkout cannot fetch without a credential; that is the
         // sweep's constraint, not a runtime-tier gap.
