@@ -403,6 +403,54 @@ async fn docker_wait_follows_the_step_not_the_client() {
     );
 }
 
+/// Output printed *after* a pause survives, on both streams. The exit status was
+/// always safe (the wrapper records it), but the log path was not: run directly
+/// under `docker exec`, `setsid` forks and the client detaches from a step still
+/// running — every later line is lost. Fast steps never showed it; the keeper
+/// shell the executor now runs `setsid` under is what keeps the client attached.
+#[tokio::test]
+async fn docker_output_after_a_pause_is_captured() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-late-output");
+    let graph = docker_graph(
+        "slow-talker",
+        "echo start; sleep 2; echo after-sleep; echo err-after >&2; exit 3",
+    );
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Never);
+
+    let report = docker_driver(graph, &dir, config).await_run().await;
+
+    let lines = log_lines(&report);
+    for expected in ["start", "after-sleep", "err-after"] {
+        assert!(
+            lines.iter().any(|l| l == expected),
+            "`{expected}` reached the log: {lines:?}"
+        );
+    }
+    assert_eq!(
+        status_of(&report, "slow-talker").as_deref(),
+        Some("failure")
+    );
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "slow-talker")
+        .unwrap();
+    assert_eq!(
+        record
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.class.as_str()),
+        Some("exit_status:3")
+    );
+}
+
 /// The wrapper is inside the group the ladder kills, so it never gets to record a
 /// status. That path must land on the cancellation outcome rather than hanging on a
 /// status file that is not coming, or falling back to a default.

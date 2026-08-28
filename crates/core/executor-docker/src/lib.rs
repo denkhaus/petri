@@ -18,17 +18,25 @@
 //! read it. `setsid` makes the shell a session leader, so its pid *is* its pgid.
 //! **The image must provide `setsid`** (busybox and util-linux both do).
 //!
-//! # Why the exit status comes from a file
+//! # Why `setsid` runs under a keeper shell, and the exit status comes from a file
 //!
-//! `setsid` forks when its caller is already a process group leader, and whether
-//! `docker exec` hands its process one is not something to rely on. If it does fork,
-//! `setsid` exits as soon as the child is running and `docker exec` returns 0
-//! immediately — the step is still going, and its real exit status is lost.
+//! `setsid` forks when its caller is already a process group leader, and `docker
+//! exec` does hand its process one (runc gives it a group of its own). Run
+//! directly, `setsid` therefore exits as soon as the child is running and the
+//! client returns 0 immediately — the step is still going, its real exit status
+//! is lost, and, worse, the client has *detached*: every line the step prints
+//! from then on is lost too. Fast steps never show it; a step that pauses for a
+//! download loses everything after the pause.
 //!
-//! So the wrapper records the status itself, and [`DockerProcess::wait`] prefers that
-//! file over the client's exit code, polling the process group's liveness rather than
-//! trusting an early return. This makes the executor correct whichever way `setsid`
-//! behaves, instead of correct on the platforms that happen to suit it.
+//! So the step runs under a keeper: the process `docker exec` attaches to is a
+//! plain shell that runs `setsid` as its child. A child is not a group leader, so
+//! `setsid` never forks — it makes the session and execs the wrapper — and the
+//! keeper stays attached until the wrapper exits, forwarding output and status.
+//!
+//! The wrapper still records the status in a file, and [`DockerProcess::wait`]
+//! prefers that file over the client's exit code, polling the process group's
+//! liveness rather than trusting the client: correct even if something kills the
+//! keeper out from under a step, instead of correct only when everything behaves.
 
 mod oneshot;
 mod services;
@@ -609,12 +617,23 @@ impl ExecEnv for DockerEnv {
             argv.push(format!("{key}={value}"));
         }
         argv.push(self.container.clone());
-        // `setsid` makes the shell a session leader, so its pid is its pgid. The
-        // wrapper records that pid, runs the step, and writes the step's exit status
-        // beside it — the status file is the source of truth, not the client's code.
         let wrapper_shell = self.wrapper_shell().await;
         argv.extend([
-            "setsid".to_string(),
+            // The keeper: the process `docker exec` attaches to. runc hands it a
+            // process group of its own, so `setsid` run *directly* here forks and
+            // exits at once — and the client detaches from a step still running,
+            // losing every line it prints from then on. As the keeper's child,
+            // `setsid` is no group leader and never forks: it makes the session,
+            // execs the wrapper, and the keeper stays attached until the wrapper
+            // exits, forwarding its status. Two statements, so no shell turns the
+            // call into an `exec` and puts the leader back.
+            wrapper_shell.to_string(),
+            "-c".to_string(),
+            r#"setsid "$@"; s=$?; exit "$s""#.to_string(),
+            wrapper_shell.to_string(),
+            // The wrapper, in its own session: its pid is the pgid it records, it
+            // runs the step, and it writes the step's exit status beside the pgid
+            // — the status file stays the source of truth, not the client's code.
             wrapper_shell.to_string(),
             "-c".to_string(),
             // Both files are written to a temporary name and renamed into place.
