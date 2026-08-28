@@ -66,11 +66,15 @@ async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, St
     let source = PathBuf::from(source);
 
     // The snapshot, assembled beside nothing the run owns and removed on the
-    // way out whatever happens.
+    // way out whatever happens. The name carries a process-global counter, not
+    // the firing id: concurrent *runs* in one process (the corpus sweep) each
+    // count firings from zero, and a shared name would let one run's cleanup
+    // delete another's snapshot mid-copy.
+    static SNAPSHOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let scratch = std::env::temp_dir().join(format!(
         "petri-checkout-{}-{}",
         std::process::id(),
-        ctx.firing.raw()
+        SNAPSHOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let _ = tokio::fs::remove_dir_all(&scratch).await;
     let result = materialize(&source, &scratch, &config, &mut ctx).await;
