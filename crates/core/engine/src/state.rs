@@ -171,6 +171,8 @@ pub struct EngineState {
     next_firing: u64,
     next_cancel_scope: u32,
     next_edge: u32,
+    /// High-water mark for splice-allocated node ids; see [`Self::next_node_id`].
+    next_node: u32,
 
     started: bool,
     finished: bool,
@@ -221,6 +223,7 @@ impl EngineState {
             next_firing: 1,
             next_cancel_scope: 1,
             next_edge,
+            next_node: 0,
             started: false,
             finished: false,
             cancelled: false,
@@ -428,6 +431,17 @@ impl EngineState {
         let id = EdgeId::new(self.next_edge);
         self.next_edge += 1;
         id
+    }
+
+    /// Allocate the id for a node a splice will add: never behind the live
+    /// graph, and monotonic across allocations. Two expansions queued in the
+    /// same cascade both build their splices before either applies, so a plain
+    /// `nodes.len()` read would hand the second one the first one's ids — this
+    /// counter is what keeps every clone at the slot its id names.
+    pub(crate) fn next_node_id(&mut self) -> NodeId {
+        let id = self.next_node.max(self.graph.nodes.len() as u32);
+        self.next_node = id + 1;
+        NodeId::new(id)
     }
 
     pub(crate) fn register_seed_edge(&mut self, edge: EdgeId, node: NodeId) {

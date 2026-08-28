@@ -346,3 +346,38 @@ fn non_array_items_fails_the_run() {
         Some(engine::RunError::ItemsNotArray { .. })
     ));
 }
+
+/// Two independent matrices whose entry nodes expand in the same cascade: each
+/// splice's clones land at distinct ids, and every live node occupies the slot
+/// its id names. (Regression: both expansions once allocated clone ids against
+/// the same pre-splice graph length, and the second splice corrupted the live
+/// graph.)
+#[test]
+fn two_expansions_in_one_cascade_get_distinct_ids() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let a = b.add_step("a", scope, NOOP);
+    let a_done = b.add_step("a_done", scope, NOOP);
+    let z = b.add_step("z", scope, NOOP);
+    let z_done = b.add_step("z_done", scope, NOOP);
+
+    let collector = collector_exprs(b.exprs());
+    let a_items = b.exprs().lit(json!(["x", "y"]));
+    let z_items = b.exprs().lit(json!(["1", "2", "3"]));
+    b.select(a, vec![Arm::always(a_done).with_map(collector.indexed)]);
+    b.select(z, vec![Arm::always(z_done).with_map(collector.indexed)]);
+    b.set_join(a_done, JoinPolicy::All);
+    b.set_join(z_done, JoinPolicy::All);
+    parallel_for_each(&mut b, a, a_items, ExpandTarget::Node, None, false);
+    parallel_for_each(&mut b, z, z_items, ExpandTarget::Node, None, false);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph);
+    assert_eq!(h.run(), RunStatus::Success);
+    assert_eq!(h.start_count("a"), 2);
+    assert_eq!(h.start_count("z"), 3);
+    for (index, node) in h.state.graph.nodes.iter().enumerate() {
+        assert_eq!(node.id.index(), index, "node `{}` sits at its id", node.name);
+    }
+}

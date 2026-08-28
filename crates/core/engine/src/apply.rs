@@ -820,16 +820,16 @@ fn expand(
         .map(|t| t.payload.clone())
         .unwrap_or(Value::Null);
 
-    let mut next_node = state.graph.nodes.len() as u32;
     let mut clones = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let index = index as u32;
         // Old id to new id, decided before any edge is rewritten so edges inside
         // the region point at clones and edges leaving it still point outward.
+        // Ids come from the state's allocator, not `nodes.len()`: another
+        // expansion may already sit in the queue with ids past the live length.
         let mut remap: BTreeMap<NodeId, NodeId> = BTreeMap::new();
         for old in &region {
-            remap.insert(*old, NodeId::new(next_node));
-            next_node += 1;
+            remap.insert(*old, state.next_node_id());
         }
 
         let mut nodes = Vec::with_capacity(region.len());
