@@ -70,6 +70,8 @@ async fn corpus_run_sweep() {
     let jobs = env_num("PETRI_SWEEP_JOBS", 4) as usize;
     let timeout = Duration::from_secs(env_num("PETRI_SWEEP_TIMEOUT", 300));
 
+    let pins = corpus_pins(&root);
+
     // Lower everything serially first: it fills the action caches while the
     // classification decides what runs. Excluded files (Windows/macOS,
     // callee-only, broken upstream) leave the denominator exactly as REPORT.md
@@ -92,7 +94,7 @@ async fn corpus_run_sweep() {
             },
         };
         if let (Class::Clean | Class::Warnings, Some(mut graph)) = (outcome.class, graph) {
-            prepare(&mut graph, &repo);
+            prepare(&mut graph, &repo, pins.get(&repo), &repo_root);
             queue.push((records.len(), graph));
         }
         records.push(record);
@@ -152,9 +154,10 @@ async fn corpus_run_sweep() {
     let note = format!(
         "Sweep configuration: host scopes rewritten to the pinned runner images \
          `{}` (22.04/26.04 variants by label), matrices capped to their first leg, \
-         each workflow capped at {}s wall clock, parallelism {jobs}. Identity: the \
-         fixed lowering identity (`github.sha` all zeros), a dummy `GITHUB_TOKEN` — \
-         token-less by policy.",
+         each workflow capped at {}s wall clock, parallelism {jobs}. Identity: \
+         `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the \
+         sweep's analog of `default_params` reading HEAD — so `checkout` fetches \
+         real state; a dummy `GITHUB_TOKEN` keeps the sweep token-less by policy.",
         runs::RUNNER_IMAGE_2404,
         timeout.as_secs(),
     );
@@ -166,8 +169,12 @@ async fn corpus_run_sweep() {
 
 /// Sweep shape: scripts stubbed, host scopes containerized, matrices capped,
 /// and the run parameters a host would fill — the corpus directory's slug as
-/// the repository, everything else the fixed lowering identity.
-fn prepare(graph: &mut Graph, repo_slug: &str) {
+/// the repository and its **pinned commit** as `github.sha`, the sweep's
+/// analog of `default_params` reading the checkout's HEAD. A corpus dir is
+/// workflows without a checkout, so the honest identity comes from
+/// `corpus-pins.txt` and the fetch's recorded default branch; `checkout` then
+/// fetches a commit that exists.
+fn prepare(graph: &mut Graph, repo_slug: &str, pin: Option<&String>, repo_root: &Path) {
     runs::stub_run_scripts(graph);
     runs::containerize(graph, |requirements| {
         battery_image(requirements).to_string()
@@ -175,12 +182,40 @@ fn prepare(graph: &mut Graph, repo_slug: &str) {
     runs::cap_expansions(graph);
     let mut github = frontend_gha::identity::github_context(Some(repo_slug));
     github["event"] = json!({});
+    if let Some(sha) = pin {
+        let branch = default_branch(repo_root).unwrap_or_else(|| "main".to_string());
+        github["sha"] = json!(sha);
+        github["ref"] = json!(format!("refs/heads/{branch}"));
+        github["ref_name"] = json!(branch);
+    }
     graph.params.insert("github".into(), github);
     graph.params.insert(
         "runner".into(),
         json!({"os": "Linux", "arch": "X64", "name": "petri-sweep"}),
     );
     graph.params.insert("vars".into(), json!({}));
+}
+
+/// `corpus-pins.txt`: `owner/repo <sha>` per line — the commit each corpus
+/// repo was fetched at, which is the commit its workflows describe.
+fn corpus_pins(corpus_root: &Path) -> std::collections::BTreeMap<String, String> {
+    let text = std::fs::read_to_string(corpus_root.join("../corpus-pins.txt")).unwrap_or_default();
+    text.lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let (repo, sha) = line.split_once(' ')?;
+            let sha = sha.trim();
+            (sha.len() == 40).then(|| (repo.to_string(), sha.to_string()))
+        })
+        .collect()
+}
+
+/// The default branch the fetch recorded in the repo's PROVENANCE.md.
+fn default_branch(repo_root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(repo_root.join("PROVENANCE.md")).ok()?;
+    let line = text.lines().find(|l| l.contains("default branch:"))?;
+    let (_, rest) = line.split_once("default branch:")?;
+    Some(rest.trim().trim_end_matches(')').to_string())
 }
 
 async fn run_one(
@@ -280,6 +315,7 @@ fn first_failure(
             step: identity.label(),
             class,
             message,
+            tail: log_tail(report, record.firing),
             expected,
         });
     }
@@ -288,8 +324,33 @@ fn first_failure(
         step: "(run)".to_string(),
         class: String::new(),
         message: format!("run ended {:?} with no failing record", report.status),
+        tail: Vec::new(),
         expected: None,
     })
+}
+
+/// The failing firing's last log lines — what the failure actually said. With
+/// `PETRI_SWEEP_LOG` set, the whole failing log goes to stderr — the dev loop
+/// for one workflow's failure.
+fn log_tail(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
+    let lines: Vec<String> = report
+        .state
+        .log
+        .events()
+        .filter_map(|e| match e {
+            runtime::engine::Event::StepProgress {
+                firing: f,
+                ev: ir::StepEvent::Log { line, .. },
+            } if *f == firing => Some(line.clone()),
+            _ => None,
+        })
+        .collect();
+    if std::env::var("PETRI_SWEEP_LOG").is_ok_and(|v| !v.is_empty()) {
+        for line in &lines {
+            eprintln!("    | {line}");
+        }
+    }
+    lines.into_iter().rev().take(4).rev().collect()
 }
 
 /// Remove the containers a wedged, abandoned run left behind: everything under

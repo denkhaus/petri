@@ -266,6 +266,14 @@ pub fn expected_reason(identity: &StepIdentity, failure_class: &str) -> Option<S
     if *cross_run {
         return Some("cross-run artifact download (REST API)".to_string());
     }
+    // The real checkout action always authenticates its fetch with
+    // `github.token` (an `AUTHORIZATION` header GitHub rejects unless the
+    // token is valid — even for public repositories), so a token-less sweep
+    // cannot run it. Local checkout substitution is the local answer; what
+    // falls through to the real action needs a credential.
+    if bare == "actions/checkout" && failure_class.starts_with("exit_status") {
+        return Some("needs a git credential (the sweep is token-less)".to_string());
+    }
     SERVER_COUPLED
         .iter()
         .find(|(action, _)| action == bare)
@@ -305,6 +313,8 @@ pub struct FirstFailure {
     /// The failure class the step reported (empty when unclassified).
     pub class: String,
     pub message: String,
+    /// The step's last log lines — what the failure actually said.
+    pub tail: Vec<String>,
     /// Present when the failure is server-coupled ([`expected_reason`]).
     pub expected: Option<String>,
 }
@@ -422,9 +432,10 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
     let _ = writeln!(out, "\n## Expected failures — server-coupled, ranked\n");
     let _ = writeln!(
         out,
-        "First failures no local runner can fix: OIDC, GitHub App and repository \
-         secrets, third-party SaaS backends, cross-run artifact reads. Kept out of \
-         the gap ranking so it never drowns in server-bound noise.\n"
+        "First failures no token-less local run can fix: OIDC, GitHub App and \
+         repository secrets, git credentials for the real checkout action, \
+         third-party SaaS backends, cross-run artifact reads. Kept out of the gap \
+         ranking so it never drowns in server-bound noise.\n"
     );
     if expected_classes.is_empty() {
         let _ = writeln!(out, "None.");
@@ -444,6 +455,9 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
         let detail = match &record.result {
             RunResult::Fail(f) => {
                 let mut detail = format!("`{}` — {}", f.step, sanitize_cell(&f.message));
+                if let Some(last) = f.tail.iter().rev().find(|l| !l.trim().is_empty()) {
+                    detail.push_str(&format!(" · `{}`", sanitize_cell(last)));
+                }
                 if let Some(why) = &f.expected {
                     detail.push_str(&format!(" _({why})_"));
                 }
@@ -619,13 +633,13 @@ mod tests {
 
     #[test]
     fn classification_separates_gap_from_server_coupled() {
-        let checkout = StepIdentity::Action {
-            bare: "actions/checkout".to_string(),
+        let setup = StepIdentity::Action {
+            bare: "actions/setup-python".to_string(),
             cross_run: false,
         };
-        assert_eq!(expected_reason(&checkout, "exit_status:1"), None);
+        assert_eq!(expected_reason(&setup, "exit_status:1"), None);
         assert_eq!(
-            expected_reason(&checkout, "secret_unavailable"),
+            expected_reason(&setup, "secret_unavailable"),
             Some("needs a repository secret".to_string())
         );
         let oidc = StepIdentity::Action {
@@ -636,6 +650,13 @@ mod tests {
             expected_reason(&oidc, "exit_status:1"),
             Some("OIDC attestation".to_string())
         );
+        // The real checkout cannot fetch without a credential; that is the
+        // sweep's constraint, not a runtime-tier gap.
+        let checkout = StepIdentity::Action {
+            bare: "actions/checkout".to_string(),
+            cross_run: false,
+        };
+        assert!(expected_reason(&checkout, "exit_status:1").is_some());
     }
 
     #[test]

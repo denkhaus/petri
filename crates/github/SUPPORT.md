@@ -26,7 +26,11 @@ through the same matrix expansion the engine runs. The identity is the
 repository slug from the checkout's `origin` remote — stable across commits,
 deliberately never HEAD, and the same value `default_params` hands the run, so
 a guard's branch choice and a step's `github.repository` cannot disagree;
-without a checkout, guards take their fallback branch. Matrix values resolve
+without a checkout, guards take their fallback branch. At *run* time,
+`default_params` also fills `github.sha`, `github.ref` and `github.ref_name`
+from the checkout's actual HEAD — run parameters, recorded in the graph, so
+replay is untouched — which is what lets `actions/checkout` fetch a commit
+that exists; without a checkout the fixed values (zero sha, `main`) stand. Matrix values resolve
 against the same contexts, so a repository-guarded axis is as static as a
 literal one; each leg's labels face the same placement
 policy as literal labels (Linux labels the executor knows), a rejected leg names
@@ -133,7 +137,10 @@ one routable failure on the step or scope, never a run abort. Actions that call
 GitHub's hosted backends (artifact upload/download, the cache service) run their
 real code and fail at the HTTP call — local stand-ins are planned, below.
 `shell: bash` invokes `bash -eo pipefail -c`, not GitHub's
-`--noprofile --norc` file invocation.
+`--noprofile --norc` file invocation. Placement statics keep the fixed zero
+`github.sha` while the run's parameters carry the checkout's honest HEAD, so a
+*condition* on `github.sha` sees the zero sha where placement resolves it and
+the real commit at run time — placement never reads HEAD by design.
 
 ## Ignored, with a warning
 

@@ -76,8 +76,11 @@ enum Command {
     },
     /// Replay a saved event log against the workflow and verify byte-identity.
     ///
-    /// Lower the same file on the same machine as the original run: the graph —
-    /// including the default run parameters — is the replay's input.
+    /// Lower the same file on the same machine — and the same checkout state,
+    /// since a format's default run parameters may read it (GHA reads HEAD) —
+    /// as the original run: the graph, including the default run parameters,
+    /// is the replay's input. A host that persists the graph itself (the run
+    /// dir's `graph.json`) has no such constraint.
     Replay {
         #[command(flatten)]
         target: FileArgs,

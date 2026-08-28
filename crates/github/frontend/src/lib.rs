@@ -174,13 +174,22 @@ impl Frontend for GitHubActions {
         load_configured(file, text, files, self.actions.as_deref(), &self.runners)
     }
 
-    /// The `github`, `runner` and `vars` contexts a runner would supply. Fixed
-    /// values — a local run is not a real GitHub event — so the same file lowers to
-    /// the same graph every time and a saved log replays against it. The one
-    /// read value is the repository slug, from the checkout's `origin` remote
-    /// (stable across commits; never HEAD): the same identity the lowering's
-    /// placement guards evaluate against, so the two can never disagree. With
-    /// no checkout, the directory's name stands in.
+    /// The `github`, `runner` and `vars` contexts a runner would supply.
+    ///
+    /// The repository slug comes from the checkout's `origin` remote — the same
+    /// identity the lowering's placement guards evaluate against, so the two can
+    /// never disagree. `github.sha`, `github.ref` and `github.ref_name` come
+    /// from the checkout's actual HEAD: run parameters are host-filled at run
+    /// start and recorded in the graph, so honest values here change no
+    /// lowering and break no replay — and `actions/checkout` fetches a commit
+    /// that exists instead of the fixed zero sha. Everything else stays fixed
+    /// (a local run is not a real GitHub event), and without a checkout the
+    /// fixed values stand in wholesale.
+    ///
+    /// The one delta this creates from lowering: a *condition* reading
+    /// `github.sha` resolves to the zero sha in the placement statics and to
+    /// the real commit at run time. Placement never reads HEAD by design — a
+    /// commit must not change what a file lowers to.
     fn default_params(&self, repo: &Path) -> Vec<(SmolStr, Value)> {
         let slug = std::fs::read_to_string(repo.join(".git").join("config"))
             .ok()
@@ -192,11 +201,18 @@ impl Frontend for GitHubActions {
                     .unwrap_or_else(|| "repo".to_string());
                 format!("local/{name}")
             });
+        let mut github = identity::github_context(Some(&slug));
+        if let Some(head) = identity::head_identity(repo) {
+            github["sha"] = serde_json::json!(head.sha);
+            if let Some(reference) = head.reference {
+                if let Some(name) = reference.strip_prefix("refs/heads/") {
+                    github["ref_name"] = serde_json::json!(name);
+                }
+                github["ref"] = serde_json::json!(reference);
+            }
+        }
         vec![
-            (
-                SmolStr::new("github"),
-                identity::github_context(Some(&slug)),
-            ),
+            (SmolStr::new("github"), github),
             (
                 SmolStr::new("runner"),
                 serde_json::json!({
