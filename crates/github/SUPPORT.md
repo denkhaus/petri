@@ -133,11 +133,24 @@ environment or a logged-in `gh`.
 (`ubuntu-*` labels) on this machine; `runner.os` reports the actual host.
 JavaScript actions and `hashFiles` need `node` on `PATH`; Docker container
 actions (and `container:` jobs) need a reachable Docker daemon — its absence is
-one routable failure on the step or scope, never a run abort. Actions that call
-GitHub's hosted backends (artifact upload/download, the cache service) run their
-real code and fail at the HTTP call — local stand-ins are planned, below.
+one routable failure on the step or scope, never a run abort. **Artifacts run against a local
+stand-in**: every run gets its own ObjectService — the results backend the
+2026 toolkit speaks (`ACTIONS_RESULTS_URL`/`ACTIONS_RUNTIME_TOKEN`, twirp plus
+signed blob URLs) — with artifacts stored under `<run_dir>/artifacts`, released
+with the run. Upload and download flow across jobs, host and containerized
+alike (containers reach it through `host.docker.internal`, which the executor
+guarantees); artifacts never leave the machine, and cross-**run** artifact
+reads (`download-artifact` with `run-id:`) go to the real REST API and need
+real credentials. The cache service still degrades to a miss with a warning —
+its stand-in is planned, below.
 `shell: bash` invokes `bash -eo pipefail -c`, not GitHub's
-`--noprofile --norc` file invocation. Placement statics keep the fixed zero
+`--noprofile --norc` file invocation; JavaScript actions run through `bash -c
+exec node`, so a container image that has `node` but no `bash` cannot run them
+(GitHub execs `node` directly). Environment names that are not valid shell
+identifiers — the toolkit's own `INPUT_INCLUDE-HIDDEN-FILES` shape — survive
+only where the wrapper shell is bash: petri prefers bash for its process
+wrappers exactly so they do, and a busybox-only container drops them (dash
+semantics). Placement statics keep the fixed zero
 `github.sha` while the run's parameters carry the checkout's honest HEAD, so a
 *condition* on `github.sha` sees the zero sha where placement resolves it and
 the real commit at run time — placement never reads HEAD by design.
@@ -171,8 +184,9 @@ workflow counts in brackets rank the pressure.
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |
 
 Planned on the runtime side (no rejection code — lowered workflows fail at run
-time instead): local stand-ins for the artifact and cache services, and
-authenticated fetch for private action repositories.
+time instead): a local stand-in for the cache service on the artifact
+stand-in's listener, a persistent tool cache, and authenticated fetch for
+private action repositories.
 
 ## Out of scope
 

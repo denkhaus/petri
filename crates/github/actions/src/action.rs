@@ -101,12 +101,22 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
         literal(repository),
     );
     env.insert(SmolStr::new("GITHUB_ACTION_REF"), literal(git_ref));
+    // The results backend, when the host stood one up — actions only, the
+    // visibility GitHub gives the runtime token.
+    if let Some(results) = ctx.capability::<crate::ResultsServiceCap>() {
+        for (key, value) in results.env(ctx.env.host_address()) {
+            env.insert(key, literal(value.to_string()));
+        }
+    }
     let allow_unsecure = env_truthy(&env, "ACTIONS_ALLOW_UNSECURE_COMMANDS");
 
     let entry = format!("{action_dir}/{}", config.entry.trim_start_matches("./"));
     let process = ProcessConfig {
         run: format!("{}exec node {}\n", session.prologue(), shell_quote(&entry)),
-        shell: Shell::Sh,
+        // Bash, not sh: GitHub execs `node` directly with the full env, and a
+        // dash/busybox `sh` would drop the hyphenated `INPUT_*` names the
+        // toolkit contract requires (`INPUT_NODE-VERSION`) on the way through.
+        shell: Shell::Bash,
         env,
         working_dir: Some(PathBuf::from(REPO_DIR)),
         soft_fail: config.soft_fail,

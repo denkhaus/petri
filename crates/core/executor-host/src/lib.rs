@@ -88,9 +88,26 @@ const GROUPS_DIR: &str = "groups";
 /// workload may start under this generation, and whatever runs must die.
 const FENCED_MARKER: &str = "fenced";
 
-/// The sentinel, as a `/bin/sh -c` script. `$1` is the status file, `$2` the
-/// group record, `$3` the generation's fence marker; the rest is the workload's
-/// argv.
+/// The shell the sentinel runs under: bash when the machine has it, `/bin/sh`
+/// otherwise. Not a style choice — a POSIX `sh` that is dash (Linux's usual
+/// `/bin/sh`) *filters out* environment names that are not valid identifiers
+/// when it spawns children, and GitHub's contract passes exactly such names
+/// (`INPUT_INCLUDE-HIDDEN-FILES`). Bash passes them through. The script itself
+/// is plain POSIX either way.
+fn sentinel_shell() -> &'static str {
+    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| {
+        if std::path::Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        }
+    })
+}
+
+/// The sentinel, as a [`sentinel_shell`] `-c` script. `$1` is the status file,
+/// `$2` the group record, `$3` the generation's fence marker; the rest is the
+/// workload's argv.
 ///
 /// Ordering inside the script is load-bearing:
 /// - **Publish, then check, then spawn.** The group record (the sentinel's own
@@ -364,7 +381,7 @@ impl ExecEnv for HostEnv {
         let group_file = self.gen_dir.join(format!("{n}.group"));
         let fence = self.gen_dir.join(FENCED_MARKER);
 
-        let mut command = tokio::process::Command::new("/bin/sh");
+        let mut command = tokio::process::Command::new(sentinel_shell());
         command
             .arg("-c")
             .arg(SENTINEL_SCRIPT)

@@ -1,0 +1,25 @@
+[package]
+name = "petri-github-objects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The per-run ObjectService: local stand-ins for GitHub's results backends (artifacts, cache)."
+
+[lib]
+# The package is `petri-github-objects`; the crate is `github_objects`.
+name = "github_objects"
+
+[dependencies]
+# `net` on top of the workspace set: this crate owns a real TCP listener.
+tokio = { workspace = true, features = ["net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+humantime = { workspace = true }

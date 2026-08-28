@@ -54,6 +54,21 @@ impl RunOptions {
     }
 }
 
+/// What a per-run service provisioner returns beside the capabilities: the
+/// running service, opaque to the runtime. The driver holds it for the run's
+/// lifetime; drop is teardown.
+pub type RunServiceGuard = Box<dyn std::any::Any + Send + Sync>;
+
+/// A per-run service provisioner — see [`Runtime::run_services`].
+type RunProvisioner = Arc<
+    dyn Fn(
+            &Path,
+            ::steps::CapabilitiesBuilder,
+        ) -> (::steps::CapabilitiesBuilder, Option<RunServiceGuard>)
+        + Send
+        + Sync,
+>;
+
 /// The assembled system: frontends, step kinds, executors, secrets, options.
 pub struct Runtime {
     frontends: Vec<Arc<dyn Frontend>>,
@@ -63,6 +78,7 @@ pub struct Runtime {
     observers: Vec<Arc<dyn EventObserver>>,
     progress: Option<Arc<dyn ProgressSink>>,
     caps: ::steps::CapabilitiesBuilder,
+    provisioners: Vec<RunProvisioner>,
     options: RunOptions,
 }
 
@@ -87,6 +103,7 @@ impl Runtime {
             observers: Vec::new(),
             progress: None,
             caps: ::steps::Capabilities::builder(),
+            provisioners: Vec::new(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
@@ -103,6 +120,7 @@ impl Runtime {
             observers: Vec::new(),
             progress: None,
             caps: ::steps::Capabilities::builder(),
+            provisioners: Vec::new(),
             options: RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
@@ -128,13 +146,8 @@ impl Runtime {
         self
     }
 
-    /// Route scopes through this composed local executor.
-    pub fn local_executor(mut self, executor: LocalExecutor) -> Self {
-        self.executor = Some(Arc::new(executor));
-        self
-    }
-
-    /// Use one executor for every scope, whatever its target.
+    /// Use one executor for every scope, whatever its target — the composed
+    /// [`LocalExecutor`] included.
     pub fn executor(mut self, executor: impl Executor + 'static) -> Self {
         self.executor = Some(Arc::new(executor));
         self
@@ -166,10 +179,33 @@ impl Runtime {
     /// # Panics
     ///
     /// On a duplicate type — registration is configuration, the same rule as
-    /// step registration. A host with per-run services builds its own
-    /// [`::steps::Capabilities`] and calls `Driver::with_capabilities` instead.
+    /// step registration. A service with *run* lifetime registers a
+    /// [`Runtime::run_services`] provisioner instead; a host assembling its
+    /// own driver can also build its own [`::steps::Capabilities`] and call
+    /// `Driver::with_capabilities` directly.
     pub fn capability<T: Send + Sync + 'static>(mut self, value: T) -> Self {
         self.caps = self.caps.provide(value);
+        self
+    }
+
+    /// Register a per-run service provisioner: called once per driver this
+    /// runtime builds — fresh and resumed runs alike — with the run directory,
+    /// to stand a run-scoped host service up and hand its capability to the
+    /// run's steps. The guard it returns rides the driver; dropping the driver
+    /// is the teardown. A provisioner that cannot start its service returns
+    /// the capabilities unchanged and no guard — the steps that need it then
+    /// fail routably (`capability_unavailable`), never the run.
+    pub fn run_services<F>(mut self, provision: F) -> Self
+    where
+        F: Fn(
+                &Path,
+                ::steps::CapabilitiesBuilder,
+            ) -> (::steps::CapabilitiesBuilder, Option<RunServiceGuard>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.provisioners.push(Arc::new(provision));
         self
     }
 
@@ -315,7 +351,15 @@ impl Runtime {
 
     /// The registrations every driver gets, whichever way it was built.
     fn equip(&self, mut driver: Driver) -> Driver {
-        driver = driver.with_capabilities(self.caps.clone().build());
+        let mut caps = self.caps.clone();
+        for provision in &self.provisioners {
+            let (next, guard) = provision(&self.options.run_dir, caps);
+            caps = next;
+            if let Some(guard) = guard {
+                driver = driver.with_run_guard(guard);
+            }
+        }
+        driver = driver.with_capabilities(caps.build());
         for observer in &self.observers {
             driver = driver.observe(Arc::clone(observer));
         }

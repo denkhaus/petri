@@ -182,4 +182,13 @@ pub trait ExecEnv: Send + Sync {
 
     /// How long a step gets between `SIGTERM` and `SIGKILL`.
     fn grace(&self) -> Duration;
+
+    /// How a process in *this* environment reaches the driver's machine — the
+    /// host half of a URL for a service the driver runs beside the workspace.
+    /// One fact, answered where it is known: a host process uses loopback; a
+    /// containerized environment answers with the alias its executor
+    /// guaranteed resolvable at create (`host.docker.internal`).
+    fn host_address(&self) -> &str {
+        "127.0.0.1"
+    }
 }

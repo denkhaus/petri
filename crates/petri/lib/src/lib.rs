@@ -56,11 +56,17 @@ pub mod github {
 /// The shipped configuration: core's standard runtime plus every in-tree component.
 ///
 /// GitHub Actions comes with an action source that fetches from GitHub into
-/// [`github::default_cache_dir`], its two step kinds, and `GITHUB_TOKEN` as a secret
+/// [`github::default_cache_dir`], its step kinds, and `GITHUB_TOKEN` as a secret
 /// when this machine has one (`$GITHUB_TOKEN`, else `gh auth token`). Its runner
 /// map knows the `ubuntu-*` labels; `PETRI_RUNNER_LABELS` (labels separated by
 /// commas or whitespace) adds third-party or self-hosted labels that name Linux
 /// environments this machine can stand in for.
+///
+/// Every run also gets the per-run **ObjectService** — the local stand-in for
+/// GitHub's results backend — started beside the run dir (artifacts under
+/// `<run_dir>/artifacts`, released with the run) and handed to action steps as
+/// `ACTIONS_RESULTS_URL`/`ACTIONS_RUNTIME_TOKEN`. When it cannot start, the
+/// run proceeds and only the steps that need the backend fail, routably.
 ///
 /// A consumer that wants a different set builds one itself — `Runtime::standard()`
 /// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
@@ -76,6 +82,21 @@ pub fn runtime() -> Runtime {
         .step(github::ActionStep)
         .step(github::DockerActionStep)
         .capability(github::ActionSourceCap(trees))
+        .run_services(|run_dir, caps| {
+            match github_objects::ObjectService::start(run_dir.join("artifacts")) {
+                Ok(service) => {
+                    let cap = github::ResultsServiceCap {
+                        port: service.port(),
+                        token: service.token().into(),
+                    };
+                    (caps.provide(cap), Some(Box::new(service) as _))
+                }
+                Err(error) => {
+                    eprintln!("warning: no results service for this run: {error}");
+                    (caps, None)
+                }
+            }
+        })
         .secrets(GithubSecrets::new())
 }
 

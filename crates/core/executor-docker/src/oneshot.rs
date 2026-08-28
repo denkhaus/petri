@@ -86,6 +86,10 @@ impl ContainerRunner for OneShotRunner {
         CONTAINER_WORKSPACE
     }
 
+    fn host_address(&self) -> &str {
+        crate::HOST_ALIAS
+    }
+
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         let image = self.prepare(&spec.image).await?;
         let name = format!("{}{}-{}", self.prefix, std::process::id(), next_token());
@@ -111,9 +115,19 @@ impl ContainerRunner for OneShotRunner {
             "-w".into(),
             workdir,
         ];
-        if let Some(network) = &self.network {
-            argv.push("--network".into());
-            argv.push(network.clone());
+        match &self.network {
+            Some(network) => {
+                argv.push("--network".into());
+                argv.push(network.clone());
+                // `container:<job>` shares the job container's network
+                // namespace — `--add-host` is refused there, and unneeded: the
+                // job container's own mapping answers. Every other network
+                // gets the mapping directly.
+                if !network.starts_with("container:") {
+                    argv.push(crate::ADD_HOST_GATEWAY.into());
+                }
+            }
+            None => argv.push(crate::ADD_HOST_GATEWAY.into()),
         }
         if let Some(entrypoint) = &spec.entrypoint {
             argv.push("--entrypoint".into());

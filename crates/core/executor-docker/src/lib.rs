@@ -58,6 +58,16 @@ use crate::oneshot::OneShotRunner;
 /// Where the workspace is mounted inside the container.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
+/// How a process inside any container this executor creates reaches the
+/// driver's machine. Docker Desktop resolves the alias by itself; on a Linux
+/// daemon it exists because every create passes
+/// `--add-host=host.docker.internal:host-gateway` — the executor guarantees
+/// the name, so `host_address` can promise it.
+pub const HOST_ALIAS: &str = "host.docker.internal";
+
+/// The `--add-host` argument that backs [`HOST_ALIAS`] on every daemon.
+pub(crate) const ADD_HOST_GATEWAY: &str = "--add-host=host.docker.internal:host-gateway";
+
 /// The run id's file under the run dir. Container names carry the id and the
 /// acquire fence is remove-by-name, so the id must outlive the process that
 /// minted it: it is recorded here before the run's first container exists, and
@@ -400,6 +410,7 @@ impl Executor for DockerExecutor {
             mount,
             "-w".into(),
             CONTAINER_WORKSPACE.into(),
+            ADD_HOST_GATEWAY.into(),
         ];
         if let Some(network) = &network {
             create.push("--network".into());
@@ -451,6 +462,7 @@ impl Executor for DockerExecutor {
                 container: name.clone(),
                 workspace: workspace.clone(),
                 grace: scope.grace,
+                wrapper_shell: OnceCell::new(),
             }),
             DockerTeardown {
                 container: name,
@@ -515,6 +527,32 @@ struct DockerEnv {
     container: String,
     workspace: PathBuf,
     grace: Duration,
+    /// The shell the pgid wrapper runs under, probed once per container:
+    /// `bash` when the image has it, `sh` otherwise. Not a style choice — a
+    /// POSIX `sh` that is dash or busybox *filters out* environment names that
+    /// are not valid identifiers when it spawns children, and GitHub's
+    /// contract passes exactly such names (`INPUT_INCLUDE-HIDDEN-FILES`); bash
+    /// passes them through. The wrapper script is plain POSIX either way.
+    wrapper_shell: OnceCell<&'static str>,
+}
+
+impl DockerEnv {
+    async fn wrapper_shell(&self) -> &'static str {
+        *self
+            .wrapper_shell
+            .get_or_init(|| async {
+                let probe = run_docker(&[
+                    "exec",
+                    &self.container,
+                    "sh",
+                    "-c",
+                    "command -v bash >/dev/null 2>&1",
+                ])
+                .await;
+                if probe.is_ok() { "bash" } else { "sh" }
+            })
+            .await
+    }
 }
 
 #[async_trait]
@@ -559,16 +597,17 @@ impl ExecEnv for DockerEnv {
         // `setsid` makes the shell a session leader, so its pid is its pgid. The
         // wrapper records that pid, runs the step, and writes the step's exit status
         // beside it — the status file is the source of truth, not the client's code.
+        let wrapper_shell = self.wrapper_shell().await;
         argv.extend([
             "setsid".to_string(),
-            "sh".to_string(),
+            wrapper_shell.to_string(),
             "-c".to_string(),
             // Both files are written to a temporary name and renamed into place.
             // Rename within a directory is atomic on POSIX, so the host can never
             // read a half-written pgid or status.
             r#"p="$1"; shift; echo $$ > "$p.tmp"; mv "$p.tmp" "$p"; "$@"; s=$?; echo "$s" > "$p.status.tmp"; mv "$p.status.tmp" "$p.status"; exit "$s""#
                 .to_string(),
-            "sh".to_string(),
+            wrapper_shell.to_string(),
             pgid_in_container,
         ]);
         argv.push(spec.program.to_string());

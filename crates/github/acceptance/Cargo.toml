@@ -21,6 +21,7 @@ smol_str = { workspace = true }
 [dev-dependencies]
 runtime = { workspace = true }
 github-actions = { workspace = true }
+github-objects = { workspace = true }
 testkit = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

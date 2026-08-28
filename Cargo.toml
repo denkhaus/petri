@@ -15,6 +15,7 @@ members = [
     "crates/core/testkit",
     "crates/github/frontend",
     "crates/github/actions",
+    "crates/github/objects",
     "crates/github/acceptance",
     "crates/petri/lib",
     "crates/petri/cli",
@@ -36,6 +37,7 @@ driver = { package = "petri-driver", path = "crates/core/driver" }
 frontend = { package = "petri-frontend", path = "crates/core/frontend" }
 frontend-gha = { package = "petri-frontend-gha", path = "crates/github/frontend" }
 github-actions = { package = "petri-github-actions", path = "crates/github/actions" }
+github-objects = { package = "petri-github-objects", path = "crates/github/objects" }
 frontend-native = { package = "petri-frontend-native", path = "crates/core/frontend-native" }
 runtime = { package = "petri-runtime", path = "crates/core/runtime" }
 cli = { package = "petri-cli-core", path = "crates/core/cli" }
@@ -63,6 +65,16 @@ tokio = { version = "1", features = [
     "fs",
 ] }
 serde = { version = "1", features = ["derive"] }
+# The ObjectService's HTTP stack (per review decision: the listener rides hyper).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# Signed blob URLs are HMAC query tokens; the run token carries real randomness.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+humantime = "2"
 # `preserve_order`: GHA matrix axes, object filters and outputs follow document
 # order, and a sorted map would silently reorder them.
 serde_json = { version = "1", features = ["preserve_order"] }

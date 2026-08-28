@@ -273,6 +273,9 @@ pub struct Driver {
     tasks: HashMap<FiringId, Task>,
     caps: Capabilities,
     observers: Vec<Arc<dyn EventObserver>>,
+    /// Per-run host services riding this run's lifetime: held untouched until
+    /// the driver drops, which is their teardown.
+    run_guards: Vec<Box<dyn std::any::Any + Send + Sync>>,
     releases: Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer: Option<JoinHandle<()>>,
@@ -360,6 +363,7 @@ impl Driver {
             tasks: HashMap::new(),
             caps: Capabilities::default(),
             observers: Vec::new(),
+            run_guards: Vec::new(),
             releases: Vec::new(),
             cleanup_timer: None,
             resume: None,
@@ -378,6 +382,14 @@ impl Driver {
     /// The host services every step's `StepCtx` carries (default: none).
     pub fn with_capabilities(mut self, caps: Capabilities) -> Self {
         self.caps = caps;
+        self
+    }
+
+    /// Hold a per-run host service for this run's lifetime. The driver never
+    /// looks inside; dropping the driver drops the guard, which is the
+    /// service's teardown.
+    pub fn with_run_guard(mut self, guard: Box<dyn std::any::Any + Send + Sync>) -> Self {
+        self.run_guards.push(guard);
         self
     }
 

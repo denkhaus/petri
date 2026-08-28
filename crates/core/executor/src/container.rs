@@ -119,6 +119,11 @@ pub trait ContainerRunner: Send + Sync {
     /// point), for building paths to hand to the container.
     fn workspace_path(&self) -> &str;
 
+    /// How a one-shot container reaches the driver's machine — the container
+    /// side of [`crate::ExecEnv::host_address`]. The provider guarantees the
+    /// answer resolves inside the containers it runs (`--add-host` at create).
+    fn host_address(&self) -> &str;
+
     /// Pull or build the image as needed, then run the container. The exit
     /// status is the container's own.
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError>;
