@@ -244,6 +244,20 @@ pub async fn docker_available() -> bool {
     DockerExecutor::is_available().await
 }
 
+/// The skip-or-require convention every Docker battery shares: skip loudly
+/// without a daemon, unless `PETRI_REQUIRE_DOCKER` says a silent skip must be
+/// a failure (CI cannot tell a skipped battery from a passing one).
+pub async fn docker_ready() -> bool {
+    if docker_available().await {
+        return true;
+    }
+    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
+        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
+    }
+    eprintln!("skipping: no Docker daemon reachable");
+    false
+}
+
 /// Scope env as a plain map, for building scope specs in tests.
 pub fn env(pairs: &[(&str, &str)]) -> BTreeMap<smol_str::SmolStr, ir::ExprOrValue> {
     pairs
