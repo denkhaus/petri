@@ -112,6 +112,55 @@ struct RawActionConfig {
     event: Value,
 }
 
+/// The manifest's entry (`runs.main`/`pre`/`post`), validated the way the
+/// runner joins it: relative to the action directory, `./` normal, and `..`
+/// allowed only as far as the fetched repository root — a subpath action's
+/// entry may live beside it (`github/codeql-action/init` runs
+/// `../lib/init-entry.js`), and the whole repository is what stages. A local
+/// action's bound is the checkout root (`GITHUB_WORKSPACE`) for the same
+/// reason. Nothing may climb past that root: the workspace beyond it is the
+/// runner's, and on a host job the filesystem beyond *that* is the machine's.
+fn validate_entry(action: &ActionLocation, entry: &str) -> Result<(), String> {
+    if entry.is_empty() {
+        return Err("the action has no entry point".to_string());
+    }
+    if entry.starts_with('/') || entry.contains('\\') || entry.contains('\0') {
+        return Err(format!(
+            "unsafe action entry `{entry}`: the path must be relative"
+        ));
+    }
+    // How far above the action directory the repository root sits.
+    let path_depth = |path: &str| {
+        path.split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .count() as i64
+    };
+    let mut depth: i64 = match action {
+        ActionLocation::Pinned(pinned) => pinned
+            .reference
+            .path
+            .as_deref()
+            .map(path_depth)
+            .unwrap_or(0),
+        ActionLocation::Local { local } => path_depth(local),
+    };
+    for part in entry.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(format!(
+                        "unsafe action entry `{entry}`: it escapes the repository root"
+                    ));
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for ActionConfig {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = RawActionConfig::deserialize(deserializer)?;
@@ -121,7 +170,7 @@ impl<'de> Deserialize<'de> for ActionConfig {
                 validate_relative_action_path(local, true).map_err(de::Error::custom)?
             }
         }
-        validate_relative_action_path(&raw.entry, false).map_err(de::Error::custom)?;
+        validate_entry(&raw.action, &raw.entry).map_err(de::Error::custom)?;
         Ok(Self {
             action: raw.action,
             entry: raw.entry,
@@ -251,5 +300,55 @@ mod tests {
             }))
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::*;
+    use frontend_gha::action::ActionRef;
+    use smol_str::SmolStr;
+
+    fn pinned(reference: &str) -> ActionLocation {
+        ActionLocation::Pinned(frontend_gha::action::PinnedAction {
+            reference: ActionRef::parse(reference).expect("valid"),
+            sha: SmolStr::new("0123456789012345678901234567890123456789"),
+        })
+    }
+
+    #[test]
+    fn entries_resolve_within_the_repository_root() {
+        let root_action = pinned("octo/tool@v1");
+        assert!(validate_entry(&root_action, "dist/index.js").is_ok());
+        assert!(
+            validate_entry(&root_action, "./dist/main.js").is_ok(),
+            "a leading ./ is normal"
+        );
+        assert!(
+            validate_entry(&root_action, "../outside.js").is_err(),
+            "a root action cannot climb"
+        );
+
+        let subpath = pinned("github/codeql-action/init@v3");
+        assert!(
+            validate_entry(&subpath, "../lib/init-entry.js").is_ok(),
+            "a subpath action may reach beside itself"
+        );
+        assert!(
+            validate_entry(&subpath, "../../escape.js").is_err(),
+            "but never past the repository root"
+        );
+        assert!(
+            validate_entry(&subpath, "a/../../../escape.js").is_err(),
+            "descending first buys no extra climb"
+        );
+
+        let local = ActionLocation::Local {
+            local: "tools/act".to_string(),
+        };
+        assert!(validate_entry(&local, "../shared/run.js").is_ok());
+        assert!(validate_entry(&local, "../../../outside.js").is_err());
+        assert!(validate_entry(&root_action, "/abs.js").is_err());
+        assert!(validate_entry(&root_action, "").is_err());
     }
 }

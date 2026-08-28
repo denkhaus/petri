@@ -147,15 +147,19 @@ pub(crate) async fn stage(
     pinned: &PinnedAction,
 ) -> Result<PathBuf, StepFailure> {
     let reference = &pinned.reference;
-    let mut relative = PathBuf::from(RUNNER_DIR)
+    // The whole repository stages once per commit — a subpath action's entry
+    // may reach beside its directory (`../lib/…`), exactly as on GitHub's
+    // runners — and the returned path names the action's own directory in it.
+    let root = PathBuf::from(RUNNER_DIR)
         .join("actions")
         .join(reference.owner.as_str())
         .join(reference.repo.as_str())
         .join(pinned.sha.as_str());
-    if let Some(path) = &reference.path {
-        relative = relative.join(path.as_str());
-    }
-    let marker = relative.join(".petri-staged");
+    let relative = match &reference.path {
+        Some(path) => root.join(path.as_str()),
+        None => root.clone(),
+    };
+    let marker = root.join(".petri-staged");
     let already = ctx.env.read_file(&marker).await.map_err(|e| StepFailure {
         class: STAGE_CLASS,
         message: format!("could not check the staged action: {e}"),
@@ -185,7 +189,7 @@ pub(crate) async fn stage(
             finish_write(&mut writes).await?;
         }
         let env = Arc::clone(&ctx.env);
-        let destination = relative.join(&path);
+        let destination = root.join(&path);
         let action = action.clone();
         writes.spawn(async move {
             env.write_file(&destination, &bytes)

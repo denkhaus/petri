@@ -58,16 +58,12 @@ impl GitActionSource {
     }
 
     fn tree_entry_dir(&self, pinned: &PinnedAction) -> PathBuf {
-        let root = self
-            .cache
+        self.cache
             .join("trees")
             .join(pinned.reference.owner.as_str())
             .join(pinned.reference.repo.as_str())
-            .join(pinned.sha.as_str());
-        match &pinned.reference.path {
-            Some(path) => root.join("path").join(path.as_str()),
-            None => root.join("root"),
-        }
+            .join(pinned.sha.as_str())
+            .join("root")
     }
 
     fn repo_lock(&self, reference: &ActionRef) -> Arc<Mutex<()>> {
@@ -268,45 +264,35 @@ impl ActionSource for GitActionSource {
 }
 
 impl ActionTreeSource for GitActionSource {
+    /// The whole repository tree at the pinned commit — never just an action's
+    /// subdirectory. A subpath action's manifest may reach beside it
+    /// (`github/codeql-action/init` runs `../lib/init-entry.js`), so the tree
+    /// an action executes from is the repository, exactly as on GitHub's
+    /// runners. Extracted once per commit, whichever subpath asked first.
     fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
         let lock = self.repo_lock(&pinned.reference);
         let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
         let dir = self.tree_entry_dir(pinned);
-        let action_dir = match &pinned.reference.path {
-            Some(path) => dir.join(path.trim_matches('/')),
-            None => dir.clone(),
-        };
-        let complete = match &pinned.reference.path {
-            Some(_) => dir.join(".complete"),
-            None => dir.with_extension("complete"),
-        };
-        if !complete.is_file() || !action_dir.is_dir() {
+        let complete = dir.with_extension("complete");
+        if !complete.is_file() || !dir.is_dir() {
             let _ = std::fs::remove_file(&complete);
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)
                 .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
-            extract(
-                &bare,
-                pinned.sha.as_str(),
-                pinned.reference.path.as_deref(),
-                &dir,
-            )
-            .map_err(|e| fetch_error(&pinned.reference, e))?;
+            extract(&bare, pinned.sha.as_str(), &dir)
+                .map_err(|e| fetch_error(&pinned.reference, e))?;
             std::fs::write(&complete, b"")
                 .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
         }
-        Ok(action_dir)
+        Ok(dir)
     }
 }
 
 /// `git archive <sha> | tar -x -C <dir>`.
-fn extract(bare: &Path, sha: &str, path: Option<&str>, dir: &Path) -> Result<(), String> {
+fn extract(bare: &Path, sha: &str, dir: &Path) -> Result<(), String> {
     let mut command = Command::new("git");
     command.args(["archive", "--format=tar", sha]);
-    if let Some(path) = path {
-        command.args(["--", path]);
-    }
     let mut archive = command
         .current_dir(bare)
         .stdout(Stdio::piped())
