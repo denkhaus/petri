@@ -558,14 +558,9 @@ pub fn env_truthy(env: &BTreeMap<SmolStr, ValueOrSecretRef>, key: &str) -> bool 
     }
 }
 
-/// A JSON value as the string a process sees, the way the process step does it.
-pub fn stringify(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
+/// A JSON value as the string a process sees — the process step's own rule,
+/// re-exported so the two can never drift again (they once did, on null).
+pub use steps::stringify;
 
 /// Single-quote `s` for `sh`.
 pub fn shell_quote(s: &str) -> String {

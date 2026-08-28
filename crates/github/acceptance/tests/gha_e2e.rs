@@ -1134,3 +1134,31 @@ jobs:
         "the secret stays out of the log"
     );
 }
+
+/// A null expression renders **empty**, as GitHub's coercion table says —
+/// never the JSON spelling `null`, which actions then read as a real value.
+/// (The corpus sweep caught the setup-* family receiving the string "null"
+/// for inputs whose expressions had nothing to say locally: `scandir 'null'`,
+/// `Unable to find Go version 'null'`.) Both coercion paths are pinned: a
+/// whole-expression env value, and an inline template in the script.
+#[tokio::test]
+async fn null_expressions_render_empty() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          WHOLE: ${{ github.event.nope }}
+        run: echo "whole=[$WHOLE] inline=[${{ github.event.nope }}]"
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "null-empty").await;
+    assert_eq!(report.status, ir::RunStatus::Success);
+    assert!(
+        log_lines(&report).iter().any(|l| l == "whole=[] inline=[]"),
+        "{:?}",
+        log_lines(&report)
+    );
+}

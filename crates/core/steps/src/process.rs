@@ -369,9 +369,14 @@ fn exit_value(status: &ExitStatus) -> Value {
     }
 }
 
-fn stringify(value: &Value) -> String {
+/// A config value as the string a child process sees. Null renders empty —
+/// an environment variable has no null, and GitHub's expression coercion
+/// (which the GHA frontend leans on) spells the same rule — never the JSON
+/// spelling `null`, which actions then read as a real path or version.
+pub fn stringify(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
+        Value::Null => String::new(),
         other => other.to_string(),
     }
 }
@@ -465,5 +470,19 @@ mod tests {
         );
         let root = json!({ "$secret": "T" });
         assert_eq!(misplaced_secret(&root, &["env"]), Some("<root>".into()));
+    }
+}
+
+#[cfg(test)]
+mod stringify_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn null_renders_empty_and_scalars_render_plain() {
+        assert_eq!(stringify(&Value::Null), "");
+        assert_eq!(stringify(&json!("text")), "text");
+        assert_eq!(stringify(&json!(true)), "true");
+        assert_eq!(stringify(&json!(3)), "3");
     }
 }
