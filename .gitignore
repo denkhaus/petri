@@ -11,3 +11,4 @@ tmp
 /dist/
 /crates/github/corpus/*
 !/crates/github/corpus/REPORT.md
+!/crates/github/corpus/RUNS.md

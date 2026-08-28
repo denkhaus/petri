@@ -19,6 +19,8 @@ use frontend_gha::GitHubActions;
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 use smol_str::SmolStr;
 
+pub mod runs;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
     /// Lowered with no diagnostics at all.
@@ -322,6 +324,18 @@ pub fn check_one(
     file: &Path,
     actions: Option<&Arc<dyn ActionSource>>,
 ) -> Outcome {
+    lower_one(repo, repo_root, file, actions).0
+}
+
+/// [`check_one`], keeping the lowered graph when there is one — the run sweep's
+/// entry, which classifies exactly as the lowering harness does and then runs
+/// what lowered.
+pub fn lower_one(
+    repo: &str,
+    repo_root: &Path,
+    file: &Path,
+    actions: Option<&Arc<dyn ActionSource>>,
+) -> (Outcome, Option<ir::Graph>) {
     let rel = file
         .strip_prefix(repo_root)
         .unwrap_or(file)
@@ -330,18 +344,21 @@ pub fn check_one(
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            return Outcome {
-                repo: repo.to_string(),
-                file: rel,
-                class: Class::OtherError,
-                diagnostics: vec![Diagnostic::error(
-                    "io",
-                    frontend::Span::file(file.to_string_lossy().as_ref()),
-                    e.to_string(),
-                )],
-                nodes: 0,
-                panic: None,
-            };
+            return (
+                Outcome {
+                    repo: repo.to_string(),
+                    file: rel,
+                    class: Class::OtherError,
+                    diagnostics: vec![Diagnostic::error(
+                        "io",
+                        frontend::Span::file(file.to_string_lossy().as_ref()),
+                        e.to_string(),
+                    )],
+                    nodes: 0,
+                    panic: None,
+                },
+                None,
+            );
         }
     };
     let files = DirFiles {
@@ -361,14 +378,17 @@ pub fn check_one(
                 .cloned()
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "unknown panic".to_string());
-            Outcome {
-                repo: repo.to_string(),
-                file: rel,
-                class: Class::Panicked,
-                diagnostics: Vec::new(),
-                nodes: 0,
-                panic: Some(message),
-            }
+            (
+                Outcome {
+                    repo: repo.to_string(),
+                    file: rel,
+                    class: Class::Panicked,
+                    diagnostics: Vec::new(),
+                    nodes: 0,
+                    panic: Some(message),
+                },
+                None,
+            )
         }
         Ok(lowered) => {
             let diagnostics = lowered.diagnostics.into_vec();
@@ -384,14 +404,17 @@ pub fn check_one(
             } else {
                 Class::OtherError
             };
-            Outcome {
-                repo: repo.to_string(),
-                file: rel,
-                class,
-                nodes: lowered.graph.as_ref().map_or(0, |g| g.nodes.len()),
-                diagnostics,
-                panic: None,
-            }
+            (
+                Outcome {
+                    repo: repo.to_string(),
+                    file: rel,
+                    class,
+                    nodes: lowered.graph.as_ref().map_or(0, |g| g.nodes.len()),
+                    diagnostics,
+                    panic: None,
+                },
+                lowered.graph,
+            )
         }
     }
 }
