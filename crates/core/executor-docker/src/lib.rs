@@ -45,8 +45,7 @@ use async_trait::async_trait;
 use executor::lines::pump;
 use executor::{
     AcquireContext, ContainerRunner, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus,
-    LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec,
-    Sig,
+    LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
 };
 use ir::RuntimeTarget;
 use smol_str::SmolStr;
@@ -159,16 +158,29 @@ impl DockerExecutor {
     /// The workspace directory a scope instance gets, shared with the host
     /// executor's layout so the composed executor can bind either.
     fn workspace_for(&self, instance: &str) -> PathBuf {
-        self.run_dir
-            .join("scopes")
-            .join(instance)
-            .join("work")
+        self.run_dir.join("scopes").join(instance).join("work")
     }
 
     /// The container-name prefix of a scope instance's one-shot containers, for
     /// fencing and leak checks.
     pub async fn one_shot_prefix(&self, instance: &str) -> Result<String, EnvError> {
-        Ok(format!("{}-s", self.container_name(instance).await?))
+        Ok(one_shot_prefix_of(&self.container_name(instance).await?))
+    }
+
+    /// Where a scope instance's one-shot marker lives: recorded before the
+    /// runner's first launch, so a later process over the same run dir knows
+    /// whether the instance may have one-shot leftovers to fence away.
+    fn one_shot_marker(&self, instance: &str) -> PathBuf {
+        self.run_dir.join("scopes").join(instance).join("one-shots")
+    }
+
+    /// Whether an acquisition over this run dir ever launched one-shot
+    /// containers for `instance`. A `false` means the fence and release sweep
+    /// have nothing to look for — no daemon roundtrip needed.
+    pub async fn one_shots_marked(&self, instance: &str) -> bool {
+        tokio::fs::try_exists(self.one_shot_marker(instance))
+            .await
+            .unwrap_or(false)
     }
 
     /// Realize `scope`'s sidecar services for an environment acquired
@@ -206,16 +218,41 @@ impl DockerExecutor {
         network: Option<String>,
         ctx: &AcquireContext,
     ) -> Result<Arc<dyn ContainerRunner>, EnvError> {
-        Ok(Arc::new(OneShotRunner {
-            prefix: self.one_shot_prefix(&scope.instance).await?,
-            workspace: self.workspace_for(&scope.instance),
-            env: scope.env.clone(),
+        Ok(Arc::new(OneShotRunner::new(
+            self.one_shot_prefix(&scope.instance).await?,
+            self.workspace_for(&scope.instance),
+            self.one_shot_marker(&scope.instance),
+            scope,
             network,
-            pull: self.pull,
-            scope: scope.id,
-            progress: Arc::clone(ctx.progress()),
-        }))
+            self.pull,
+            ctx,
+        )))
     }
+}
+
+/// The one-shot container-name prefix hanging off a scope container's name.
+/// One spelling for the fence, the runner, and the release sweep.
+fn one_shot_prefix_of(container: &str) -> String {
+    format!("{container}-s")
+}
+
+/// Whether the policy calls for a pull now. The presence probe runs only when
+/// the policy reads the answer.
+async fn should_pull(image: &str, pull: PullPolicy) -> bool {
+    match pull {
+        PullPolicy::Never => false,
+        PullPolicy::Always => true,
+        PullPolicy::IfNotPresent => run_docker(&["image", "inspect", image]).await.is_err(),
+    }
+}
+
+fn announce_pull(progress: &Arc<dyn executor::ProgressSink>, scope: ir::ScopeId, image: &str) {
+    progress.progress(
+        scope,
+        executor::Progress::PullingImage {
+            image: SmolStr::new(image),
+        },
+    );
 }
 
 /// Make `image` available under the pull policy, announcing the pull when one
@@ -226,19 +263,8 @@ pub(crate) async fn prepare_registry_image(
     scope: ir::ScopeId,
     progress: &Arc<dyn executor::ProgressSink>,
 ) -> Result<(), EnvError> {
-    let present = run_docker(&["image", "inspect", image]).await.is_ok();
-    let pull_now = match pull {
-        PullPolicy::Never => false,
-        PullPolicy::IfNotPresent => !present,
-        PullPolicy::Always => true,
-    };
-    if pull_now {
-        progress.progress(
-            scope,
-            executor::Progress::PullingImage {
-                image: SmolStr::new(image),
-            },
-        );
+    if should_pull(image, pull).await {
+        announce_pull(progress, scope, image);
         run_docker(&["pull", image]).await?;
     }
     Ok(())
@@ -253,10 +279,14 @@ pub(crate) async fn prepare_image(
     scope: ir::ScopeId,
     ctx: &AcquireContext,
 ) -> Result<(), EnvError> {
-    match credentials {
-        Some(credentials) => pull_with_credentials(image, credentials, pull, scope, ctx).await,
-        None => prepare_registry_image(image, pull, scope, ctx.progress()).await,
+    let Some(credentials) = credentials else {
+        return prepare_registry_image(image, pull, scope, ctx.progress()).await;
+    };
+    if !should_pull(image, pull).await {
+        return Ok(());
     }
+    announce_pull(ctx.progress(), scope, image);
+    pull_with_credentials(image, credentials, ctx).await
 }
 
 /// Pull `image` as `credentials` — an isolated Docker config dir (the user's
@@ -266,33 +296,16 @@ pub(crate) async fn prepare_image(
 async fn pull_with_credentials(
     image: &str,
     credentials: &ir::RegistryCredentials,
-    pull: PullPolicy,
-    scope: ir::ScopeId,
     ctx: &AcquireContext,
 ) -> Result<(), EnvError> {
-    let present = run_docker(&["image", "inspect", image]).await.is_ok();
-    let pull_now = match pull {
-        PullPolicy::Never => false,
-        PullPolicy::IfNotPresent => !present,
-        PullPolicy::Always => true,
-    };
-    if !pull_now {
-        return Ok(());
-    }
-    ctx.progress().progress(
-        scope,
-        executor::Progress::PullingImage {
-            image: SmolStr::new(image),
-        },
-    );
-    let password =
-        ctx.secrets()
-            .resolve(&credentials.password_secret)
-            .map_err(|e| EnvError::Backend {
-                backend: SmolStr::new("docker"),
-                operation: SmolStr::new("login"),
-                message: e.to_string(),
-            })?;
+    let password = ctx
+        .secrets()
+        .resolve(&credentials.password_secret)
+        .map_err(|e| EnvError::Backend {
+            backend: SmolStr::new("docker"),
+            operation: SmolStr::new("login"),
+            message: e.to_string(),
+        })?;
     let config_dir = std::env::temp_dir().join(format!(
         "petri-docker-login-{}-{}",
         std::process::id(),
@@ -317,7 +330,9 @@ async fn pull_with_credentials(
         login.push(host);
     }
     let result = match run_docker_stdin("login", &login, password.expose().as_bytes()).await {
-        Ok(_) => run_docker(&["--config", &config, "pull", image]).await.map(|_| ()),
+        Ok(_) => run_docker(&["--config", &config, "pull", image])
+            .await
+            .map(|_| ()),
         Err(error) => Err(error),
     };
     let _ = tokio::fs::remove_dir_all(&config_dir).await;
@@ -391,7 +406,7 @@ impl Executor for DockerExecutor {
         // crashed run's containers. One-shot containers and the service world a
         // crash left behind share the scope's prefixes and go the same way.
         let _ = run_docker(&["rm", "-f", &name]).await;
-        sweep_containers(&format!("{name}-s")).await;
+        sweep_containers(&one_shot_prefix_of(&name)).await;
         if !scope.services.is_empty() {
             services::sweep(&name).await;
         }
@@ -445,15 +460,15 @@ impl Executor for DockerExecutor {
         // One-shot containers in this scope's world share the job container's
         // network namespace, so a service reachable from the job is reachable
         // from them under the same names.
-        let runner = OneShotRunner {
-            prefix: format!("{name}-s"),
-            workspace: workspace.clone(),
-            env: scope.env.clone(),
-            network: Some(format!("container:{name}")),
-            pull: self.pull,
-            scope: scope.id,
-            progress: Arc::clone(ctx.progress()),
-        };
+        let runner = OneShotRunner::new(
+            one_shot_prefix_of(&name),
+            workspace.clone(),
+            self.one_shot_marker(&scope.instance),
+            scope,
+            Some(format!("container:{name}")),
+            self.pull,
+            ctx,
+        );
 
         Ok(EnvHandle::new(
             scope.id,
@@ -490,7 +505,7 @@ impl Executor for DockerExecutor {
 
         // One-shot containers first: they may hang off the job container's
         // network namespace, and everything of the scope is meant to stop.
-        sweep_containers(&format!("{container}-s")).await;
+        sweep_containers(&one_shot_prefix_of(container)).await;
 
         // Container-level kill is exactly right here: everything inside is meant to
         // stop. `stop` sends TERM and waits, then `rm -f` guarantees no leak.
@@ -647,6 +662,10 @@ impl ExecEnv for DockerEnv {
 
     fn workspace_path(&self) -> &str {
         CONTAINER_WORKSPACE
+    }
+
+    fn host_address(&self) -> &str {
+        HOST_ALIAS
     }
 
     // The workspace is bind-mounted from the run directory, so the host filesystem
@@ -853,8 +872,7 @@ async fn signal_group(container: &str, pgid: i32, signal: &str) -> Result<(), En
         .map(|_| ())
 }
 
-fn next_token() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
+pub(crate) fn next_token() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
@@ -882,7 +900,11 @@ pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
 
 /// [`run_docker`], with `input` written to the child's stdin — how a login's
 /// password travels without ever being an argument.
-async fn run_docker_stdin(operation: &str, args: &[&str], input: &[u8]) -> Result<String, EnvError> {
+async fn run_docker_stdin(
+    operation: &str,
+    args: &[&str],
+    input: &[u8],
+) -> Result<String, EnvError> {
     let operation = SmolStr::new(operation);
     let backend_error = |message: String| EnvError::Backend {
         backend: SmolStr::new("docker"),
@@ -965,6 +987,20 @@ fn fresh_run_id() -> String {
     )
 }
 
+/// Containers this run left behind, for leak checks in tests.
+pub async fn list_containers(prefix: &str) -> Vec<String> {
+    run_docker(&["ps", "-a", "--format", "{{.Names}}"])
+        .await
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|n| n.starts_with(prefix))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::registry_host;
@@ -980,18 +1016,4 @@ mod tests {
         );
         assert_eq!(registry_host("localhost/acme/tool"), Some("localhost"));
     }
-}
-
-/// Containers this run left behind, for leak checks in tests.
-pub async fn list_containers(prefix: &str) -> Vec<String> {
-    run_docker(&["ps", "-a", "--format", "{{.Names}}"])
-        .await
-        .map(|out| {
-            out.lines()
-                .map(str::trim)
-                .filter(|n| n.starts_with(prefix))
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
 }

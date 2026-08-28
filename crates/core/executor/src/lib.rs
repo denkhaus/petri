@@ -20,9 +20,7 @@ pub mod progress;
 pub mod scope;
 pub mod secrets;
 
-pub use container::{
-    CONTAINER_RUNTIME_CLASS, ContainerImage, ContainerRunner, OneShotContainer,
-};
+pub use container::{CONTAINER_RUNTIME_CLASS, ContainerImage, ContainerRunner, OneShotContainer};
 pub use env::{ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSpec, Sig};
 pub use error::{EnvError, ReleaseReport};
 pub use lines::LINE_CAP;

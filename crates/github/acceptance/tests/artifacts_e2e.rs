@@ -94,6 +94,7 @@ fn artifact_runtime(dir: &Path, source: Arc<GitActionSource>) -> Runtime {
         .step(github_actions::RunStep)
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
+        .step(github_actions::CheckoutStep)
         .capability(ActionSourceCap(trees))
         .run_services(|run_dir, caps| {
             match ObjectService::start(run_dir.join("artifacts"), run_dir.join("cache")) {
@@ -173,6 +174,94 @@ async fn artifacts_flow_across_containerized_jobs() {
         return;
     }
     run_artifact_flow("boxed", Some(RUNNER_IMAGE_2404)).await;
+}
+
+/// The runtime tier's whole story in one workflow, the plan's done-condition:
+/// checkout + build + upload in one job, download + verify in the next, to
+/// `Success` — the checkout local, the artifacts local, the actions from the
+/// warm cache. No network beyond what a container image pull would need.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_build_and_artifacts_run_to_success() {
+    if !node_ready() {
+        return;
+    }
+    let repo = std::env::temp_dir()
+        .join("petri-full-flow")
+        .join(format!("repo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(&repo).expect("create the fixture");
+    std::fs::write(repo.join("input.txt"), "source-of-truth\n").expect("write");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "petri")
+            .env("GIT_AUTHOR_EMAIL", "petri@test")
+            .env("GIT_COMMITTER_NAME", "petri")
+            .env("GIT_COMMITTER_EMAIL", "petri@test")
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "--quiet", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixture"]);
+
+    let text = format!(
+        "on: push\n\
+         jobs:\n\
+         \x20 build:\n\
+         \x20   runs-on: ubuntu-latest\n\
+         \x20   steps:\n\
+         \x20     - uses: actions/checkout@v4\n\
+         \x20     - run: mkdir -p dist && tr a-z A-Z < input.txt > dist/built.txt\n\
+         \x20     - uses: {UPLOAD}\n\
+         \x20       with:\n\
+         \x20         name: built\n\
+         \x20         path: dist/built.txt\n\
+         \x20 verify:\n\
+         \x20   needs: build\n\
+         \x20   runs-on: ubuntu-latest\n\
+         \x20   steps:\n\
+         \x20     - uses: {DOWNLOAD}\n\
+         \x20       with:\n\
+         \x20         name: built\n\
+         \x20         path: got\n\
+         \x20     - run: cat got/built.txt\n"
+    );
+    let source = action_source();
+    let mut graph = with_params(lower_with_actions(&text, &source));
+    graph.params.insert(
+        "petri".into(),
+        serde_json::json!({ "repo": repo.display().to_string() }),
+    );
+    let dir = std::env::temp_dir()
+        .join("petri-full-flow")
+        .join(format!("run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let report = artifact_runtime(&dir, source)
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    let report = RunReportPlus::from(report);
+    assert_eq!(
+        report.status,
+        runtime::ir::RunStatus::Success,
+        "log: {:?}",
+        log_lines(&report)
+    );
+    assert!(
+        log_lines(&report).iter().any(|l| l == "SOURCE-OF-TRUTH"),
+        "the build's output round-tripped: {:?}",
+        log_lines(&report)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&repo);
 }
 
 /// JavaScript actions need `node` on `PATH` for the host case; without it the

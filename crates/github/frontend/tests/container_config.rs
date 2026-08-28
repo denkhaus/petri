@@ -84,7 +84,7 @@ jobs:
         Some(&ir::ExprOrValue::Value(serde_json::json!("from-the-job")))
     );
     // The secret is pushed down into the step's env, never onto the scope.
-    assert!(scope.env.get("TOKEN").is_none());
+    assert!(!scope.env.contains_key("TOKEN"));
     let step = graph
         .nodes
         .iter()

@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use executor::{ExecEnv, SecretProvider};
@@ -81,7 +81,6 @@ pub struct Session {
     /// this environment's filesystem has it.
     tool_cache: Option<std::path::PathBuf>,
 }
-
 
 /// What the step left behind, for the step kind to fold into its outcome.
 #[derive(Debug, Default)]
@@ -178,8 +177,7 @@ impl Session {
     /// `/opt/hostedtoolcache` names it in its env — keep it. A value here
     /// would override the image's at exec time.
     pub fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
-        let workspace = self.workspace.clone();
-        let mut out = self.env_rooted(node, &workspace);
+        let mut out = self.env_rooted(node, &self.workspace);
         out.remove("RUNNER_TOOL_CACHE");
         out
     }
@@ -331,7 +329,7 @@ impl Session {
         let (tx, rx) = mpsc::channel(64);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
         let collected = sink.effects();
-        let mut sink_task = tokio::spawn(sink.run(rx));
+        let sink_task = tokio::spawn(sink.run(rx));
         let delegate = StepCtx {
             firing,
             attempt,
@@ -345,15 +343,20 @@ impl Session {
             control,
         };
         let outcome = Step::run(&ProcessStep, process, delegate).await;
-        if tokio::time::timeout(SINK_LIMIT, &mut sink_task)
-            .await
-            .is_err()
-        {
-            sink_task.abort();
-            let _ = sink_task.await;
-        }
-        let commands = std::mem::take(&mut *collected.lock().expect("effects are not poisoned"));
+        let commands = settle_sink(sink_task, &collected).await;
+        let effects = self.conclude(commands, &logs).await;
+        (outcome, effects)
+    }
 
+    /// Finish the session and surface what it left behind: a warning into the
+    /// step's log when the runner files cannot be read back — the step's own
+    /// outcome stands either way — and the step-summary event when the step
+    /// wrote one.
+    pub(crate) async fn conclude(
+        &mut self,
+        commands: CommandEffects,
+        logs: &mpsc::Sender<StepEvent>,
+    ) -> Effects {
         let effects = match self.finish(commands).await {
             Ok(effects) => effects,
             Err(failure) => {
@@ -373,12 +376,15 @@ impl Session {
                 ))
                 .await;
         }
-        (outcome, effects)
+        effects
     }
 
     /// Read the files back and apply them: env and path to the job, state and
     /// outputs to the caller.
-    pub(crate) async fn finish(&mut self, commands: CommandEffects) -> Result<Effects, StepFailure> {
+    pub(crate) async fn finish(
+        &mut self,
+        commands: CommandEffects,
+    ) -> Result<Effects, StepFailure> {
         let (env_text, state_text, path_text, summary) = tokio::try_join!(
             read_text(&*self.env, &self.files.env),
             read_text(&*self.env, &self.files.state),
@@ -419,35 +425,60 @@ impl Session {
     }
 }
 
+/// Join the command sink and take what it collected; a sink that will not stop
+/// is abandoned rather than waited on forever.
+pub(crate) async fn settle_sink(
+    mut sink_task: tokio::task::JoinHandle<()>,
+    collected: &Arc<Mutex<CommandEffects>>,
+) -> CommandEffects {
+    if tokio::time::timeout(SINK_LIMIT, &mut sink_task)
+        .await
+        .is_err()
+    {
+        sink_task.abort();
+        let _ = sink_task.await;
+    }
+    std::mem::take(&mut *collected.lock().expect("effects are not poisoned"))
+}
+
+/// Resolve the secret sentinels in one text, from the run's provider — which
+/// registers each value for masking as it resolves it — then unescape. `None`
+/// means the text carries neither a sentinel nor an escape and stands as it is.
+///
+/// The escape-resolve-unescape ordering is the masking contract; every path
+/// that turns sentinels into plaintext goes through here.
+pub(crate) fn resolve_sentinel_text(
+    text: &str,
+    secrets: &dyn SecretProvider,
+) -> Result<Option<String>, StepFailure> {
+    let has_secret = has_secret_sentinel(text);
+    if !has_secret && !has_sentinel_escape(text) {
+        return Ok(None);
+    }
+    let resolved = if has_secret {
+        replace_secret_sentinels(text, |name| {
+            secrets
+                .resolve(name)
+                .map(|secret| escape_sentinel_text(&secret.expose()))
+                .map_err(|e| StepFailure {
+                    class: steps::SECRET_UNAVAILABLE_CLASS,
+                    message: e.to_string(),
+                })
+        })?
+    } else {
+        text.to_string()
+    };
+    Ok(Some(unescape_sentinel_text(&resolved)))
+}
+
 /// Replace the secret sentinels the frontend lowered into the script and the env
-/// with their values, from the run's provider — which registers each for masking
-/// as it resolves it. A whole-value `$secret` reference is left for the process
+/// with their values. A whole-value `$secret` reference is left for the process
 /// step, which resolves it the same way.
 fn resolve_secret_sentinels(
     mut process: ProcessConfig,
     secrets: &dyn SecretProvider,
 ) -> Result<ProcessConfig, StepFailure> {
-    let mut resolve = |name: &str| -> Result<String, StepFailure> {
-        secrets
-            .resolve(name)
-            .map(|secret| escape_sentinel_text(&secret.expose()))
-            .map_err(|e| StepFailure {
-                class: steps::SECRET_UNAVAILABLE_CLASS,
-                message: e.to_string(),
-            })
-    };
-    try_map_process_texts(&mut process, |text| {
-        let has_secret = has_secret_sentinel(text);
-        if !has_secret && !has_sentinel_escape(text) {
-            return Ok(None);
-        }
-        let resolved = if has_secret {
-            replace_secret_sentinels(text, &mut resolve)?
-        } else {
-            text.to_string()
-        };
-        Ok(Some(unescape_sentinel_text(&resolved)))
-    })?;
+    try_map_process_texts(&mut process, |text| resolve_sentinel_text(text, secrets))?;
     Ok(process)
 }
 

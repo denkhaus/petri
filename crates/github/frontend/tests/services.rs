@@ -51,12 +51,7 @@ jobs:
     assert_eq!(service.ports, vec!["5432:5432"]);
     assert_eq!(
         service.options,
-        vec![
-            "--health-cmd",
-            "pg_isready",
-            "--health-interval",
-            "10s",
-        ]
+        vec!["--health-cmd", "pg_isready", "--health-interval", "10s",]
     );
 }
 

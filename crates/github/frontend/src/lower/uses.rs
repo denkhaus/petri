@@ -209,15 +209,21 @@ impl<'w, 'a> Lowering<'w, 'a> {
         state_from: Option<&str>,
     ) -> NodeId {
         match &plan.kind {
-            PlanKind::Node(node) => {
-                let node = node.clone();
-                self.action_node(context, plan, &node, phase, state_from)
-            }
+            PlanKind::Node(node) => self.action_node(context, plan, node, phase, state_from),
             PlanKind::Docker(docker) => {
-                let docker = docker.clone();
-                self.docker_action_node(context, plan, &docker, phase, state_from)
+                self.docker_action_node(context, plan, docker, phase, state_from)
             }
         }
+    }
+
+    /// GitHub's runner warns and runs anyway when a step omits a required
+    /// input; real workflows rely on that, so this is a warning everywhere.
+    fn warn_missing_input(&mut self, uses: &str, input: &str, span: Span) {
+        self.diags.warning(
+            "gha.missing_input",
+            span,
+            format!("`{uses}` declares required input `{input}`, which this step does not provide"),
+        );
     }
 
     /// One `github/action` node: the action pinned, its phase and entry point, its
@@ -260,10 +266,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // Inputs: declared ones take the caller's `with:`, else their default;
         // undeclared `with:` keys pass through as GitHub does (with a warning there).
-        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
-        for (k, v) in &step.with {
-            with.insert(k.to_lowercase(), *v);
-        }
+        let with = lowercased_with(step);
         let mut inputs = Map::new();
         let mut declared: HashSet<String> = HashSet::new();
         for input in &plan.inputs {
@@ -275,16 +278,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     Some(text) => self.text_value(text, span.clone(), &step_site),
                     None => {
                         if input.required && phase == Phase::Main {
-                            // GitHub's runner warns and runs anyway; real
-                            // workflows rely on that.
-                            self.diags.warning(
-                                "gha.missing_input",
-                                span.clone(),
-                                format!(
-                                    "`{uses}` declares required input `{}`, which this step                                      does not provide",
-                                    input.name
-                                ),
-                            );
+                            self.warn_missing_input(uses, &input.name, span.clone());
                         }
                         None
                     }
@@ -380,9 +374,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut step_site = site.clone();
         let mut env_config = self.step_env_config(step, &mut step_site, job_secret_env);
 
+        // `with:` keys lowercased once, for the input match and the main-phase
+        // entrypoint and args overrides below.
+        let with = lowercased_with(step);
+
         // Declared inputs (or their defaults) as expressions: the `INPUT_*`
         // values, and the `inputs` context the manifest's own text lowers in.
-        let inputs = self.docker_action_inputs(plan, step, &step_site, span.clone(), uses, phase);
+        let inputs =
+            self.docker_action_inputs(plan, step, &with, &step_site, span.clone(), uses, phase);
         let mut manifest_site = step_site.clone();
         manifest_site.action_inputs = Some(inputs.clone());
 
@@ -410,10 +409,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
         // `with.entrypoint` and `with.args` override the manifest for the main
         // phase, as GitHub documents for Docker container actions; `pre` and
         // `post` run their own entrypoints with no args.
-        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
-        for (k, v) in &step.with {
-            with.insert(k.to_lowercase(), *v);
-        }
         let entrypoint = match phase {
             Phase::Pre => docker
                 .pre_entrypoint
@@ -519,19 +514,17 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// through as GitHub's do. A whole-value secret rides as its sentinel,
     /// resolved by the step at spawn. Missing required inputs are reported on
     /// the main phase only, like a JavaScript action's.
+    #[allow(clippy::too_many_arguments)]
     fn docker_action_inputs(
         &mut self,
         plan: &ActionPlan,
         step: &Step<'_>,
+        with: &BTreeMap<String, Node<'_>>,
         site: &Site,
         span: Span,
         uses: &str,
         phase: Phase,
     ) -> BTreeMap<String, ExprId> {
-        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
-        for (k, v) in &step.with {
-            with.insert(k.to_lowercase(), *v);
-        }
         let mut inputs: BTreeMap<String, ExprId> = BTreeMap::new();
         let mut declared: HashSet<String> = HashSet::new();
         for input in &plan.inputs {
@@ -543,16 +536,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     Some(text) => self.input_expr_from_text(text, span.clone(), site),
                     None => {
                         if input.required && phase == Phase::Main {
-                            // GitHub's runner warns and runs anyway; real
-                            // workflows rely on that.
-                            self.diags.warning(
-                                "gha.missing_input",
-                                span.clone(),
-                                format!(
-                                    "`{uses}` declares required input `{}`, which this step                                      does not provide",
-                                    input.name
-                                ),
-                            );
+                            self.warn_missing_input(uses, &input.name, span.clone());
                         }
                         None
                     }
@@ -583,7 +567,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     fn input_expr_from_text(&mut self, text: &str, span: Span, site: &Site) -> Option<ExprId> {
-        match lower_scalar(text, span, site, true, true, self.b.exprs(), &mut self.diags)? {
+        match lower_scalar(
+            text,
+            span,
+            site,
+            true,
+            true,
+            self.b.exprs(),
+            &mut self.diags,
+        )? {
             LoweredScalar::Literal(v) => Some(self.b.exprs().lit(v)),
             LoweredScalar::Expr(id) => Some(id),
             LoweredScalar::Secret(name) => {
@@ -597,7 +589,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// secret rides as its sentinel — these positions are not env-shaped maps,
     /// so a `$secret` reference has nowhere to live.
     fn sentinel_text_value(&mut self, text: &str, span: Span, site: &Site) -> Option<Value> {
-        let lowered = lower_scalar(text, span, site, true, true, self.b.exprs(), &mut self.diags)?;
+        let lowered = lower_scalar(
+            text,
+            span,
+            site,
+            true,
+            true,
+            self.b.exprs(),
+            &mut self.diags,
+        )?;
         Some(match lowered {
             LoweredScalar::Secret(name) => Value::String(secret_sentinel(&name)),
             other => config_value(other),
@@ -897,10 +897,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             s
         };
         let mut inputs: BTreeMap<String, ExprId> = BTreeMap::new();
-        let mut with: BTreeMap<String, Node<'_>> = BTreeMap::new();
-        for (k, v) in &step.with {
-            with.insert(k.to_lowercase(), *v);
-        }
+        let with = lowercased_with(step);
         for input in &action.inputs {
             let node = with
                 .get(&input.name.to_lowercase())
@@ -935,15 +932,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     }
                 }
                 None if input.required => {
-                    // GitHub's runner warns and runs anyway.
-                    self.diags.warning(
-                        "gha.missing_input",
-                        span.clone(),
-                        format!(
-                            "`{reference}` declares required input `{}`, which this step does                              not provide",
-                            input.name
-                        ),
-                    );
+                    self.warn_missing_input(reference, &input.name, span.clone());
                 }
                 None => {
                     let id = self.b.exprs().lit(Value::Null);
@@ -1083,6 +1072,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 }
 
+/// A step's `with:` keys lowercased, as GitHub matches inputs.
+fn lowercased_with<'n>(step: &Step<'n>) -> BTreeMap<String, Node<'n>> {
+    step.with
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), *v))
+        .collect()
+}
+
 /// The plan for `uses: docker://image`: no files, no manifest — the image as
 /// written, and whatever `with:` provides.
 fn docker_image_plan(image: &str) -> ActionPlan {
@@ -1111,13 +1108,5 @@ fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
             default: input.default.and_then(scalar_text_opt),
             required: input.required,
         })
-        .collect()
-}
-
-/// A step's `with:` keys lowercased, as GitHub matches inputs.
-fn lowercased_with<'n>(step: &Step<'n>) -> BTreeMap<String, Node<'n>> {
-    step.with
-        .iter()
-        .map(|(k, v)| (k.to_lowercase(), *v))
         .collect()
 }

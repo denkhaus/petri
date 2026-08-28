@@ -95,9 +95,13 @@ impl Executor for LocalExecutor {
                 // it declares any) its service world too: a crashed run's
                 // Docker side dies before its names can be reused. Best
                 // effort, like the Docker fence — a daemon that is down has
-                // nothing of ours to remove.
-                let prefix = self.docker.one_shot_prefix(&scope.instance).await?;
-                executor_docker::sweep_containers(&prefix).await;
+                // nothing of ours to remove. The one-shot marker gates the
+                // sweep, so a Docker-free scope never spawns a `docker` client
+                // for a fence with nothing to look for.
+                if self.docker.one_shots_marked(&scope.instance).await {
+                    let prefix = self.docker.one_shot_prefix(&scope.instance).await?;
+                    executor_docker::sweep_containers(&prefix).await;
+                }
                 let services = !scope.services.is_empty();
                 if services {
                     self.docker.sweep_scope_services(&scope.instance).await?;
@@ -142,8 +146,12 @@ impl Executor for LocalExecutor {
                 // One-shot leftovers first — a step aborted at its hard
                 // deadline can leave its container running — then the host's
                 // own process groups and workspace, then the service world
-                // (nothing of the scope uses it any more).
-                if let Ok(prefix) = self.docker.one_shot_prefix(env.instance()).await {
+                // (nothing of the scope uses it any more). The marker gates
+                // the sweep, as at acquire: no one-shot ever launched means
+                // nothing to look for.
+                if self.docker.one_shots_marked(env.instance()).await
+                    && let Ok(prefix) = self.docker.one_shot_prefix(env.instance()).await
+                {
                     executor_docker::sweep_containers(&prefix).await;
                 }
                 let instance = env.instance().to_string();

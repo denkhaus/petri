@@ -460,7 +460,14 @@ jobs:
     // explicit rejection.
     let partial = RunnerMap::builtin().allow_list("self-hosted linux");
     let text = "on: push\njobs:\n  j:\n    runs-on: [self-hosted, linux, x64]\n    steps:\n      - run: echo\n";
-    let lowered = load_configured(".github/workflows/test.yml", text, &NoFiles, None, &partial, true);
+    let lowered = load_configured(
+        ".github/workflows/test.yml",
+        text,
+        &NoFiles,
+        None,
+        &partial,
+        true,
+    );
     assert!(lowered.graph.is_none());
     let diags = lowered.diagnostics.into_vec();
     let unknown: Vec<&frontend::Diagnostic> = diags
@@ -563,9 +570,8 @@ jobs:
         ),
         ("codspeed-macro", "unsupported.runs_on.unknown"),
     ] {
-        let text = format!(
-            "on: push\njobs:\n  j:\n    runs-on: {label}\n    steps:\n      - run: echo\n"
-        );
+        let text =
+            format!("on: push\njobs:\n  j:\n    runs-on: {label}\n    steps:\n      - run: echo\n");
         let diags = diagnostics(&text);
         assert!(diags.iter().any(|d| d.code == code), "{label}: {diags:?}");
     }

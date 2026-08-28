@@ -13,24 +13,19 @@ use std::path::PathBuf;
 
 use executor::{ContainerImage, OneShotContainer};
 use frontend_gha::action::validate_relative_action_path;
-use frontend_gha::exprs::{
-    has_hashfiles_sentinel, has_secret_sentinel, has_sentinel_escape, replace_secret_sentinels,
-    unescape_sentinel_text,
-};
+use frontend_gha::exprs::has_hashfiles_sentinel;
 use ir::{Outcome, StepEvent, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
-use steps::{
-    Ending, Step, StepCtx, StepFailure, ValueOrSecretRef, ladder, natural_outcome,
-    parse_outputs,
-};
+use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder, parse_outputs};
 use tokio::sync::mpsc;
 
 use crate::action::{ActionSourceCap, stage};
 use crate::commands::CommandSink;
 use crate::config::{DockerActionConfig, DockerActionImage, DockerfileImage};
 use crate::session::{
-    REPO_DIR, SINK_LIMIT, Session, fold_into_outcome, github_workspace_path, stringify,
+    REPO_DIR, SINK_LIMIT, Session, fold_into_outcome, github_workspace_path, resolve_sentinel_text,
+    settle_sink, stringify,
 };
 
 /// The action's image could not be prepared.
@@ -178,7 +173,7 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
     let (tx, rx) = mpsc::channel(64);
     let sink = CommandSink::new(ctx.logs.clone(), ctx.secrets.masker(), allow_unsecure);
     let collected = sink.effects();
-    let mut sink_task = tokio::spawn(sink.run(rx));
+    let sink_task = tokio::spawn(sink.run(rx));
     let drain = handle.lines().map(|mut lines| {
         tokio::spawn(async move {
             while let Some(line) = lines.recv().await {
@@ -202,14 +197,10 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
     if let Some(drain) = drain {
         let _ = tokio::time::timeout(SINK_LIMIT, drain).await;
     }
-    if tokio::time::timeout(SINK_LIMIT, &mut sink_task).await.is_err() {
-        sink_task.abort();
-        let _ = sink_task.await;
-    }
-    let commands = std::mem::take(&mut *collected.lock().expect("effects are not poisoned"));
+    let commands = settle_sink(sink_task, &collected).await;
 
     // What the action wrote to `GITHUB_OUTPUT`, into the outcome's output.
-    let mut output = match ctx.env.read_file(&output_rel_path).await {
+    let output = match ctx.env.read_file(&output_rel_path).await {
         Ok(Some(bytes)) => {
             parse_outputs(&String::from_utf8_lossy(&bytes)).map_err(|e| StepFailure {
                 class: steps::BAD_OUTPUT_CLASS,
@@ -219,32 +210,9 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
         _ => Map::new(),
     };
 
-    let outcome = match ending {
-        Ending::Natural(status) => {
-            output.insert("exit_status".into(), exit_value(&status));
-            natural_outcome(&status, &config.soft_fail, Value::Object(output))
-        }
-        Ending::Signalled { escalation, status } => {
-            if let Some(status) = &status {
-                output.insert("exit_status".into(), exit_value(status));
-            }
-            output.insert(
-                "cancel_escalation".into(),
-                Value::String(escalation.to_string()),
-            );
-            Outcome::new(ir::Status::Cancelled, Value::Object(output))
-        }
-    };
+    let outcome = ending_outcome(ending, &config.soft_fail, output);
 
-    let effects = session.finish(commands).await.unwrap_or_default();
-    if !effects.summary.is_empty() {
-        let _ = ctx
-            .logs
-            .send(StepEvent::Custom(
-                serde_json::json!({ "github/step_summary": effects.summary }),
-            ))
-            .await;
-    }
+    let effects = session.conclude(commands, &ctx.logs).await;
     let mut state: Map<String, Value> = config
         .state
         .into_iter()
@@ -388,8 +356,12 @@ impl TextResolver {
             .collect();
         let workspace = github_workspace_path(&*ctx.env);
         let hashes = if texts.iter().any(|t| has_hashfiles_sentinel(t)) {
-            crate::hashfiles::resolved_calls(texts.iter().map(String::as_str), &*ctx.env, &workspace)
-                .await?
+            crate::hashfiles::resolved_calls(
+                texts.iter().map(String::as_str),
+                &*ctx.env,
+                &workspace,
+            )
+            .await?
         } else {
             Default::default()
         };
@@ -402,33 +374,10 @@ impl TextResolver {
         } else {
             text.to_string()
         };
-        if !has_secret_sentinel(&text) && !has_sentinel_escape(&text) {
-            return Ok(text);
+        match resolve_sentinel_text(&text, ctx.secrets.as_ref())? {
+            Some(resolved) => Ok(resolved),
+            None => Ok(text),
         }
-        let resolved = if has_secret_sentinel(&text) {
-            replace_secret_sentinels(&text, |name| {
-                ctx.secrets
-                    .resolve(name)
-                    .map(|secret| {
-                        frontend_gha::exprs::escape_sentinel_text(&secret.expose())
-                    })
-                    .map_err(|e| StepFailure {
-                        class: steps::SECRET_UNAVAILABLE_CLASS,
-                        message: e.to_string(),
-                    })
-            })?
-        } else {
-            text
-        };
-        Ok(unescape_sentinel_text(&resolved))
-    }
-}
-
-fn exit_value(status: &executor::ExitStatus) -> Value {
-    match (status.code, status.signal) {
-        (Some(code), _) => Value::from(code),
-        (None, Some(signal)) => Value::String(format!("signal:{signal}")),
-        _ => Value::Null,
     }
 }
 

@@ -286,8 +286,8 @@ fn read_call_interface<'a>(wc: Node<'a>, diags: &mut Diagnostics) -> CallInterfa
         .and_then(|o| o.as_mapping())
         .map(|om| {
             om.iter()
-                .filter_map(|(name, spec)| {
-                    match spec.as_mapping().and_then(|sm| sm.get("value")) {
+                .filter_map(
+                    |(name, spec)| match spec.as_mapping().and_then(|sm| sm.get("value")) {
                         Some(value) => Some((name.to_string(), value)),
                         None => {
                             diags.error(
@@ -297,8 +297,8 @@ fn read_call_interface<'a>(wc: Node<'a>, diags: &mut Diagnostics) -> CallInterfa
                             );
                             None
                         }
-                    }
-                })
+                    },
+                )
                 .collect()
         })
         .unwrap_or_default();

@@ -11,19 +11,7 @@ use executor_docker::{DockerExecutor, list_containers};
 use executor_host::HostExecutor;
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;
-use testkit::{RunDir, docker_available, wait_for_file};
-
-/// The same skip-or-require convention as the driver's Docker battery.
-async fn docker_ready() -> bool {
-    if docker_available().await {
-        return true;
-    }
-    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
-        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
-    }
-    eprintln!("skipping: no Docker daemon reachable");
-    false
-}
+use testkit::{RunDir, docker_ready, wait_for_file};
 
 const IMAGE: &str = "alpine:3.20";
 
@@ -56,10 +44,7 @@ async fn the_host_executor_refuses_services() {
         .acquire(&spec, &AcquireContext::bare())
         .await
         .expect_err("the host executor cannot realize services");
-    assert!(
-        error.to_string().contains("service containers"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("service containers"), "{error}");
 }
 
 /// A host scope acquired through the composition carries a runner, without
@@ -72,8 +57,13 @@ async fn a_local_host_scope_is_bound_to_a_runner() {
         .acquire(&host_spec(), &AcquireContext::bare())
         .await
         .expect("acquire");
-    let runner = handle.container_runner().expect("a runner rides the handle");
-    assert_eq!(runner.workspace_path(), executor_docker::CONTAINER_WORKSPACE);
+    let runner = handle
+        .container_runner()
+        .expect("a runner rides the handle");
+    assert_eq!(
+        runner.workspace_path(),
+        executor_docker::CONTAINER_WORKSPACE
+    );
     let report = executor.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
 }
@@ -92,10 +82,15 @@ async fn a_one_shot_container_runs_in_a_host_scope() {
         .acquire(&host_spec(), &AcquireContext::bare())
         .await
         .expect("acquire");
-    let runner = handle.container_runner().expect("a runner rides the handle");
+    let runner = handle
+        .container_runner()
+        .expect("a runner rides the handle");
 
-    let spec = OneShotContainer::registry(IMAGE)
-        .with_args(&["sh", "-c", "echo one-shot ran; echo mark > /workspace/mark"]);
+    let spec = OneShotContainer::registry(IMAGE).with_args(&[
+        "sh",
+        "-c",
+        "echo one-shot ran; echo mark > /workspace/mark",
+    ]);
     let mut process = runner.run(spec).await.expect("docker run");
     let lines = drain(&mut process).await;
     let status = process.wait().await.expect("wait");
@@ -123,7 +118,9 @@ async fn a_pure_docker_scope_is_bound_to_a_runner() {
         .acquire(&container_spec(), &AcquireContext::bare())
         .await
         .expect("acquire");
-    let runner = handle.container_runner().expect("a runner rides the handle");
+    let runner = handle
+        .container_runner()
+        .expect("a runner rides the handle");
 
     let spec = OneShotContainer::registry(IMAGE).with_args(&[
         "sh",

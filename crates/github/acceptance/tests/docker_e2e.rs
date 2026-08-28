@@ -5,20 +5,10 @@
 
 mod support;
 
+use runtime::ir;
 use runtime::ir::RunStatus;
-use runtime::{engine, frontend, ir};
 use support::*;
-
-async fn docker_ready() -> bool {
-    if testkit::docker_available().await {
-        return true;
-    }
-    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
-        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
-    }
-    eprintln!("skipping: no Docker daemon reachable");
-    false
-}
+use testkit::docker_ready;
 
 fn output_of(report: &RunReportPlus, name: &str) -> ir::Value {
     report
@@ -102,7 +92,9 @@ jobs:
     assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
     let lines = log_lines(&report);
     assert!(
-        lines.iter().any(|l| l == "dockerfile-action-ran: and-spoke"),
+        lines
+            .iter()
+            .any(|l| l == "dockerfile-action-ran: and-spoke"),
         // The entrypoint echoes its appended args: the manifest's one arg,
         // bound to the caller's input.
         "{lines:?}"
@@ -232,9 +224,3 @@ fn errors(report: &RunReportPlus) -> Vec<String> {
         .map(|r| format!("{}: {:?}", r.name, r.outcome))
         .collect()
 }
-
-// Quiet the unused-import lint when every test above skips without a daemon.
-#[allow(unused_imports)]
-use engine as _engine;
-#[allow(unused_imports)]
-use frontend as _frontend;

@@ -213,5 +213,8 @@ jobs:
     let graph = lower(text, &source).graph.expect("lowers");
     let inner = node(&graph, "build/step-1/step-1");
     assert_eq!(inner.step.kind.to_string(), DOCKER_ACTION_KIND);
-    assert_eq!(inner.step.config["image"], json!({ "registry": "alpine:3.21" }));
+    assert_eq!(
+        inner.step.config["image"],
+        json!({ "registry": "alpine:3.21" })
+    );
 }

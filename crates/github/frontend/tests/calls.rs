@@ -80,7 +80,11 @@ fn a_local_call_inlines_the_callee_under_the_call_job() {
         assert!(names.contains(&wanted), "missing {wanted} in {names:?}");
     }
     // The call is preserved on its start.
-    let start = graph.nodes.iter().find(|n| n.name == "release/start").unwrap();
+    let start = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "release/start")
+        .unwrap();
     assert_eq!(
         start.meta["call"]["uses"],
         json!("./.github/workflows/build.yml")
@@ -199,8 +203,7 @@ fn files_with_plain(base: &frontend::MapFiles) -> frontend::MapFiles {
     let mut map = base.0.clone();
     map.insert(
         ".github/workflows/plain.yml".into(),
-        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n"
-            .into(),
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n".into(),
     );
     frontend::MapFiles(map)
 }
@@ -249,7 +252,10 @@ jobs:
     let call_files = files(&[(".github/workflows/build.yml", callee)]);
     let graph = lower_ok_with(caller, &call_files);
     let start = graph.nodes.iter().find(|n| n.name == "fan/start").unwrap();
-    assert!(start.expand.is_some(), "the call start is the expansion head");
+    assert!(
+        start.expand.is_some(),
+        "the call start is the expansion head"
+    );
 
     let nested_callee = r#"
 on:
@@ -318,7 +324,12 @@ jobs:
             .iter()
             .find(|n| n.name == format!("{job}/start"))
             .unwrap();
-        graph.scope(start.scope).unwrap().runtime.requirements.clone()
+        graph
+            .scope(start.scope)
+            .unwrap()
+            .runtime
+            .requirements
+            .clone()
     };
     assert_eq!(requirements("fast/build"), ["depot-ubuntu-22.04-16"]);
     assert_eq!(requirements("default/build"), ["ubuntu-slim"]);
@@ -370,7 +381,11 @@ jobs:
         eprintln!("{d}");
     }
     let graph = lowered.graph.expect("a graph");
-    let start = graph.nodes.iter().find(|n| n.name == "build/start").unwrap();
+    let start = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "build/start")
+        .unwrap();
     assert_eq!(
         graph.scope(start.scope).unwrap().runtime.requirements,
         ["ubuntu-24.04"]
@@ -379,8 +394,11 @@ jobs:
     // No default: nothing standalone could ever place this file — only a
     // caller can. Its own class, so the corpus never reads it as a gap.
     let defaultless = callee.replace("        default: ubuntu-24.04\n", "");
-    let lowered =
-        frontend_gha::load(".github/workflows/build.yml", &defaultless, &frontend::NoFiles);
+    let lowered = frontend_gha::load(
+        ".github/workflows/build.yml",
+        &defaultless,
+        &frontend::NoFiles,
+    );
     assert!(lowered.graph.is_none());
     let diags = lowered.diagnostics.into_vec();
     assert!(
@@ -403,9 +421,8 @@ fn a_remote_call_resolves_through_the_action_source() {
         sha,
         callee,
     );
-    let text = format!(
-        "on: push\njobs:\n  j:\n    uses: octo/shared/.github/workflows/build.yml@{sha}\n"
-    );
+    let text =
+        format!("on: push\njobs:\n  j:\n    uses: octo/shared/.github/workflows/build.yml@{sha}\n");
     let lowered = load_with(".github/workflows/test.yml", &text, &NoFiles, Some(&source));
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");

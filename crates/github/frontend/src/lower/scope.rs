@@ -7,7 +7,7 @@ use ir::{ExprOrValue, RuntimeSpec, Scope, ScopeId, Value};
 use serde_json::json;
 use smol_str::SmolStr;
 
-use crate::model::Job;
+use crate::model::{Job, Workflow};
 use crate::runs_on;
 
 use super::{EnvValue, Lowering};
@@ -15,13 +15,25 @@ use super::{EnvValue, Lowering};
 /// The job container's `env:` entries, when the job has a container mapping.
 /// Read here for the scope and again by `job_body`'s secret scan, so a secret
 /// in container env is pushed down into every step like a job-env secret.
-pub(super) fn container_env<'x>(job: &Job<'x>) -> Vec<(String, Node<'x>)> {
-    job.container
+/// The scope-level env in precedence order: container env first (lowest — it
+/// configures the container, and per-step env wins inside it), then workflow
+/// env, then job env on top. The one spelling of that order, shared by the
+/// scope's env and `job_body`'s secret push-down.
+pub(super) fn scope_env<'x>(wf: &Workflow<'x>, job: &Job<'x>) -> Vec<(String, Node<'x>)> {
+    let mut entries: Vec<(String, Node<'x>)> = job
+        .container
         .and_then(|c| c.as_mapping())
         .and_then(|m| m.get("env"))
         .and_then(|e| e.as_mapping())
         .map(|em| em.iter().map(|(k, v)| (k.to_string(), v)).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    entries.extend(
+        wf.env
+            .iter()
+            .chain(job.env.iter())
+            .map(|(k, n)| (k.clone(), *n)),
+    );
+    entries
 }
 
 impl<'w, 'a> Lowering<'w, 'a> {
@@ -90,20 +102,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
             );
         }
 
-        // Container env first (lowest precedence — it configures the container,
-        // and per-step env wins inside it), then workflow env, then job env on
-        // top. Secret refs cannot live in scope env (there is nowhere for them
+        // Secret refs cannot live in scope env (there is nowhere for them
         // to go but the process), so they are pushed down into every step's env
         // instead; `job_body` reads them back from `site`.
-        let container_env = container_env(job);
-        for (key, node) in container_env
-            .iter()
-            .map(|(k, n)| (k, *n))
-            .chain(self.wf.env.iter().chain(job.env.iter()).map(|(k, n)| (k, *n)))
-        {
+        for (key, node) in scope_env(self.wf, job) {
             match self.env_value(&node, &site, false) {
                 Some(EnvValue::Plain(v)) => {
-                    scope.env.insert(SmolStr::new(key), v);
+                    scope.env.insert(SmolStr::new(&key), v);
                 }
                 Some(EnvValue::Secret(_)) => {
                     // Recorded in job_body via the same lookup; nothing to do here.
@@ -314,7 +319,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         };
         let (username_text, username_span) = field("username")?;
         let (password_text, password_span) = field("password")?;
-        let username = self.static_scope_text(&username_text, username_span, "registry username")?;
+        let username =
+            self.static_scope_text(&username_text, username_span, "registry username")?;
         let Some(password_secret) = crate::exprs::whole_value_secret(&password_text) else {
             self.diags.unsupported(
                 "container.credentials",
@@ -380,7 +386,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 if let Some(node) = sm.get("credentials") {
                     service.credentials = self.registry_credentials(node, "service");
                 }
-                for (key, value) in sm.get("env").and_then(|e| e.as_mapping()).iter().flat_map(|em| em.iter()) {
+                for (key, value) in sm
+                    .get("env")
+                    .and_then(|e| e.as_mapping())
+                    .iter()
+                    .flat_map(|em| em.iter())
+                {
                     match self.env_value(&value, &site, false) {
                         Some(EnvValue::Plain(v)) => {
                             service.env.insert(SmolStr::new(key), v);

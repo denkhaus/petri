@@ -227,6 +227,8 @@ impl Executor for HostExecutor {
     ) -> Result<EnvHandle, EnvError> {
         // This executor is deliberately Docker-free; a scope that declares
         // sidecar services needs a composition that can realize them.
+        // `LocalExecutor` satisfies this guard by realizing the services
+        // itself and handing this executor a spec with none.
         if !scope.services.is_empty() {
             return Err(EnvError::Backend {
                 backend: SmolStr::new("host"),

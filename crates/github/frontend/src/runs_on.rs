@@ -32,10 +32,7 @@ pub fn static_legs(matrix: Node<'_>, inputs: &Value, github: &Value) -> Option<V
     let value = static_value(matrix, &mut table, inputs, github)?;
     let m = table.lit(value);
     let legs = crate::expr_lower::matrix_legs(&mut table, m).ok()?;
-    let env_statics = statics(inputs, github, &Value::Null);
-    let run = RunContext::new();
-    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
-    match eval(&table, legs, &env) {
+    match eval_static(&table, legs, inputs, github, &Value::Null) {
         Ok(Value::Array(legs)) => Some(legs),
         _ => None,
     }
@@ -71,10 +68,7 @@ fn static_value(
         return Some(node.to_json());
     }
     let id = compile_scalar(text, &node.span(), table).ok()?;
-    let env_statics = statics(inputs, github, &Value::Null);
-    let run = RunContext::new();
-    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
-    let value = eval(table, id, &env).ok()?;
+    let value = eval_static(table, id, inputs, github, &Value::Null).ok()?;
     (!carries_mark(&value)).then_some(value)
 }
 
@@ -135,6 +129,41 @@ pub enum Failure {
 /// character a real label contains.
 pub const DYNAMIC_MARK: char = '\u{1}';
 
+/// A run-time input's placeholder value: the mark, then the input's name.
+/// [`dynamic_input`] is the decoder; the pair lives together so the format has
+/// one home.
+pub fn dynamic_placeholder(name: &str) -> String {
+    format!("{DYNAMIC_MARK}{name}")
+}
+
+/// The failure a resolved text carries when it absorbed a run-time input's
+/// placeholder, naming the input. `None` when the text is mark-free.
+fn dynamic_input(text: &str, span: &Span) -> Option<Failure> {
+    let name = text.split(DYNAMIC_MARK).nth(1)?;
+    Some(Failure::DynamicInput {
+        name: name
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+            .collect(),
+        span: span.clone(),
+    })
+}
+
+/// Evaluate one compiled expression over the static contexts: the leg's
+/// `matrix`, the frame's `inputs`, and the checkout's `github` identity.
+fn eval_static(
+    table: &ExprTable,
+    id: ExprId,
+    inputs: &Value,
+    github: &Value,
+    leg: &Value,
+) -> Result<Value, String> {
+    let env_statics = statics(inputs, github, leg);
+    let run = RunContext::new();
+    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
+    eval(table, id, &env).map_err(|e| e.to_string())
+}
+
 /// A compiled `runs-on`: each label position lowered once, evaluated once per
 /// leg. The table is private — nothing of this resolution enters the graph.
 pub struct Compiled {
@@ -184,26 +213,18 @@ pub fn static_scalar(
 ) -> Result<String, Failure> {
     let mut table = ExprTable::new();
     let id = compile_with(text, span, &mut table, &mut ScopeContexts)?;
-    let env_statics = statics(inputs, github, &Value::Null);
-    let run = RunContext::new();
-    let env = EvalEnv::new(&Value::Null, &run, &env_statics);
-    let value = eval(&table, id, &env).map_err(|e| Failure::Bad {
-        message: e.to_string(),
-        span: span.clone(),
-    })?;
+    let value =
+        eval_static(&table, id, inputs, github, &Value::Null).map_err(|message| Failure::Bad {
+            message,
+            span: span.clone(),
+        })?;
     let text = match value {
         Value::String(s) => s,
         Value::Null => String::new(),
         other => other.to_string(),
     };
-    if let Some(name) = text.split(DYNAMIC_MARK).nth(1) {
-        return Err(Failure::DynamicInput {
-            name: name
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
-                .collect(),
-            span: span.clone(),
-        });
+    if let Some(failure) = dynamic_input(&text, span) {
+        return Err(failure);
     }
     Ok(text)
 }
@@ -291,14 +312,8 @@ impl Compiled {
                 span: entry.span.clone(),
             };
             let mut push = |s: String| -> Result<(), Failure> {
-                if let Some(name) = s.split(DYNAMIC_MARK).nth(1) {
-                    return Err(Failure::DynamicInput {
-                        name: name
-                            .chars()
-                            .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
-                            .collect(),
-                        span: entry.span.clone(),
-                    });
+                if let Some(failure) = dynamic_input(&s, &entry.span) {
+                    return Err(failure);
                 }
                 labels.push((s, entry.span.clone()));
                 Ok(())

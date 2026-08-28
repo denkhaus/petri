@@ -110,14 +110,22 @@ mod tests {
         ] {
             assert_eq!(classify(label), LabelClass::Linux, "{label}");
         }
-        for label in ["windows-latest", "windows-11-arm", "namespace-profile-windows-2022-x86-64-4"]
-        {
+        for label in [
+            "windows-latest",
+            "windows-11-arm",
+            "namespace-profile-windows-2022-x86-64-4",
+        ] {
             assert_eq!(classify(label), LabelClass::Windows, "{label}");
         }
         for label in ["macos-14", "macos-15-intel", "namespace-profile-macos-15"] {
             assert_eq!(classify(label), LabelClass::MacOs, "{label}");
         }
-        for label in ["self-hosted", "gpu", "codspeed-macro", "namespace-profile-default"] {
+        for label in [
+            "self-hosted",
+            "gpu",
+            "codspeed-macro",
+            "namespace-profile-default",
+        ] {
             assert_eq!(classify(label), LabelClass::Opaque, "{label}");
         }
     }
@@ -128,7 +136,13 @@ mod tests {
         for label in ["codspeed-macro", "self-hosted", "X64"] {
             assert!(map.knows(label), "{label}");
         }
-        assert!(map.knows("Ubuntu-Latest"), "the naming rule needs no config");
-        assert!(!map.knows("namespace-profile-default"), "opaque stays unknown");
+        assert!(
+            map.knows("Ubuntu-Latest"),
+            "the naming rule needs no config"
+        );
+        assert!(
+            !map.knows("namespace-profile-default"),
+            "opaque stays unknown"
+        );
     }
 }

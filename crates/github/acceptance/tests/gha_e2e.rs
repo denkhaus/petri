@@ -702,7 +702,8 @@ jobs:
         !encoded.contains("REAL_KEY_VALUE"),
         "no secret value in the graph"
     );
-    let report = run_host_with_secrets(graph, "call-secrets", &[("REAL_KEY", "s3cret-value")]).await;
+    let report =
+        run_host_with_secrets(graph, "call-secrets", &[("REAL_KEY", "s3cret-value")]).await;
     assert_eq!(
         report.status,
         RunStatus::Success,

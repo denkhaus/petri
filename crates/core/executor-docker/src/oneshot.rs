@@ -7,50 +7,95 @@
 //! `setsid` machinery long-lived scope containers need — and the `docker run`
 //! client's exit code is the container's own.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use executor::lines::pump;
 use executor::{
-    ContainerImage, ContainerRunner, EnvError, ExitStatus, LineStream, OneShotContainer,
-    ProcessHandle, Progress, ProgressSink, Sig,
+    AcquireContext, ContainerImage, ContainerRunner, EnvError, ExitStatus, LineStream,
+    OneShotContainer, ProcessHandle, Progress, ProgressSink, ScopeSpec, Sig,
 };
 use ir::ScopeId;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
+use tokio::sync::{OnceCell, mpsc};
 
-use crate::{CONTAINER_WORKSPACE, PullPolicy, prepare_registry_image, run_docker};
+use crate::{CONTAINER_WORKSPACE, PullPolicy, next_token, prepare_registry_image, run_docker};
 
 /// Runs one-shot containers in one scope's world.
 pub(crate) struct OneShotRunner {
     /// Container-name prefix for this scope's one-shots (`petri-<run>-<inst>-s`).
-    pub(crate) prefix: String,
+    prefix: String,
     /// The scope's workspace on the host, mounted at [`CONTAINER_WORKSPACE`].
-    pub(crate) workspace: PathBuf,
+    workspace: PathBuf,
     /// The scope's resolved env: one-shots live in the scope's world, so they
     /// see what every process of the scope sees. A spec's own env wins.
-    pub(crate) env: std::collections::BTreeMap<SmolStr, SmolStr>,
+    env: std::collections::BTreeMap<SmolStr, SmolStr>,
     /// `--network` value — the job container's namespace for a containerized
     /// scope, the scope's network for a host scope with services. `None` is the
     /// daemon default.
-    pub(crate) network: Option<String>,
-    pub(crate) pull: PullPolicy,
-    pub(crate) scope: ScopeId,
-    pub(crate) progress: Arc<dyn ProgressSink>,
+    network: Option<String>,
+    pull: PullPolicy,
+    scope: ScopeId,
+    progress: Arc<dyn ProgressSink>,
+    /// The scope's one-shot marker, recorded before the first launch so the
+    /// acquire fence and release sweep of a Docker-free scope know whether
+    /// there can be anything to look for.
+    marker: PathBuf,
+    marked: OnceCell<()>,
+    /// Image references this runner has already ensured. Presence cannot
+    /// regress within a run, so a `pre`/`main`/`post` trio — or N steps naming
+    /// one image — costs one probe, not N.
+    ensured: Mutex<HashSet<SmolStr>>,
 }
 
 impl OneShotRunner {
+    pub(crate) fn new(
+        prefix: String,
+        workspace: PathBuf,
+        marker: PathBuf,
+        scope: &ScopeSpec,
+        network: Option<String>,
+        pull: PullPolicy,
+        ctx: &AcquireContext,
+    ) -> Self {
+        Self {
+            prefix,
+            workspace,
+            env: scope.env.clone(),
+            network,
+            pull,
+            scope: scope.id,
+            progress: Arc::clone(ctx.progress()),
+            marker,
+            marked: OnceCell::new(),
+            ensured: Mutex::new(HashSet::new()),
+        }
+    }
+
     /// The image reference to run: a registry image pulled under the policy, or
     /// a workspace Dockerfile built under its tag (content-addressed tags are
-    /// reused, across runs).
+    /// reused, across runs). Ensured once per reference — except a non-`reuse`
+    /// build, which asks for a rebuild every time.
     async fn prepare(&self, image: &ContainerImage) -> Result<SmolStr, EnvError> {
+        let (reference, memoize) = match image {
+            ContainerImage::Registry { image } => (image.clone(), true),
+            ContainerImage::Build { tag, reuse, .. } => (tag.clone(), *reuse),
+        };
+        if memoize
+            && self
+                .ensured
+                .lock()
+                .expect("ensured images")
+                .contains(&reference)
+        {
+            return Ok(reference);
+        }
         match image {
             ContainerImage::Registry { image } => {
                 prepare_registry_image(image, self.pull, self.scope, &self.progress).await?;
-                Ok(image.clone())
             }
             ContainerImage::Build {
                 context,
@@ -58,25 +103,49 @@ impl OneShotRunner {
                 tag,
                 reuse,
             } => {
-                if *reuse && run_docker(&["image", "inspect", tag]).await.is_ok() {
-                    return Ok(tag.clone());
-                }
-                let context = self.workspace.join(context);
-                self.progress
-                    .progress(self.scope, Progress::BuildingImage { tag: tag.clone() });
-                let context = context.display().to_string();
-                match dockerfile {
-                    Some(file) => {
-                        let file = format!("{context}/{file}");
-                        run_docker(&["build", "-t", tag, "-f", &file, &context]).await?;
+                if !(*reuse && run_docker(&["image", "inspect", tag]).await.is_ok()) {
+                    let context = self.workspace.join(context);
+                    self.progress
+                        .progress(self.scope, Progress::BuildingImage { tag: tag.clone() });
+                    let context = context.display().to_string();
+                    match dockerfile {
+                        Some(file) => {
+                            let file = format!("{context}/{file}");
+                            run_docker(&["build", "-t", tag, "-f", &file, &context]).await?;
+                        }
+                        None => {
+                            run_docker(&["build", "-t", tag, &context]).await?;
+                        }
                     }
-                    None => {
-                        run_docker(&["build", "-t", tag, &context]).await?;
-                    }
                 }
-                Ok(tag.clone())
             }
         }
+        if memoize {
+            self.ensured
+                .lock()
+                .expect("ensured images")
+                .insert(reference.clone());
+        }
+        Ok(reference)
+    }
+
+    /// Record the scope's one-shot marker, once, before the first container
+    /// exists — so a crash right after the launch still leaves the mark a
+    /// resuming fence looks for.
+    async fn mark(&self) -> Result<(), EnvError> {
+        self.marked
+            .get_or_try_init(|| async {
+                let io_error = |e: std::io::Error| EnvError::Workspace {
+                    path: self.marker.display().to_string(),
+                    message: e.to_string(),
+                };
+                if let Some(parent) = self.marker.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
+                }
+                tokio::fs::write(&self.marker, b"").await.map_err(io_error)
+            })
+            .await
+            .map(|_| ())
     }
 }
 
@@ -91,6 +160,7 @@ impl ContainerRunner for OneShotRunner {
     }
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
+        self.mark().await?;
         let image = self.prepare(&spec.image).await?;
         let name = format!("{}{}-{}", self.prefix, std::process::id(), next_token());
 
@@ -208,9 +278,4 @@ impl ProcessHandle for OneShotProcess {
         let _ = result;
         Ok(())
     }
-}
-
-fn next_token() -> u64 {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }

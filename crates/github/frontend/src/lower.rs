@@ -332,7 +332,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             for name in bound.keys() {
                 let value = match ctx.static_inputs.get(name) {
                     Some(value) => value.clone(),
-                    None => Value::String(format!("{}{name}", crate::runs_on::DYNAMIC_MARK)),
+                    None => Value::String(crate::runs_on::dynamic_placeholder(name)),
                 };
                 inputs.insert(name.clone(), value);
             }

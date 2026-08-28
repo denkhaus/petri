@@ -7,18 +7,7 @@ use executor_docker::{DockerExecutor, list_containers};
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;
 use smol_str::SmolStr;
-use testkit::{RunDir, docker_available};
-
-async fn docker_ready() -> bool {
-    if docker_available().await {
-        return true;
-    }
-    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
-        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
-    }
-    eprintln!("skipping: no Docker daemon reachable");
-    false
-}
+use testkit::{RunDir, docker_ready};
 
 const REDIS: &str = "redis:7-alpine";
 
@@ -53,10 +42,8 @@ async fn a_host_scope_realizes_and_tears_down_services() {
     }
     let dir = RunDir::new("services-host");
     let executor = LocalExecutor::new(dir.path());
-    let spec =
-        ScopeSpec::new(ScopeId::new(0), "scope-0").with_services(vec![redis_service(Some(
-            "29811:6379",
-        ))]);
+    let spec = ScopeSpec::new(ScopeId::new(0), "scope-0")
+        .with_services(vec![redis_service(Some("29811:6379"))]);
     let handle = executor
         .acquire(&spec, &AcquireContext::bare())
         .await
@@ -67,11 +54,8 @@ async fn a_host_scope_realizes_and_tears_down_services() {
 
     // One-shots run on the scope's network and resolve the service by name.
     let runner = handle.container_runner().expect("a runner");
-    let one_shot = OneShotContainer::registry("alpine:3.20").with_args(&[
-        "sh",
-        "-c",
-        "nslookup redis",
-    ]);
+    let one_shot =
+        OneShotContainer::registry("alpine:3.20").with_args(&["sh", "-c", "nslookup redis"]);
     let mut process = runner.run(one_shot).await.expect("docker run");
     let status = process.wait().await.expect("wait");
     assert!(status.success(), "the service name resolves: {status:?}");
@@ -146,7 +130,10 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
         list_containers(&format!("{base}-svc-")).await.is_empty(),
         "the failed acquire left no service container"
     );
-    assert!(network_gone(&base).await, "the failed acquire left no network");
+    assert!(
+        network_gone(&base).await,
+        "the failed acquire left no network"
+    );
 }
 
 /// The scope's base container name, computed the way the executors compute it.

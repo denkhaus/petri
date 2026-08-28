@@ -20,9 +20,7 @@ use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::Document;
 
-use crate::action::{
-    ActionRef, ActionSource, ActionSourceError, PinnedAction, unavailable_hint,
-};
+use crate::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction, unavailable_hint};
 use crate::model::{self, Workflow};
 
 /// GitHub's nesting limit: a top-level workflow and up to three levels of
@@ -202,9 +200,7 @@ fn walk(
             diags.error(
                 "gha.workflow_depth",
                 span.clone(),
-                format!(
-                    "reusable workflows nest more than {MAX_DEPTH} deep at `{identity}`",
-                ),
+                format!("reusable workflows nest more than {MAX_DEPTH} deep at `{identity}`",),
             );
             continue;
         }
@@ -293,7 +289,12 @@ fn fetch(
                         Some(_) => "action.upstream_gone",
                         None => "action.remote",
                     };
-                    diags.unsupported(code, span.clone(), identity.to_string(), &unavailable_hint(reason));
+                    diags.unsupported(
+                        code,
+                        span.clone(),
+                        identity.to_string(),
+                        &unavailable_hint(reason),
+                    );
                     None
                 }
                 Err(other) => {

@@ -65,15 +65,29 @@ async fn realize_inner(
     ctx: &AcquireContext,
 ) -> Result<(), EnvError> {
     run_docker(&["network", "create", base]).await?;
+    // The pulls are the long pole of a cold acquire and the services are
+    // independent: fetch every image concurrently. Every pull runs to
+    // completion before any verdict, so a failing service never leaves another
+    // one racing the sweep that follows.
+    let mut pulls = tokio::task::JoinSet::new();
     for service in &scope.services {
-        prepare_image(
-            &service.image,
-            service.credentials.as_ref(),
-            pull,
-            scope.id,
-            ctx,
-        )
-        .await?;
+        let image = service.image.clone();
+        let credentials = service.credentials.clone();
+        let scope_id = scope.id;
+        let ctx = ctx.clone();
+        pulls.spawn(async move {
+            prepare_image(&image, credentials.as_ref(), pull, scope_id, &ctx).await
+        });
+    }
+    let mut failed = None;
+    while let Some(joined) = pulls.join_next().await {
+        let result = joined.expect("image pull task does not panic");
+        failed = failed.or(result.err());
+    }
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    for service in &scope.services {
         let name = format!("{}{}", service_prefix(base), service.name);
         let mut create: Vec<String> = vec![
             "create".into(),
@@ -145,7 +159,9 @@ async fn await_health(container: &str, service: &SmolStr) -> Result<(), EnvError
             }
             ("running", "") => return Ok(()),
             ("exited" | "dead", _) => {
-                return Err(service_failure(service, container, "exited before it was ready").await);
+                return Err(
+                    service_failure(service, container, "exited before it was ready").await,
+                );
             }
             _ => {}
         }

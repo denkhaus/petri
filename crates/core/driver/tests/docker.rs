@@ -16,25 +16,9 @@ use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
+use testkit::docker_ready;
 
 const IMAGE: &str = "alpine:3.20";
-
-/// Docker tests need a daemon. Skip without one, so `cargo test` is green on a
-/// machine that has none.
-///
-/// `PETRI_REQUIRE_DOCKER` turns that skip into a failure. CI sets it on the Linux
-/// job, because a silently skipped acceptance battery is indistinguishable from a
-/// passing one, and this is the job whose whole purpose is that the battery ran.
-async fn docker_ready() -> bool {
-    if docker_available().await {
-        return true;
-    }
-    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
-        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
-    }
-    eprintln!("skipping: no Docker daemon reachable");
-    false
-}
 
 fn docker_graph(name: &str, run: &str) -> ir::Graph {
     let mut b = GraphBuilder::bare();

@@ -611,21 +611,6 @@ impl ServiceSpec {
             credentials: None,
         }
     }
-
-    pub fn with_env(mut self, key: &str, value: ExprOrValue) -> Self {
-        self.env.insert(SmolStr::new(key), value);
-        self
-    }
-
-    pub fn with_ports(mut self, ports: &[&str]) -> Self {
-        self.ports = ports.iter().map(|p| SmolStr::new(*p)).collect();
-        self
-    }
-
-    pub fn with_options(mut self, options: &[&str]) -> Self {
-        self.options = options.iter().map(|o| SmolStr::new(*o)).collect();
-        self
-    }
 }
 
 impl Default for RuntimeSpec {
@@ -690,11 +675,6 @@ impl Scope {
             workspace: WorkspacePolicy::Shared,
             services: Vec::new(),
         }
-    }
-
-    pub fn with_service(mut self, service: ServiceSpec) -> Self {
-        self.services.push(service);
-        self
     }
 
     pub fn with_env(mut self, key: &str, value: ExprOrValue) -> Self {
