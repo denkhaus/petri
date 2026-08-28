@@ -78,6 +78,23 @@ pub async fn run_host(graph: Graph, label: &str) -> RunReportPlus {
     run_host_with_secrets(graph, label, &[]).await
 }
 
+/// [`run_host`], with the runtime customized before the run — an extra
+/// capability, an option — for batteries that probe host wiring.
+pub async fn run_host_with(
+    graph: Graph,
+    label: &str,
+    customize: impl FnOnce(Runtime) -> Runtime,
+) -> RunReportPlus {
+    let graph = with_params(graph);
+    let dir = run_dir(label);
+    let report = customize(runtime(&dir))
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    let _ = std::fs::remove_dir_all(&dir);
+    RunReportPlus::from(report)
+}
+
 /// [`run_host`], with named secrets configured for the run.
 pub async fn run_host_with_secrets(
     graph: Graph,

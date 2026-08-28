@@ -80,6 +80,12 @@ pub fn runtime() -> Runtime {
     // off: every `actions/checkout` stays the real action, credentials,
     // network and all.
     let substitute_checkout = !std::env::var("PETRI_REAL_CHECKOUT").is_ok_and(|v| !v.is_empty());
+    // The persistent store: cache entries and the per-OS tool cache under one
+    // root ($PETRI_STORE overrides). Created now so the tool-cache prologue's
+    // existence probe finds it on the host.
+    let store = github_objects::default_store_dir();
+    let tool_cache = store.join("toolcache").join(std::env::consts::OS);
+    let _ = std::fs::create_dir_all(&tool_cache);
     Runtime::standard()
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests)
@@ -91,8 +97,10 @@ pub fn runtime() -> Runtime {
         .step(github::DockerActionStep)
         .step(github::CheckoutStep)
         .capability(github::ActionSourceCap(trees))
-        .run_services(|run_dir, caps| {
-            match github_objects::ObjectService::start(run_dir.join("artifacts")) {
+        .capability(github::ToolCacheCap(tool_cache))
+        .run_services(move |run_dir, caps| {
+            let cache = store.join("cache");
+            match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
                 Ok(service) => {
                     let cap = github::ResultsServiceCap {
                         port: service.port(),

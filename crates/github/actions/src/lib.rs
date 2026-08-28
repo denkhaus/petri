@@ -31,6 +31,6 @@ pub use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, Pinne
 pub use frontend_gha::{
     ACTION_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
 };
-pub use results::ResultsServiceCap;
+pub use results::{ResultsServiceCap, ToolCacheCap};
 pub use run::RunStep;
 pub use source::{GitActionSource, default_cache_dir};

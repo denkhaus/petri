@@ -24,6 +24,7 @@
 //! starting it needs no async context and dropping the [`ObjectService`] tears
 //! it down from any context.
 
+mod cache;
 mod http;
 mod store;
 mod token;
@@ -33,7 +34,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+pub use cache::{CacheEntry, CacheStore, DEFAULT_BUDGET};
 pub use store::Artifact;
+
+/// The persistent store root — the host-scoped half of the object world: the
+/// cache entries and the tool cache, owned by one root so one component prunes
+/// them. `$PETRI_STORE` overrides; the default rides the same platform
+/// convention as the action cache (`$XDG_CACHE_HOME`, else `~/.cache`).
+pub fn default_store_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("PETRI_STORE") {
+        return PathBuf::from(dir);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg).join("petri").join("store");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join("petri")
+            .join("store");
+    }
+    std::env::temp_dir().join("petri-store")
+}
 
 /// A running object service: listener, token, stores. Drop tears it down.
 pub struct ObjectService {
@@ -44,13 +66,14 @@ pub struct ObjectService {
 }
 
 impl ObjectService {
-    /// Bind an ephemeral port on every interface and serve, with the artifact
-    /// store under `artifacts` (created if absent; reopened on resume).
-    pub fn start(artifacts: PathBuf) -> io::Result<Self> {
+    /// Bind an ephemeral port on every interface and serve: the artifact store
+    /// under `artifacts` (run-scoped; created if absent, reopened on resume),
+    /// the cache store under `cache` (host-scoped, shared across runs).
+    pub fn start(artifacts: PathBuf, cache: PathBuf) -> io::Result<Self> {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
-        let backend = Arc::new(http::Backend::new(artifacts, port)?);
+        let backend = Arc::new(http::Backend::new(artifacts, cache, port)?);
         let token = backend.token().to_string();
         let (shutdown, rx) = tokio::sync::oneshot::channel();
         let thread = std::thread::Builder::new()

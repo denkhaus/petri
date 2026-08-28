@@ -24,8 +24,10 @@ pub struct ResultsServiceCap {
 }
 
 impl ResultsServiceCap {
-    /// The env pair for a process that reaches this machine at `host_address`.
-    pub fn env(&self, host_address: &str) -> [(SmolStr, SmolStr); 2] {
+    /// The env for a process that reaches this machine at `host_address`.
+    /// `ACTIONS_CACHE_SERVICE_V2` rides along: the service speaks the v2 cache
+    /// façade on the same listener, and the flag is how the toolkit selects it.
+    pub fn env(&self, host_address: &str) -> [(SmolStr, SmolStr); 3] {
         [
             (
                 SmolStr::new("ACTIONS_RESULTS_URL"),
@@ -33,13 +35,20 @@ impl ResultsServiceCap {
                 // `twirp/…` against this as a relative URL.
                 SmolStr::new(format!("http://{host_address}:{}/", self.port)),
             ),
+            (SmolStr::new("ACTIONS_RUNTIME_TOKEN"), self.token.clone()),
             (
-                SmolStr::new("ACTIONS_RUNTIME_TOKEN"),
-                self.token.clone(),
+                SmolStr::new("ACTIONS_CACHE_SERVICE_V2"),
+                SmolStr::new("true"),
             ),
         ]
     }
 }
+
+/// Where the host's persistent tool cache lives, for this machine's OS
+/// (`<store>/toolcache/<os>` — the toolkit's layout has no OS segment, so the
+/// store splits per OS above it). Host-scoped: registered once on the runtime,
+/// not per run. Absent means every run re-downloads into its workspace.
+pub struct ToolCacheCap(pub std::path::PathBuf);
 
 #[cfg(test)]
 mod tests {

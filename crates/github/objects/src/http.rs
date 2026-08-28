@@ -2,13 +2,18 @@
 //!
 //! ```text
 //! POST /twirp/github.actions.results.api.v1.ArtifactService/<Method>
+//! POST /twirp/github.actions.results.api.v1.CacheService/<Method>
 //!        JSON in proto-field-name form (the toolkit serializes with
 //!        `useProtoFieldName`), Bearer auth against the exact run token.
-//! PUT  /blob/upload/<id>?sig=…&comp=block&blockid=…    stage one block
-//! PUT  /blob/upload/<id>?sig=…&comp=blocklist          commit, in list order
-//! PUT  /blob/upload/<id>?sig=…                         single-shot content
-//! GET  /blob/download/<id>?sig=…                       content (+Range)
+//! PUT  /blob/<kind>/<id>?sig=…&comp=block&blockid=…    stage one block
+//! PUT  /blob/<kind>/<id>?sig=…&comp=blocklist          commit, in list order
+//! PUT  /blob/<kind>/<id>?sig=…                         single-shot content
+//! GET  /blob/<kind>/<id>?sig=…                         content (+Range)
 //! ```
+//!
+//! Blob kinds name their store: `upload`/`download` resolve into the run's
+//! artifact store, `cache-upload`/`cache-download` into the host's cache
+//! store — two lifecycles, one blob implementation.
 //!
 //! The blob half is the subset of the Azure block-blob protocol the toolkit's
 //! `@azure/storage-blob` client actually speaks: `stageBlock` PUTs, one
@@ -34,6 +39,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+use crate::cache::CacheStore;
 use crate::store::ArtifactStore;
 use crate::token;
 
@@ -45,15 +51,17 @@ pub(crate) struct Backend {
     key: [u8; 32],
     port: u16,
     artifacts: ArtifactStore,
+    cache: CacheStore,
 }
 
 impl Backend {
-    pub(crate) fn new(artifacts_dir: PathBuf, port: u16) -> io::Result<Self> {
+    pub(crate) fn new(artifacts_dir: PathBuf, cache_dir: PathBuf, port: u16) -> io::Result<Self> {
         Ok(Self {
             token: token::mint(),
             key: token::random(),
             port,
             artifacts: ArtifactStore::open(artifacts_dir)?,
+            cache: CacheStore::open(cache_dir, crate::cache::DEFAULT_BUDGET)?,
         })
     }
 
@@ -125,7 +133,12 @@ async fn handle(
         path.strip_prefix("/twirp/github.actions.results.api.v1.ArtifactService/")
     {
         let method = method.to_string();
-        twirp(&backend, &method, req).await
+        twirp(&backend, Service::Artifacts, &method, req).await
+    } else if let Some(method) =
+        path.strip_prefix("/twirp/github.actions.results.api.v1.CacheService/")
+    {
+        let method = method.to_string();
+        twirp(&backend, Service::Cache, &method, req).await
     } else if let Some(rest) = path.strip_prefix("/blob/") {
         let rest = rest.to_string();
         blob(&backend, &rest, req).await
@@ -162,8 +175,16 @@ impl Twirp {
     }
 }
 
+/// Which twirp façade a request addresses.
+#[derive(Clone, Copy)]
+enum Service {
+    Artifacts,
+    Cache,
+}
+
 async fn twirp(
     backend: &Backend,
+    service: Service,
     method: &str,
     req: Request<Incoming>,
 ) -> io::Result<Response<Body>> {
@@ -199,16 +220,23 @@ async fn twirp(
             ))));
         }
     };
-    let result = match method {
-        "CreateArtifact" => create_artifact(backend, &host, &request),
-        "FinalizeArtifact" => finalize_artifact(backend, &request),
-        "ListArtifacts" => list_artifacts(backend, &request),
-        "GetSignedArtifactURL" => signed_artifact_url(backend, &host, &request),
-        "DeleteArtifact" => delete_artifact(backend, &request),
-        other => Err(Twirp {
+    let result = match (service, method) {
+        (Service::Artifacts, "CreateArtifact") => create_artifact(backend, &host, &request),
+        (Service::Artifacts, "FinalizeArtifact") => finalize_artifact(backend, &request),
+        (Service::Artifacts, "ListArtifacts") => list_artifacts(backend, &request),
+        (Service::Artifacts, "GetSignedArtifactURL") => {
+            signed_artifact_url(backend, &host, &request)
+        }
+        (Service::Artifacts, "DeleteArtifact") => delete_artifact(backend, &request),
+        (Service::Cache, "CreateCacheEntry") => create_cache_entry(backend, &host, &request),
+        (Service::Cache, "FinalizeCacheEntryUpload") => finalize_cache_entry(backend, &request),
+        (Service::Cache, "GetCacheEntryDownloadURL") => {
+            cache_download_url(backend, &host, &request)
+        }
+        (_, other) => Err(Twirp {
             status: StatusCode::NOT_FOUND,
             code: "bad_route",
-            msg: format!("no such method: ArtifactService/{other}"),
+            msg: format!("no such method: {other}"),
         }),
     };
     Ok(match result {
@@ -230,7 +258,7 @@ fn create_artifact(backend: &Backend, host: &str, request: &Value) -> Result<Val
     let id = backend.artifacts.begin(name).map_err(store_error)?;
     Ok(json!({
         "ok": true,
-        "signed_upload_url": blob_url(backend, host, "upload", id),
+        "signed_upload_url": blob_url(backend, host, "upload", &id.to_string()),
     }))
 }
 
@@ -248,7 +276,9 @@ fn finalize_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp>
 
 fn list_artifacts(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
     let name_filter = request["name_filter"].as_str();
-    let id_filter = request["id_filter"].as_str().and_then(|s| s.parse::<i64>().ok());
+    let id_filter = request["id_filter"]
+        .as_str()
+        .and_then(|s| s.parse::<i64>().ok());
     let artifacts: Vec<Value> = backend
         .artifacts
         .list()
@@ -279,7 +309,9 @@ fn signed_artifact_url(backend: &Backend, host: &str, request: &Value) -> Result
         .artifacts
         .find(name)
         .ok_or_else(|| Twirp::not_found(format!("no artifact named `{name}`")))?;
-    Ok(json!({ "signed_url": blob_url(backend, host, "download", artifact.id) }))
+    Ok(json!({
+        "signed_url": blob_url(backend, host, "download", &artifact.id.to_string())
+    }))
 }
 
 fn delete_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
@@ -300,18 +332,68 @@ fn store_error(e: io::Error) -> Twirp {
     }
 }
 
-fn blob_url(backend: &Backend, host: &str, kind: &str, id: i64) -> String {
+fn blob_url(backend: &Backend, host: &str, kind: &str, id: &str) -> String {
     let sig = backend.sign(&format!("{kind}/{id}"));
     format!("http://{host}/blob/{kind}/{id}?sig={sig}")
+}
+
+// ── The cache façade ──────────────────────────────────────────────────────
+
+fn create_cache_entry(backend: &Backend, host: &str, request: &Value) -> Result<Value, Twirp> {
+    let key = field(request, "key")?;
+    let version = field(request, "version")?;
+    let reserved = backend.cache.reserve(key, version).map_err(store_error)?;
+    Ok(match reserved {
+        Some(id) => json!({
+            "ok": true,
+            "signed_upload_url": blob_url(backend, host, "cache-upload", &id),
+        }),
+        // Immutable, as on GitHub: the client logs "unable to reserve" and
+        // moves on.
+        None => json!({ "ok": false, "message": "the cache entry already exists" }),
+    })
+}
+
+fn finalize_cache_entry(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
+    let key = field(request, "key")?;
+    let version = field(request, "version")?;
+    let entry = backend.cache.finalize(key, version).map_err(store_error)?;
+    Ok(match entry {
+        Some(id) => json!({ "ok": true, "entry_id": id.to_string() }),
+        None => json!({ "ok": false, "message": "nothing was uploaded for that key" }),
+    })
+}
+
+fn cache_download_url(backend: &Backend, host: &str, request: &Value) -> Result<Value, Twirp> {
+    let key = field(request, "key")?;
+    let version = field(request, "version")?;
+    let restore_keys: Vec<String> = request["restore_keys"]
+        .as_array()
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let hit = backend
+        .cache
+        .lookup(key, &restore_keys, version)
+        .map_err(store_error)?;
+    Ok(match hit {
+        Some(entry) => json!({
+            "ok": true,
+            "signed_download_url": blob_url(backend, host, "cache-download", &entry.id),
+            "matched_key": entry.key,
+        }),
+        None => json!({ "ok": false }),
+    })
 }
 
 // ── The blob half ─────────────────────────────────────────────────────────
 
 async fn blob(backend: &Backend, rest: &str, req: Request<Incoming>) -> io::Result<Response<Body>> {
     let Some((kind, id)) = rest.split_once('/') else {
-        return Ok(plain(StatusCode::NOT_FOUND, "not found"));
-    };
-    let Ok(id) = id.parse::<i64>() else {
         return Ok(plain(StatusCode::NOT_FOUND, "not found"));
     };
     let query = parse_query(req.uri().query().unwrap_or(""));
@@ -322,16 +404,44 @@ async fn blob(backend: &Backend, rest: &str, req: Request<Incoming>) -> io::Resu
     if !signed {
         return Ok(plain(StatusCode::FORBIDDEN, "bad signature"));
     }
+    // Each kind names its store; the id's shape is validated per store even
+    // though every signed URL is ours — an id is a path segment.
+    let target = match kind {
+        "upload" | "download" => match id.parse::<i64>() {
+            Ok(id) => BlobTarget {
+                content: backend.artifacts.content_path(id),
+                staging: backend.artifacts.staging_dir(id),
+            },
+            Err(_) => return Ok(plain(StatusCode::NOT_FOUND, "not found")),
+        },
+        "cache-upload" | "cache-download" => {
+            if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(plain(StatusCode::NOT_FOUND, "not found"));
+            }
+            BlobTarget {
+                content: backend.cache.blob_path(id),
+                staging: backend.cache.staging_dir(id),
+            }
+        }
+        _ => return Ok(plain(StatusCode::NOT_FOUND, "not found")),
+    };
     match (req.method(), kind) {
-        (&Method::PUT, "upload") => upload(backend, id, &query, req).await,
-        (&Method::GET | &Method::HEAD, "download") => download(backend, id, req).await,
+        (&Method::PUT, "upload" | "cache-upload") => upload(&target, &query, req).await,
+        (&Method::GET | &Method::HEAD, "download" | "cache-download") => {
+            download(&target, req).await
+        }
         _ => Ok(plain(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")),
     }
 }
 
+/// Where a blob request's content and staging live, whichever store owns them.
+struct BlobTarget {
+    content: PathBuf,
+    staging: PathBuf,
+}
+
 async fn upload(
-    backend: &Backend,
-    id: i64,
+    target: &BlobTarget,
     query: &[(String, String)],
     req: Request<Incoming>,
 ) -> io::Result<Response<Body>> {
@@ -345,9 +455,8 @@ async fn upload(
             let Some((_, block_id)) = query.iter().find(|(k, _)| k == "blockid") else {
                 return Ok(plain(StatusCode::BAD_REQUEST, "blockid is required"));
             };
-            let dir = backend.artifacts.staging_dir(id);
-            tokio::fs::create_dir_all(&dir).await?;
-            let path = dir.join(encode_hex(block_id.as_bytes()));
+            tokio::fs::create_dir_all(&target.staging).await?;
+            let path = target.staging.join(encode_hex(block_id.as_bytes()));
             body_to_file(req.into_body(), &path).await?;
             Ok(empty(StatusCode::CREATED))
         }
@@ -360,16 +469,17 @@ async fn upload(
                 .map_err(io::Error::other)?
                 .to_bytes();
             let ids = block_list(&String::from_utf8_lossy(&xml));
-            let staging = backend.artifacts.staging_dir(id);
-            let target = backend.artifacts.content_path(id);
-            let mut out = tokio::fs::File::create(&target).await?;
+            if let Some(parent) = target.content.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let mut out = tokio::fs::File::create(&target.content).await?;
             for block in &ids {
-                let block_path = staging.join(encode_hex(block.as_bytes()));
+                let block_path = target.staging.join(encode_hex(block.as_bytes()));
                 let mut file = match tokio::fs::File::open(&block_path).await {
                     Ok(file) => file,
                     Err(_) => {
                         drop(out);
-                        let _ = tokio::fs::remove_file(&target).await;
+                        let _ = tokio::fs::remove_file(&target.content).await;
                         return Ok(plain(StatusCode::BAD_REQUEST, "unknown block in the list"));
                     }
                 };
@@ -377,12 +487,12 @@ async fn upload(
             }
             out.flush().await?;
             drop(out);
-            let _ = tokio::fs::remove_dir_all(&staging).await;
+            let _ = tokio::fs::remove_dir_all(&target.staging).await;
             Ok(empty(StatusCode::CREATED))
         }
         // A single-shot block-blob PUT: the body is the whole content.
         None => {
-            body_to_file(req.into_body(), &backend.artifacts.content_path(id)).await?;
+            body_to_file(req.into_body(), &target.content).await?;
             Ok(empty(StatusCode::CREATED))
         }
         Some(other) => Ok(plain(
@@ -392,12 +502,8 @@ async fn upload(
     }
 }
 
-async fn download(
-    backend: &Backend,
-    id: i64,
-    req: Request<Incoming>,
-) -> io::Result<Response<Body>> {
-    let path = backend.artifacts.content_path(id);
+async fn download(target: &BlobTarget, req: Request<Incoming>) -> io::Result<Response<Body>> {
+    let path = target.content.clone();
     let total = match tokio::fs::metadata(&path).await {
         Ok(meta) => meta.len(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

@@ -73,7 +73,11 @@ fn exchange(port: u16, method: &str, target: &str, headers: &[(&str, &str)], bod
         .expect("numeric status");
     let content_length: usize = head
         .lines()
-        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().to_string())
+        })
         .expect("every response carries a length")
         .parse()
         .expect("numeric length");
@@ -110,7 +114,8 @@ fn target_of(url: &str) -> String {
 #[test]
 fn the_artifact_lifecycle_round_trips_over_http() {
     let scratch = Scratch::new("lifecycle");
-    let service = ObjectService::start(scratch.0.clone()).expect("start");
+    let service =
+        ObjectService::start(scratch.0.join("artifacts"), scratch.0.join("cache")).expect("start");
 
     // Create: the toolkit's exact request shape.
     let created = twirp(
@@ -200,7 +205,8 @@ fn the_artifact_lifecycle_round_trips_over_http() {
 #[test]
 fn the_token_is_the_auth_and_signatures_gate_the_blobs() {
     let scratch = Scratch::new("auth");
-    let service = ObjectService::start(scratch.0.clone()).expect("start");
+    let service =
+        ObjectService::start(scratch.0.join("artifacts"), scratch.0.join("cache")).expect("start");
 
     // A wrong bearer is refused with a twirp error.
     let refused = exchange(
@@ -214,11 +220,21 @@ fn the_token_is_the_auth_and_signatures_gate_the_blobs() {
     assert_eq!(refused.json()["code"], json!("unauthenticated"));
 
     // A blob URL with a bad signature is refused.
-    let refused = exchange(service.port(), "PUT", "/blob/upload/1?sig=deadbeef", &[], b"x");
+    let refused = exchange(
+        service.port(),
+        "PUT",
+        "/blob/upload/1?sig=deadbeef",
+        &[],
+        b"x",
+    );
     assert_eq!(refused.status, 403);
 
     // An unknown artifact is a twirp not_found.
-    let missing = twirp(&service, "GetSignedArtifactURL", &json!({ "name": "ghost" }));
+    let missing = twirp(
+        &service,
+        "GetSignedArtifactURL",
+        &json!({ "name": "ghost" }),
+    );
     assert_eq!(missing.status, 404);
     assert_eq!(missing.json()["code"], json!("not_found"));
 }
@@ -226,8 +242,14 @@ fn the_token_is_the_auth_and_signatures_gate_the_blobs() {
 #[test]
 fn a_fresh_service_over_the_same_store_serves_prior_artifacts() {
     let scratch = Scratch::new("resume");
-    let first = ObjectService::start(scratch.0.clone()).expect("start");
-    let created = twirp(&first, "CreateArtifact", &json!({ "name": "kept", "version": 4 })).json();
+    let first =
+        ObjectService::start(scratch.0.join("artifacts"), scratch.0.join("cache")).expect("start");
+    let created = twirp(
+        &first,
+        "CreateArtifact",
+        &json!({ "name": "kept", "version": 4 }),
+    )
+    .json();
     let target = target_of(created["signed_upload_url"].as_str().expect("url"));
     let put = exchange(first.port(), "PUT", &target, &[], b"whole-content");
     assert_eq!(put.status, 201, "a single-shot PUT is content too");
@@ -235,7 +257,8 @@ fn a_fresh_service_over_the_same_store_serves_prior_artifacts() {
     drop(first);
 
     // The resume case: new listener, new token, same store.
-    let second = ObjectService::start(scratch.0.clone()).expect("restart");
+    let second = ObjectService::start(scratch.0.join("artifacts"), scratch.0.join("cache"))
+        .expect("restart");
     let listed = twirp(&second, "ListArtifacts", &json!({})).json();
     assert_eq!(listed["artifacts"][0]["name"], json!("kept"));
     let url = twirp(&second, "GetSignedArtifactURL", &json!({ "name": "kept" })).json();
@@ -247,4 +270,74 @@ fn a_fresh_service_over_the_same_store_serves_prior_artifacts() {
         b"",
     );
     assert_eq!(content.body, b"whole-content");
+}
+
+/// The cache façade, as the toolkit calls it: reserve, upload, finalize,
+/// look up by restore-key prefix, download — and a miss answers `ok: false`
+/// with status 200, which is what the client treats as a plain miss.
+#[test]
+fn the_cache_lifecycle_round_trips_over_http() {
+    let scratch = Scratch::new("cache");
+    let service =
+        ObjectService::start(scratch.0.join("artifacts"), scratch.0.join("cache")).expect("start");
+    let cache = |method: &str, request: &Value| {
+        exchange(
+            service.port(),
+            "POST",
+            &format!("/twirp/github.actions.results.api.v1.CacheService/{method}"),
+            &[("Authorization", &format!("Bearer {}", service.token()))],
+            request.to_string().as_bytes(),
+        )
+    };
+
+    // A miss first: ok false, status 200.
+    let miss = cache(
+        "GetCacheEntryDownloadURL",
+        &json!({ "key": "deps-abc", "restore_keys": [], "version": "v1" }),
+    );
+    assert_eq!(miss.status, 200);
+    assert_eq!(miss.json()["ok"], json!(false));
+
+    // Reserve, upload (single shot), finalize.
+    let reserved = cache(
+        "CreateCacheEntry",
+        &json!({ "key": "deps-abc", "version": "v1" }),
+    )
+    .json();
+    assert_eq!(reserved["ok"], json!(true));
+    let upload = reserved["signed_upload_url"].as_str().expect("a URL");
+    let put = exchange(
+        service.port(),
+        "PUT",
+        &target_of(upload),
+        &[],
+        b"tar-zst-bytes",
+    );
+    assert_eq!(put.status, 201);
+    let finalized = cache(
+        "FinalizeCacheEntryUpload",
+        &json!({ "key": "deps-abc", "size_bytes": "13", "version": "v1" }),
+    )
+    .json();
+    assert_eq!(finalized["ok"], json!(true));
+
+    // A second reserve of the same pair is refused — immutable, as on GitHub.
+    let again = cache(
+        "CreateCacheEntry",
+        &json!({ "key": "deps-abc", "version": "v1" }),
+    )
+    .json();
+    assert_eq!(again["ok"], json!(false));
+
+    // Restore-key prefix hit, then the bytes.
+    let hit = cache(
+        "GetCacheEntryDownloadURL",
+        &json!({ "key": "deps-zzz", "restore_keys": ["deps-"], "version": "v1" }),
+    )
+    .json();
+    assert_eq!(hit["ok"], json!(true));
+    assert_eq!(hit["matched_key"], json!("deps-abc"));
+    let url = hit["signed_download_url"].as_str().expect("a URL");
+    let content = exchange(service.port(), "GET", &target_of(url), &[], b"");
+    assert_eq!(content.body, b"tar-zst-bytes");
 }

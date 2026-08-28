@@ -151,16 +151,26 @@ environment or a logged-in `gh`.
 (`ubuntu-*` labels) on this machine; `runner.os` reports the actual host.
 JavaScript actions and `hashFiles` need `node` on `PATH`; Docker container
 actions (and `container:` jobs) need a reachable Docker daemon — its absence is
-one routable failure on the step or scope, never a run abort. **Artifacts run against a local
-stand-in**: every run gets its own ObjectService — the results backend the
-2026 toolkit speaks (`ACTIONS_RESULTS_URL`/`ACTIONS_RUNTIME_TOKEN`, twirp plus
-signed blob URLs) — with artifacts stored under `<run_dir>/artifacts`, released
-with the run. Upload and download flow across jobs, host and containerized
-alike (containers reach it through `host.docker.internal`, which the executor
-guarantees); artifacts never leave the machine, and cross-**run** artifact
+one routable failure on the step or scope, never a run abort. **Artifacts and the cache run against local
+stand-ins**: every run gets its own ObjectService — the results backend the
+2026 toolkit speaks (`ACTIONS_RESULTS_URL`/`ACTIONS_RUNTIME_TOKEN`,
+`ACTIONS_CACHE_SERVICE_V2`, twirp plus signed blob URLs). Artifacts store
+under `<run_dir>/artifacts`, released with the run; cache entries live in the
+host's persistent store (`$PETRI_STORE`, default `~/.cache/petri/store`; 10
+GiB, pruned LRU on write) and outlive the run — save in one run, restore in
+the next. Entries are immutable per `(key, version)` as on GitHub; lookups
+match the exact key then each restore key as a prefix, newest first.
+**GitHub's branch scoping is deliberately ignored locally**: one machine, one
+store. Upload and download flow across jobs, host and containerized alike
+(containers reach the service through `host.docker.internal`, which the
+executor guarantees); nothing leaves the machine, and cross-**run** artifact
 reads (`download-artifact` with `run-id:`) go to the real REST API and need
-real credentials. The cache service still degrades to a miss with a warning —
-its stand-in is planned, below.
+real credentials. The tool cache is persistent too: host jobs get
+`RUNNER_TOOL_CACHE` pointed at `<store>/toolcache/<os>` (per-OS, since the
+toolkit's layout has no OS segment), so setup-* stop re-downloading every
+run; a container image that names its own populated tool cache keeps it —
+mounting an initially-empty persistent cache over `/opt/hostedtoolcache`
+would remove tools — and a bare image falls back to the per-run workspace.
 `shell: bash` invokes `bash -eo pipefail -c`, not GitHub's
 `--noprofile --norc` file invocation; JavaScript actions run through `bash -c
 exec node`, so a container image that has `node` but no `bash` cannot run them
@@ -202,9 +212,9 @@ workflow counts in brackets rank the pressure.
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |
 
 Planned on the runtime side (no rejection code — lowered workflows fail at run
-time instead): a local stand-in for the cache service on the artifact
-stand-in's listener, a persistent tool cache, and authenticated fetch for
-private action repositories.
+time instead): the persistent tool cache mounted into container images that
+ship none, the legacy cache v1 REST façade if pressure appears, and
+authenticated fetch for private action repositories.
 
 ## Out of scope
 

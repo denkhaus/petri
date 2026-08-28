@@ -57,7 +57,11 @@ mod tests {
         let parts: Vec<&str> = scope.split(':').collect();
         assert_eq!(
             parts,
-            vec!["Actions.Results", WORKFLOW_RUN_BACKEND_ID, JOB_RUN_BACKEND_ID]
+            vec![
+                "Actions.Results",
+                WORKFLOW_RUN_BACKEND_ID,
+                JOB_RUN_BACKEND_ID
+            ]
         );
     }
 

@@ -74,7 +74,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
             let var = format!("GITHUB_{}", key.to_uppercase());
             scope.env.insert(SmolStr::new(&var), github(self, key));
         }
-        for key in ["os", "arch", "name", "temp", "tool_cache"] {
+        // Only the runner facts the params actually carry. `RUNNER_TEMP` and
+        // `RUNNER_TOOL_CACHE` are the session's per-step business — an
+        // empty-string value here would *override* a container image's own
+        // (the runner images name their populated `/opt/hostedtoolcache`).
+        for key in ["os", "arch", "name"] {
             let t = self.b.exprs();
             let ctx = t.var("runner");
             let k = t.lit(key);

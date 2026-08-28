@@ -76,7 +76,12 @@ pub struct Session {
     files: StepFiles,
     job_env: BTreeMap<String, String>,
     job_path: Vec<String>,
+    /// The host's persistent tool cache, when the host registered one
+    /// ([`crate::ToolCacheCap`]): the prologue points shell steps at it where
+    /// this environment's filesystem has it.
+    tool_cache: Option<std::path::PathBuf>,
 }
+
 
 /// What the step left behind, for the step kind to fold into its outcome.
 #[derive(Debug, Default)]
@@ -140,12 +145,16 @@ impl Session {
         )?;
         let job_env: BTreeMap<String, String> = job_env.unwrap_or_default();
         let job_path: Vec<String> = job_path.unwrap_or_default();
+        let tool_cache = ctx
+            .capability::<crate::ToolCacheCap>()
+            .map(|cap| cap.0.clone());
         Ok(Self {
             env,
             workspace,
             files,
             job_env,
             job_path,
+            tool_cache,
         })
     }
 
@@ -162,9 +171,17 @@ impl Session {
     /// The environment every step gets on top of the scope's: the job's
     /// accumulated `GITHUB_ENV` first (a step's own `env:` wins over it), then the
     /// files and directories of the contract.
+    ///
+    /// `RUNNER_TOOL_CACHE` is deliberately *not* here: shell steps get it from
+    /// the [`Session::prologue`], whose default-only export lets an
+    /// environment that already has one — a runner image with a populated
+    /// `/opt/hostedtoolcache` names it in its env — keep it. A value here
+    /// would override the image's at exec time.
     pub fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
         let workspace = self.workspace.clone();
-        self.env_rooted(node, &workspace)
+        let mut out = self.env_rooted(node, &workspace);
+        out.remove("RUNNER_TOOL_CACHE");
+        out
     }
 
     /// [`Session::env`], with every path under `root` instead of this
@@ -192,19 +209,48 @@ impl Session {
         out
     }
 
-    /// A shell prologue putting the job's `GITHUB_PATH` entries in front of `PATH`,
-    /// newest first as GitHub does. Empty when there are none.
+    /// A shell prologue: the tool cache resolved for this environment, and the
+    /// job's `GITHUB_PATH` entries in front of `PATH`, newest first as GitHub
+    /// does.
+    ///
+    /// The tool cache resolves in three steps, weakest default last: the
+    /// environment's own `RUNNER_TOOL_CACHE` wins when non-empty (a runner
+    /// image ships a populated `/opt/hostedtoolcache` and says so in its env);
+    /// else the host's persistent store, *where this filesystem has it* —
+    /// which is what makes one prologue correct for host processes and
+    /// containers alike; else the per-run workspace directory. Plain POSIX,
+    /// like the rest of the runner scripts.
     pub fn prologue(&self) -> String {
-        if self.job_path.is_empty() {
-            return String::new();
+        let mut out = String::new();
+        let fallback = shell_quote(&format!("{}/{TOOL_CACHE_DIR}", self.workspace));
+        match &self.tool_cache {
+            Some(store) => {
+                let store = shell_quote(&store.display().to_string());
+                out.push_str(&format!(
+                    "if [ -z \"${{RUNNER_TOOL_CACHE:-}}\" ]; then\n\
+                     \x20 if [ -d {store} ]; then RUNNER_TOOL_CACHE={store}; \
+                     else RUNNER_TOOL_CACHE={fallback}; fi\n\
+                     \x20 export RUNNER_TOOL_CACHE\n\
+                     fi\n"
+                ));
+            }
+            None => {
+                out.push_str(&format!(
+                    "if [ -z \"${{RUNNER_TOOL_CACHE:-}}\" ]; then \
+                     RUNNER_TOOL_CACHE={fallback}; export RUNNER_TOOL_CACHE; fi\n"
+                ));
+            }
         }
-        let joined = self
-            .job_path
-            .iter()
-            .map(|p| shell_quote(p))
-            .collect::<Vec<_>>()
-            .join(":");
-        format!("export PATH={joined}:\"$PATH\"\n")
+        if !self.job_path.is_empty() {
+            let joined = self
+                .job_path
+                .iter()
+                .map(|p| shell_quote(p))
+                .collect::<Vec<_>>()
+                .join(":");
+            out.push_str(&format!("export PATH={joined}:\"$PATH\"\n"));
+        }
+        out
     }
 
     /// Write the resolved script to the step's `script` file and turn the process

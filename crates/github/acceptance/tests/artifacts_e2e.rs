@@ -95,8 +95,8 @@ fn artifact_runtime(dir: &Path, source: Arc<GitActionSource>) -> Runtime {
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
         .capability(ActionSourceCap(trees))
-        .run_services(
-            |run_dir, caps| match ObjectService::start(run_dir.join("artifacts")) {
+        .run_services(|run_dir, caps| {
+            match ObjectService::start(run_dir.join("artifacts"), run_dir.join("cache")) {
                 Ok(service) => {
                     let cap = ResultsServiceCap {
                         port: service.port(),
@@ -108,8 +108,8 @@ fn artifact_runtime(dir: &Path, source: Arc<GitActionSource>) -> Runtime {
                     eprintln!("warning: no results service: {error}");
                     (caps, None)
                 }
-            },
-        )
+            }
+        })
 }
 
 async fn run_artifact_flow(label: &str, container: Option<&str>) {
