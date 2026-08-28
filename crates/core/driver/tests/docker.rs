@@ -403,6 +403,50 @@ async fn docker_wait_follows_the_step_not_the_client() {
     );
 }
 
+/// A single-architecture image with no manifest for this daemon still
+/// acquires: the pull retries as linux/amd64 — CI images target GitHub's
+/// hosted runners — and the step runs (emulated, on a non-amd64 host). The
+/// `amd64/` library namespace publishes amd64-only manifests, so this
+/// exercises the fallback on arm64 daemons and the native path on amd64 ones;
+/// either way the container reports an x86_64 machine.
+#[tokio::test]
+async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
+    if !docker_ready().await {
+        return;
+    }
+    let dir = RunDir::new("docker-platform-fallback");
+    let mut b = GraphBuilder::bare();
+    let mut scope = ir::Scope::new(ScopeId::new(0));
+    scope.runtime = RuntimeSpec::container("amd64/alpine:3.20");
+    let scope = b.add_scope(scope);
+    b.add_node(
+        "arch",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            script_with("uname -m", json!({ "shell": "sh" })),
+        ),
+    );
+    let graph = b.build();
+    validate(&graph).expect("valid");
+    let config = RunConfig::new(dir.path())
+        .with_grace(Duration::from_secs(2))
+        .with_retention(Retention::Never);
+
+    let report = docker_driver(graph, &dir, config).await_run().await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(
+        log_lines(&report).iter().any(|l| l == "x86_64"),
+        "{:?}",
+        log_lines(&report)
+    );
+}
+
 /// Output printed *after* a pause survives, on both streams. The exit status was
 /// always safe (the wrapper records it), but the log path was not: run directly
 /// under `docker exec`, `setsid` forks and the client detaches from a step still

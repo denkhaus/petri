@@ -273,9 +273,43 @@ pub(crate) async fn prepare_registry_image(
 ) -> Result<(), EnvError> {
     if should_pull(image, pull).await {
         announce_pull(progress, scope, image);
-        run_docker(&["pull", image]).await?;
+        pull_image(&[], image).await?;
     }
     Ok(())
+}
+
+/// The one fallback platform: GitHub-hosted runners are linux/amd64, so that
+/// is what CI images target — an image with no manifest for this daemon's
+/// architecture is retried as amd64 and runs emulated. (The later `create`
+/// warns about the mismatch and proceeds; the daemon needs emulation
+/// configured, which Docker Desktop ships.)
+const FALLBACK_PLATFORM: &str = "linux/amd64";
+
+/// Whether a failed pull says the image exists but not for this daemon's
+/// architecture — the error an arm64 host gets for an amd64-only CI image.
+fn missing_platform(error: &EnvError) -> bool {
+    matches!(error, EnvError::Backend { message, .. } if message.contains("no matching manifest"))
+}
+
+/// `docker pull` with `config_args` in front (a credentialed pull's isolated
+/// `--config`), retrying an architecture miss as [`FALLBACK_PLATFORM`]. When
+/// the retry fails too, the *first* error is the one reported — it names the
+/// real problem, the missing architecture.
+pub(crate) async fn pull_image(config_args: &[&str], image: &str) -> Result<(), EnvError> {
+    let mut args: Vec<&str> = config_args.to_vec();
+    args.extend(["pull", image]);
+    let Err(error) = run_docker(&args).await else {
+        return Ok(());
+    };
+    if !missing_platform(&error) {
+        return Err(error);
+    }
+    let mut args: Vec<&str> = config_args.to_vec();
+    args.extend(["pull", "--platform", FALLBACK_PLATFORM, image]);
+    match run_docker(&args).await {
+        Ok(_) => Ok(()),
+        Err(_) => Err(error),
+    }
 }
 
 /// Make `image` available under the pull policy, with or without registry
@@ -338,9 +372,7 @@ async fn pull_with_credentials(
         login.push(host);
     }
     let result = match run_docker_stdin("login", &login, password.expose().as_bytes()).await {
-        Ok(_) => run_docker(&["--config", &config, "pull", image])
-            .await
-            .map(|_| ()),
+        Ok(_) => pull_image(&["--config", &config], image).await,
         Err(error) => Err(error),
     };
     let _ = tokio::fs::remove_dir_all(&config_dir).await;
@@ -1034,5 +1066,27 @@ mod tests {
             Some("localhost:5000")
         );
         assert_eq!(registry_host("localhost/acme/tool"), Some("localhost"));
+    }
+}
+
+#[cfg(test)]
+mod platform_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_architecture_miss_triggers_the_fallback() {
+        let miss = EnvError::Backend {
+            backend: SmolStr::new("docker"),
+            operation: SmolStr::new("pull"),
+            message: "no matching manifest for linux/arm64/v8 in the manifest list entries"
+                .to_string(),
+        };
+        assert!(missing_platform(&miss));
+        let denied = EnvError::Backend {
+            backend: SmolStr::new("docker"),
+            operation: SmolStr::new("pull"),
+            message: "pull access denied for ghcr.io/x/y".to_string(),
+        };
+        assert!(!missing_platform(&denied));
     }
 }
