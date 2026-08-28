@@ -147,6 +147,15 @@ and `RUNNER_*` variables, `GITHUB_EVENT_PATH`, and the `::` workflow commands:
 `ACTIONS_ALLOW_UNSECURE_COMMANDS` as on GitHub. `GITHUB_TOKEN` comes from the
 environment or a logged-in `gh`.
 
+**The GitHub API.** Petri neither proxies nor blocks it (v1 stance, decided
+2026-08-28): `github-script`, `gh` steps and API-calling actions hit the real
+API with the ambient token when one exists (`$GITHUB_TOKEN`, else a logged-in
+`gh`); without one, public reads work and authenticated calls fail routably.
+**A local run with a real token can mutate — comment, tag, release — exactly
+as the workflow says.** Prefer a fine-grained read-only token when running
+workflows you did not write; the corpus sweep runs token-less by policy. A
+default-deny proxy stays future work if real demand appears.
+
 **Known deltas from GitHub.** The local executor emulates a Linux runner
 (`ubuntu-*` labels) on this machine; `runner.os` reports the actual host.
 JavaScript actions and `hashFiles` need `node` on `PATH`; Docker container
