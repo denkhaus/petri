@@ -79,6 +79,32 @@ pub fn tool_ready(program: &str) -> bool {
     found
 }
 
+/// A `gh` on `PATH` that records what it was asked and answers `cache list`, so a
+/// corpus workflow runs for real without reaching GitHub's API. Returns the bin dir
+/// to prepend to `PATH`; invocations append to the file named by `GH_STUB_LOG`.
+pub fn install_gh_stub(dir: &Path) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("gh");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+echo "gh $*" >> "$GH_STUB_LOG"
+case "$1 $2" in
+  "cache list") echo 101; echo 202 ;;
+esac
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
 /// The corpus's shared action cache: the acceptance batteries and the sweep
 /// pull the same pinned trees once.
 pub fn corpus_action_source() -> Arc<GitActionSource> {

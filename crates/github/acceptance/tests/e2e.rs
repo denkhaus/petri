@@ -10,6 +10,8 @@
 //! The corpus is fetched, not committed, so these skip when it is absent. See
 //! `acceptance::corpus_present` for the convention.
 
+mod support;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,7 +22,7 @@ use runtime::frontend::DirFiles;
 use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
-use testkit::install_gh_stub;
+use support::install_gh_stub;
 
 fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")

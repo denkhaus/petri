@@ -2,9 +2,8 @@
 //!
 //! What every end-to-end harness needs and none should copy: a run directory that
 //! cleans itself up, readers over a [`RunReport`], the replay canary as an
-//! assertion, a step that ignores cancellation, a step that needs a capability,
-//! and the `gh` stub the corpus workflows drive. Dev-dependency only; never
-//! published.
+//! assertion, a step that ignores cancellation, and a step that needs a
+//! capability. Dev-dependency only; never published.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -267,29 +266,3 @@ pub fn env(pairs: &[(&str, &str)]) -> BTreeMap<smol_str::SmolStr, ir::ExprOrValu
 }
 
 pub const RETAIN: Retention = Retention::Always;
-
-/// A `gh` on `PATH` that records what it was asked and answers `cache list`, so a
-/// corpus workflow runs for real without reaching GitHub's API. Returns the bin dir
-/// to prepend to `PATH`; invocations append to the file named by `GH_STUB_LOG`.
-pub fn install_gh_stub(dir: &Path) -> PathBuf {
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let stub = bin.join("gh");
-    std::fs::write(
-        &stub,
-        r#"#!/bin/sh
-echo "gh $*" >> "$GH_STUB_LOG"
-case "$1 $2" in
-  "cache list") echo 101; echo 202 ;;
-esac
-exit 0
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    bin
-}
