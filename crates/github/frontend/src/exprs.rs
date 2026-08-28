@@ -367,6 +367,9 @@ pub struct GhaRoots<'s> {
     /// Set when a `hashFiles(...)` call lowered to its sentinel; the caller decides
     /// whether the position allowed it.
     pub saw_hashfiles: bool,
+    /// Set when `github.workspace` lowered to its sentinel; the caller decides
+    /// whether the position allowed it.
+    pub saw_workspace: bool,
 }
 
 /// Contexts that come from the run's parameters, looked up case-insensitively.
@@ -617,6 +620,19 @@ impl Roots for GhaRoots<'_> {
                     _ => table.lit(Value::Null),
                 })
             }
+            // `github.workspace` is runner-side truth: only the step's
+            // environment knows the path, so in step positions it lowers to a
+            // sentinel the step kinds substitute at spawn
+            // ([`WORKSPACE_SENTINEL`]). A scope position (a job-level `env:`)
+            // is resolved at acquire, where nothing could substitute — the
+            // reference stays a parameter read there (null, rendered empty).
+            "github"
+                if self.at_step
+                    && matches!(path, [key] if key.eq_ignore_ascii_case("workspace")) =>
+            {
+                self.saw_workspace = true;
+                Some(table.lit(WORKSPACE_SENTINEL))
+            }
             // `github.token` is a secret, not a parameter: the same rule as `secrets.*`.
             "github" if matches!(path, [token] if token.eq_ignore_ascii_case("token")) => {
                 self.saw_secret = true;
@@ -751,6 +767,7 @@ pub(crate) struct LoweredExpr {
     pub id: ExprId,
     pub saw_secret: bool,
     pub saw_hashfiles: bool,
+    pub saw_workspace: bool,
 }
 
 /// Lower one parsed expression through [`GhaRoots`], mapping lowering failures
@@ -770,6 +787,7 @@ pub(crate) fn lower_expr(
         span: span.clone(),
         saw_secret: false,
         saw_hashfiles: false,
+        saw_workspace: false,
     };
     let id = match gha(ast, table, &mut roots) {
         Ok(id) => id,
@@ -791,6 +809,7 @@ pub(crate) fn lower_expr(
         id,
         saw_secret: roots.saw_secret,
         saw_hashfiles: roots.saw_hashfiles,
+        saw_workspace: roots.saw_workspace,
     })
 }
 
@@ -1047,6 +1066,23 @@ pub fn secret_sentinel(name: &str) -> String {
 /// Whether `text` carries a secret sentinel.
 pub fn has_secret_sentinel(text: &str) -> bool {
     text.contains(SENTINEL_OPEN)
+}
+
+/// The stand-in for `github.workspace` inside a lowered string. GitHub renders
+/// the context to the runner-side workspace path, which only the step's
+/// environment knows — a host path, or the container's mount point — so the
+/// lowering emits this marker and the step kinds substitute their own
+/// `GITHUB_WORKSPACE` at spawn, the same shape as [`secret_sentinel`] and
+/// [`hashfiles_sentinel`]. User text cannot forge it: [`escape_sentinel_text`]
+/// escapes the private-use characters.
+pub const WORKSPACE_SENTINEL: &str = "\u{E000}petri-workspace\u{E001}";
+
+pub fn has_workspace_sentinel(text: &str) -> bool {
+    text.contains(WORKSPACE_SENTINEL)
+}
+
+pub fn replace_workspace_sentinels(text: &str, workspace: &str) -> String {
+    text.replace(WORKSPACE_SENTINEL, workspace)
 }
 
 /// Replace every secret sentinel in `text` with what `resolve` returns for its name.

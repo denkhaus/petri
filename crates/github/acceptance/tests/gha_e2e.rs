@@ -1162,3 +1162,41 @@ jobs:
         log_lines(&report)
     );
 }
+
+/// `${{ github.workspace }}` resolves to the runner-side workspace path — the
+/// same value as `GITHUB_WORKSPACE` — in every position: a whole-expression
+/// env value, an inline script template, a larger template, and a gate. The
+/// lowering cannot know the path (a host path here, a mount point in a
+/// container), so it rides a sentinel the step substitutes at spawn; the
+/// corpus sweep caught the setup-* family receiving nothing at all (setup-uv's
+/// `working-directory` input *defaults* to this context).
+#[tokio::test]
+async fn github_workspace_resolves_to_the_runner_side_path() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          WS: ${{ github.workspace }}
+        run: |
+          [ "$WS" = "$GITHUB_WORKSPACE" ] && echo env-matches
+          [ "${{ github.workspace }}" = "$GITHUB_WORKSPACE" ] && echo inline-matches
+          [ "${{ github.workspace }}/sub" = "$GITHUB_WORKSPACE/sub" ] && echo template-matches
+      - if: github.workspace != ''
+        run: echo gate-saw-a-path
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "workspace-context").await;
+    assert_eq!(report.status, ir::RunStatus::Success);
+    let lines = log_lines(&report);
+    for expected in [
+        "env-matches",
+        "inline-matches",
+        "template-matches",
+        "gate-saw-a-path",
+    ] {
+        assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
+    }
+}

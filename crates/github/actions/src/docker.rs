@@ -13,7 +13,9 @@ use std::path::PathBuf;
 
 use executor::{ContainerImage, OneShotContainer};
 use frontend_gha::action::validate_relative_action_path;
-use frontend_gha::exprs::has_hashfiles_sentinel;
+use frontend_gha::exprs::{
+    has_hashfiles_sentinel, has_workspace_sentinel, replace_workspace_sentinels,
+};
 use ir::{Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
@@ -71,7 +73,12 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
 
     // Everything textual resolves before the container exists: hashFiles
     // against the workspace, then secret sentinels from the run's provider.
-    let resolver = TextResolver::begin(&config, &ctx).await?;
+    let resolver = TextResolver::begin(
+        &config,
+        &ctx,
+        format!("{}/{REPO_DIR}", runner.workspace_path()),
+    )
+    .await?;
     let resolve = |value: &Value| resolver.resolve(&stringify(value), &ctx);
 
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
@@ -324,13 +331,20 @@ fn image_tag(key: &str) -> String {
     tag
 }
 
-/// The hashes and secrets every configured text may carry, resolved once.
+/// The hashes, workspace path and secrets every configured text may carry,
+/// resolved once. `container_workspace` is the *action container's* view of
+/// `GITHUB_WORKSPACE` — the mount point, not the job environment's path.
 struct TextResolver {
     hashes: std::collections::BTreeMap<Vec<String>, String>,
+    container_workspace: String,
 }
 
 impl TextResolver {
-    async fn begin(config: &DockerActionConfig, ctx: &StepCtx) -> Result<Self, StepFailure> {
+    async fn begin(
+        config: &DockerActionConfig,
+        ctx: &StepCtx,
+        container_workspace: String,
+    ) -> Result<Self, StepFailure> {
         let texts: Vec<String> = config
             .entrypoint
             .iter()
@@ -354,7 +368,10 @@ impl TextResolver {
         } else {
             Default::default()
         };
-        Ok(Self { hashes })
+        Ok(Self {
+            hashes,
+            container_workspace,
+        })
     }
 
     fn resolve(&self, text: &str, ctx: &StepCtx) -> Result<String, StepFailure> {
@@ -362,6 +379,11 @@ impl TextResolver {
             crate::hashfiles::splice(text, &self.hashes)
         } else {
             text.to_string()
+        };
+        let text = if has_workspace_sentinel(&text) {
+            replace_workspace_sentinels(&text, &self.container_workspace)
+        } else {
+            text
         };
         match resolve_sentinel_text(&text, ctx.secrets.as_ref())? {
             Some(resolved) => Ok(resolved),

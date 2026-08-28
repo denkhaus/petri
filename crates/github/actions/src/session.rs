@@ -29,8 +29,8 @@ use std::time::Duration;
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
-    escape_sentinel_text, has_secret_sentinel, has_sentinel_escape, replace_secret_sentinels,
-    unescape_sentinel_text,
+    escape_sentinel_text, has_secret_sentinel, has_sentinel_escape, has_workspace_sentinel,
+    replace_secret_sentinels, replace_workspace_sentinels, unescape_sentinel_text,
 };
 use ir::{LogStream, Outcome, StepEvent, Value};
 use serde_json::{Map, json};
@@ -311,6 +311,7 @@ impl Session {
                 Ok(process) => process,
                 Err(failure) => return (failure.into(), Effects::default()),
             };
+        let process = resolve_workspace_sentinels(process, &self.github_workspace());
         let StepCtx {
             firing,
             attempt,
@@ -502,6 +503,18 @@ pub(crate) fn resolve_sentinel_text(
         text.to_string()
     };
     Ok(Some(unescape_sentinel_text(&resolved)))
+}
+
+/// Replace the `github.workspace` sentinels in every configured text with this
+/// environment's own workspace path — runner-side truth the lowering could not
+/// know (a host path here; a one-shot container resolves against its mount).
+fn resolve_workspace_sentinels(mut process: ProcessConfig, workspace: &str) -> ProcessConfig {
+    let infallible: Result<(), std::convert::Infallible> =
+        try_map_process_texts(&mut process, |text| {
+            Ok(has_workspace_sentinel(text).then(|| replace_workspace_sentinels(text, workspace)))
+        });
+    let _ = infallible;
+    process
 }
 
 /// Replace the secret sentinels the frontend lowered into the script and the env

@@ -305,9 +305,9 @@ pub fn eval<E>(
 // ── Lowering a condition onto the gate ────────────────────────────────────
 
 /// Whether the subtree holds something only the step can resolve: an `env.NAME`
-/// reference, or a `hashFiles(...)` call.
+/// reference, a `hashFiles(...)` call, or `github.workspace`.
 pub fn needs_lazy(expr: &Expr) -> bool {
-    if env_leaf(expr).is_some() {
+    if env_leaf(expr).is_some() || workspace_leaf(expr) {
         return true;
     }
     match expr {
@@ -320,6 +320,15 @@ pub fn needs_lazy(expr: &Expr) -> bool {
             name.eq_ignore_ascii_case("hashfiles") || args.iter().any(needs_lazy)
         }
     }
+}
+
+/// `github.workspace`: runner-side truth only the step's environment knows.
+fn workspace_leaf(expr: &Expr) -> bool {
+    let Some((root, path)) = expr.dotted_path() else {
+        return false;
+    };
+    root.eq_ignore_ascii_case("github")
+        && matches!(path.as_slice(), [key] if key.eq_ignore_ascii_case("workspace"))
 }
 
 /// `env.NAME` (or `env['NAME']`), the reference a step resolves itself.
@@ -361,6 +370,14 @@ pub fn condition_tree(
             name,
             or: Some(Box::new(or)),
         });
+    }
+    if workspace_leaf(ast) {
+        // A string leaf the step rewrites to its own workspace path before
+        // evaluation; comparisons decompose around it (`needs_lazy`), so the
+        // engine never evaluates over the marker.
+        return Some(Gate::Lit(Value::String(
+            crate::exprs::WORKSPACE_SENTINEL.to_string(),
+        )));
     }
     match ast {
         Expr::Group(inner) => condition_tree(inner, site, span, table, diags),
@@ -434,6 +451,17 @@ fn engine_leaf(
             "in a condition, `hashFiles(...)` may stand alone or under the comparison and boolean \
              operators, where the step resolves it; under other functions the engine would \
              evaluate over the unresolved sentinel",
+        );
+        return None;
+    }
+    if lowered.saw_workspace {
+        diags.unsupported(
+            "expression.workspace",
+            span.clone(),
+            "`github.workspace` under a function the engine evaluates",
+            "the workspace path is known only to the step's environment; in a condition, \
+             `github.workspace` may stand alone or under the comparison and boolean operators, \
+             where the step resolves it — or read `GITHUB_WORKSPACE` in the step itself",
         );
         return None;
     }

@@ -20,7 +20,9 @@
 
 use std::collections::BTreeMap;
 
-use frontend_gha::exprs::has_hashfiles_sentinel;
+use frontend_gha::exprs::{
+    has_hashfiles_sentinel, has_workspace_sentinel, replace_workspace_sentinels,
+};
 use frontend_gha::gate::{Gate, GateOp, eval};
 use ir::expr::builtins::loose;
 use ir::{Outcome, Value};
@@ -152,6 +154,10 @@ fn ci_find<'a, T>(mut entries: impl Iterator<Item = (&'a str, T)>, name: &str) -
 /// workspace walk, before evaluation compares anything.
 async fn resolve_hashfiles(gate: &mut Gate, ctx: &StepCtx) -> Result<(), StepFailure> {
     let workspace = github_workspace_path(&*ctx.env);
+    // `github.workspace` first: a literal this environment can answer outright.
+    gate.map_texts(&mut |text| {
+        has_workspace_sentinel(text).then(|| replace_workspace_sentinels(text, &workspace))
+    });
     let calls =
         crate::hashfiles::resolved_calls(gate.texts().into_iter(), &*ctx.env, &workspace).await?;
     if calls.is_empty() {

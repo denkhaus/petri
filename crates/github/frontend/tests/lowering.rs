@@ -634,6 +634,13 @@ fn the_rejection_set_is_loud_and_specific() {
             "on: push\njobs:\n  j:\n    uses: org/repo/.github/workflows/x.yml@main\n",
             "unsupported.action.remote",
         ),
+        (
+            // `github.workspace` under a function in a condition: the engine
+            // would evaluate over the step-resolved sentinel — same rule as
+            // `hashFiles` there. Standing alone or under operators it works.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: contains(github.workspace, 'x')\n        run: echo\n",
+            "unsupported.expression.workspace",
+        ),
     ];
     for (text, code) in cases {
         let diags = diagnostics(text);
