@@ -16,6 +16,11 @@
 //! 300) so one wedged workflow cannot stall the battery, and
 //! `PETRI_SWEEP_FILTER` narrows the sweep to workflows whose `repo/file`
 //! contains the substring — the dev loop for a single repository.
+//!
+//! The sweep is token-less by default (see [`sweep_token`]); `PETRI_SWEEP_TOKEN`
+//! opts a real token in — `PETRI_SWEEP_TOKEN=$(gh auth token)` — for a
+//! measurement free of GitHub's anonymous rate limit. Opt-in only: corpus code
+//! then runs with that identity, bounded by the token's own permissions.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,11 +38,19 @@ use runtime::ir::{self, Graph};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 
-/// The sweep's `GITHUB_TOKEN`: a value, so `${{ secrets.GITHUB_TOKEN }}` and
-/// `github.token` resolve, but not a credential — GitHub serves anonymous-capable
-/// git reads regardless and rejects every API mutation, which is the stance: the
-/// sweep runs token-less, and corpus code can never act with the user's identity.
-const DUMMY_TOKEN: &str = "petri-sweep-not-a-token";
+/// The sweep's `GITHUB_TOKEN`: `PETRI_SWEEP_TOKEN` when the operator opted a
+/// real one in, else **empty**. Empty still resolves `${{ secrets.GITHUB_TOKEN }}`
+/// and `github.token`, and the toolkit treats it as "no auth" — API calls go
+/// anonymous (the setup-* version manifests, github-script reads) and succeed
+/// where a *bogus* value gets `401 Bad credentials`: GitHub accepts absent
+/// credentials and rejects invalid ones. Token-less by default, so corpus code
+/// can never act with the user's identity; it is also the value a bare machine
+/// with no `gh` login gets from the distribution. The anonymous tier is
+/// rate-limited (60/hour/IP), which a whole-corpus sweep exceeds — hence the
+/// opt-in.
+fn sweep_token() -> String {
+    std::env::var("PETRI_SWEEP_TOKEN").unwrap_or_default()
+}
 
 fn corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
@@ -151,13 +164,20 @@ async fn corpus_run_sweep() {
         records[slot].result = result;
     }
 
+    let auth = if sweep_token().is_empty() {
+        "an empty `GITHUB_TOKEN` kept the sweep token-less (actions' API calls went \
+         anonymous, as on a machine with no `gh` login — rate-limited at 60/hour)"
+    } else {
+        "a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API \
+         calls, so no anonymous rate limit applied"
+    };
     let note = format!(
         "Sweep configuration: host scopes rewritten to the pinned runner images \
          `{}` (22.04/26.04 variants by label), matrices capped to their first leg, \
          each workflow capped at {}s wall clock, parallelism {jobs}. Identity: \
          `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the \
          sweep's analog of `default_params` reading HEAD — so `checkout` fetches \
-         real state; a dummy `GITHUB_TOKEN` keeps the sweep token-less by policy.",
+         real state; {auth}.",
         runs::RUNNER_IMAGE_2404,
         timeout.as_secs(),
     );
@@ -255,7 +275,7 @@ async fn run_one(
         .step(github_actions::DockerActionStep)
         .step(github_actions::CheckoutStep)
         .capability(ActionSourceCap(trees))
-        .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", DUMMY_TOKEN)]));
+        .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", &sweep_token())]));
 
     let driver = rt.driver(graph);
     let handle = driver.handle();
@@ -316,7 +336,7 @@ fn first_failure(
         let identity = identity_of(identities, &record.name)
             .cloned()
             .unwrap_or_else(|| StepIdentity::Other(record.name.to_string()));
-        let expected = expected_reason(&identity, &class);
+        let expected = expected_reason(&identity, &class, !sweep_token().is_empty());
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),
             step: identity.label(),

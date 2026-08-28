@@ -150,7 +150,13 @@ environment or a logged-in `gh`.
 **The GitHub API.** Petri neither proxies nor blocks it (v1 stance, decided
 2026-08-28): `github-script`, `gh` steps and API-calling actions hit the real
 API with the ambient token when one exists (`$GITHUB_TOKEN`, else a logged-in
-`gh`); without one, public reads work and authenticated calls fail routably.
+`gh`). Without one, `github.token` is the **empty string** (with a warning at
+run start), never a missing secret: the toolkit treats an empty token as "no
+auth", so actions' API calls go anonymous — the setup-* version manifests and
+public reads work (rate-limited at GitHub's anonymous tier), writes fail with
+the API's own error. The real `actions/checkout` is the exception — it
+requires a token input and cannot run token-less — which is one more reason
+the local-checkout substitution above exists.
 **A local run with a real token can mutate — comment, tag, release — exactly
 as the workflow says.** Prefer a fine-grained read-only token when running
 workflows you did not write; the corpus sweep runs token-less by policy. A

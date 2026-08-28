@@ -255,8 +255,14 @@ pub const SERVER_COUPLED: &[(&str, &str)] = &[
 const SECRET_UNAVAILABLE: &str = "secret_unavailable";
 
 /// Why this first failure is expected — server-coupled, not a gap — or `None`
-/// when it measures a real runtime-tier gap.
-pub fn expected_reason(identity: &StepIdentity, failure_class: &str) -> Option<String> {
+/// when it measures a real runtime-tier gap. `authenticated` says whether the
+/// sweep ran with a real token: with one, only the credential-free classes
+/// (OIDC, other repositories' secrets, SaaS backends) stay expected.
+pub fn expected_reason(
+    identity: &StepIdentity,
+    failure_class: &str,
+    authenticated: bool,
+) -> Option<String> {
     if failure_class == SECRET_UNAVAILABLE {
         return Some("needs a repository secret".to_string());
     }
@@ -266,13 +272,13 @@ pub fn expected_reason(identity: &StepIdentity, failure_class: &str) -> Option<S
     if *cross_run {
         return Some("cross-run artifact download (REST API)".to_string());
     }
-    // The real checkout action always authenticates its fetch with
-    // `github.token` (an `AUTHORIZATION` header GitHub rejects unless the
-    // token is valid — even for public repositories), so a token-less sweep
-    // cannot run it. Local checkout substitution is the local answer; what
-    // falls through to the real action needs a credential.
-    if bare == "actions/checkout" && failure_class.starts_with("exit_status") {
-        return Some("needs a git credential (the sweep is token-less)".to_string());
+    // The real checkout action requires a token input and authenticates its
+    // fetch with it, so a token-less sweep cannot run it at all. Local
+    // checkout substitution is the local answer; what falls through to the
+    // real action needs a credential — and with one supplied, a failure there
+    // is a real gap again.
+    if !authenticated && bare == "actions/checkout" && failure_class.starts_with("exit_status") {
+        return Some("needs a git credential (the sweep ran token-less)".to_string());
     }
     SERVER_COUPLED
         .iter()
@@ -626,7 +632,7 @@ mod tests {
         });
         let identity = action_identity(&cross);
         assert_eq!(
-            expected_reason(&identity, "network"),
+            expected_reason(&identity, "network", false),
             Some("cross-run artifact download (REST API)".to_string())
         );
     }
@@ -637,9 +643,9 @@ mod tests {
             bare: "actions/setup-python".to_string(),
             cross_run: false,
         };
-        assert_eq!(expected_reason(&setup, "exit_status:1"), None);
+        assert_eq!(expected_reason(&setup, "exit_status:1", false), None);
         assert_eq!(
-            expected_reason(&setup, "secret_unavailable"),
+            expected_reason(&setup, "secret_unavailable", false),
             Some("needs a repository secret".to_string())
         );
         let oidc = StepIdentity::Action {
@@ -647,7 +653,7 @@ mod tests {
             cross_run: false,
         };
         assert_eq!(
-            expected_reason(&oidc, "exit_status:1"),
+            expected_reason(&oidc, "exit_status:1", false),
             Some("OIDC attestation".to_string())
         );
         // The real checkout cannot fetch without a credential; that is the
@@ -656,7 +662,11 @@ mod tests {
             bare: "actions/checkout".to_string(),
             cross_run: false,
         };
-        assert!(expected_reason(&checkout, "exit_status:1").is_some());
+        assert!(expected_reason(&checkout, "exit_status:1", false).is_some());
+        assert!(
+            expected_reason(&checkout, "exit_status:1", true).is_none(),
+            "with a real token, a checkout failure is a gap again"
+        );
     }
 
     #[test]

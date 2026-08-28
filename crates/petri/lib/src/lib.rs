@@ -56,8 +56,9 @@ pub mod github {
 /// The shipped configuration: core's standard runtime plus every in-tree component.
 ///
 /// GitHub Actions comes with an action source that fetches from GitHub into
-/// [`github::default_cache_dir`], its step kinds, and `GITHUB_TOKEN` as a secret
-/// when this machine has one (`$GITHUB_TOKEN`, else `gh auth token`). Its runner
+/// [`github::default_cache_dir`], its step kinds, and `GITHUB_TOKEN` as a secret:
+/// this machine's (`$GITHUB_TOKEN`, else `gh auth token`), or the empty string
+/// with a warning when it has none — actions then run anonymously. Its runner
 /// map knows the `ubuntu-*` labels; `PETRI_RUNNER_LABELS` (labels separated by
 /// commas or whitespace) adds third-party or self-hosted labels that name Linux
 /// environments this machine can stand in for.
@@ -131,11 +132,24 @@ impl GithubSecrets {
         }
     }
 
+    /// The machine's token, or — with none configured — the empty string, said
+    /// once. `github.token` always exists on GitHub; locally, empty is the
+    /// honest analog the toolkit is built for: actions send no auth header and
+    /// their API calls go anonymous (public reads work, rate-limited; writes
+    /// fail with the API's own error). A missing-secret failure would instead
+    /// stop every action that merely *names* the token, setup-* included.
     fn load_token() -> Option<String> {
-        std::env::var("GITHUB_TOKEN")
+        let token = std::env::var("GITHUB_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty())
-            .or_else(gh_auth_token)
+            .or_else(gh_auth_token);
+        if token.is_none() {
+            eprintln!(
+                "warning: no GITHUB_TOKEN (set it, or log in with `gh`); actions that use \
+                 `github.token` run anonymously"
+            );
+        }
+        token
     }
 }
 
@@ -153,7 +167,9 @@ impl executor::SecretProvider for GithubSecrets {
             .token
             .get_or_init(Self::load_token)
             .as_deref()
-            .ok_or_else(|| executor::SecretError::Unknown(name.into()))?;
+            .unwrap_or_default();
+        // An empty value never enters the mask set (the masker refuses short
+        // values), so this is a no-op for the token-less case by construction.
         self.registered.masker().register(value);
         Ok(executor::Secret::new(value.into()))
     }

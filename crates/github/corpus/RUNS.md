@@ -2,50 +2,55 @@
 
 The run-time counterpart of REPORT.md: every in-scope workflow that lowers, run end to end with `run:` scripts stubbed to `true` and `uses:` steps real. The outcome measures the runtime tier — checkout, action staging and execution, artifact and cache backends, cross-job flow — not the corpus projects' own builds.
 
-Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-66c538cd3ef8` (22.04/26.04 variants by label), matrices capped to their first leg, each workflow capped at 300s wall clock, parallelism 6. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a dummy `GITHUB_TOKEN` keeps the sweep token-less by policy.
+Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-66c538cd3ef8` (22.04/26.04 variants by label), matrices capped to their first leg, each workflow capped at 300s wall clock, parallelism 6. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied.
 
 249 workflows in scope; 240 lower and were run.
 
 | Result (of the 240 run) | Count | Share |
 |---|---|---|
-| passed | 78 | 32% |
-| **failed on a runtime-tier gap** | 109 | 45% |
-| expected failure (server-coupled) | 53 | 22% |
+| passed | 108 | 45% |
+| **failed on a runtime-tier gap** | 93 | 39% |
+| expected failure (server-coupled) | 39 | 16% |
 | **timed out** | 0 | 0% |
 
 ## First failures — gaps, ranked
 
 | First failing step · class | Workflows |
 |---|---|
-| `actions/setup-node · exit_status:1` | 17 |
-| `actions/setup-python · exit_status:1` | 14 |
-| `astral-sh/setup-uv · exit_status:1` | 12 |
-| `actions/setup-go · exit_status:1` | 8 |
-| `actions/stale · exit_status:1` | 7 |
+| `astral-sh/setup-uv · exit_status:1` | 17 |
+| `actions/setup-node · exit_status:1` | 9 |
+| `actions/setup-go · exit_status:1` | 7 |
+| `actions/checkout · exit_status:1` | 5 |
 | `actions/upload-artifact · exit_status:1` | 5 |
 | `noop · env_acquire` | 5 |
-| `actions/github-script · exit_status:1` | 4 |
 | `noop` | 4 |
+| `actions/github-script · exit_status:1` | 3 |
 | `ghcr.io/ossf/scorecard-action:v2.4.4 · exit_status:1` | 3 |
-| `github/codeql-action/init · exit_status:1` | 3 |
 | `github/gh-aw-actions/setup · exit_status:1` | 3 |
 | `Dockerfile · exit_status:126` | 2 |
-| `bufbuild/buf-setup-action · exit_status:1` | 2 |
+| `bufbuild/buf-lint-action · exit_status:1` | 2 |
 | `dessant/lock-threads · exit_status:1` | 2 |
 | `docker/login-action · exit_status:1` | 2 |
+| `github/codeql-action/analyze · exit_status:1` | 2 |
 | `release-drafter/release-drafter · exit_status:1` | 2 |
 | `rust-lang/crates-io-auth-action · exit_status:1` | 2 |
 | `Dockerfile · action_image` | 1 |
 | `JamesIves/github-pages-deploy-action · exit_status:1` | 1 |
+| `PyO3/maturin-action · exit_status:1` | 1 |
 | `actions/publish-immutable-action · exit_status:1` | 1 |
 | `actions/upload-artifact` | 1 |
+| `depot/build-push-action · exit_status:1` | 1 |
+| `docker/setup-buildx-action · exit_status:1` | 1 |
 | `dorny/paths-filter · exit_status:1` | 1 |
+| `ghcr.io/mszostok/codeowners-validator:v0.7.4 · exit_status:1` | 1 |
 | `github/checkout · exit_status:1` | 1 |
+| `github/codeql-action/init · exit_status:1` | 1 |
 | `github/issue-labeler · exit_status:1` | 1 |
 | `gr2m/create-or-update-pull-request-action · exit_status:1` | 1 |
 | `j178/prek-action · exit_status:1` | 1 |
+| `liskin/gh-problem-matcher-wrap · exit_status:1` | 1 |
 | `mheap/github-action-required-labels · exit_status:1` | 1 |
-| `mymindstorm/setup-emsdk · exit_status:1` | 1 |
+| `rubygems/configure-rubygems-credentials · exit_status:1` | 1 |
 | `run: · env_acquire` | 1 |
 
 ## Expected failures — server-coupled, ranked
@@ -54,19 +59,19 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 
 | First failing step · why | Workflows |
 |---|---|
-| `actions/checkout · needs a git credential (the sweep is token-less)` | 21 |
-| `actions/create-github-app-token · needs a repository secret` | 8 |
+| `actions/create-github-app-token · needs a repository secret` | 9 |
 | `actions/setup-node · needs a repository secret` | 5 |
+| `actions/download-artifact · cross-run artifact download (REST API)` | 4 |
 | `actions/checkout · needs a repository secret` | 3 |
 | `actions/github-script · needs a repository secret` | 3 |
+| `gr2m/create-or-update-pull-request-action · needs a repository secret` | 3 |
 | `open-security-tools/ost-simple-sts · needs a repository secret` | 3 |
-| `actions/download-artifact · cross-run artifact download (REST API)` | 2 |
+| `peter-evans/create-pull-request · needs a repository secret` | 2 |
 | `actions/stale · needs a repository secret` | 1 |
 | `dessant/lock-threads · needs a repository secret` | 1 |
 | `docker.io/chko/docker-pushrm:1 · needs a repository secret` | 1 |
 | `google-github-actions/auth · needs a repository secret` | 1 |
 | `nodejs/node-pr-labeler · needs a repository secret` | 1 |
-| `peter-evans/create-pull-request · needs a repository secret` | 1 |
 | `tsickert/discord-webhook · needs a repository secret` | 1 |
 | `withgraphite/graphite-ci-action · needs a repository secret` | 1 |
 
@@ -75,56 +80,56 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | Repository | Workflow | Result | First failure |
 |---|---|---|---|
 | actions/checkout | `check-dist.yml` | pass | — |
-| actions/checkout | `codeql-analysis.yml` | **fail** | `github/codeql-action/init` — step exited with status 1 · `Job run UUID is bed85bfe-064f-4f82-8d51-877209491072.` |
+| actions/checkout | `codeql-analysis.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Warning: Failed to gather information for telemetry: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run. Will skip sending status report.` |
 | actions/checkout | `licensed.yml` | pass | — |
 | actions/checkout | `publish-immutable-actions.yml` | **fail** | `actions/publish-immutable-action` — step exited with status 1 · `Error: Could not find Repository.` |
 | actions/checkout | `update-main-version.yml` | pass | — |
 | actions/checkout | `update-test-ubuntu-git.yml` | **fail** | `docker/login-action` — step exited with status 1 · `Error: Unable to locate executable file: docker. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file m…` |
-| astral-sh/ruff | `build-docker.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/ruff | `build-docker.yml` | **fail** | `docker/setup-buildx-action` — step exited with status 1 · `Error: ERROR: failed to initialize builder builder-6b201840-70a9-41c0-a554-19b3bf032811 (builder-6b201840-70a9-41c0-a554-19b3bf0328110): failed to connect to the docker API at unix:///var/run/docker.s…` |
 | astral-sh/ruff | `build-wasm.yml` | pass | — |
 | astral-sh/ruff | `daily_fuzz.yaml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
-| astral-sh/ruff | `memory_report.yaml` | **fail** | `actions/setup-python` — step exited with status 1 · `Version 3.14 was not found in the local cache` |
+| astral-sh/ruff | `memory_report.yaml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/ruff | `notify-dependents.yml` | expected failure | `actions/github-script` — no secret named `RUFF_PRE_COMMIT_PAT` _(needs a repository secret)_ |
 | astral-sh/ruff | `publish-crates.yml` | **fail** | `rust-lang/crates-io-auth-action` — step exited with status 1 · `Error: Please ensure the 'id-token' permission is set to 'write' in your workflow. For more information, see: https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-dep…` |
-| astral-sh/ruff | `publish-docs.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/ruff | `publish-docs.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/ruff | `publish-mirror.yml` | **fail** | `noop` — could not build the firing environment |
 | astral-sh/ruff | `publish-playground.yml` | **fail** | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: playground/ruff/dist. No artifacts will be uploaded.` |
 | astral-sh/ruff | `publish-pypi.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/ruff | `publish-ty-playground.yml` | **fail** | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: playground/ty/dist. No artifacts will be uploaded.` |
 | astral-sh/ruff | `publish-versions.yml` | **fail** | `noop` — could not build the firing environment |
 | astral-sh/ruff | `publish-wasm.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
-| astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/ruff | `ty-ecosystem-report.yaml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
-| astral-sh/ruff | `typing_conformance.yaml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/ruff | `typing_conformance.yaml` | pass | — |
 | astral-sh/uv | `bench.yml` | not lowered | `runs_on.unknown` |
-| astral-sh/uv | `build-docker.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/uv | `build-docker.yml` | **fail** | `depot/build-push-action` — step exited with status 1 · `Error: Input does not meet YAML 1.2 "Core Schema" specification: push Support boolean input list: `true \| True \| TRUE \| false \| False \| FALSE`` |
 | astral-sh/uv | `check-docs.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `check-fmt.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `check-generated-files.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `check-lock.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `check-publish.yml` | pass | — |
-| astral-sh/uv | `check-release.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/uv | `check-release.yml` | pass | — |
 | astral-sh/uv | `check-zizmor.yml` | pass | — |
 | astral-sh/uv | `diagnose-workflow-failure.yml` | pass | — |
-| astral-sh/uv | `fix-bug.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Bad credentials - https://docs.github.com/rest` _(cross-run artifact download (REST API))_ |
+| astral-sh/uv | `fix-bug.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Not Found - https://docs.github.com/rest/actions/artifacts#list-workflow-run-artifacts` _(cross-run artifact download (REST API))_ |
 | astral-sh/uv | `issue-triage.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
-| astral-sh/uv | `plan.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/uv | `plan.yml` | pass | — |
 | astral-sh/uv | `promote-pull-request.yml` | pass | — |
 | astral-sh/uv | `publish-crates.yml` | **fail** | `rust-lang/crates-io-auth-action` — step exited with status 1 · `Error: Please ensure the 'id-token' permission is set to 'write' in your workflow. For more information, see: https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-dep…` |
-| astral-sh/uv | `publish-docs.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/uv | `publish-docs.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `publish-mirror.yml` | **fail** | `noop` — could not build the firing environment |
 | astral-sh/uv | `publish-pypi.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `publish-versions.yml` | **fail** | `noop` — could not build the firing environment |
 | astral-sh/uv | `pull-request-conflicts.yml` | **fail** | `actions/upload-artifact` — step config failed to resolve |
-| astral-sh/uv | `pull-request-labels.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
-| astral-sh/uv | `pull-request-security-review.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/uv | `pull-request-labels.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 128` |
+| astral-sh/uv | `pull-request-security-review.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `rebase-conflicted-pull-request.yml` | **fail** | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /rebased.bundle. No artifacts will be uploaded.` |
 | astral-sh/uv | `release-prepare.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `reproduce-bug.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `sync-python-releases.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | astral-sh/uv | `sync-uv-dev.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
 | astral-sh/uv | `sync-uv-security.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
-| astral-sh/uv | `test-ecosystem.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| astral-sh/uv | `test-ecosystem.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
 | astral-sh/uv | `update-issue-context.yml` | pass | — |
 | astral-sh/uv | `update-pull-request-parent.yml` | pass | — |
 | cli/cli | `agentics-maintenance.yml` | **fail** | `github/gh-aw-actions/setup` — step exited with status 1 · `Failed to run setup.sh: spawnSync /workspace/.ci/github/actions/github/gh-aw-actions/423b3dc04bbf1b1797194a4a75aa5cf5d0d4f5b3/setup/setup.sh EACCES` |
@@ -145,14 +150,14 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | denoland/deno | `start_release.generated.yml` | pass | — |
 | denoland/deno | `version_bump.generated.yml` | expected failure | `actions/checkout` — no secret named `DENOBOT_PAT` _(needs a repository secret)_ |
 | django/django | `benchmark.yml` | pass | — |
-| django/django | `check-migrations.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
+| django/django | `check-migrations.yml` | pass | — |
 | django/django | `check_commit_messages.yml` | pass | — |
-| django/django | `check_pr_quality.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' \|\| :"` _(needs a git credential (the sweep is token-less))_ |
+| django/django | `check_pr_quality.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 1` |
 | django/django | `coverage_comment.yml` | pass | — |
 | django/django | `coverage_tests.yml` | pass | — |
-| django/django | `docs.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
+| django/django | `docs.yml` | pass | — |
 | django/django | `labels.yml` | **fail** | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: Cannot read properties of undefined (reading 'title')` |
-| django/django | `linters.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
+| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: flake8. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file m…` |
 | django/django | `new_contributor_pr.yml` | pass | — |
 | django/django | `playwright.yml` | pass | — |
 | django/django | `postgis.yml` | pass | — |
@@ -171,127 +176,127 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | facebook/react | `runtime_build_and_test.yml` | not lowered | `step.background` |
 | facebook/react | `runtime_commit_artifacts.yml` | **fail** | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: build/. No artifacts will be uploaded.` |
 | facebook/react | `runtime_discord_notify.yml` | pass | — |
-| facebook/react | `runtime_eslint_plugin_e2e.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| facebook/react | `runtime_eslint_plugin_e2e.yml` | pass | — |
 | facebook/react | `runtime_fuzz_tests.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `(Use `node --trace-deprecation ...` to show where the warning was created)` |
 | facebook/react | `runtime_release_from_ci.yml` | expected failure | `tsickert/discord-webhook` — no secret named `DISCORD_WEBHOOK_URL` _(needs a repository secret)_ |
 | facebook/react | `runtime_sizebot_comment.yml` | pass | — |
-| facebook/react | `shared_check_maintainer.yml` | **fail** | `actions/github-script` — step exited with status 1 · `}` |
+| facebook/react | `shared_check_maintainer.yml` | pass | — |
 | facebook/react | `shared_cleanup_merged_branch_caches.yml` | pass | — |
 | facebook/react | `shared_cleanup_stale_branch_caches.yml` | pass | — |
 | facebook/react | `shared_close_direct_sync_branch_prs.yml` | **fail** | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: SyntaxError: Unexpected token ';'` |
 | facebook/react | `shared_label_core_team_prs.yml` | pass | — |
-| facebook/react | `shared_lint.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `(Use `node --trace-deprecation ...` to show where the warning was created)` |
-| facebook/react | `shared_stale.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials` |
+| facebook/react | `shared_lint.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
+| facebook/react | `shared_stale.yml` | pass | — |
 | hashicorp/terraform | `backport.yml` | **fail** | `run:` — could not acquire the environment: docker pull failed: no matching manifest for linux/arm64/v8 in the manifest list entries |
-| hashicorp/terraform | `changelog-validation.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| hashicorp/terraform | `changelog-validation.yml` | pass | — |
 | hashicorp/terraform | `checks.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Error: Unable to find Go version 'null' for platform linux and architecture x64.` |
 | hashicorp/terraform | `enforce-changelog.yml` | **fail** | `dorny/paths-filter` — step exited with status 1 · `Error: The process 'git rev-parse --abbrev-ref HEAD' failed with exit code 128` |
 | hashicorp/terraform | `equivalence-test-diff.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Error: Unable to find Go version 'null' for platform linux and architecture x64.` |
-| hashicorp/terraform | `equivalence-test-manual-update.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| hashicorp/terraform | `equivalence-test-manual-update.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Error: Unable to find Go version 'null' for platform linux and architecture x64.` |
 | hashicorp/terraform | `equivalence-test-update.yml` | pass | — |
 | hashicorp/terraform | `issue-comment-created.yml` | pass | — |
-| hashicorp/terraform | `lock.yml` | **fail** | `dessant/lock-threads` — step exited with status 1 · `Error: Bad credentials - https://docs.github.com/rest` |
+| hashicorp/terraform | `lock.yml` | **fail** | `dessant/lock-threads` — step exited with status 1 · `Error: Must have admin rights to Repository. - https://docs.github.com/rest/issues/issues#lock-an-issue` |
 | nodejs/node | `auto-start-ci.yml` | pass | — |
-| nodejs/node | `build-tarball.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Version ~3.14.0-0 was not found in the local cache` |
-| nodejs/node | `close-stalled.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials - https://docs.github.com/rest` |
-| nodejs/node | `codeql.yml` | **fail** | `github/codeql-action/init` — step exited with status 1 |
+| nodejs/node | `build-tarball.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
+| nodejs/node | `close-stalled.yml` | pass | — |
+| nodejs/node | `codeql.yml` | **fail** | `github/codeql-action/init` — step exited with status 1 · `Warning: Failed to gather information for telemetry: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run. Will skip sending status report.` |
 | nodejs/node | `comment-labeled.yml` | pass | — |
-| nodejs/node | `commit-lint.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
+| nodejs/node | `commit-lint.yml` | pass | — |
 | nodejs/node | `commit-queue.yml` | pass | — |
-| nodejs/node | `coverage-linux-without-intl.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Version ~3.14.0-0 was not found in the local cache` |
-| nodejs/node | `coverage-linux.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Version ~3.14.0-0 was not found in the local cache` |
-| nodejs/node | `create-release-proposal.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
-| nodejs/node | `daily-wpt-fyi.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Version ~3.14.0-0 was not found in the local cache` |
-| nodejs/node | `daily.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
-| nodejs/node | `doc.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
-| nodejs/node | `find-inactive-collaborators.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
-| nodejs/node | `find-inactive-tsc.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| nodejs/node | `coverage-linux-without-intl.yml` | pass | — |
+| nodejs/node | `coverage-linux.yml` | pass | — |
+| nodejs/node | `create-release-proposal.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 1` |
+| nodejs/node | `daily-wpt-fyi.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Unable to find Node version 'null' for platform linux and architecture x64.` |
+| nodejs/node | `daily.yml` | pass | — |
+| nodejs/node | `doc.yml` | pass | — |
+| nodejs/node | `find-inactive-collaborators.yml` | expected failure | `gr2m/create-or-update-pull-request-action` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
+| nodejs/node | `find-inactive-tsc.yml` | expected failure | `gr2m/create-or-update-pull-request-action` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
 | nodejs/node | `label-flaky-test-issue.yml` | pass | — |
 | nodejs/node | `label-pr.yml` | expected failure | `nodejs/node-pr-labeler` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
 | nodejs/node | `license-builder.yml` | **fail** | `gr2m/create-or-update-pull-request-action` — step exited with status 1 · `Error: Command failed with exit code 128 (Unknown system error -128): git status` |
 | nodejs/node | `lint-release-proposal.yml` | pass | — |
-| nodejs/node | `linters.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
+| nodejs/node | `linters.yml` | **fail** | `ghcr.io/mszostok/codeowners-validator:v0.7.4` — step exited with status 1 · `time="2026-08-28T20:35:38Z" level=fatal msg="No CODEOWNERS found in the root, docs/, or .github/ directory of the repository ."` |
 | nodejs/node | `major-release.yml` | pass | — |
 | nodejs/node | `nix-changes-comment.yml` | pass | — |
-| nodejs/node | `notify-on-push.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
+| nodejs/node | `notify-on-push.yml` | pass | — |
 | nodejs/node | `notify-on-review-wanted.yml` | pass | — |
 | nodejs/node | `post-release.yml` | pass | — |
-| nodejs/node | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/28 18:08:53 scorecard had an error: repo unreachable: GET https://api.github.com/repos/nodejs/node: 401 Bad credentials []` |
-| nodejs/node | `stale.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials - https://docs.github.com/rest` |
+| nodejs/node | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-28T20:35:39Z","repo":{"name":"github.com/nodejs/node","commit":"a382c1c8edc7a43f6555898f4dd6b85cbdce0be6"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` |
+| nodejs/node | `stale.yml` | pass | — |
 | nodejs/node | `test-internet.yml` | pass | — |
 | nodejs/node | `test-linux-quic.yml` | not lowered | `action.local_missing` |
 | nodejs/node | `test-linux.yml` | not lowered | `action.local_missing` |
 | nodejs/node | `test-shared.yml` | not lowered | `runs_on.expression` |
-| nodejs/node | `timezone-update.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' \|\| :"` _(needs a git credential (the sweep is token-less))_ |
+| nodejs/node | `timezone-update.yml` | pass | — |
 | nodejs/node | `tools.yml` | expected failure | `peter-evans/create-pull-request` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
 | nodejs/node | `update-openssl.yml` | pass | — |
-| nodejs/node | `update-v8.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
-| nodejs/node | `update-wpt.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
+| nodejs/node | `update-v8.yml` | expected failure | `peter-evans/create-pull-request` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
+| nodejs/node | `update-wpt.yml` | expected failure | `gr2m/create-or-update-pull-request-action` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
 | ohmyzsh/ohmyzsh | `dependencies.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
 | ohmyzsh/ohmyzsh | `main.yml` | pass | — |
 | ohmyzsh/ohmyzsh | `project.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
-| ohmyzsh/ohmyzsh | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/28 18:09:09 scorecard had an error: repo unreachable: GET https://api.github.com/repos/ohmyzsh/ohmyzsh: 401 Bad credentials []` |
+| ohmyzsh/ohmyzsh | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-28T20:36:26Z","repo":{"name":"github.com/ohmyzsh/ohmyzsh","commit":"146461f7c6d95f4ba1220559d66eb113418b40a8"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a…` |
 | pola-rs/polars | `benchmark-remote.yml` | not lowered | `runs_on.unknown` |
-| pola-rs/polars | `benchmark.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
+| pola-rs/polars | `benchmark.yml` | pass | — |
 | pola-rs/polars | `changes-dsl-labeler.yml` | pass | — |
 | pola-rs/polars | `clear-caches.yml` | pass | — |
-| pola-rs/polars | `docs-python.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' \|\| :"` _(needs a git credential (the sweep is token-less))_ |
+| pola-rs/polars | `docs-python.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 1` |
 | pola-rs/polars | `docs-rust.yml` | **fail** | `JamesIves/github-pages-deploy-action` — step exited with status 1 · `Notice: Deployment failed! ❌` |
-| pola-rs/polars | `issue-labeler.yml` | **fail** | `github/issue-labeler` — step exited with status 1 · `Error: HttpError: Bad credentials` |
+| pola-rs/polars | `issue-labeler.yml` | **fail** | `github/issue-labeler` — step exited with status 1 · `Error: HttpError: Not Found` |
 | pola-rs/polars | `lint-global.yml` | pass | — |
-| pola-rs/polars | `lint-python.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.10.21-31661269155/python-3.10.21-linux-24.04-x64.tar.gz"` |
+| pola-rs/polars | `lint-python.yml` | pass | — |
 | pola-rs/polars | `lint-rust.yml` | pass | — |
 | pola-rs/polars | `pr-labeler.yml` | **fail** | `release-drafter/release-drafter` — step exited with status 1 · `Error: Invalid config file` |
 | pola-rs/polars | `release-drafter.yml` | **fail** | `release-drafter/release-drafter` — step exited with status 1 · `Error: Invalid config file` |
 | pola-rs/polars | `release-rust.yml` | pass | — |
-| pola-rs/polars | `test-bytecode-parser.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.10.21-31661269155/python-3.10.21-linux-24.04-x64.tar.gz"` |
-| pola-rs/polars | `test-pyodide.yml` | **fail** | `mymindstorm/setup-emsdk` — step exited with status 1 · `[command]/workspace/.ci/temp/7ddddc89-4718-4066-a528-8a4662248088/emsdk-main/emsdk install 3.1.58` |
+| pola-rs/polars | `test-bytecode-parser.yml` | pass | — |
+| pola-rs/polars | `test-pyodide.yml` | **fail** | `PyO3/maturin-action` — step exited with status 1 · `Error: Unable to locate executable file: rustc. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file mo…` |
 | prometheus/prometheus | `approve-workflows.yml` | pass | — |
 | prometheus/prometheus | `automerge-dependabot.yml` | pass | — |
-| prometheus/prometheus | `buf-lint.yml` | **fail** | `bufbuild/buf-setup-action` — step exited with status 1 · `Error: Bad credentials - https://docs.github.com/rest` |
-| prometheus/prometheus | `buf.yml` | **fail** | `bufbuild/buf-setup-action` — step exited with status 1 · `Error: Bad credentials - https://docs.github.com/rest` |
+| prometheus/prometheus | `buf-lint.yml` | **fail** | `bufbuild/buf-lint-action` — step exited with status 1 · `Failure: Module "path: "prompb"" had no .proto files` |
+| prometheus/prometheus | `buf.yml` | **fail** | `bufbuild/buf-lint-action` — step exited with status 1 · `Failure: Module "path: "prompb"" had no .proto files` |
 | prometheus/prometheus | `check_release_notes.yml` | pass | — |
-| prometheus/prometheus | `codeql-analysis.yml` | **fail** | `github/codeql-action/init` — step exited with status 1 · `Job run UUID is 1563e253-2ce8-4b31-8ead-79256731943f.` |
+| prometheus/prometheus | `codeql-analysis.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Warning: Failed to gather information for telemetry: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run. Will skip sending status report.` |
 | prometheus/prometheus | `container_description.yml` | expected failure | `docker.io/chko/docker-pushrm:1` — no secret named `DOCKER_HUB_PASSWORD` _(needs a repository secret)_ |
-| prometheus/prometheus | `fuzzing.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Acquiring 1.27.0 from https://github.com/actions/go-versions/releases/download/1.27.0-32325163857/go-1.27.0-linux-x64.tar.gz` |
-| prometheus/prometheus | `govulncheck.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Acquiring 1.27.0 from https://github.com/actions/go-versions/releases/download/1.27.0-32325163857/go-1.27.0-linux-x64.tar.gz` |
+| prometheus/prometheus | `fuzzing.yml` | pass | — |
+| prometheus/prometheus | `govulncheck.yml` | pass | — |
 | prometheus/prometheus | `lock.yml` | expected failure | `dessant/lock-threads` — no secret named `PROMBOT_LOCKTHREADS_TOKEN` _(needs a repository secret)_ |
 | prometheus/prometheus | `prombench.yml` | pass | — |
-| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container 6276efb5b29d16b854e881d4f50cb8114d5cccb26add61e86489c8b01196a7fb is not running` |
-| prometheus/prometheus | `scorecards.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/28 18:09:41 scorecard had an error: repo unreachable: GET https://api.github.com/repos/prometheus/prometheus: 401 Bad credentials []` |
-| prometheus/prometheus | `stale.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials - https://docs.github.com/rest` |
-| python/cpython | `add-issue-header.yml` | **fail** | `actions/github-script` — step exited with status 1 · `}` |
-| python/cpython | `lint.yml` | **fail** | `j178/prek-action` — step exited with status 1 · `Using prek cache dir /root/.cache/prek` |
+| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container d621525cccf860640cd1c2203bd7d6a75ae248510b7ecb884a191ca68e97aaa8 is not running` |
+| prometheus/prometheus | `scorecards.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-28T20:37:30Z","repo":{"name":"github.com/prometheus/prometheus","commit":"342884f747d6db5b79fc46a96b9892bea9ac7103"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc6…` |
+| prometheus/prometheus | `stale.yml` | pass | — |
+| python/cpython | `add-issue-header.yml` | **fail** | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: issue_data.labels is not iterable` |
+| python/cpython | `lint.yml` | **fail** | `j178/prek-action` — step exited with status 1 · `Error: prek exited with code 2` |
 | python/cpython | `mypy.yml` | **fail** | `astral-sh/setup-uv` — step exited with status 1 · `Error: ENOENT: no such file or directory, scandir 'null'` |
 | python/cpython | `new-bugs-announce-notifier.yml` | expected failure | `actions/github-script` — no secret named `MAILGUN_PYTHON_ORG_MAILGUN_KEY` _(needs a repository secret)_ |
 | python/cpython | `require-pr-label.yml` | **fail** | `mheap/github-action-required-labels` — step exited with status 1 · `Error: Not Found` |
-| python/cpython | `reusable-check-c-api-docs.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
-| python/cpython | `reusable-check-html-ids.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' \|\| :"` _(needs a git credential (the sweep is token-less))_ |
+| python/cpython | `reusable-check-c-api-docs.yml` | pass | — |
+| python/cpython | `reusable-check-html-ids.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 1` |
 | python/cpython | `reusable-cifuzz.yml` | **fail** | `Dockerfile` — unsafe action path `../../../build_fuzzers.Dockerfile`: every path component must be a normal name |
-| python/cpython | `reusable-context.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
+| python/cpython | `reusable-context.yml` | pass | — |
 | python/cpython | `reusable-docs.yml` | **fail** | `noop` — could not acquire the environment: docker pull failed: no matching manifest for linux/arm64/v8 in the manifest list entries |
 | python/cpython | `reusable-emscripten.yml` | **fail** | `noop` — could not acquire the environment: docker pull failed: no matching manifest for linux/arm64/v8 in the manifest list entries |
 | python/cpython | `reusable-install.yml` | **fail** | `noop` — could not acquire the environment: docker pull failed: no matching manifest for linux/arm64/v8 in the manifest list entries |
 | python/cpython | `reusable-san.yml` | **fail** | `noop` — could not acquire the environment: docker pull failed: no matching manifest for linux/arm64/v8 in the manifest list entries |
 | python/cpython | `reusable-wasi.yml` | **fail** | `noop` — could not acquire the environment: docker pull failed: no matching manifest for linux/arm64/v8 in the manifest list entries |
-| python/cpython | `stale.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials - https://docs.github.com/rest` |
-| python/cpython | `verify-ensurepip-wheels.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Download from "https://github.com/actions/python-versions/releases/download/3.14.7-31064857500/python-3.14.7-linux-24.04-x64.tar.gz"` |
+| python/cpython | `stale.yml` | pass | — |
+| python/cpython | `verify-ensurepip-wheels.yml` | pass | — |
 | python/cpython | `verify-expat.yml` | pass | — |
 | rails/rails | `check-markdown-api.yml` | pass | — |
 | rails/rails | `devcontainer-shellcheck.yml` | pass | — |
 | rails/rails | `devcontainer-smoke-test.yml` | **fail** | `docker/login-action` — step exited with status 1 · `Error: Unable to locate executable file: docker. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file m…` |
 | rails/rails | `labeler.yml` | pass | — |
-| rails/rails | `more-info-needed.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials - https://docs.github.com/rest` |
+| rails/rails | `more-info-needed.yml` | pass | — |
 | rails/rails | `rail_inspector.yml` | pass | — |
 | rails/rails | `rails-new-docker.yml` | pass | — |
 | rails/rails | `rails_releaser_tests.yml` | pass | — |
-| rails/rails | `release.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: Bad credentials` |
-| rails/rails | `stale.yml` | **fail** | `actions/stale` — step exited with status 1 · `Error: Getting issues was blocked by the error: Bad credentials - https://docs.github.com/rest` |
+| rails/rails | `release.yml` | **fail** | `rubygems/configure-rubygems-credentials` — step exited with status 1 · `Error: Error message: Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable` |
+| rails/rails | `stale.yml` | pass | — |
 | rust-lang/cargo | `audit.yml` | not lowered | `continue_on_error.expression` |
 | rust-lang/cargo | `contrib.yml` | **fail** | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /artifact.tar. No artifacts will be uploaded.` |
 | rust-lang/cargo | `release.yml` | pass | — |
 | sharkdp/bat | `require-changelog-for-PRs.yml` | pass | — |
-| tokio-rs/tokio | `audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (7)] exec /entrypoint.sh failed: Permission denied` |
+| tokio-rs/tokio | `audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (6)] exec /entrypoint.sh failed: Permission denied` |
 | tokio-rs/tokio | `labeler.yml` | pass | — |
 | tokio-rs/tokio | `loom.yml` | pass | — |
 | tokio-rs/tokio | `pr-audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (7)] exec /entrypoint.sh failed: Permission denied` |
@@ -300,7 +305,7 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | vercel/next.js | `automated_code_review.yml` | not lowered | — |
 | vercel/next.js | `code_freeze.yml` | pass | — |
 | vercel/next.js | `create_release_branch.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
-| vercel/next.js | `issue_lock.yml` | **fail** | `dessant/lock-threads` — step exited with status 1 |
+| vercel/next.js | `issue_lock.yml` | **fail** | `dessant/lock-threads` — step exited with status 1 · `Error: Must have admin rights to Repository.` |
 | vercel/next.js | `issue_reopen.yml` | pass | — |
 | vercel/next.js | `issue_stale.yml` | expected failure | `actions/stale` — no secret named `STALE_TOKEN` _(needs a repository secret)_ |
 | vercel/next.js | `issue_wrong_template.yml` | pass | — |
@@ -312,7 +317,7 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | vercel/next.js | `retry_deploy_test.yml` | pass | — |
 | vercel/next.js | `retry_test.yml` | pass | — |
 | vercel/next.js | `rspack-update-tests-manifest.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
-| vercel/next.js | `sync_backport_canary_release.yml` | expected failure | `actions/checkout` — step exited with status 1 · `[command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://git…` _(needs a git credential (the sweep is token-less))_ |
+| vercel/next.js | `sync_backport_canary_release.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `test_e2e_project_reset_cron.yml` | expected failure | `actions/setup-node` — no secret named `VERCEL_ADAPTER_TEST_TOKEN` _(needs a repository secret)_ |
 | vercel/next.js | `test_examples.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.node-version does not exist` |
 | vercel/next.js | `triage.yml` | pass | — |
