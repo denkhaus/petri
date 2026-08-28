@@ -194,6 +194,12 @@ fn prepare(graph: &mut Graph, repo_slug: &str, pin: Option<&String>, repo_root: 
         json!({"os": "Linux", "arch": "X64", "name": "petri-sweep"}),
     );
     graph.params.insert("vars".into(), json!({}));
+    // The corpus dir is the "repository" the substituted checkout materializes:
+    // a plain workflow tree, no `.git` — copied wholesale, offline.
+    graph.params.insert(
+        "petri".into(),
+        json!({ "repo": repo_root.display().to_string() }),
+    );
 }
 
 /// `corpus-pins.txt`: `owner/repo <sha>` per line — the commit each corpus
@@ -247,6 +253,7 @@ async fn run_one(
         .step(github_actions::RunStep)
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
+        .step(github_actions::CheckoutStep)
         .capability(ActionSourceCap(trees))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", DUMMY_TOKEN)]));
 

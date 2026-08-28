@@ -76,11 +76,20 @@ pub fn runtime() -> Runtime {
     let trees: std::sync::Arc<dyn github::ActionTreeSource> = actions;
     let runners = frontend_gha::RunnerMap::builtin()
         .allow_list(&std::env::var("PETRI_RUNNER_LABELS").unwrap_or_default());
+    // `PETRI_REAL_CHECKOUT` (non-empty) turns the local-checkout substitution
+    // off: every `actions/checkout` stays the real action, credentials,
+    // network and all.
+    let substitute_checkout = !std::env::var("PETRI_REAL_CHECKOUT").is_ok_and(|v| !v.is_empty());
     Runtime::standard()
-        .frontend(frontend_gha::GitHubActions::with_actions(manifests).with_runners(runners))
+        .frontend(
+            frontend_gha::GitHubActions::with_actions(manifests)
+                .with_runners(runners)
+                .with_checkout_substitution(substitute_checkout),
+        )
         .step(github::RunStep)
         .step(github::ActionStep)
         .step(github::DockerActionStep)
+        .step(github::CheckoutStep)
         .capability(github::ActionSourceCap(trees))
         .run_services(|run_dir, caps| {
             match github_objects::ObjectService::start(run_dir.join("artifacts")) {

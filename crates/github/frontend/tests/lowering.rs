@@ -448,6 +448,7 @@ jobs:
         &NoFiles,
         None,
         &configured,
+        true,
     );
     assert!(
         lowered.graph.is_some(),
@@ -459,7 +460,7 @@ jobs:
     // explicit rejection.
     let partial = RunnerMap::builtin().allow_list("self-hosted linux");
     let text = "on: push\njobs:\n  j:\n    runs-on: [self-hosted, linux, x64]\n    steps:\n      - run: echo\n";
-    let lowered = load_configured(".github/workflows/test.yml", text, &NoFiles, None, &partial);
+    let lowered = load_configured(".github/workflows/test.yml", text, &NoFiles, None, &partial, true);
     assert!(lowered.graph.is_none());
     let diags = lowered.diagnostics.into_vec();
     let unknown: Vec<&frontend::Diagnostic> = diags
@@ -478,6 +479,7 @@ jobs:
         &NoFiles,
         None,
         &contradiction,
+        true,
     );
     let diags = lowered.diagnostics.into_vec();
     for code in ["unsupported.runs_on.windows", "unsupported.runs_on.macos"] {
@@ -605,7 +607,7 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.runs_on.expression",
         ),
         (
-            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n",
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-node@v4\n",
             "unsupported.action.remote",
         ),
         (
@@ -641,13 +643,13 @@ fn the_rejection_set_is_loud_and_specific() {
     }
     // The remote-action message names the action, for the histogram.
     let diags = diagnostics(
-        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n",
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-node@v4\n",
     );
     let d = diags
         .iter()
         .find(|d| d.code == "unsupported.action.remote")
         .unwrap();
-    assert!(d.message.contains("actions/checkout@v4"), "{}", d.message);
+    assert!(d.message.contains("actions/setup-node@v4"), "{}", d.message);
 }
 
 #[test]

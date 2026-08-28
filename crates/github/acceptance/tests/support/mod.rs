@@ -70,6 +70,7 @@ fn runtime(dir: &std::path::Path) -> Runtime {
         .step(github_actions::RunStep)
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
+        .step(github_actions::CheckoutStep)
 }
 
 /// Run on the standard runtime, which verifies replay itself.

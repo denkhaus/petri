@@ -75,6 +75,9 @@ sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.3"
 humantime = "2"
+# The local-checkout step materializes the workspace as one tarball: mode bits
+# and symlinks survive, and the environment extracts it with its own `tar`.
+tar = "0.4"
 # `preserve_order`: GHA matrix axes, object filters and outputs follow document
 # order, and a sorted map would silently reorder them.
 serde_json = { version = "1", features = ["preserve_order"] }

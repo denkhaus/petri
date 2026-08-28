@@ -372,7 +372,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let plans: Vec<Option<ActionPlan>> = job
             .steps
             .iter()
-            .map(|step| self.action_plan(step))
+            .map(|step| {
+                // A substituted checkout has no plan: the real action's `post`
+                // (credential cleanup) belongs to the action that never runs.
+                if self.substitutable_checkout(step).is_some() {
+                    return None;
+                }
+                self.action_plan(step)
+            })
             .collect();
 
         let mut previous = start;

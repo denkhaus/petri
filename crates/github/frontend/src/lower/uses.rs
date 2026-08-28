@@ -10,8 +10,8 @@ use ir::{BinOp, ExprId, NodeId, ScopeId, StepRef, UnOp, Value};
 use serde_json::{Map, json};
 
 use crate::action::{
-    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, DOCKER_ACTION_KIND, Phase,
-    PinnedAction, STATE_OUTPUT_KEY, unavailable_hint,
+    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DOCKER_ACTION_KIND,
+    Phase, PinnedAction, STATE_OUTPUT_KEY, unavailable_hint,
 };
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
@@ -611,6 +611,120 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
+    /// Is this step a supportable `actions/checkout` call — one the local
+    /// substitution can honor? `Some(path)` when it is, carrying the literal
+    /// `path:` when given. The rules, adopted from the plan (and act's
+    /// spelled-out-default rule): default inputs, plus a literal `path:`;
+    /// `fetch-depth`/`persist-credentials` accepted and ignored (local-clone
+    /// policy); a literal `repository:`/`ref:` *equal to the checkout's own*
+    /// still substitutes, since real workflows spell the default out. Anything
+    /// else — another repository, a non-matching or expression value,
+    /// `submodules:`, a `token:` — falls through to the real action, which
+    /// needs real credentials. No diagnostics: the fall-through is the design.
+    pub(super) fn substitutable_checkout(&self, step: &Step<'_>) -> Option<Option<String>> {
+        if !self.substitute_checkout {
+            return None;
+        }
+        let (reference, _) = step.uses.as_ref()?;
+        let Uses::Remote(name) = composite::classify(reference) else {
+            return None;
+        };
+        let bare = name.split('@').next().unwrap_or(&name);
+        if bare != "actions/checkout" {
+            return None;
+        }
+        let mut path = None;
+        for (key, node) in lowercased_with(step) {
+            // Only whole literal values qualify; any expression falls through.
+            let literal = node
+                .as_str()
+                .filter(|text| !text.contains("${{"))
+                .map(str::to_string);
+            match key.as_str() {
+                "fetch-depth" | "persist-credentials" => {}
+                "path" => path = Some(literal?),
+                "repository" => {
+                    let own = self
+                        .github_identity
+                        .get("repository")
+                        .and_then(Value::as_str);
+                    if own.is_none() || literal.as_deref() != own {
+                        return None;
+                    }
+                }
+                "ref" => {
+                    let matches = [
+                        self.github_identity.get("ref").and_then(Value::as_str),
+                        self.github_identity.get("ref_name").and_then(Value::as_str),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|own| literal.as_deref() == Some(own));
+                    if !matches {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(path)
+    }
+
+    /// The `github/checkout` node a substitutable call becomes: source is the
+    /// host-filled `petri.repo` run parameter, resolved at firing — a run
+    /// whose host filled nothing fails the step routably, never the lowering.
+    fn checkout_node(
+        &mut self,
+        context: ActionContext<'_, 'a, '_>,
+        earlier: &[String],
+    ) -> Vec<NodeId> {
+        let ActionContext {
+            job,
+            step,
+            scope,
+            site,
+            job_secret_env: _,
+        } = context;
+        let path = self
+            .substitutable_checkout(step)
+            .expect("checked by the caller")
+            .filter(|p| !p.is_empty());
+        let mut step_site = site.clone();
+        step_site.earlier_steps = earlier.to_vec();
+        let node_name = format!("{}{SEP}{}", site.job_id, step.node_name());
+
+        let source = {
+            let t = self.b.exprs();
+            let petri = t.var("petri");
+            let key = t.lit("repo");
+            t.call("get_ci", vec![petri, key])
+        };
+        let mut config = Map::new();
+        config.insert(
+            "source".into(),
+            json!({ EXPR_PLACEHOLDER_KEY: source.raw() }),
+        );
+        if let Some(path) = path {
+            config.insert("path".into(), json!(path));
+        }
+        if step
+            .continue_on_error
+            .and_then(|coe| coe.as_scalar().and_then(|s| s.as_bool()))
+            == Some(true)
+        {
+            config.insert("soft_fail".into(), json!(true));
+        }
+        let id = self.b.add_node(
+            &node_name,
+            scope,
+            StepRef::new(CHECKOUT_KIND, Value::Object(config)),
+        );
+        self.spans.insert(id, step.span.clone());
+        self.set_step_budget(id, job, step);
+        self.gate_main_node(id, step, &step_site);
+        vec![id]
+    }
+
     fn main_action_node(
         &mut self,
         context: ActionContext<'_, 'a, '_>,
@@ -680,6 +794,18 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 ),
             );
             return Vec::new();
+        }
+        if self.substitutable_checkout(step).is_some() {
+            return self.checkout_node(
+                ActionContext {
+                    job,
+                    step,
+                    scope,
+                    site,
+                    job_secret_env,
+                },
+                earlier,
+            );
         }
         // Inside a composite, plans are not precomputed: a `docker://` step
         // builds its plan inline, and a manifest-backed action builds one from
@@ -985,5 +1111,13 @@ fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
             default: input.default.and_then(scalar_text_opt),
             required: input.required,
         })
+        .collect()
+}
+
+/// A step's `with:` keys lowercased, as GitHub matches inputs.
+fn lowercased_with<'n>(step: &Step<'n>) -> BTreeMap<String, Node<'n>> {
+    step.with
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), *v))
         .collect()
 }

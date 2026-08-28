@@ -13,6 +13,7 @@
 //! ([`ActionSourceCap`]) to stage the tree at run time.
 
 mod action;
+mod checkout;
 pub mod commands;
 pub mod config;
 mod docker;
@@ -24,9 +25,12 @@ pub mod session;
 pub mod source;
 
 pub use action::{ActionSourceCap, ActionStep, ActionTreeSource};
+pub use checkout::CheckoutStep;
 pub use docker::DockerActionStep;
 pub use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
-pub use frontend_gha::{ACTION_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY};
+pub use frontend_gha::{
+    ACTION_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
+};
 pub use results::ResultsServiceCap;
 pub use run::RunStep;
 pub use source::{GitActionSource, default_cache_dir};

@@ -81,7 +81,9 @@ use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 use serde_json::Value;
 use smol_str::SmolStr;
 
-pub use action::{ACTION_KIND, ActionSource, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY};
+pub use action::{
+    ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
+};
 pub use runners::RunnerMap;
 
 /// Parse and lower a workflow file, with no source for `uses: owner/repo@ref`
@@ -99,17 +101,21 @@ pub fn load_with(
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
 ) -> Lowered {
-    load_configured(file, text, files, actions, &RunnerMap::builtin())
+    load_configured(file, text, files, actions, &RunnerMap::builtin(), true)
 }
 
 /// [`load_with`], with the host's [`RunnerMap`] deciding which `runs-on` labels
-/// place on this machine.
+/// place on this machine, and the local-checkout switch:
+/// `substitute_checkout` turns supportable `actions/checkout` calls into the
+/// `github/checkout` step ([`CHECKOUT_KIND`]) — on in the shipped
+/// configuration, off for a host that wants the real action every time.
 pub fn load_configured(
     file: &str,
     text: &str,
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
     runners: &RunnerMap,
+    substitute_checkout: bool,
 ) -> Lowered {
     let mut diags = Diagnostics::new();
     let Some(doc) = frontend::yaml::Document::parse(file, text, &mut diags) else {
@@ -118,7 +124,14 @@ pub fn load_configured(
     let Some(workflow) = model::read(&doc, &mut diags) else {
         return Lowered::rejected(diags);
     };
-    lower::lower(&workflow, files, actions, runners, diags)
+    lower::lower(
+        &workflow,
+        files,
+        actions,
+        runners,
+        substitute_checkout,
+        diags,
+    )
 }
 
 /// GitHub Actions, as a [`Frontend`]: it claims anything under `.github/workflows/`.
@@ -127,10 +140,20 @@ pub fn load_configured(
 /// rejects actions from other repositories; with one, those resolve at load time.
 /// The [`RunnerMap`] starts as the built-in `ubuntu-*` labels;
 /// [`Self::with_runners`] installs the host's configuration.
-#[derive(Default)]
 pub struct GitHubActions {
     actions: Option<Arc<dyn ActionSource>>,
     runners: RunnerMap,
+    substitute_checkout: bool,
+}
+
+impl Default for GitHubActions {
+    fn default() -> Self {
+        Self {
+            actions: None,
+            runners: RunnerMap::default(),
+            substitute_checkout: true,
+        }
+    }
 }
 
 impl GitHubActions {
@@ -143,13 +166,20 @@ impl GitHubActions {
     pub fn with_actions(actions: Arc<dyn ActionSource>) -> Self {
         Self {
             actions: Some(actions),
-            runners: RunnerMap::builtin(),
+            ..Self::default()
         }
     }
 
     /// The host's runner-label map: which `runs-on` labels place here.
     pub fn with_runners(mut self, runners: RunnerMap) -> Self {
         self.runners = runners;
+        self
+    }
+
+    /// The local-checkout off-switch: `false` keeps every `actions/checkout`
+    /// the real action, credentials, network and all.
+    pub fn with_checkout_substitution(mut self, substitute: bool) -> Self {
+        self.substitute_checkout = substitute;
         self
     }
 }
@@ -171,7 +201,14 @@ impl Frontend for GitHubActions {
     }
 
     fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered {
-        load_configured(file, text, files, self.actions.as_deref(), &self.runners)
+        load_configured(
+            file,
+            text,
+            files,
+            self.actions.as_deref(),
+            &self.runners,
+            self.substitute_checkout,
+        )
     }
 
     /// The `github`, `runner` and `vars` contexts a runner would supply.
@@ -222,6 +259,13 @@ impl Frontend for GitHubActions {
                 }),
             ),
             (SmolStr::new("vars"), serde_json::json!({})),
+            // Host facts for petri's own step kinds, not a GitHub context:
+            // where the run's repository lives, for the `github/checkout`
+            // substitute to materialize the workspace from.
+            (
+                SmolStr::new("petri"),
+                serde_json::json!({ "repo": repo.display().to_string() }),
+            ),
         ]
     }
 

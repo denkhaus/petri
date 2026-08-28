@@ -53,6 +53,24 @@ as JavaScript actions' phases; `with:` inputs with declared defaults; step ids
 and `steps.<id>.outputs`. A missing required action input warns and runs, as
 GitHub's runner does.
 
+**Local checkout.** A supportable `actions/checkout` call substitutes at
+lowering for the `github/checkout` step: the workspace materializes from the
+run's own repository — the committed HEAD as a depth-1 local clone, plus the
+uncommitted tracked diff and the untracked-but-not-ignored files, `.git` and
+mode bits included — offline and token-less, in host and containerized jobs
+alike. *The tree you have*, which is what a local run should test, and a
+deliberate delta from GitHub (which fetches the pushed commit). Supportable
+means: default inputs, plus a literal `path:`; `fetch-depth` and
+`persist-credentials` accepted and ignored (local-clone policy); a literal
+`repository:`/`ref:` equal to the checkout's own still substitutes, since real
+workflows spell the default out. Anything else — another repository, an
+expression or non-matching value, `submodules:`, a `token:` — falls through to
+the real action, which run identity (`github.sha` from HEAD) makes work for
+pushed state given a credential. The substitution is lowering-visible, never a
+silent runtime intercept, and `PETRI_REAL_CHECKOUT` (or
+`with_checkout_substitution(false)`) turns it off. A repository root without
+`.git` materializes as a plain tree copy.
+
 **Reusable workflows.** A `uses:` job calls another workflow — local
 (`./.github/workflows/x.yml`, or GitHub's `$/` same-repository shorthand) or
 pinned remote (`owner/repo/.github/workflows/x.yml@ref`, fetched through the

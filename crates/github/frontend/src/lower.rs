@@ -54,6 +54,9 @@ pub struct Lowering<'w, 'a> {
     actions: Option<&'w dyn ActionSource>,
     /// Which `runs-on` labels place on this machine.
     runners: &'w RunnerMap,
+    /// Whether a supportable `actions/checkout` call becomes `github/checkout`
+    /// (the local-checkout substitution) instead of running the real action.
+    substitute_checkout: bool,
     /// Remote actions resolved so far, by reference as written: the pin and the
     /// manifest text, or why not. A reference used by several steps resolves once.
     resolved: HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
@@ -206,6 +209,7 @@ pub fn lower(
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
     runners: &RunnerMap,
+    substitute_checkout: bool,
     mut diags: Diagnostics,
 ) -> Lowered {
     // Reusable workflows first: every callee fetched, parsed and cycle-checked
@@ -232,6 +236,7 @@ pub fn lower(
         files,
         actions,
         runners,
+        substitute_checkout,
         resolved: HashMap::new(),
         jobs: HashMap::new(),
         spans: HashMap::new(),

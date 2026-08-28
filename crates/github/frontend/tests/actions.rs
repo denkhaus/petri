@@ -57,14 +57,14 @@ fn chain(graph: &ir::Graph) -> Vec<&str> {
 
 #[test]
 fn a_node_action_lowers_to_a_main_node_and_a_trailing_post_node() {
-    let source = MapActionSource::new().with("actions/checkout@v4", TEST_SHA, CHECKOUT);
+    let source = MapActionSource::new().with("octo/tool@v4", TEST_SHA, CHECKOUT);
     let text = r#"
 on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: octo/tool@v4
         with:
           fetch-depth: 0
       - run: echo hi
@@ -84,7 +84,7 @@ jobs:
     let config = &main.step.config;
     assert_eq!(config["entry"], "dist/index.js");
     assert_eq!(config["action"]["sha"], TEST_SHA);
-    assert_eq!(config["action"]["reference"]["owner"], "actions");
+    assert_eq!(config["action"]["reference"]["owner"], "octo");
     assert_eq!(config["action"]["reference"]["ref"], "v4");
     // The caller's value wins over the default; a number is passed as text.
     assert_eq!(config["inputs"]["fetch-depth"], "0");
@@ -125,7 +125,7 @@ jobs:
 fn pre_nodes_come_first_and_post_nodes_last_in_reverse() {
     let source = MapActionSource::new()
         .with("acme/prepost@v1", TEST_SHA, WITH_PRE)
-        .with("actions/checkout@v4", TEST_SHA, CHECKOUT);
+        .with("octo/tool@v4", TEST_SHA, CHECKOUT);
     let text = r#"
 on: push
 jobs:
@@ -136,7 +136,7 @@ jobs:
       - id: a
         uses: acme/prepost@v1
       - id: b
-        uses: actions/checkout@v4
+        uses: octo/tool@v4
 "#;
     let graph = lower(text, &source).graph.expect("lowers");
     assert_eq!(
@@ -247,7 +247,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: octo/tool@v4
 "#;
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
     assert!(lowered.graph.is_none());
@@ -295,7 +295,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: octo/tool@v4
 "#;
     for (reason, code, wants) in [
         (None, "action.remote", "refreshing it"),

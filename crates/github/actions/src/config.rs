@@ -49,6 +49,27 @@ pub struct RunConfig {
     pub event: Value,
 }
 
+/// `github/checkout`: the local-checkout substitute — the workspace
+/// materializes from the run's own repository.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutConfig {
+    /// The repository's host path, from the `petri.repo` run parameter. A run
+    /// whose host filled nothing resolves to null — the step fails routably.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The `path:` input: destination relative to `GITHUB_WORKSPACE`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The step's condition, as the frontend's gate tree; see [`RunConfig`].
+    #[serde(default)]
+    pub gate: Option<Value>,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
+    pub soft_fail: SoftFail,
+}
+
 /// `github/action`: one phase of a JavaScript action.
 #[derive(Debug)]
 pub struct ActionConfig {

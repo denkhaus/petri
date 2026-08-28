@@ -25,6 +25,13 @@ pub const ACTION_KIND: &str = "github/action";
 /// invocation, run against the daemon through the scope's container runner.
 pub const DOCKER_ACTION_KIND: &str = "github/docker_action";
 
+/// The step kind a supportable `actions/checkout` call substitutes to: the
+/// workspace materializes from the run's own local repository — offline,
+/// token-less, the tree you have. A lowering-visible substitution, never a
+/// silent runtime intercept; anything the substitution cannot honor falls
+/// through to the real action.
+pub const CHECKOUT_KIND: &str = "github/checkout";
+
 /// The key under which an action node's output carries the state its `pre` or
 /// `main` saved (`GITHUB_STATE`, `::save-state::`), for the phases after it.
 pub const STATE_OUTPUT_KEY: &str = "github.state";

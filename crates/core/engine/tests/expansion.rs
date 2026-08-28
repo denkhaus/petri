@@ -378,6 +378,11 @@ fn two_expansions_in_one_cascade_get_distinct_ids() {
     assert_eq!(h.start_count("a"), 2);
     assert_eq!(h.start_count("z"), 3);
     for (index, node) in h.state.graph.nodes.iter().enumerate() {
-        assert_eq!(node.id.index(), index, "node `{}` sits at its id", node.name);
+        assert_eq!(
+            node.id.index(),
+            index,
+            "node `{}` sits at its id",
+            node.name
+        );
     }
 }

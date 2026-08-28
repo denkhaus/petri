@@ -198,15 +198,29 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         let _ = tokio::time::timeout(DRAIN_LIMIT, drain).await;
     }
 
-    let mut output = match read_outputs(&*ctx.env, &output_rel_path).await {
+    let output = match read_outputs(&*ctx.env, &output_rel_path).await {
         Ok(output) => output,
         Err(message) => return Err(fail(BAD_OUTPUT_CLASS, message)),
     };
 
-    Ok(match ending {
+    Ok(ending_outcome(ending, &config.soft_fail, output))
+}
+
+/// Fold an [`Ending`] into the step's outcome: the exit status into the output
+/// as `exit_status`, natural endings through `soft_fail`, a ladder-stopped
+/// process to `Cancelled` with its `cancel_escalation`.
+///
+/// Public for the same reason [`ladder`] is: every step kind that waits on a
+/// process reports what happened through this one contract.
+pub fn ending_outcome(
+    ending: Ending,
+    soft_fail: &SoftFail,
+    mut output: Map<String, Value>,
+) -> Outcome {
+    match ending {
         Ending::Natural(status) => {
             output.insert("exit_status".into(), exit_value(&status));
-            natural_outcome(&status, &config.soft_fail, Value::Object(output))
+            natural_outcome(&status, soft_fail, Value::Object(output))
         }
         Ending::Signalled {
             escalation,
@@ -223,7 +237,7 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
             );
             Outcome::new(Status::Cancelled, Value::Object(output))
         }
-    })
+    }
 }
 
 /// How a waited-on process ended: naturally, or because the ladder stopped it.
