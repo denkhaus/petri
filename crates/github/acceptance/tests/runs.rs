@@ -1,7 +1,9 @@
 //! The corpus run sweep: every in-scope workflow that lowers, run end to end,
-//! `run:` scripts stubbed to `true`, `uses:` steps real, every host scope
-//! rewritten to a pinned runner container so corpus code never executes on the
-//! host. Writes `crates/github/corpus/RUNS.md` — the run-time REPORT.md.
+//! `run:` scripts stubbed to `true` (builds are out of budget and off the
+//! metric), `uses:` steps real over the corpus's pinned source trees, every
+//! host scope rewritten to a pinned runner container so corpus code never
+//! executes on the host. Writes `crates/github/corpus/RUNS.md` — the run-time
+//! REPORT.md.
 //!
 //! Opt-in like the snapshot refresh: it needs the network (action fetches, real
 //! checkouts) and a Docker daemon, and a full pass runs hundreds of containers.
@@ -27,8 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acceptance::runs::{
-    self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_reason,
-    identity_of, runs_report, step_identities,
+    self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_from_tail,
+    expected_reason, identity_of, runs_report, step_identities,
 };
 use acceptance::{Class, corpus_present, lower_one, workflows};
 use github_actions::{ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource};
@@ -336,13 +338,15 @@ fn first_failure(
         let identity = identity_of(identities, &record.name)
             .cloned()
             .unwrap_or_else(|| StepIdentity::Other(record.name.to_string()));
-        let expected = expected_reason(&identity, &class, !sweep_token().is_empty());
+        let tail = log_tail(report, record.firing);
+        let expected = expected_reason(&identity, &class, !sweep_token().is_empty())
+            .or_else(|| expected_from_tail(&identity, &tail));
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),
             step: identity.label(),
             class,
             message,
-            tail: log_tail(report, record.firing),
+            tail,
             expected,
         });
     }

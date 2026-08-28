@@ -7,9 +7,12 @@
 //! artifact/cache backends, cross-job flow. Three transforms put a lowered
 //! graph into sweep shape:
 //!
-//! - [`stub_run_scripts`]: every `run:` script becomes `true`. The corpus holds
-//!   workflow files only — no sources, no `.git` — so real builds are impossible
-//!   and beside the point; `uses:` steps stay real.
+//! - [`stub_run_scripts`]: every `run:` script becomes `true`. Real builds are
+//!   out of the sweep's budget and beside its point — the metric is the
+//!   runtime-tier surface, not the corpus projects' own builds — and `uses:`
+//!   steps stay real. (The corpus fetch clones each repo's sources at the pin
+//!   where the size cap allows, so version-file reads, local actions and
+//!   git-dependent actions are real; only *build outputs* stay impossible.)
 //! - [`containerize`]: every host scope is rewritten to a pinned runner image
 //!   ([`battery_image`]), so corpus code never executes on the host.
 //! - [`cap_expansions`]: every matrix is capped to its first leg. The metric is
@@ -315,6 +318,25 @@ pub fn expected_reason(
         .iter()
         .find(|(action, _)| action == bare)
         .map(|(_, why)| why.to_string())
+}
+
+/// Why a first failure is expected based on what the step actually said —
+/// the second look, for classes only the log can name. One case today: an
+/// artifact upload of a *build output* (`dist/`, a bundle) that the sweep's
+/// stubbed `run:` scripts structurally never produce. Sources are real where
+/// the corpus fetched them; build outputs never are.
+pub fn expected_from_tail(identity: &StepIdentity, tail: &[String]) -> Option<String> {
+    let StepIdentity::Action { bare, .. } = identity else {
+        return None;
+    };
+    if bare.ends_with("upload-artifact")
+        && tail
+            .iter()
+            .any(|line| line.contains("No files were found with the provided path"))
+    {
+        return Some("uploads outputs a stubbed build never produced".to_string());
+    }
+    None
 }
 
 // ── The report ────────────────────────────────────────────────────────────
@@ -718,5 +740,31 @@ mod tests {
         assert!(identity_of(&identities, "build/step#2").is_some());
         assert!(identity_of(&identities, "build#0/step#11").is_some());
         assert!(identity_of(&identities, "build/other").is_none());
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    #[test]
+    fn stubbed_build_uploads_classify_from_the_tail() {
+        let upload = StepIdentity::Action {
+            bare: "actions/upload-artifact".to_string(),
+            cross_run: false,
+        };
+        let miss = vec![
+            "Error: No files were found with the provided path: dist/. No artifacts will be \
+             uploaded."
+                .to_string(),
+        ];
+        assert!(expected_from_tail(&upload, &miss).is_some());
+        // Any other upload failure stays a gap; so does the same tail elsewhere.
+        assert!(expected_from_tail(&upload, &["ECONNREFUSED".to_string()]).is_none());
+        let other = StepIdentity::Action {
+            bare: "actions/setup-node".to_string(),
+            cross_run: false,
+        };
+        assert!(expected_from_tail(&other, &miss).is_none());
     }
 }
