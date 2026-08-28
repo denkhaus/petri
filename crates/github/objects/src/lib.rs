@@ -26,16 +26,14 @@
 
 mod cache;
 mod http;
+mod index;
 mod store;
 mod token;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-
-pub use cache::{CacheEntry, CacheStore, DEFAULT_BUDGET};
-pub use store::Artifact;
 
 /// The persistent store root — the host-scoped half of the object world: the
 /// cache entries and the tool cache, owned by one root so one component prunes
@@ -55,6 +53,19 @@ pub fn default_store_dir() -> PathBuf {
             .join("store");
     }
     std::env::temp_dir().join("petri-store")
+}
+
+/// The cache half of a store root — where [`ObjectService::start`] expects its
+/// cache store. The layout under the root is this crate's to own, so the
+/// pruner that spans both halves has one authority to consult.
+pub fn cache_dir(store: &Path) -> PathBuf {
+    store.join("cache")
+}
+
+/// The tool-cache half of a store root, for this machine's OS. The toolkit's
+/// own layout has no OS segment, so the store splits per OS above it.
+pub fn tool_cache_dir(store: &Path) -> PathBuf {
+    store.join("toolcache").join(std::env::consts::OS)
 }
 
 /// A running object service: listener, token, stores. Drop tears it down.

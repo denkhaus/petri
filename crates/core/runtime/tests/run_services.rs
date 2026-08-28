@@ -11,7 +11,7 @@ use runtime::ir::{GraphBuilder, RunStatus, ScopeId};
 use runtime::{RunOptions, Runtime};
 
 /// The capability a provisioned service hands the run.
-struct ProbeCap(&'static str);
+struct ProbeCap;
 
 /// The "service": alive until the driver drops it.
 struct ProbeGuard(Arc<AtomicBool>);
@@ -39,7 +39,7 @@ async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
             assert_eq!(run_dir, seen_dir, "the provisioner sees the run dir");
             counter.fetch_add(1, Ordering::SeqCst);
             (
-                caps.provide(ProbeCap("alive")),
+                caps.provide(ProbeCap),
                 Some(Box::new(ProbeGuard(Arc::clone(&flag))) as _),
             )
         });
@@ -61,6 +61,6 @@ async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
     );
     // The capability type itself is exercised end to end by the GitHub
     // component's batteries; here the seam's mechanics are the subject.
-    let _ = ProbeCap("type is registered");
+    let _ = ProbeCap;
     let _ = std::fs::remove_dir_all(&dir);
 }

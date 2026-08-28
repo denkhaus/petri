@@ -32,6 +32,12 @@ pub const DOCKER_ACTION_KIND: &str = "github/docker_action";
 /// through to the real action.
 pub const CHECKOUT_KIND: &str = "github/checkout";
 
+/// The run-parameter context and key naming the run's repository root:
+/// the host fills `petri.repo`, and a [`CHECKOUT_KIND`] node's config reads
+/// it back at firing. One spelling, shared by writer and reader.
+pub const REPO_PARAM_CONTEXT: &str = "petri";
+pub const REPO_PARAM_KEY: &str = "repo";
+
 /// The key under which an action node's output carries the state its `pre` or
 /// `main` saved (`GITHUB_STATE`, `::save-state::`), for the phases after it.
 pub const STATE_OUTPUT_KEY: &str = "github.state";

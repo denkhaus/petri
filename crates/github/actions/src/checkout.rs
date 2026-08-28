@@ -58,9 +58,12 @@ async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, St
     let Some(source) = config.source.as_deref().filter(|s| !s.is_empty()) else {
         return Err(StepFailure {
             class: CHECKOUT_CLASS,
-            message: "no local repository is configured for this run — the host fills the \
-                      `petri.repo` run parameter from the workflow's repository root"
-                .into(),
+            message: format!(
+                "no local repository is configured for this run — the host fills the `{}.{}` \
+                 run parameter from the workflow's repository root",
+                frontend_gha::REPO_PARAM_CONTEXT,
+                frontend_gha::REPO_PARAM_KEY
+            ),
         });
     };
     let source = PathBuf::from(source);
@@ -97,8 +100,12 @@ async fn materialize(
         snapshot_repository(source, &clone, ctx).await?
     } else {
         // No history: a plain tree (the corpus case) copies wholesale.
-        copy_tree(source, &clone)
-            .map_err(|e| checkout_error(format!("could not copy `{}`: {e}", source.display())))?;
+        let (from, to) = (source.to_path_buf(), clone.clone());
+        blocking(move || {
+            copy_tree(&from, &to)
+                .map_err(|e| checkout_error(format!("could not copy `{}`: {e}", from.display())))
+        })
+        .await?;
         String::new()
     };
 
@@ -109,12 +116,16 @@ async fn materialize(
         Some(path) => format!("{REPO_DIR}/{}", path.trim_matches('/')),
         None => REPO_DIR.to_string(),
     };
-    let mut builder = tar::Builder::new(Vec::new());
-    builder.follow_symlinks(false);
-    let tarball = builder
-        .append_dir_all(&destination, &clone)
-        .and_then(|()| builder.into_inner())
-        .map_err(|e| checkout_error(format!("could not pack the snapshot: {e}")))?;
+    let clone_dir = clone.clone();
+    let tarball = blocking(move || {
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.follow_symlinks(false);
+        builder
+            .append_dir_all(&destination, &clone_dir)
+            .and_then(|()| builder.into_inner())
+            .map_err(|e| checkout_error(format!("could not pack the snapshot: {e}")))
+    })
+    .await?;
 
     let tar_rel = format!(".ci/checkout/{}.tar", ctx.firing.raw());
     ctx.env
@@ -137,44 +148,42 @@ async fn snapshot_repository(
     ctx: &mut StepCtx,
 ) -> Result<String, StepFailure> {
     let url = format!("file://{}", source.display());
-    git(
-        None,
-        &[
-            "clone",
-            "--depth",
-            "1",
-            "--quiet",
-            "--",
-            &url,
-            &clone.display().to_string(),
-        ],
-    )
-    .await?;
+    let clone_arg = clone.display().to_string();
+    let clone_args = ["clone", "--depth", "1", "--quiet", "--", &url, &clone_arg];
+    // The clone and the status walk read the source independently; only the
+    // overlay needs both.
+    let (_, porcelain) = tokio::try_join!(
+        git(None, &clone_args),
+        git(
+            Some(source),
+            &["status", "--porcelain", "-z", "--untracked-files=all"],
+        ),
+    )?;
 
     // The dirty overlay: worktree truth wins, path by path.
-    let porcelain = git(
-        Some(source),
-        &["status", "--porcelain", "-z", "--untracked-files=all"],
-    )
-    .await?;
-    let mut copied = 0usize;
-    for entry in porcelain_paths(porcelain.as_bytes()) {
-        let from = source.join(&entry);
-        let to = clone.join(&entry);
-        if from.symlink_metadata().is_ok() {
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)
+    let (source_dir, clone_dir) = (source.to_path_buf(), clone.to_path_buf());
+    let copied = blocking(move || {
+        let mut copied = 0usize;
+        for entry in porcelain_paths(porcelain.as_bytes()) {
+            let from = source_dir.join(&entry);
+            let to = clone_dir.join(&entry);
+            if from.symlink_metadata().is_ok() {
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| checkout_error(format!("overlay `{entry}`: {e}")))?;
+                }
+                let _ = std::fs::remove_file(&to);
+                copy_entry(&from, &to)
                     .map_err(|e| checkout_error(format!("overlay `{entry}`: {e}")))?;
+                copied += 1;
+            } else {
+                // Deleted in the working tree: deleted in the snapshot.
+                let _ = std::fs::remove_file(&to);
             }
-            let _ = std::fs::remove_file(&to);
-            copy_entry(&from, &to)
-                .map_err(|e| checkout_error(format!("overlay `{entry}`: {e}")))?;
-            copied += 1;
-        } else {
-            // Deleted in the working tree: deleted in the snapshot.
-            let _ = std::fs::remove_file(&to);
         }
-    }
+        Ok(copied)
+    })
+    .await?;
     if copied > 0 {
         ctx.log(
             LogStream::Stdout,
@@ -252,21 +261,19 @@ async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure
         })
         .await
         .map_err(|e| checkout_error(format!("could not run `tar`: {e}")))?;
-    if let Some(mut lines) = handle.lines() {
-        let logs = ctx.logs.clone();
-        tokio::spawn(async move {
-            while let Some(line) = lines.recv().await {
-                let _ = logs
-                    .send(ir::StepEvent::Log {
-                        stream: line.stream,
-                        line: line.line,
-                    })
-                    .await;
-            }
-        });
-    }
+    let _ = crate::session::forward_lines(handle.lines(), ctx.logs.clone());
     let grace = ctx.env.grace();
     Ok(ladder(&mut *handle, &mut ctx.control, grace).await)
+}
+
+/// Filesystem-heavy snapshot work runs on the blocking pool, not this
+/// worker thread — a large tree walk must not stall the runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, StepFailure> + Send + 'static,
+) -> Result<T, StepFailure> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| Err(checkout_error(format!("a snapshot task failed: {e}"))))
 }
 
 async fn git(dir: Option<&Path>, args: &[&str]) -> Result<String, StepFailure> {
@@ -274,6 +281,9 @@ async fn git(dir: Option<&Path>, args: &[&str]) -> Result<String, StepFailure> {
     if let Some(dir) = dir {
         command.arg("-C").arg(dir);
     }
+    // Never prompt, as the action source's git runner never prompts: a path
+    // that unexpectedly needs credentials fails fast instead of hanging.
+    command.env("GIT_TERMINAL_PROMPT", "0");
     let output = command
         .args(args)
         .kill_on_drop(true)

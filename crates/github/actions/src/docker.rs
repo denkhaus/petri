@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use executor::{ContainerImage, OneShotContainer};
 use frontend_gha::action::validate_relative_action_path;
 use frontend_gha::exprs::has_hashfiles_sentinel;
-use ir::{Outcome, StepEvent, Value};
+use ir::{Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder, parse_outputs};
@@ -109,6 +109,10 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
     for (key, value) in session.env_rooted(&ctx.node, &root) {
         env.entry(key).or_insert(value);
     }
+    // A one-shot container runs no shell prologue, so the tool cache is the
+    // static per-run directory rather than the prologue's resolution.
+    env.entry(SmolStr::new("RUNNER_TOOL_CACHE"))
+        .or_insert_with(|| SmolStr::new(crate::session::workspace_tool_cache(&root)));
     env.insert(
         SmolStr::new("GITHUB_ACTION_REPOSITORY"),
         SmolStr::new(repository),
@@ -174,22 +178,7 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
     let sink = CommandSink::new(ctx.logs.clone(), ctx.secrets.masker(), allow_unsecure);
     let collected = sink.effects();
     let sink_task = tokio::spawn(sink.run(rx));
-    let drain = handle.lines().map(|mut lines| {
-        tokio::spawn(async move {
-            while let Some(line) = lines.recv().await {
-                if tx
-                    .send(StepEvent::Log {
-                        stream: line.stream,
-                        line: line.line,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        })
-    });
+    let drain = crate::session::forward_lines(handle.lines(), tx);
 
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;

@@ -7,7 +7,6 @@
 mod support;
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use acceptance::runs::RUNNER_IMAGE_2404;
 use serde_json::json;
@@ -24,23 +23,6 @@ impl Fixture {
             .join(format!("{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create the fixture dir");
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "petri")
-                .env("GIT_AUTHOR_EMAIL", "petri@test")
-                .env("GIT_COMMITTER_NAME", "petri")
-                .env("GIT_COMMITTER_EMAIL", "petri@test")
-                .output()
-                .expect("git runs");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
         std::fs::write(dir.join("a.txt"), "committed\n").expect("write");
         std::fs::write(dir.join(".gitignore"), "*.log\n").expect("write");
         std::fs::write(dir.join("script.sh"), "#!/bin/sh\necho ran-script\n").expect("write");
@@ -53,9 +35,7 @@ impl Fixture {
             )
             .expect("chmod");
         }
-        git(&["init", "--quiet", "-b", "main"]);
-        git(&["add", "."]);
-        git(&["commit", "--quiet", "-m", "fixture"]);
+        commit_fixture(&dir);
         // The tree you have: a dirty tracked edit, an untracked file, an
         // ignored file that must never travel.
         std::fs::write(dir.join("a.txt"), "dirty-edit\n").expect("write");
@@ -131,7 +111,7 @@ async fn run_checkout(label: &str, container: Option<&str>) {
 /// Host job, no action source configured — the substitution is offline.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_checkout_materializes_the_tree_you_have() {
-    if !git_ready() {
+    if !tool_ready("git") {
         return;
     }
     run_checkout("host", None).await;
@@ -140,22 +120,11 @@ async fn local_checkout_materializes_the_tree_you_have() {
 /// The same tree in a containerized job, streamed through the workspace.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_checkout_reaches_containerized_jobs() {
-    if !git_ready() {
+    if !tool_ready("git") {
         return;
     }
     if !testkit::docker_ready().await {
         return;
     }
     run_checkout("boxed", Some(RUNNER_IMAGE_2404)).await;
-}
-
-fn git_ready() -> bool {
-    let found = Command::new("git")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !found {
-        eprintln!("skipping: no `git` on PATH");
-    }
-    found
 }

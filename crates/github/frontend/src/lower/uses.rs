@@ -11,7 +11,7 @@ use serde_json::{Map, json};
 
 use crate::action::{
     ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DOCKER_ACTION_KIND,
-    Phase, PinnedAction, STATE_OUTPUT_KEY, unavailable_hint,
+    Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, STATE_OUTPUT_KEY, unavailable_hint,
 };
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
@@ -677,6 +677,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         &mut self,
         context: ActionContext<'_, 'a, '_>,
         earlier: &[String],
+        path: Option<String>,
     ) -> Vec<NodeId> {
         let ActionContext {
             job,
@@ -685,18 +686,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
             site,
             job_secret_env: _,
         } = context;
-        let path = self
-            .substitutable_checkout(step)
-            .expect("checked by the caller")
-            .filter(|p| !p.is_empty());
+        let path = path.filter(|p| !p.is_empty());
         let mut step_site = site.clone();
         step_site.earlier_steps = earlier.to_vec();
         let node_name = format!("{}{SEP}{}", site.job_id, step.node_name());
 
         let source = {
             let t = self.b.exprs();
-            let petri = t.var("petri");
-            let key = t.lit("repo");
+            let petri = t.var(REPO_PARAM_CONTEXT);
+            let key = t.lit(REPO_PARAM_KEY);
             t.call("get_ci", vec![petri, key])
         };
         let mut config = Map::new();
@@ -795,7 +793,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             );
             return Vec::new();
         }
-        if self.substitutable_checkout(step).is_some() {
+        if let Some(path) = self.substitutable_checkout(step) {
             return self.checkout_node(
                 ActionContext {
                     job,
@@ -805,6 +803,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     job_secret_env,
                 },
                 earlier,
+                path,
             );
         }
         // Inside a composite, plans are not precomputed: a `docker://` step

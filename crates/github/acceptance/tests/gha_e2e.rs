@@ -1021,13 +1021,7 @@ jobs:
 /// runs on.
 #[tokio::test]
 async fn hashfiles_conditions_read_the_workspace() {
-    if std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| !o.status.success())
-        .unwrap_or(true)
-    {
-        eprintln!("skipping: node is not on PATH");
+    if !tool_ready("node") {
         return;
     }
     let text = r#"

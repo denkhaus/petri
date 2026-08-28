@@ -91,17 +91,21 @@ fn exchange(port: u16, method: &str, target: &str, headers: &[(&str, &str)], bod
     Reply { status, body }
 }
 
-fn twirp(service: &ObjectService, method: &str, request: &Value) -> Reply {
+fn twirp_call(service: &ObjectService, api: &str, method: &str, request: &Value) -> Reply {
     exchange(
         service.port(),
         "POST",
-        &format!("/twirp/github.actions.results.api.v1.ArtifactService/{method}"),
+        &format!("/twirp/github.actions.results.api.v1.{api}/{method}"),
         &[
             ("Authorization", &format!("Bearer {}", service.token())),
             ("Content-Type", "application/json"),
         ],
         request.to_string().as_bytes(),
     )
+}
+
+fn twirp(service: &ObjectService, method: &str, request: &Value) -> Reply {
+    twirp_call(service, "ArtifactService", method, request)
 }
 
 /// Path+query out of a signed URL (the client uses it against the same host).
@@ -280,15 +284,8 @@ fn the_cache_lifecycle_round_trips_over_http() {
     let scratch = Scratch::new("cache");
     let service =
         ObjectService::start(scratch.0.join("artifacts"), scratch.0.join("cache")).expect("start");
-    let cache = |method: &str, request: &Value| {
-        exchange(
-            service.port(),
-            "POST",
-            &format!("/twirp/github.actions.results.api.v1.CacheService/{method}"),
-            &[("Authorization", &format!("Bearer {}", service.token()))],
-            request.to_string().as_bytes(),
-        )
-    };
+    let cache =
+        |method: &str, request: &Value| twirp_call(&service, "CacheService", method, request);
 
     // A miss first: ok false, status 200.
     let miss = cache(

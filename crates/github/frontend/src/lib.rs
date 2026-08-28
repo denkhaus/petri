@@ -82,7 +82,8 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 pub use action::{
-    ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, REPO_PARAM_CONTEXT,
+    REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
 };
 pub use runners::RunnerMap;
 
@@ -263,8 +264,8 @@ impl Frontend for GitHubActions {
             // where the run's repository lives, for the `github/checkout`
             // substitute to materialize the workspace from.
             (
-                SmolStr::new("petri"),
-                serde_json::json!({ "repo": repo.display().to_string() }),
+                SmolStr::new(REPO_PARAM_CONTEXT),
+                serde_json::json!({ REPO_PARAM_KEY: repo.display().to_string() }),
             ),
         ]
     }

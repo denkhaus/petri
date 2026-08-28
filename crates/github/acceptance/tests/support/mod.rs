@@ -4,9 +4,12 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use frontend_gha::load;
+use github_actions::GitActionSource;
 use runtime::driver::RunReport;
 use runtime::executor::Retention;
 use runtime::frontend::{FileSource, MapFiles, NoFiles};
@@ -50,12 +53,102 @@ pub fn with_params(graph: Graph) -> Graph {
     graph
 }
 
-fn run_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir()
+fn run_dir(label: &str) -> PathBuf {
+    // Canonical, or macOS's `/var` → `/private/var` symlink makes toolkit
+    // actions compute relative archive paths that resolve nowhere.
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let dir = temp
         .join("petri-gha")
         .join(format!("{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+/// Whether `program --version` answers on this machine, with the skip note the
+/// batteries share (`node` for JavaScript actions, `git` for fixtures).
+pub fn tool_ready(program: &str) -> bool {
+    let found = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        eprintln!("skipping: no `{program}` on PATH");
+    }
+    found
+}
+
+/// The corpus's shared action cache: the acceptance batteries and the sweep
+/// pull the same pinned trees once.
+pub fn corpus_action_source() -> Arc<GitActionSource> {
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/.actions-cache");
+    Arc::new(GitActionSource::new(cache))
+}
+
+/// [`lower_ok`], with remote `uses:` resolved through `source`.
+pub fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> Graph {
+    let actions: Arc<dyn github_actions::ActionSource> = Arc::clone(source) as _;
+    let lowered = frontend_gha::load_with(
+        ".github/workflows/test.yml",
+        text,
+        &NoFiles,
+        Some(actions.as_ref()),
+    );
+    for d in lowered.diagnostics.iter() {
+        eprintln!("{d}");
+    }
+    lowered.graph.expect("the workflow lowers")
+}
+
+/// The distribution's per-run ObjectService wiring, assembled here because a
+/// component's tests may not depend on the distribution: the service starts
+/// beside the run dir and its capability reaches the steps. `cache_store` is
+/// the host-scoped half; `None` keeps it per run, under the run dir.
+pub fn with_object_service(rt: Runtime, cache_store: Option<PathBuf>) -> Runtime {
+    rt.run_services(move |run_dir, caps| {
+        let cache = cache_store.clone().unwrap_or_else(|| run_dir.join("cache"));
+        match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
+            Ok(service) => {
+                let cap = github_actions::ResultsServiceCap {
+                    port: service.port(),
+                    token: service.token().into(),
+                };
+                (caps.provide(cap), Some(Box::new(service) as _))
+            }
+            Err(error) => {
+                eprintln!("warning: no results service: {error}");
+                (caps, None)
+            }
+        }
+    })
+}
+
+/// Run `git -C <dir>` under the batteries' fixed fixture identity, asserting
+/// success.
+pub fn git_in(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "petri")
+        .env("GIT_AUTHOR_EMAIL", "petri@test")
+        .env("GIT_COMMITTER_NAME", "petri")
+        .env("GIT_COMMITTER_EMAIL", "petri@test")
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `init -b main`, `add .`, `commit`: the committed half of a fixture tree.
+pub fn commit_fixture(dir: &Path) {
+    git_in(dir, &["init", "--quiet", "-b", "main"]);
+    git_in(dir, &["add", "."]);
+    git_in(dir, &["commit", "--quiet", "-m", "fixture"]);
 }
 
 /// The standard runtime plus the GitHub step kinds the frontend lowers to — what

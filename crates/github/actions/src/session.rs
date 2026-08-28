@@ -108,6 +108,13 @@ pub(crate) fn github_workspace_path(env: &dyn ExecEnv) -> String {
     format!("{}/{REPO_DIR}", env.workspace_path())
 }
 
+/// The per-run workspace tool cache under `root` — the static value for an
+/// environment that cannot run the [`Session::prologue`], whose three-step
+/// resolution is the full policy.
+pub(crate) fn workspace_tool_cache(root: &str) -> String {
+    format!("{root}/{TOOL_CACHE_DIR}")
+}
+
 impl Session {
     /// Create the step's files and read what the job has accumulated so far.
     pub async fn begin(ctx: &StepCtx, event: &Value) -> Result<Self, StepFailure> {
@@ -177,14 +184,16 @@ impl Session {
     /// `/opt/hostedtoolcache` names it in its env — keep it. A value here
     /// would override the image's at exec time.
     pub fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
-        let mut out = self.env_rooted(node, &self.workspace);
-        out.remove("RUNNER_TOOL_CACHE");
-        out
+        self.env_rooted(node, &self.workspace)
     }
 
     /// [`Session::env`], with every path under `root` instead of this
     /// environment's workspace path: what a process sees when the workspace is
     /// mounted somewhere else — a one-shot action container's mount point.
+    ///
+    /// The tool cache is the caller's decision: [`Session::prologue`] resolves
+    /// it for shell steps, [`workspace_tool_cache`] is the static value for an
+    /// environment that cannot run the prologue.
     pub fn env_rooted(&self, node: &str, root: &str) -> BTreeMap<SmolStr, SmolStr> {
         let mut out: BTreeMap<SmolStr, SmolStr> = self
             .job_env
@@ -203,7 +212,6 @@ impl Session {
         set("GITHUB_WORKSPACE", format!("{root}/{REPO_DIR}"));
         set("GITHUB_ACTION", node.to_string());
         set("RUNNER_TEMP", rooted(Path::new(TEMP_DIR)));
-        set("RUNNER_TOOL_CACHE", rooted(Path::new(TOOL_CACHE_DIR)));
         out
     }
 
@@ -220,7 +228,7 @@ impl Session {
     /// like the rest of the runner scripts.
     pub fn prologue(&self) -> String {
         let mut out = String::new();
-        let fallback = shell_quote(&format!("{}/{TOOL_CACHE_DIR}", self.workspace));
+        let fallback = shell_quote(&workspace_tool_cache(&self.workspace));
         match &self.tool_cache {
             Some(store) => {
                 let store = shell_quote(&store.display().to_string());
@@ -423,6 +431,31 @@ impl Session {
             summary,
         })
     }
+}
+
+/// Forward a process handle's output lines into `sink` as log events, on
+/// their own task; `None` when the handle exposes no line stream. The task
+/// ends with the stream — or as soon as the receiver is gone.
+pub(crate) fn forward_lines(
+    lines: Option<executor::LineStream>,
+    sink: mpsc::Sender<StepEvent>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    lines.map(|mut lines| {
+        tokio::spawn(async move {
+            while let Some(line) = lines.recv().await {
+                if sink
+                    .send(StepEvent::Log {
+                        stream: line.stream,
+                        line: line.line,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+    })
 }
 
 /// Join the command sink and take what it collected; a sink that will not stop

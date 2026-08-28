@@ -72,11 +72,7 @@ impl Backend {
     fn sign(&self, message: &str) -> String {
         let mut mac = HmacSha256::new_from_slice(&self.key).expect("any key length works");
         mac.update(message.as_bytes());
-        mac.finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        token::hex(&mac.finalize().into_bytes())
     }
 
     fn verify(&self, message: &str, sig: &str) -> bool {
@@ -132,16 +128,13 @@ async fn handle(
     let response = if let Some(method) =
         path.strip_prefix("/twirp/github.actions.results.api.v1.ArtifactService/")
     {
-        let method = method.to_string();
-        twirp(&backend, Service::Artifacts, &method, req).await
+        twirp(&backend, Service::Artifacts, method, req).await
     } else if let Some(method) =
         path.strip_prefix("/twirp/github.actions.results.api.v1.CacheService/")
     {
-        let method = method.to_string();
-        twirp(&backend, Service::Cache, &method, req).await
+        twirp(&backend, Service::Cache, method, req).await
     } else if let Some(rest) = path.strip_prefix("/blob/") {
-        let rest = rest.to_string();
-        blob(&backend, &rest, req).await
+        blob(&backend, rest, req).await
     } else {
         Ok(plain(StatusCode::NOT_FOUND, "not found"))
     };
@@ -183,7 +176,7 @@ enum Service {
 }
 
 async fn twirp(
-    backend: &Backend,
+    backend: &Arc<Backend>,
     service: Service,
     method: &str,
     req: Request<Incoming>,
@@ -220,25 +213,32 @@ async fn twirp(
             ))));
         }
     };
-    let result = match (service, method) {
-        (Service::Artifacts, "CreateArtifact") => create_artifact(backend, &host, &request),
-        (Service::Artifacts, "FinalizeArtifact") => finalize_artifact(backend, &request),
-        (Service::Artifacts, "ListArtifacts") => list_artifacts(backend, &request),
+    // The stores do synchronous filesystem work (index rewrites, the prune
+    // sweep); run it on the blocking pool so this thread — the service's only
+    // event loop — keeps streaming concurrent blob uploads and downloads.
+    let backend = Arc::clone(backend);
+    let method = method.to_string();
+    let result = tokio::task::spawn_blocking(move || match (service, method.as_str()) {
+        (Service::Artifacts, "CreateArtifact") => create_artifact(&backend, &host, &request),
+        (Service::Artifacts, "FinalizeArtifact") => finalize_artifact(&backend, &request),
+        (Service::Artifacts, "ListArtifacts") => list_artifacts(&backend, &request),
         (Service::Artifacts, "GetSignedArtifactURL") => {
-            signed_artifact_url(backend, &host, &request)
+            signed_artifact_url(&backend, &host, &request)
         }
-        (Service::Artifacts, "DeleteArtifact") => delete_artifact(backend, &request),
-        (Service::Cache, "CreateCacheEntry") => create_cache_entry(backend, &host, &request),
-        (Service::Cache, "FinalizeCacheEntryUpload") => finalize_cache_entry(backend, &request),
+        (Service::Artifacts, "DeleteArtifact") => delete_artifact(&backend, &request),
+        (Service::Cache, "CreateCacheEntry") => create_cache_entry(&backend, &host, &request),
+        (Service::Cache, "FinalizeCacheEntryUpload") => finalize_cache_entry(&backend, &request),
         (Service::Cache, "GetCacheEntryDownloadURL") => {
-            cache_download_url(backend, &host, &request)
+            cache_download_url(&backend, &host, &request)
         }
         (_, other) => Err(Twirp {
             status: StatusCode::NOT_FOUND,
             code: "bad_route",
             msg: format!("no such method: {other}"),
         }),
-    };
+    })
+    .await
+    .map_err(io::Error::other)?;
     Ok(match result {
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => twirp_error(&error),
@@ -456,7 +456,7 @@ async fn upload(
                 return Ok(plain(StatusCode::BAD_REQUEST, "blockid is required"));
             };
             tokio::fs::create_dir_all(&target.staging).await?;
-            let path = target.staging.join(encode_hex(block_id.as_bytes()));
+            let path = target.staging.join(token::hex(block_id.as_bytes()));
             body_to_file(req.into_body(), &path).await?;
             Ok(empty(StatusCode::CREATED))
         }
@@ -474,7 +474,7 @@ async fn upload(
             }
             let mut out = tokio::fs::File::create(&target.content).await?;
             for block in &ids {
-                let block_path = target.staging.join(encode_hex(block.as_bytes()));
+                let block_path = target.staging.join(token::hex(block.as_bytes()));
                 let mut file = match tokio::fs::File::open(&block_path).await {
                     Ok(file) => file,
                     Err(_) => {
@@ -704,10 +704,6 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn decode_hex(text: &str) -> Result<Vec<u8>, ()> {

@@ -55,8 +55,6 @@ pub struct CacheStore {
     lock: Mutex<()>,
 }
 
-const INDEX_FILE: &str = "index.json";
-
 impl CacheStore {
     /// Open (or create) the store under `dir`, pruning to `budget` on writes.
     pub fn open(dir: PathBuf, budget: u64) -> std::io::Result<Self> {
@@ -75,11 +73,7 @@ impl CacheStore {
         hasher.update(key.as_bytes());
         hasher.update([0]);
         hasher.update(version.as_bytes());
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        crate::token::hex(&hasher.finalize())
     }
 
     /// Reserve an upload. `None` when the entry already exists — immutable, as
@@ -156,10 +150,15 @@ impl CacheStore {
             exact.or_else(by_prefix).cloned()
         };
         let Some(found) = found else { return Ok(None) };
-        if let Some(entry) = index.entries.iter_mut().find(|e| e.id == found.id) {
-            entry.used = unix_now();
+        // The stamp only orders the LRU, so a repeat hit within the minute
+        // doesn't earn a whole-index rewrite.
+        let now = unix_now();
+        if now.saturating_sub(found.used) >= 60 {
+            if let Some(entry) = index.entries.iter_mut().find(|e| e.id == found.id) {
+                entry.used = now;
+            }
+            self.write_index(&index)?;
         }
-        self.write_index(&index)?;
         Ok(Some(found))
     }
 
@@ -202,19 +201,11 @@ impl CacheStore {
     }
 
     fn read_index(&self) -> std::io::Result<Index> {
-        match std::fs::read(self.dir.join(INDEX_FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| std::io::Error::other(format!("the cache index is corrupt: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Index::default()),
-            Err(e) => Err(e),
-        }
+        crate::index::read(&self.dir, "cache")
     }
 
     fn write_index(&self, index: &Index) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(index).expect("the index encodes");
-        let temp = self.dir.join(format!("{INDEX_FILE}.tmp"));
-        std::fs::write(&temp, bytes)?;
-        std::fs::rename(&temp, self.dir.join(INDEX_FILE))
+        crate::index::write(&self.dir, index)
     }
 }
 

@@ -10,27 +10,11 @@
 
 mod support;
 
-use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use acceptance::runs::RUNNER_IMAGE_2404;
-use github_actions::{
-    ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource, ResultsServiceCap,
-};
-use github_objects::ObjectService;
-use runtime::executor::Retention;
-use runtime::frontend::NoFiles;
-use runtime::ir::Graph;
-use runtime::{RunOptions, Runtime};
+use github_actions::{ActionSourceCap, ActionTreeSource};
 use support::*;
-
-/// The corpus's shared action cache: the acceptance battery and the sweep pull
-/// the same pinned trees once.
-fn action_source() -> Arc<GitActionSource> {
-    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/.actions-cache");
-    Arc::new(GitActionSource::new(cache))
-}
 
 /// Pinned at v4 of each — the era whose toolkit speaks the results service.
 const UPLOAD: &str = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02";
@@ -67,65 +51,14 @@ fn artifact_workflow(container: Option<&str>) -> String {
     )
 }
 
-fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> Graph {
-    let actions: Arc<dyn ActionSource> = Arc::clone(source) as _;
-    let lowered = frontend_gha::load_with(
-        ".github/workflows/test.yml",
-        text,
-        &NoFiles,
-        Some(actions.as_ref()),
-    );
-    for d in lowered.diagnostics.iter() {
-        eprintln!("{d}");
-    }
-    lowered.graph.expect("the workflow lowers")
-}
-
-/// The distribution's per-run wiring, assembled here because a component's
-/// tests may not depend on the distribution: the ObjectService starts beside
-/// the run dir and its capability reaches the steps.
-fn artifact_runtime(dir: &Path, source: Arc<GitActionSource>) -> Runtime {
-    let trees: Arc<dyn ActionTreeSource> = source;
-    let mut options = RunOptions::new(dir);
-    options.grace = Duration::from_secs(2);
-    options.retention = Retention::Never;
-    Runtime::standard()
-        .options(options)
-        .step(github_actions::RunStep)
-        .step(github_actions::ActionStep)
-        .step(github_actions::DockerActionStep)
-        .step(github_actions::CheckoutStep)
-        .capability(ActionSourceCap(trees))
-        .run_services(|run_dir, caps| {
-            match ObjectService::start(run_dir.join("artifacts"), run_dir.join("cache")) {
-                Ok(service) => {
-                    let cap = ResultsServiceCap {
-                        port: service.port(),
-                        token: service.token().into(),
-                    };
-                    (caps.provide(cap), Some(Box::new(service) as _))
-                }
-                Err(error) => {
-                    eprintln!("warning: no results service: {error}");
-                    (caps, None)
-                }
-            }
-        })
-}
-
 async fn run_artifact_flow(label: &str, container: Option<&str>) {
-    let source = action_source();
-    let graph = with_params(lower_with_actions(&artifact_workflow(container), &source));
-    let dir = std::env::temp_dir()
-        .join("petri-artifacts-e2e")
-        .join(format!("{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-
-    let report = artifact_runtime(&dir, source)
-        .run(graph)
-        .await
-        .expect("replay is byte-identical");
-    let report = RunReportPlus::from(report);
+    let source = corpus_action_source();
+    let graph = lower_with_actions(&artifact_workflow(container), &source);
+    let report = run_host_with(graph, label, |rt| {
+        let trees: Arc<dyn ActionTreeSource> = source;
+        with_object_service(rt.capability(ActionSourceCap(trees)), None)
+    })
+    .await;
 
     let statuses: Vec<(String, String)> = report
         .state
@@ -154,13 +87,12 @@ async fn run_artifact_flow(label: &str, container: Option<&str>) {
         "the artifact round-tripped",
     );
     assert_eq!(report.status, runtime::ir::RunStatus::Success);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Host jobs: upload in one job, download in the next, through loopback.
 #[tokio::test(flavor = "multi_thread")]
 async fn artifacts_flow_across_host_jobs() {
-    if !node_ready() {
+    if !tool_ready("node") {
         return;
     }
     run_artifact_flow("host", None).await;
@@ -182,7 +114,7 @@ async fn artifacts_flow_across_containerized_jobs() {
 /// warm cache. No network beyond what a container image pull would need.
 #[tokio::test(flavor = "multi_thread")]
 async fn checkout_build_and_artifacts_run_to_success() {
-    if !node_ready() {
+    if !tool_ready("node") {
         return;
     }
     let repo = std::env::temp_dir()
@@ -191,26 +123,7 @@ async fn checkout_build_and_artifacts_run_to_success() {
     let _ = std::fs::remove_dir_all(&repo);
     std::fs::create_dir_all(&repo).expect("create the fixture");
     std::fs::write(repo.join("input.txt"), "source-of-truth\n").expect("write");
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "petri")
-            .env("GIT_AUTHOR_EMAIL", "petri@test")
-            .env("GIT_COMMITTER_NAME", "petri")
-            .env("GIT_COMMITTER_EMAIL", "petri@test")
-            .output()
-            .expect("git runs");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    git(&["init", "--quiet", "-b", "main"]);
-    git(&["add", "."]);
-    git(&["commit", "--quiet", "-m", "fixture"]);
+    commit_fixture(&repo);
 
     let text = format!(
         "on: push\n\
@@ -234,25 +147,27 @@ async fn checkout_build_and_artifacts_run_to_success() {
          \x20         path: got\n\
          \x20     - run: cat got/built.txt\n"
     );
-    let source = action_source();
-    let mut graph = with_params(lower_with_actions(&text, &source));
+    let source = corpus_action_source();
+    let mut graph = lower_with_actions(&text, &source);
     graph.params.insert(
         "petri".into(),
         serde_json::json!({ "repo": repo.display().to_string() }),
     );
-    let dir = std::env::temp_dir()
-        .join("petri-full-flow")
-        .join(format!("run-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let report = artifact_runtime(&dir, source)
-        .run(graph)
-        .await
-        .expect("replay is byte-identical");
-    let report = RunReportPlus::from(report);
+    let report = run_host_with(graph, "full-flow", |rt| {
+        let trees: Arc<dyn ActionTreeSource> = source;
+        with_object_service(rt.capability(ActionSourceCap(trees)), None)
+    })
+    .await;
     assert_eq!(
         report.status,
         runtime::ir::RunStatus::Success,
-        "log: {:?}",
+        "statuses: {:?}\nlog: {:?}",
+        report
+            .state
+            .history()
+            .iter()
+            .map(|r| (r.name.to_string(), r.outcome.status.tag()))
+            .collect::<Vec<_>>(),
         log_lines(&report)
     );
     assert!(
@@ -260,19 +175,5 @@ async fn checkout_build_and_artifacts_run_to_success() {
         "the build's output round-tripped: {:?}",
         log_lines(&report)
     );
-    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&repo);
-}
-
-/// JavaScript actions need `node` on `PATH` for the host case; without it the
-/// host half skips exactly as the hashFiles test does.
-fn node_ready() -> bool {
-    let found = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !found {
-        eprintln!("skipping: no `node` on PATH");
-    }
-    found
 }

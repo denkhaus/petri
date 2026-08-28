@@ -23,7 +23,8 @@ pub fn random<const N: usize>() -> [u8; N] {
     bytes
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// Lowercase hex — the one spelling of the codec for the whole crate.
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

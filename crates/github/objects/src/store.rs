@@ -52,18 +52,11 @@ pub struct ArtifactStore {
     state: Mutex<State>,
 }
 
-const INDEX_FILE: &str = "index.json";
-
 impl ArtifactStore {
     /// Open (or create) the store under `dir`.
     pub fn open(dir: PathBuf) -> io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
-        let index = match std::fs::read(dir.join(INDEX_FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| io::Error::other(format!("the artifact index is corrupt: {e}")))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Index::default(),
-            Err(e) => return Err(e),
-        };
+        let index: Index = crate::index::read(&dir, "artifact")?;
         Ok(Self {
             dir,
             state: Mutex::new(State {
@@ -157,10 +150,7 @@ impl ArtifactStore {
     }
 
     fn persist(&self, index: &Index) -> io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(index).expect("the index encodes");
-        let temp = self.dir.join(format!("{INDEX_FILE}.tmp"));
-        std::fs::write(&temp, bytes)?;
-        std::fs::rename(&temp, self.dir.join(INDEX_FILE))
+        crate::index::write(&self.dir, index)
     }
 }
 

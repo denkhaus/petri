@@ -84,7 +84,7 @@ pub fn runtime() -> Runtime {
     // root ($PETRI_STORE overrides). Created now so the tool-cache prologue's
     // existence probe finds it on the host.
     let store = github_objects::default_store_dir();
-    let tool_cache = store.join("toolcache").join(std::env::consts::OS);
+    let tool_cache = github_objects::tool_cache_dir(&store);
     let _ = std::fs::create_dir_all(&tool_cache);
     Runtime::standard()
         .frontend(
@@ -99,7 +99,7 @@ pub fn runtime() -> Runtime {
         .capability(github::ActionSourceCap(trees))
         .capability(github::ToolCacheCap(tool_cache))
         .run_services(move |run_dir, caps| {
-            let cache = store.join("cache");
+            let cache = github_objects::cache_dir(&store);
             match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
                 Ok(service) => {
                     let cap = github::ResultsServiceCap {
