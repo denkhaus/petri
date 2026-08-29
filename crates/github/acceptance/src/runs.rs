@@ -41,6 +41,12 @@ pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-66
 pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-66c538cd3ef8";
 pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-66c538cd3ef8";
 
+/// The dind flavor of the 24.04 runner: slim plus a Docker engine and its
+/// `start-docker` helper. The daemon is not running when the container starts
+/// — the session prologue brings it up lazily on the first step — and it needs
+/// `--privileged` ([`privilege`]). Only the 24.04 flavor is built.
+pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-66c538cd3ef8";
+
 /// The battery image for a scope's placement labels: the label's OS version
 /// picks the Ubuntu release, defaulting to 24.04 (`ubuntu-latest`).
 pub fn battery_image(requirements: &[SmolStr]) -> &'static str {
@@ -93,6 +99,38 @@ pub fn containerize(graph: &mut Graph, image_for: impl Fn(&[SmolStr]) -> String)
             options: vec![SmolStr::new("--platform"), SmolStr::new("linux/amd64")],
             credentials: None,
         };
+    }
+}
+
+/// Does this graph drive a Docker engine? Docker container actions run
+/// `docker` over the scope's runner, and the `docker/*` toolchain actions
+/// (login, setup-buildx, build-push, …) call the CLI directly. `run:` scripts
+/// don't count — the sweep stubs them to `true`. Service containers don't
+/// either: the executor starts those on the outer daemon at acquisition.
+pub fn needs_docker(graph: &Graph) -> bool {
+    step_identities(graph)
+        .values()
+        .any(|identity| match identity {
+            StepIdentity::DockerAction(_) => true,
+            StepIdentity::Action { bare, .. } => bare.starts_with("docker/"),
+            _ => false,
+        })
+}
+
+/// Add `--privileged` to every containerized scope running `image`: the dind
+/// runner's Docker engine cannot start without it. A separate pass after
+/// [`containerize`] so the flag rides exactly the scopes that got that image.
+pub fn privilege(graph: &mut Graph, image: &str) {
+    for scope in &mut graph.scopes {
+        if let RuntimeTarget::Container {
+            image: scope_image,
+            options,
+            ..
+        } = &mut scope.runtime.target
+            && scope_image == image
+        {
+            options.push(SmolStr::new("--privileged"));
+        }
     }
 }
 
@@ -257,6 +295,10 @@ pub const SERVER_COUPLED: &[(&str, &str)] = &[
     ("codecov/codecov-action", "third-party SaaS upload"),
     ("coverallsapp/github-action", "third-party SaaS upload"),
     ("CodSpeedHQ/action", "third-party SaaS upload"),
+    (
+        "depot/build-push-action",
+        "builds on the depot.dev service (project token)",
+    ),
     ("rust-lang/crates-io-auth-action", "OIDC token exchange"),
     (
         "rubygems/configure-rubygems-credentials",
@@ -329,6 +371,18 @@ pub fn expected_reason(
 /// stubbed `run:` scripts structurally never produce. Sources are real where
 /// the corpus fetched them; build outputs never are.
 pub fn expected_from_tail(identity: &StepIdentity, tail: &[String]) -> Option<String> {
+    // ENOSYS from basic syscalls (`mkdir: Function not implemented`) means the
+    // image's binaries don't run under this host's amd64 emulation — the 26.04
+    // runner is amd64-only, an arm64 daemon pulls it through the platform
+    // fallback and then cannot execute it. A host-architecture limit, not a
+    // petri gap: an amd64 host runs these rows. Any step can hit it, so this
+    // look precedes the action-only ones.
+    if tail
+        .iter()
+        .any(|line| line.contains("Function not implemented"))
+    {
+        return Some("amd64-only image; this host's emulation cannot run it".to_string());
+    }
     let StepIdentity::Action { bare, .. } = identity else {
         return None;
     };
@@ -674,6 +728,58 @@ mod tests {
             graph.exprs.get(elements[0]),
             Some(Expr::Index(..))
         ));
+    }
+
+    #[test]
+    fn docker_driving_graphs_pick_the_privileged_dind_runner() {
+        let mut graph = lower(
+            "on: push\n\
+             jobs:\n\
+             \x20 build:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   steps: [{run: echo}]\n",
+        );
+        assert!(!needs_docker(&graph), "a stubbed script drives nothing");
+        let node = graph
+            .nodes
+            .iter_mut()
+            .find(|n| n.step.kind.as_ref() == RUN_KIND)
+            .expect("a run node");
+        node.step.kind = ACTION_KIND.into();
+        node.step.config = serde_json::json!({
+            "action": serde_json::to_value(pinned("docker/build-push-action@v6")).unwrap(),
+            "inputs": {},
+        });
+        assert!(needs_docker(&graph));
+        // The sweep's selection: dind where 24.04 would have been picked.
+        containerize(&mut graph, |req| {
+            let image = battery_image(req);
+            if image == RUNNER_IMAGE_2404 {
+                RUNNER_IMAGE_2404_DIND.to_string()
+            } else {
+                image.to_string()
+            }
+        });
+        privilege(&mut graph, RUNNER_IMAGE_2404_DIND);
+        let options: Vec<_> = graph
+            .scopes
+            .iter()
+            .filter_map(|s| match &s.runtime.target {
+                RuntimeTarget::Container { image, options, .. }
+                    if image == RUNNER_IMAGE_2404_DIND =>
+                {
+                    Some(options.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!options.is_empty(), "a dind scope exists");
+        assert!(
+            options
+                .iter()
+                .all(|o| o.iter().any(|flag| flag == "--privileged")),
+            "{options:?}"
+        );
     }
 
     fn pinned(reference: &str) -> ActionLocation {

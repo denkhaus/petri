@@ -205,9 +205,21 @@ async fn corpus_run_sweep() {
 /// fetches a commit that exists.
 fn prepare(graph: &mut Graph, repo_slug: &str, pin: Option<&String>, repo_root: &Path) {
     runs::stub_run_scripts(graph);
+    // A graph that drives a Docker engine gets the dind runner (and the
+    // `--privileged` its daemon needs) where the 24.04 image would have been
+    // picked — the only flavor the dind variant is built for.
+    let docker = runs::needs_docker(graph);
     runs::containerize(graph, |requirements| {
-        battery_image(requirements).to_string()
+        let image = battery_image(requirements);
+        if docker && image == runs::RUNNER_IMAGE_2404 {
+            runs::RUNNER_IMAGE_2404_DIND.to_string()
+        } else {
+            image.to_string()
+        }
     });
+    if docker {
+        runs::privilege(graph, runs::RUNNER_IMAGE_2404_DIND);
+    }
     runs::cap_expansions(graph);
     let mut github = frontend_gha::identity::github_context(Some(repo_slug));
     github["event"] = json!({});

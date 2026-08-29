@@ -256,6 +256,15 @@ impl Session {
                 .join(":");
             out.push_str(&format!("export PATH={joined}:\"$PATH\"\n"));
         }
+        // A runner image that ships a Docker engine leaves its daemon stopped
+        // (containers get no init to supervise one) and provides a
+        // `start-docker` helper. The first step brings the daemon up; the
+        // marker keeps every later prologue free. Images without the helper
+        // skip the whole block, so this costs a `command -v` everywhere else.
+        out.push_str(
+            "if [ ! -e /tmp/.petri-dockerd ] && command -v start-docker >/dev/null 2>&1; then \
+             : > /tmp/.petri-dockerd; start-docker >/dev/null 2>&1 || true; fi\n",
+        );
         out
     }
 
