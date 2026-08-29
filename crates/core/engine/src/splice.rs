@@ -299,7 +299,7 @@ pub(crate) fn prepare_outcome_splices(
         // Added pre-routing — the uploader's own routing pass runs after
         // commit and evaluates these.
         let mut extensions: Vec<(NodeId, SelectGroup)> = Vec::new();
-        if !fragment.entries.is_empty() {
+        if !fragment.entry.is_empty() {
             let outcome_var = push_expr(&mut exprs, expr_base, Expr::Var(SmolStr::new("outcome")));
             let success_like = push_expr(
                 &mut exprs,
@@ -323,7 +323,7 @@ pub(crate) fn prepare_outcome_splices(
                 expr_base,
                 Expr::Binary(BinOp::And, success_like, same_generation),
             );
-            for entry in &fragment.entries {
+            for entry in &fragment.entry {
                 let to = NodeId::new(node_base + entry.raw());
                 extensions.push((
                     uploader.id,

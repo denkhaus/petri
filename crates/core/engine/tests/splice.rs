@@ -373,10 +373,12 @@ fn parking_fragment(prefix: &str) -> GraphFragment {
     wa.routing = ir::Routing::next(Edge::always(EdgeId::new(0), NodeId::new(2)));
     wb.routing = ir::Routing::next(Edge::always(EdgeId::new(1), NodeId::new(2)));
     GraphFragment {
-        nodes: vec![wa, wb, wj],
-        scopes: vec![Scope::new(ScopeId::new(0))],
-        exprs: Default::default(),
-        entries: vec![NodeId::new(0), NodeId::new(1)],
+        body: ir::GraphBody {
+            nodes: vec![wa, wb, wj],
+            scopes: vec![Scope::new(ScopeId::new(0))],
+            exprs: Default::default(),
+            entry: vec![NodeId::new(0), NodeId::new(1)],
+        },
         exits: vec![NodeId::new(2)],
     }
 }

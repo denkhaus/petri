@@ -9,11 +9,12 @@
 //! delegation check rejects a fragment node whose declared policy exceeds its
 //! uploader's. Both reject loudly as `invalid_splice` — never a silent clamp.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smol_str::SmolStr;
 
 use crate::builder::GraphBuilder;
-use crate::graph::{Completion, Graph, Node, Scope, StepRef};
+use crate::graph::{Completion, Graph, GraphBody, Node, Scope, StepRef};
 use crate::ids::{Local, NodeId, ScopeId};
 use crate::step::StepKinds;
 use crate::validate::{self, ValidationError, ValidationLocation};
@@ -95,18 +96,77 @@ impl SpliceMode {
 /// id, and only the engine's preparation remapper converts. A fragment owns no
 /// run `params`, no root entries and no `completion` — those belong to the run.
 /// V1 fragments declare their own resource scopes only.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphFragment {
-    pub nodes: Vec<Node<Local>>,
-    pub scopes: Vec<Scope<Local>>,
-    pub exprs: ExprTable<Local>,
-    /// Where the fragment starts: these nodes implicitly attach to the uploader
-    /// through new select groups on it.
-    pub entries: Vec<NodeId<Local>>,
+    pub body: GraphBody<Local>,
     /// Where the fragment ends: exits gain edges to each existing dependent of
     /// the uploader, so a dependency on the uploader becomes a dependency on the
     /// batch too.
     pub exits: Vec<NodeId<Local>>,
+}
+
+impl std::ops::Deref for GraphFragment {
+    type Target = GraphBody<Local>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.body
+    }
+}
+
+impl std::ops::DerefMut for GraphFragment {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.body
+    }
+}
+
+impl Serialize for GraphFragment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut out = serializer.serialize_struct("GraphFragment", 5)?;
+        out.serialize_field("nodes", &self.nodes)?;
+        out.serialize_field("scopes", &self.scopes)?;
+        out.serialize_field("exprs", &self.exprs)?;
+        // Keep the request wire shape while the shared body uses `entry`, like a
+        // live graph.
+        out.serialize_field("entries", &self.entry)?;
+        out.serialize_field("exits", &self.exits)?;
+        out.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for GraphFragment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            nodes: Vec<Node<Local>>,
+            scopes: Vec<Scope<Local>>,
+            exprs: ExprTable<Local>,
+            entries: Vec<NodeId<Local>>,
+            exits: Vec<NodeId<Local>>,
+        }
+
+        let Wire {
+            nodes,
+            scopes,
+            exprs,
+            entries,
+            exits,
+        } = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            body: GraphBody {
+                nodes,
+                scopes,
+                exprs,
+                entry: entries,
+            },
+            exits,
+        })
+    }
 }
 
 impl GraphFragment {
@@ -145,10 +205,7 @@ impl GraphBuilder<Local> {
     /// entry, routing, and scope allocation path as a live graph builder.
     pub fn build_fragment(self, exits: impl IntoIterator<Item = NodeId<Local>>) -> GraphFragment {
         let Graph {
-            nodes,
-            scopes,
-            exprs,
-            entry,
+            body,
             params,
             completion,
         } = self.build();
@@ -161,10 +218,7 @@ impl GraphBuilder<Local> {
             "a graph fragment cannot carry a completion policy"
         );
         GraphFragment {
-            nodes,
-            scopes,
-            exprs,
-            entries: entry,
+            body,
             exits: exits.into_iter().collect(),
         }
     }
@@ -296,15 +350,7 @@ pub fn validate_fragment_with(
     // only report `NoEntry`, and emptiness is a mode question, not a structure
     // question — `validate_request` owns it.
     if !fragment.nodes.is_empty() {
-        let view = Graph::<Local> {
-            nodes: fragment.nodes.clone(),
-            scopes: fragment.scopes.clone(),
-            exprs: fragment.exprs.clone(),
-            entry: fragment.entries.clone(),
-            params: Default::default(),
-            completion: Completion::AnyFailure,
-        };
-        for error in validate::collect(&view, registry) {
+        for error in validate::collect_body(&fragment.body, registry) {
             errors.push(FragmentValidationError {
                 location: structure_location(&error),
                 kind: FragmentErrorKind::Structure(error),

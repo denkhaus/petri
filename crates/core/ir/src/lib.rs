@@ -36,8 +36,9 @@ pub use flow::{
 };
 pub use graph::{
     Backoff, Budget, Completion, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue,
-    Fallthrough, Graph, Guard, JoinPolicy, Node, RegistryCredentials, RetryOn, RetryPolicy,
-    Routing, RuntimeSpec, RuntimeTarget, Scope, SelectGroup, ServiceSpec, StepRef, WorkspacePolicy,
+    Fallthrough, Graph, GraphBody, Guard, JoinPolicy, Node, RegistryCredentials, RetryOn,
+    RetryPolicy, Routing, RuntimeSpec, RuntimeTarget, Scope, SelectGroup, ServiceSpec, StepRef,
+    WorkspacePolicy,
 };
 pub use ids::{
     Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, Live, Local, NodeId, ScopeId,

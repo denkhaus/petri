@@ -746,38 +746,30 @@ fn is_default_completion<S>(completion: &Completion<S>) -> bool {
     matches!(completion, Completion::AnyFailure)
 }
 
-/// A whole workflow. HIR and executable plans share this shape; a plan is a graph
-/// that carries no [`Node::expand`] and no unresolved config placeholders.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Graph<S = Live> {
+/// The topology and execution resources shared by whole graphs and fragments.
+/// Identifier space `S` keeps fragment-local ids separate from live run ids.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(bound(deserialize = "S: Deserialize<'de> + Default"))]
+pub struct GraphBody<S = Live> {
     pub nodes: Vec<Node<S>>,
     pub scopes: Vec<Scope<S>>,
     pub exprs: ExprTable<S>,
     /// Seeded with one `Generation(0)` token each.
     pub entry: Vec<NodeId<S>>,
-    /// Per-run parameters, visible to every expression as a static binding of the
-    /// same name — the GHA `github`, `vars` and `runner` contexts, a native format's
-    /// `params`. Frontends leave this empty; the host fills it in before the run
-    /// starts, so the graph a run used is self-describing and replay needs nothing
-    /// beyond it.
-    ///
-    /// Lowest precedence: a firing's own bindings (`env`, `item`, `status`, …) shadow
-    /// a parameter of the same name. Read-only for the whole run.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub params: BTreeMap<SmolStr, Value>,
-    /// How the run's status folds from node outcomes (§1).
-    #[serde(default, skip_serializing_if = "is_default_completion")]
-    pub completion: Completion<S>,
 }
 
-impl<S> Graph<S> {
-    pub fn new() -> Self
-    where
-        S: Default,
-    {
-        Self::default()
+impl<S> Default for GraphBody<S> {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            scopes: Vec::new(),
+            exprs: ExprTable::default(),
+            entry: Vec::new(),
+        }
     }
+}
 
+impl<S> GraphBody<S> {
     pub fn node(&self, id: NodeId<S>) -> Option<&Node<S>> {
         self.nodes.get(id.index())
     }
@@ -824,9 +816,52 @@ impl<S> Graph<S> {
             .map(|n| n.id)
     }
 
-    /// Whether this graph is executable: no HIR-only fields left (invariant 6).
+    /// Whether this graph body is executable: no HIR-only fields remain.
     pub fn is_plan(&self) -> bool {
         self.nodes.iter().all(|n| n.expand.is_none())
+    }
+}
+
+/// A whole workflow: the reusable graph body plus run-level configuration.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Graph<S = Live> {
+    #[serde(flatten)]
+    pub body: GraphBody<S>,
+    /// Per-run parameters, visible to every expression as a static binding of the
+    /// same name — the GHA `github`, `vars` and `runner` contexts, a native format's
+    /// `params`. Frontends leave this empty; the host fills it in before the run
+    /// starts, so the graph a run used is self-describing and replay needs nothing
+    /// beyond it.
+    ///
+    /// Lowest precedence: a firing's own bindings (`env`, `item`, `status`, …) shadow
+    /// a parameter of the same name. Read-only for the whole run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<SmolStr, Value>,
+    /// How the run's status folds from node outcomes (§1).
+    #[serde(default, skip_serializing_if = "is_default_completion")]
+    pub completion: Completion<S>,
+}
+
+impl<S> std::ops::Deref for Graph<S> {
+    type Target = GraphBody<S>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.body
+    }
+}
+
+impl<S> std::ops::DerefMut for Graph<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.body
+    }
+}
+
+impl<S> Graph<S> {
+    pub fn new() -> Self
+    where
+        S: Default,
+    {
+        Self::default()
     }
 
     /// Set a run parameter. Chainable, for hosts filling the graph in before a run.

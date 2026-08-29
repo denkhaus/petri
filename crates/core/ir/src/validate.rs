@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use smol_str::SmolStr;
 
 use crate::expr::Expr;
-use crate::graph::{Completion, ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
+use crate::graph::{
+    Completion, ExpandTarget, Expansion, ExprOrValue, Graph, GraphBody, Guard, JoinPolicy,
+};
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 use crate::placeholder::placeholder_path;
 use crate::step::StepKinds;
@@ -266,8 +268,8 @@ pub fn check<S>(graph: &Graph<S>) -> ValidationReport<S> {
 /// Validate a graph against a step registry and return both errors and warnings.
 pub fn check_with<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> ValidationReport<S> {
     let mut warnings = Vec::new();
-    check_scope_reentry(graph, &mut warnings);
-    check_run_on_cancel(graph, &mut warnings);
+    check_scope_reentry(&graph.body, &mut warnings);
+    check_run_on_cancel(&graph.body, &mut warnings);
     ValidationReport {
         errors: collect(graph, registry),
         warnings,
@@ -278,7 +280,7 @@ pub fn check_with<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> Vali
 /// requirement that no HIR-only field survives.
 pub fn validate_plan<S>(graph: &Graph<S>) -> Result<(), Vec<ValidationError<S>>> {
     let mut errors = collect(graph, None);
-    check_fully_lowered(graph, &mut errors);
+    check_fully_lowered(&graph.body, &mut errors);
     done(errors)
 }
 
@@ -303,22 +305,38 @@ pub(crate) fn collect<S>(
     registry: Option<&dyn StepKinds>,
 ) -> Vec<ValidationError<S>> {
     let mut errors = Vec::new();
-    check_structure(graph, registry, &mut errors);
+    check_structure(&graph.body, registry, &mut errors);
     check_completion(graph, &mut errors);
-    check_edge_ids(graph, &mut errors);
-    check_routing_shape(graph, &mut errors);
-    check_exprs_resolve(graph, &mut errors);
-    check_back_edges(graph, &mut errors);
-    check_budgets(graph, &mut errors);
-    check_loop_head_joins(graph, &mut errors);
-    check_expansions(graph, &mut errors);
+    collect_body_tail(&graph.body, &mut errors);
     errors
+}
+
+/// Validate the shared structural body without cloning it into a whole graph.
+/// Run-level completion checks stay with [`collect`].
+pub(crate) fn collect_body<S>(
+    body: &GraphBody<S>,
+    registry: Option<&dyn StepKinds>,
+) -> Vec<ValidationError<S>> {
+    let mut errors = Vec::new();
+    check_structure(body, registry, &mut errors);
+    collect_body_tail(body, &mut errors);
+    errors
+}
+
+fn collect_body_tail<S>(body: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
+    check_edge_ids(body, errors);
+    check_routing_shape(body, errors);
+    check_exprs_resolve(body, errors);
+    check_back_edges(body, errors);
+    check_budgets(body, errors);
+    check_loop_head_joins(body, errors);
+    check_expansions(body, errors);
 }
 
 // ── Structure ─────────────────────────────────────────────────────────────
 
 fn check_structure<S>(
-    graph: &Graph<S>,
+    graph: &GraphBody<S>,
     registry: Option<&dyn StepKinds>,
     errors: &mut Vec<ValidationError<S>>,
 ) {
@@ -405,7 +423,7 @@ fn check_completion<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
 
 /// Invariant 5: edge ids are unique across the whole graph, and none reuses the
 /// reserved seed id.
-fn check_edge_ids<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_edge_ids<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     let mut seen = HashSet::new();
     let mut reported = HashSet::new();
     for edge in graph.edges() {
@@ -419,7 +437,7 @@ fn check_edge_ids<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
 }
 
 /// Invariants 2 and 3.
-fn check_routing_shape<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_routing_shape<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         for (group_index, group) in node.routing.groups.iter().enumerate() {
             if group.arms.is_empty() {
@@ -444,7 +462,7 @@ fn check_routing_shape<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>
 
 // ── Invariant 6 (references) ──────────────────────────────────────────────
 
-fn check_exprs_resolve<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_exprs_resolve<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     let table = &graph.exprs;
     let check = |site: String, id: ExprId<S>, errors: &mut Vec<ValidationError<S>>| {
         if table.get(id).is_none() {
@@ -506,7 +524,7 @@ fn children<S>(expr: &Expr<S>) -> Vec<ExprId<S>> {
     }
 }
 
-fn check_fully_lowered<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_fully_lowered<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         if node.expand.is_some() {
             errors.push(ValidationError::HirFieldInPlan(node.id));
@@ -525,7 +543,7 @@ fn check_fully_lowered<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>
 /// Every cycle contains at least one back edge — equivalently, the graph with back
 /// edges removed is acyclic. Reports one representative cycle per offending
 /// strongly connected component.
-fn check_back_edges<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_back_edges<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     // Iterative DFS over forward edges only, tracking the current path so a
     // rediscovered grey node yields the cycle itself, not just "a cycle exists".
     #[derive(Clone, Copy, PartialEq)]
@@ -590,7 +608,7 @@ fn check_back_edges<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
 
 // ── Invariant 4 ───────────────────────────────────────────────────────────
 
-fn check_budgets<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_budgets<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         if node.budget.max_firings == 0 {
             errors.push(ValidationError::ZeroBudget(node.id));
@@ -611,7 +629,7 @@ fn check_budgets<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
 /// Nodes that can fire more than once: everything forward-reachable from a back
 /// edge's target. The finite-budget rule above and the engine's `depends_on`
 /// ambiguity rule both count against this one definition.
-pub fn loop_reachable<S>(graph: &Graph<S>) -> BTreeSet<NodeId<S>> {
+pub fn loop_reachable<S>(graph: &GraphBody<S>) -> BTreeSet<NodeId<S>> {
     let mut queue: VecDeque<NodeId<S>> = graph
         .edges()
         .filter(|e| e.back)
@@ -633,7 +651,7 @@ pub fn loop_reachable<S>(graph: &Graph<S>) -> BTreeSet<NodeId<S>> {
 
 // ── Invariant 7 ───────────────────────────────────────────────────────────
 
-fn check_expansions<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_expansions<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         let Some(Expansion::ForEach {
             target: ExpandTarget::Subgraph { entry, exit },
@@ -729,7 +747,7 @@ fn check_expansions<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
 /// The corollary users meet first: a node cannot be both a multi-branch `All` join
 /// and a loop head. Put a dedicated join node in front of the loop head and let the
 /// back edge target the head.
-fn check_loop_head_joins<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+fn check_loop_head_joins<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     let mut heads: BTreeSet<NodeId<S>> = BTreeSet::new();
     for edge in graph.edges() {
         if edge.back && graph.node(edge.to).is_some() {
@@ -766,7 +784,7 @@ fn check_loop_head_joins<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S
 ///
 /// `Any` and `Quorum` re-entry nodes keep the warning: those can genuinely fire on
 /// the outside token alone, after the scope has been released.
-fn check_scope_reentry<S>(graph: &Graph<S>, warnings: &mut Vec<ValidationWarning<S>>) {
+fn check_scope_reentry<S>(graph: &GraphBody<S>, warnings: &mut Vec<ValidationWarning<S>>) {
     let mut by_scope: BTreeMap<ScopeId<S>, BTreeSet<NodeId<S>>> = BTreeMap::new();
     for node in &graph.nodes {
         by_scope.entry(node.scope).or_default().insert(node.id);
@@ -829,7 +847,7 @@ fn check_scope_reentry<S>(graph: &Graph<S>, warnings: &mut Vec<ValidationWarning
 /// Warn where `run_on_cancel` sits on an expansion node: a cancelled scope never
 /// splices, so the flag can never admit anything there. v1 ignores it; the fix is to
 /// flag the template nodes inside the region, which clones inherit.
-fn check_run_on_cancel<S>(graph: &Graph<S>, warnings: &mut Vec<ValidationWarning<S>>) {
+fn check_run_on_cancel<S>(graph: &GraphBody<S>, warnings: &mut Vec<ValidationWarning<S>>) {
     for node in &graph.nodes {
         if node.run_on_cancel && node.expand.is_some() {
             warnings.push(ValidationWarning::RunOnCancelExpansion { node: node.id });
@@ -857,7 +875,7 @@ fn reachable<S>(
 }
 
 /// Map of edge id to the node it leaves, built once for callers that need it often.
-pub fn edge_sources<S>(graph: &Graph<S>) -> HashMap<EdgeId<S>, NodeId<S>> {
+pub fn edge_sources<S>(graph: &GraphBody<S>) -> HashMap<EdgeId<S>, NodeId<S>> {
     let mut map = HashMap::new();
     for node in &graph.nodes {
         for edge in node.routing.edges() {

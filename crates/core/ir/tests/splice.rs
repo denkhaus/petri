@@ -96,7 +96,7 @@ fn fragment_validation_reuses_the_shared_invariant_engine() {
 #[test]
 fn a_nonempty_fragment_needs_entries() {
     let mut fragment = one_node_fragment();
-    fragment.entries.clear();
+    fragment.entry.clear();
     let errors = validate_fragment(&fragment).unwrap_err();
     assert!(
         errors.iter().any(|e| matches!(

@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::expr::ExprTable;
 use crate::graph::{
-    Budget, Completion, Edge, Expansion, Fallthrough, Graph, JoinPolicy, Node, Routing, Scope,
-    SelectGroup, StepRef,
+    Budget, Completion, Edge, Expansion, Fallthrough, Graph, GraphBody, JoinPolicy, Node, Routing,
+    Scope, SelectGroup, StepRef,
 };
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 
@@ -63,10 +63,7 @@ impl<S> Default for GraphBuilder<S> {
     fn default() -> Self {
         Self {
             graph: Graph {
-                nodes: Vec::new(),
-                scopes: Vec::new(),
-                exprs: ExprTable::default(),
-                entry: Vec::new(),
+                body: GraphBody::default(),
                 params: Default::default(),
                 completion: Completion::AnyFailure,
             },

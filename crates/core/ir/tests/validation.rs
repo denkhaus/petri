@@ -309,15 +309,17 @@ fn a_well_formed_expansion_region_passes() {
 #[test]
 fn structural_problems_are_reported() {
     let graph = Graph {
-        nodes: vec![Node::new(
-            NodeId::new(7),
-            "misnumbered",
-            ScopeId::new(0),
-            StepRef::new(NOOP, Value::Null),
-        )],
-        scopes: vec![Scope::new(ScopeId::new(0))],
-        exprs: Default::default(),
-        entry: vec![],
+        body: ir::GraphBody {
+            nodes: vec![Node::new(
+                NodeId::new(7),
+                "misnumbered",
+                ScopeId::new(0),
+                StepRef::new(NOOP, Value::Null),
+            )],
+            scopes: vec![Scope::new(ScopeId::new(0))],
+            exprs: Default::default(),
+            entry: vec![],
+        },
         params: Default::default(),
         completion: Default::default(),
     };
