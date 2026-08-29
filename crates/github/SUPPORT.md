@@ -16,7 +16,10 @@ specific code and a hint. `gha.*` codes are malformed-file errors (a missing
 **Workflow structure.** `jobs`, `needs`, job and step `if:` with the status
 functions (`success`, `failure`, `always`, `cancelled` — cleanup steps really run
 after a cancel), `env` at workflow/job/step level, `defaults.run`, job `outputs`,
-`timeout-minutes`, `continue-on-error` (literal), `strategy.matrix` with
+`timeout-minutes`, `continue-on-error` (literal, step and job level — a
+tolerated job's failure reports `success` to its dependents and the run, and
+does not trigger matrix fail-fast, as on GitHub; its steps' own outcomes stay
+as they fell), `strategy.matrix` with
 `include`/`exclude`, `fail-fast` and `max-parallel`. `runs-on: ${{ matrix.os }}`
 — and any `runs-on` over `matrix` values, `inputs` (a literal call site's
 `with:`, or the declared default, which is also how a directly run reusable

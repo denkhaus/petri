@@ -363,7 +363,14 @@ impl EngineState {
         }
         match self.graph.completion {
             Completion::AnyFailure => {
-                if self.any_failure() {
+                // A failure on a node that tolerates it is control flow, not a
+                // run failure. `run.failed` deliberately still counts it: the
+                // record says `failure`, and guards read records.
+                let hard_failure = self.history.iter().any(|r| {
+                    r.outcome.status.is_failure()
+                        && !self.graph.node(r.node).is_some_and(|n| n.tolerates_failure)
+                });
+                if hard_failure {
                     RunStatus::Failed
                 } else {
                     RunStatus::Success

@@ -593,6 +593,41 @@ fn windows_and_macos_runners_are_rejected() {
     }
 }
 
+/// Job-level `continue-on-error: true`: every node of the job tolerates
+/// failure — the run status and matrix fail-fast pass over it, and the job's
+/// summary reports `success` to dependents, as on GitHub. An expression-valued
+/// flag stays rejected, as at step level.
+#[test]
+fn a_continue_on_error_job_tolerates_failure() {
+    let text = r#"
+on: push
+jobs:
+  experimental:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo
+  stable:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
+"#;
+    let graph = lower_ok(text);
+    for node in &graph.nodes {
+        let expected = node.name.starts_with("experimental/");
+        assert_eq!(node.tolerates_failure, expected, "{}", node.name);
+    }
+
+    let text = "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    continue-on-error: ${{ github.ref == 'refs/heads/main' }}\n    steps:\n      - run: echo\n";
+    let diags = diagnostics(text);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == "unsupported.continue_on_error.expression"),
+        "{diags:?}"
+    );
+}
+
 /// `with:` belongs to `uses:` steps. GitHub's parser rejects it on a `run:`
 /// step ("Unexpected value 'with'"), and so does this reader — silently
 /// dropping inputs the author wrote would hide a real mistake.

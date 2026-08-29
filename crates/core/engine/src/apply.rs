@@ -498,8 +498,10 @@ fn on_step_finished(
     });
 
     // fail_fast: the first clone failure cancels its siblings through the splice's
-    // own cancel scope. Keyed off the final attempt, like everything else.
+    // own cancel scope. Keyed off the final attempt, like everything else. A
+    // tolerated failure never pulls its siblings down.
     if outcome.status.is_failure()
+        && !node.tolerates_failure
         && let Some(splice) = state.splice_for_node(firing.node)
         && splice.fail_fast
         && !state.is_scope_cancelled(splice.cancel_scope)

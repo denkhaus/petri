@@ -454,6 +454,14 @@ pub struct Node {
     /// Kill admits nothing, flag or no flag.
     #[serde(default)]
     pub run_on_cancel: bool,
+    /// This node's failure is control flow, not a run failure: under
+    /// [`Completion::AnyFailure`] the status fold passes over a failed record
+    /// here, and a failed clone does not trigger its splice's fail-fast cancel.
+    /// The record itself still says `failure` — routing, status guards and
+    /// `run.failed` see it unchanged. Set by frontends for constructs like
+    /// GHA's job-level `continue-on-error`.
+    #[serde(default)]
+    pub tolerates_failure: bool,
     /// Frontend-supplied metadata: display label, source span, classes. Opaque to the
     /// engine; `apply` never reads it. Hosts and observers render with it.
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -475,6 +483,7 @@ impl Node {
             budget: Budget::once(),
             retry: RetryPolicy::none(),
             run_on_cancel: false,
+            tolerates_failure: false,
             meta: Value::Null,
             expand: None,
         }

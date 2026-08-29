@@ -444,9 +444,19 @@ impl<'w, 'a> Lowering<'w, 'a> {
             j.last = last;
         }
 
+        // Job-level `continue-on-error`: the job's failure is control flow. Its
+        // nodes' failures no longer fail the run or trigger fail-fast, and the
+        // summary below reports `success` to dependents — as GitHub's does.
+        let tolerated = self.job_tolerates_failure(job);
+        if tolerated {
+            for id in [start, done].into_iter().chain(chain.iter().copied()) {
+                self.b.node_mut(id).tolerates_failure = true;
+            }
+        }
+
         // The last step's edge carries the job summary into `done`. It is evaluated in
         // the last step's outcome context, so `status` is that step's own.
-        let summary = self.job_summary(job, &site, last == start);
+        let summary = self.job_summary(job, &site, last == start, tolerated);
         let ids = self
             .b
             .select(last, vec![ir::Arm::always(done).with_map(summary)]);
@@ -533,9 +543,40 @@ impl<'w, 'a> Lowering<'w, 'a> {
         site.earlier_steps = names.clone();
     }
 
+    /// Job-level `continue-on-error`, read once per job: a literal `true`
+    /// tolerates the job's failure. GitHub keeps the steps' own outcomes as
+    /// they fell — within the job, `failure()` and `steps.<id>.outcome` still
+    /// see them — so this masks nothing step-side.
+    fn job_tolerates_failure(&mut self, job: &Job<'a>) -> bool {
+        let Some(coe) = job.continue_on_error else {
+            return false;
+        };
+        match coe.as_scalar().and_then(|s| s.as_bool()) {
+            Some(v) => v,
+            None => {
+                self.diags.unsupported(
+                    "continue_on_error.expression",
+                    coe.span(),
+                    "an expression-valued `continue-on-error`",
+                    "use a literal true or false",
+                );
+                false
+            }
+        }
+    }
+
     /// The `{ result, outputs }` summary the last step's edge carries into `done`,
-    /// evaluated in that step's outcome context.
-    fn job_summary(&mut self, job: &Job<'a>, site: &Site, no_steps: bool) -> ExprId {
+    /// evaluated in that step's outcome context. A `tolerated` job reports
+    /// `success` where it would report `failure` — GitHub's conclusion for a
+    /// `continue-on-error` job, and the value `needs.<job>.result` carries —
+    /// while a cancel still reports `cancelled`.
+    fn job_summary(
+        &mut self,
+        job: &Job<'a>,
+        site: &Site,
+        no_steps: bool,
+        tolerated: bool,
+    ) -> ExprId {
         let t = self.b.exprs();
         // Own status counts too: `status` here is the last step's.
         let own = t.var("status");
@@ -570,7 +611,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let s_success = t.lit("success");
         let s_skipped = t.lit("skipped");
         let inner = t.cond(cancelled, s_cancelled, s_success);
-        let ran = t.cond(failed, s_failure, inner);
+        let ran = if tolerated {
+            inner
+        } else {
+            t.cond(failed, s_failure, inner)
+        };
         // A job that never began: cancelled before its start could fire, else
         // skipped by its own gate — the distinction GitHub reports.
         let never_ran = t.cond(start_cancelled, s_cancelled, s_skipped);

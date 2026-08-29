@@ -59,6 +59,28 @@ fn a_routed_failure_is_control_flow_under_terminal_node() {
     assert_eq!(terminal.status_of("exit").as_deref(), Some("success"));
 }
 
+/// A failure on a node that tolerates it is control flow under `AnyFailure`:
+/// the run folds to `Success`, while the record itself still says `failure` —
+/// guards and status reads see it unchanged.
+#[test]
+fn a_tolerated_failure_does_not_fail_the_run() {
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let work = b.add_step("work", scope, NOOP);
+    let exit = b.add_step("exit", scope, NOOP);
+    b.node_mut(work).tolerates_failure = true;
+    b.link(work, exit);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let mut h =
+        Harness::new(graph).results(BTreeMap::from([("work", Outcome::failure("tolerated"))]));
+    assert_eq!(h.run(), RunStatus::Success);
+    assert_eq!(h.status_of("work").as_deref(), Some("failure"));
+    assert_eq!(h.status_of("exit").as_deref(), Some("success"));
+    h.verify_replay();
+}
+
 /// Quiescence without the exit record is `Failed` — including the successful dead
 /// end, where every node that ran succeeded. This is a deliberate departure from
 /// fabro_core, whose executor reports success when traversal stops on a succeeded

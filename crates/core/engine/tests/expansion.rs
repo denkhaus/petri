@@ -193,6 +193,39 @@ fn fail_fast_cancels_the_sibling_clones() {
     assert!(h.state.cancel_scope(splice.cancel_scope).unwrap().cancelled);
 }
 
+/// A clone whose node tolerates failure never pulls its siblings down: the
+/// failed leg records `failure`, the others run to completion, the collector
+/// fires, and the run folds to `Success` — GHA's job-level `continue-on-error`
+/// under a matrix.
+#[test]
+fn a_tolerated_clone_failure_does_not_trigger_fail_fast() {
+    let mut graph = matrix_graph(None, true);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.name == "deploy")
+        .unwrap()
+        .tolerates_failure = true;
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph).respond_with(|info| match info.base.as_str() {
+        "plan" => Outcome::success(json!(["a", "b", "c"])),
+        "deploy" if info.index == Some(0) => Outcome::failure("boom"),
+        _ => Outcome::success(Value::Null),
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+
+    let cancels = h
+        .commands
+        .iter()
+        .filter(|c| matches!(c, engine::Command::DeliverControl { .. }))
+        .count();
+    assert_eq!(cancels, 0, "no sibling is cancelled");
+    assert_eq!(h.start_count("deploy"), 3);
+    assert_eq!(h.start_count("collect"), 1, "the collector fires normally");
+    assert_eq!(h.status_of("deploy#0").as_deref(), Some("failure"));
+}
+
 /// The other half of the `fail_fast` rule: a collector marked `run_on_cancel`
 /// fires and gathers the partial results — the failed leg's, and the cancelled
 /// siblings' — instead of never firing.
