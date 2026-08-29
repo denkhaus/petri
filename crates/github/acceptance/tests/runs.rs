@@ -112,7 +112,13 @@ async fn corpus_run_sweep() {
             },
         };
         if let (Class::Clean | Class::Warnings, Some(mut graph)) = (outcome.class, graph) {
-            prepare(&mut graph, &repo, &outcome.file, pins.get(&repo), &repo_root);
+            prepare(
+                &mut graph,
+                &repo,
+                &outcome.file,
+                pins.get(&repo),
+                &repo_root,
+            );
             // A reusable file run standalone has no caller to supply its
             // declared inputs; a firing-environment failure there is
             // caller-coupled, not a gap. (The word in the file is the signal:
@@ -403,16 +409,17 @@ fn first_failure(
                 })
             })
             .or_else(|| {
-                // A clone's record is `name#N`; the consumer set holds template names.
-                let base = record.name.split('#').next().unwrap_or(&record.name);
+                // A clone's record suffixes every segment (`job#0/step#1`);
+                // the consumer set holds template names.
+                let base = runs::clone_base(&record.name);
                 stub_consumers
-                    .contains(base)
+                    .contains(&base)
                     .then(|| "reads a stubbed script's output".to_string())
                     .or_else(|| {
                         // A ref built from an empty dispatch input names a ref
                         // only a real dispatch run has; no fetch of it can
                         // ever succeed locally.
-                        dispatch_refs.contains(base).then(|| {
+                        dispatch_refs.contains(&base).then(|| {
                             "checks out a ref built from an empty dispatch input".to_string()
                         })
                     })

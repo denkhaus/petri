@@ -49,8 +49,7 @@ pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:di
 
 /// The full 24.04 runner capture — GitHub's own ubuntu-latest filesystem,
 /// ~21 GB to pull once. Pinned by the runner release's ImageVersion.
-pub const RUNNER_IMAGE_2404_FULL: &str =
-    "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.283.1";
+pub const RUNNER_IMAGE_2404_FULL: &str = "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.283.1";
 
 /// Workflows the sweep runs on [`RUNNER_IMAGE_2404_FULL`] instead of slim. On
 /// GitHub they run on ubuntu-latest — the full image — and their setup-ruby
@@ -62,7 +61,10 @@ pub const RUNNER_IMAGE_2404_FULL: &str =
 /// capture's own truth (binaries without a running daemon) rather than
 /// failing on missing packages first.
 pub const FULL_IMAGE_WORKFLOWS: &[(&str, &str)] = &[
-    ("rails/rails", ".github/workflows/devcontainer-smoke-test.yml"),
+    (
+        "rails/rails",
+        ".github/workflows/devcontainer-smoke-test.yml",
+    ),
     ("rails/rails", ".github/workflows/rail_inspector.yml"),
     ("rails/rails", ".github/workflows/rails-new-docker.yml"),
 ];
@@ -116,8 +118,18 @@ pub fn stub_run_scripts(graph: &mut Graph) {
 /// `nodes[...].output` read). The stub never writes the output, so the consumer
 /// sees empty where GitHub sees a value; its failure is the stub's doing, not a
 /// runtime gap, and the sweep classifies it as expected.
+///
+/// The read need not be direct. A stubbed step's output can travel through a
+/// **job output** — the `{ result, outputs, index }` summary the job's last
+/// edge carries into `<job>/done`, which `needs.<job>.outputs.<name>` projects
+/// back out — and from there into another job's output, or into a matrix
+/// expression, where a null leg poisons every clone that reads its `item`. All
+/// of those consumers fail on the stub's account, so the taint is chased:
+/// job outputs fed by stubbed steps to a fixpoint (an output built from
+/// another job's tainted output is tainted too), then reads of tainted
+/// outputs, then expansions whose items ride one.
 pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<String> {
-    use ir::{BinOp, Expr, ExprId};
+    use ir::{BinOp, ExpandTarget, Expr, ExprId, NodeId};
 
     let stubbed: std::collections::BTreeSet<&str> = graph
         .nodes
@@ -143,8 +155,31 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
         }
     };
 
-    // Does the expression tree under `root` read a stubbed node's `output`?
-    let reads_stubbed_output = |root: ExprId| -> bool {
+    // The `(done node, output name)` a `<done>.output.outputs.<name>` read
+    // projects — the lowered shape of `needs.<job>.outputs.<name>`.
+    let outputs_projection = |id: ExprId| -> Option<(String, String)> {
+        let Some(Expr::Field(outputs, name)) = graph.exprs.get(id) else {
+            return None;
+        };
+        let Some(Expr::Field(output, outputs_key)) = graph.exprs.get(*outputs) else {
+            return None;
+        };
+        if outputs_key != "outputs" {
+            return None;
+        }
+        let Some(Expr::Field(record, output_key)) = graph.exprs.get(*output) else {
+            return None;
+        };
+        if output_key != "output" {
+            return None;
+        }
+        Some((record_read(*record)?, name.to_string()))
+    };
+
+    // Does the tree under `root` read a stubbed node's `output` — directly, or
+    // as a tainted job output's projection?
+    type Tainted = std::collections::BTreeSet<(String, String)>;
+    let reads_stubbed = |root: ExprId, tainted: &Tainted| -> bool {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             let Some(expr) = graph.exprs.get(id) else {
@@ -156,22 +191,60 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
             {
                 return true;
             }
-            match expr {
-                Expr::Lit(_) | Expr::Var(_) => {}
-                Expr::Field(a, _) | Expr::Unary(_, a) => stack.push(*a),
-                Expr::Index(a, b) | Expr::Binary(_, a, b) => stack.extend([*a, *b]),
-                Expr::Cond {
-                    cond,
-                    then,
-                    otherwise,
-                } => stack.extend([*cond, *then, *otherwise]),
-                Expr::Array(items) => stack.extend(items.iter().copied()),
-                Expr::Object(pairs) => stack.extend(pairs.iter().map(|(_, v)| *v)),
-                Expr::Call(_, args) => stack.extend(args.iter().copied()),
+            if let Some(pair) = outputs_projection(id)
+                && tainted.contains(&pair)
+            {
+                return true;
             }
+            push_children(expr, &mut stack);
         }
         false
     };
+
+    // The tainted job outputs, to a fixpoint: every edge into a `<job>/done`
+    // carries the job's summary — `{ result, outputs, index }` — and an
+    // `outputs` entry reading a stubbed output (or an already-tainted one:
+    // outputs pass through jobs) marks `(done, name)`.
+    let mut tainted = Tainted::new();
+    loop {
+        let mut changed = false;
+        for node in &graph.nodes {
+            for edge in node.routing.edges() {
+                let Some(map) = edge.map else {
+                    continue;
+                };
+                let Some(target) = graph.node(edge.to) else {
+                    continue;
+                };
+                if !target.name.ends_with("/done") {
+                    continue;
+                }
+                let Some(Expr::Object(summary)) = graph.exprs.get(map) else {
+                    continue;
+                };
+                let Some(outputs) = summary
+                    .iter()
+                    .find(|(k, _)| k == "outputs")
+                    .map(|(_, v)| *v)
+                else {
+                    continue;
+                };
+                let Some(Expr::Object(entries)) = graph.exprs.get(outputs) else {
+                    continue;
+                };
+                for (name, expr) in entries {
+                    let pair = (target.name.to_string(), name.to_string());
+                    if !tainted.contains(&pair) && reads_stubbed(*expr, &tainted) {
+                        tainted.insert(pair);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 
     // Every `$expr` placeholder in a config, by id.
     fn expr_ids(value: &Value, out: &mut Vec<ExprId>) {
@@ -196,15 +269,82 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
         }
     }
 
+    let config_reads = |node: &ir::Node, pred: &dyn Fn(ExprId) -> bool| -> bool {
+        let mut ids = Vec::new();
+        expr_ids(&node.step.config, &mut ids);
+        ids.into_iter().any(pred)
+    };
+
     let mut consumers = std::collections::BTreeSet::new();
     for node in &graph.nodes {
         if node.step.kind.as_ref() == RUN_KIND {
             continue;
         }
-        let mut ids = Vec::new();
-        expr_ids(&node.step.config, &mut ids);
-        if ids.into_iter().any(reads_stubbed_output) {
+        if config_reads(node, &|id| reads_stubbed(id, &tainted)) {
             consumers.insert(node.name.to_string());
+        }
+    }
+
+    // The expansion hop: an expansion whose items ride a tainted output gets a
+    // null where GitHub had a leg, so every node in its region reading the
+    // leg's `item` — the lowered `matrix.*` — fails on the stub's account.
+    // Region membership mirrors the engine's own splice rule (`region_nodes`
+    // in the engine's apply): reachable from `entry` along routing edges
+    // without passing through `exit`, plus `exit`.
+    let region_of = |entry: NodeId, exit: NodeId| -> Vec<NodeId> {
+        let mut seen = std::collections::BTreeSet::from([entry]);
+        let mut order = vec![entry];
+        let mut queue = std::collections::VecDeque::from([entry]);
+        while let Some(id) = queue.pop_front() {
+            if id == exit {
+                continue;
+            }
+            let Some(node) = graph.node(id) else {
+                continue;
+            };
+            for edge in node.routing.edges() {
+                if graph.node(edge.to).is_some() && seen.insert(edge.to) {
+                    order.push(edge.to);
+                    queue.push_back(edge.to);
+                }
+            }
+        }
+        order
+    };
+    let reads_item = |root: ExprId| -> bool {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = graph.exprs.get(id) else {
+                continue;
+            };
+            if matches!(expr, Expr::Var(v) if v == "item") {
+                return true;
+            }
+            push_children(expr, &mut stack);
+        }
+        false
+    };
+    for node in &graph.nodes {
+        let Some(Expansion::ForEach { items, target, .. }) = &node.expand else {
+            continue;
+        };
+        if !reads_stubbed(*items, &tainted) {
+            continue;
+        }
+        let region = match target {
+            ExpandTarget::Node => vec![node.id],
+            ExpandTarget::Subgraph { entry, exit } => region_of(*entry, *exit),
+        };
+        for id in region {
+            let Some(member) = graph.node(id) else {
+                continue;
+            };
+            if member.step.kind.as_ref() == RUN_KIND {
+                continue;
+            }
+            if config_reads(member, &reads_item) {
+                consumers.insert(member.name.to_string());
+            }
         }
     }
     consumers
@@ -513,12 +653,18 @@ pub fn identity_of<'a>(
     if let Some(found) = identities.get(record_name) {
         return Some(found);
     }
-    let stripped: String = record_name
+    identities.get(&clone_base(record_name))
+}
+
+/// The template name behind a firing-record name: the splice's `#index` clone
+/// suffix stripped from **each** path segment — a nested clone
+/// (`job#0/step#1`) suffixes every level, so a first-`#` cut is wrong.
+pub fn clone_base(record_name: &str) -> String {
+    record_name
         .split('/')
         .map(strip_clone_suffix)
         .collect::<Vec<_>>()
-        .join("/");
-    identities.get(&stripped)
+        .join("/")
 }
 
 fn strip_clone_suffix(segment: &str) -> &str {
@@ -1070,6 +1216,112 @@ mod tests {
         );
     }
 
+    /// A stubbed step's output rides the job summary into `<job>/done` and
+    /// comes back out as `needs.<job>.outputs.<name>`: its reader is a
+    /// consumer even a job removed (the taint passes through `relay`'s own
+    /// output), while an output no stubbed step feeds taints nothing.
+    #[test]
+    fn job_outputs_of_stubbed_scripts_taint_their_readers() {
+        let graph = lower(
+            "on: push\n\
+             jobs:\n\
+             \x20 make:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   outputs:\n\
+             \x20     version: ${{ steps.v.outputs.version }}\n\
+             \x20     fixed: plain\n\
+             \x20   steps:\n\
+             \x20     - id: v\n\
+             \x20       run: echo \"version=1\" >> \"$GITHUB_OUTPUT\"\n\
+             \x20 relay:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   needs: make\n\
+             \x20   outputs:\n\
+             \x20     forwarded: ${{ needs.make.outputs.version }}\n\
+             \x20   steps:\n\
+             \x20     - run: true\n\
+             \x20 reads-stubbed:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   needs: relay\n\
+             \x20   steps:\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ needs.relay.outputs.forwarded }}\n\
+             \x20 reads-fixed:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   needs: make\n\
+             \x20   steps:\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ needs.make.outputs.fixed }}\n",
+        );
+        let consumers = stubbed_output_consumers(&graph);
+        assert!(
+            consumers.iter().any(|n| n.starts_with("reads-stubbed/")),
+            "the reader of a stubbed job output, one relay removed: {consumers:?}"
+        );
+        assert!(
+            !consumers.iter().any(|n| n.starts_with("reads-fixed/")),
+            "a job output no stubbed step feeds taints nothing: {consumers:?}"
+        );
+    }
+
+    /// A matrix whose items expression rides a stubbed job output expands over
+    /// a null leg: every node in the expansion region reading the leg's `item`
+    /// (the lowered `matrix.*`) is a consumer. A literal input in the same
+    /// region reads no item, and a static matrix's readers get real legs.
+    #[test]
+    fn tainted_matrix_expansions_mark_their_item_readers() {
+        let graph = lower(
+            "on: push\n\
+             jobs:\n\
+             \x20 gen:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   outputs:\n\
+             \x20     matrix: ${{ steps.m.outputs.matrix }}\n\
+             \x20   steps:\n\
+             \x20     - id: m\n\
+             \x20       run: echo \"matrix=[1]\" >> \"$GITHUB_OUTPUT\"\n\
+             \x20 fan:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   needs: gen\n\
+             \x20   strategy:\n\
+             \x20     matrix: ${{ fromJSON(needs.gen.outputs.matrix) }}\n\
+             \x20   steps:\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ matrix.value }}\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: literal\n\
+             \x20 fixed:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   strategy:\n\
+             \x20     matrix: { v: [1, 2] }\n\
+             \x20   steps:\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ matrix.v }}\n",
+        );
+        let consumers = stubbed_output_consumers(&graph);
+        assert!(
+            consumers
+                .iter()
+                .any(|n| n.starts_with("fan/") && n.contains("step-1")),
+            "the item reader under a tainted matrix is a consumer: {consumers:?}"
+        );
+        assert!(
+            !consumers
+                .iter()
+                .any(|n| n.starts_with("fan/") && n.contains("step-2")),
+            "a literal input in the region reads no item: {consumers:?}"
+        );
+        assert!(
+            !consumers.iter().any(|n| n.starts_with("fixed/")),
+            "a static matrix's legs are real: {consumers:?}"
+        );
+    }
+
     /// A checkout ref built from a defaultless dispatch input is collected —
     /// the sweep's empty event zero-fills it into a ref no repository has. A
     /// ref reading a *defaulted* input resolves to a real ref, and a literal
@@ -1365,6 +1617,17 @@ mod tests {
         assert!(identity_of(&identities, "build/step#2").is_some());
         assert!(identity_of(&identities, "build#0/step#11").is_some());
         assert!(identity_of(&identities, "build/other").is_none());
+    }
+
+    /// Every path segment loses its clone suffix — a first-`#` cut would
+    /// truncate a multi-segment clone name to its head segment.
+    #[test]
+    fn clone_base_strips_each_segment() {
+        assert_eq!(clone_base("build/step"), "build/step");
+        assert_eq!(clone_base("build/step#2"), "build/step");
+        assert_eq!(clone_base("build#0/step#11"), "build/step");
+        // A non-numeric `#` is part of the name, not a clone suffix.
+        assert_eq!(clone_base("build/step#done"), "build/step#done");
     }
 }
 
