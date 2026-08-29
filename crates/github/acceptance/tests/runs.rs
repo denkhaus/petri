@@ -132,17 +132,17 @@ async fn corpus_run_sweep() {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs));
     let mut set = tokio::task::JoinSet::new();
     for (slot, graph, caller_coupled) in queue {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore open");
+        // The permit is acquired inside the task: every task spawns at once and
+        // the completion loop below drains while work runs. Acquiring here
+        // would stall spawning on the permits, and the first progress line
+        // waited until nearly the whole sweep had finished.
+        let semaphore = Arc::clone(&semaphore);
         let trees = Arc::clone(&trees);
         let repo = records[slot].repo.clone();
         let file = records[slot].file.clone();
         set.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.expect("semaphore open");
             let result = run_one(&repo, &file, graph, trees, timeout, caller_coupled).await;
-            drop(permit);
             (slot, result)
         });
     }
