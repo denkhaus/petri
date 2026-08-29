@@ -307,11 +307,22 @@ async fn prepare_image(
     }
 }
 
+/// The version of the pipeline that stages a build context. A pinned build's
+/// reuse tag names the action's commit, but the image's bytes also depend on
+/// how staging put the context on disk — 71905fb changed file modes, and every
+/// image built before it stayed cached and broken, because the tag could not
+/// tell the difference. Bump this when staged bytes change shape; old images
+/// become unreferenced instead of immortal. (2 retires everything tagged
+/// before versioning existed.)
+const STAGING_VERSION: u32 = 2;
+
 /// A valid, stable Docker image tag from a descriptive key: lowercase
 /// alphanumerics with single hyphens between them — the strictest reading of
 /// Docker's repository-name grammar, so nothing descriptive can break it.
+/// Carries [`STAGING_VERSION`], so the tag names the pipeline as well as the
+/// content key.
 fn image_tag(key: &str) -> String {
-    let mut tag = String::from("petri-action");
+    let mut tag = format!("petri-action-v{STAGING_VERSION}");
     let mut gap = true;
     for c in key.to_lowercase().chars().take(96) {
         if c.is_ascii_alphanumeric() {
@@ -404,11 +415,11 @@ mod tests {
     fn tags_are_valid_and_stable() {
         assert_eq!(
             image_tag("Owner-Repo-0123abcd4567-sub/dir"),
-            "petri-action-owner-repo-0123abcd4567-sub-dir"
+            "petri-action-v2-owner-repo-0123abcd4567-sub-dir"
         );
         assert_eq!(
             image_tag("local-.github/actions/x"),
-            "petri-action-local-github-actions-x"
+            "petri-action-v2-local-github-actions-x"
         );
     }
 }
