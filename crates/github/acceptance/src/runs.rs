@@ -84,6 +84,107 @@ pub fn stub_run_scripts(graph: &mut Graph) {
     }
 }
 
+/// The nodes whose config consumes a stubbed `run:` step's output: a real
+/// `uses:` step whose input reads `steps.<id>.outputs.*` of a script the sweep
+/// stubbed to `true` — directly, or through an inlined composite whose declared
+/// output wraps the inner script's record (both lower to the same
+/// `nodes[...].output` read). The stub never writes the output, so the consumer
+/// sees empty where GitHub sees a value; its failure is the stub's doing, not a
+/// runtime gap, and the sweep classifies it as expected.
+pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<String> {
+    use ir::{BinOp, Expr, ExprId};
+
+    let stubbed: std::collections::BTreeSet<&str> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.step.kind.as_ref() == RUN_KIND)
+        .map(|n| n.name.as_ref())
+        .collect();
+
+    // The node a `nodes.<name>` / `nodes[<name># + index]` record read names.
+    let record_read = |base: ExprId| -> Option<String> {
+        let is_nodes =
+            |id: ExprId| matches!(graph.exprs.get(id), Some(Expr::Var(v)) if v == "nodes");
+        match graph.exprs.get(base)? {
+            Expr::Field(nodes, name) if is_nodes(*nodes) => Some(name.to_string()),
+            Expr::Index(nodes, key) if is_nodes(*nodes) => match graph.exprs.get(*key)? {
+                Expr::Binary(BinOp::Add, prefix, _) => match graph.exprs.get(*prefix)? {
+                    Expr::Lit(Value::String(s)) => s.strip_suffix('#').map(str::to_string),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+
+    // Does the expression tree under `root` read a stubbed node's `output`?
+    let reads_stubbed_output = |root: ExprId| -> bool {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = graph.exprs.get(id) else {
+                continue;
+            };
+            if let Expr::Field(base, key) = expr
+                && key == "output"
+                && record_read(*base).is_some_and(|name| stubbed.contains(name.as_str()))
+            {
+                return true;
+            }
+            match expr {
+                Expr::Lit(_) | Expr::Var(_) => {}
+                Expr::Field(a, _) | Expr::Unary(_, a) => stack.push(*a),
+                Expr::Index(a, b) | Expr::Binary(_, a, b) => stack.extend([*a, *b]),
+                Expr::Cond {
+                    cond,
+                    then,
+                    otherwise,
+                } => stack.extend([*cond, *then, *otherwise]),
+                Expr::Array(items) => stack.extend(items.iter().copied()),
+                Expr::Object(pairs) => stack.extend(pairs.iter().map(|(_, v)| *v)),
+                Expr::Call(_, args) => stack.extend(args.iter().copied()),
+            }
+        }
+        false
+    };
+
+    // Every `$expr` placeholder in a config, by id.
+    fn expr_ids(value: &Value, out: &mut Vec<ExprId>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(raw) = map
+                    .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
+                    .and_then(Value::as_u64)
+                {
+                    out.push(ExprId::new(raw as u32));
+                }
+                for child in map.values() {
+                    expr_ids(child, out);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    expr_ids(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut consumers = std::collections::BTreeSet::new();
+    for node in &graph.nodes {
+        if node.step.kind.as_ref() == RUN_KIND {
+            continue;
+        }
+        let mut ids = Vec::new();
+        expr_ids(&node.step.config, &mut ids);
+        if ids.into_iter().any(reads_stubbed_output) {
+            consumers.insert(node.name.to_string());
+        }
+    }
+    consumers
+}
+
 /// Rewrite every host scope to a runner container, chosen per scope from its
 /// placement labels. A workflow's own `container:` stays its own image — the
 /// stand-in is only for scopes that would have run on the host. The explicit
@@ -563,10 +664,12 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
     let _ = writeln!(out, "\n## Expected failures — server-coupled, ranked\n");
     let _ = writeln!(
         out,
-        "First failures no token-less local run can fix: OIDC, GitHub App and \
-         repository secrets, git credentials for the real checkout action, \
-         third-party SaaS backends, cross-run artifact reads. Kept out of the gap \
-         ranking so it never drowns in server-bound noise.\n"
+        "First failures the sweep's own stance produces or no token-less local \
+         run can fix: OIDC, GitHub App and repository secrets, git credentials \
+         for the real checkout action, third-party SaaS backends, cross-run \
+         artifact reads, and steps that read an output a stubbed `run:` script \
+         would have written. Kept out of the gap ranking so it never drowns in \
+         server-bound noise.\n"
     );
     if expected_classes.is_empty() {
         let _ = writeln!(out, "None.");
@@ -652,6 +755,37 @@ mod tests {
     fn lower(text: &str) -> Graph {
         let lowered = load(".github/workflows/test.yml", text, &frontend::NoFiles);
         lowered.graph.expect("the test workflow lowers")
+    }
+
+    /// A real `uses:` step whose input reads a `run:` step's output is a
+    /// stubbed-output consumer — the stub will never write the output. Steps
+    /// with no such read are not.
+    #[test]
+    fn output_consumers_of_stubbed_scripts_are_found() {
+        let graph = lower(
+            "on: push\n\
+             jobs:\n\
+             \x20 j:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   steps:\n\
+             \x20     - id: v\n\
+             \x20       run: echo \"version=1\" >> \"$GITHUB_OUTPUT\"\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ steps.v.outputs.version }}\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: fixed\n",
+        );
+        let consumers = stubbed_output_consumers(&graph);
+        assert!(
+            consumers.iter().any(|n| n.contains("step-2")),
+            "the reader of `steps.v.outputs.version` is a consumer: {consumers:?}"
+        );
+        assert!(
+            !consumers.iter().any(|n| n.contains("step-3")),
+            "a literal `args:` consumes nothing: {consumers:?}"
+        );
     }
 
     #[test]

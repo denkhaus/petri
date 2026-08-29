@@ -15,7 +15,8 @@
 //! Scale controls, so the sweep stays runnable after every commit:
 //! `PETRI_SWEEP_JOBS` bounds workflow parallelism (default 4),
 //! `PETRI_SWEEP_TIMEOUT` caps each workflow's wall clock in seconds (default
-//! 300) so one wedged workflow cannot stall the battery, and
+//! 900 — real toolchain installs run emulated on an arm64 host and outlive a
+//! tighter cap) so one wedged workflow cannot stall the battery, and
 //! `PETRI_SWEEP_FILTER` narrows the sweep to workflows whose `repo/file`
 //! contains the substring — the dev loop for a single repository.
 //!
@@ -83,7 +84,7 @@ async fn corpus_run_sweep() {
 
     let filter = std::env::var("PETRI_SWEEP_FILTER").unwrap_or_default();
     let jobs = env_num("PETRI_SWEEP_JOBS", 4) as usize;
-    let timeout = Duration::from_secs(env_num("PETRI_SWEEP_TIMEOUT", 300));
+    let timeout = Duration::from_secs(env_num("PETRI_SWEEP_TIMEOUT", 900));
 
     let pins = corpus_pins(&root);
 
@@ -275,6 +276,7 @@ async fn run_one(
     caller_coupled: bool,
 ) -> RunResult {
     let identities = step_identities(&graph);
+    let stub_consumers = runs::stubbed_output_consumers(&graph);
     let label: String = format!("{repo}-{file}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -330,7 +332,7 @@ async fn run_one(
         Finished::TimedOut => RunResult::TimedOut { wedged: false },
         Finished::Ran(report) => match report.status {
             ir::RunStatus::Success => RunResult::Pass,
-            _ => first_failure(&report, &identities, caller_coupled),
+            _ => first_failure(&report, &identities, caller_coupled, &stub_consumers),
         },
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -348,6 +350,7 @@ fn first_failure(
     report: &RunReport,
     identities: &std::collections::BTreeMap<String, StepIdentity>,
     caller_coupled: bool,
+    stub_consumers: &std::collections::BTreeSet<String>,
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -367,6 +370,13 @@ fn first_failure(
                 (caller_coupled && class == runtime::engine::FIRING_ENV_CLASS).then(|| {
                     "requires its caller's inputs (a reusable workflow run standalone)".to_string()
                 })
+            })
+            .or_else(|| {
+                // A clone's record is `name#N`; the consumer set holds template names.
+                let base = record.name.split('#').next().unwrap_or(&record.name);
+                stub_consumers
+                    .contains(base)
+                    .then(|| "reads a stubbed script's output".to_string())
             });
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),
