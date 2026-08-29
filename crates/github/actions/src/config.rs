@@ -13,7 +13,7 @@ use smol_str::SmolStr;
 use steps::{ProcessConfig, Shell, SoftFail, ValueOrSecretRef};
 
 pub use frontend_gha::action::ActionLocation;
-use frontend_gha::action::validate_relative_action_path;
+use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
 
 /// `github/run`: a `run:` step.
 #[derive(Debug, Deserialize)]
@@ -125,52 +125,19 @@ struct RawActionConfig {
 }
 
 /// The manifest's entry (`runs.main`/`pre`/`post`), validated the way the
-/// runner joins it: relative to the action directory, `./` normal, and `..`
-/// allowed only as far as the fetched repository root — a subpath action's
-/// entry may live beside it (`github/codeql-action/init` runs
-/// `../lib/init-entry.js`), and the whole repository is what stages. A local
-/// action's bound is the checkout root (`GITHUB_WORKSPACE`) for the same
-/// reason. Nothing may climb past that root: the workspace beyond it is the
-/// runner's, and on a host job the filesystem beyond *that* is the machine's.
+/// runner joins it: relative to the action directory, `..` allowed only as far
+/// as the fetched repository root — the checkout root (`GITHUB_WORKSPACE`) for
+/// a local action ([`resolve_manifest_path`]). Nothing may climb past that
+/// root: the workspace beyond it is the runner's, and on a host job the
+/// filesystem beyond *that* is the machine's. Only the bound matters here; the
+/// step joins the entry as written.
 fn validate_entry(action: &ActionLocation, entry: &str) -> Result<(), String> {
     if entry.is_empty() {
         return Err("the action has no entry point".to_string());
     }
-    if entry.starts_with('/') || entry.contains('\\') || entry.contains('\0') {
-        return Err(format!(
-            "unsafe action entry `{entry}`: the path must be relative"
-        ));
-    }
-    // How far above the action directory the repository root sits.
-    let path_depth = |path: &str| {
-        path.split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .count() as i64
-    };
-    let mut depth: i64 = match action {
-        ActionLocation::Pinned(pinned) => pinned
-            .reference
-            .path
-            .as_deref()
-            .map(path_depth)
-            .unwrap_or(0),
-        ActionLocation::Local { local } => path_depth(local),
-    };
-    for part in entry.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                depth -= 1;
-                if depth < 0 {
-                    return Err(format!(
-                        "unsafe action entry `{entry}`: it escapes the repository root"
-                    ));
-                }
-            }
-            _ => depth += 1,
-        }
-    }
-    Ok(())
+    resolve_manifest_path(action.directory(), entry)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 impl<'de> Deserialize<'de> for ActionConfig {

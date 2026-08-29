@@ -62,6 +62,17 @@ pub enum ActionLocation {
     Local { local: String },
 }
 
+impl ActionLocation {
+    /// The action's directory, relative to the fetched repository root (pinned)
+    /// or the checkout root (local). Empty for the root itself.
+    pub fn directory(&self) -> &str {
+        match self {
+            Self::Pinned(pinned) => pinned.reference.path.as_deref().unwrap_or(""),
+            Self::Local { local } => local,
+        }
+    }
+}
+
 /// `owner/repo[/path]@ref`, as written in `uses:`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActionRef {
@@ -157,6 +168,49 @@ pub fn validate_relative_action_path(path: &str, allow_empty: bool) -> Result<()
         ));
     }
     Ok(())
+}
+
+/// Resolve a path a manifest names relative to its action directory —
+/// `runs.main`, `runs.image` — the way the runner joins it: `./` is normal,
+/// and `..` may climb only as far as the fetched repository root (the checkout
+/// root for a local action). A subpath action's file may live beside or above
+/// its directory (`github/codeql-action/init` runs `../lib/init-entry.js`;
+/// oss-fuzz's `infra/cifuzz` actions build `../../../build_fuzzers.Dockerfile`),
+/// and the whole repository is what stages. The invariant: a fetched manifest
+/// can name any file of its own pinned repository and nothing outside it —
+/// stricter than GitHub, which only checks that the joined file exists. The
+/// result is the file's path from that root with every `.` and `..` resolved
+/// away, so the executor receives a fully normalized path, never `..`.
+///
+/// `directory` must already be strictly validated
+/// ([`validate_relative_action_path`]) — the climb budget it grants is only
+/// as trustworthy as its own components.
+pub fn resolve_manifest_path(directory: &str, path: &str) -> Result<String, ActionPathError> {
+    if path.is_empty() {
+        return Err(path_error(path, "the path is empty"));
+    }
+    if path.starts_with('/') || path.contains('\\') || path.contains('\0') {
+        return Err(path_error(path, "the path must be relative"));
+    }
+    let mut resolved: Vec<&str> = directory
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if resolved.pop().is_none() {
+                    return Err(path_error(path, "it escapes the repository root"));
+                }
+            }
+            _ => resolved.push(part),
+        }
+    }
+    if resolved.is_empty() {
+        return Err(path_error(path, "it names the repository root, not a file"));
+    }
+    Ok(resolved.join("/"))
 }
 
 impl ActionRef {
@@ -387,6 +441,59 @@ mod tests {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         assert!(ActionRef::parse(&format!("a/b@{sha}")).unwrap().is_commit());
         assert!(!r.is_commit());
+    }
+
+    #[test]
+    fn manifest_paths_resolve_within_the_repository_root() {
+        assert_eq!(
+            resolve_manifest_path("", "Dockerfile").unwrap(),
+            "Dockerfile"
+        );
+        assert_eq!(
+            resolve_manifest_path("sub/dir", "Dockerfile").unwrap(),
+            "sub/dir/Dockerfile"
+        );
+        assert_eq!(
+            resolve_manifest_path("sub/dir", "./images/Dockerfile").unwrap(),
+            "sub/dir/images/Dockerfile",
+            "a leading ./ is normal, and a subdirectory joins"
+        );
+        assert_eq!(
+            resolve_manifest_path(
+                "infra/cifuzz/actions/build_fuzzers",
+                "../../../build_fuzzers.Dockerfile"
+            )
+            .unwrap(),
+            "infra/build_fuzzers.Dockerfile",
+            "a manifest may name a file above its directory, within its repository"
+        );
+        assert_eq!(
+            resolve_manifest_path(
+                ".github/actions/next-stats-action",
+                "../../next-stats-action.Dockerfile"
+            )
+            .unwrap(),
+            ".github/next-stats-action.Dockerfile",
+            "a local action is bounded by the checkout root the same way"
+        );
+        assert!(resolve_manifest_path("", "../escape").is_err());
+        assert!(resolve_manifest_path("sub", "../../escape").is_err());
+        assert!(
+            resolve_manifest_path("a", "c/../../../escape").is_err(),
+            "descending first buys no extra climb"
+        );
+        assert_eq!(
+            resolve_manifest_path("a/b", "c/../../../at-root").unwrap(),
+            "at-root",
+            "climbing exactly to the root is within the repository"
+        );
+        assert!(resolve_manifest_path("a", "/abs").is_err());
+        assert!(resolve_manifest_path("a", "a\\b").is_err());
+        assert!(resolve_manifest_path("a", "").is_err());
+        assert!(
+            resolve_manifest_path("a", "..").is_err(),
+            "the root itself is not a file"
+        );
     }
 
     #[test]

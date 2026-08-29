@@ -63,7 +63,11 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     let (action_dir, repository, git_ref) = match &config.action {
         ActionLocation::Pinned(pinned) => {
             let source = ctx.require_capability::<ActionSourceCap>()?;
-            let staged = stage(&ctx, &source.0, pinned).await?;
+            let root = stage(&ctx, &source.0, pinned).await?;
+            let staged = match &pinned.reference.path {
+                Some(path) => root.join(path.as_str()),
+                None => root,
+            };
             (
                 format!("{}/{}", session.workspace(), staged.display()),
                 pinned.reference.repository(),
@@ -140,7 +144,7 @@ pub fn input_variable(name: &str) -> String {
 }
 
 /// Put the action's tree into the job environment, once per scope instance, and
-/// return where it went (relative to the workspace root).
+/// return the staged repository root (relative to the workspace root).
 pub(crate) async fn stage(
     ctx: &StepCtx,
     source: &Arc<dyn ActionTreeSource>,
@@ -149,23 +153,20 @@ pub(crate) async fn stage(
     let reference = &pinned.reference;
     // The whole repository stages once per commit — a subpath action's entry
     // may reach beside its directory (`../lib/…`), exactly as on GitHub's
-    // runners — and the returned path names the action's own directory in it.
+    // runners — and callers join what they need below the returned root: the
+    // action's own directory, or a Dockerfile's parent.
     let root = PathBuf::from(RUNNER_DIR)
         .join("actions")
         .join(reference.owner.as_str())
         .join(reference.repo.as_str())
         .join(pinned.sha.as_str());
-    let relative = match &reference.path {
-        Some(path) => root.join(path.as_str()),
-        None => root.clone(),
-    };
     let marker = root.join(".petri-staged");
     let already = ctx.env.read_file(&marker).await.map_err(|e| StepFailure {
         class: STAGE_CLASS,
         message: format!("could not check the staged action: {e}"),
     })?;
     if already.is_some() {
-        return Ok(relative);
+        return Ok(root);
     }
 
     let source = Arc::clone(source);
@@ -205,7 +206,7 @@ pub(crate) async fn stage(
             class: STAGE_CLASS,
             message: format!("could not mark `{pinned}` as staged: {e}"),
         })?;
-    Ok(relative)
+    Ok(root)
 }
 
 /// Pack the fetched tree as one archive whose entries live under

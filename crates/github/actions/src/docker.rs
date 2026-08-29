@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use executor::{ContainerImage, OneShotContainer};
-use frontend_gha::action::validate_relative_action_path;
+use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
 use frontend_gha::exprs::{
     has_hashfiles_sentinel, has_runner_temp_sentinel, has_workspace_sentinel,
     replace_runner_temp_sentinels, replace_workspace_sentinels,
@@ -241,19 +241,42 @@ async fn prepare_image(
             String::new(),
         )),
         DockerActionImage::Dockerfile(DockerfileImage { action, file }) => {
-            validate_relative_action_path(file, false).map_err(|e| StepFailure {
-                class: IMAGE_CLASS,
-                message: e.to_string(),
-            })?;
-            let dockerfile = (file != "Dockerfile").then(|| SmolStr::new(file));
+            // The action's own location first — it is the climb budget the
+            // Dockerfile path resolves against, so it must hold no `..` itself.
             match action {
                 crate::config::ActionLocation::Pinned(pinned) => {
                     pinned.validate().map_err(|e| StepFailure {
                         class: IMAGE_CLASS,
                         message: e.to_string(),
-                    })?;
+                    })?
+                }
+                crate::config::ActionLocation::Local { local } => {
+                    validate_relative_action_path(local, true).map_err(|e| StepFailure {
+                        class: IMAGE_CLASS,
+                        message: e.to_string(),
+                    })?
+                }
+            }
+            // GitHub builds with the *Dockerfile's parent directory* as the
+            // context (the runner joins `runs.image` to the action directory
+            // and takes its parent), and manifests depend on it: oss-fuzz's
+            // `build_fuzzers.Dockerfile` sits three levels above its actions
+            // and does `ADD .` of the directory it sits in. The path resolves
+            // like an entry point — `..` bounded by the action's own
+            // repository — so the executor receives a normalized context and
+            // basename, never `..`.
+            let normalized =
+                resolve_manifest_path(action.directory(), file).map_err(|e| StepFailure {
+                    class: IMAGE_CLASS,
+                    message: e.to_string(),
+                })?;
+            let (parent, file) = normalized.rsplit_once('/').unwrap_or(("", &normalized));
+            let dockerfile = (file != "Dockerfile").then(|| SmolStr::new(file));
+            match action {
+                crate::config::ActionLocation::Pinned(pinned) => {
                     let source = ctx.require_capability::<ActionSourceCap>()?;
-                    let context = stage(ctx, &source.0, pinned).await?;
+                    let staged = stage(ctx, &source.0, pinned).await?;
+                    let context = join_context(staged, parent);
                     let tag = image_tag(&format!(
                         "{}-{}-{}{}",
                         pinned.reference.owner,
@@ -278,10 +301,6 @@ async fn prepare_image(
                     ))
                 }
                 crate::config::ActionLocation::Local { local } => {
-                    validate_relative_action_path(local, true).map_err(|e| StepFailure {
-                        class: IMAGE_CLASS,
-                        message: e.to_string(),
-                    })?;
                     let tag = image_tag(&format!("local-{local}"));
                     // The tag is not content-addressed: rebuild on the scope's
                     // first use, then the marker lets later phases and steps of
@@ -293,7 +312,7 @@ async fn prepare_image(
                     }
                     Ok((
                         ContainerImage::Build {
-                            context: PathBuf::from(REPO_DIR).join(local),
+                            context: join_context(PathBuf::from(REPO_DIR), parent),
                             dockerfile,
                             tag: SmolStr::new(tag),
                             reuse,
@@ -307,14 +326,28 @@ async fn prepare_image(
     }
 }
 
-/// The version of the pipeline that stages a build context. A pinned build's
-/// reuse tag names the action's commit, but the image's bytes also depend on
-/// how staging put the context on disk — 71905fb changed file modes, and every
-/// image built before it stayed cached and broken, because the tag could not
-/// tell the difference. Bump this when staged bytes change shape; old images
-/// become unreferenced instead of immortal. (2 retires everything tagged
-/// before versioning existed.)
-const STAGING_VERSION: u32 = 2;
+/// A build context under `root`: the Dockerfile's parent directory, which for
+/// the common `image: Dockerfile` is the action directory itself.
+fn join_context(root: PathBuf, parent: &str) -> PathBuf {
+    if parent.is_empty() {
+        root
+    } else {
+        root.join(parent)
+    }
+}
+
+/// The version of the pipeline that stages and shapes a build context. A
+/// pinned build's reuse tag names the action's commit, but the image's bytes
+/// also depend on how staging put the context on disk and which directory the
+/// build ran in — 71905fb changed file modes, and every image built before it
+/// stayed cached and broken, because the tag could not tell the difference.
+/// Bump this when the staged bytes or the context derivation change shape; old
+/// images become unreferenced instead of immortal. (2 retires everything
+/// tagged before versioning existed. 3: the context moved to the Dockerfile's
+/// parent directory, as GitHub builds — an `image:` naming a subdirectory's
+/// file had built with the action directory as its context, under the same
+/// tag.)
+const STAGING_VERSION: u32 = 3;
 
 /// A valid, stable Docker image tag from a descriptive key: lowercase
 /// alphanumerics with single hyphens between them — the strictest reading of
@@ -415,11 +448,39 @@ mod tests {
     fn tags_are_valid_and_stable() {
         assert_eq!(
             image_tag("Owner-Repo-0123abcd4567-sub/dir"),
-            "petri-action-v2-owner-repo-0123abcd4567-sub-dir"
+            "petri-action-v3-owner-repo-0123abcd4567-sub-dir"
         );
         assert_eq!(
             image_tag("local-.github/actions/x"),
-            "petri-action-v2-local-github-actions-x"
+            "petri-action-v3-local-github-actions-x"
+        );
+    }
+
+    #[test]
+    fn the_context_is_the_dockerfiles_parent() {
+        let split = |normalized: &str| {
+            let (parent, file) = normalized.rsplit_once('/').unwrap_or(("", normalized));
+            (
+                join_context(PathBuf::from("root"), parent),
+                file.to_string(),
+            )
+        };
+        assert_eq!(
+            split("Dockerfile"),
+            (PathBuf::from("root"), "Dockerfile".to_string())
+        );
+        assert_eq!(
+            split("sub/dir/Dockerfile"),
+            (PathBuf::from("root/sub/dir"), "Dockerfile".to_string())
+        );
+        // The oss-fuzz shape, resolved: the Dockerfile above its action,
+        // built from the directory it sits in.
+        assert_eq!(
+            split("infra/build_fuzzers.Dockerfile"),
+            (
+                PathBuf::from("root/infra"),
+                "build_fuzzers.Dockerfile".to_string()
+            )
         );
     }
 }
