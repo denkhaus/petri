@@ -302,15 +302,35 @@ pub(crate) fn prepare_outcome_splices(
 
         // Entry attachment: one new select group on the uploader per entry,
         // guarded success-like, so uploaded work starts only from a
-        // success-like uploader. Added pre-routing — the uploader's own routing
-        // pass runs after commit and evaluates these.
+        // success-like uploader — and pinned to the uploading firing's
+        // generation, because the groups persist on the node: a loop-head
+        // uploader's next generation must not re-seed an earlier batch.
+        // Added pre-routing — the uploader's own routing pass runs after
+        // commit and evaluates these.
         let mut extensions: Vec<(NodeId, SelectGroup)> = Vec::new();
         if !fragment.entries.is_empty() {
             let outcome_var = push_expr(&mut exprs, expr_base, Expr::Var(SmolStr::new("outcome")));
-            let guard = push_expr(
+            let success_like = push_expr(
                 &mut exprs,
                 expr_base,
                 Expr::Field(outcome_var, SmolStr::new("success_like")),
+            );
+            let generation_var =
+                push_expr(&mut exprs, expr_base, Expr::Var(SmolStr::new("generation")));
+            let this_generation = push_expr(
+                &mut exprs,
+                expr_base,
+                Expr::Lit(Value::from(generation.raw())),
+            );
+            let same_generation = push_expr(
+                &mut exprs,
+                expr_base,
+                Expr::Binary(BinOp::Eq, generation_var, this_generation),
+            );
+            let guard = push_expr(
+                &mut exprs,
+                expr_base,
+                Expr::Binary(BinOp::And, success_like, same_generation),
             );
             for entry in &fragment.entries {
                 let to = NodeId::new(node_base + entry.raw());

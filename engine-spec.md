@@ -49,9 +49,11 @@ Fan-out requires writing multiple groups; it can never occur implicitly.
 ## 3. Core types (normative shapes; code is authoritative for detail)
 
 ```rust
-// Identifiers: NodeId, EdgeId, ScopeId, ExprId, CancelScopeId (u32 newtypes);
-// FiringId (u64, unique per run); Generation(u32); Attempt(u32, 1-based).
-// Firing key: (NodeId, Generation, Attempt).
+// Identifiers: NodeId, EdgeId, ScopeId, ExprId (u32 newtypes over an id-space
+// marker parameter, default `Live`; a GraphFragment reuses the same node/edge/
+// scope/expression types over `Local` ids, and the type system refuses a mixed-
+// space id); CancelScopeId (u32); FiringId (u64, unique per run);
+// Generation(u32); Attempt(u32, 1-based). Firing key: (NodeId, Generation, Attempt).
 
 pub enum Guard { Always, Expr(ExprId) }
 
@@ -76,6 +78,7 @@ pub struct Node {
     pub budget: Budget,                    // max_firings (counts generations), timeout (per attempt)
     pub retry: RetryPolicy,
     pub run_on_cancel: bool,               // §5: may fire inside a cancelled scope
+    pub splice_policy: SplicePolicy,       // §5.1: Deny (default) | Append | Replace{scope}
     pub meta: Value,                       // opaque, host-facing; the core never reads it
     pub expand: Option<Expansion>,         // HIR only
 }
@@ -275,6 +278,121 @@ ladder or the kill tier, and delivering one touches no cancel-scope state.
 A hierarchical `SubgraphStep` (nested scheduler) remains rejected: loops and
 matrices always flatten into the one graph.
 
+### 5.1 Outcome-driven splice: the boundary
+
+The engine's one mutation applicator takes a producer-neutral prepared input;
+`ForEach` and step-initiated uploads are its two producers. Three
+representations, one direction of travel:
+
+- `SpliceRequest { mode, fragment, attachments }` is fragment-local, serialized
+  in `StepFinished` via `Outcome.splices: Vec<SpliceRequest>` (ordered, empty by
+  default), and untrusted. `GraphFragment` is an executable-plan type — local
+  nodes, edges, resource scopes, an `ExprTable`, explicit entries and exits, in
+  the `Local` id space — with no run `params`, root entries, or `completion`.
+  V1 fragments declare their own resource scopes only. Fragment validation is
+  the one §8 invariant engine over a fragment-local view (`validate_fragment`,
+  with a registry-aware variant mirroring `validate_with` for the host half of
+  the two-stage contract) plus fragment-only rules: exits resolve, no HIR
+  `expand`, and an empty fragment is valid only under `Replace`.
+- `PreparedSplice` has every identifier remapped and every structural,
+  composition, capability, and secret-reference check complete. Engine-private,
+  non-serializable, constructible only by preparation: `apply_prepared_splice`
+  is infallible for domain errors. `ForEach` supersession and outcome
+  retraction ride it as data, so the applicator stays producer-neutral.
+- `AppliedSplice` is runtime bookkeeping, serialized with `EngineState`: a
+  `SpliceBatchId`, the core-stamped owner `NodeId`, added nodes and cancel
+  scope on one common record, and producer-only data on a `SpliceProducer` arm
+  (`ForEach` scheduling and supersession; outcome retractions as
+  `AdmissionKey { node, generation }` structs).
+
+**Policy.** `Node.splice_policy` is a closed capability, totally ordered:
+`Deny < Append < Replace(OwnBatches) < Replace(AllPending)`. `Deny` is the
+default. `authorize(policy, mode)` rejects an operation above the node's
+policy; the delegation check rejects a fragment node whose declared policy
+exceeds its uploader's — a legality check, never a mutation: excess authority
+in either direction rejects loudly as `invalid_splice`, and nothing is
+clamped. `AllPending` is run-scoped destructive authority; the cap permits
+delegating any policy at equal or lower strength, which is what allows normal
+chained uploads.
+
+**Attachment** is concrete stage-1 IR on the request. Entries implicitly
+attach through new select groups on the uploader, added pre-routing, guarded
+success-like **and pinned to the uploading firing's generation** (the groups
+persist on the node, and a loop-head uploader's next generation must not
+re-seed an earlier batch). Batch exits gain edges to each existing forward
+dependent of the uploader — `All` joins only; anything else rejects (a
+generated batch barrier for `Any`/`Quorum` is a v2 seam) — and a dependent the
+same transaction retracted is skipped. `Attachment::DependsOn` pairs a
+fragment-local node with a typed `ExistingNodeRef` — an instance name, never a
+live `NodeId` — resolved through the preparation name index, which covers the
+live graph and nodes added by earlier requests in the same outcome. A
+reference must resolve to exactly one admission: a target with admissions in
+more than one generation — any loop node — rejects in v1. By state at splice
+time: a not-final reference extends the referenced node's routing with a real
+unconditional edge (ordering; it has not routed yet, so the edge can still
+emit); a final reference becomes a guard over `nodes.<name>.status` — the
+record exists, so the guard does not need to wait. Both are completion
+ordering; status gating stays the frontend's business. A reference to a key
+retracted by an earlier request in the same transaction rejects.
+
+Identifier remapping allocates from live-graph high-water marks; instance
+names are used verbatim under the existing `#` scheme, and a collision with
+any live or planned name is `invalid_splice`. Each applied batch gets a fresh
+`CancelScope` parented under the uploader firing's current cancel scope.
+
+### 5.2 Finalization: prepare-then-commit
+
+Only a firing's **final attempt** applies its requests; a non-final attempt's
+requests are recorded in its `StepFinished` and change nothing. For a
+candidate-final result, in order:
+
+1. **Cancelled-scope check first.** If the firing's scope is cancelled (killed
+   included), the splice list is dropped wholesale — no policy check, no
+   validation, no `invalid_splice` — and the rest of the outcome records,
+   merges, and routes under the normal cancel semantics. Cancellation must not
+   admit new work.
+2. **Prepare** every request in order inside one transaction plan owning the
+   allocation cursors, the name index, planned edges, and planned retractions.
+   Preparation never touches canonical `EngineState`, so a rejected
+   transaction leaks nothing — not even allocator movement.
+3. **On rejection**, convert the whole outcome to the canonical
+   `Failure{class: invalid_splice}` — the step's `output` and metrics kept, its
+   `context_updates` dropped, the message naming the request index and
+   location, raw requests remaining only in the External event — and only then
+   run `retry_on` and exhaustion. `invalid_splice` is an ordinary retry class:
+   a matching retry re-runs the step, and a later attempt can succeed.
+4. **If all requests prepare, commit** consumes the plan: record the outcome,
+   apply in order, route the uploader (with its refreshed routing), run
+   quiescence. Nothing partial ever commits, splices apply before the uploader
+   routes (no lost-upload race), and replaying the External `StepFinished`
+   regenerates the same mutations byte-identically.
+
+V1 commits at the uploader's final attempt, not per upload call — a deliberate
+departure from Buildkite's apply-per-call, preserving "retries are invisible
+outside the log". If commit-at-call becomes necessary, the v2 seam is a
+distinct External `SpliceRequested` event, not an overload of `StepProgress`.
+
+### 5.3 Replace: generation-scoped retraction
+
+`Replace` computes a set of `AdmissionKey`s, not a permanent set of nodes. A
+key is retractable when it has no live firing and no final record — exactly
+the keys with parked tokens or `max_parallel` deferrals. Under `OwnBatches`,
+candidates are limited to batches whose recorded owner is the retracting
+uploader's `NodeId` (stable across generations, so a loop-head uploader can
+replace its own earlier batches); under `AllPending`, every retractable key
+qualifies. Retraction drops the parked tokens and deferrals, swallows later
+tokens for those exact keys, and records the keys on the batch. Running
+firings, history, and future generations are untouched; retracted admissions
+never fire, leave no record, and do not block quiescence or terminal release.
+The retractable set is a pure function of `EngineState` at finalization time —
+never stored in the External event; replay re-derives it.
+
+The driver adds one splice-scoped secret rule (§11): a registered secret value
+inside a `SpliceRequest` fails the firing with `invalid_splice` and no
+fragment applied — never masked, because masking a fragment would change the
+executable plan. The driver clears `Outcome.splices` before the append, so the
+offending request never reaches the log.
+
 ## 6. Engine interface, event log, ResolvedFiring
 
 Events: `RunStarted`, `TokenEmitted`, `StepStarted{firing, attempt}`,
@@ -295,7 +413,7 @@ whose own scope-routed events carry closure bookkeeping (`cancelling`, kill
 tiers, `run_on_cancel` admission) a raw per-firing path would bypass. The
 command-or-no-command result of `apply` is the disposition the driver reports.
 
-**Log v3 + EventSource.** Append-then-apply; every record carries
+**Log v6 + EventSource.** Append-then-apply; every record carries
 `EventSource::{External, Core}` (closed enum). Replay feeds back **External
 only**; the core must regenerate its own events byte-identically — that
 regeneration is the determinism assertion, not redundancy. Arrival order at the
@@ -582,6 +700,10 @@ pattern-based redaction beyond registered values is the **emitting step's**
 job before it sends — a product's redaction policy does not belong in the
 core.
 
+A splice payload is never masked: masking a fragment would change the
+executable plan, so the driver's backstop (§5.3) fails the firing and clears
+`Outcome.splices` before the append instead.
+
 A sensitive `Deliver` payload crosses the same way: `{"$secret": "answer:<id>"}`
 in the event (the log keeps the reference), resolved by the driver at
 command-dispatch time into the step. `SecretProvider::register(name, value)`
@@ -638,11 +760,11 @@ groups; `for_each` + `parallel: true|false` → `ForEach` vs cycle desugar.
 | `env_acquire` | the scope's environment could not be materialized |
 | `no_runner` | no step kind is registered for a node's `StepRef.kind` |
 | `capability_unavailable` | a step required a host capability no one registered (§10) |
+| `invalid_splice` | a splice transaction was rejected: policy, validation, or composition (§5.2) — also the driver's splice-payload secret backstop (§5.3) |
 
 Not classes, listed here so they are findable: `cancel_forced` is a value of
 `output.cancel_escalation` (§3.1 rule 5); `UnresolvedConfig` is an error type that
-surfaces as a node failure; `invalid_splice` is reserved for the deferred
-outcome-driven splice.
+surfaces as a node failure.
 
 Names say what went wrong, so a `retry_on` entry reads as a policy rather than a
 riddle — this is why `spawn` and `workspace` became `spawn_failed` and
@@ -653,8 +775,10 @@ for a caller that skipped validation.
 
 ## 14. Deferred and v2 seams (build nothing here)
 
-Outcome-driven splice / BuildKite pipeline upload (`Outcome.splice`,
-`allow_splice` — additive later). Cross-run concurrency: driver-layer service
+Outcome-driven splice shipped (§5.1–5.3); still deferred from it: the
+BuildKite component itself, commit-at-call (`SpliceRequested`), referencing an
+existing resource scope by stable identity, and a generated batch barrier for
+`Any`/`Quorum` dependents. Cross-run concurrency: driver-layer service
 (D2); eventual `concurrency_key` is additive. Placement semantics beyond
 opaque labels (D3). `Control::Pause` (enum is `#[non_exhaustive]`); `Steer` and
 `Approve` shipped as `Control::Deliver` (§6, §10). Strict expression mode. Encoded-secret masking. Content

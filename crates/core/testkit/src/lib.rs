@@ -112,6 +112,57 @@ impl steps::StepRunner for WedgedStep {
     }
 }
 
+/// A step kind that returns configured [`ir::SpliceRequest`]s, so batteries
+/// drive uploads with no component. Config shape:
+/// `{ "requests": [<SpliceRequest>...], "output": <value?> }` — `requests`
+/// deserialized as-is, `output` returned as the outcome's output.
+pub struct SpliceStep;
+
+pub const SPLICE_KIND: ir::StepKindId = ir::StepKindId::new_static("splice");
+
+/// The config a [`SpliceStep`] node takes, for building graphs in tests.
+pub fn splice_config(requests: &[ir::SpliceRequest], output: Value) -> Value {
+    json!({
+        "requests": serde_json::to_value(requests).expect("requests encode"),
+        "output": output,
+    })
+}
+
+impl ir::StepKind for SpliceStep {
+    fn id(&self) -> ir::StepKindId {
+        SPLICE_KIND
+    }
+
+    fn name(&self) -> &str {
+        "splice"
+    }
+}
+
+#[async_trait::async_trait]
+impl steps::StepRunner for SpliceStep {
+    async fn run(&self, ctx: steps::StepCtx) -> ir::Outcome {
+        let requests: Vec<ir::SpliceRequest> = match ctx.config.get("requests") {
+            None => Vec::new(),
+            Some(value) => match serde_json::from_value(value.clone()) {
+                Ok(requests) => requests,
+                Err(error) => {
+                    return ir::Outcome::new(
+                        ir::Status::Failure(
+                            ir::FailureInfo::new(format!(
+                                "splice config did not deserialize: {error}"
+                            ))
+                            .with_class(steps::BAD_CONFIG_CLASS),
+                        ),
+                        Value::Null,
+                    );
+                }
+            },
+        };
+        let output = ctx.config.get("output").cloned().unwrap_or(Value::Null);
+        ir::Outcome::success(output).with_splices(requests)
+    }
+}
+
 /// The handle a host registers as a capability: a concrete type over whatever it
 /// wraps. [`GreetStep`] requires it.
 pub struct Greeting(pub &'static str);

@@ -1070,6 +1070,34 @@ impl Driver {
             outcome.status = Status::TimedOut;
         }
 
+        // The splice backstop, scoped to splice payloads: a registered secret
+        // value inside a `SpliceRequest` fails the firing with no fragment
+        // applied — never masked, because masking a fragment would change the
+        // executable plan. The hit path is exact: the requests are cleared
+        // before the append, so the offending request never reaches the log,
+        // and the canonical `Failure{class: invalid_splice}` carries a
+        // non-secret message. `context_updates` drop with the requests, per
+        // the invalid-splice rule.
+        if !outcome.splices.is_empty() {
+            let serialized = serde_json::to_string(&outcome.splices)
+                .expect("splice requests always encode");
+            if self.sink.masker().mask(&serialized) != serialized {
+                outcome = Outcome {
+                    status: Status::Failure(
+                        ir::FailureInfo::new(
+                            "a splice request contained a registered secret value; \
+                             the request list was dropped before the log",
+                        )
+                        .with_class(engine::INVALID_SPLICE_CLASS),
+                    ),
+                    output: outcome.output,
+                    metrics: outcome.metrics,
+                    context_updates: Default::default(),
+                    splices: Vec::new(),
+                };
+            }
+        }
+
         // Masking happens before the append, so the persisted log is post-mask.
         outcome.output = self.sink.mask_value(&outcome.output);
         outcome.context_updates = outcome

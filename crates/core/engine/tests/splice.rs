@@ -361,6 +361,343 @@ fn a_non_all_dependent_rejects_the_request() {
     h.verify_replay();
 }
 
+// ── Replace and retraction ────────────────────────────────────────────────
+
+/// A fragment whose interior join can park: `wa -> wj <- wb`, entries `wa`/`wb`,
+/// exit `wj`. After `wa` finishes, `wj`'s admission is pending until `wb` does.
+fn parking_fragment(prefix: &str) -> GraphFragment {
+    let name = |suffix: &str| format!("{prefix}{suffix}");
+    let mut wa = Node::new(
+        NodeId::<Local>::new(0),
+        &name("a"),
+        ScopeId::new(0),
+        StepRef::new("noop", Value::Null),
+    );
+    let mut wb = Node::new(
+        NodeId::new(1),
+        &name("b"),
+        ScopeId::new(0),
+        StepRef::new("noop", Value::Null),
+    );
+    let wj = Node::new(
+        NodeId::new(2),
+        &name("j"),
+        ScopeId::new(0),
+        StepRef::new("noop", Value::Null),
+    );
+    wa.routing = ir::Routing::next(Edge::always(EdgeId::new(0), NodeId::new(2)));
+    wb.routing = ir::Routing::next(Edge::always(EdgeId::new(1), NodeId::new(2)));
+    GraphFragment {
+        nodes: vec![wa, wb, wj],
+        scopes: vec![Scope::new(ScopeId::new(0))],
+        exprs: Default::default(),
+        entries: vec![NodeId::new(0), NodeId::new(1)],
+        exits: vec![NodeId::new(2)],
+    }
+}
+
+/// Three entries: uploader `up1` (Append), uploader `up2` with `policy`, and
+/// `slow`, which the tests finish last.
+fn two_uploader_graph(up2_policy: SplicePolicy) -> Graph {
+    let mut b = GraphBuilder::new();
+    let up1 = b.add_step("up1", ScopeId::new(0), NOOP);
+    let up2 = b.add_step("up2", ScopeId::new(0), NOOP);
+    let _slow = b.add_step("slow", ScopeId::new(0), NOOP);
+    b.node_mut(up1).splice_policy = SplicePolicy::Append;
+    b.node_mut(up2).splice_policy = up2_policy;
+    b.build()
+}
+
+/// Drive: up1 appends a parking batch, wa finishes (wj parks, wb stays live),
+/// then up2 replaces. Returns the harness after up2's outcome, with `wb` still
+/// live, for the caller to finish the run its way.
+fn parked_batch_then_replace(up2_policy: SplicePolicy, scope: ReplaceScope) -> Harness {
+    let graph = two_uploader_graph(up2_policy);
+    let mut h = Harness::new(graph);
+    h.feed(engine::Event::RunStarted);
+    let starts = h.take_starts();
+    let by_name = |starts: &[(ir::FiringId, String)], name: &str| {
+        starts
+            .iter()
+            .find(|(_, n)| n == name)
+            .map(|(f, _)| *f)
+            .expect("started")
+    };
+    let up1 = by_name(&starts, "up1");
+    let up2 = by_name(&starts, "up2");
+    let slow = by_name(&starts, "slow");
+
+    h.finish(
+        up1,
+        splice_outcome(vec![SpliceRequest::append(parking_fragment("w"))]),
+    );
+    // Both entries start; `wj` parks once `wa` finishes, `wb` stays live.
+    let batch_starts = h.take_starts();
+    let wa = by_name(&batch_starts, "wa");
+    let wb = by_name(&batch_starts, "wb");
+    h.finish(wa, Outcome::success(Value::Null));
+
+    h.finish(
+        up2,
+        splice_outcome(vec![SpliceRequest::replace(scope, GraphFragment::new())]),
+    );
+    // `wb` lived through the replace; `slow` and `wb` now finish.
+    h.finish(slow, Outcome::success(Value::Null));
+    h.finish(wb, Outcome::success(Value::Null));
+    h
+}
+
+#[test]
+fn own_batches_spares_another_uploaders_batch_and_live_firings_survive() {
+    let mut h = parked_batch_then_replace(
+        SplicePolicy::Replace {
+            scope: ReplaceScope::OwnBatches,
+        },
+        ReplaceScope::OwnBatches,
+    );
+    // up2 owns no batch, so up1's parked `wj` survives, `wb` (live through the
+    // replace) finishes normally, and `wj` fires once `wb`'s token arrives.
+    let wj = h
+        .take_starts()
+        .iter()
+        .find(|(_, n)| n == "wj")
+        .map(|(f, _)| *f)
+        .expect("wj fires: its admission was spared");
+    h.finish(wj, Outcome::success(Value::Null));
+    assert_eq!(h.status.expect("finished"), RunStatus::Success);
+    assert_eq!(h.status_of("wb").as_deref(), Some("success"));
+    h.verify_replay();
+}
+
+#[test]
+fn all_pending_takes_another_uploaders_batch_and_the_run_still_quiesces() {
+    let h = parked_batch_then_replace(
+        SplicePolicy::Replace {
+            scope: ReplaceScope::AllPending,
+        },
+        ReplaceScope::AllPending,
+    );
+    // `wj`'s parked admission was retracted: its token dropped, `wb`'s late
+    // token swallowed by retraction identity, and the dead spliced region does
+    // not block quiescence or terminal release.
+    assert_eq!(h.start_count("wj"), 0, "the retracted admission never fires");
+    assert!(h.status_of("wj").is_none(), "and leaves no record");
+    assert_eq!(h.status.expect("finished"), RunStatus::Success);
+    assert_eq!(h.state.held_scopes().count(), 0, "terminal release ran");
+    let retraction = h
+        .state
+        .splices()
+        .iter()
+        .find_map(|b| match &b.producer {
+            engine::SpliceProducer::Outcome { retracted } if !retracted.is_empty() => {
+                Some(retracted.clone())
+            }
+            _ => None,
+        })
+        .expect("the batch records its retraction");
+    assert_eq!(retraction.len(), 1);
+    h.verify_replay();
+}
+
+#[test]
+fn own_batches_retracts_the_same_uploaders_earlier_batch_across_generations() {
+    // A loop-head uploader: fires at generation 0 and 1. NodeId is stable
+    // across generations, so the second firing's OwnBatches reaches the first
+    // firing's batch.
+    let mut b = GraphBuilder::new();
+    let up = b.add_step("up", ScopeId::new(0), NOOP);
+    b.set_join(up, JoinPolicy::Any);
+    b.set_budget(up, ir::Budget::looped(2));
+    b.node_mut(up).splice_policy = SplicePolicy::Replace {
+        scope: ReplaceScope::OwnBatches,
+    };
+    let again = {
+        let generation = b.exprs().var("generation");
+        let one = b.exprs().lit(1);
+        b.exprs().binary(ir::BinOp::Lt, generation, one)
+    };
+    b.select(up, vec![ir::Arm::when(up, again).as_back()]);
+    b.mark_entry(up);
+    let graph = b.build();
+
+    let mut h = Harness::new(graph);
+    h.feed(engine::Event::RunStarted);
+    let up_gen0 = h.take_starts()[0].0;
+    h.finish(
+        up_gen0,
+        splice_outcome(vec![SpliceRequest::append(parking_fragment("w"))]),
+    );
+    let starts = h.take_starts();
+    let wa = starts.iter().find(|(_, n)| n == "wa").unwrap().0;
+    let up_gen1 = starts.iter().find(|(_, n)| n == "up").unwrap().0;
+    h.finish(wa, Outcome::success(Value::Null));
+    // `wj` parks. The same uploader's next generation retracts it.
+    h.finish(
+        up_gen1,
+        splice_outcome(vec![SpliceRequest::replace(
+            ReplaceScope::OwnBatches,
+            GraphFragment::new(),
+        )]),
+    );
+    let wb = h
+        .state
+        .live_firings()
+        .find(|f| h.state.graph.node(f.node).is_some_and(|n| n.name == "wb"))
+        .map(|f| f.id)
+        .expect("wb is live");
+    h.finish(wb, Outcome::success(Value::Null));
+
+    assert_eq!(h.start_count("wj"), 0, "the uploader's own batch was taken");
+    assert!(
+        h.state.errors().is_empty(),
+        "the gen-1 firing must not re-seed the gen-0 batch: {:?}",
+        h.state.errors()
+    );
+    assert_eq!(h.status.expect("finished"), RunStatus::Success);
+    h.verify_replay();
+}
+
+#[test]
+fn a_retracted_admission_readmits_in_a_future_generation() {
+    // `head -> b1 -> back`, with `b2` joining from generation 1: X (All over b1
+    // and b2) parks at generation 0 forever, and completes at generation 1.
+    // Retracting (X, 0) must not touch the generation-1 admission.
+    let mut b = GraphBuilder::new();
+    let head = b.add_step("head", ScopeId::new(0), NOOP);
+    let b1 = b.add_step("b1", ScopeId::new(0), NOOP);
+    let b2 = b.add_step("b2", ScopeId::new(0), NOOP);
+    let x = b.add_step("x", ScopeId::new(0), NOOP);
+    let up = b.add_step("up", ScopeId::new(0), NOOP);
+    b.set_join(head, JoinPolicy::Any);
+    b.set_budget(head, ir::Budget::looped(2));
+    b.set_budget(b1, ir::Budget::looped(2));
+    b.node_mut(up).splice_policy = SplicePolicy::Replace {
+        scope: ReplaceScope::AllPending,
+    };
+    let second_lap = {
+        let generation = b.exprs().var("generation");
+        let one = b.exprs().lit(1);
+        b.exprs().binary(ir::BinOp::Ge, generation, one)
+    };
+    let first_lap = {
+        let generation = b.exprs().var("generation");
+        let one = b.exprs().lit(1);
+        b.exprs().binary(ir::BinOp::Lt, generation, one)
+    };
+    b.fan_out_groups(
+        head,
+        vec![
+            vec![ir::Arm::always(b1)],
+            vec![ir::Arm::when(b2, second_lap)],
+        ],
+    );
+    b.fan_out_groups(
+        b1,
+        vec![
+            vec![ir::Arm::always(x)],
+            vec![ir::Arm::when(head, first_lap).as_back()],
+        ],
+    );
+    b.link(b2, x);
+    b.graph_mut().entry = vec![head, up];
+    let graph = b.build();
+
+    let mut h = Harness::new(graph);
+    h.feed(engine::Event::RunStarted);
+    let starts = h.take_starts();
+    let head_gen0 = starts.iter().find(|(_, n)| n == "head").unwrap().0;
+    let up_firing = starts.iter().find(|(_, n)| n == "up").unwrap().0;
+    h.finish(head_gen0, Outcome::success(Value::Null));
+    let b1_gen0 = h.take_starts()[0].0;
+    h.finish(b1_gen0, Outcome::success(Value::Null));
+    // (x, 0) is parked — b2 never emits at generation 0 — and generation 1 is
+    // under way. Retract everything pending.
+    h.finish(
+        up_firing,
+        splice_outcome(vec![SpliceRequest::replace(
+            ReplaceScope::AllPending,
+            GraphFragment::new(),
+        )]),
+    );
+    // Generation 1 runs to completion: b1, b2, then x at generation 1.
+    loop {
+        let starts = h.take_starts();
+        if starts.is_empty() {
+            break;
+        }
+        for (firing, _) in starts {
+            h.finish(firing, Outcome::success(Value::Null));
+        }
+    }
+    let record = h
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "x")
+        .expect("x completed in a later generation");
+    assert_eq!(record.generation.raw(), 1);
+    assert_eq!(h.status.expect("finished"), RunStatus::Success);
+    h.verify_replay();
+}
+
+#[test]
+fn a_reference_to_a_key_retracted_by_the_same_transaction_rejects() {
+    // `x` joins All over `early` and `slow`; `early`'s token parks it. One
+    // outcome then retracts (x, 0) and tries to depend on `x`.
+    let mut b = GraphBuilder::new();
+    let early = b.add_step("early", ScopeId::new(0), NOOP);
+    let slow = b.add_step("slow", ScopeId::new(0), NOOP);
+    let x = b.add_step("x", ScopeId::new(0), NOOP);
+    let up = b.add_step("up", ScopeId::new(0), NOOP);
+    b.link(early, x);
+    b.link(slow, x);
+    b.node_mut(up).splice_policy = SplicePolicy::Replace {
+        scope: ReplaceScope::AllPending,
+    };
+    b.graph_mut().entry = vec![early, slow, up];
+    let graph = b.build();
+    let before = graph.nodes.len();
+
+    let mut h = Harness::new(graph);
+    h.feed(engine::Event::RunStarted);
+    let starts = h.take_starts();
+    let early_f = starts.iter().find(|(_, n)| n == "early").unwrap().0;
+    let up_f = starts.iter().find(|(_, n)| n == "up").unwrap().0;
+    let slow_f = starts.iter().find(|(_, n)| n == "slow").unwrap().0;
+    h.finish(early_f, Outcome::success(Value::Null));
+
+    let depends = SpliceRequest::append(fragment(&["f"])).with_attachment(Attachment::DependsOn {
+        node: NodeId::new(0),
+        on: ExistingNodeRef::new("x"),
+    });
+    h.finish(
+        up_f,
+        splice_outcome(vec![
+            SpliceRequest::replace(ReplaceScope::AllPending, GraphFragment::new()),
+            depends,
+        ]),
+    );
+    // Atomic: no fragment, no retraction, and the canonical class.
+    assert_eq!(h.state.graph.nodes.len(), before);
+    let info = h
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "up")
+        .and_then(|r| r.outcome.status.failure_info().cloned())
+        .expect("up failed");
+    assert_eq!(info.class, INVALID_SPLICE_CLASS);
+    h.finish(slow_f, Outcome::success(Value::Null));
+    let x_f = h.take_starts().first().map(|(f, _)| *f).expect("x fires");
+    h.finish(x_f, Outcome::success(Value::Null));
+    assert_eq!(
+        h.status_of("x").as_deref(),
+        Some("success"),
+        "the rejected transaction retracted nothing"
+    );
+    h.verify_replay();
+}
+
 // ── Cancellation ──────────────────────────────────────────────────────────
 
 #[test]
@@ -389,11 +726,11 @@ fn a_request_from_a_cancelled_scope_is_a_logged_no_op() {
         .find(|r| r.name == "up")
         .expect("up recorded");
     assert!(
-        !record
+        record
             .outcome
             .status
             .failure_info()
-            .is_some_and(|i| i.class == INVALID_SPLICE_CLASS),
+            .is_none_or(|i| i.class != INVALID_SPLICE_CLASS),
         "a cancelled-scope request is dropped, never invalid_splice"
     );
     h.verify_replay();
