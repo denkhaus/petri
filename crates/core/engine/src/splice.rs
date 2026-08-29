@@ -22,7 +22,9 @@ use ir::{
 use smol_str::SmolStr;
 
 use crate::event::Event;
-use crate::state::{AdmissionKey, Allocators, AppliedSplice, EngineState, SpliceProducer};
+use crate::state::{
+    AdmissionKey, Allocators, AppliedSplice, BatchPolicy, EngineState, SpliceEffect, SpliceOrigin,
+};
 
 /// The failure class every rejected splice transaction converts to. Registered
 /// in the §13 table; an ordinary retry class — a matching `retry_on` re-runs
@@ -148,9 +150,11 @@ pub(crate) struct PreparedSplice {
     /// Select groups appended to nodes once they are live: the uploader's entry
     /// groups, and `depends_on` edges on not-final or earlier-planned references.
     pub routing_extensions: Vec<(NodeId, SelectGroup)>,
-    /// Producer-only behavior, applied here and recorded verbatim on the
+    pub origin: SpliceOrigin,
+    pub policy: BatchPolicy,
+    /// State changes applied with the graph additions and recorded on the
     /// [`AppliedSplice`].
-    pub producer: SpliceProducer,
+    pub effects: Vec<SpliceEffect>,
 }
 
 /// Every request in one final outcome, prepared: the transaction plan. Commit
@@ -567,7 +571,9 @@ impl<'a> SpliceTransaction<'a> {
             bindings: BTreeMap::new(),
             seeds: Vec::new(),
             routing_extensions,
-            producer: SpliceProducer::Outcome { retracted },
+            origin: SpliceOrigin::Outcome,
+            policy: BatchPolicy::default(),
+            effects: retracted.into_iter().map(SpliceEffect::Retract).collect(),
         });
     }
 
@@ -637,15 +643,15 @@ pub(crate) fn apply_prepared_splice(
         batch_nodes.clone(),
     );
 
-    match &prepared.producer {
-        SpliceProducer::ForEach { superseded, .. } => {
-            for node in superseded {
-                state.supersede(*node);
-            }
+    let mut retracted = Vec::new();
+    for effect in &prepared.effects {
+        match effect {
+            SpliceEffect::Supersede(node) => state.supersede(*node),
+            SpliceEffect::Retract(admission) => retracted.push(*admission),
         }
-        SpliceProducer::Outcome { retracted } => {
-            state.retract_admissions(retracted);
-        }
+    }
+    if !retracted.is_empty() {
+        state.retract_admissions(&retracted);
     }
 
     // Batch identity is apply-time bookkeeping, like ownership: the id is the
@@ -655,7 +661,9 @@ pub(crate) fn apply_prepared_splice(
         owner: prepared.owner,
         nodes: batch_nodes,
         cancel_scope: prepared.cancel_scope,
-        producer: prepared.producer,
+        origin: prepared.origin,
+        policy: prepared.policy,
+        effects: prepared.effects,
         live_count: 0,
     });
 

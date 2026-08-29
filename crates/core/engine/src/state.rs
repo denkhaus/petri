@@ -82,8 +82,7 @@ pub struct AdmissionKey {
 }
 
 /// Bookkeeping for one applied splice batch — a `ForEach` expansion or an
-/// outcome upload. One shape for both producers; producer-only data rides the
-/// [`SpliceProducer`] arm, so there is no optional-field soup.
+/// outcome upload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppliedSplice {
     pub batch: SpliceBatchId,
@@ -95,28 +94,14 @@ pub struct AppliedSplice {
     /// Every node the batch added, for admission control and cancellation.
     pub nodes: BTreeSet<NodeId>,
     pub cancel_scope: CancelScopeId,
-    pub producer: SpliceProducer,
+    pub origin: SpliceOrigin,
+    pub policy: BatchPolicy,
+    pub effects: Vec<SpliceEffect>,
     /// Firings currently occupying this batch's admission slots.
     pub(crate) live_count: u32,
 }
 
 impl AppliedSplice {
-    /// Scheduler admission control across the batch, where the producer has one.
-    pub fn max_parallel(&self) -> Option<u32> {
-        match &self.producer {
-            SpliceProducer::ForEach { max_parallel, .. } => *max_parallel,
-            SpliceProducer::Outcome { .. } => None,
-        }
-    }
-
-    /// Whether the first failure in the batch cancels its siblings.
-    pub fn fail_fast(&self) -> bool {
-        match &self.producer {
-            SpliceProducer::ForEach { fail_fast, .. } => *fail_fast,
-            SpliceProducer::Outcome { .. } => false,
-        }
-    }
-
     /// Firings currently occupying this batch's admission slots.
     pub fn live_count(&self) -> u32 {
         self.live_count
@@ -174,20 +159,25 @@ impl Allocators {
     }
 }
 
-/// Producer-only splice data: what a `ForEach` needs that an upload does not,
-/// and vice versa.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum SpliceProducer {
-    /// A `for_each` expansion: scheduling knobs plus the template region its
-    /// clones superseded.
-    ForEach {
-        max_parallel: Option<u32>,
-        fail_fast: bool,
-        superseded: Vec<NodeId>,
-    },
-    /// An outcome upload: the admissions its `Replace` retracted (empty under
-    /// `Append`).
-    Outcome { retracted: Vec<AdmissionKey> },
+/// The operation that created a splice batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpliceOrigin {
+    Expansion,
+    Outcome,
+}
+
+/// Scheduler behavior for every node in a splice batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchPolicy {
+    pub max_parallel: Option<u32>,
+    pub fail_fast: bool,
+}
+
+/// A state change applied with a splice batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpliceEffect {
+    Supersede(NodeId),
+    Retract(AdmissionKey),
 }
 
 /// Anything that makes a run fail without a step failing.

@@ -35,6 +35,6 @@ pub use log::{
 pub use replay::{ReplayMismatch, ResumePoint, replay, resume, verify_replay};
 pub use splice::{INVALID_SPLICE_CLASS, reject_splices};
 pub use state::{
-    AdmissionKey, AppliedSplice, CancelScope, EngineState, Firing, FiringRecord, RunError,
-    SpliceBatchId, SpliceProducer,
+    AdmissionKey, AppliedSplice, BatchPolicy, CancelScope, EngineState, Firing, FiringRecord,
+    RunError, SpliceBatchId, SpliceEffect, SpliceOrigin,
 };

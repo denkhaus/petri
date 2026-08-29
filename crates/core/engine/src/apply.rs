@@ -23,7 +23,9 @@ use crate::context::{clone_bindings, firing_statics, primary_token, resolve_conf
 use crate::event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice};
 use crate::log::EventSource;
 use crate::splice::{PreparedSeed, PreparedSplice, apply_prepared_splice};
-use crate::state::{EngineState, Firing, FiringRecord, RunError, SpliceProducer, synthetic};
+use crate::state::{
+    BatchPolicy, EngineState, Firing, FiringRecord, RunError, SpliceEffect, SpliceOrigin, synthetic,
+};
 
 /// Apply one event and return the commands it produced.
 ///
@@ -205,7 +207,7 @@ fn try_fire(
     // node completing without running takes no slot, so it is not held back.
     if admitted
         && let Some(splice) = state.splice_for_node(node_id)
-        && let Some(max) = splice.max_parallel()
+        && let Some(max) = splice.policy.max_parallel
         && splice.live_count() >= max.max(1)
     {
         state.defer(key);
@@ -549,7 +551,7 @@ fn on_step_finished(
     if outcome.status.is_failure()
         && !node.tolerates_failure
         && let Some(splice) = state.splice_for_node(firing.node)
-        && splice.fail_fast()
+        && splice.policy.fail_fast
         && !state.is_scope_cancelled(splice.cancel_scope)
     {
         let scope = splice.cancel_scope;
@@ -1031,11 +1033,16 @@ fn on_node_expanded(
         bindings,
         seeds,
         routing_extensions: Vec::new(),
-        producer: SpliceProducer::ForEach {
+        origin: SpliceOrigin::Expansion,
+        policy: BatchPolicy {
             max_parallel: splice.max_parallel,
             fail_fast: splice.fail_fast,
-            superseded: splice.region,
         },
+        effects: splice
+            .region
+            .into_iter()
+            .map(SpliceEffect::Supersede)
+            .collect(),
     };
     apply_prepared_splice(state, prepared, queue);
 }

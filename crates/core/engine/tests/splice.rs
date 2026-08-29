@@ -479,11 +479,16 @@ fn all_pending_takes_another_uploaders_batch_and_the_run_still_quiesces() {
         .state
         .splices()
         .iter()
-        .find_map(|b| match &b.producer {
-            engine::SpliceProducer::Outcome { retracted } if !retracted.is_empty() => {
-                Some(retracted.clone())
-            }
-            _ => None,
+        .find_map(|batch| {
+            let retracted: Vec<_> = batch
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    engine::SpliceEffect::Retract(admission) => Some(*admission),
+                    engine::SpliceEffect::Supersede(_) => None,
+                })
+                .collect();
+            (!retracted.is_empty()).then_some(retracted)
         })
         .expect("the batch records its retraction");
     assert_eq!(retraction.len(), 1);
