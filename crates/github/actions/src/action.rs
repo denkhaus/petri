@@ -180,39 +180,24 @@ pub(crate) async fn stage(
             class: FETCH_CLASS,
             message: e.to_string(),
         })?;
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    let producer = tokio::task::spawn_blocking(move || stream_files(&host_dir, tx));
-    let mut writes = tokio::task::JoinSet::new();
-    let action = pinned.to_string();
-    while let Some((path, bytes)) = rx.recv().await {
-        if writes.len() >= 8 {
-            finish_write(&mut writes).await?;
-        }
-        let env = Arc::clone(&ctx.env);
-        let destination = root.join(&path);
-        let action = action.clone();
-        writes.spawn(async move {
-            env.write_file(&destination, &bytes)
-                .await
-                .map_err(|e| StepFailure {
-                    class: STAGE_CLASS,
-                    message: format!("could not stage `{}` of `{action}`: {e}", path.display()),
-                })
-        });
-    }
-    while !writes.is_empty() {
-        finish_write(&mut writes).await?;
-    }
-    producer
+    // One tarball, packed host-side from the fetched tree and extracted by the
+    // environment's own `tar` — the delivery the checkout step uses. Mode bits
+    // and symlinks survive, which per-file writes through `write_file` did not:
+    // a shipped `setup.sh` arrived unexecutable and the action died spawning
+    // it. One write also beats hundreds.
+    let destination = root.to_string_lossy().into_owned();
+    let tarball = tokio::task::spawn_blocking(move || pack_tree(&destination, &host_dir))
         .await
-        .map_err(|e| StepFailure {
-            class: STAGE_CLASS,
-            message: format!("reading `{pinned}` did not complete: {e}"),
-        })?
-        .map_err(|e| StepFailure {
-            class: STAGE_CLASS,
-            message: format!("could not read the fetched `{pinned}`: {e}"),
-        })?;
+        .map_err(|e| stage_error(format!("packing `{pinned}` did not complete: {e}")))?
+        .map_err(|e| stage_error(format!("could not pack `{pinned}`: {e}")))?;
+
+    let tar_rel = root.with_extension("tar");
+    ctx.env
+        .write_file(&tar_rel, &tarball)
+        .await
+        .map_err(|e| stage_error(format!("could not write `{pinned}`'s archive: {e}")))?;
+    drop(tarball);
+    unpack(ctx, &tar_rel, pinned).await?;
     ctx.env
         .write_file(&marker, b"")
         .await
@@ -223,53 +208,66 @@ pub(crate) async fn stage(
     Ok(relative)
 }
 
-async fn finish_write(
-    writes: &mut tokio::task::JoinSet<Result<(), StepFailure>>,
-) -> Result<(), StepFailure> {
-    writes
-        .join_next()
-        .await
-        .expect("the write set is not empty")
-        .map_err(|e| StepFailure {
-            class: STAGE_CLASS,
-            message: format!("staging an action file did not complete: {e}"),
-        })?
+/// Pack the fetched tree as one archive whose entries live under
+/// `destination`. Symlinks are archived as symlinks, never followed — a link
+/// pointing outside the tree carries no target bytes, exactly as a git
+/// checkout of the action would behave on GitHub's runners.
+fn pack_tree(destination: &str, dir: &Path) -> std::io::Result<Vec<u8>> {
+    let mut builder = tar::Builder::new(Vec::new());
+    builder.follow_symlinks(false);
+    builder
+        .append_dir_all(destination, dir)
+        .and_then(|()| builder.into_inner())
 }
 
-/// Stream every regular file under `root`, by relative path, through a bounded
-/// channel. The action size does not become one in-memory `Vec`.
-fn stream_files(
-    root: &Path,
-    tx: tokio::sync::mpsc::Sender<(PathBuf, Vec<u8>)>,
-) -> std::io::Result<()> {
-    fn walk(
-        dir: &Path,
-        root: &Path,
-        tx: &tokio::sync::mpsc::Sender<(PathBuf, Vec<u8>)>,
-    ) -> std::io::Result<()> {
-        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let path = entry.path();
-            if path.file_name().is_some_and(|n| n == ".git") {
-                continue;
-            }
-            let kind = entry.file_type()?;
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                walk(&path, root, tx)?;
-            } else if kind.is_file() {
-                let relative = path.strip_prefix(root).expect("under root").to_path_buf();
-                if tx.blocking_send((relative, std::fs::read(&path)?)).is_err() {
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
+fn stage_error(message: String) -> StepFailure {
+    StepFailure {
+        class: STAGE_CLASS,
+        message,
     }
-    walk(root, root, &tx)
+}
+
+/// Extract the staged archive with the environment's own `tar`. No cancel
+/// ladder: action trees are small, `tar` always terminates, and the streamed
+/// per-file writes this replaced never consulted cancellation either.
+async fn unpack(ctx: &StepCtx, tar_rel: &Path, pinned: &PinnedAction) -> Result<(), StepFailure> {
+    let workspace = ctx.env.workspace_path().to_string();
+    let mut handle = ctx
+        .env
+        .spawn(executor::ProcessSpec {
+            program: SmolStr::new("tar"),
+            args: vec![
+                SmolStr::new("-xf"),
+                SmolStr::new(format!("{workspace}/{}", tar_rel.display())),
+                SmolStr::new("-C"),
+                SmolStr::new(&workspace),
+            ],
+            env: Default::default(),
+            cwd: None,
+        })
+        .await
+        .map_err(|e| stage_error(format!("could not run `tar` for `{pinned}`: {e}")))?;
+    // Silent on success; on failure the last lines are the diagnosis.
+    let mut said = std::collections::VecDeque::with_capacity(4);
+    if let Some(mut lines) = handle.lines() {
+        while let Some(line) = lines.recv().await {
+            if said.len() == 4 {
+                said.pop_front();
+            }
+            said.push_back(line.line);
+        }
+    }
+    let status = handle
+        .wait()
+        .await
+        .map_err(|e| stage_error(format!("extracting `{pinned}` did not complete: {e}")))?;
+    if status.code != Some(0) {
+        return Err(stage_error(format!(
+            "could not extract `{pinned}`: tar said {}",
+            said.into_iter().collect::<Vec<_>>().join(" | "),
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,20 +283,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn staging_does_not_follow_symbolic_links() {
+    fn staging_archives_symlinks_without_following_them() {
         use std::os::unix::fs::symlink;
 
         let run = testkit::RunDir::new("action-staging-symlink");
         let root = run.path().join("action");
         std::fs::create_dir_all(&root).expect("action directory");
         std::fs::write(root.join("index.js"), "safe").expect("action file");
-        std::fs::write(run.path().join("outside"), "secret").expect("outside file");
+        std::fs::write(run.path().join("outside"), "secret-bytes").expect("outside file");
         symlink(run.path().join("outside"), root.join("linked")).expect("symbolic link");
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        stream_files(&root, tx).expect("stream action files");
-        let files: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-
-        assert_eq!(files, vec![(PathBuf::from("index.js"), b"safe".to_vec())]);
+        let bytes = pack_tree("staged", &root).expect("pack");
+        let mut saw_link = false;
+        for entry in tar::Archive::new(&bytes[..]).entries().expect("entries") {
+            let entry = entry.expect("entry");
+            if entry.path().expect("path").ends_with("linked") {
+                saw_link = true;
+                assert!(entry.header().entry_type().is_symlink());
+                assert_eq!(entry.header().size().expect("size"), 0);
+            }
+        }
+        assert!(saw_link, "the link travels as a link");
+        // The link's target never enters the archive: following it would let a
+        // hostile action tree stage bytes from outside itself.
+        assert!(!bytes.windows(12).any(|w| w == b"secret-bytes"));
     }
 }

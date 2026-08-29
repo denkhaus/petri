@@ -55,6 +55,7 @@ console.log('the value is supersecretvalue');
 console.log('::warning::heads up');
 console.log('cwd=' + process.cwd());
 console.log('action_path_ok=' + fs.existsSync(process.env.GITHUB_ACTION_PATH + '/action.yml'));
+console.log('tool=' + require('child_process').execFileSync(__dirname + '/tool.sh').toString().trim());
 console.log('action_ref=' + process.env.GITHUB_ACTION_REPOSITORY + '@' + process.env.GITHUB_ACTION_REF);
 console.log('event_name=' + JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')).action);
 "#;
@@ -112,6 +113,22 @@ fn fixture_action(base: &Path) {
     std::fs::write(dir.join("action.yml"), ACTION_YML).unwrap();
     std::fs::write(dir.join("dist/index.js"), INDEX_JS).unwrap();
     std::fs::write(dir.join("dist/post.js"), POST_JS).unwrap();
+    // An executable the action ships and spawns: its mode must survive the
+    // trip through git, the tree cache, and staging into the workspace.
+    std::fs::write(
+        dir.join("dist/tool.sh"),
+        "#!/bin/sh\necho exec-bit-survived\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("dist/tool.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(
@@ -230,6 +247,8 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
     };
     // Inputs in, outputs out, and `steps.<id>.outputs` reads them.
     has("greeting=Hello, World");
+    // The shipped executable ran: staging preserved its mode bits.
+    has("tool=exec-bit-survived");
     // GITHUB_ENV applies to later steps, heredoc form included.
     has("env=from-action");
     has("multi=line one");
