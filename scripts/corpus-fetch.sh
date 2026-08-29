@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Fetch well-known OSS repositories at a pinned commit for the compatibility corpus.
-# Each repo gets crates/github/corpus/<owner>__<repo>/ with, preferably, its full
-# source tree at the pin (a depth-1 fetch of the commit, `.git` included) — the run
-# sweep then exercises real version-file reads, local actions, and git-dependent
-# actions. Repositories over PETRI_CORPUS_SOURCE_MAX_MB (default 400, by GitHub's
-# reported history size) fall back to workflows-only, since the sweep's checkout
-# copies the tree into every job. A PROVENANCE.md records the commit, the licence,
-# what was fetched, and when.
+# Each repo gets crates/github/corpus/<owner>__<repo>/ with its full source tree at
+# the pin (a depth-1 fetch of the commit, `.git` included) — the run sweep then
+# exercises real version-file reads, local actions, and git-dependent actions.
+# Always the whole tree: a workflows-only corpus made checkout lie, and workflows
+# that read any repo file (version files, hashFiles patterns, local scripts) failed
+# for the corpus's sin, not petri's. A failed fetch is an error, never a silent
+# fallback. A PROVENANCE.md records the commit, the licence, and when.
 #
 # The corpus data is not committed — crates/github/corpus/ is gitignored apart from
 # REPORT.md. Commits come from crates/github/corpus-pins.txt, which is committed, so
@@ -16,7 +16,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PINS=crates/github/corpus-pins.txt
-SOURCE_MAX_MB="${PETRI_CORPUS_SOURCE_MAX_MB:-400}"
 REPIN=0
 for arg in "$@"; do
   case "$arg" in
@@ -75,47 +74,25 @@ for repo in "${REPOS[@]}"; do
   RESOLVED+=("$repo $sha")
   license=$(gh api "repos/$repo" --jq '.license.spdx_id // "unknown"' 2>/dev/null || echo unknown)
   default_branch=$(gh api "repos/$repo" --jq .default_branch 2>/dev/null || echo main)
-  size_kb=$(gh api "repos/$repo" --jq .size 2>/dev/null || echo 0)
 
-  # The full source tree at the pin, when the repository is small enough: one
-  # depth-1 fetch of the commit, checked out detached, `.git` included.
-  contents="workflows only"
-  if [ "$sha" != "unknown" ] && [ "$size_kb" -le $((SOURCE_MAX_MB * 1024)) ]; then
-    if [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$sha" ]; then
-      contents="full source tree at the pin"
-      echo "   sources already at $sha"
-    else
-      git -C "$dir" init -q 2>/dev/null || true
-      if git -C "$dir" fetch -q --depth 1 "https://github.com/$repo" "$sha" 2>/dev/null         && git -C "$dir" checkout -qf FETCH_HEAD 2>/dev/null; then
-        contents="full source tree at the pin"
-        echo "   sources fetched at $sha (depth 1)"
-      else
-        echo "   sources fetch failed; falling back to workflows only"
-      fi
-    fi
-  elif [ "$size_kb" -gt $((SOURCE_MAX_MB * 1024)) ]; then
-    echo "   sources skipped ($((size_kb / 1024))MB > ${SOURCE_MAX_MB}MB cap)"
+  if [ "$sha" = "unknown" ]; then
+    echo "error: could not resolve a commit for $repo" >&2
+    exit 1
   fi
 
-  if [ "$contents" = "workflows only" ]; then
-    # List workflow files at that commit.
-    files=$(gh api "repos/$repo/contents/.github/workflows?ref=$sha" --jq '.[] | select(.type=="file") | .name' 2>/dev/null || true)
-    for f in $files; do
-      case "$f" in
-        *.yml|*.yaml) ;;
-        *) continue ;;
-      esac
-      curl -sfL "https://raw.githubusercontent.com/$repo/$sha/.github/workflows/$f" -o "$dir/.github/workflows/$f" || true
-    done
-    # Local composite actions, if any, so `uses: ./.github/actions/x` resolves.
-    actions=$(gh api "repos/$repo/contents/.github/actions?ref=$sha" --jq '.[] | select(.type=="dir") | .name' 2>/dev/null || true)
-    for a in $actions; do
-      for candidate in action.yml action.yaml; do
-        if curl -sfL "https://raw.githubusercontent.com/$repo/$sha/.github/actions/$a/$candidate" -o "$dir/.github/actions/$a/$candidate" --create-dirs; then
-          break
-        fi
-      done
-    done
+  # The full source tree at the pin: one depth-1 fetch of the commit, checked
+  # out detached, `.git` included.
+  contents="full source tree at the pin"
+  if [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" = "$sha" ]; then
+    echo "   sources already at $sha"
+  else
+    git -C "$dir" init -q 2>/dev/null || true
+    if git -C "$dir" fetch -q --depth 1 "https://github.com/$repo" "$sha"       && git -C "$dir" checkout -qf FETCH_HEAD; then
+      echo "   sources fetched at $sha (depth 1)"
+    else
+      echo "error: depth-1 fetch of $repo at $sha failed" >&2
+      exit 1
+    fi
   fi
   count=$(ls "$dir/.github/workflows" 2>/dev/null | grep -cE '\.(yml|yaml)$' || true)
   cat > "$dir/PROVENANCE.md" <<EOF
