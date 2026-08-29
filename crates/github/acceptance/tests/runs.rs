@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acceptance::runs::{
-    self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_from_tail,
+    self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_from_log,
     expected_reason, identity_of, runs_report, step_identities,
 };
 use acceptance::{Class, corpus_present, lower_one, workflows};
@@ -278,6 +278,7 @@ async fn run_one(
 ) -> RunResult {
     let identities = step_identities(&graph);
     let stub_consumers = runs::stubbed_output_consumers(&graph);
+    let dispatch_refs = runs::dispatch_ref_checkouts(&graph);
     let label: String = format!("{repo}-{file}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -333,7 +334,13 @@ async fn run_one(
         Finished::TimedOut => RunResult::TimedOut { wedged: false },
         Finished::Ran(report) => match report.status {
             ir::RunStatus::Success => RunResult::Pass,
-            _ => first_failure(&report, &identities, caller_coupled, &stub_consumers),
+            _ => first_failure(
+                &report,
+                &identities,
+                caller_coupled,
+                &stub_consumers,
+                &dispatch_refs,
+            ),
         },
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -352,6 +359,7 @@ fn first_failure(
     identities: &std::collections::BTreeMap<String, StepIdentity>,
     caller_coupled: bool,
     stub_consumers: &std::collections::BTreeSet<String>,
+    dispatch_refs: &std::collections::BTreeSet<String>,
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -364,9 +372,10 @@ fn first_failure(
         let identity = identity_of(identities, &record.name)
             .cloned()
             .unwrap_or_else(|| StepIdentity::Other(record.name.to_string()));
-        let tail = log_tail(report, record.firing);
+        let lines = step_log(report, record.firing);
+        let tail = display_tail(&lines);
         let expected = expected_reason(&identity, &class, !sweep_token().is_empty())
-            .or_else(|| expected_from_tail(&identity, &tail))
+            .or_else(|| expected_from_log(&identity, &lines))
             .or_else(|| {
                 (caller_coupled && class == runtime::engine::FIRING_ENV_CLASS).then(|| {
                     "requires its caller's inputs (a reusable workflow run standalone)".to_string()
@@ -378,6 +387,14 @@ fn first_failure(
                 stub_consumers
                     .contains(base)
                     .then(|| "reads a stubbed script's output".to_string())
+                    .or_else(|| {
+                        // A ref built from an empty dispatch input names a ref
+                        // only a real dispatch run has; no fetch of it can
+                        // ever succeed locally.
+                        dispatch_refs.contains(base).then(|| {
+                            "checks out a ref built from an empty dispatch input".to_string()
+                        })
+                    })
             });
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),
@@ -410,10 +427,10 @@ fn first_failure(
     })
 }
 
-/// The failing firing's last log lines — what the failure actually said. With
-/// `PETRI_SWEEP_LOG` set, the whole failing log goes to stderr — the dev loop
-/// for one workflow's failure.
-fn log_tail(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
+/// The failing firing's whole log — what the classifiers read (the line that
+/// names the cause can sit far above the end). With `PETRI_SWEEP_LOG` set, it
+/// also goes to stderr — the dev loop for one workflow's failure.
+fn step_log(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
     let lines: Vec<String> = report
         .state
         .log
@@ -431,14 +448,19 @@ fn log_tail(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
             eprintln!("    | {line}");
         }
     }
+    lines
+}
+
+/// The report's window onto a failing log: its last lines.
+fn display_tail(lines: &[String]) -> Vec<String> {
     let mut tail: Vec<String> = lines.iter().rev().take(4).rev().cloned().collect();
     // A step can keep printing after its error — deprecation-warning
     // continuations, stack frames — pushing the line that names the failure
-    // out of the window. Keep it: the report and the tail classifiers read it.
-    if runs::error_line(&tail).is_none() {
-        if let Some(err) = runs::error_line(&lines) {
-            tail.insert(0, err.clone());
-        }
+    // out of the window. Keep it: the report reads it.
+    if runs::error_line(&tail).is_none()
+        && let Some(err) = runs::error_line(lines)
+    {
+        tail.insert(0, err.clone());
     }
     tail
 }

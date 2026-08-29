@@ -185,6 +185,183 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
     consumers
 }
 
+/// The nodes whose checkout `ref:` is built from a `workflow_dispatch` input
+/// the sweep leaves empty. A directly run workflow's `inputs.<name>` lowers to
+/// `default(github.event.inputs.<name>, <fallback>)`, and when the input
+/// declares no default the fallback is the type's zero (`0`, `""`, `false`) —
+/// GitHub's own rule for an unset input. The sweep's synthesized event carries
+/// no inputs, so such a ref renders from zeros (`refs/pull/0/head`,
+/// `v0.x-staging`) and names a ref that exists only for a real dispatch run —
+/// server-coupled, not a gap. A ref read routed through scope `env:` is chased
+/// to the env value's own expression. A ref reading only *defaulted* inputs
+/// resolves to a real ref and is not collected: its failures stay gaps.
+pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<String> {
+    use ir::{Expr, ExprId};
+
+    let zero = |v: &Value| match v {
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.is_empty(),
+        Value::Bool(b) => !b,
+        _ => false,
+    };
+    let lit_str = |id: ExprId, want: &str| matches!(graph.exprs.get(id), Some(Expr::Lit(Value::String(s))) if s == want);
+    // `get_ci(get_ci(github, "event"), "inputs")` — the one read
+    // `bind_param_inputs` builds for a run-parameter lookup.
+    let event_inputs = |id: ExprId| -> bool {
+        let Some(Expr::Call(name, args)) = graph.exprs.get(id) else {
+            return false;
+        };
+        name == "get_ci"
+            && args.len() == 2
+            && lit_str(args[1], "inputs")
+            && match graph.exprs.get(args[0]) {
+                Some(Expr::Call(inner_name, inner)) => {
+                    inner_name == "get_ci"
+                        && inner.len() == 2
+                        && matches!(graph.exprs.get(inner[0]), Some(Expr::Var(v)) if v == "github")
+                        && lit_str(inner[1], "event")
+                }
+                _ => false,
+            }
+    };
+    // Does this subtree contain the run-parameter read at all?
+    let contains_event_inputs = |root: ExprId| -> bool {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if event_inputs(id) {
+                return true;
+            }
+            if let Some(expr) = graph.exprs.get(id) {
+                push_children(expr, &mut stack);
+            }
+        }
+        false
+    };
+    // The env-var name a `env.<name>` read resolves, in any lowered spelling.
+    let env_read = |expr: &Expr| -> Option<String> {
+        let is_env = |id: ExprId| matches!(graph.exprs.get(id), Some(Expr::Var(v)) if v == "env");
+        match expr {
+            Expr::Field(base, name) if is_env(*base) => Some(name.to_string()),
+            Expr::Index(base, key) if is_env(*base) => match graph.exprs.get(*key) {
+                Some(Expr::Lit(Value::String(s))) => Some(s.to_string()),
+                _ => None,
+            },
+            Expr::Call(name, args) if name == "get_ci" && args.len() == 2 && is_env(args[0]) => {
+                match graph.exprs.get(args[1]) {
+                    Some(Expr::Lit(Value::String(s))) => Some(s.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+
+    // Does the ref expression read an empty-falling dispatch input, chasing
+    // `env.<name>` into the scope's env expressions? `seen` breaks env cycles.
+    fn reads_empty_input(
+        graph: &Graph,
+        scope: ir::ScopeId,
+        root: ir::ExprId,
+        seen: &mut std::collections::BTreeSet<String>,
+        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
+        env_read: &dyn Fn(&ir::Expr) -> Option<String>,
+    ) -> bool {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = graph.exprs.get(id) else {
+                continue;
+            };
+            if event_inputs_default(expr) {
+                return true;
+            }
+            if let Some(name) = env_read(expr)
+                && seen.insert(name.clone())
+                && let Some(scope) = graph.scopes.iter().find(|s| s.id == scope)
+                && let Some(ir::ExprOrValue::Expr(env_expr)) = scope.env.get(name.as_str())
+                && reads_empty_input(
+                    graph,
+                    scope.id,
+                    *env_expr,
+                    seen,
+                    event_inputs_default,
+                    env_read,
+                )
+            {
+                return true;
+            }
+            push_children(expr, &mut stack);
+        }
+        false
+    }
+
+    // `default(<reads github.event.inputs>, <zero literal>)`: an undeclared
+    // default zero-fills exactly here; a declared default puts its real value
+    // in the fallback slot and does not match.
+    let event_inputs_default = |expr: &Expr| -> bool {
+        let Expr::Call(name, args) = expr else {
+            return false;
+        };
+        name == "default"
+            && args.len() == 2
+            && matches!(graph.exprs.get(args[1]), Some(Expr::Lit(v)) if zero(v))
+            && contains_event_inputs(args[0])
+    };
+
+    let mut out = std::collections::BTreeSet::new();
+    for node in &graph.nodes {
+        if node.step.kind.as_ref() != ACTION_KIND {
+            continue;
+        }
+        let StepIdentity::Action { bare, .. } = action_identity(&node.step.config) else {
+            continue;
+        };
+        if bare != "actions/checkout" {
+            continue;
+        }
+        let Some(raw) = node
+            .step
+            .config
+            .get("inputs")
+            .and_then(|i| i.get("ref"))
+            .and_then(|r| r.get(ir::placeholder::EXPR_PLACEHOLDER_KEY))
+            .and_then(Value::as_u64)
+        else {
+            continue;
+        };
+        let ref_expr = ir::ExprId::new(raw as u32);
+        let mut seen = std::collections::BTreeSet::new();
+        if reads_empty_input(
+            graph,
+            node.scope,
+            ref_expr,
+            &mut seen,
+            &event_inputs_default,
+            &env_read,
+        ) {
+            out.insert(node.name.to_string());
+        }
+    }
+    out
+}
+
+/// Every child expression of `expr`, onto `stack`.
+fn push_children(expr: &ir::Expr, stack: &mut Vec<ir::ExprId>) {
+    use ir::Expr;
+    match expr {
+        Expr::Lit(_) | Expr::Var(_) => {}
+        Expr::Field(a, _) | Expr::Unary(_, a) => stack.push(*a),
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => stack.extend([*a, *b]),
+        Expr::Cond {
+            cond,
+            then,
+            otherwise,
+        } => stack.extend([*cond, *then, *otherwise]),
+        Expr::Array(items) => stack.extend(items.iter().copied()),
+        Expr::Object(pairs) => stack.extend(pairs.iter().map(|(_, v)| *v)),
+        Expr::Call(_, args) => stack.extend(args.iter().copied()),
+    }
+}
+
 /// Rewrite every host scope to a runner container, chosen per scope from its
 /// placement labels. A workflow's own `container:` stays its own image — the
 /// stand-in is only for scopes that would have run on the host. The explicit
@@ -467,32 +644,71 @@ pub fn expected_reason(
 }
 
 /// Why a first failure is expected based on what the step actually said —
-/// the second look, for classes only the log can name. One case today: an
-/// artifact upload of a *build output* (`dist/`, a bundle) that the sweep's
-/// stubbed `run:` scripts structurally never produce. Sources are real where
-/// the corpus fetched them; build outputs never are.
-pub fn expected_from_tail(identity: &StepIdentity, tail: &[String]) -> Option<String> {
+/// the second look, for classes only the log can name. `log` is the failing
+/// step's whole log, not the report's display tail: the line that names the
+/// cause can sit hundreds of lines before the end (scorecard prints its error,
+/// then dumps the full results JSON). One family: an artifact upload of a
+/// *build output* (`dist/`, a bundle) that the sweep's stubbed `run:` scripts
+/// structurally never produce. Sources are real where the corpus fetched them;
+/// build outputs never are.
+pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<String> {
     // ENOSYS from basic syscalls (`mkdir: Function not implemented`) means the
     // image's binaries don't run under this host's amd64 emulation — the 26.04
     // runner is amd64-only, an arm64 daemon pulls it through the platform
     // fallback and then cannot execute it. A host-architecture limit, not a
     // petri gap: an amd64 host runs these rows. Any step can hit it, so this
     // look precedes the action-only ones.
-    if tail
+    if log
         .iter()
         .any(|line| line.contains("Function not implemented"))
     {
         return Some("amd64-only image; this host's emulation cannot run it".to_string());
     }
+    // The scorecard action's publish path signs its results, and the signing
+    // service takes only the Actions-issued ephemeral `GITHUB_TOKEN` — any
+    // PAT, which is all the sweep can supply, is rejected on shape alone. The
+    // scan itself completed; the write to the OpenSSF service is what failed.
+    if let StepIdentity::DockerAction(image) = identity
+        && image.starts_with("ghcr.io/ossf/scorecard-action")
+        && log
+            .iter()
+            .any(|line| line.contains("SigningNew: invalid token"))
+    {
+        return Some("signs results with the Actions-issued GITHUB_TOKEN".to_string());
+    }
     let StepIdentity::Action { bare, .. } = identity else {
         return None;
     };
     if bare.ends_with("upload-artifact")
-        && tail
+        && log
             .iter()
             .any(|line| line.contains("No files were found with the provided path"))
     {
         return Some("uploads outputs a stubbed build never produced".to_string());
+    }
+    // paths-filter run against no repository: on GitHub a pull-request event
+    // routes it to the PR list-files API — the job checks nothing out — while
+    // the sweep's synthesized event forces its git-diff mode, which fatals on
+    // the empty workspace. Two keys, both required: git's no-repository fatal,
+    // and the log's last error being the git call that hit it — a stray
+    // mention with a different terminal failure classifies nothing, and a
+    // git-mode diff failing over a real checkout stays a gap.
+    if bare == "dorny/paths-filter"
+        && log.iter().any(|line| line.contains("not a git repository"))
+        && error_line(log).is_some_and(|line| line.contains("The process 'git"))
+    {
+        return Some("reads the triggering pull request (no local event)".to_string());
+    }
+    // codeql analyze reads its *own* workflow run over the Actions API to
+    // decide status-report fields; petri's run id names no server-side run, so
+    // the lookup 404s. The same 404 also shows up incidentally in logs that
+    // die on something else (cli/cli's database-finalize fatal prints one on
+    // the way down), so a mere mention is not the cause: the 404 must be the
+    // log's last error-naming line — the failure the step actually reported.
+    if bare == "github/codeql-action/analyze"
+        && error_line(log).is_some_and(|line| line.contains("workflow-runs#get-a-workflow-run"))
+    {
+        return Some("reads its own workflow run (no server-side run exists)".to_string());
     }
     // An unhandled exception inside a `github-script` inline script is the
     // script's own business, never the runner's: the runner staged it, ran
@@ -501,8 +717,7 @@ pub fn expected_from_tail(identity: &StepIdentity, tail: &[String]) -> Option<St
     // (`context.payload.number`, `.labels`), which a local run does not have.
     // GitHub with the same empty event would produce the identical throw:
     // interpolation is not the difference, the event is.
-    if bare == "actions/github-script" && tail.iter().any(|line| line.contains("Unhandled error:"))
-    {
+    if bare == "actions/github-script" && log.iter().any(|line| line.contains("Unhandled error:")) {
         return Some(
             "the inline script threw (it acts on the triggering event, which a local run lacks)"
                 .to_string(),
@@ -667,8 +882,10 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
         "First failures the sweep's own stance produces or no token-less local \
          run can fix: OIDC, GitHub App and repository secrets, git credentials \
          for the real checkout action, third-party SaaS backends, cross-run \
-         artifact reads, and steps that read an output a stubbed `run:` script \
-         would have written. Kept out of the gap ranking so it never drowns in \
+         artifact reads, steps that read an output a stubbed `run:` script \
+         would have written, refs and event payloads only a real triggering \
+         run has, and actions that read or write only the hosted service can \
+         answer. Kept out of the gap ranking so it never drowns in \
          server-bound noise.\n"
     );
     if expected_classes.is_empty() {
@@ -757,6 +974,46 @@ mod tests {
         lowered.graph.expect("the test workflow lowers")
     }
 
+    /// A resolver for tests whose workflows call remote actions: every
+    /// reference pins as-is, every manifest is a minimal node action.
+    struct StubActions;
+
+    impl frontend_gha::action::ActionSource for StubActions {
+        fn resolve(
+            &self,
+            reference: &ActionRef,
+        ) -> Result<PinnedAction, frontend_gha::action::ActionSourceError> {
+            Ok(PinnedAction {
+                reference: reference.clone(),
+                sha: "0123456789012345678901234567890123456789".into(),
+            })
+        }
+
+        fn manifest(
+            &self,
+            _pinned: &PinnedAction,
+        ) -> Result<String, frontend_gha::action::ActionSourceError> {
+            Ok("name: checkout\n\
+                inputs:\n\
+                \x20 ref: { description: r }\n\
+                \x20 path: { description: p }\n\
+                runs:\n\
+                \x20 using: node20\n\
+                \x20 main: index.js\n"
+                .to_string())
+        }
+    }
+
+    fn lower_uses(text: &str) -> Graph {
+        let lowered = frontend_gha::load_with(
+            ".github/workflows/test.yml",
+            text,
+            &frontend::NoFiles,
+            Some(&StubActions),
+        );
+        lowered.graph.expect("the test workflow lowers")
+    }
+
     /// A real `uses:` step whose input reads a `run:` step's output is a
     /// stubbed-output consumer — the stub will never write the output. Steps
     /// with no such read are not.
@@ -785,6 +1042,76 @@ mod tests {
         assert!(
             !consumers.iter().any(|n| n.contains("step-3")),
             "a literal `args:` consumes nothing: {consumers:?}"
+        );
+    }
+
+    /// A checkout ref built from a defaultless dispatch input is collected —
+    /// the sweep's empty event zero-fills it into a ref no repository has. A
+    /// ref reading a *defaulted* input resolves to a real ref, and a literal
+    /// ref reads nothing: both stay out, so their failures stay gaps.
+    #[test]
+    fn zero_filled_dispatch_refs_are_found_and_defaulted_ones_are_not() {
+        let pin = "0123456789012345678901234567890123456789";
+        let graph = lower_uses(&format!(
+            "on:\n\
+             \x20 workflow_dispatch:\n\
+             \x20   inputs:\n\
+             \x20     pull_request: {{ required: true, type: number }}\n\
+             \x20     branch: {{ type: string, default: main }}\n\
+             jobs:\n\
+             \x20 j:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   steps:\n\
+             \x20     - uses: actions/checkout@{pin}\n\
+             \x20       with:\n\
+             \x20         ref: refs/pull/${{{{ inputs.pull_request }}}}/head\n\
+             \x20     - uses: actions/checkout@{pin}\n\
+             \x20       with:\n\
+             \x20         ref: ${{{{ inputs.branch }}}}\n\
+             \x20     - uses: actions/checkout@{pin}\n\
+             \x20       with:\n\
+             \x20         ref: main\n",
+        ));
+        let found = dispatch_ref_checkouts(&graph);
+        assert!(
+            found.iter().any(|n| n.contains("step-1")),
+            "the zero-filled ref is collected: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|n| n.contains("step-2")),
+            "a defaulted input resolves to a real ref: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|n| n.contains("step-3")),
+            "a literal ref reads nothing: {found:?}"
+        );
+    }
+
+    /// The nodejs shape: the input read hides behind a job-level `env:`
+    /// (`ref: ${{ env.STAGING }}`, `STAGING: v${{ inputs.release-line }}.x`).
+    /// The walker chases the env value's own expression.
+    #[test]
+    fn dispatch_ref_reads_chase_scope_env() {
+        let pin = "0123456789012345678901234567890123456789";
+        let graph = lower_uses(&format!(
+            "on:\n\
+             \x20 workflow_dispatch:\n\
+             \x20   inputs:\n\
+             \x20     release-line: {{ required: true, type: number }}\n\
+             jobs:\n\
+             \x20 j:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   env:\n\
+             \x20     STAGING: v${{{{ inputs.release-line }}}}.x-staging\n\
+             \x20   steps:\n\
+             \x20     - uses: actions/checkout@{pin}\n\
+             \x20       with:\n\
+             \x20         ref: ${{{{ env.STAGING }}}}\n",
+        ));
+        let found = dispatch_ref_checkouts(&graph);
+        assert!(
+            found.iter().any(|n| n.contains("step-1")),
+            "the env-routed input read is chased: {found:?}"
         );
     }
 
@@ -1017,11 +1344,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tail_tests {
+mod log_tests {
     use super::*;
 
     #[test]
-    fn stubbed_build_uploads_classify_from_the_tail() {
+    fn stubbed_build_uploads_classify_from_the_log() {
         let upload = StepIdentity::Action {
             bare: "actions/upload-artifact".to_string(),
             cross_run: false,
@@ -1031,9 +1358,9 @@ mod tail_tests {
              uploaded."
                 .to_string(),
         ];
-        assert!(expected_from_tail(&upload, &miss).is_some());
-        // Any other upload failure stays a gap; so does the same tail elsewhere.
-        assert!(expected_from_tail(&upload, &["ECONNREFUSED".to_string()]).is_none());
+        assert!(expected_from_log(&upload, &miss).is_some());
+        // Any other upload failure stays a gap; so does the same log elsewhere.
+        assert!(expected_from_log(&upload, &["ECONNREFUSED".to_string()]).is_none());
         // github-script: an unhandled throw inside the inline script is the
         // script's own business (locally, usually the empty event).
         let script = StepIdentity::Action {
@@ -1041,13 +1368,115 @@ mod tail_tests {
             cross_run: false,
         };
         let threw = vec!["Error: Unhandled error: SyntaxError: Unexpected token ';'".to_string()];
-        assert!(expected_from_tail(&script, &threw).is_some());
-        assert!(expected_from_tail(&script, &["exit 1".to_string()]).is_none());
+        assert!(expected_from_log(&script, &threw).is_some());
+        assert!(expected_from_log(&script, &["exit 1".to_string()]).is_none());
         let other = StepIdentity::Action {
             bare: "actions/setup-node".to_string(),
             cross_run: false,
         };
-        assert!(expected_from_tail(&other, &miss).is_none());
+        assert!(expected_from_log(&other, &miss).is_none());
+    }
+
+    /// The scorecard action fails on the result-signing service rejecting the
+    /// sweep's PAT — the one line that names it can sit far above the results
+    /// dump the step prints last. Keyed on that line: a scorecard log without
+    /// it — the scan output alone, or any other failure — stays a gap.
+    #[test]
+    fn scorecard_signing_rejection_classifies_and_the_scan_alone_does_not() {
+        let scorecard = StepIdentity::DockerAction("ghcr.io/ossf/scorecard-action:v2.4.4".into());
+        let signing = vec![
+            "2026/08/29 18:06:29 error SigningNew: invalid token: not a default GITHUB_TOKEN"
+                .to_string(),
+            r#"{"date":"2026-08-29","repo":{"name":"github.com/prometheus/prometheus"}}"#
+                .to_string(),
+        ];
+        assert_eq!(
+            expected_from_log(&scorecard, &signing),
+            Some("signs results with the Actions-issued GITHUB_TOKEN".to_string())
+        );
+        // A success-shaped log — the results JSON with no signing rejection —
+        // classifies nothing; neither does the signature under another step.
+        let results_only = vec![
+            r#"{"date":"2026-08-29","scorecard":{"version":"v5.5.0"},"score":8.1}"#.to_string(),
+        ];
+        assert!(expected_from_log(&scorecard, &results_only).is_none());
+        let other = StepIdentity::DockerAction("ghcr.io/other/tool:v1".to_string());
+        assert!(expected_from_log(&other, &signing).is_none());
+    }
+
+    /// paths-filter forced into git-diff mode by the synthesized event, over a
+    /// job that checked nothing out: expected. The same action failing without
+    /// the no-repository fatal — a real git-mode diff gone wrong — stays a gap.
+    #[test]
+    fn paths_filter_without_a_repository_classifies_and_git_mode_failures_do_not() {
+        let filter = StepIdentity::Action {
+            bare: "dorny/paths-filter".to_string(),
+            cross_run: false,
+        };
+        let no_repo = vec![
+            "fatal: not a git repository (or any of the parent directories): .git".to_string(),
+            "Error: The process 'git rev-parse --abbrev-ref HEAD' failed with exit code 128"
+                .to_string(),
+        ];
+        assert_eq!(
+            expected_from_log(&filter, &no_repo),
+            Some("reads the triggering pull request (no local event)".to_string())
+        );
+        let diff_broke =
+            vec!["Error: The process 'git diff --name-only' failed with exit code 129".to_string()];
+        assert!(expected_from_log(&filter, &diff_broke).is_none());
+        // A stray no-repository mention with a different terminal failure is
+        // not the cause.
+        let stray = vec![
+            "fatal: not a git repository (or any of the parent directories): .git".to_string(),
+            "Error: Unable to read the filter configuration".to_string(),
+        ];
+        assert!(expected_from_log(&filter, &stray).is_none());
+        let other = StepIdentity::Action {
+            bare: "actions/setup-node".to_string(),
+            cross_run: false,
+        };
+        assert!(expected_from_log(&other, &no_repo).is_none());
+    }
+
+    /// codeql analyze is expected only when the failure IS the own-run API
+    /// lookup; the cli/cli database-finalize fatal — same action, different
+    /// cause — must stay a gap.
+    #[test]
+    fn codeql_analyze_own_run_lookup_classifies_and_finalize_fatals_do_not() {
+        let analyze = StepIdentity::Action {
+            bare: "github/codeql-action/analyze".to_string(),
+            cross_run: false,
+        };
+        let not_found = vec![
+            "Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run"
+                .to_string(),
+        ];
+        assert_eq!(
+            expected_from_log(&analyze, &not_found),
+            Some("reads its own workflow run (no server-side run exists)".to_string())
+        );
+        // The cli/cli shape: the own-run 404 appears in passing — as telemetry
+        // noise and as an earlier error — then the step dies on a
+        // database-finalize fatal. The last error names the real cause, and
+        // the incidental mentions must not classify it.
+        let finalize = vec![
+            "Warning: Failed to gather information for telemetry: Not Found - \
+             https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run"
+                .to_string(),
+            "Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run"
+                .to_string(),
+            "Error: Encountered a fatal error while running \"codeql database finalize \
+             --finalize-dataset\""
+                .to_string(),
+        ];
+        assert!(expected_from_log(&analyze, &finalize).is_none());
+        // The same 404 under a different action names a different problem.
+        let other = StepIdentity::Action {
+            bare: "github/codeql-action/init".to_string(),
+            cross_run: false,
+        };
+        assert!(expected_from_log(&other, &not_found).is_none());
     }
 
     /// The setup-node shape that made a whole gap class undiagnosable: the
