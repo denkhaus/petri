@@ -480,15 +480,7 @@ fn on_step_finished(
         // and nothing is routed: only the final attempt is visible downstream —
         // this attempt's splice requests included, which stay in the log and
         // change nothing.
-        if let Some(f) = state.firing_mut(firing_id) {
-            f.awaiting_retry = true;
-            f.started = false;
-        }
-        cmds.push(Command::ScheduleRetry {
-            firing: firing_id,
-            next_attempt: attempt.next(),
-            base_delay: node.retry.base_delay(attempt),
-        });
+        schedule_retry(state, cmds, firing_id, &node, attempt);
         return;
     }
 
@@ -525,29 +517,12 @@ fn on_step_finished(
             ) {
                 Ok(prepared) => plan = Some(prepared),
                 Err(error) => {
-                    outcome = Outcome {
-                        status: Status::Failure(
-                            FailureInfo::new(error.to_string())
-                                .with_class(crate::splice::INVALID_SPLICE_CLASS),
-                        ),
-                        output: outcome.output,
-                        metrics: outcome.metrics,
-                        context_updates: std::collections::BTreeMap::new(),
-                        splices: Vec::new(),
-                    };
+                    outcome = crate::splice::reject_splices(outcome, error.to_string());
                     // The converted failure gets the ordinary retry decision.
                     if node.retry.should_retry(&outcome.status)
                         && node.retry.has_attempt_after(attempt)
                     {
-                        if let Some(f) = state.firing_mut(firing_id) {
-                            f.awaiting_retry = true;
-                            f.started = false;
-                        }
-                        cmds.push(Command::ScheduleRetry {
-                            firing: firing_id,
-                            next_attempt: attempt.next(),
-                            base_delay: node.retry.base_delay(attempt),
-                        });
+                        schedule_retry(state, cmds, firing_id, &node, attempt);
                         return;
                     }
                 }
@@ -609,6 +584,27 @@ fn on_step_finished(
         &outcome,
         queue,
     );
+}
+
+/// Park the firing for a retry: keep it live through the backoff — which holds
+/// its scope and keeps the run non-quiescent — and schedule the next attempt.
+/// The caller has already decided the retry is admissible.
+fn schedule_retry(
+    state: &mut EngineState,
+    cmds: &mut Vec<Command>,
+    firing_id: FiringId,
+    node: &Node,
+    attempt: Attempt,
+) {
+    if let Some(f) = state.firing_mut(firing_id) {
+        f.awaiting_retry = true;
+        f.started = false;
+    }
+    cmds.push(Command::ScheduleRetry {
+        firing: firing_id,
+        next_attempt: attempt.next(),
+        base_delay: node.retry.base_delay(attempt),
+    });
 }
 
 /// Turn an exhausted retry's failure into a `PartialSuccess`, keeping the real
@@ -1011,11 +1007,11 @@ fn on_node_expanded(
     let mut nodes = Vec::new();
     let mut bindings = BTreeMap::new();
     let mut seeds = Vec::new();
-    for clone in &splice.clones {
+    for clone in splice.clones {
         let clone_binding = clone_bindings(clone.index, &clone.item);
-        for node in &clone.nodes {
+        for node in clone.nodes {
             bindings.insert(node.id, clone_binding.clone());
-            nodes.push(node.clone());
+            nodes.push(node);
         }
         seeds.push(PreparedSeed {
             edge: clone.seed_edge,
@@ -1026,7 +1022,6 @@ fn on_node_expanded(
     }
 
     let prepared = PreparedSplice {
-        batch: state.next_batch_id(),
         owner: source,
         cancel_scope: splice.cancel_scope,
         parent_scope: parent,
@@ -1039,7 +1034,7 @@ fn on_node_expanded(
         producer: SpliceProducer::ForEach {
             max_parallel: splice.max_parallel,
             fail_fast: splice.fail_fast,
-            superseded: splice.region.clone(),
+            superseded: splice.region,
         },
     };
     apply_prepared_splice(state, prepared, queue);

@@ -9,11 +9,42 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use driver::{Driver, RunConfig, RunReport};
+use engine::{Event, EventLog, EventRecord};
 use executor::{Executor, MapSecrets, Retention};
 use executor_docker::DockerExecutor;
 use executor_host::HostExecutor;
-use ir::{Control, Graph, Outcome, ScopeId, Value};
+use ir::{Control, FiringId, Graph, Outcome, ScopeId, Value};
 use steps::{ProcessStep, Registry};
+
+// ── Helpers over the log and report ───────────────────────────────────────
+
+/// The log position of the first record matching `pred`.
+pub fn seq_of(log: &EventLog, pred: impl Fn(&EventRecord) -> bool) -> usize {
+    log.records()
+        .iter()
+        .find(|r| pred(r))
+        .map(|r| r.seq as usize)
+        .expect("the record is in the log")
+}
+
+/// The log position of a firing's `StepFinished` record.
+pub fn finish_seq(log: &EventLog, firing: FiringId) -> usize {
+    seq_of(
+        log,
+        |r| matches!(&r.event, Event::StepFinished { firing: f, .. } if *f == firing),
+    )
+}
+
+/// The firing recorded for the named node.
+pub fn firing_of(report: &RunReport, name: &str) -> FiringId {
+    report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == name)
+        .expect("the node recorded")
+        .firing
+}
 
 pub fn runners() -> Registry {
     let mut registry = Registry::new();

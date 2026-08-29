@@ -111,6 +111,57 @@ pub enum ValidationError<S = Live> {
     BoundaryCrossing { node: NodeId<S>, edge: EdgeId<S> },
 }
 
+/// The structural location a validation error describes. Callers can format it
+/// for their own container or map it to source spans without matching every
+/// [`ValidationError`] variant again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationLocation<S = Live> {
+    Graph,
+    Node(NodeId<S>),
+    Edge(EdgeId<S>),
+    Scope(ScopeId<S>),
+    Entry(NodeId<S>),
+    Site(SmolStr),
+}
+
+impl<S> ValidationError<S> {
+    pub fn location(&self) -> ValidationLocation<S> {
+        use ValidationError as E;
+        match self {
+            E::NodeIdMismatch { index, .. } => ValidationLocation::Node(NodeId::new(*index as u32)),
+            E::ScopeIdMismatch { index, .. } => {
+                ValidationLocation::Scope(ScopeId::new(*index as u32))
+            }
+            E::UnknownScope { node, .. }
+            | E::UnknownStepKind { node, .. }
+            | E::BadStepConfig { node, .. }
+            | E::AlwaysNotLast { node, .. }
+            | E::EmptyGroup { node, .. }
+            | E::ExitUnreachable { node, .. }
+            | E::ExitNotPostdominator { node, .. }
+            | E::BoundaryCrossing { node, .. }
+            | E::HirConfigInPlan { node, .. } => ValidationLocation::Node(*node),
+            E::UnknownTarget { edge, .. } | E::DuplicateEdgeId(edge) | E::ReservedEdgeId(edge) => {
+                ValidationLocation::Edge(*edge)
+            }
+            E::NoEntry | E::CompletionUnknownNode(_) => ValidationLocation::Graph,
+            E::UnknownEntry(node) | E::DuplicateEntry(node) | E::EntryHasIncoming(node) => {
+                ValidationLocation::Entry(*node)
+            }
+            E::CycleWithoutBackEdge(nodes) => nodes
+                .first()
+                .copied()
+                .map(ValidationLocation::Node)
+                .unwrap_or(ValidationLocation::Graph),
+            E::ZeroBudget(node)
+            | E::UnboundedLoopBudget(node)
+            | E::LoopHeadMustJoinAny(node)
+            | E::HirFieldInPlan(node) => ValidationLocation::Node(*node),
+            E::UnknownExpr { site, .. } => ValidationLocation::Site(site.clone()),
+        }
+    }
+}
+
 /// Something worth flagging that is still a legal graph.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationWarning<S = Live> {
@@ -247,7 +298,10 @@ fn done<S>(errors: Vec<ValidationError<S>>) -> Result<(), Vec<ValidationError<S>
     }
 }
 
-pub(crate) fn collect<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> Vec<ValidationError<S>> {
+pub(crate) fn collect<S>(
+    graph: &Graph<S>,
+    registry: Option<&dyn StepKinds>,
+) -> Vec<ValidationError<S>> {
     let mut errors = Vec::new();
     check_structure(graph, registry, &mut errors);
     check_completion(graph, &mut errors);
@@ -545,18 +599,28 @@ fn check_budgets<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
 
     // Anything downstream of a back edge can fire once per generation, so its cap
     // is what makes the run terminate.
+    for node in loop_reachable(graph) {
+        if let Some(nd) = graph.node(node)
+            && !nd.budget.is_finite()
+        {
+            errors.push(ValidationError::UnboundedLoopBudget(node));
+        }
+    }
+}
+
+/// Nodes that can fire more than once: everything forward-reachable from a back
+/// edge's target. The finite-budget rule above and the engine's `depends_on`
+/// ambiguity rule both count against this one definition.
+pub fn loop_reachable<S>(graph: &Graph<S>) -> BTreeSet<NodeId<S>> {
     let mut queue: VecDeque<NodeId<S>> = graph
         .edges()
         .filter(|e| e.back)
         .map(|e| e.to)
         .filter(|to| graph.node(*to).is_some())
         .collect();
-    let mut seen: HashSet<NodeId<S>> = queue.iter().copied().collect();
+    let mut seen: BTreeSet<NodeId<S>> = queue.iter().copied().collect();
     while let Some(node) = queue.pop_front() {
         if let Some(nd) = graph.node(node) {
-            if !nd.budget.is_finite() {
-                errors.push(ValidationError::UnboundedLoopBudget(node));
-            }
             for edge in nd.routing.edges() {
                 if graph.node(edge.to).is_some() && seen.insert(edge.to) {
                     queue.push_back(edge.to);
@@ -564,6 +628,7 @@ fn check_budgets<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
             }
         }
     }
+    seen
 }
 
 // ── Invariant 7 ───────────────────────────────────────────────────────────

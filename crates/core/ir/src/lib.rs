@@ -50,8 +50,8 @@ pub use splice::{
 };
 pub use step::{Digest, StepKind, StepKinds};
 pub use validate::{
-    ValidationError, ValidationReport, ValidationWarning, check, check_with, validate,
-    validate_plan, validate_with,
+    ValidationError, ValidationLocation, ValidationReport, ValidationWarning, check, check_with,
+    validate, validate_plan, validate_with,
 };
 
 /// The value type carried by tokens, outcomes and step configuration.

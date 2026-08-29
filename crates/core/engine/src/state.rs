@@ -63,9 +63,7 @@ pub struct CancelScope {
 }
 
 /// Identity of one applied splice batch, whoever produced it.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SpliceBatchId(pub u32);
 
 impl std::fmt::Display for SpliceBatchId {
@@ -77,9 +75,7 @@ impl std::fmt::Display for SpliceBatchId {
 /// One admissible unit of work: a node at one generation. What `Replace`
 /// retracts — a struct, not a bare tuple, because these serialize into
 /// [`AppliedSplice`] records and read back out of them.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AdmissionKey {
     pub node: NodeId,
     pub generation: Generation,
@@ -120,17 +116,23 @@ impl AppliedSplice {
     }
 }
 
-/// A copy of the id allocators, taken by [`EngineState::allocator_snapshot`]
-/// and advanced by a preparation transaction in place of the real ones.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AllocatorSnapshot {
+/// The engine's id allocators. Splice preparation copies this value and advances
+/// the copy, so a rejected transaction cannot move canonical state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Allocators {
+    /// High-water mark for splice-allocated node ids.
     pub next_node: u32,
     pub next_edge: u32,
     pub next_cancel_scope: u32,
-    pub next_batch: u32,
 }
 
-impl AllocatorSnapshot {
+impl Allocators {
+    pub(crate) fn reserve_nodes(&mut self, count: usize) -> u32 {
+        let base = self.next_node;
+        self.next_node += count as u32;
+        base
+    }
+
     pub(crate) fn take_edge(&mut self) -> EdgeId {
         let id = EdgeId::new(self.next_edge);
         self.next_edge += 1;
@@ -140,12 +142,6 @@ impl AllocatorSnapshot {
     pub(crate) fn take_cancel_scope(&mut self) -> CancelScopeId {
         let id = CancelScopeId::new(self.next_cancel_scope);
         self.next_cancel_scope += 1;
-        id
-    }
-
-    pub(crate) fn take_batch(&mut self) -> SpliceBatchId {
-        let id = SpliceBatchId(self.next_batch);
-        self.next_batch += 1;
         id
     }
 }
@@ -267,13 +263,8 @@ pub struct EngineState {
     held_scopes: BTreeSet<ScopeId>,
 
     next_firing: u64,
-    next_cancel_scope: u32,
-    next_edge: u32,
-    /// Allocator for [`SpliceBatchId`]s, across both producers.
-    #[serde(default)]
-    next_batch: u32,
-    /// High-water mark for splice-allocated node ids; see [`Self::next_node_id`].
-    next_node: u32,
+    #[serde(flatten)]
+    allocators: Allocators,
 
     started: bool,
     finished: bool,
@@ -323,10 +314,11 @@ impl EngineState {
             seed_edges: BTreeMap::new(),
             held_scopes: BTreeSet::new(),
             next_firing: 1,
-            next_cancel_scope: 1,
-            next_edge,
-            next_batch: 0,
-            next_node: 0,
+            allocators: Allocators {
+                next_node: 0,
+                next_edge,
+                next_cancel_scope: 1,
+            },
             started: false,
             finished: false,
             cancelled: false,
@@ -532,15 +524,11 @@ impl EngineState {
     }
 
     pub(crate) fn next_cancel_scope_id(&mut self) -> CancelScopeId {
-        let id = CancelScopeId::new(self.next_cancel_scope);
-        self.next_cancel_scope += 1;
-        id
+        self.allocators.take_cancel_scope()
     }
 
     pub(crate) fn next_edge_id(&mut self) -> EdgeId {
-        let id = EdgeId::new(self.next_edge);
-        self.next_edge += 1;
-        id
+        self.allocators.take_edge()
     }
 
     /// Allocate the id for a node a splice will add: never behind the live
@@ -549,9 +537,8 @@ impl EngineState {
     /// `nodes.len()` read would hand the second one the first one's ids — this
     /// counter is what keeps every clone at the slot its id names.
     pub(crate) fn next_node_id(&mut self) -> NodeId {
-        let id = self.next_node.max(self.graph.nodes.len() as u32);
-        self.next_node = id + 1;
-        NodeId::new(id)
+        self.allocators.next_node = self.allocators.next_node.max(self.graph.nodes.len() as u32);
+        NodeId::new(self.allocators.reserve_nodes(1))
     }
 
     pub(crate) fn register_seed_edge(&mut self, edge: EdgeId, node: NodeId) {
@@ -818,34 +805,21 @@ impl EngineState {
         self.splices.iter().find(|s| s.nodes.contains(&node))
     }
 
-    pub(crate) fn next_batch_id(&mut self) -> SpliceBatchId {
-        let id = SpliceBatchId(self.next_batch);
-        self.next_batch += 1;
-        id
-    }
-
     /// A copy of the id allocators for a preparation transaction. Preparation
     /// advances the copy; a rejected transaction drops it, so canonical state
     /// never moves — not even allocator movement leaks.
-    pub(crate) fn allocator_snapshot(&self) -> AllocatorSnapshot {
-        AllocatorSnapshot {
-            next_node: self.next_node.max(self.graph.nodes.len() as u32),
-            next_edge: self.next_edge,
-            next_cancel_scope: self.next_cancel_scope,
-            next_batch: self.next_batch,
-        }
+    pub(crate) fn allocator_snapshot(&self) -> Allocators {
+        let mut allocators = self.allocators;
+        allocators.next_node = allocators.next_node.max(self.graph.nodes.len() as u32);
+        allocators
     }
 
     /// Commit a prepared transaction's allocator movement.
-    pub(crate) fn adopt_allocators(&mut self, snapshot: AllocatorSnapshot) {
-        debug_assert!(snapshot.next_node >= self.next_node);
-        debug_assert!(snapshot.next_edge >= self.next_edge);
-        debug_assert!(snapshot.next_cancel_scope >= self.next_cancel_scope);
-        debug_assert!(snapshot.next_batch >= self.next_batch);
-        self.next_node = snapshot.next_node;
-        self.next_edge = snapshot.next_edge;
-        self.next_cancel_scope = snapshot.next_cancel_scope;
-        self.next_batch = snapshot.next_batch;
+    pub(crate) fn adopt_allocators(&mut self, allocators: Allocators) {
+        debug_assert!(allocators.next_node >= self.allocators.next_node);
+        debug_assert!(allocators.next_edge >= self.allocators.next_edge);
+        debug_assert!(allocators.next_cancel_scope >= self.allocators.next_cancel_scope);
+        self.allocators = allocators;
     }
 
     /// Every admission with parked tokens or a `max_parallel` deferral: the
@@ -873,55 +847,63 @@ impl EngineState {
         keys.into_iter().collect()
     }
 
-    /// Every generation this node has been admitted in — fired, parked,
-    /// deferred, or retracted. The one-admission rule for `depends_on`
-    /// references counts these.
-    pub(crate) fn admission_generations(&self, node: NodeId) -> BTreeSet<Generation> {
-        let mut generations: BTreeSet<Generation> = self
+    /// Whether this node was admitted in more than one generation. The
+    /// `depends_on` ambiguity rule only needs this Boolean, so stop at the first
+    /// generation that differs from the first one seen.
+    pub(crate) fn has_multiple_admission_generations(&self, node: NodeId) -> bool {
+        let mut generations = self
             .fired
             .iter()
-            .filter(|(n, _)| *n == node)
-            .map(|(_, generation)| *generation)
-            .collect();
-        if let Some(pending) = self.pending.get(&node) {
-            generations.extend(pending.keys().copied());
-        }
-        generations.extend(
-            self.deferred
-                .iter()
-                .filter(|(n, _)| *n == node)
-                .map(|(_, generation)| *generation),
-        );
-        generations.extend(
-            self.retracted_admissions
-                .iter()
-                .filter(|key| key.node == node)
-                .map(|key| key.generation),
-        );
-        generations
+            .filter_map(|(n, generation)| (*n == node).then_some(*generation))
+            .chain(
+                self.pending
+                    .get(&node)
+                    .into_iter()
+                    .flat_map(|pending| pending.keys().copied()),
+            )
+            .chain(
+                self.deferred
+                    .iter()
+                    .filter_map(|(n, generation)| (*n == node).then_some(*generation)),
+            )
+            .chain(
+                self.retracted_admissions
+                    .iter()
+                    .filter_map(|key| (key.node == node).then_some(key.generation)),
+            );
+        let Some(first) = generations.next() else {
+            return false;
+        };
+        generations.any(|generation| generation != first)
     }
 
     /// Retract admissions: drop their parked tokens and deferred joins, and
     /// remember the keys so later tokens for them are swallowed. Running
     /// firings, history, and future generations are untouched.
     pub(crate) fn retract_admissions(&mut self, keys: &[AdmissionKey]) {
-        for key in keys {
+        let keys: BTreeSet<AdmissionKey> = keys.iter().copied().collect();
+        for key in &keys {
             if let Some(generations) = self.pending.get_mut(&key.node) {
                 generations.remove(&key.generation);
                 if generations.is_empty() {
                     self.pending.remove(&key.node);
                 }
             }
-            self.deferred
-                .retain(|(node, generation)| !(*node == key.node && *generation == key.generation));
-            self.retracted_admissions.insert(*key);
         }
+        self.deferred.retain(|(node, generation)| {
+            !keys.contains(&AdmissionKey {
+                node: *node,
+                generation: *generation,
+            })
+        });
+        self.retracted_admissions.extend(keys);
     }
 
     /// Whether this exact `(node, generation)` admission was retracted, so a
     /// late token for it is swallowed.
     pub(crate) fn is_admission_retracted(&self, node: NodeId, generation: Generation) -> bool {
-        self.retracted_admissions.contains(&AdmissionKey { node, generation })
+        self.retracted_admissions
+            .contains(&AdmissionKey { node, generation })
     }
 
     /// Live firings inside a splice, for `max_parallel` admission control.

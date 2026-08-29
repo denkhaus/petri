@@ -29,16 +29,11 @@ pub struct Live;
 )]
 pub struct Local;
 
-macro_rules! spaced_id_newtype {
-    ($(#[$meta:meta])* $name:ident, $repr:ty) => {
-        $(#[$meta])*
-        #[derive(Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name<S = Live>(pub $repr, PhantomData<S>);
-
-        impl<S> $name<S> {
+macro_rules! impl_id_api {
+    ($name:ident [$($impl_generics:tt)*] [$($type_generics:tt)*], $repr:ty, [$($extra:expr),*]) => {
+        impl $($impl_generics)* $name $($type_generics)* {
             pub const fn new(raw: $repr) -> Self {
-                Self(raw, PhantomData)
+                Self(raw $(, $extra)*)
             }
 
             pub const fn raw(self) -> $repr {
@@ -49,6 +44,35 @@ macro_rules! spaced_id_newtype {
                 self.0 as usize
             }
         }
+
+        impl $($impl_generics)* From<$repr> for $name $($type_generics)* {
+            fn from(raw: $repr) -> Self {
+                Self::new(raw)
+            }
+        }
+
+        impl $($impl_generics)* std::fmt::Debug for $name $($type_generics)* {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, concat!(stringify!($name), "({})"), self.0)
+            }
+        }
+
+        impl $($impl_generics)* std::fmt::Display for $name $($type_generics)* {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+}
+
+macro_rules! id_newtype {
+    ($(#[$meta:meta])* $name:ident<S = $default:ty>, $repr:ty) => {
+        $(#[$meta])*
+        #[derive(Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name<S = $default>(pub $repr, PhantomData<S>);
+
+        impl_id_api!($name [<S>] [<S>], $repr, [PhantomData]);
 
         // Manual impls rather than derives: a derive would demand the same trait of
         // the space marker, and the marker is phantom — the id is a `$repr` whatever
@@ -86,28 +110,7 @@ macro_rules! spaced_id_newtype {
                 self.0.hash(state);
             }
         }
-
-        impl<S> From<$repr> for $name<S> {
-            fn from(raw: $repr) -> Self {
-                Self::new(raw)
-            }
-        }
-
-        impl<S> std::fmt::Debug for $name<S> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, concat!(stringify!($name), "({})"), self.0)
-            }
-        }
-
-        impl<S> std::fmt::Display for $name<S> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
     };
-}
-
-macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident, $repr:ty) => {
         $(#[$meta])*
         #[derive(
@@ -116,55 +119,25 @@ macro_rules! id_newtype {
         #[serde(transparent)]
         pub struct $name(pub $repr);
 
-        impl $name {
-            pub const fn new(raw: $repr) -> Self {
-                Self(raw)
-            }
-
-            pub const fn raw(self) -> $repr {
-                self.0
-            }
-
-            pub const fn index(self) -> usize {
-                self.0 as usize
-            }
-        }
-
-        impl From<$repr> for $name {
-            fn from(raw: $repr) -> Self {
-                Self(raw)
-            }
-        }
-
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, concat!(stringify!($name), "({})"), self.0)
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
+        impl_id_api!($name [] [], $repr, []);
     };
 }
 
-spaced_id_newtype!(
+id_newtype!(
     /// Index of a node in [`Graph::nodes`](crate::Graph::nodes).
-    NodeId, u32
+    NodeId<S = Live>, u32
 );
-spaced_id_newtype!(
+id_newtype!(
     /// Unique id of an outgoing edge. Joins count distinct incoming edge ids.
-    EdgeId, u32
+    EdgeId<S = Live>, u32
 );
-spaced_id_newtype!(
+id_newtype!(
     /// Index of a resource scope in [`Graph::scopes`](crate::Graph::scopes).
-    ScopeId, u32
+    ScopeId<S = Live>, u32
 );
-spaced_id_newtype!(
+id_newtype!(
     /// Index into the graph's [`ExprTable`](crate::ExprTable).
-    ExprId, u32
+    ExprId<S = Live>, u32
 );
 id_newtype!(
     /// Unique per run: one id per node execution attempt.

@@ -23,31 +23,6 @@ use support::*;
 
 // ── Helpers over the log ──────────────────────────────────────────────────
 
-fn seq_of(log: &EventLog, pred: impl Fn(&EventRecord) -> bool) -> usize {
-    log.records()
-        .iter()
-        .find(|r| pred(r))
-        .map(|r| r.seq as usize)
-        .expect("the record is in the log")
-}
-
-fn finish_seq(log: &EventLog, firing: FiringId) -> usize {
-    seq_of(
-        log,
-        |r| matches!(&r.event, Event::StepFinished { firing: f, .. } if *f == firing),
-    )
-}
-
-fn firing_of(report: &RunReport, name: &str) -> FiringId {
-    report
-        .state
-        .history()
-        .iter()
-        .find(|r| r.name == name)
-        .expect("the node recorded")
-        .firing
-}
-
 fn started_count(report: &RunReport, firing: FiringId) -> usize {
     report
         .state

@@ -7,12 +7,12 @@ mod support;
 
 use std::sync::Arc;
 
-use driver::{Driver, RunConfig, RunReport};
-use engine::{Event, EventLog, EventRecord, INVALID_SPLICE_CLASS};
+use driver::{Driver, RunConfig};
+use engine::{Event, INVALID_SPLICE_CLASS};
 use executor::{MapSecrets, Retention};
 use ir::{
-    Edge, EdgeId, FiringId, Graph, GraphBuilder, GraphFragment, Local, Node, NodeId, Routing,
-    RunStatus, Scope, ScopeId, SplicePolicy, SpliceRequest, StepRef, Value,
+    Graph, GraphBuilder, GraphFragment, RunStatus, ScopeId, SplicePolicy, SpliceRequest, StepRef,
+    Value,
 };
 use serde_json::json;
 use steps::{PROCESS_KIND, Registry};
@@ -20,34 +20,17 @@ use support::*;
 
 fn splice_runners() -> Registry {
     let mut registry = runners();
-    registry.register_runner(Arc::new(SpliceStep));
+    registry.register(SpliceStep);
     registry
 }
 
 /// A fragment of chained process steps, each running `commands[i]`.
 fn process_fragment(names_and_commands: &[(&str, &str)]) -> GraphFragment {
-    let mut nodes: Vec<Node<Local>> = names_and_commands
-        .iter()
-        .enumerate()
-        .map(|(i, (name, run))| {
-            Node::new(
-                NodeId::new(i as u32),
-                name,
-                ScopeId::new(0),
-                StepRef::new(PROCESS_KIND, json!({ "run": run })),
-            )
-        })
-        .collect();
-    for i in 0..nodes.len().saturating_sub(1) {
-        nodes[i].routing = Routing::next(Edge::always(EdgeId::new(i as u32), NodeId::new(i as u32 + 1)));
-    }
-    GraphFragment {
-        entries: vec![NodeId::new(0)],
-        exits: vec![NodeId::new(nodes.len() as u32 - 1)],
-        nodes,
-        scopes: vec![Scope::new(ScopeId::new(0))],
-        exprs: Default::default(),
-    }
+    GraphFragment::chain(
+        names_and_commands
+            .iter()
+            .map(|(name, run)| (*name, StepRef::new(PROCESS_KIND, json!({ "run": run })))),
+    )
 }
 
 /// `up` (splice step, Append) -> `down`; `up` uploads `requests`.
@@ -63,24 +46,6 @@ fn upload_graph(requests: &[SpliceRequest]) -> Graph {
     b.link(up, down);
     b.node_mut(up).splice_policy = SplicePolicy::Append;
     b.build()
-}
-
-fn seq_of(log: &EventLog, pred: impl Fn(&EventRecord) -> bool) -> usize {
-    log.records()
-        .iter()
-        .find(|r| pred(r))
-        .map(|r| r.seq as usize)
-        .expect("the record is in the log")
-}
-
-fn firing_of(report: &RunReport, name: &str) -> FiringId {
-    report
-        .state
-        .history()
-        .iter()
-        .find(|r| r.name == name)
-        .expect("the node recorded")
-        .firing
 }
 
 /// The testkit step kind uploads a real process fragment, the batch runs on the
@@ -103,7 +68,12 @@ async fn an_uploaded_fragment_runs_end_to_end() {
     .await_run()
     .await;
 
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     assert_eq!(status_of(&report, "gen-a").as_deref(), Some("success"));
     assert_eq!(status_of(&report, "gen-b").as_deref(), Some("success"));
     let order = started(&report);
@@ -137,9 +107,10 @@ impl ir::StepKind for LeakyUpload {
 impl steps::StepRunner for LeakyUpload {
     async fn run(&self, _ctx: steps::StepCtx) -> ir::Outcome {
         let leak = format!("echo {SECRET}");
-        ir::Outcome::success(Value::Null).with_splice(SpliceRequest::append(process_fragment(&[
-            ("exfil", leak.as_str()),
-        ])))
+        ir::Outcome::success(Value::Null).with_splice(SpliceRequest::append(process_fragment(&[(
+            "exfil",
+            leak.as_str(),
+        )])))
     }
 }
 
@@ -200,7 +171,10 @@ async fn a_secret_bearing_request_fails_the_firing_and_stays_out_of_the_log() {
     let log_bytes = serde_json::to_string(&report.state.log).expect("encode");
     assert!(!log_bytes.contains(SECRET), "the request reached the log");
     let state_bytes = serde_json::to_string(&report.state).expect("encode");
-    assert!(!state_bytes.contains(SECRET), "the request reached the state");
+    assert!(
+        !state_bytes.contains(SECRET),
+        "the request reached the state"
+    );
     assert_replay_identical(&graph, &report);
 }
 
@@ -224,14 +198,20 @@ async fn a_crash_between_the_finish_and_its_core_records_reconstructs_the_batch(
     )
     .await_run()
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
 
     // Cut immediately after the External finish: its Core derivations — the
     // routed tokens into the batch — are regenerated, not read back.
     let up_firing = firing_of(&report, "up");
-    let cut = seq_of(&report.state.log, |r| {
-        matches!(&r.event, Event::StepFinished { firing, .. } if *firing == up_firing)
-    }) + 1;
+    let cut = seq_of(
+        &report.state.log,
+        |r| matches!(&r.event, Event::StepFinished { firing, .. } if *firing == up_firing),
+    ) + 1;
     let prefix = report.state.log.prefix(cut);
 
     let dir2 = RunDir::new("splice-resume-2");
@@ -252,7 +232,12 @@ async fn a_crash_between_the_finish_and_its_core_records_reconstructs_the_batch(
     );
     let resumed = driver.run().await;
 
-    assert_eq!(resumed.status, RunStatus::Success, "{:?}", resumed.state.errors());
+    assert_eq!(
+        resumed.status,
+        RunStatus::Success,
+        "{:?}",
+        resumed.state.errors()
+    );
     assert_eq!(status_of(&resumed, "gen-a").as_deref(), Some("success"));
     assert_eq!(resumed.state.splices().len(), 1, "the batch was rebuilt");
     assert_eq!(status_of(&resumed, "down").as_deref(), Some("success"));

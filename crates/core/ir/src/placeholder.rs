@@ -94,3 +94,27 @@ pub fn placeholder_path(config: &Value) -> Option<String> {
 pub fn contains_placeholder(config: &Value) -> bool {
     placeholder_path(config).is_some()
 }
+
+/// Rewrite every `{"$expr": id}` placeholder id through `f`, leaving the rest of
+/// the config untouched. How the engine's splice remapper shifts fragment-local
+/// expression ids into the live table — kept here so only this module walks the
+/// placeholder encoding.
+pub fn map_expr_ids(config: &Value, f: &impl Fn(u64) -> u64) -> Value {
+    match config {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, child)| {
+                    if key == EXPR_PLACEHOLDER_KEY
+                        && let Some(id) = child.as_u64()
+                    {
+                        (key.clone(), Value::from(f(id)))
+                    } else {
+                        (key.clone(), map_expr_ids(child, f))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(|i| map_expr_ids(i, f)).collect()),
+        other => other.clone(),
+    }
+}

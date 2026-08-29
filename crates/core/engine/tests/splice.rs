@@ -17,29 +17,11 @@ use support::{Harness, NOOP};
 /// A linear fragment: `names` chained by unconditional edges, entry at the
 /// first, exit at the last, one declared scope.
 fn fragment(names: &[&str]) -> GraphFragment {
-    let mut nodes: Vec<Node<Local>> = names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            Node::new(
-                NodeId::new(i as u32),
-                name,
-                ScopeId::new(0),
-                StepRef::new("noop", Value::Null),
-            )
-        })
-        .collect();
-    for i in 0..nodes.len().saturating_sub(1) {
-        let edge = Edge::always(EdgeId::new(i as u32), NodeId::new(i as u32 + 1));
-        nodes[i].routing = ir::Routing::next(edge);
-    }
-    GraphFragment {
-        entries: vec![NodeId::new(0)],
-        exits: vec![NodeId::new(nodes.len() as u32 - 1)],
-        nodes,
-        scopes: vec![Scope::new(ScopeId::new(0))],
-        exprs: Default::default(),
-    }
+    GraphFragment::chain(
+        names
+            .iter()
+            .map(|name| (*name, StepRef::new("noop", Value::Null))),
+    )
 }
 
 /// `up -> down`, with `up` granted `policy`.
@@ -201,7 +183,10 @@ fn a_later_request_may_reference_an_earlier_ones_node_but_not_the_reverse() {
     });
     let mut h = Harness::new(graph.clone()).results(BTreeMap::from([(
         "up",
-        splice_outcome(vec![SpliceRequest::append(fragment(&["x"])), depends.clone()]),
+        splice_outcome(vec![
+            SpliceRequest::append(fragment(&["x"])),
+            depends.clone(),
+        ]),
     )]));
     assert_eq!(h.run(), RunStatus::Success);
     let x_started = h.started.iter().position(|n| n == "x").expect("x started");
@@ -480,7 +465,11 @@ fn all_pending_takes_another_uploaders_batch_and_the_run_still_quiesces() {
     // `wj`'s parked admission was retracted: its token dropped, `wb`'s late
     // token swallowed by retraction identity, and the dead spliced region does
     // not block quiescence or terminal release.
-    assert_eq!(h.start_count("wj"), 0, "the retracted admission never fires");
+    assert_eq!(
+        h.start_count("wj"),
+        0,
+        "the retracted admission never fires"
+    );
     assert!(h.status_of("wj").is_none(), "and leaves no record");
     assert_eq!(h.status.expect("finished"), RunStatus::Success);
     assert_eq!(h.state.held_scopes().count(), 0, "terminal release ran");

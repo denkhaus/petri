@@ -793,6 +793,7 @@ dependencies = [
  "petri-executor-docker",
  "petri-ir",
  "petri-steps",
+ "serde",
  "serde_json",
  "smol_str",
  "tokio",

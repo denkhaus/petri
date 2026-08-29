@@ -2,29 +2,14 @@
 //! shared invariant engine, and the serialized shapes the log version rides on.
 
 use ir::{
-    Attachment, Edge, EdgeId, ExistingNodeRef, FragmentErrorKind, GraphFragment, Local, Node,
-    NodeId, Outcome, ReplaceScope, Routing, Scope, ScopeId, SpliceMode, SplicePolicy,
-    SpliceRequest, StepRef, ValidationError, validate_fragment, validate_request,
+    Attachment, Edge, EdgeId, ExistingNodeRef, FragmentErrorKind, GraphFragment, Local, NodeId,
+    Outcome, ReplaceScope, Routing, SpliceMode, SplicePolicy, SpliceRequest, StepRef,
+    ValidationError, validate_fragment, validate_request,
 };
 use serde_json::json;
 
-fn local_node(id: u32, name: &str) -> Node<Local> {
-    Node::new(
-        NodeId::new(id),
-        name,
-        ScopeId::new(0),
-        StepRef::new("noop", serde_json::Value::Null),
-    )
-}
-
 fn one_node_fragment() -> GraphFragment {
-    GraphFragment {
-        nodes: vec![local_node(0, "uploaded")],
-        scopes: vec![Scope::new(ScopeId::new(0))],
-        exprs: Default::default(),
-        entries: vec![NodeId::new(0)],
-        exits: vec![NodeId::new(0)],
-    }
+    GraphFragment::chain([("uploaded", StepRef::new("noop", serde_json::Value::Null))])
 }
 
 // ── Policy order ──────────────────────────────────────────────────────────
@@ -183,12 +168,11 @@ fn an_empty_fragment_is_valid_only_under_replace() {
 
 #[test]
 fn an_attachment_must_name_a_fragment_node() {
-    let request = SpliceRequest::append(one_node_fragment()).with_attachment(
-        Attachment::DependsOn {
+    let request =
+        SpliceRequest::append(one_node_fragment()).with_attachment(Attachment::DependsOn {
             node: NodeId::new(7),
             on: ExistingNodeRef::new("build"),
-        },
-    );
+        });
     let errors = validate_request(&request).unwrap_err();
     assert!(
         errors
@@ -251,12 +235,11 @@ fn splice_policy_and_splices_default_on_deserialization() {
 
 #[test]
 fn a_request_round_trips_through_serde() {
-    let request = SpliceRequest::append(one_node_fragment()).with_attachment(
-        Attachment::DependsOn {
+    let request =
+        SpliceRequest::append(one_node_fragment()).with_attachment(Attachment::DependsOn {
             node: NodeId::new(0),
             on: ExistingNodeRef::new("build#2"),
-        },
-    );
+        });
     let json = serde_json::to_value(&request).unwrap();
     let back: SpliceRequest = serde_json::from_value(json).unwrap();
     assert_eq!(back, request);

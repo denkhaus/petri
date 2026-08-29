@@ -12,10 +12,11 @@
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::graph::{Completion, Graph, Node, Scope};
-use crate::ids::{Local, NodeId};
+use crate::builder::GraphBuilder;
+use crate::graph::{Completion, Graph, Node, Scope, StepRef};
+use crate::ids::{Local, NodeId, ScopeId};
 use crate::step::StepKinds;
-use crate::validate::{self, ValidationError};
+use crate::validate::{self, ValidationError, ValidationLocation};
 use crate::{Expansion, ExprTable};
 
 // ── Policy ────────────────────────────────────────────────────────────────
@@ -111,6 +112,61 @@ pub struct GraphFragment {
 impl GraphFragment {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A linear fragment: the given steps chained by unconditional edges, entry
+    /// at the first, exit at the last, one declared scope holding every node.
+    pub fn chain<'a>(steps: impl IntoIterator<Item = (&'a str, StepRef)>) -> Self {
+        let mut builder = GraphBuilder::<Local>::fragment();
+        let scope = crate::ScopeId::new(0);
+        let mut previous = None;
+        let mut last = None;
+        for (name, step) in steps {
+            let node = builder.add_node(name, scope, step);
+            if let Some(previous) = previous {
+                builder.link(previous, node);
+            }
+            previous = Some(node);
+            last = Some(node);
+        }
+        builder.build_fragment(last)
+    }
+}
+
+impl GraphBuilder<Local> {
+    /// A fragment builder with one default local scope, `ScopeId(0)`.
+    pub fn fragment() -> Self {
+        let mut builder = Self::default();
+        builder.add_scope(Scope::new(ScopeId::new(0)));
+        builder
+    }
+
+    /// Finish a fragment graph with explicit exits. This uses the same node, edge,
+    /// entry, routing, and scope allocation path as a live graph builder.
+    pub fn build_fragment(self, exits: impl IntoIterator<Item = NodeId<Local>>) -> GraphFragment {
+        let Graph {
+            nodes,
+            scopes,
+            exprs,
+            entry,
+            params,
+            completion,
+        } = self.build();
+        assert!(
+            params.is_empty(),
+            "a graph fragment cannot carry run params"
+        );
+        assert!(
+            matches!(completion, Completion::AnyFailure),
+            "a graph fragment cannot carry a completion policy"
+        );
+        GraphFragment {
+            nodes,
+            scopes,
+            exprs,
+            entries: entry,
+            exits: exits.into_iter().collect(),
+        }
     }
 }
 
@@ -282,7 +338,11 @@ pub fn validate_fragment_with(
         }
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validate a whole request: the fragment, the mode/emptiness rule (an empty
@@ -320,40 +380,22 @@ pub fn validate_request_with(
         }
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// The fragment location a structural error anchors to.
-fn structure_location(error: &ValidationError<Local>) -> SmolStr {
-    use ValidationError as E;
-    let text = match error {
-        E::NodeIdMismatch { index, .. } => format!("node {index}"),
-        E::ScopeIdMismatch { index, .. } => format!("scope {index}"),
-        E::UnknownScope { node, .. }
-        | E::UnknownStepKind { node, .. }
-        | E::BadStepConfig { node, .. }
-        | E::AlwaysNotLast { node, .. }
-        | E::EmptyGroup { node, .. }
-        | E::ExitUnreachable { node, .. }
-        | E::ExitNotPostdominator { node, .. }
-        | E::BoundaryCrossing { node, .. }
-        | E::HirConfigInPlan { node, .. } => format!("node {node}"),
-        E::UnknownTarget { edge, .. } => format!("edge {edge}"),
-        E::NoEntry => "fragment".to_string(),
-        E::UnknownEntry(node) | E::DuplicateEntry(node) | E::EntryHasIncoming(node) => {
-            format!("entry {node}")
-        }
-        E::CompletionUnknownNode(_) => "fragment".to_string(),
-        E::CycleWithoutBackEdge(nodes) => match nodes.first() {
-            Some(node) => format!("node {node}"),
-            None => "fragment".to_string(),
-        },
-        E::ZeroBudget(node)
-        | E::UnboundedLoopBudget(node)
-        | E::LoopHeadMustJoinAny(node)
-        | E::HirFieldInPlan(node) => format!("node {node}"),
-        E::DuplicateEdgeId(edge) | E::ReservedEdgeId(edge) => format!("edge {edge}"),
-        E::UnknownExpr { site, .. } => site.to_string(),
+fn structure_location(error: &validate::ValidationError<Local>) -> SmolStr {
+    let text = match error.location() {
+        ValidationLocation::Graph => "fragment".to_string(),
+        ValidationLocation::Node(node) => format!("node {node}"),
+        ValidationLocation::Edge(edge) => format!("edge {edge}"),
+        ValidationLocation::Scope(scope) => format!("scope {scope}"),
+        ValidationLocation::Entry(node) => format!("entry {node}"),
+        ValidationLocation::Site(site) => site.to_string(),
     };
     SmolStr::new(text)
 }

@@ -1079,22 +1079,18 @@ impl Driver {
         // non-secret message. `context_updates` drop with the requests, per
         // the invalid-splice rule.
         if !outcome.splices.is_empty() {
-            let serialized = serde_json::to_string(&outcome.splices)
-                .expect("splice requests always encode");
-            if self.sink.masker().mask(&serialized) != serialized {
-                outcome = Outcome {
-                    status: Status::Failure(
-                        ir::FailureInfo::new(
-                            "a splice request contained a registered secret value; \
-                             the request list was dropped before the log",
-                        )
-                        .with_class(engine::INVALID_SPLICE_CLASS),
-                    ),
-                    output: outcome.output,
-                    metrics: outcome.metrics,
-                    context_updates: Default::default(),
-                    splices: Vec::new(),
-                };
+            let masker = self.sink.masker();
+            if !masker.is_empty()
+                && masker.contains_secret(
+                    &serde_json::to_string(&outcome.splices)
+                        .expect("splice requests always encode"),
+                )
+            {
+                outcome = engine::reject_splices(
+                    outcome,
+                    "a splice request contained a registered secret value; \
+                     the request list was dropped before the log",
+                );
             }
         }
 

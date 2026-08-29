@@ -13,6 +13,7 @@ use driver::RunReport;
 use executor::Retention;
 use executor_docker::DockerExecutor;
 use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
+use serde::Deserialize;
 use serde_json::json;
 use steps::PROCESS_KIND;
 
@@ -123,43 +124,29 @@ pub const SPLICE_KIND: ir::StepKindId = ir::StepKindId::new_static("splice");
 /// The config a [`SpliceStep`] node takes, for building graphs in tests.
 pub fn splice_config(requests: &[ir::SpliceRequest], output: Value) -> Value {
     json!({
-        "requests": serde_json::to_value(requests).expect("requests encode"),
+        "requests": requests,
         "output": output,
     })
 }
 
-impl ir::StepKind for SpliceStep {
-    fn id(&self) -> ir::StepKindId {
-        SPLICE_KIND
-    }
-
-    fn name(&self) -> &str {
-        "splice"
-    }
+/// Typed config for [`SpliceStep`].
+#[doc(hidden)]
+#[derive(Deserialize)]
+pub struct SpliceConfig {
+    #[serde(default)]
+    requests: Vec<ir::SpliceRequest>,
+    #[serde(default)]
+    output: Value,
 }
 
 #[async_trait::async_trait]
-impl steps::StepRunner for SpliceStep {
-    async fn run(&self, ctx: steps::StepCtx) -> ir::Outcome {
-        let requests: Vec<ir::SpliceRequest> = match ctx.config.get("requests") {
-            None => Vec::new(),
-            Some(value) => match serde_json::from_value(value.clone()) {
-                Ok(requests) => requests,
-                Err(error) => {
-                    return ir::Outcome::new(
-                        ir::Status::Failure(
-                            ir::FailureInfo::new(format!(
-                                "splice config did not deserialize: {error}"
-                            ))
-                            .with_class(steps::BAD_CONFIG_CLASS),
-                        ),
-                        Value::Null,
-                    );
-                }
-            },
-        };
-        let output = ctx.config.get("output").cloned().unwrap_or(Value::Null);
-        ir::Outcome::success(output).with_splices(requests)
+impl steps::Step for SpliceStep {
+    const NAME: &'static str = "splice";
+
+    type Config = SpliceConfig;
+
+    async fn run(&self, config: Self::Config, _ctx: steps::StepCtx) -> ir::Outcome {
+        ir::Outcome::success(config.output).with_splices(config.requests)
     }
 }
 

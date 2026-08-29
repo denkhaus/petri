@@ -128,6 +128,16 @@ impl Masker {
         out
     }
 
+    /// Whether `text` contains any registered value, without building a masked
+    /// copy. Use this when the caller only needs to reject sensitive content.
+    pub fn contains_secret(&self, text: &str) -> bool {
+        self.values
+            .read()
+            .expect("mask set is not poisoned")
+            .iter()
+            .any(|value| text.contains(value))
+    }
+
     /// Mask every string inside a JSON value, however deeply nested.
     pub fn mask_value(&self, value: &serde_json::Value) -> serde_json::Value {
         match value {
@@ -221,5 +231,7 @@ mod tests {
         assert_eq!(secret.expose(), "hunter2-hunter2");
         // Resolution registered the value, so the masker knows it.
         assert_eq!(secrets.masker().mask("got hunter2-hunter2"), "got ***");
+        assert!(secrets.masker().contains_secret("got hunter2-hunter2"));
+        assert!(!secrets.masker().contains_secret("nothing sensitive"));
     }
 }
