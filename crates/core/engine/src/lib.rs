@@ -20,6 +20,7 @@ pub mod context;
 pub mod event;
 pub mod log;
 pub mod replay;
+mod splice;
 pub mod state;
 
 pub use apply::{FIRING_ENV_CLASS, apply};
@@ -32,4 +33,7 @@ pub use log::{
     UnsupportedLogVersion,
 };
 pub use replay::{ReplayMismatch, ResumePoint, replay, resume, verify_replay};
-pub use state::{CancelScope, EngineState, Firing, FiringRecord, RunError, Splice};
+pub use state::{
+    AdmissionKey, AppliedSplice, CancelScope, EngineState, Firing, FiringRecord, RunError,
+    SpliceBatchId, SpliceProducer,
+};

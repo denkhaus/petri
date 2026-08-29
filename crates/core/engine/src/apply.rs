@@ -22,7 +22,8 @@ use smol_str::SmolStr;
 use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};
 use crate::event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice};
 use crate::log::EventSource;
-use crate::state::{EngineState, Firing, FiringRecord, RunError, Splice, synthetic};
+use crate::splice::{PreparedSeed, PreparedSplice, apply_prepared_splice};
+use crate::state::{EngineState, Firing, FiringRecord, RunError, SpliceProducer, synthetic};
 
 /// Apply one event and return the commands it produced.
 ///
@@ -151,6 +152,11 @@ fn on_token(
     if state.is_node_killed(target) {
         return;
     }
+    // A retracted admission swallows its tokens by exact identity: the key never
+    // fires, and the node's other generations are untouched.
+    if state.is_admission_retracted(target, token.generation) {
+        return;
+    }
     let key = (target, token.generation);
     // `Any` fires on the first token; later same-generation tokens are dropped.
     // The same rule stops a satisfied `All` from firing twice.
@@ -199,7 +205,7 @@ fn try_fire(
     // node completing without running takes no slot, so it is not held back.
     if admitted
         && let Some(splice) = state.splice_for_node(node_id)
-        && let Some(max) = splice.max_parallel
+        && let Some(max) = splice.max_parallel()
         && state.live_in_splice(splice) >= max.max(1)
     {
         state.defer(key);
@@ -503,7 +509,7 @@ fn on_step_finished(
     if outcome.status.is_failure()
         && !node.tolerates_failure
         && let Some(splice) = state.splice_for_node(firing.node)
-        && splice.fail_fast
+        && splice.fail_fast()
         && !state.is_scope_cancelled(splice.cancel_scope)
     {
         let scope = splice.cancel_scope;
@@ -914,6 +920,9 @@ fn region_nodes(state: &EngineState, entry: NodeId, exit: NodeId) -> Vec<NodeId>
     order
 }
 
+/// The `ForEach` producer's second half: turn the logged [`SubgraphSplice`] into
+/// a [`PreparedSplice`] and hand it to the one applicator. The event stays the
+/// wire shape; the applicator is the only code that mutates the live graph.
 fn on_node_expanded(
     state: &mut EngineState,
     source: NodeId,
@@ -921,41 +930,39 @@ fn on_node_expanded(
     queue: &mut VecDeque<Event>,
 ) {
     let parent = state.cancel_scope_of(source);
-    let mut scope_nodes = BTreeSet::new();
 
+    let mut nodes = Vec::new();
+    let mut bindings = BTreeMap::new();
+    let mut seeds = Vec::new();
     for clone in &splice.clones {
-        let bindings = clone_bindings(clone.index, &clone.item);
+        let clone_binding = clone_bindings(clone.index, &clone.item);
         for node in &clone.nodes {
-            // Ids were allocated against this exact length, so a mismatch means the
-            // splice was built against a different graph.
-            debug_assert_eq!(node.id.index(), state.graph.nodes.len());
-            state.graph.nodes.push(node.clone());
-            state.set_clone_bindings(node.id, bindings.clone());
-            state.set_node_cancel_scope(node.id, splice.cancel_scope);
-            scope_nodes.insert(node.id);
+            bindings.insert(node.id, clone_binding.clone());
+            nodes.push(node.clone());
         }
-        state.register_seed_edge(clone.seed_edge, clone.entry);
+        seeds.push(PreparedSeed {
+            edge: clone.seed_edge,
+            entry: clone.entry,
+            generation: splice.generation,
+            payload: splice.payload.clone(),
+        });
     }
 
-    state.add_cancel_scope(splice.cancel_scope, parent, scope_nodes.clone());
-    for node in &splice.region {
-        state.supersede(*node);
-    }
-    state.push_splice(Splice {
+    let prepared = PreparedSplice {
+        batch: state.next_batch_id(),
+        owner: source,
         cancel_scope: splice.cancel_scope,
-        source,
-        max_parallel: splice.max_parallel,
-        fail_fast: splice.fail_fast,
-        nodes: scope_nodes,
-    });
-
-    for clone in &splice.clones {
-        queue.push_back(Event::TokenEmitted(Token::seeded(
-            clone.seed_edge,
-            splice.generation,
-            splice.payload.clone(),
-        )));
-    }
+        parent_scope: parent,
+        nodes,
+        bindings,
+        seeds,
+        producer: SpliceProducer::ForEach {
+            max_parallel: splice.max_parallel,
+            fail_fast: splice.fail_fast,
+            superseded: splice.region.clone(),
+        },
+    };
+    apply_prepared_splice(state, prepared, queue);
 }
 
 // ── Host-delivered controls ───────────────────────────────────────────────

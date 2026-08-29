@@ -62,15 +62,78 @@ pub struct CancelScope {
     pub killed: bool,
 }
 
-/// Bookkeeping for one spliced expansion.
+/// Identity of one applied splice batch, whoever produced it.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct SpliceBatchId(pub u32);
+
+impl std::fmt::Display for SpliceBatchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One admissible unit of work: a node at one generation. What `Replace`
+/// retracts — a struct, not a bare tuple, because these serialize into
+/// [`AppliedSplice`] records and read back out of them.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct AdmissionKey {
+    pub node: NodeId,
+    pub generation: Generation,
+}
+
+/// Bookkeeping for one applied splice batch — a `ForEach` expansion or an
+/// outcome upload. One shape for both producers; producer-only data rides the
+/// [`SpliceProducer`] arm, so there is no optional-field soup.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Splice {
-    pub cancel_scope: CancelScopeId,
-    pub source: NodeId,
-    pub max_parallel: Option<u32>,
-    pub fail_fast: bool,
-    /// Every node the splice added, for admission control and cancellation.
+pub struct AppliedSplice {
+    pub batch: SpliceBatchId,
+    /// The node whose firing produced the batch: the expansion source, or the
+    /// uploader. Core-derived — stamped at apply time, never taken from a
+    /// request — and stable across generations, so a loop-head uploader can
+    /// replace its own earlier batches.
+    pub owner: NodeId,
+    /// Every node the batch added, for admission control and cancellation.
     pub nodes: BTreeSet<NodeId>,
+    pub cancel_scope: CancelScopeId,
+    pub producer: SpliceProducer,
+}
+
+impl AppliedSplice {
+    /// Scheduler admission control across the batch, where the producer has one.
+    pub fn max_parallel(&self) -> Option<u32> {
+        match &self.producer {
+            SpliceProducer::ForEach { max_parallel, .. } => *max_parallel,
+            SpliceProducer::Outcome { .. } => None,
+        }
+    }
+
+    /// Whether the first failure in the batch cancels its siblings.
+    pub fn fail_fast(&self) -> bool {
+        match &self.producer {
+            SpliceProducer::ForEach { fail_fast, .. } => *fail_fast,
+            SpliceProducer::Outcome { .. } => false,
+        }
+    }
+}
+
+/// Producer-only splice data: what a `ForEach` needs that an upload does not,
+/// and vice versa.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SpliceProducer {
+    /// A `for_each` expansion: scheduling knobs plus the template region its
+    /// clones superseded.
+    ForEach {
+        max_parallel: Option<u32>,
+        fail_fast: bool,
+        superseded: Vec<NodeId>,
+    },
+    /// An outcome upload: the admissions its `Replace` retracted (empty under
+    /// `Append`).
+    Outcome { retracted: Vec<AdmissionKey> },
 }
 
 /// Anything that makes a run fail without a step failing.
@@ -147,7 +210,12 @@ pub struct EngineState {
     cancel_scopes: BTreeMap<CancelScopeId, CancelScope>,
     /// Innermost cancel scope per node; anything unlisted belongs to the root.
     node_cancel_scope: BTreeMap<NodeId, CancelScopeId>,
-    splices: Vec<Splice>,
+    splices: Vec<AppliedSplice>,
+    /// Admissions retracted by a `Replace`: their parked tokens were dropped, and
+    /// later tokens for these exact keys are swallowed. Kept flat beside the
+    /// per-batch records because the swallow check runs per token.
+    #[serde(default)]
+    retracted_admissions: BTreeSet<AdmissionKey>,
     /// Nodes replaced by expansion clones. They never fire, and their outgoing
     /// edges stop counting toward downstream joins.
     superseded: BTreeSet<NodeId>,
@@ -171,6 +239,9 @@ pub struct EngineState {
     next_firing: u64,
     next_cancel_scope: u32,
     next_edge: u32,
+    /// Allocator for [`SpliceBatchId`]s, across both producers.
+    #[serde(default)]
+    next_batch: u32,
     /// High-water mark for splice-allocated node ids; see [`Self::next_node_id`].
     next_node: u32,
 
@@ -215,6 +286,7 @@ impl EngineState {
             cancel_scopes,
             node_cancel_scope: BTreeMap::new(),
             splices: Vec::new(),
+            retracted_admissions: BTreeSet::new(),
             superseded: BTreeSet::new(),
             clone_bindings: BTreeMap::new(),
             retry_tombstones: BTreeSet::new(),
@@ -223,6 +295,7 @@ impl EngineState {
             next_firing: 1,
             next_cancel_scope: 1,
             next_edge,
+            next_batch: 0,
             next_node: 0,
             started: false,
             finished: false,
@@ -326,7 +399,7 @@ impl EngineState {
         self.cancel_scopes.get(&id)
     }
 
-    pub fn splices(&self) -> &[Splice] {
+    pub fn splices(&self) -> &[AppliedSplice] {
         &self.splices
     }
 
@@ -707,16 +780,45 @@ impl EngineState {
         nodes
     }
 
-    pub(crate) fn push_splice(&mut self, splice: Splice) {
+    pub(crate) fn push_splice(&mut self, splice: AppliedSplice) {
         self.splices.push(splice);
     }
 
-    pub(crate) fn splice_for_node(&self, node: NodeId) -> Option<&Splice> {
+    pub(crate) fn splice_for_node(&self, node: NodeId) -> Option<&AppliedSplice> {
         self.splices.iter().find(|s| s.nodes.contains(&node))
     }
 
+    pub(crate) fn next_batch_id(&mut self) -> SpliceBatchId {
+        let id = SpliceBatchId(self.next_batch);
+        self.next_batch += 1;
+        id
+    }
+
+    /// Retract admissions: drop their parked tokens and deferred joins, and
+    /// remember the keys so later tokens for them are swallowed. Running
+    /// firings, history, and future generations are untouched.
+    pub(crate) fn retract_admissions(&mut self, keys: &[AdmissionKey]) {
+        for key in keys {
+            if let Some(generations) = self.pending.get_mut(&key.node) {
+                generations.remove(&key.generation);
+                if generations.is_empty() {
+                    self.pending.remove(&key.node);
+                }
+            }
+            self.deferred
+                .retain(|(node, generation)| !(*node == key.node && *generation == key.generation));
+            self.retracted_admissions.insert(*key);
+        }
+    }
+
+    /// Whether this exact `(node, generation)` admission was retracted, so a
+    /// late token for it is swallowed.
+    pub(crate) fn is_admission_retracted(&self, node: NodeId, generation: Generation) -> bool {
+        self.retracted_admissions.contains(&AdmissionKey { node, generation })
+    }
+
     /// Live firings inside a splice, for `max_parallel` admission control.
-    pub(crate) fn live_in_splice(&self, splice: &Splice) -> u32 {
+    pub(crate) fn live_in_splice(&self, splice: &AppliedSplice) -> u32 {
         self.live
             .values()
             .filter(|f| splice.nodes.contains(&f.node))
