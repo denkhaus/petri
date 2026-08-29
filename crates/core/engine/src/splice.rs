@@ -173,276 +173,412 @@ pub(crate) fn prepare_outcome_splices(
     parent_scope: CancelScopeId,
     requests: &[SpliceRequest],
 ) -> Result<SplicePlan, SplicePreparationError> {
-    let mut alloc = state.allocator_snapshot();
-    let mut expr_cursor = state.graph.exprs.len() as u32;
-    let mut scope_cursor = state.graph.scopes.len() as u32;
-    let mut batches: Vec<PreparedSplice> = Vec::new();
-    let mut retracted: BTreeSet<AdmissionKey> = BTreeSet::new();
+    SpliceTransaction::new(state, uploader, generation, parent_scope).prepare(requests)
+}
 
-    let mut names: BTreeMap<SmolStr, NodeId> = state
-        .graph
-        .nodes
-        .iter()
-        .map(|n| (n.name.clone(), n.id))
-        .collect();
-    // Canonical state never changes during preparation, so these are computed at
-    // most once across the whole transaction — and not at all when no request
-    // needs them.
-    let loop_nodes: OnceCell<BTreeSet<NodeId>> = OnceCell::new();
-    let pending_keys: OnceCell<Vec<AdmissionKey>> = OnceCell::new();
-    let owned_nodes: OnceCell<BTreeSet<NodeId>> = OnceCell::new();
-    let mut ambiguous_references: BTreeMap<NodeId, bool> = BTreeMap::new();
+/// Scratch state for one outcome's atomic splice transaction. Every field is a
+/// prepared view; canonical [`EngineState`] remains borrowed and unchanged until
+/// the resulting [`SplicePlan`] commits.
+struct SpliceTransaction<'a> {
+    state: &'a EngineState,
+    uploader: &'a Node,
+    generation: Generation,
+    parent_scope: CancelScopeId,
+    allocators: Allocators,
+    expr_cursor: u32,
+    scope_cursor: u32,
+    batches: Vec<PreparedSplice>,
+    names: BTreeMap<SmolStr, NodeId>,
+    retracted: BTreeSet<AdmissionKey>,
+    loop_nodes: OnceCell<BTreeSet<NodeId>>,
+    pending_keys: OnceCell<Vec<AdmissionKey>>,
+    owned_nodes: OnceCell<BTreeSet<NodeId>>,
+    ambiguous_references: BTreeMap<NodeId, bool>,
+}
 
-    for (request_index, request) in requests.iter().enumerate() {
-        let reject = |source| SplicePreparationError {
-            request_index,
-            source,
-        };
+/// The remapped graph data and attachment effects for one request before it is
+/// sealed as a [`PreparedSplice`].
+struct BatchDraft {
+    node_base: u32,
+    expr_base: u32,
+    scope_base: u32,
+    nodes: Vec<Node>,
+    exprs: Vec<Expr>,
+    scopes: Vec<Scope>,
+    routing_extensions: Vec<(NodeId, SelectGroup)>,
+    retracted: Vec<AdmissionKey>,
+}
 
-        // Policy authorization before anything else: `authorize` per request,
-        // the delegation check per fragment node. Excess authority in either
-        // direction rejects; nothing is clamped.
-        if !uploader.splice_policy.authorizes(&request.mode) {
+impl<'a> SpliceTransaction<'a> {
+    fn new(
+        state: &'a EngineState,
+        uploader: &'a Node,
+        generation: Generation,
+        parent_scope: CancelScopeId,
+    ) -> Self {
+        Self {
+            state,
+            uploader,
+            generation,
+            parent_scope,
+            allocators: state.allocator_snapshot(),
+            expr_cursor: state.graph.exprs.len() as u32,
+            scope_cursor: state.graph.scopes.len() as u32,
+            batches: Vec::new(),
+            names: state
+                .graph
+                .nodes
+                .iter()
+                .map(|node| (node.name.clone(), node.id))
+                .collect(),
+            retracted: BTreeSet::new(),
+            loop_nodes: OnceCell::new(),
+            pending_keys: OnceCell::new(),
+            owned_nodes: OnceCell::new(),
+            ambiguous_references: BTreeMap::new(),
+        }
+    }
+
+    fn prepare(mut self, requests: &[SpliceRequest]) -> Result<SplicePlan, SplicePreparationError> {
+        for (request_index, request) in requests.iter().enumerate() {
+            self.prepare_request(request_index, request)?;
+        }
+        Ok(SplicePlan {
+            batches: self.batches,
+            allocators: self.allocators,
+        })
+    }
+
+    fn prepare_request(
+        &mut self,
+        request_index: usize,
+        request: &SpliceRequest,
+    ) -> Result<(), SplicePreparationError> {
+        self.authorize_and_validate(request_index, request)?;
+        let retracted = self.prepare_retractions(request);
+        let mut draft = self.remap_fragment(request, retracted);
+        self.register_names(request_index, &draft.nodes)?;
+        self.attach_entries(&request.fragment, &mut draft);
+        self.attach_dependents(request_index, &request.fragment, &mut draft)?;
+        self.attach_dependencies(request_index, request, &mut draft)?;
+        self.push_batch(draft);
+        Ok(())
+    }
+
+    /// Policy runs before validation, preserving the transaction's rejection
+    /// order. Excess authority rejects; nothing is clamped.
+    fn authorize_and_validate(
+        &self,
+        request_index: usize,
+        request: &SpliceRequest,
+    ) -> Result<(), SplicePreparationError> {
+        let reject = |source| Self::rejection(request_index, source);
+        if !self.uploader.splice_policy.authorizes(&request.mode) {
             return Err(reject(PreparationRejection::Policy {
-                policy: uploader.splice_policy,
+                policy: self.uploader.splice_policy,
                 mode: request.mode,
             }));
         }
-        for fragment_node in &request.fragment.nodes {
-            if !uploader
-                .splice_policy
-                .may_delegate(fragment_node.splice_policy)
-            {
+        for node in &request.fragment.nodes {
+            if !self.uploader.splice_policy.may_delegate(node.splice_policy) {
                 return Err(reject(PreparationRejection::Delegation {
-                    node: fragment_node.name.clone(),
-                    declared: fragment_node.splice_policy,
-                    cap: uploader.splice_policy,
+                    node: node.name.clone(),
+                    declared: node.splice_policy,
+                    cap: self.uploader.splice_policy,
                 }));
             }
         }
+        validate_request(request).map_err(|errors| reject(PreparationRejection::Fragment(errors)))
+    }
 
-        // Fragment-local validation: the shared invariant engine over the
-        // fragment view, plus the mode/emptiness rule.
-        if let Err(errors) = validate_request(request) {
-            return Err(reject(PreparationRejection::Fragment(errors)));
-        }
-
-        // Retraction, before attachment: computed from state at finalization
-        // time, filtered by the request's scope against recorded batch owners.
-        // Keys another request already took are skipped, so the plan stays a
-        // set.
-        let mut batch_retracted: Vec<AdmissionKey> = Vec::new();
-        if let SpliceMode::Replace { scope } = request.mode {
-            for key in pending_keys.get_or_init(|| state.pending_admission_keys()) {
-                if retracted.contains(key) {
-                    continue;
-                }
-                let qualifies = match scope {
-                    ir::ReplaceScope::AllPending => true,
-                    ir::ReplaceScope::OwnBatches => owned_nodes
-                        .get_or_init(|| {
-                            state
-                                .splices()
-                                .iter()
-                                .filter(|b| b.owner == uploader.id)
-                                .flat_map(|b| b.nodes.iter().copied())
-                                .collect()
-                        })
-                        .contains(&key.node),
-                };
-                if qualifies {
-                    retracted.insert(*key);
-                    batch_retracted.push(*key);
-                }
+    /// Compute this request's retractions against the same canonical snapshot as
+    /// every other request, excluding keys an earlier request already took.
+    fn prepare_retractions(&mut self, request: &SpliceRequest) -> Vec<AdmissionKey> {
+        let mut batch = Vec::new();
+        let SpliceMode::Replace { scope } = request.mode else {
+            return batch;
+        };
+        let state = self.state;
+        let owner = self.uploader.id;
+        for key in self
+            .pending_keys
+            .get_or_init(|| state.pending_admission_keys())
+        {
+            if self.retracted.contains(key) {
+                continue;
+            }
+            let qualifies = match scope {
+                ir::ReplaceScope::AllPending => true,
+                ir::ReplaceScope::OwnBatches => self
+                    .owned_nodes
+                    .get_or_init(|| {
+                        state
+                            .splices()
+                            .iter()
+                            .filter(|batch| batch.owner == owner)
+                            .flat_map(|batch| batch.nodes.iter().copied())
+                            .collect()
+                    })
+                    .contains(&key.node),
+            };
+            if qualifies {
+                self.retracted.insert(*key);
+                batch.push(*key);
             }
         }
+        batch
+    }
 
-        // Identifier remapping from live-graph high-water marks: nodes, edges,
-        // scopes and expressions all shift into freshly allocated live ids.
+    /// Remap one fragment into fresh live ids. All allocator movement remains on
+    /// the transaction copy.
+    fn remap_fragment(
+        &mut self,
+        request: &SpliceRequest,
+        retracted: Vec<AdmissionKey>,
+    ) -> BatchDraft {
         let fragment = &request.fragment;
-        let node_base = alloc.reserve_nodes(fragment.nodes.len());
-        let expr_base = expr_cursor;
-        let scope_base = scope_cursor;
-
-        let mut exprs: Vec<Expr> = fragment
-            .exprs
-            .iter()
-            .map(|(_, expr)| shift_expr(expr, expr_base))
-            .collect();
-        let scopes: Vec<Scope> = fragment
-            .scopes
-            .iter()
-            .map(|scope| remap_scope(scope, scope_base, expr_base))
-            .collect();
-        let mut nodes: Vec<Node> = fragment
-            .nodes
-            .iter()
-            .map(|node| remap_node(node, node_base, scope_base, expr_base, &mut alloc))
-            .collect();
-
-        // Instance names are used verbatim; a collision with any live name, or
-        // with a name planned earlier in this transaction, rejects.
-        for node in &nodes {
-            if names.contains_key(&node.name) {
-                return Err(reject(PreparationRejection::NameCollision {
-                    name: node.name.clone(),
-                }));
-            }
-            names.insert(node.name.clone(), node.id);
+        let node_base = self.allocators.reserve_nodes(fragment.nodes.len());
+        let expr_base = self.expr_cursor;
+        let scope_base = self.scope_cursor;
+        BatchDraft {
+            node_base,
+            expr_base,
+            scope_base,
+            exprs: fragment
+                .exprs
+                .iter()
+                .map(|(_, expr)| shift_expr(expr, expr_base))
+                .collect(),
+            scopes: fragment
+                .scopes
+                .iter()
+                .map(|scope| remap_scope(scope, scope_base, expr_base))
+                .collect(),
+            nodes: fragment
+                .nodes
+                .iter()
+                .map(|node| {
+                    remap_node(node, node_base, scope_base, expr_base, &mut self.allocators)
+                })
+                .collect(),
+            routing_extensions: Vec::new(),
+            retracted,
         }
+    }
 
-        // Entry attachment: one new select group on the uploader per entry,
-        // guarded success-like, so uploaded work starts only from a
-        // success-like uploader — and pinned to the uploading firing's
-        // generation, because the groups persist on the node: a loop-head
-        // uploader's next generation must not re-seed an earlier batch.
-        // Added pre-routing — the uploader's own routing pass runs after
-        // commit and evaluates these.
-        let mut extensions: Vec<(NodeId, SelectGroup)> = Vec::new();
-        if !fragment.entry.is_empty() {
-            let outcome_var = push_expr(&mut exprs, expr_base, Expr::Var(SmolStr::new("outcome")));
-            let success_like = push_expr(
-                &mut exprs,
-                expr_base,
-                Expr::Field(outcome_var, SmolStr::new("success_like")),
-            );
-            let generation_var =
-                push_expr(&mut exprs, expr_base, Expr::Var(SmolStr::new("generation")));
-            let this_generation = push_expr(
-                &mut exprs,
-                expr_base,
-                Expr::Lit(Value::from(generation.raw())),
-            );
-            let same_generation = push_expr(
-                &mut exprs,
-                expr_base,
-                Expr::Binary(BinOp::Eq, generation_var, this_generation),
-            );
-            let guard = push_expr(
-                &mut exprs,
-                expr_base,
-                Expr::Binary(BinOp::And, success_like, same_generation),
-            );
-            for entry in &fragment.entry {
-                let to = NodeId::new(node_base + entry.raw());
-                extensions.push((
-                    uploader.id,
-                    SelectGroup::new(vec![Edge::when(alloc.take_edge(), to, guard)]),
+    fn register_names(
+        &mut self,
+        request_index: usize,
+        nodes: &[Node],
+    ) -> Result<(), SplicePreparationError> {
+        for node in nodes {
+            if self.names.contains_key(&node.name) {
+                return Err(Self::rejection(
+                    request_index,
+                    PreparationRejection::NameCollision {
+                        name: node.name.clone(),
+                    },
                 ));
             }
+            self.names.insert(node.name.clone(), node.id);
         }
+        Ok(())
+    }
 
-        // Dependent auto-extension: each existing forward dependent of the
-        // uploader also waits for the batch, via edges from every exit. Such a
-        // dependent cannot have fired — its `All` join still awaits the
-        // uploader's token — and anything but `All` rejects (a generated batch
-        // barrier for `Any`/`Quorum` is a v2 seam). A dependent this
-        // transaction already retracted is skipped: it can never fire.
-        if !fragment.exits.is_empty() {
-            let mut dependents: Vec<NodeId> = Vec::new();
-            let mut seen_dependents = BTreeSet::new();
-            for edge in uploader.routing.edges().filter(|e| !e.back) {
-                if seen_dependents.insert(edge.to)
-                    && state.graph.node(edge.to).is_some()
-                    && !state.is_superseded(edge.to)
-                {
-                    dependents.push(edge.to);
-                }
+    /// Attach fragment entries to the uploader, gated by success-like status and
+    /// the exact uploading generation.
+    fn attach_entries(&mut self, fragment: &ir::GraphFragment, draft: &mut BatchDraft) {
+        if fragment.entry.is_empty() {
+            return;
+        }
+        let outcome = push_expr(
+            &mut draft.exprs,
+            draft.expr_base,
+            Expr::Var(SmolStr::new("outcome")),
+        );
+        let success_like = push_expr(
+            &mut draft.exprs,
+            draft.expr_base,
+            Expr::Field(outcome, SmolStr::new("success_like")),
+        );
+        let generation = push_expr(
+            &mut draft.exprs,
+            draft.expr_base,
+            Expr::Var(SmolStr::new("generation")),
+        );
+        let expected = push_expr(
+            &mut draft.exprs,
+            draft.expr_base,
+            Expr::Lit(Value::from(self.generation.raw())),
+        );
+        let same_generation = push_expr(
+            &mut draft.exprs,
+            draft.expr_base,
+            Expr::Binary(BinOp::Eq, generation, expected),
+        );
+        let guard = push_expr(
+            &mut draft.exprs,
+            draft.expr_base,
+            Expr::Binary(BinOp::And, success_like, same_generation),
+        );
+        for entry in &fragment.entry {
+            draft.routing_extensions.push((
+                self.uploader.id,
+                SelectGroup::new(vec![Edge::when(
+                    self.allocators.take_edge(),
+                    NodeId::new(draft.node_base + entry.raw()),
+                    guard,
+                )]),
+            ));
+        }
+    }
+
+    /// Extend each existing forward dependent of the uploader through every
+    /// fragment exit.
+    fn attach_dependents(
+        &mut self,
+        request_index: usize,
+        fragment: &ir::GraphFragment,
+        draft: &mut BatchDraft,
+    ) -> Result<(), SplicePreparationError> {
+        if fragment.exits.is_empty() {
+            return Ok(());
+        }
+        let mut seen = BTreeSet::new();
+        let dependents: Vec<NodeId> = self
+            .uploader
+            .routing
+            .edges()
+            .filter(|edge| !edge.back)
+            .filter(|edge| seen.insert(edge.to))
+            .map(|edge| edge.to)
+            .filter(|node| self.state.graph.node(*node).is_some())
+            .filter(|node| !self.state.is_superseded(*node))
+            .collect();
+        for dependent in dependents {
+            if self.retracted.contains(&AdmissionKey {
+                node: dependent,
+                generation: self.generation,
+            }) {
+                continue;
             }
-            for dependent in dependents {
-                if retracted.contains(&AdmissionKey {
-                    node: dependent,
-                    generation,
-                }) {
-                    continue;
-                }
-                let dependent_node = state.graph.node(dependent).expect("checked above");
-                if dependent_node.join != JoinPolicy::All {
-                    return Err(reject(PreparationRejection::DependentJoinNotAll {
-                        name: dependent_node.name.clone(),
-                        join: dependent_node.join,
-                    }));
-                }
-                for exit in &fragment.exits {
-                    nodes[exit.index()]
-                        .routing
-                        .groups
-                        .push(SelectGroup::new(vec![Edge::always(
-                            alloc.take_edge(),
-                            dependent,
-                        )]));
-                }
+            let node = self.state.graph.node(dependent).expect("filtered above");
+            if node.join != JoinPolicy::All {
+                return Err(Self::rejection(
+                    request_index,
+                    PreparationRejection::DependentJoinNotAll {
+                        name: node.name.clone(),
+                        join: node.join,
+                    },
+                ));
+            }
+            for exit in &fragment.exits {
+                draft.nodes[exit.index()]
+                    .routing
+                    .groups
+                    .push(SelectGroup::new(vec![Edge::always(
+                        self.allocators.take_edge(),
+                        dependent,
+                    )]));
             }
         }
+        Ok(())
+    }
 
-        // Cross-batch `depends_on`, by state at splice time. A not-final
-        // reference extends the referenced node's routing with a real edge —
-        // it has not routed its final outcome yet, so the edge can still emit.
-        // A final reference becomes a guard over `nodes.<name>.status`: the
-        // record already exists, so the guard does not need to wait. Both are
-        // completion ordering; status gating stays the frontend's business.
+    /// Resolve explicit `depends_on` attachments against live and earlier-planned
+    /// names in the transaction.
+    fn attach_dependencies(
+        &mut self,
+        request_index: usize,
+        request: &SpliceRequest,
+        draft: &mut BatchDraft,
+    ) -> Result<(), SplicePreparationError> {
         for attachment in &request.attachments {
             let ir::Attachment::DependsOn { node, on } = attachment;
             let dependent_index = node.index();
-            let dependent_live = NodeId::new(node_base + node.raw());
+            let dependent = NodeId::new(draft.node_base + node.raw());
             let name = SmolStr::new(on.as_str());
-            let Some(&target) = names.get(name.as_str()) else {
-                return Err(reject(PreparationRejection::UnknownReference { name }));
+            let Some(&target) = self.names.get(name.as_str()) else {
+                return Err(Self::rejection(
+                    request_index,
+                    PreparationRejection::UnknownReference { name },
+                ));
             };
-            if state.graph.node(target).is_some() {
-                if retracted.iter().any(|key| key.node == target) {
-                    return Err(reject(PreparationRejection::RetractedReference { name }));
+            if self.state.graph.node(target).is_some() {
+                if self.retracted.iter().any(|key| key.node == target) {
+                    return Err(Self::rejection(
+                        request_index,
+                        PreparationRejection::RetractedReference { name },
+                    ));
                 }
-                // Exactly one admission: a loop node — or anything already
-                // admitted in more than one generation — is ambiguous, so
-                // the final/not-final rule below never is.
-                let ambiguous = *ambiguous_references.entry(target).or_insert_with(|| {
+                let loop_nodes = &self.loop_nodes;
+                let state = self.state;
+                let ambiguous = *self.ambiguous_references.entry(target).or_insert_with(|| {
                     loop_nodes
                         .get_or_init(|| ir::validate::loop_reachable(&state.graph))
                         .contains(&target)
                         || state.has_multiple_admission_generations(target)
                 });
                 if ambiguous {
-                    return Err(reject(PreparationRejection::AmbiguousReference { name }));
+                    return Err(Self::rejection(
+                        request_index,
+                        PreparationRejection::AmbiguousReference { name },
+                    ));
                 }
-                if state.run_context().node(name.as_str()).is_some() {
-                    let guard = record_exists_guard(&mut exprs, expr_base, &name);
-                    conjoin_precondition(&mut nodes[dependent_index], &mut exprs, expr_base, guard);
+                if self.state.run_context().node(name.as_str()).is_some() {
+                    let guard = record_exists_guard(&mut draft.exprs, draft.expr_base, &name);
+                    conjoin_precondition(
+                        &mut draft.nodes[dependent_index],
+                        &mut draft.exprs,
+                        draft.expr_base,
+                        guard,
+                    );
                     continue;
                 }
             }
-            // A non-final live node or any planned node gets one routing
-            // extension. Batches apply in order, after adding their nodes, so the
-            // target is live before this extension is committed.
-            extensions.push((
+            // A non-final live node or any planned node is live by the time this
+            // batch applies, because batches commit in request order.
+            draft.routing_extensions.push((
                 target,
-                SelectGroup::new(vec![Edge::always(alloc.take_edge(), dependent_live)]),
+                SelectGroup::new(vec![Edge::always(self.allocators.take_edge(), dependent)]),
             ));
         }
+        Ok(())
+    }
 
-        expr_cursor = expr_base + exprs.len() as u32;
-        scope_cursor = scope_base + scopes.len() as u32;
-
-        batches.push(PreparedSplice {
-            owner: uploader.id,
-            cancel_scope: alloc.take_cancel_scope(),
-            parent_scope,
+    fn push_batch(&mut self, draft: BatchDraft) {
+        let BatchDraft {
+            expr_base,
+            scope_base,
+            nodes,
+            exprs,
+            scopes,
+            routing_extensions,
+            retracted,
+            ..
+        } = draft;
+        self.expr_cursor = expr_base + exprs.len() as u32;
+        self.scope_cursor = scope_base + scopes.len() as u32;
+        self.batches.push(PreparedSplice {
+            owner: self.uploader.id,
+            cancel_scope: self.allocators.take_cancel_scope(),
+            parent_scope: self.parent_scope,
             nodes,
             exprs,
             scopes,
             bindings: BTreeMap::new(),
             seeds: Vec::new(),
-            routing_extensions: extensions,
-            producer: SpliceProducer::Outcome {
-                retracted: batch_retracted,
-            },
+            routing_extensions,
+            producer: SpliceProducer::Outcome { retracted },
         });
     }
 
-    Ok(SplicePlan {
-        batches,
-        allocators: alloc,
-    })
+    fn rejection(request_index: usize, source: PreparationRejection) -> SplicePreparationError {
+        SplicePreparationError {
+            request_index,
+            source,
+        }
+    }
 }
 
 /// Commit a prepared transaction: adopt the allocator movement, then apply the
