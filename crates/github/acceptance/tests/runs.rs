@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 use acceptance::runs::{
     self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_from_log,
     expected_reason, identity_of, runs_report, step_identities,
@@ -187,7 +189,10 @@ async fn corpus_run_sweep() {
          the graph drives a Docker engine), matrices capped to their first leg, \
          each workflow capped at {}s wall clock, parallelism {jobs}; the \
          full-image list runs on the ubuntu-latest capture, since its \
-         workflows compile native gems against full-image packages. Identity: \
+         workflows compile native gems against full-image packages. The \
+         artifact and cache backends are live: each run gets the \
+         distribution's ObjectService, cache and tool cache in the host \
+         store, persistent across sweeps. Identity: \
          `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the \
          sweep's analog of `default_params` reading HEAD — so `checkout` fetches \
          real state; {auth}.",
@@ -302,6 +307,13 @@ async fn run_one(
     // The sweep measures outcomes, not determinism; replay verification is the
     // acceptance battery's business.
     options.verify_replay = false;
+    // The distribution's backends, so the sweep measures what the CLI ships:
+    // each run gets its own ObjectService, with cache entries and the tool
+    // cache in the host's persistent store — entries survive across sweeps,
+    // so warm-cache effects are real, as they are on GitHub.
+    let store = github_objects::default_store_dir();
+    let tool_cache = github_objects::tool_cache_dir(&store);
+    let _ = std::fs::create_dir_all(&tool_cache);
     let rt = Runtime::standard()
         .options(options)
         .step(github_actions::RunStep)
@@ -309,7 +321,9 @@ async fn run_one(
         .step(github_actions::DockerActionStep)
         .step(github_actions::CheckoutStep)
         .capability(ActionSourceCap(trees))
+        .capability(github_actions::ToolCacheCap(tool_cache))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", &sweep_token())]));
+    let rt = support::with_object_service(rt, Some(github_objects::cache_dir(&store)));
 
     let driver = rt.driver(graph);
     let handle = driver.handle();
