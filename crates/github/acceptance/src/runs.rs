@@ -47,6 +47,31 @@ pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-2e
 /// `--privileged` ([`privilege`]). Only the 24.04 flavor is built.
 pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-2ea78b6f826c";
 
+/// The full 24.04 runner capture — GitHub's own ubuntu-latest filesystem,
+/// ~21 GB to pull once. Pinned by the runner release's ImageVersion.
+pub const RUNNER_IMAGE_2404_FULL: &str =
+    "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.283.1";
+
+/// Workflows the sweep runs on [`RUNNER_IMAGE_2404_FULL`] instead of slim. On
+/// GitHub they run on ubuntu-latest — the full image — and their setup-ruby
+/// bundler step compiles native gems (libxml-ruby, mysql2) against packages
+/// (`libxml2-dev`, `libmysqlclient-dev`) the slim image deliberately does not
+/// carry: the additions were vetoed for their ICU weight (2026-08-29), and
+/// slim stays at GitHub-ubuntu-slim parity. The full image wins over the dind
+/// substitution for a listed workflow: a Docker-driving step then reports the
+/// capture's own truth (binaries without a running daemon) rather than
+/// failing on missing packages first.
+pub const FULL_IMAGE_WORKFLOWS: &[(&str, &str)] = &[
+    ("rails/rails", ".github/workflows/devcontainer-smoke-test.yml"),
+    ("rails/rails", ".github/workflows/rail_inspector.yml"),
+    ("rails/rails", ".github/workflows/rails-new-docker.yml"),
+];
+
+/// Whether the sweep routes this workflow to the full image.
+pub fn full_image_workflow(repo: &str, file: &str) -> bool {
+    FULL_IMAGE_WORKFLOWS.contains(&(repo, file))
+}
+
 /// The battery image for a scope's placement labels: the label's OS version
 /// picks the Ubuntu release, defaulting to 24.04 (`ubuntu-latest`).
 pub fn battery_image(requirements: &[SmolStr]) -> &'static str {

@@ -110,7 +110,7 @@ async fn corpus_run_sweep() {
             },
         };
         if let (Class::Clean | Class::Warnings, Some(mut graph)) = (outcome.class, graph) {
-            prepare(&mut graph, &repo, pins.get(&repo), &repo_root);
+            prepare(&mut graph, &repo, &outcome.file, pins.get(&repo), &repo_root);
             // A reusable file run standalone has no caller to supply its
             // declared inputs; a firing-environment failure there is
             // caller-coupled, not a gap. (The word in the file is the signal:
@@ -185,7 +185,9 @@ async fn corpus_run_sweep() {
         "Sweep configuration: host scopes rewritten to the pinned runner images \
          `{}` (22.04/26.04 variants by label; the privileged dind flavor where \
          the graph drives a Docker engine), matrices capped to their first leg, \
-         each workflow capped at {}s wall clock, parallelism {jobs}. Identity: \
+         each workflow capped at {}s wall clock, parallelism {jobs}; the \
+         full-image list runs on the ubuntu-latest capture, since its \
+         workflows compile native gems against full-image packages. Identity: \
          `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the \
          sweep's analog of `default_params` reading HEAD — so `checkout` fetches \
          real state; {auth}.",
@@ -205,21 +207,26 @@ async fn corpus_run_sweep() {
 /// workflows without a checkout, so the honest identity comes from
 /// `corpus-pins.txt` and the fetch's recorded default branch; `checkout` then
 /// fetches a commit that exists.
-fn prepare(graph: &mut Graph, repo_slug: &str, pin: Option<&String>, repo_root: &Path) {
+fn prepare(graph: &mut Graph, repo_slug: &str, file: &str, pin: Option<&String>, repo_root: &Path) {
     runs::stub_run_scripts(graph);
     // A graph that drives a Docker engine gets the dind runner (and the
     // `--privileged` its daemon needs) where the 24.04 image would have been
-    // picked — the only flavor the dind variant is built for.
+    // picked — the only flavor the dind variant is built for. A workflow on
+    // the full-image list outranks both: it needs the full runner's package
+    // set, as on ubuntu-latest.
+    let full = runs::full_image_workflow(repo_slug, file);
     let docker = runs::needs_docker(graph);
     runs::containerize(graph, |requirements| {
         let image = battery_image(requirements);
-        if docker && image == runs::RUNNER_IMAGE_2404 {
+        if full && image == runs::RUNNER_IMAGE_2404 {
+            runs::RUNNER_IMAGE_2404_FULL.to_string()
+        } else if docker && image == runs::RUNNER_IMAGE_2404 {
             runs::RUNNER_IMAGE_2404_DIND.to_string()
         } else {
             image.to_string()
         }
     });
-    if docker {
+    if docker && !full {
         runs::privilege(graph, runs::RUNNER_IMAGE_2404_DIND);
     }
     runs::cap_expansions(graph);
