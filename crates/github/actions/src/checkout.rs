@@ -5,7 +5,9 @@
 //! `GITHUB_WORKSPACE` from the run's own repository — the committed HEAD as a
 //! depth-1 local clone, plus the uncommitted tracked diff and the
 //! untracked-but-not-ignored files, never the ignored bulk (`target/`,
-//! `node_modules/`). `.git` rides along, so later `git` steps keep working.
+//! `node_modules/`). `.git` rides along, so later `git` steps keep working —
+//! shaped like GitHub's checkout leaves it: a branch run's branch checked out
+//! with a matching remote-tracking ref, `origin` naming the repository.
 //! Offline, token-less, and an explicit documented delta from GitHub.
 //!
 //! The workspace stays a copy: the snapshot is assembled host-side in a
@@ -97,7 +99,7 @@ async fn materialize(
         .map_err(|e| checkout_error(format!("could not create a scratch dir: {e}")))?;
 
     let commit = if source.join(".git").exists() {
-        snapshot_repository(source, &clone, ctx).await?
+        snapshot_repository(source, &clone, config, ctx).await?
     } else {
         // No history: a plain tree (the corpus case) copies wholesale.
         let (from, to) = (source.to_path_buf(), clone.clone());
@@ -145,6 +147,7 @@ async fn materialize(
 async fn snapshot_repository(
     source: &Path,
     clone: &Path,
+    config: &CheckoutConfig,
     ctx: &mut StepCtx,
 ) -> Result<String, StepFailure> {
     let url = format!("file://{}", source.display());
@@ -159,6 +162,7 @@ async fn snapshot_repository(
             &["status", "--porcelain", "-z", "--untracked-files=all"],
         ),
     )?;
+    shape_clone(clone, config).await?;
 
     // The dirty overlay: worktree truth wins, path by path.
     let (source_dir, clone_dir) = (source.to_path_buf(), clone.to_path_buf());
@@ -194,6 +198,36 @@ async fn snapshot_repository(
 
     let head = git(Some(clone), &["rev-parse", "HEAD"]).await?;
     Ok(head.trim().to_string())
+}
+
+/// Give the fresh clone the git shape GitHub's checkout leaves behind, so
+/// actions asking ordinary questions — the current branch, a rev-parse, a
+/// diff against a base — see what they expect. A branch run gets its branch:
+/// the clone of a detached source (a corpus pin) arrives branchless, and a
+/// branched source's name may not be the run's, so `-B` from a matching
+/// remote-tracking ref covers both, exactly as the real checkout does. When
+/// the repository is named, `origin` is set to its real URL: the clone's
+/// `file://` host path is dead inside a container, and not what an action
+/// reading the remote should see.
+async fn shape_clone(clone: &Path, config: &CheckoutConfig) -> Result<(), StepFailure> {
+    if let Some(branch) = config
+        .reference
+        .as_deref()
+        .and_then(|r| r.strip_prefix("refs/heads/"))
+        .filter(|b| !b.is_empty())
+    {
+        let tracking = format!("refs/remotes/origin/{branch}");
+        git(Some(clone), &["update-ref", &tracking, "HEAD"]).await?;
+        git(Some(clone), &["checkout", "--quiet", "-B", branch, &tracking]).await?;
+    }
+    if let (Some(server), Some(repository)) = (
+        config.server_url.as_deref().filter(|s| !s.is_empty()),
+        config.repository.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        let url = format!("{}/{repository}", server.trim_end_matches('/'));
+        git(Some(clone), &["remote", "set-url", "origin", &url]).await?;
+    }
+    Ok(())
 }
 
 /// Paths out of `git status --porcelain -z`: `XY path\0`, with a rename's

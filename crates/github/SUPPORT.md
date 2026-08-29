@@ -75,7 +75,14 @@ the real action, which run identity (`github.sha` from HEAD) makes work for
 pushed state given a credential. The substitution is lowering-visible, never a
 silent runtime intercept, and `PETRI_REAL_CHECKOUT` (or
 `with_checkout_substitution(false)`) turns it off. A repository root without
-`.git` materializes as a plain tree copy.
+`.git` materializes as a plain tree copy. The snapshot's git *shape* matches
+what GitHub's checkout leaves: a branch run (`github.ref` under `refs/heads/`)
+has that branch checked out with a matching `refs/remotes/origin/<branch>` —
+even when the source sits detached, as a corpus pin does — and `origin` is set
+to `<server_url>/<repository>` where the repository is named, so an action
+asking an ordinary git question (the current branch, a rev-parse, a diff
+against a base) sees what it expects rather than the scratch clone's
+`file://` host path.
 
 **Reusable workflows.** A `uses:` job calls another workflow — local
 (`./.github/workflows/x.yml`, or GitHub's `$/` same-repository shorthand) or

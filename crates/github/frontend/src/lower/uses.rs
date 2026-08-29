@@ -702,6 +702,19 @@ impl<'w, 'a> Lowering<'w, 'a> {
             "source".into(),
             json!({ EXPR_PLACEHOLDER_KEY: source.raw() }),
         );
+        // Run identity, resolved at firing like `source`: the step shapes the
+        // snapshot's git state to answer ordinary questions the way GitHub's
+        // checkout would — the ref's branch checked out, `origin` naming the
+        // repository.
+        for key in ["ref", "repository", "server_url"] {
+            let value = {
+                let t = self.b.exprs();
+                let github = t.var("github");
+                let k = t.lit(key);
+                t.call("get_ci", vec![github, k])
+            };
+            config.insert(key.into(), json!({ EXPR_PLACEHOLDER_KEY: value.raw() }));
+        }
         if let Some(path) = path {
             config.insert("path".into(), json!(path));
         }

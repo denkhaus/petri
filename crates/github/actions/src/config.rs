@@ -61,6 +61,18 @@ pub struct CheckoutConfig {
     /// The `path:` input: destination relative to `GITHUB_WORKSPACE`.
     #[serde(default)]
     pub path: Option<String>,
+    /// The run's fully-qualified ref (`github.ref`): a `refs/heads/*` value
+    /// names the branch the snapshot leaves checked out, as GitHub's checkout
+    /// does; anything else stays as the clone landed (detached).
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// `github.repository` — with `server_url`, the URL the snapshot's
+    /// `origin` remote is set to, as GitHub's checkout configures it.
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// `github.server_url`.
+    #[serde(default)]
+    pub server_url: Option<String>,
     /// The step's condition, as the frontend's gate tree; see [`RunConfig`].
     #[serde(default)]
     pub gate: Option<Value>,

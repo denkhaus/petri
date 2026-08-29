@@ -66,6 +66,9 @@ fn checkout_workflow(container: Option<&str>) -> String {
          \x20     - run: test ! -e noise.log && echo ignored-stayed-home\n\
          \x20     - run: ./script.sh\n\
          \x20     - run: git rev-parse --short HEAD && echo git-works\n\
+         \x20     - run: test \"$(git rev-parse --abbrev-ref HEAD)\" = main && echo on-run-branch\n\
+         \x20     - run: test \"$(git rev-parse origin/main)\" = \"$(git rev-parse HEAD)\" && echo tracking-ref-set\n\
+         \x20     - run: test \"$(git remote get-url origin)\" = https://github.com/example/repo && echo origin-names-repo\n\
          \x20 pathed:\n\
          \x20   runs-on: ubuntu-latest\n\
          {container}\
@@ -106,6 +109,9 @@ async fn run_checkout(label: &str, container: Option<&str>) {
     assert!(has("ignored-stayed-home"), "the ignored file does not");
     assert!(has("ran-script"), "mode bits survive");
     assert!(has("git-works"), "`.git` rides along");
+    assert!(has("on-run-branch"), "the run's branch is checked out");
+    assert!(has("tracking-ref-set"), "origin/<branch> matches HEAD");
+    assert!(has("origin-names-repo"), "origin is the repository URL");
 }
 
 /// Host job, no action source configured — the substitution is offline.
@@ -127,4 +133,39 @@ async fn local_checkout_reaches_containerized_jobs() {
         return;
     }
     run_checkout("boxed", Some(RUNNER_IMAGE_2404)).await;
+}
+
+/// A corpus-shaped source — detached at its pin, no branch at all — still
+/// materializes onto the run's branch, with the matching remote-tracking ref:
+/// the git shape GitHub's checkout guarantees, whatever the source's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_branchless_source_lands_on_the_run_branch() {
+    if !tool_ready("git") {
+        return;
+    }
+    let fixture = Fixture::new("detached");
+    git_in(&fixture.0, &["checkout", "--quiet", "--detach"]);
+    git_in(&fixture.0, &["branch", "-D", "main"]);
+    let text = "on: push\n\
+                jobs:\n\
+                \x20 probe:\n\
+                \x20   runs-on: ubuntu-latest\n\
+                \x20   steps:\n\
+                \x20     - uses: actions/checkout@v4\n\
+                \x20     - run: test \"$(git rev-parse --abbrev-ref HEAD)\" = main && echo on-run-branch\n\
+                \x20     - run: test \"$(git rev-parse origin/main)\" = \"$(git rev-parse HEAD)\" && echo tracking-ref-set\n";
+    let mut graph = lower_ok(text);
+    graph.params.insert(
+        "petri".into(),
+        json!({ "repo": fixture.0.display().to_string() }),
+    );
+    let report = run_host(graph, "detached").await;
+    let lines = log_lines(&report);
+    assert_eq!(
+        report.status,
+        runtime::ir::RunStatus::Success,
+        "log: {lines:?}"
+    );
+    assert!(lines.iter().any(|l| l == "on-run-branch"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "tracking-ref-set"), "{lines:?}");
 }

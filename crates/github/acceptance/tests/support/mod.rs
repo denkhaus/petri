@@ -44,7 +44,7 @@ pub fn with_params(graph: Graph) -> Graph {
     graph.params.entry("github".into()).or_insert(json!({
         "sha": "0123456789abcdef", "ref": "refs/heads/main", "ref_name": "main",
         "repository": "example/repo", "actor": "tester", "event_name": "push",
-        "run_id": "1", "run_number": "1",
+        "run_id": "1", "run_number": "1", "server_url": "https://github.com",
     }));
     graph.params.entry("runner".into()).or_insert(json!({
         "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "name": "local",

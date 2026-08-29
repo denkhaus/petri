@@ -238,7 +238,8 @@ fn prepare(graph: &mut Graph, repo_slug: &str, pin: Option<&String>, repo_root: 
     );
     graph.params.insert("vars".into(), json!({}));
     // The corpus dir is the "repository" the substituted checkout materializes:
-    // a plain workflow tree, no `.git` — copied wholesale, offline.
+    // the real source tree at the pin, `.git` included — cloned and shaped
+    // onto the run's branch, offline.
     graph.params.insert(
         "petri".into(),
         json!({ "repo": repo_root.display().to_string() }),

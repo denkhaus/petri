@@ -64,6 +64,30 @@ fn path_is_honored_and_clone_policy_inputs_are_ignored() {
 }
 
 #[test]
+fn the_substituted_config_carries_run_identity() {
+    let lowered = frontend_gha::load(
+        ".github/workflows/test.yml",
+        &checkout_workflow(""),
+        &frontend::NoFiles,
+    );
+    let graph = lowered.graph.expect("lowers");
+    let node = graph
+        .nodes
+        .iter()
+        .find(|n| n.step.kind.as_ref() == CHECKOUT_KIND)
+        .expect("the substituted node");
+    // The step shapes the snapshot's git state from the run's identity, each
+    // field riding a firing-time expression like `source`.
+    for key in ["ref", "repository", "server_url"] {
+        assert!(
+            node.step.config[key].get("$expr").is_some(),
+            "`{key}` rides a run-parameter expression: {:?}",
+            node.step.config
+        );
+    }
+}
+
+#[test]
 fn a_spelled_out_own_repository_and_ref_still_substitute() {
     let config = "[remote \"origin\"]\n\turl = git@github.com:octo/widget.git\n";
     let files = files(&[(".git/config", config)]);
