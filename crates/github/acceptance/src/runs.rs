@@ -37,15 +37,15 @@ use smol_str::SmolStr;
 /// deliberately. From lithoscomputer/sandbox-images; linux/amd64 only, so an
 /// Apple-Silicon host runs them emulated (fine for the correctness metric,
 /// noted for speed).
-pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-66c538cd3ef8";
-pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-66c538cd3ef8";
-pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-66c538cd3ef8";
+pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-2ea78b6f826c";
+pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-2ea78b6f826c";
+pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-2ea78b6f826c";
 
 /// The dind flavor of the 24.04 runner: slim plus a Docker engine and its
 /// `start-docker` helper. The daemon is not running when the container starts
 /// — the session prologue brings it up lazily on the first step — and it needs
 /// `--privileged` ([`privilege`]). Only the 24.04 flavor is built.
-pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-66c538cd3ef8";
+pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-2ea78b6f826c";
 
 /// The battery image for a scope's placement labels: the label's OS version
 /// picks the Ubuntu release, defaulting to 24.04 (`ubuntu-latest`).
