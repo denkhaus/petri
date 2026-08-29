@@ -305,9 +305,9 @@ pub fn eval<E>(
 // ── Lowering a condition onto the gate ────────────────────────────────────
 
 /// Whether the subtree holds something only the step can resolve: an `env.NAME`
-/// reference, a `hashFiles(...)` call, or `github.workspace`.
+/// reference, a `hashFiles(...)` call, `github.workspace`, or `runner.temp`.
 pub fn needs_lazy(expr: &Expr) -> bool {
-    if env_leaf(expr).is_some() || workspace_leaf(expr) {
+    if env_leaf(expr).is_some() || workspace_leaf(expr) || runner_temp_leaf(expr) {
         return true;
     }
     match expr {
@@ -329,6 +329,15 @@ fn workspace_leaf(expr: &Expr) -> bool {
     };
     root.eq_ignore_ascii_case("github")
         && matches!(path.as_slice(), [key] if key.eq_ignore_ascii_case("workspace"))
+}
+
+/// `runner.temp`: the same runner-side truth as `github.workspace`.
+fn runner_temp_leaf(expr: &Expr) -> bool {
+    let Some((root, path)) = expr.dotted_path() else {
+        return false;
+    };
+    root.eq_ignore_ascii_case("runner")
+        && matches!(path.as_slice(), [key] if key.eq_ignore_ascii_case("temp"))
 }
 
 /// `env.NAME` (or `env['NAME']`), the reference a step resolves itself.
@@ -377,6 +386,13 @@ pub fn condition_tree(
         // engine never evaluates over the marker.
         return Some(Gate::Lit(Value::String(
             crate::exprs::WORKSPACE_SENTINEL.to_string(),
+        )));
+    }
+    if runner_temp_leaf(ast) {
+        // The same shape for `runner.temp`: the step rewrites the marker to
+        // its own `RUNNER_TEMP` before evaluation.
+        return Some(Gate::Lit(Value::String(
+            crate::exprs::RUNNER_TEMP_SENTINEL.to_string(),
         )));
     }
     match ast {
@@ -462,6 +478,17 @@ fn engine_leaf(
             "the workspace path is known only to the step's environment; in a condition, \
              `github.workspace` may stand alone or under the comparison and boolean operators, \
              where the step resolves it — or read `GITHUB_WORKSPACE` in the step itself",
+        );
+        return None;
+    }
+    if lowered.saw_runner_temp {
+        diags.unsupported(
+            "expression.runner_temp",
+            span.clone(),
+            "`runner.temp` under a function the engine evaluates",
+            "the temp path is known only to the step's environment; in a condition, \
+             `runner.temp` may stand alone or under the comparison and boolean operators, \
+             where the step resolves it — or read `RUNNER_TEMP` in the step itself",
         );
         return None;
     }

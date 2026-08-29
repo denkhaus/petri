@@ -138,7 +138,14 @@ documented functions. `hashFiles(...)` with literal patterns works in step confi
 (`run:`, `env:`, `with:`) and in step-level conditions (`if:`, `pre-if`,
 `post-if`), resolved against the workspace at spawn with GitHub's hash. Secrets —
 `secrets.*` and `github.token` — may appear anywhere in step config; the value is
-spliced in at spawn and never enters the graph or the log.
+spliced in at spawn and never enters the graph or the log. `github.workspace`
+and `runner.temp` are runner-side paths only the step's environment knows: in
+step positions they resolve at spawn to exactly `GITHUB_WORKSPACE` and
+`RUNNER_TEMP`; in scope positions (a job-level `env:`) they render empty.
+`runner.tool_cache` renders empty everywhere: its runtime value is resolved by
+the shell prologue at exec time (an image's own populated cache wins), so no
+spawn-time substitution could promise the same path — read `RUNNER_TOOL_CACHE`
+in the step instead.
 
 **Conditions.** The docs' context-availability matrix is the compatibility
 target. A step-level condition sees `github`, `needs`, `strategy`, `matrix`,
@@ -258,6 +265,7 @@ Rejected with an error, and staying that way.
 | `secrets.expression` | A secret in a condition (any level), inside a larger output expression, or in a matrix | The docs' availability table gives conditions no `secrets` context, and secrets are absent from the expression environment by construction, so they can never reach the event log. In step config they are supported, and a whole-value secret job output is dropped with `ignored.secret_output` (above). |
 | `expression.hashFiles` | `hashFiles` in a job `if:`, an output or a matrix; under another function in a condition; or with computed patterns | Only the step, at spawn, may read the workspace. In a step-level condition it works standing alone or under the comparison and boolean operators (above). |
 | `expression.workspace` | `github.workspace` under a function in a condition | The path is runner-side truth the step substitutes at spawn; standing alone or under the comparison and boolean operators it resolves step-side, but under other functions the engine would evaluate over the unresolved marker. Read `GITHUB_WORKSPACE` in the step instead. |
+| `expression.runner_temp` | `runner.temp` under a function in a condition | The same runner-side truth as `github.workspace`, with the same operator-position support. Read `RUNNER_TEMP` in the step instead. |
 | `runs_on.callee_input` | A reusable file, lowered standalone, whose `runs-on` reads a `workflow_call` input with no default | Only a caller can place such a file, and every call site does (per-call-site resolution, above); standalone there is no runner to place by construction. The corpus keeps these out of the compatibility denominator ("callee only"), the way Windows/macOS workflows leave it. |
 | `action.remote` | A remote action with no action source configured, or one the source does not cover | Not a feature gap: the hint points at refreshing the source, which may add the reference. Authenticated fetch for private repositories is planned runtime work, above. |
 | `action.upstream_gone` | A remote action whose repository is gone upstream (private or removed, recorded at snapshot refresh) | The workflow is broken on GitHub itself — the corpus has exactly one — so no refresh, and no feature work here, can change it. Kept out of the compatibility denominator ("broken upstream"). |

@@ -692,6 +692,11 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.expression.workspace",
         ),
         (
+            // `runner.temp` is the same runner-side truth, same rule.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: contains(runner.temp, 'x')\n        run: echo\n",
+            "unsupported.expression.runner_temp",
+        ),
+        (
             // Service containers run; their runtime ids, networks and port
             // mappings are not in the expression environment.
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: job.services.db.id != ''\n        run: echo\n",
@@ -1067,5 +1072,44 @@ jobs:
     assert!(
         printed.contains("scope_cancelled"),
         "the static appears in the lowered expressions: {printed}"
+    );
+}
+
+/// `runner.temp` in step config lowers to its sentinel — the step substitutes
+/// its own `RUNNER_TEMP` at spawn — while a scope position (a job-level
+/// `env:`) stays a parameter read, as `github.workspace` does: resolved at
+/// acquire, where nothing could substitute, it is null and renders empty.
+#[test]
+fn runner_temp_lowers_to_a_sentinel_in_step_positions_only() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    env:
+      SCOPE_TD: ${{ runner.temp }}
+    steps:
+      - env:
+          TD: ${{ runner.temp }}
+        run: echo "${{ runner.temp }}/sub"
+"#;
+    let graph = lower_ok(text);
+    let encoded = serde_json::to_string(&graph).unwrap();
+    assert!(
+        encoded.contains(frontend_gha::exprs::RUNNER_TEMP_SENTINEL),
+        "step config carries the sentinel: {encoded}"
+    );
+    let diags = diagnostics(text);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:?}");
+
+    // The same reference only at job level: no sentinel anywhere — the value
+    // is a parameter read the engine resolves at acquire (null, empty).
+    let scope_only = lower_ok(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    env:\n      TD: ${{ runner.temp }}\n    steps:\n      - run: echo\n",
+    );
+    let encoded = serde_json::to_string(&scope_only).unwrap();
+    assert!(
+        !encoded.contains(frontend_gha::exprs::RUNNER_TEMP_SENTINEL),
+        "a job-level env stays a parameter read: {encoded}"
     );
 }

@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use executor::{ContainerImage, OneShotContainer};
 use frontend_gha::action::validate_relative_action_path;
 use frontend_gha::exprs::{
-    has_hashfiles_sentinel, has_workspace_sentinel, replace_workspace_sentinels,
+    has_hashfiles_sentinel, has_runner_temp_sentinel, has_workspace_sentinel,
+    replace_runner_temp_sentinels, replace_workspace_sentinels,
 };
 use ir::{Outcome, Value};
 use serde_json::Map;
@@ -73,12 +74,7 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
 
     // Everything textual resolves before the container exists: hashFiles
     // against the workspace, then secret sentinels from the run's provider.
-    let resolver = TextResolver::begin(
-        &config,
-        &ctx,
-        format!("{}/{REPO_DIR}", runner.workspace_path()),
-    )
-    .await?;
+    let resolver = TextResolver::begin(&config, &ctx, runner.workspace_path().to_string()).await?;
     let resolve = |value: &Value| resolver.resolve(&stringify(value), &ctx);
 
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
@@ -331,19 +327,21 @@ fn image_tag(key: &str) -> String {
     tag
 }
 
-/// The hashes, workspace path and secrets every configured text may carry,
-/// resolved once. `container_workspace` is the *action container's* view of
-/// `GITHUB_WORKSPACE` — the mount point, not the job environment's path.
+/// The hashes, runner-side paths and secrets every configured text may carry,
+/// resolved once. `container_workspace` and `container_runner_temp` are the
+/// *action container's* view of `GITHUB_WORKSPACE` and `RUNNER_TEMP` — under
+/// the mount point, not the job environment's paths.
 struct TextResolver {
     hashes: std::collections::BTreeMap<Vec<String>, String>,
     container_workspace: String,
+    container_runner_temp: String,
 }
 
 impl TextResolver {
     async fn begin(
         config: &DockerActionConfig,
         ctx: &StepCtx,
-        container_workspace: String,
+        container_root: String,
     ) -> Result<Self, StepFailure> {
         let texts: Vec<String> = config
             .entrypoint
@@ -370,7 +368,8 @@ impl TextResolver {
         };
         Ok(Self {
             hashes,
-            container_workspace,
+            container_workspace: format!("{container_root}/{REPO_DIR}"),
+            container_runner_temp: crate::session::runner_temp_path(&container_root),
         })
     }
 
@@ -382,6 +381,11 @@ impl TextResolver {
         };
         let text = if has_workspace_sentinel(&text) {
             replace_workspace_sentinels(&text, &self.container_workspace)
+        } else {
+            text
+        };
+        let text = if has_runner_temp_sentinel(&text) {
+            replace_runner_temp_sentinels(&text, &self.container_runner_temp)
         } else {
             text
         };

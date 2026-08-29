@@ -21,7 +21,8 @@
 use std::collections::BTreeMap;
 
 use frontend_gha::exprs::{
-    has_hashfiles_sentinel, has_workspace_sentinel, replace_workspace_sentinels,
+    has_hashfiles_sentinel, has_runner_temp_sentinel, has_workspace_sentinel,
+    replace_runner_temp_sentinels, replace_workspace_sentinels,
 };
 use frontend_gha::gate::{Gate, GateOp, eval};
 use ir::expr::builtins::loose;
@@ -154,9 +155,14 @@ fn ci_find<'a, T>(mut entries: impl Iterator<Item = (&'a str, T)>, name: &str) -
 /// workspace walk, before evaluation compares anything.
 async fn resolve_hashfiles(gate: &mut Gate, ctx: &StepCtx) -> Result<(), StepFailure> {
     let workspace = github_workspace_path(&*ctx.env);
-    // `github.workspace` first: a literal this environment can answer outright.
+    // `github.workspace` and `runner.temp` first: literals this environment
+    // can answer outright.
     gate.map_texts(&mut |text| {
         has_workspace_sentinel(text).then(|| replace_workspace_sentinels(text, &workspace))
+    });
+    let runner_temp = crate::session::runner_temp_path(ctx.env.workspace_path());
+    gate.map_texts(&mut |text| {
+        has_runner_temp_sentinel(text).then(|| replace_runner_temp_sentinels(text, &runner_temp))
     });
     let calls =
         crate::hashfiles::resolved_calls(gate.texts().into_iter(), &*ctx.env, &workspace).await?;

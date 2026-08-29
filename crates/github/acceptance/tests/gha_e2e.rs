@@ -1200,3 +1200,39 @@ jobs:
         assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
     }
 }
+
+/// `${{ runner.temp }}` resolves to the same path `RUNNER_TEMP` carries, in
+/// the same positions as `github.workspace` above: an env value, an inline
+/// script, a template, and a gate. Before the sentinel, the context rendered
+/// empty at lowering while the variable was set at runtime — gh-aw's prompt
+/// containment check compares exactly these two and failed on the mismatch.
+#[tokio::test]
+async fn runner_temp_resolves_to_the_runner_side_path() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TD: ${{ runner.temp }}
+        run: |
+          [ "$TD" = "$RUNNER_TEMP" ] && echo env-matches
+          [ "${{ runner.temp }}" = "$RUNNER_TEMP" ] && echo inline-matches
+          [ "${{ runner.temp }}/sub" = "$RUNNER_TEMP/sub" ] && echo template-matches
+      - if: runner.temp != ''
+        run: echo gate-saw-a-path
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "runner-temp-context").await;
+    assert_eq!(report.status, ir::RunStatus::Success);
+    let lines = log_lines(&report);
+    for expected in [
+        "env-matches",
+        "inline-matches",
+        "template-matches",
+        "gate-saw-a-path",
+    ] {
+        assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
+    }
+}

@@ -29,8 +29,9 @@ use std::time::Duration;
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
-    escape_sentinel_text, has_secret_sentinel, has_sentinel_escape, has_workspace_sentinel,
-    replace_secret_sentinels, replace_workspace_sentinels, unescape_sentinel_text,
+    escape_sentinel_text, has_runner_temp_sentinel, has_secret_sentinel, has_sentinel_escape,
+    has_workspace_sentinel, replace_runner_temp_sentinels, replace_secret_sentinels,
+    replace_workspace_sentinels, unescape_sentinel_text,
 };
 use ir::{LogStream, Outcome, StepEvent, Value};
 use serde_json::{Map, json};
@@ -113,6 +114,13 @@ pub(crate) fn github_workspace_path(env: &dyn ExecEnv) -> String {
 /// resolution is the full policy.
 pub(crate) fn workspace_tool_cache(root: &str) -> String {
     format!("{root}/{TOOL_CACHE_DIR}")
+}
+
+/// `RUNNER_TEMP` under `root`: the one computation behind both the exported
+/// variable ([`Session::env_rooted`]) and the `runner.temp` sentinel
+/// substitution, so the expression and the environment cannot diverge.
+pub(crate) fn runner_temp_path(root: &str) -> String {
+    format!("{root}/{TEMP_DIR}")
 }
 
 impl Session {
@@ -211,7 +219,7 @@ impl Session {
         set("GITHUB_EVENT_PATH", rooted(Path::new(EVENT_FILE)));
         set("GITHUB_WORKSPACE", format!("{root}/{REPO_DIR}"));
         set("GITHUB_ACTION", node.to_string());
-        set("RUNNER_TEMP", rooted(Path::new(TEMP_DIR)));
+        set("RUNNER_TEMP", runner_temp_path(root));
         out
     }
 
@@ -320,7 +328,11 @@ impl Session {
                 Ok(process) => process,
                 Err(failure) => return (failure.into(), Effects::default()),
             };
-        let process = resolve_workspace_sentinels(process, &self.github_workspace());
+        let process = resolve_workspace_sentinels(
+            process,
+            &self.github_workspace(),
+            &runner_temp_path(&self.workspace),
+        );
         let StepCtx {
             firing,
             attempt,
@@ -514,13 +526,30 @@ pub(crate) fn resolve_sentinel_text(
     Ok(Some(unescape_sentinel_text(&resolved)))
 }
 
-/// Replace the `github.workspace` sentinels in every configured text with this
-/// environment's own workspace path — runner-side truth the lowering could not
-/// know (a host path here; a one-shot container resolves against its mount).
-fn resolve_workspace_sentinels(mut process: ProcessConfig, workspace: &str) -> ProcessConfig {
+/// Replace the `github.workspace` and `runner.temp` sentinels in every
+/// configured text with this environment's own paths — runner-side truth the
+/// lowering could not know (host paths here; a one-shot container resolves
+/// against its mount).
+fn resolve_workspace_sentinels(
+    mut process: ProcessConfig,
+    workspace: &str,
+    runner_temp: &str,
+) -> ProcessConfig {
     let infallible: Result<(), std::convert::Infallible> =
         try_map_process_texts(&mut process, |text| {
-            Ok(has_workspace_sentinel(text).then(|| replace_workspace_sentinels(text, workspace)))
+            let ws = has_workspace_sentinel(text);
+            let temp = has_runner_temp_sentinel(text);
+            if !ws && !temp {
+                return Ok(None);
+            }
+            let mut out = text.to_string();
+            if ws {
+                out = replace_workspace_sentinels(&out, workspace);
+            }
+            if temp {
+                out = replace_runner_temp_sentinels(&out, runner_temp);
+            }
+            Ok(Some(out))
         });
     let _ = infallible;
     process

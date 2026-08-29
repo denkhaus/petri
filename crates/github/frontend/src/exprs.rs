@@ -370,6 +370,9 @@ pub struct GhaRoots<'s> {
     /// Set when `github.workspace` lowered to its sentinel; the caller decides
     /// whether the position allowed it.
     pub saw_workspace: bool,
+    /// Set when `runner.temp` lowered to its sentinel; the caller decides
+    /// whether the position allowed it.
+    pub saw_runner_temp: bool,
 }
 
 /// Contexts that come from the run's parameters, looked up case-insensitively.
@@ -634,6 +637,19 @@ impl Roots for GhaRoots<'_> {
                 self.saw_workspace = true;
                 Some(table.lit(WORKSPACE_SENTINEL))
             }
+            // `runner.temp` is runner-side truth the same way: `RUNNER_TEMP`
+            // is set by the step's environment (a host path, or a container
+            // mount), so in step positions it lowers to a sentinel the step
+            // kinds substitute at spawn ([`RUNNER_TEMP_SENTINEL`]). A scope
+            // position stays a parameter read — null, rendered empty — as
+            // `github.workspace` does. `runner.os/arch/name` stay parameters.
+            "runner"
+                if self.at_step
+                    && matches!(path, [key] if key.eq_ignore_ascii_case("temp")) =>
+            {
+                self.saw_runner_temp = true;
+                Some(table.lit(RUNNER_TEMP_SENTINEL))
+            }
             // `github.token` is a secret, not a parameter: the same rule as `secrets.*`.
             "github" if matches!(path, [token] if token.eq_ignore_ascii_case("token")) => {
                 self.saw_secret = true;
@@ -769,6 +785,7 @@ pub(crate) struct LoweredExpr {
     pub saw_secret: bool,
     pub saw_hashfiles: bool,
     pub saw_workspace: bool,
+    pub saw_runner_temp: bool,
 }
 
 /// Lower one parsed expression through [`GhaRoots`], mapping lowering failures
@@ -789,6 +806,7 @@ pub(crate) fn lower_expr(
         saw_secret: false,
         saw_hashfiles: false,
         saw_workspace: false,
+        saw_runner_temp: false,
     };
     let id = match gha(ast, table, &mut roots) {
         Ok(id) => id,
@@ -811,6 +829,7 @@ pub(crate) fn lower_expr(
         saw_secret: roots.saw_secret,
         saw_hashfiles: roots.saw_hashfiles,
         saw_workspace: roots.saw_workspace,
+        saw_runner_temp: roots.saw_runner_temp,
     })
 }
 
@@ -1084,6 +1103,20 @@ pub fn has_workspace_sentinel(text: &str) -> bool {
 
 pub fn replace_workspace_sentinels(text: &str, workspace: &str) -> String {
     text.replace(WORKSPACE_SENTINEL, workspace)
+}
+
+/// The stand-in for `runner.temp` inside a lowered string: the same shape as
+/// [`WORKSPACE_SENTINEL`], for the same reason — only the step's environment
+/// knows the path `RUNNER_TEMP` carries, so the step kinds substitute exactly
+/// that value at spawn, and the two cannot diverge.
+pub const RUNNER_TEMP_SENTINEL: &str = "\u{E000}petri-runner-temp\u{E001}";
+
+pub fn has_runner_temp_sentinel(text: &str) -> bool {
+    text.contains(RUNNER_TEMP_SENTINEL)
+}
+
+pub fn replace_runner_temp_sentinels(text: &str, temp: &str) -> String {
+    text.replace(RUNNER_TEMP_SENTINEL, temp)
 }
 
 /// Replace every secret sentinel in `text` with what `resolve` returns for its name.
