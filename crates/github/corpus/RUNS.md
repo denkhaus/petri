@@ -2,64 +2,59 @@
 
 The run-time counterpart of REPORT.md: every in-scope workflow that lowers, run end to end with `run:` scripts stubbed to `true` and `uses:` steps real. The outcome measures the runtime tier — checkout, action staging and execution, artifact and cache backends, cross-job flow — not the corpus projects' own builds.
 
-Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-66c538cd3ef8` (22.04/26.04 variants by label; the privileged dind flavor where the graph drives a Docker engine), matrices capped to their first leg, each workflow capped at 300s wall clock, parallelism 4. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied.
+Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-2ea78b6f826c` (22.04/26.04 variants by label; the privileged dind flavor where the graph drives a Docker engine), matrices capped to their first leg, each workflow capped at 900s wall clock, parallelism 4. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied.
 
 249 workflows in scope; 240 lower and were run.
 
 | Result (of the 240 run) | Count | Share |
 |---|---|---|
-| passed | 122 | 51% |
-| **failed on a runtime-tier gap** | 39 | 16% |
-| expected failure (server-coupled) | 76 | 32% |
-| **timed out** | 3 | 1% |
+| passed | 134 | 56% |
+| **failed on a runtime-tier gap** | 22 | 9% |
+| expected failure (server-coupled) | 82 | 34% |
+| **timed out** | 2 | 1% |
 
 ## First failures — gaps, ranked
 
 | First failing step · class | Workflows |
 |---|---|
-| `actions/setup-node · exit_status:1` | 8 |
-| `ruby/setup-ruby · exit_status:1` | 6 |
-| `actions/setup-go · exit_status:1` | 3 |
 | `ghcr.io/ossf/scorecard-action:v2.4.4 · exit_status:1` | 3 |
+| `github/codeql-action/analyze · exit_status:1` | 3 |
+| `ruby/setup-ruby · exit_status:1` | 3 |
 | `Dockerfile · exit_status:126` | 2 |
 | `actions/checkout · exit_status:1` | 2 |
 | `actions/github-script · exit_status:1` | 2 |
 | `(run)` | 1 |
 | `Dockerfile · action_image` | 1 |
 | `PyO3/maturin-action · exit_status:1` | 1 |
-| `actions/setup-node · action_stage` | 1 |
 | `actions/upload-artifact` | 1 |
 | `dorny/paths-filter · exit_status:1` | 1 |
-| `ghcr.io/mszostok/codeowners-validator:v0.7.4 · exit_status:1` | 1 |
 | `github/checkout · exit_status:1` | 1 |
-| `github/codeql-action/analyze · exit_status:1` | 1 |
-| `github/codeql-action/init · exit_status:1` | 1 |
-| `j178/prek-action · exit_status:1` | 1 |
-| `job marker · env_acquire` | 1 |
 | `liskin/gh-problem-matcher-wrap · exit_status:1` | 1 |
 
 ## Expected failures — server-coupled, ranked
 
-First failures no token-less local run can fix: OIDC, GitHub App and repository secrets, git credentials for the real checkout action, third-party SaaS backends, cross-run artifact reads. Kept out of the gap ranking so it never drowns in server-bound noise.
+First failures the sweep's own stance produces or no token-less local run can fix: OIDC, GitHub App and repository secrets, git credentials for the real checkout action, third-party SaaS backends, cross-run artifact reads, and steps that read an output a stubbed `run:` script would have written. Kept out of the gap ranking so it never drowns in server-bound noise.
 
 | First failing step · why | Workflows |
 |---|---|
 | `actions/create-github-app-token · needs a repository secret` | 9 |
 | `actions/download-artifact · cross-run artifact download (REST API)` | 8 |
+| `actions/upload-artifact · uploads outputs a stubbed build never produced` | 6 |
 | `actions/setup-node · needs a repository secret` | 5 |
-| `actions/upload-artifact · uploads outputs a stubbed build never produced` | 5 |
 | `github/checkout · amd64-only image; this host's emulation cannot run it` | 5 |
 | `open-security-tools/ost-simple-sts · needs a repository secret` | 5 |
 | `job marker · requires its caller's inputs (a reusable workflow run standalone)` | 4 |
 | `actions/checkout · needs a repository secret` | 3 |
 | `actions/github-script · needs a repository secret` | 3 |
 | `actions/github-script · the inline script threw (it acts on the triggering event, which a local run lacks)` | 3 |
+| `actions/setup-go · reads a stubbed script's output` | 3 |
 | `gr2m/create-or-update-pull-request-action · needs a repository secret` | 3 |
 | `JamesIves/github-pages-deploy-action · pushes a deployment branch` | 2 |
 | `dessant/lock-threads · mutates issues over the API` | 2 |
 | `peter-evans/create-pull-request · needs a repository secret` | 2 |
 | `release-drafter/release-drafter · mutates releases over the API` | 2 |
 | `rust-lang/crates-io-auth-action · OIDC token exchange` | 2 |
+| `./.github/actions/upload-turboyet-data · needs a repository secret` | 1 |
 | `actions/publish-immutable-action · publishes to GitHub's registry` | 1 |
 | `actions/stale · needs a repository secret` | 1 |
 | `depot/build-push-action · builds on the depot.dev service (project token)` | 1 |
@@ -71,6 +66,7 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | `gr2m/create-or-update-pull-request-action · mutates pull requests over the API` | 1 |
 | `mheap/github-action-required-labels · reads the triggering pull request (no local event)` | 1 |
 | `nodejs/node-pr-labeler · needs a repository secret` | 1 |
+| `rubygems/configure-rubygems-credentials · OIDC token exchange` | 1 |
 | `tsickert/discord-webhook · needs a repository secret` | 1 |
 | `withgraphite/graphite-ci-action · needs a repository secret` | 1 |
 
@@ -79,7 +75,7 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | Repository | Workflow | Result | First failure |
 |---|---|---|---|
 | actions/checkout | `check-dist.yml` | pass | — |
-| actions/checkout | `codeql-analysis.yml` | **timeout** | — |
+| actions/checkout | `codeql-analysis.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run` |
 | actions/checkout | `licensed.yml` | pass | — |
 | actions/checkout | `publish-immutable-actions.yml` | expected failure | `actions/publish-immutable-action` — step exited with status 1 · `Error: Could not find Repository.` _(publishes to GitHub's registry)_ |
 | actions/checkout | `update-main-version.yml` | pass | — |
@@ -131,8 +127,8 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | astral-sh/uv | `test-ecosystem.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
 | astral-sh/uv | `update-issue-context.yml` | pass | — |
 | astral-sh/uv | `update-pull-request-parent.yml` | pass | — |
-| cli/cli | `agentics-maintenance.yml` | **fail** | `(run)` — engine error: unknown firing FiringId(35) \| unknown firing FiringId(36) \| unknown firing FiringId(45) \| unknown firing FiringId(49) |
-| cli/cli | `bump-go.yml` | pass | — |
+| cli/cli | `agentics-maintenance.yml` | pass | — |
+| cli/cli | `bump-go.yml` | **fail** | `(run)` — engine error: unknown firing FiringId(1) |
 | cli/cli | `codeql.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Error: Encountered a fatal error while running "/opt/hostedtoolcache/CodeQL/2.26.3/x64/codeql/codeql database finalize --finalize-dataset --threads=18 --ram=14622 /workspace/.ci/temp/codeql_databases/…` |
 | cli/cli | `copilot-setup-steps.yml` | pass | — |
 | cli/cli | `dependabot-triage.lock.yml` | **fail** | `actions/github-script` — step exited with status 1 · `Error: ERR_CONFIG: ERR_CONFIG: Prompt output must stay within the runner temp directory` |
@@ -149,14 +145,14 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | denoland/deno | `start_release.generated.yml` | pass | — |
 | denoland/deno | `version_bump.generated.yml` | expected failure | `actions/checkout` — no secret named `DENOBOT_PAT` _(needs a repository secret)_ |
 | django/django | `benchmark.yml` | pass | — |
-| django/django | `check-migrations.yml` | **fail** | `job marker` — could not acquire the environment: docker service failed: service `postgres` reported unhealthy; last output: creating subdirectories ... ok selecting dynamic shared memory implementation ... posix se… |
+| django/django | `check-migrations.yml` | pass | — |
 | django/django | `check_commit_messages.yml` | pass | — |
 | django/django | `check_pr_quality.yml` | pass | — |
 | django/django | `coverage_comment.yml` | pass | — |
 | django/django | `coverage_tests.yml` | pass | — |
 | django/django | `docs.yml` | pass | — |
 | django/django | `labels.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: Cannot read properties of undefined (reading 'title')` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
-| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: flake8. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file m…` |
+| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: isort. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file mo…` |
 | django/django | `new_contributor_pr.yml` | pass | — |
 | django/django | `playwright.yml` | pass | — |
 | django/django | `postgis.yml` | pass | — |
@@ -164,19 +160,19 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | django/django | `schedules.yml` | expected failure | `actions/github-script` — no secret named `SCHEDULE_WORKFLOW_TOKEN` _(needs a repository secret)_ |
 | django/django | `screenshots.yml` | pass | — |
 | facebook/react | `compiler_discord_notify.yml` | pass | — |
-| facebook/react | `compiler_playground.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
+| facebook/react | `compiler_playground.yml` | pass | — |
 | facebook/react | `compiler_prereleases.yml` | expected failure | `actions/setup-node` — no secret named `NPM_TOKEN` _(needs a repository secret)_ |
 | facebook/react | `compiler_prereleases_manual.yml` | expected failure | `actions/setup-node` — no secret named `NPM_TOKEN` _(needs a repository secret)_ |
 | facebook/react | `compiler_prereleases_nightly.yml` | expected failure | `actions/setup-node` — no secret named `NPM_TOKEN` _(needs a repository secret)_ |
-| facebook/react | `compiler_rust.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
-| facebook/react | `compiler_typescript.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
+| facebook/react | `compiler_rust.yml` | pass | — |
+| facebook/react | `compiler_typescript.yml` | pass | — |
 | facebook/react | `devtools_discord_notify.yml` | pass | — |
-| facebook/react | `devtools_regression_tests.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
+| facebook/react | `devtools_regression_tests.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: build. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | facebook/react | `runtime_build_and_test.yml` | not lowered | `step.background` |
 | facebook/react | `runtime_commit_artifacts.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: build/. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | facebook/react | `runtime_discord_notify.yml` | pass | — |
 | facebook/react | `runtime_eslint_plugin_e2e.yml` | pass | — |
-| facebook/react | `runtime_fuzz_tests.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
+| facebook/react | `runtime_fuzz_tests.yml` | pass | — |
 | facebook/react | `runtime_release_from_ci.yml` | expected failure | `tsickert/discord-webhook` — no secret named `DISCORD_WEBHOOK_URL` _(needs a repository secret)_ |
 | facebook/react | `runtime_sizebot_comment.yml` | pass | — |
 | facebook/react | `shared_check_maintainer.yml` | pass | — |
@@ -184,21 +180,21 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | facebook/react | `shared_cleanup_stale_branch_caches.yml` | pass | — |
 | facebook/react | `shared_close_direct_sync_branch_prs.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: SyntaxError: Unexpected token ';'` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
 | facebook/react | `shared_label_core_team_prs.yml` | pass | — |
-| facebook/react | `shared_lint.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.nvmrc does not exist` |
+| facebook/react | `shared_lint.yml` | pass | — |
 | facebook/react | `shared_stale.yml` | pass | — |
 | hashicorp/terraform | `backport.yml` | pass | — |
 | hashicorp/terraform | `changelog-validation.yml` | pass | — |
-| hashicorp/terraform | `checks.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` |
+| hashicorp/terraform | `checks.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
 | hashicorp/terraform | `enforce-changelog.yml` | **fail** | `dorny/paths-filter` — step exited with status 1 · `Error: The process 'git rev-parse --abbrev-ref HEAD' failed with exit code 128` |
-| hashicorp/terraform | `equivalence-test-diff.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` |
-| hashicorp/terraform | `equivalence-test-manual-update.yml` | **fail** | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` |
+| hashicorp/terraform | `equivalence-test-diff.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
+| hashicorp/terraform | `equivalence-test-manual-update.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
 | hashicorp/terraform | `equivalence-test-update.yml` | pass | — |
 | hashicorp/terraform | `issue-comment-created.yml` | pass | — |
 | hashicorp/terraform | `lock.yml` | expected failure | `dessant/lock-threads` — step exited with status 1 · `Error: Must have admin rights to Repository. - https://docs.github.com/rest/issues/issues#lock-an-issue` _(mutates issues over the API)_ |
 | nodejs/node | `auto-start-ci.yml` | pass | — |
 | nodejs/node | `build-tarball.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
 | nodejs/node | `close-stalled.yml` | pass | — |
-| nodejs/node | `codeql.yml` | **fail** | `github/codeql-action/init` — step exited with status 1 · `Error: The configuration file "/workspace/repo/.github/codeql-config.yml" does not exist` |
+| nodejs/node | `codeql.yml` | **timeout** | — |
 | nodejs/node | `comment-labeled.yml` | pass | — |
 | nodejs/node | `commit-lint.yml` | pass | — |
 | nodejs/node | `commit-queue.yml` | pass | — |
@@ -212,15 +208,15 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | nodejs/node | `find-inactive-tsc.yml` | expected failure | `gr2m/create-or-update-pull-request-action` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
 | nodejs/node | `label-flaky-test-issue.yml` | pass | — |
 | nodejs/node | `label-pr.yml` | expected failure | `nodejs/node-pr-labeler` — no secret named `GH_USER_TOKEN` _(needs a repository secret)_ |
-| nodejs/node | `license-builder.yml` | expected failure | `gr2m/create-or-update-pull-request-action` — step exited with status 1 · `Error: Command failed with exit code 128 (Unknown system error -128): git status` _(mutates pull requests over the API)_ |
+| nodejs/node | `license-builder.yml` | expected failure | `gr2m/create-or-update-pull-request-action` — step exited with status 1 · `Error: Command failed with exit code 128 (Unknown system error -128): git push -f https://x-access-token:***@github.com/nodejs/node.git HEAD:refs/heads/actions/license-builder` _(mutates pull requests over the API)_ |
 | nodejs/node | `lint-release-proposal.yml` | pass | — |
-| nodejs/node | `linters.yml` | **fail** | `ghcr.io/mszostok/codeowners-validator:v0.7.4` — step exited with status 1 · `time="2026-08-29T13:35:20Z" level=fatal msg="No CODEOWNERS found in the root, docs/, or .github/ directory of the repository ."` |
+| nodejs/node | `linters.yml` | pass | — |
 | nodejs/node | `major-release.yml` | pass | — |
 | nodejs/node | `nix-changes-comment.yml` | pass | — |
-| nodejs/node | `notify-on-push.yml` | **fail** | `actions/setup-node` — could not extract `actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e (48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e)`: tar said tar: This does not look like a tar archive \| tar: Exiting with fai… |
+| nodejs/node | `notify-on-push.yml` | pass | — |
 | nodejs/node | `notify-on-review-wanted.yml` | pass | — |
 | nodejs/node | `post-release.yml` | pass | — |
-| nodejs/node | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T13:35:40Z","repo":{"name":"github.com/nodejs/node","commit":"452c8c5783b5d175502ecf0c9df668607139ff62"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` |
+| nodejs/node | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T15:19:28Z","repo":{"name":"github.com/nodejs/node","commit":"789c7fdc7c5180b58b215b81a2c1845d10379c61"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` |
 | nodejs/node | `stale.yml` | pass | — |
 | nodejs/node | `test-internet.yml` | pass | — |
 | nodejs/node | `test-linux-quic.yml` | not lowered | `action.local_missing` |
@@ -234,7 +230,7 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | ohmyzsh/ohmyzsh | `dependencies.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
 | ohmyzsh/ohmyzsh | `main.yml` | pass | — |
 | ohmyzsh/ohmyzsh | `project.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
-| ohmyzsh/ohmyzsh | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/29 13:38:13 error SigningNew: invalid token: not a default GITHUB_TOKEN` |
+| ohmyzsh/ohmyzsh | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/29 15:24:07 error SigningNew: invalid token: not a default GITHUB_TOKEN` |
 | pola-rs/polars | `benchmark-remote.yml` | not lowered | `runs_on.unknown` |
 | pola-rs/polars | `benchmark.yml` | pass | — |
 | pola-rs/polars | `changes-dsl-labeler.yml` | pass | — |
@@ -255,17 +251,17 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | prometheus/prometheus | `buf-lint.yml` | pass | — |
 | prometheus/prometheus | `buf.yml` | pass | — |
 | prometheus/prometheus | `check_release_notes.yml` | pass | — |
-| prometheus/prometheus | `codeql-analysis.yml` | **timeout** | — |
+| prometheus/prometheus | `codeql-analysis.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run` |
 | prometheus/prometheus | `container_description.yml` | expected failure | `docker.io/chko/docker-pushrm:1` — no secret named `DOCKER_HUB_PASSWORD` _(needs a repository secret)_ |
 | prometheus/prometheus | `fuzzing.yml` | pass | — |
 | prometheus/prometheus | `govulncheck.yml` | pass | — |
 | prometheus/prometheus | `lock.yml` | expected failure | `dessant/lock-threads` — no secret named `PROMBOT_LOCKTHREADS_TOKEN` _(needs a repository secret)_ |
 | prometheus/prometheus | `prombench.yml` | pass | — |
-| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container eca1ca096c08129d2047fce40775cfc57b1cdae83d9dc3062a1b2d71c6c3c678 is not running` |
-| prometheus/prometheus | `scorecards.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/29 13:40:32 error SigningNew: invalid token: not a default GITHUB_TOKEN` |
+| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container 6fbfb6a168e7044ee7fefe361e4bc6649f0dcbb23817eca40fc7b5a47ac29d47 is not running` |
+| prometheus/prometheus | `scorecards.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T15:25:51Z","repo":{"name":"github.com/prometheus/prometheus","commit":"e06b2dc5a6149e20ca82fe936fb044a6dfe45958"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc6…` |
 | prometheus/prometheus | `stale.yml` | pass | — |
 | python/cpython | `add-issue-header.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: issue_data.labels is not iterable` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
-| python/cpython | `lint.yml` | **fail** | `j178/prek-action` — step exited with status 1 · `Error: prek exited with code 2` |
+| python/cpython | `lint.yml` | pass | — |
 | python/cpython | `mypy.yml` | pass | — |
 | python/cpython | `new-bugs-announce-notifier.yml` | expected failure | `actions/github-script` — no secret named `MAILGUN_PYTHON_ORG_MAILGUN_KEY` _(needs a repository secret)_ |
 | python/cpython | `require-pr-label.yml` | expected failure | `mheap/github-action-required-labels` — step exited with status 1 · `Error: Not Found` _(reads the triggering pull request (no local event))_ |
@@ -281,15 +277,15 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | python/cpython | `stale.yml` | pass | — |
 | python/cpython | `verify-ensurepip-wheels.yml` | pass | — |
 | python/cpython | `verify-expat.yml` | pass | — |
-| rails/rails | `check-markdown-api.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/gem' failed with exit code 1` |
+| rails/rails | `check-markdown-api.yml` | pass | — |
 | rails/rails | `devcontainer-shellcheck.yml` | pass | — |
-| rails/rails | `devcontainer-smoke-test.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/gem' failed with exit code 1` |
+| rails/rails | `devcontainer-smoke-test.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/bundle' failed with exit code 5` |
 | rails/rails | `labeler.yml` | pass | — |
 | rails/rails | `more-info-needed.yml` | pass | — |
-| rails/rails | `rail_inspector.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/gem' failed with exit code 1` |
-| rails/rails | `rails-new-docker.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/gem' failed with exit code 1` |
-| rails/rails | `rails_releaser_tests.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/gem' failed with exit code 1` |
-| rails/rails | `release.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/gem' failed with exit code 1` |
+| rails/rails | `rail_inspector.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/bundle' failed with exit code 5` |
+| rails/rails | `rails-new-docker.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/bundle' failed with exit code 5` |
+| rails/rails | `rails_releaser_tests.yml` | pass | — |
+| rails/rails | `release.yml` | expected failure | `rubygems/configure-rubygems-credentials` — step exited with status 1 · `Error: Error message: Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable` _(OIDC token exchange)_ |
 | rails/rails | `stale.yml` | pass | — |
 | rust-lang/cargo | `audit.yml` | not lowered | `continue_on_error.expression` |
 | rust-lang/cargo | `contrib.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /artifact.tar. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
@@ -298,7 +294,7 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | tokio-rs/tokio | `audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (7)] exec /entrypoint.sh failed: Permission denied` |
 | tokio-rs/tokio | `labeler.yml` | pass | — |
 | tokio-rs/tokio | `loom.yml` | pass | — |
-| tokio-rs/tokio | `pr-audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (6)] exec /entrypoint.sh failed: Permission denied` |
+| tokio-rs/tokio | `pr-audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (7)] exec /entrypoint.sh failed: Permission denied` |
 | tokio-rs/tokio | `stress-test.yml` | pass | — |
 | tokio-rs/tokio | `uring-kernel-version-test.yml` | pass | — |
 | vercel/next.js | `automated_code_review.yml` | not lowered | — |
@@ -318,12 +314,12 @@ First failures no token-less local run can fix: OIDC, GitHub App and repository 
 | vercel/next.js | `rspack-update-tests-manifest.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `sync_backport_canary_release.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `test_e2e_project_reset_cron.yml` | expected failure | `actions/setup-node` — no secret named `VERCEL_ADAPTER_TEST_TOKEN` _(needs a repository secret)_ |
-| vercel/next.js | `test_examples.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.node-version does not exist` |
+| vercel/next.js | `test_examples.yml` | pass | — |
 | vercel/next.js | `triage.yml` | pass | — |
 | vercel/next.js | `trigger_release.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `turbopack-update-tests-manifest.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `update_fonts_data.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `update_react.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `update_react_poller.yml` | pass | — |
-| vercel/next.js | `upload-tests-manifest.yml` | **fail** | `actions/setup-node` — step exited with status 1 · `Error: The specified node version file at: /workspace/repo/.node-version does not exist` |
+| vercel/next.js | `upload-tests-manifest.yml` | expected failure | `./.github/actions/upload-turboyet-data` — no secret named `TURBOYET_KV_REST_API_TOKEN` _(needs a repository secret)_ |
 | vercel/next.js | `upload_preview_tarballs.yml` | pass | — |
