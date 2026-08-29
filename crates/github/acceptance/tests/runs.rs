@@ -182,7 +182,8 @@ async fn corpus_run_sweep() {
     };
     let note = format!(
         "Sweep configuration: host scopes rewritten to the pinned runner images \
-         `{}` (22.04/26.04 variants by label), matrices capped to their first leg, \
+         `{}` (22.04/26.04 variants by label; the privileged dind flavor where \
+         the graph drives a Docker engine), matrices capped to their first leg, \
          each workflow capped at {}s wall clock, parallelism {jobs}. Identity: \
          `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the \
          sweep's analog of `default_params` reading HEAD — so `checkout` fetches \
