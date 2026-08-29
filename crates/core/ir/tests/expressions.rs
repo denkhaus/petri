@@ -694,6 +694,7 @@ fn loose_equality_matrix() {
     let equal: &[(Value, Value)] = &[
         (json!(null), json!(null)),
         (json!(null), json!(0)),
+        (json!(null), json!("0")),
         (json!(null), json!("")),
         (json!(null), json!(false)),
         (json!(true), json!(1)),
