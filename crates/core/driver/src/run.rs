@@ -614,17 +614,17 @@ impl Driver {
                 // A started firing is already acknowledged in the loaded log; a
                 // second `StepStarted` would be a replay divergence.
                 let started = live.is_some_and(|state| state.started);
-                self.start(resolved).await;
                 if !started {
-                    // The acknowledgement that the attempt was dispatched. It goes
-                    // through the one channel like every other external event, so its
-                    // place in the log is its arrival order and replay feeds it back
-                    // verbatim.
-                    let _ = self
-                        .tx
-                        .send(Signal::Inject(Event::StepStarted { firing, attempt }))
-                        .await;
+                    // The acknowledgement that the attempt was dispatched. It is
+                    // applied here, before `start` can spawn the runner, so the
+                    // log places it ahead of anything the runner sends back: an
+                    // instant runner's `Finished` riding the signal channel can
+                    // otherwise land first, and the late `StepStarted` then
+                    // reports the finalized firing as unknown.
+                    let commands = self.apply_event(Event::StepStarted { firing, attempt });
+                    debug_assert!(commands.is_empty(), "StepStarted derives no commands");
                 }
+                self.start(resolved).await;
             }
             Command::DeliverControl { firing, ctl } => match ctl {
                 // A delivered value only forwards: no deadline, no reason — it never
