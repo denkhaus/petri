@@ -218,7 +218,11 @@ async fn shape_clone(clone: &Path, config: &CheckoutConfig) -> Result<(), StepFa
     {
         let tracking = format!("refs/remotes/origin/{branch}");
         git(Some(clone), &["update-ref", &tracking, "HEAD"]).await?;
-        git(Some(clone), &["checkout", "--quiet", "-B", branch, &tracking]).await?;
+        git(
+            Some(clone),
+            &["checkout", "--quiet", "-B", branch, &tracking],
+        )
+        .await?;
     }
     if let (Some(server), Some(repository)) = (
         config.server_url.as_deref().filter(|s| !s.is_empty()),
