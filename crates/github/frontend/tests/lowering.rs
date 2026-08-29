@@ -593,6 +593,21 @@ fn windows_and_macos_runners_are_rejected() {
     }
 }
 
+/// `with:` belongs to `uses:` steps. GitHub's parser rejects it on a `run:`
+/// step ("Unexpected value 'with'"), and so does this reader — silently
+/// dropping inputs the author wrote would hide a real mistake.
+#[test]
+fn with_on_a_run_step_is_an_error() {
+    let text = "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n        with:\n          foo: bar\n";
+    let diags = diagnostics(text);
+    assert!(
+        diags.iter().any(|d| d.code == "gha.bad_step"
+            && d.severity == Severity::Error
+            && d.message.contains("`with:` without `uses:`")),
+        "{diags:?}"
+    );
+}
+
 // ── The rejection set ─────────────────────────────────────────────────────
 
 #[test]
@@ -640,6 +655,12 @@ fn the_rejection_set_is_loud_and_specific() {
             // `hashFiles` there. Standing alone or under operators it works.
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: contains(github.workspace, 'x')\n        run: echo\n",
             "unsupported.expression.workspace",
+        ),
+        (
+            // Service containers run; their runtime ids, networks and port
+            // mappings are not in the expression environment.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: job.services.db.id != ''\n        run: echo\n",
+            "unsupported.job_context",
         ),
     ];
     for (text, code) in cases {

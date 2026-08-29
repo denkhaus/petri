@@ -504,8 +504,9 @@ impl Roots for GhaRoots<'_> {
                     self.diags.unsupported(
                         "job_context",
                         self.span.clone(),
-                        format!("`job.{}` describes service containers", path[0]),
-                        "service containers are v2",
+                        format!("`job.{}` reads runtime container details", path[0]),
+                        "container ids, networks and port mappings are not exposed to \
+                         expressions yet; reach a service by its name and declared ports",
                     );
                     None
                 }

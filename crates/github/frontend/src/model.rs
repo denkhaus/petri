@@ -652,6 +652,22 @@ pub fn read_step<'a>(
         _ => {}
     }
 
+    // `with:` belongs to `uses:` steps; GitHub rejects it elsewhere ("Unexpected
+    // value 'with'"). The raw key, not the parsed reference, decides — a malformed
+    // `uses:` is its own error, not a reason to blame `with:`.
+    if let Some(with) = m.get("with")
+        && m.get("uses").is_none()
+    {
+        diags.error(
+            "gha.bad_step",
+            with.span(),
+            format!(
+                "step {} of job `{job}` has `with:` without `uses:`",
+                index + 1
+            ),
+        );
+    }
+
     Some(Step {
         index,
         id: m.get("id").and_then(|n| n.as_str()).map(str::to_string),

@@ -36,7 +36,10 @@ literal one; each leg's labels face the same placement
 policy as literal labels (Linux labels the executor knows), a rejected leg names
 itself without stopping the others, and the per-leg results are preserved on the
 job's `start` node. `on:` is accepted as metadata — a local run fires the
-workflow directly; `github.event` comes from the run's parameters.
+workflow directly; `github.event` comes from the run's parameters. `name:` and
+`run-name:` — the workflow, job and step display names — are accepted as
+metadata too; nodes are named by their ids, so the display names carry no
+semantics to drop.
 
 **Steps.** `run:` steps; `uses:` for JavaScript actions (fetched from their
 repositories, resolved to a pinned commit at load time, `pre`/`main`/`post`
@@ -224,6 +227,7 @@ workflow counts in brackets rank the pressure.
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |
 | `action.nested_local` | `./` actions inside a fetched composite or called workflow [2] | Stage the fetched repository so relative references resolve. |
+| `job_context` | `job.container` / `job.services` in an expression [0] | Service containers run (above), but their ids, networks and host port mappings are run-time facts the expression environment does not carry yet. Reach a service by its name and declared ports. |
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |
 
 Planned on the runtime side (no rejection code — lowered workflows fail at run
