@@ -29,8 +29,9 @@ use std::time::Duration;
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
-    escape_sentinel_text, has_runner_temp_sentinel, has_secret_sentinel, has_sentinel_escape,
-    has_workspace_sentinel, replace_runner_temp_sentinels, replace_secret_sentinels,
+    escape_sentinel_text, has_runner_temp_sentinel, has_runner_tool_cache_sentinel,
+    has_secret_sentinel, has_sentinel_escape, has_workspace_sentinel,
+    replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels, replace_secret_sentinels,
     replace_workspace_sentinels, unescape_sentinel_text,
 };
 use ir::{LogStream, Outcome, StepEvent, Value};
@@ -78,8 +79,8 @@ pub struct Session {
     job_env: BTreeMap<String, String>,
     job_path: Vec<String>,
     /// The host's persistent tool cache, when the host registered one
-    /// ([`crate::ToolCacheCap`]): the prologue points shell steps at it where
-    /// this environment's filesystem has it.
+    /// ([`crate::ToolCacheCap`]): [`resolved_tool_cache`] points steps at it
+    /// where this environment's filesystem has it.
     tool_cache: Option<std::path::PathBuf>,
 }
 
@@ -109,11 +110,80 @@ pub(crate) fn github_workspace_path(env: &dyn ExecEnv) -> String {
     format!("{}/{REPO_DIR}", env.workspace_path())
 }
 
-/// The per-run workspace tool cache under `root` — the static value for an
-/// environment that cannot run the [`Session::prologue`], whose three-step
-/// resolution is the full policy.
+/// The per-run workspace tool cache under `root` — the weakest default of
+/// [`resolved_tool_cache`].
 pub(crate) fn workspace_tool_cache(root: &str) -> String {
     format!("{root}/{TOOL_CACHE_DIR}")
+}
+
+/// `RUNNER_TOOL_CACHE` as a process rooted at `root` will see it: the one
+/// computation behind the exported variable, the `runner.tool_cache` sentinel
+/// substitution, and the gate evaluator, so the expression and the environment
+/// cannot diverge.
+///
+/// The resolution mirrors the retired shell prologue's, weakest default last:
+/// the step's own `env:` (`env_config`), then the job's accumulated
+/// `GITHUB_ENV` (`job_env`), then the environment's own variable (`ambient` —
+/// a runner image ships a populated `/opt/hostedtoolcache` and says so in its
+/// env), then the host's persistent store (`store`, already gated on this
+/// filesystem having it), then the per-run workspace directory. Empty values
+/// fall through, as the prologue's `-z` did. GitHub's `runner.tool_cache` is a
+/// constant; that the first two rungs can move it mid-job is this runner's
+/// documented divergence, kept because the exported variable must match.
+pub(crate) fn resolved_tool_cache(
+    root: &str,
+    ambient: Option<String>,
+    store: Option<&Path>,
+    env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    job_env: &BTreeMap<String, String>,
+) -> String {
+    // A configured value may itself carry runner-side path sentinels; resolve
+    // them against the same root so every consumer sees the exec-time text. A
+    // value still carrying a sentinel after that (a secret, a hash) cannot be
+    // known here and falls through.
+    let resolved = |text: &str| {
+        let mut text = text.to_string();
+        if has_workspace_sentinel(&text) {
+            text = replace_workspace_sentinels(&text, &format!("{root}/{REPO_DIR}"));
+        }
+        if has_runner_temp_sentinel(&text) {
+            text = replace_runner_temp_sentinels(&text, &runner_temp_path(root));
+        }
+        (!text.is_empty() && !text.contains('\u{E000}')).then_some(text)
+    };
+    let configured = match env_config.get("RUNNER_TOOL_CACHE") {
+        Some(ValueOrSecretRef::Literal(value)) => resolved(&stringify(value)),
+        _ => None,
+    };
+    configured
+        .or_else(|| job_env.get("RUNNER_TOOL_CACHE").and_then(|v| resolved(v)))
+        .or_else(|| ambient.filter(|v| !v.is_empty()))
+        .or_else(|| store.map(|s| s.display().to_string()))
+        .unwrap_or_else(|| workspace_tool_cache(root))
+}
+
+/// [`resolved_tool_cache`] for a process running in `env` itself — a shell or
+/// node step: the ambient env is the executor's fact, and the host store
+/// counts only where this environment's filesystem has it (petri mounts
+/// nothing but the workspace into containers, so a containerized job never
+/// sees host paths).
+pub(crate) fn env_tool_cache(
+    env: &dyn ExecEnv,
+    store: Option<&Path>,
+    env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    job_env: &BTreeMap<String, String>,
+) -> String {
+    resolved_tool_cache(
+        env.workspace_path(),
+        env.ambient_env("RUNNER_TOOL_CACHE"),
+        if env.shares_host_filesystem() {
+            store
+        } else {
+            None
+        },
+        env_config,
+        job_env,
+    )
 }
 
 /// `RUNNER_TEMP` under `root`: the one computation behind both the exported
@@ -182,15 +252,26 @@ impl Session {
         github_workspace_path(&*self.env)
     }
 
+    /// [`resolved_tool_cache`] for a one-shot action container mounted at
+    /// `root`: the explicit export overrides the action image's own env and
+    /// no host path reaches inside, so neither ambient env nor the store
+    /// applies — the chain is the step's `env:`, the job's, the workspace.
+    pub fn container_tool_cache(
+        &self,
+        env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+        root: &str,
+    ) -> String {
+        resolved_tool_cache(root, None, None, env_config, &self.job_env)
+    }
+
     /// The environment every step gets on top of the scope's: the job's
     /// accumulated `GITHUB_ENV` first (a step's own `env:` wins over it), then the
     /// files and directories of the contract.
     ///
-    /// `RUNNER_TOOL_CACHE` is deliberately *not* here: shell steps get it from
-    /// the [`Session::prologue`], whose default-only export lets an
-    /// environment that already has one — a runner image with a populated
-    /// `/opt/hostedtoolcache` names it in its env — keep it. A value here
-    /// would override the image's at exec time.
+    /// `RUNNER_TOOL_CACHE` is deliberately *not* here: its value depends on
+    /// the step's own `env:` config ([`resolved_tool_cache`]), so
+    /// [`Session::run`] exports it once the config is assembled, and a
+    /// one-shot action container gets [`Session::container_tool_cache`].
     pub fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
         self.env_rooted(node, &self.workspace)
     }
@@ -198,10 +279,6 @@ impl Session {
     /// [`Session::env`], with every path under `root` instead of this
     /// environment's workspace path: what a process sees when the workspace is
     /// mounted somewhere else — a one-shot action container's mount point.
-    ///
-    /// The tool cache is the caller's decision: [`Session::prologue`] resolves
-    /// it for shell steps, [`workspace_tool_cache`] is the static value for an
-    /// environment that cannot run the prologue.
     pub fn env_rooted(&self, node: &str, root: &str) -> BTreeMap<SmolStr, SmolStr> {
         let mut out: BTreeMap<SmolStr, SmolStr> = self
             .job_env
@@ -223,38 +300,16 @@ impl Session {
         out
     }
 
-    /// A shell prologue: the tool cache resolved for this environment, and the
-    /// job's `GITHUB_PATH` entries in front of `PATH`, newest first as GitHub
-    /// does.
+    /// A shell prologue: the job's `GITHUB_PATH` entries in front of `PATH`,
+    /// newest first as GitHub does, and the runner image's Docker daemon
+    /// started once. Plain POSIX, like the rest of the runner scripts.
     ///
-    /// The tool cache resolves in three steps, weakest default last: the
-    /// environment's own `RUNNER_TOOL_CACHE` wins when non-empty (a runner
-    /// image ships a populated `/opt/hostedtoolcache` and says so in its env);
-    /// else the host's persistent store, *where this filesystem has it* —
-    /// which is what makes one prologue correct for host processes and
-    /// containers alike; else the per-run workspace directory. Plain POSIX,
-    /// like the rest of the runner scripts.
+    /// The tool cache once resolved here, at exec time; it is now computed in
+    /// Rust ([`resolved_tool_cache`]) and exported by [`Session::run`] with
+    /// the rest of the environment, where the `runner.tool_cache` sentinel
+    /// substitution and the gate evaluator share it.
     pub fn prologue(&self) -> String {
         let mut out = String::new();
-        let fallback = shell_quote(&workspace_tool_cache(&self.workspace));
-        match &self.tool_cache {
-            Some(store) => {
-                let store = shell_quote(&store.display().to_string());
-                out.push_str(&format!(
-                    "if [ -z \"${{RUNNER_TOOL_CACHE:-}}\" ]; then\n\
-                     \x20 if [ -d {store} ]; then RUNNER_TOOL_CACHE={store}; \
-                     else RUNNER_TOOL_CACHE={fallback}; fi\n\
-                     \x20 export RUNNER_TOOL_CACHE\n\
-                     fi\n"
-                ));
-            }
-            None => {
-                out.push_str(&format!(
-                    "if [ -z \"${{RUNNER_TOOL_CACHE:-}}\" ]; then \
-                     RUNNER_TOOL_CACHE={fallback}; export RUNNER_TOOL_CACHE; fi\n"
-                ));
-            }
-        }
         if !self.job_path.is_empty() {
             let joined = self
                 .job_path
@@ -328,11 +383,33 @@ impl Session {
                 Ok(process) => process,
                 Err(failure) => return (failure.into(), Effects::default()),
             };
-        let process = resolve_workspace_sentinels(
+        // The tool cache, from the config as it will execute (the hashes are
+        // already spliced; a path sentinel in the configured value resolves
+        // inside), then substituted and exported in one breath.
+        let tool_cache = env_tool_cache(
+            &*self.env,
+            self.tool_cache.as_deref(),
+            &process.env,
+            &self.job_env,
+        );
+        let mut process = resolve_workspace_sentinels(
             process,
             &self.github_workspace(),
             &runner_temp_path(&self.workspace),
+            &tool_cache,
         );
+        // The export: the one resolved value, so the variable and the
+        // sentinel cannot diverge. A configured literal resolves to itself; a
+        // configured secret is the step's own to keep.
+        if !matches!(
+            process.env.get("RUNNER_TOOL_CACHE"),
+            Some(ValueOrSecretRef::Secret { .. })
+        ) {
+            process.env.insert(
+                SmolStr::new("RUNNER_TOOL_CACHE"),
+                ValueOrSecretRef::Literal(Value::String(tool_cache)),
+            );
+        }
         let StepCtx {
             firing,
             attempt,
@@ -526,20 +603,22 @@ pub(crate) fn resolve_sentinel_text(
     Ok(Some(unescape_sentinel_text(&resolved)))
 }
 
-/// Replace the `github.workspace` and `runner.temp` sentinels in every
-/// configured text with this environment's own paths — runner-side truth the
-/// lowering could not know (host paths here; a one-shot container resolves
-/// against its mount).
+/// Replace the `github.workspace`, `runner.temp` and `runner.tool_cache`
+/// sentinels in every configured text with this environment's own paths —
+/// runner-side truth the lowering could not know (host paths here; a one-shot
+/// container resolves against its mount).
 fn resolve_workspace_sentinels(
     mut process: ProcessConfig,
     workspace: &str,
     runner_temp: &str,
+    tool_cache: &str,
 ) -> ProcessConfig {
     let infallible: Result<(), std::convert::Infallible> =
         try_map_process_texts(&mut process, |text| {
             let ws = has_workspace_sentinel(text);
             let temp = has_runner_temp_sentinel(text);
-            if !ws && !temp {
+            let tool = has_runner_tool_cache_sentinel(text);
+            if !ws && !temp && !tool {
                 return Ok(None);
             }
             let mut out = text.to_string();
@@ -548,6 +627,9 @@ fn resolve_workspace_sentinels(
             }
             if temp {
                 out = replace_runner_temp_sentinels(&out, runner_temp);
+            }
+            if tool {
+                out = replace_runner_tool_cache_sentinels(&out, tool_cache);
             }
             Ok(Some(out))
         });
@@ -681,6 +763,46 @@ mod tests {
         assert!(env_truthy(&env, "A"));
         assert!(!env_truthy(&env, "B"));
         assert!(!env_truthy(&env, "C"));
+    }
+
+    #[test]
+    fn the_tool_cache_resolution_orders_its_defaults() {
+        let store = Path::new("/store/toolcache");
+        let none: BTreeMap<SmolStr, ValueOrSecretRef> = BTreeMap::new();
+        let no_job: BTreeMap<String, String> = BTreeMap::new();
+        let cache = |config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+                     job: &BTreeMap<String, String>,
+                     ambient: Option<&str>,
+                     store: Option<&Path>| {
+            resolved_tool_cache("/w", ambient.map(String::from), store, config, job)
+        };
+
+        // Weakest default first: workspace, then store, then ambient.
+        assert_eq!(cache(&none, &no_job, None, None), "/w/.ci/toolcache");
+        assert_eq!(cache(&none, &no_job, None, Some(store)), "/store/toolcache");
+        assert_eq!(
+            cache(&none, &no_job, Some("/opt/tc"), Some(store)),
+            "/opt/tc"
+        );
+        // An empty ambient value falls through, as the prologue's `-z` did.
+        assert_eq!(cache(&none, &no_job, Some(""), None), "/w/.ci/toolcache");
+
+        // A mid-job `GITHUB_ENV` export beats the ambient value; the step's
+        // own `env:` beats them both, with its path sentinels resolved.
+        let job: BTreeMap<String, String> = [("RUNNER_TOOL_CACHE".into(), "/job/tc".into())].into();
+        assert_eq!(cache(&none, &job, Some("/opt/tc"), None), "/job/tc");
+        let config: BTreeMap<SmolStr, ValueOrSecretRef> = [(
+            SmolStr::new("RUNNER_TOOL_CACHE"),
+            ValueOrSecretRef::Literal(Value::String(format!(
+                "{}/tc",
+                frontend_gha::exprs::RUNNER_TEMP_SENTINEL
+            ))),
+        )]
+        .into();
+        assert_eq!(
+            cache(&config, &job, Some("/opt/tc"), None),
+            "/w/.ci/temp/tc"
+        );
     }
 
     #[test]

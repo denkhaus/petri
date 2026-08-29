@@ -21,12 +21,20 @@ fn workflow(container: Option<&str>) -> String {
          \x20   runs-on: ubuntu-latest\n\
          {container}\
          \x20   steps:\n\
-         \x20     - run: echo \"tool-cache=$RUNNER_TOOL_CACHE\"\n"
+         \x20     - run: echo \"tool-cache=$RUNNER_TOOL_CACHE\"\n\
+         \x20     - run: '[ \"${{{{ runner.tool_cache }}}}\" = \"$RUNNER_TOOL_CACHE\" ] && echo expression-matches'\n"
     )
 }
 
 fn tool_cache_line(report: &RunReportPlus) -> String {
-    log_lines(report)
+    let lines = log_lines(report);
+    // The expression must land on the same path the variable carries, in
+    // every branch of the resolution below.
+    assert!(
+        lines.iter().any(|l| l == "expression-matches"),
+        "`runner.tool_cache` equals `RUNNER_TOOL_CACHE`: {lines:?}"
+    );
+    lines
         .iter()
         .find(|l| l.starts_with("tool-cache="))
         .expect("the probe printed its tool cache")
@@ -54,8 +62,9 @@ async fn host_jobs_use_the_persistent_tool_cache() {
 }
 
 /// A runner image that ships a populated tool cache keeps it: the image's env
-/// names `/opt/hostedtoolcache`, and the prologue's default-only export never
-/// overrides an environment that already answered.
+/// names `/opt/hostedtoolcache`, and the resolution never overrides an
+/// environment that already answered — the ambient value wins for the
+/// exported variable and the expression alike.
 #[tokio::test(flavor = "multi_thread")]
 async fn containerized_jobs_keep_the_image_tool_cache() {
     if !testkit::docker_ready().await {

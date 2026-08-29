@@ -191,4 +191,23 @@ pub trait ExecEnv: Send + Sync {
     fn host_address(&self) -> &str {
         "127.0.0.1"
     }
+
+    /// One variable of the environment a process spawned here starts from,
+    /// before the spec's own `env` lands on top: a container's effective env,
+    /// snapshotted at create (the image's plus the scope's); a host process's
+    /// inherited env under the scope's. A fact, not policy — `None` means this
+    /// environment does not carry the variable, which is all the default can
+    /// promise for an executor that never looked.
+    fn ambient_env(&self, name: &str) -> Option<String> {
+        let _ = name;
+        None
+    }
+
+    /// Whether an absolute path on the driver's machine names the same file in
+    /// this environment. True only for a host process: a container shares
+    /// nothing with the host but the workspace (mounted at its own path), and
+    /// a remote environment shares nothing at all — so `false` is the default.
+    fn shares_host_filesystem(&self) -> bool {
+        false
+    }
 }

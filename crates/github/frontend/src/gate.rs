@@ -305,9 +305,14 @@ pub fn eval<E>(
 // ── Lowering a condition onto the gate ────────────────────────────────────
 
 /// Whether the subtree holds something only the step can resolve: an `env.NAME`
-/// reference, a `hashFiles(...)` call, `github.workspace`, or `runner.temp`.
+/// reference, a `hashFiles(...)` call, `github.workspace`, `runner.temp`, or
+/// `runner.tool_cache`.
 pub fn needs_lazy(expr: &Expr) -> bool {
-    if env_leaf(expr).is_some() || workspace_leaf(expr) || runner_temp_leaf(expr) {
+    if env_leaf(expr).is_some()
+        || workspace_leaf(expr)
+        || runner_temp_leaf(expr)
+        || runner_tool_cache_leaf(expr)
+    {
         return true;
     }
     match expr {
@@ -338,6 +343,15 @@ fn runner_temp_leaf(expr: &Expr) -> bool {
     };
     root.eq_ignore_ascii_case("runner")
         && matches!(path.as_slice(), [key] if key.eq_ignore_ascii_case("temp"))
+}
+
+/// `runner.tool_cache`: runner-side truth again, resolved by the step.
+fn runner_tool_cache_leaf(expr: &Expr) -> bool {
+    let Some((root, path)) = expr.dotted_path() else {
+        return false;
+    };
+    root.eq_ignore_ascii_case("runner")
+        && matches!(path.as_slice(), [key] if key.eq_ignore_ascii_case("tool_cache"))
 }
 
 /// `env.NAME` (or `env['NAME']`), the reference a step resolves itself.
@@ -393,6 +407,13 @@ pub fn condition_tree(
         // its own `RUNNER_TEMP` before evaluation.
         return Some(Gate::Lit(Value::String(
             crate::exprs::RUNNER_TEMP_SENTINEL.to_string(),
+        )));
+    }
+    if runner_tool_cache_leaf(ast) {
+        // And for `runner.tool_cache`: the step rewrites the marker to the
+        // tool cache it resolved for its environment before evaluation.
+        return Some(Gate::Lit(Value::String(
+            crate::exprs::RUNNER_TOOL_CACHE_SENTINEL.to_string(),
         )));
     }
     match ast {
@@ -489,6 +510,17 @@ fn engine_leaf(
             "the temp path is known only to the step's environment; in a condition, \
              `runner.temp` may stand alone or under the comparison and boolean operators, \
              where the step resolves it — or read `RUNNER_TEMP` in the step itself",
+        );
+        return None;
+    }
+    if lowered.saw_runner_tool_cache {
+        diags.unsupported(
+            "expression.runner_tool_cache",
+            span.clone(),
+            "`runner.tool_cache` under a function the engine evaluates",
+            "the tool cache path is known only to the step's environment; in a condition, \
+             `runner.tool_cache` may stand alone or under the comparison and boolean operators, \
+             where the step resolves it — or read `RUNNER_TOOL_CACHE` in the step itself",
         );
         return None;
     }

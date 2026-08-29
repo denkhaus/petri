@@ -697,6 +697,11 @@ fn the_rejection_set_is_loud_and_specific() {
             "unsupported.expression.runner_temp",
         ),
         (
+            // And `runner.tool_cache`, once more.
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: contains(runner.tool_cache, 'x')\n        run: echo\n",
+            "unsupported.expression.runner_tool_cache",
+        ),
+        (
             // Service containers run; their runtime ids, networks and port
             // mappings are not in the expression environment.
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - if: job.services.db.id != ''\n        run: echo\n",
@@ -1110,6 +1115,42 @@ jobs:
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
         !encoded.contains(frontend_gha::exprs::RUNNER_TEMP_SENTINEL),
+        "a job-level env stays a parameter read: {encoded}"
+    );
+}
+
+/// `runner.tool_cache` rides the same split as `runner.temp` above: a sentinel
+/// in step positions — the step substitutes the tool cache it resolved for its
+/// environment — and a parameter read (null, rendered empty) at scope level.
+#[test]
+fn runner_tool_cache_lowers_to_a_sentinel_in_step_positions_only() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    env:
+      SCOPE_TC: ${{ runner.tool_cache }}
+    steps:
+      - env:
+          TC: ${{ runner.tool_cache }}
+        run: echo "${{ runner.tool_cache }}/node"
+"#;
+    let graph = lower_ok(text);
+    let encoded = serde_json::to_string(&graph).unwrap();
+    assert!(
+        encoded.contains(frontend_gha::exprs::RUNNER_TOOL_CACHE_SENTINEL),
+        "step config carries the sentinel: {encoded}"
+    );
+    let diags = diagnostics(text);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:?}");
+
+    let scope_only = lower_ok(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    env:\n      TC: ${{ runner.tool_cache }}\n    steps:\n      - run: echo\n",
+    );
+    let encoded = serde_json::to_string(&scope_only).unwrap();
+    assert!(
+        !encoded.contains(frontend_gha::exprs::RUNNER_TOOL_CACHE_SENTINEL),
         "a job-level env stays a parameter read: {encoded}"
     );
 }

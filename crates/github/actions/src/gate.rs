@@ -21,8 +21,9 @@
 use std::collections::BTreeMap;
 
 use frontend_gha::exprs::{
-    has_hashfiles_sentinel, has_runner_temp_sentinel, has_workspace_sentinel,
-    replace_runner_temp_sentinels, replace_workspace_sentinels,
+    has_hashfiles_sentinel, has_runner_temp_sentinel, has_runner_tool_cache_sentinel,
+    has_workspace_sentinel, replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
+    replace_workspace_sentinels,
 };
 use frontend_gha::gate::{Gate, GateOp, eval};
 use ir::expr::builtins::loose;
@@ -30,7 +31,7 @@ use ir::{Outcome, Value};
 use smol_str::SmolStr;
 use steps::{StepCtx, StepFailure, ValueOrSecretRef};
 
-use crate::session::{github_workspace_path, read_job_env};
+use crate::session::{env_tool_cache, github_workspace_path, read_job_env};
 
 /// The step's gate could not be read or evaluated.
 pub const GATE_CLASS: &str = "gate";
@@ -79,12 +80,28 @@ async fn admitted(
 
     resolve_hashfiles(&mut gate, ctx).await?;
 
-    // The job env file is control input the gate may not even need.
-    let job_env = if gate.reads_env() {
+    // The job env file is control input the gate may not even need — but a
+    // `runner.tool_cache` leaf does, resolution's second rung being a mid-job
+    // `GITHUB_ENV` export.
+    let wants_tool_cache = gate.texts().into_iter().any(has_runner_tool_cache_sentinel);
+    let job_env = if gate.reads_env() || wants_tool_cache {
         read_job_env(&*ctx.env).await?
     } else {
         BTreeMap::new()
     };
+    if wants_tool_cache {
+        let store = ctx.capability::<crate::ToolCacheCap>();
+        let tool_cache = env_tool_cache(
+            &*ctx.env,
+            store.as_ref().map(|cap| cap.0.as_path()),
+            env_config,
+            &job_env,
+        );
+        gate.map_texts(&mut |text| {
+            has_runner_tool_cache_sentinel(text)
+                .then(|| replace_runner_tool_cache_sentinels(text, &tool_cache))
+        });
+    }
 
     let value = eval(&gate, &mut |name| {
         env_value(name, env_config, &job_env, ctx)

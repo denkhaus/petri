@@ -1236,3 +1236,39 @@ jobs:
         assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
     }
 }
+
+/// `${{ runner.tool_cache }}` resolves to the same path `RUNNER_TOOL_CACHE`
+/// carries, in the same four positions as `runner.temp` above. Before the
+/// sentinel, the context rendered empty at lowering while the variable was
+/// resolved at exec time by the shell prologue; now one computation feeds
+/// both, per environment.
+#[tokio::test]
+async fn runner_tool_cache_resolves_to_the_runner_side_path() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TC: ${{ runner.tool_cache }}
+        run: |
+          [ "$TC" = "$RUNNER_TOOL_CACHE" ] && echo env-matches
+          [ "${{ runner.tool_cache }}" = "$RUNNER_TOOL_CACHE" ] && echo inline-matches
+          [ "${{ runner.tool_cache }}/node" = "$RUNNER_TOOL_CACHE/node" ] && echo template-matches
+      - if: runner.tool_cache != ''
+        run: echo gate-saw-a-path
+"#;
+    let graph = lower_ok(text);
+    let report = run_host(graph, "runner-tool-cache-context").await;
+    assert_eq!(report.status, ir::RunStatus::Success);
+    let lines = log_lines(&report);
+    for expected in [
+        "env-matches",
+        "inline-matches",
+        "template-matches",
+        "gate-saw-a-path",
+    ] {
+        assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
+    }
+}

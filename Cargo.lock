@@ -630,6 +630,7 @@ dependencies = [
  "async-trait",
  "petri-executor",
  "petri-ir",
+ "serde_json",
  "smol_str",
  "tokio",
 ]

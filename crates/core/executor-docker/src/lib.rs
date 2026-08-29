@@ -43,6 +43,7 @@ mod services;
 
 pub use services::SERVICE_HEALTH_WAIT;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -484,18 +485,25 @@ impl Executor for DockerExecutor {
         let refs: Vec<&str> = create.iter().map(String::as_str).collect();
         let created = async {
             run_docker(&refs).await?;
-            run_docker(&["start", &name]).await
+            run_docker(&["start", &name]).await?;
+            // The environment a `docker exec` will start from, snapshotted
+            // once: the image's `Config.Env` with the `-e` flags above folded
+            // in — the fact behind [`ExecEnv::ambient_env`].
+            run_docker(&["inspect", "--format", "{{json .Config.Env}}", &name]).await
         }
         .await;
-        if let Err(error) = created {
-            // A failed acquire leaks nothing: the services came up for a job
-            // container that will never exist.
-            let _ = run_docker(&["rm", "-f", &name]).await;
-            if network.is_some() {
-                services::sweep(&name).await;
+        let ambient = match created {
+            Ok(env_json) => parse_env_list(&env_json),
+            Err(error) => {
+                // A failed acquire leaks nothing: the services came up for a job
+                // container that will never exist.
+                let _ = run_docker(&["rm", "-f", &name]).await;
+                if network.is_some() {
+                    services::sweep(&name).await;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
 
         // One-shot containers in this scope's world share the job container's
         // network namespace, so a service reachable from the job is reachable
@@ -516,6 +524,7 @@ impl Executor for DockerExecutor {
             Arc::new(DockerEnv {
                 container: name.clone(),
                 workspace: workspace.clone(),
+                ambient,
                 grace: scope.grace,
                 wrapper_shell: OnceCell::new(),
             }),
@@ -581,6 +590,8 @@ impl Executor for DockerExecutor {
 struct DockerEnv {
     container: String,
     workspace: PathBuf,
+    /// The container's effective env, snapshotted at create.
+    ambient: BTreeMap<String, String>,
     grace: Duration,
     /// The shell the pgid wrapper runs under, probed once per container:
     /// `bash` when the image has it, `sh` otherwise. Not a style choice — a
@@ -718,6 +729,13 @@ impl ExecEnv for DockerEnv {
     fn host_address(&self) -> &str {
         HOST_ALIAS
     }
+
+    fn ambient_env(&self, name: &str) -> Option<String> {
+        self.ambient.get(name).cloned()
+    }
+
+    // `shares_host_filesystem` stays the default `false`: nothing of the host
+    // is mounted into the container but the workspace, at its own path.
 
     // The workspace is bind-mounted from the run directory, so the host filesystem
     // answers for the container. A remote executor would go through its transport.
@@ -923,6 +941,21 @@ async fn signal_group(container: &str, pgid: i32, signal: &str) -> Result<(), En
         .map(|_| ())
 }
 
+/// `docker inspect`'s `.Config.Env` — a JSON array of `KEY=VALUE` strings —
+/// as a map. Docker appends `-e` flags after the image's entries, so on a
+/// duplicate the later, stronger value wins.
+fn parse_env_list(json: &str) -> BTreeMap<String, String> {
+    serde_json::from_str::<Vec<String>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 pub(crate) fn next_token() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -1054,7 +1087,17 @@ pub async fn list_containers(prefix: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::registry_host;
+    use super::{parse_env_list, registry_host};
+
+    #[test]
+    fn env_lists_parse_with_the_later_duplicate_winning() {
+        let parsed = parse_env_list(r#"["PATH=/usr/bin","A=first","A=second","EMPTY=","BARE"]"#);
+        assert_eq!(parsed.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(parsed.get("A").map(String::as_str), Some("second"));
+        assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
+        assert_eq!(parsed.get("BARE"), None);
+        assert!(parse_env_list("not json").is_empty());
+    }
 
     #[test]
     fn registry_hosts_parse_from_image_references() {

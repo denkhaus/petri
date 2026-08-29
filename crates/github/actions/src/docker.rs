@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use executor::{ContainerImage, OneShotContainer};
 use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
 use frontend_gha::exprs::{
-    has_hashfiles_sentinel, has_runner_temp_sentinel, has_workspace_sentinel,
-    replace_runner_temp_sentinels, replace_workspace_sentinels,
+    has_hashfiles_sentinel, has_runner_temp_sentinel, has_runner_tool_cache_sentinel,
+    has_workspace_sentinel, replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
+    replace_workspace_sentinels,
 };
 use ir::{Outcome, Value};
 use serde_json::Map;
@@ -74,7 +75,16 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
 
     // Everything textual resolves before the container exists: hashFiles
     // against the workspace, then secret sentinels from the run's provider.
-    let resolver = TextResolver::begin(&config, &ctx, runner.workspace_path().to_string()).await?;
+    // The tool cache is this container's own resolution, shared between the
+    // sentinel substitution and the exported variable below.
+    let container_tool_cache = session.container_tool_cache(&config.env, runner.workspace_path());
+    let resolver = TextResolver::begin(
+        &config,
+        &ctx,
+        runner.workspace_path().to_string(),
+        container_tool_cache.clone(),
+    )
+    .await?;
     let resolve = |value: &Value| resolver.resolve(&stringify(value), &ctx);
 
     let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
@@ -112,10 +122,17 @@ async fn execute(config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome
     for (key, value) in session.env_rooted(&ctx.node, &root) {
         env.entry(key).or_insert(value);
     }
-    // A one-shot container runs no shell prologue, so the tool cache is the
-    // static per-run directory rather than the prologue's resolution.
-    env.entry(SmolStr::new("RUNNER_TOOL_CACHE"))
-        .or_insert_with(|| SmolStr::new(crate::session::workspace_tool_cache(&root)));
+    // The export, from the same resolution the sentinel used — a configured
+    // secret is the step's own to keep (its value is already in `env`).
+    if !matches!(
+        config.env.get("RUNNER_TOOL_CACHE"),
+        Some(ValueOrSecretRef::Secret { .. })
+    ) {
+        env.insert(
+            SmolStr::new("RUNNER_TOOL_CACHE"),
+            SmolStr::new(&container_tool_cache),
+        );
+    }
     env.insert(
         SmolStr::new("GITHUB_ACTION_REPOSITORY"),
         SmolStr::new(repository),
@@ -372,13 +389,15 @@ fn image_tag(key: &str) -> String {
 }
 
 /// The hashes, runner-side paths and secrets every configured text may carry,
-/// resolved once. `container_workspace` and `container_runner_temp` are the
-/// *action container's* view of `GITHUB_WORKSPACE` and `RUNNER_TEMP` — under
-/// the mount point, not the job environment's paths.
+/// resolved once. `container_workspace`, `container_runner_temp` and
+/// `container_tool_cache` are the *action container's* view of
+/// `GITHUB_WORKSPACE`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` — under the
+/// mount point, not the job environment's paths.
 struct TextResolver {
     hashes: std::collections::BTreeMap<Vec<String>, String>,
     container_workspace: String,
     container_runner_temp: String,
+    container_tool_cache: String,
 }
 
 impl TextResolver {
@@ -386,6 +405,7 @@ impl TextResolver {
         config: &DockerActionConfig,
         ctx: &StepCtx,
         container_root: String,
+        container_tool_cache: String,
     ) -> Result<Self, StepFailure> {
         let texts: Vec<String> = config
             .entrypoint
@@ -414,6 +434,7 @@ impl TextResolver {
             hashes,
             container_workspace: format!("{container_root}/{REPO_DIR}"),
             container_runner_temp: crate::session::runner_temp_path(&container_root),
+            container_tool_cache,
         })
     }
 
@@ -430,6 +451,11 @@ impl TextResolver {
         };
         let text = if has_runner_temp_sentinel(&text) {
             replace_runner_temp_sentinels(&text, &self.container_runner_temp)
+        } else {
+            text
+        };
+        let text = if has_runner_tool_cache_sentinel(&text) {
+            replace_runner_tool_cache_sentinels(&text, &self.container_tool_cache)
         } else {
             text
         };

@@ -373,6 +373,9 @@ pub struct GhaRoots<'s> {
     /// Set when `runner.temp` lowered to its sentinel; the caller decides
     /// whether the position allowed it.
     pub saw_runner_temp: bool,
+    /// Set when `runner.tool_cache` lowered to its sentinel; the caller
+    /// decides whether the position allowed it.
+    pub saw_runner_tool_cache: bool,
 }
 
 /// Contexts that come from the run's parameters, looked up case-insensitively.
@@ -644,11 +647,24 @@ impl Roots for GhaRoots<'_> {
             // position stays a parameter read — null, rendered empty — as
             // `github.workspace` does. `runner.os/arch/name` stay parameters.
             "runner"
-                if self.at_step
-                    && matches!(path, [key] if key.eq_ignore_ascii_case("temp")) =>
+                if self.at_step && matches!(path, [key] if key.eq_ignore_ascii_case("temp")) =>
             {
                 self.saw_runner_temp = true;
                 Some(table.lit(RUNNER_TEMP_SENTINEL))
+            }
+            // `runner.tool_cache` follows: the step computes the one resolved
+            // value (its own env wins, else the environment's ambient
+            // `RUNNER_TOOL_CACHE`, else the host store where this filesystem
+            // has it, else the workspace directory) and substitutes the
+            // sentinel with exactly what it exports as the variable
+            // ([`RUNNER_TOOL_CACHE_SENTINEL`]). `runner.os/arch/name` stay
+            // parameters.
+            "runner"
+                if self.at_step
+                    && matches!(path, [key] if key.eq_ignore_ascii_case("tool_cache")) =>
+            {
+                self.saw_runner_tool_cache = true;
+                Some(table.lit(RUNNER_TOOL_CACHE_SENTINEL))
             }
             // `github.token` is a secret, not a parameter: the same rule as `secrets.*`.
             "github" if matches!(path, [token] if token.eq_ignore_ascii_case("token")) => {
@@ -786,6 +802,7 @@ pub(crate) struct LoweredExpr {
     pub saw_hashfiles: bool,
     pub saw_workspace: bool,
     pub saw_runner_temp: bool,
+    pub saw_runner_tool_cache: bool,
 }
 
 /// Lower one parsed expression through [`GhaRoots`], mapping lowering failures
@@ -807,6 +824,7 @@ pub(crate) fn lower_expr(
         saw_hashfiles: false,
         saw_workspace: false,
         saw_runner_temp: false,
+        saw_runner_tool_cache: false,
     };
     let id = match gha(ast, table, &mut roots) {
         Ok(id) => id,
@@ -830,6 +848,7 @@ pub(crate) fn lower_expr(
         saw_hashfiles: roots.saw_hashfiles,
         saw_workspace: roots.saw_workspace,
         saw_runner_temp: roots.saw_runner_temp,
+        saw_runner_tool_cache: roots.saw_runner_tool_cache,
     })
 }
 
@@ -1117,6 +1136,21 @@ pub fn has_runner_temp_sentinel(text: &str) -> bool {
 
 pub fn replace_runner_temp_sentinels(text: &str, temp: &str) -> String {
     text.replace(RUNNER_TEMP_SENTINEL, temp)
+}
+
+/// The stand-in for `runner.tool_cache`: the same shape again, though the
+/// value is not a static path — an image's own populated cache wins, else the
+/// host store where this filesystem has it, else the workspace directory. The
+/// step kinds substitute exactly the value they export as
+/// `RUNNER_TOOL_CACHE`, so the expression and the environment cannot diverge.
+pub const RUNNER_TOOL_CACHE_SENTINEL: &str = "\u{E000}petri-runner-tool-cache\u{E001}";
+
+pub fn has_runner_tool_cache_sentinel(text: &str) -> bool {
+    text.contains(RUNNER_TOOL_CACHE_SENTINEL)
+}
+
+pub fn replace_runner_tool_cache_sentinels(text: &str, tool_cache: &str) -> String {
+    text.replace(RUNNER_TOOL_CACHE_SENTINEL, tool_cache)
 }
 
 /// Replace every secret sentinel in `text` with what `resolve` returns for its name.

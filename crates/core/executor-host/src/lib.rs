@@ -444,6 +444,19 @@ impl ExecEnv for HostEnv {
         &self.workspace_str
     }
 
+    fn ambient_env(&self, name: &str) -> Option<String> {
+        // The scope env over the inherited process env — the same order
+        // `spawn` applies them.
+        self.env
+            .get(name)
+            .map(|v| v.to_string())
+            .or_else(|| std::env::var(name).ok())
+    }
+
+    fn shares_host_filesystem(&self) -> bool {
+        true
+    }
+
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
         match tokio::fs::read(self.workspace.join(relative)).await {
             Ok(bytes) => Ok(Some(bytes)),
