@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 
-use ir::validate::{ValidationError, ValidationWarning};
+use ir::validate::{ValidationError, ValidationLocation, ValidationWarning};
 use ir::{
     Arm, Budget, Edge, ExpandTarget, Expansion, ExprId, Graph, GraphBuilder, Guard, JoinPolicy,
     Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef, Value, validate,
@@ -28,6 +28,20 @@ fn a_well_formed_graph_passes() {
     let c = b.add_step("c", scope, NOOP);
     b.link(a, c);
     validate(&b.build()).expect("valid");
+}
+
+#[test]
+fn validation_diagnostics_own_their_shared_metadata() {
+    let node = NodeId::new(3);
+    let error: ValidationError = ValidationError::LoopHeadMustJoinAny(node);
+    assert_eq!(error.code(), "validate.loop_head_must_join_any");
+    assert_eq!(error.primary_node(), Some(node));
+    assert_eq!(error.location(), ValidationLocation::Node(node));
+    assert!(error.hint().is_some());
+
+    let warning: ValidationWarning = ValidationWarning::RunOnCancelExpansion { node };
+    assert_eq!(warning.code(), "lint.run_on_cancel_expansion");
+    assert_eq!(warning.primary_node(), node);
 }
 
 /// Invariant 1: every cycle contains at least one back edge.

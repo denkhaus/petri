@@ -22,7 +22,7 @@ use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
 use frontend::expr::parse;
 use frontend::yaml::Node;
-use ir::{BinOp, ExprId, ExprOrValue, GraphBuilder, NodeId, ScopeId, ValidationError, Value};
+use ir::{BinOp, ExprId, ExprOrValue, GraphBuilder, NodeId, ScopeId, Value};
 
 use crate::action::{ActionLocation, ActionSource, Phase, PinnedAction};
 use crate::call::{self, CalleeSource};
@@ -280,15 +280,22 @@ pub fn lower(
     ir::normalize_loop_heads(&mut graph);
     let report = ir::check(&graph);
     for error in &report.errors {
-        let span = lw.span_for(error);
-        lw.diags.error(
-            &format!("validate.{}", variant(error)),
-            span,
-            error.to_string(),
-        );
+        let span = error
+            .primary_node()
+            .and_then(|node| lw.spans.get(&node).cloned())
+            .unwrap_or_else(|| lw.wf.span.clone());
+        let mut d = Diagnostic::error(error.code(), span, error.to_string());
+        if let Some(hint) = error.hint() {
+            d = d.with_hint(hint);
+        }
+        lw.diags.push(d);
     }
     for warning in &report.warnings {
-        let span = lw.spans.get(&warning.at()).cloned().unwrap_or_default();
+        let span = lw
+            .spans
+            .get(&warning.primary_node())
+            .cloned()
+            .unwrap_or_else(|| lw.wf.span.clone());
         let mut d = Diagnostic::warning(warning.code(), span, warning.to_string());
         if let Some(hint) = warning.hint() {
             d = d.with_hint(hint);
@@ -454,25 +461,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
             LoweredScalar::Secret(name) => Some(EnvValue::Secret(name)),
         }
     }
-
-    fn span_for(&self, error: &ValidationError) -> Span {
-        let node = match error {
-            ValidationError::LoopHeadMustJoinAny(n)
-            | ValidationError::ZeroBudget(n)
-            | ValidationError::UnboundedLoopBudget(n)
-            | ValidationError::HirFieldInPlan(n)
-            | ValidationError::EntryHasIncoming(n) => Some(*n),
-            ValidationError::AlwaysNotLast { node, .. }
-            | ValidationError::EmptyGroup { node, .. }
-            | ValidationError::UnknownScope { node, .. }
-            | ValidationError::ExitUnreachable { node, .. }
-            | ValidationError::ExitNotPostdominator { node, .. }
-            | ValidationError::BoundaryCrossing { node, .. } => Some(*node),
-            _ => None,
-        };
-        node.and_then(|n| self.spans.get(&n).cloned())
-            .unwrap_or_else(|| self.wf.span.clone())
-    }
 }
 
 enum EnvValue {
@@ -537,15 +525,4 @@ fn names_status_function(ast: &frontend::expr::Expr) -> bool {
     ast.calls()
         .iter()
         .any(|c| STATUS_FUNCTIONS.contains(&c.to_lowercase().as_str()))
-}
-
-fn variant(error: &ValidationError) -> &'static str {
-    match error {
-        ValidationError::CycleWithoutBackEdge(_) => "cycle_without_back_edge",
-        ValidationError::LoopHeadMustJoinAny(_) => "loop_head_must_join_any",
-        ValidationError::ExitUnreachable { .. }
-        | ValidationError::ExitNotPostdominator { .. }
-        | ValidationError::BoundaryCrossing { .. } => "expansion_region",
-        _ => "structure",
-    }
 }

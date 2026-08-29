@@ -127,6 +127,27 @@ pub enum ValidationLocation<S = Live> {
 }
 
 impl<S> ValidationError<S> {
+    /// The diagnostic code a frontend reports this error under.
+    pub fn code(&self) -> &'static str {
+        use ValidationError as E;
+        match self {
+            E::CycleWithoutBackEdge(_) => "validate.cycle_without_back_edge",
+            E::AlwaysNotLast { .. } => "validate.always_not_last",
+            E::EmptyGroup { .. } => "validate.empty_group",
+            E::ZeroBudget(_) => "validate.zero_budget",
+            E::UnboundedLoopBudget(_) => "validate.unbounded_loop_budget",
+            E::LoopHeadMustJoinAny(_) => "validate.loop_head_must_join_any",
+            E::DuplicateEdgeId(_) | E::ReservedEdgeId(_) => "validate.edge_id",
+            E::UnknownExpr { .. } => "validate.unknown_expr",
+            E::HirFieldInPlan(_) | E::HirConfigInPlan { .. } => "validate.hir_in_plan",
+            E::ExitUnreachable { .. }
+            | E::ExitNotPostdominator { .. }
+            | E::BoundaryCrossing { .. } => "validate.expansion_region",
+            E::EntryHasIncoming(_) => "validate.entry_has_incoming",
+            _ => "validate.structure",
+        }
+    }
+
     pub fn location(&self) -> ValidationLocation<S> {
         use ValidationError as E;
         match self {
@@ -160,6 +181,59 @@ impl<S> ValidationError<S> {
             | E::LoopHeadMustJoinAny(node)
             | E::HirFieldInPlan(node) => ValidationLocation::Node(*node),
             E::UnknownExpr { site, .. } => ValidationLocation::Site(site.clone()),
+        }
+    }
+
+    /// The node a source frontend should use as the primary diagnostic span.
+    /// Errors without a meaningful node return `None` and use the document span.
+    pub fn primary_node(&self) -> Option<NodeId<S>> {
+        use ValidationError as E;
+        match self {
+            E::NodeIdMismatch { index, .. } => Some(NodeId::new(*index as u32)),
+            E::UnknownScope { node, .. }
+            | E::UnknownStepKind { node, .. }
+            | E::BadStepConfig { node, .. }
+            | E::AlwaysNotLast { node, .. }
+            | E::EmptyGroup { node, .. }
+            | E::ExitUnreachable { node, .. }
+            | E::ExitNotPostdominator { node, .. }
+            | E::BoundaryCrossing { node, .. }
+            | E::HirConfigInPlan { node, .. } => Some(*node),
+            E::UnknownTarget { from, .. } => Some(*from),
+            E::UnknownEntry(node)
+            | E::DuplicateEntry(node)
+            | E::EntryHasIncoming(node)
+            | E::ZeroBudget(node)
+            | E::UnboundedLoopBudget(node)
+            | E::LoopHeadMustJoinAny(node)
+            | E::HirFieldInPlan(node) => Some(*node),
+            E::CycleWithoutBackEdge(nodes) => nodes.first().copied(),
+            E::ScopeIdMismatch { .. }
+            | E::NoEntry
+            | E::CompletionUnknownNode(_)
+            | E::DuplicateEdgeId(_)
+            | E::ReservedEdgeId(_)
+            | E::UnknownExpr { .. } => None,
+        }
+    }
+
+    /// A hint to attach beneath the message, if the error has one.
+    pub fn hint(&self) -> Option<&'static str> {
+        use ValidationError as E;
+        match self {
+            E::LoopHeadMustJoinAny(_) => Some(
+                "put a dedicated join node in front of the loop head, and let the back edge target the loop head",
+            ),
+            E::CycleWithoutBackEdge(_) => {
+                Some("mark the edge that closes the cycle as a back edge")
+            }
+            E::UnboundedLoopBudget(_) => {
+                Some("give every node in the loop a finite `Budget.max_firings`")
+            }
+            E::AlwaysNotLast { .. } => {
+                Some("move the `Guard::Always` arm to the end of its select group")
+            }
+            _ => None,
         }
     }
 }
@@ -202,7 +276,7 @@ impl<S> ValidationWarning<S> {
     }
 
     /// The node a frontend anchors the diagnostic's span to.
-    pub fn at(&self) -> NodeId<S> {
+    pub fn primary_node(&self) -> NodeId<S> {
         match self {
             Self::ScopeReentry { at, .. } => *at,
             Self::RunOnCancelExpansion { node } => *node,

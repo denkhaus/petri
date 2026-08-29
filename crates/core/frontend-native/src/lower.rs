@@ -11,7 +11,7 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, Backoff, Budget, ExpandTarget, ExprId, ExprOrValue, ExprTable, Fallthrough, GraphBuilder,
     JoinPolicy, NodeId, RetryOn, RetryPolicy, RuntimeSpec, Scope, ScopeId, StatusKind, StepRef,
-    ValidationError, WorkspacePolicy,
+    WorkspacePolicy,
 };
 use serde_json::{Map, Value};
 use smol_str::SmolStr;
@@ -190,13 +190,12 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
     ir::normalize_loop_heads(&mut graph);
     let report = ir::check(&graph);
     for error in &report.errors {
-        let (span, hint) = ctx.locate(error);
-        let mut d = frontend::Diagnostic::error(
-            &format!("validate.{}", variant_name(error)),
-            span,
-            error.to_string(),
-        );
-        if let Some(hint) = hint {
+        let span = error
+            .primary_node()
+            .and_then(|node| ctx.spans.get(&node).cloned())
+            .unwrap_or_else(|| Span::file(doc.file()));
+        let mut d = frontend::Diagnostic::error(error.code(), span, error.to_string());
+        if let Some(hint) = error.hint() {
             d = d.with_hint(hint);
         }
         ctx.diags.push(d);
@@ -204,7 +203,7 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
     for warning in &report.warnings {
         let span = ctx
             .spans
-            .get(&warning.at())
+            .get(&warning.primary_node())
             .cloned()
             .unwrap_or_else(|| Span::file(doc.file()));
         let mut d = frontend::Diagnostic::warning(warning.code(), span, warning.to_string());
@@ -1133,70 +1132,6 @@ impl<'a> Ctx<'a> {
             acc = self.b.exprs().binary(ir::BinOp::Concat, acc, next);
         }
         Some(acc)
-    }
-
-    // ── Diagnostics from validation ────────────────────────────────────────
-
-    fn locate(&self, error: &ValidationError) -> (Span, Option<String>) {
-        let span_of = |id: &NodeId| self.spans.get(id).cloned().unwrap_or_default();
-        match error {
-            ValidationError::LoopHeadMustJoinAny(id) => (
-                span_of(id),
-                Some(
-                    "a node cannot be both a multi-branch `all` join and a loop head: put a dedicated join node \
-                     in front of the loop head, and let the back edge target the head"
-                        .to_string(),
-                ),
-            ),
-            ValidationError::CycleWithoutBackEdge(nodes) => (
-                nodes.first().map(span_of).unwrap_or_default(),
-                Some("mark the arm that closes the loop with `back: true`".to_string()),
-            ),
-            ValidationError::UnboundedLoopBudget(id) => (
-                span_of(id),
-                Some("give every node in a loop `budget: { max_firings: n }`".to_string()),
-            ),
-            ValidationError::AlwaysNotLast { node, .. } => (
-                span_of(node),
-                Some("an arm without `when:` must be the last arm of its group".to_string()),
-            ),
-            ValidationError::EmptyGroup { node, .. }
-            | ValidationError::ZeroBudget(node)
-            | ValidationError::HirFieldInPlan(node)
-            | ValidationError::UnknownScope { node, .. }
-            | ValidationError::UnknownStepKind { node, .. }
-            | ValidationError::BadStepConfig { node, .. }
-            | ValidationError::HirConfigInPlan { node, .. }
-            | ValidationError::UnknownTarget { from: node, .. }
-            | ValidationError::ExitUnreachable { node, .. }
-            | ValidationError::ExitNotPostdominator { node, .. }
-            | ValidationError::BoundaryCrossing { node, .. } => (span_of(node), None),
-            ValidationError::EntryHasIncoming(id) | ValidationError::UnknownEntry(id) | ValidationError::DuplicateEntry(id) => {
-                (span_of(id), None)
-            }
-            _ => (Span::default(), None),
-        }
-    }
-}
-
-fn variant_name(error: &ValidationError) -> &'static str {
-    match error {
-        ValidationError::CycleWithoutBackEdge(_) => "cycle_without_back_edge",
-        ValidationError::AlwaysNotLast { .. } => "always_not_last",
-        ValidationError::EmptyGroup { .. } => "empty_group",
-        ValidationError::ZeroBudget(_) => "zero_budget",
-        ValidationError::UnboundedLoopBudget(_) => "unbounded_loop_budget",
-        ValidationError::LoopHeadMustJoinAny(_) => "loop_head_must_join_any",
-        ValidationError::DuplicateEdgeId(_) | ValidationError::ReservedEdgeId(_) => "edge_id",
-        ValidationError::UnknownExpr { .. } => "unknown_expr",
-        ValidationError::HirFieldInPlan(_) | ValidationError::HirConfigInPlan { .. } => {
-            "hir_in_plan"
-        }
-        ValidationError::ExitUnreachable { .. }
-        | ValidationError::ExitNotPostdominator { .. }
-        | ValidationError::BoundaryCrossing { .. } => "expansion_region",
-        ValidationError::EntryHasIncoming(_) => "entry_has_incoming",
-        _ => "structure",
     }
 }
 
