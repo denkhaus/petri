@@ -443,7 +443,8 @@ pub struct FirstFailure {
     /// The failure class the step reported (empty when unclassified).
     pub class: String,
     pub message: String,
-    /// The step's last log lines — what the failure actually said.
+    /// The step's last log lines — what the failure actually said — plus the
+    /// last [`error_line`] when later noise pushed it out of the window.
     pub tail: Vec<String>,
     /// Present when the failure is server-coupled ([`expected_reason`]).
     pub expected: Option<String>,
@@ -585,8 +586,10 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
         let detail = match &record.result {
             RunResult::Fail(f) => {
                 let mut detail = format!("`{}` — {}", f.step, sanitize_cell(&f.message));
-                if let Some(last) = f.tail.iter().rev().find(|l| !l.trim().is_empty()) {
-                    detail.push_str(&format!(" · `{}`", sanitize_cell(last)));
+                let named = error_line(&f.tail)
+                    .or_else(|| f.tail.iter().rev().find(|l| !l.trim().is_empty()));
+                if let Some(line) = named {
+                    detail.push_str(&format!(" · `{}`", sanitize_cell(line)));
                 }
                 if let Some(why) = &f.expected {
                     detail.push_str(&format!(" _({why})_"));
@@ -610,6 +613,19 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
         );
     }
     out
+}
+
+/// The last line that names an error, if any: raw `Error:`/`error:` tool
+/// output, a `::error::` command the runner rendered as `Error:`, or a nested
+/// runner's `##[error]`. Trailing noise — a deprecation warning's continuation,
+/// a stack frame — often outlives the error itself, so "last line" is not it.
+pub fn error_line(lines: &[String]) -> Option<&String> {
+    lines.iter().rev().find(|line| {
+        let l = line.trim_start();
+        l.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("error:"))
+            || l.starts_with("##[error]")
+            || l.starts_with("::error")
+    })
 }
 
 /// One Markdown table cell: no pipes, no newlines, bounded length.
@@ -898,5 +914,25 @@ mod tail_tests {
             cross_run: false,
         };
         assert!(expected_from_tail(&other, &miss).is_none());
+    }
+
+    /// The setup-node shape that made a whole gap class undiagnosable: the
+    /// real error, then deprecation noise the report used to print instead.
+    #[test]
+    fn the_error_line_outranks_trailing_noise() {
+        let tail = vec![
+            "Error: Cache service responded with 503".to_string(),
+            "(node:42) [DEP0005] DeprecationWarning: Buffer() is deprecated".to_string(),
+            "(Use `node --trace-deprecation ...` to show where the warning was created)"
+                .to_string(),
+        ];
+        assert_eq!(
+            error_line(&tail).unwrap(),
+            "Error: Cache service responded with 503"
+        );
+        // The marker is a prefix, not a substring: a line that merely mentions
+        // an error is not the error.
+        assert!(error_line(&["the previous error repeated".to_string()]).is_none());
+        assert!(error_line(&[]).is_none());
     }
 }

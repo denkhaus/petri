@@ -419,7 +419,16 @@ fn log_tail(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
             eprintln!("    | {line}");
         }
     }
-    lines.into_iter().rev().take(4).rev().collect()
+    let mut tail: Vec<String> = lines.iter().rev().take(4).rev().cloned().collect();
+    // A step can keep printing after its error — deprecation-warning
+    // continuations, stack frames — pushing the line that names the failure
+    // out of the window. Keep it: the report and the tail classifiers read it.
+    if runs::error_line(&tail).is_none() {
+        if let Some(err) = runs::error_line(&lines) {
+            tail.insert(0, err.clone());
+        }
+    }
+    tail
 }
 
 /// Remove the containers a wedged, abandoned run left behind: everything under
