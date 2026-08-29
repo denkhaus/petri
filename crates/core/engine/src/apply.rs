@@ -477,7 +477,9 @@ fn on_step_finished(
     {
         // The firing stays live, so its scope stays held and the run stays
         // non-quiescent while the driver waits out the backoff. Nothing is recorded
-        // and nothing is routed: only the final attempt is visible downstream.
+        // and nothing is routed: only the final attempt is visible downstream —
+        // this attempt's splice requests included, which stay in the log and
+        // change nothing.
         if let Some(f) = state.firing_mut(firing_id) {
             f.awaiting_retry = true;
             f.started = false;
@@ -488,6 +490,69 @@ fn on_step_finished(
             base_delay: node.retry.base_delay(attempt),
         });
         return;
+    }
+
+    // This attempt is candidate-final. Finalization is prepare-then-commit for
+    // its splice requests, in this order:
+    //
+    // 1. Cancelled-scope check first: a cancelled (or killed) firing's splice
+    //    list is dropped wholesale — no policy check, no validation, no
+    //    `invalid_splice` — and the rest of the outcome records, merges and
+    //    routes under the normal cancel semantics. Cancellation must not admit
+    //    new work.
+    // 2. Prepare every request in order against a scratch view. Preparation
+    //    never touches canonical state, so a rejection leaks nothing.
+    // 3. On rejection, convert to the canonical `Failure{class: invalid_splice}`
+    //    — output and metrics kept, `context_updates` dropped, the message
+    //    naming the request index and location, raw requests remaining only in
+    //    the External event — and only then run `retry_on` and exhaustion:
+    //    `invalid_splice` is an ordinary retry class, and a later attempt can
+    //    succeed.
+    // 4. If all requests prepare, commit consumes the plan below: record the
+    //    outcome, apply in order, route the uploader, and quiescence runs at
+    //    the end of `apply` as always. Nothing partial ever commits.
+    let mut outcome = outcome;
+    let mut plan = None;
+    if !outcome.splices.is_empty() {
+        let requests = std::mem::take(&mut outcome.splices);
+        if !cancelled {
+            match crate::splice::prepare_outcome_splices(
+                state,
+                &node,
+                firing.generation,
+                firing.cancel_scope,
+                &requests,
+            ) {
+                Ok(prepared) => plan = Some(prepared),
+                Err(error) => {
+                    outcome = Outcome {
+                        status: Status::Failure(
+                            FailureInfo::new(error.to_string())
+                                .with_class(crate::splice::INVALID_SPLICE_CLASS),
+                        ),
+                        output: outcome.output,
+                        metrics: outcome.metrics,
+                        context_updates: std::collections::BTreeMap::new(),
+                        splices: Vec::new(),
+                    };
+                    // The converted failure gets the ordinary retry decision.
+                    if node.retry.should_retry(&outcome.status)
+                        && node.retry.has_attempt_after(attempt)
+                    {
+                        if let Some(f) = state.firing_mut(firing_id) {
+                            f.awaiting_retry = true;
+                            f.started = false;
+                        }
+                        cmds.push(Command::ScheduleRetry {
+                            firing: firing_id,
+                            next_attempt: attempt.next(),
+                            base_delay: node.retry.base_delay(attempt),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     // This attempt is final.
@@ -519,9 +584,21 @@ fn on_step_finished(
     // A killed firing's outcome is recorded but never routed. A merely cancelled
     // one routes like any other outcome (§5): what stops work from restarting is
     // the structural `run_on_cancel` admission in `try_fire`, not a routing hole.
+    // A killed firing prepared no plan: killed implies cancelled, and the
+    // cancelled check above dropped its requests.
     if state.is_node_killed(firing.node) {
         return;
     }
+
+    // Commit before routing: splices apply before the uploader routes or the
+    // engine tests quiescence, so there is no lost-upload race. The uploader's
+    // routing may have gained entry groups, so route with the refreshed node.
+    let node = if let Some(plan) = plan {
+        crate::splice::commit_splice_plan(state, plan, queue);
+        state.graph.node(firing.node).cloned().unwrap_or(node)
+    } else {
+        node
+    };
     route(
         state,
         &node,
@@ -954,8 +1031,11 @@ fn on_node_expanded(
         cancel_scope: splice.cancel_scope,
         parent_scope: parent,
         nodes,
+        exprs: Vec::new(),
+        scopes: Vec::new(),
         bindings,
         seeds,
+        routing_extensions: Vec::new(),
         producer: SpliceProducer::ForEach {
             max_parallel: splice.max_parallel,
             fail_fast: splice.fail_fast,

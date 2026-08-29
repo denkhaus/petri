@@ -33,6 +33,7 @@ pub use log::{
     UnsupportedLogVersion,
 };
 pub use replay::{ReplayMismatch, ResumePoint, replay, resume, verify_replay};
+pub use splice::INVALID_SPLICE_CLASS;
 pub use state::{
     AdmissionKey, AppliedSplice, CancelScope, EngineState, Firing, FiringRecord, RunError,
     SpliceBatchId, SpliceProducer,

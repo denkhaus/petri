@@ -120,6 +120,36 @@ impl AppliedSplice {
     }
 }
 
+/// A copy of the id allocators, taken by [`EngineState::allocator_snapshot`]
+/// and advanced by a preparation transaction in place of the real ones.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AllocatorSnapshot {
+    pub next_node: u32,
+    pub next_edge: u32,
+    pub next_cancel_scope: u32,
+    pub next_batch: u32,
+}
+
+impl AllocatorSnapshot {
+    pub(crate) fn take_edge(&mut self) -> EdgeId {
+        let id = EdgeId::new(self.next_edge);
+        self.next_edge += 1;
+        id
+    }
+
+    pub(crate) fn take_cancel_scope(&mut self) -> CancelScopeId {
+        let id = CancelScopeId::new(self.next_cancel_scope);
+        self.next_cancel_scope += 1;
+        id
+    }
+
+    pub(crate) fn take_batch(&mut self) -> SpliceBatchId {
+        let id = SpliceBatchId(self.next_batch);
+        self.next_batch += 1;
+        id
+    }
+}
+
 /// Producer-only splice data: what a `ForEach` needs that an upload does not,
 /// and vice versa.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -792,6 +822,83 @@ impl EngineState {
         let id = SpliceBatchId(self.next_batch);
         self.next_batch += 1;
         id
+    }
+
+    /// A copy of the id allocators for a preparation transaction. Preparation
+    /// advances the copy; a rejected transaction drops it, so canonical state
+    /// never moves — not even allocator movement leaks.
+    pub(crate) fn allocator_snapshot(&self) -> AllocatorSnapshot {
+        AllocatorSnapshot {
+            next_node: self.next_node.max(self.graph.nodes.len() as u32),
+            next_edge: self.next_edge,
+            next_cancel_scope: self.next_cancel_scope,
+            next_batch: self.next_batch,
+        }
+    }
+
+    /// Commit a prepared transaction's allocator movement.
+    pub(crate) fn adopt_allocators(&mut self, snapshot: AllocatorSnapshot) {
+        debug_assert!(snapshot.next_node >= self.next_node);
+        debug_assert!(snapshot.next_edge >= self.next_edge);
+        debug_assert!(snapshot.next_cancel_scope >= self.next_cancel_scope);
+        debug_assert!(snapshot.next_batch >= self.next_batch);
+        self.next_node = snapshot.next_node;
+        self.next_edge = snapshot.next_edge;
+        self.next_cancel_scope = snapshot.next_cancel_scope;
+        self.next_batch = snapshot.next_batch;
+    }
+
+    /// Every admission with parked tokens or a `max_parallel` deferral: the
+    /// retractable candidates. A pending key can have no live firing and no
+    /// final record — firing consumes its tokens first — so no further filter
+    /// is needed.
+    pub(crate) fn pending_admission_keys(&self) -> Vec<AdmissionKey> {
+        let mut keys: BTreeSet<AdmissionKey> = self
+            .pending
+            .iter()
+            .flat_map(|(node, generations)| {
+                generations
+                    .iter()
+                    .filter(|(_, tokens)| !tokens.is_empty())
+                    .map(move |(generation, _)| AdmissionKey {
+                        node: *node,
+                        generation: *generation,
+                    })
+            })
+            .collect();
+        keys.extend(self.deferred.iter().map(|(node, generation)| AdmissionKey {
+            node: *node,
+            generation: *generation,
+        }));
+        keys.into_iter().collect()
+    }
+
+    /// Every generation this node has been admitted in — fired, parked,
+    /// deferred, or retracted. The one-admission rule for `depends_on`
+    /// references counts these.
+    pub(crate) fn admission_generations(&self, node: NodeId) -> BTreeSet<Generation> {
+        let mut generations: BTreeSet<Generation> = self
+            .fired
+            .iter()
+            .filter(|(n, _)| *n == node)
+            .map(|(_, generation)| *generation)
+            .collect();
+        if let Some(pending) = self.pending.get(&node) {
+            generations.extend(pending.keys().copied());
+        }
+        generations.extend(
+            self.deferred
+                .iter()
+                .filter(|(n, _)| *n == node)
+                .map(|(_, generation)| *generation),
+        );
+        generations.extend(
+            self.retracted_admissions
+                .iter()
+                .filter(|key| key.node == node)
+                .map(|key| key.generation),
+        );
+        generations
     }
 
     /// Retract admissions: drop their parked tokens and deferred joins, and
