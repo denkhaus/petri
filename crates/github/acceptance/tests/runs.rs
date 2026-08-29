@@ -92,7 +92,7 @@ async fn corpus_run_sweep() {
     // callee-only, broken upstream) leave the denominator exactly as REPORT.md
     // leaves them.
     let mut records: Vec<RunRecord> = Vec::new();
-    let mut queue: Vec<(usize, Graph)> = Vec::new();
+    let mut queue: Vec<(usize, Graph, bool)> = Vec::new();
     for (repo, repo_root, file) in workflows(&root) {
         let (outcome, graph) = lower_one(&repo, &repo_root, &file, Some(&manifests));
         if outcome.out_of_scope() || outcome.broken_upstream() || outcome.callee_only() {
@@ -110,7 +110,14 @@ async fn corpus_run_sweep() {
         };
         if let (Class::Clean | Class::Warnings, Some(mut graph)) = (outcome.class, graph) {
             prepare(&mut graph, &repo, pins.get(&repo), &repo_root);
-            queue.push((records.len(), graph));
+            // A reusable file run standalone has no caller to supply its
+            // declared inputs; a firing-environment failure there is
+            // caller-coupled, not a gap. (The word in the file is the signal:
+            // hybrid-trigger files whose env broke on absent inputs would
+            // break on GitHub's own non-call triggers too.)
+            let caller_coupled =
+                std::fs::read_to_string(&file).is_ok_and(|text| text.contains("workflow_call"));
+            queue.push((records.len(), graph, caller_coupled));
         }
         records.push(record);
     }
@@ -123,7 +130,7 @@ async fn corpus_run_sweep() {
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs));
     let mut set = tokio::task::JoinSet::new();
-    for (slot, graph) in queue {
+    for (slot, graph, caller_coupled) in queue {
         let permit = semaphore
             .clone()
             .acquire_owned()
@@ -133,7 +140,7 @@ async fn corpus_run_sweep() {
         let repo = records[slot].repo.clone();
         let file = records[slot].file.clone();
         set.spawn(async move {
-            let result = run_one(&repo, &file, graph, trees, timeout).await;
+            let result = run_one(&repo, &file, graph, trees, timeout, caller_coupled).await;
             drop(permit);
             (slot, result)
         });
@@ -252,6 +259,7 @@ async fn run_one(
     graph: Graph,
     trees: Arc<dyn ActionTreeSource>,
     timeout: Duration,
+    caller_coupled: bool,
 ) -> RunResult {
     let identities = step_identities(&graph);
     let label: String = format!("{repo}-{file}")
@@ -309,7 +317,7 @@ async fn run_one(
         Finished::TimedOut => RunResult::TimedOut { wedged: false },
         Finished::Ran(report) => match report.status {
             ir::RunStatus::Success => RunResult::Pass,
-            _ => first_failure(&report, &identities),
+            _ => first_failure(&report, &identities, caller_coupled),
         },
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -326,6 +334,7 @@ enum Finished {
 fn first_failure(
     report: &RunReport,
     identities: &std::collections::BTreeMap<String, StepIdentity>,
+    caller_coupled: bool,
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -340,7 +349,12 @@ fn first_failure(
             .unwrap_or_else(|| StepIdentity::Other(record.name.to_string()));
         let tail = log_tail(report, record.firing);
         let expected = expected_reason(&identity, &class, !sweep_token().is_empty())
-            .or_else(|| expected_from_tail(&identity, &tail));
+            .or_else(|| expected_from_tail(&identity, &tail))
+            .or_else(|| {
+                (caller_coupled && class == runtime::engine::FIRING_ENV_CLASS).then(|| {
+                    "requires its caller's inputs (a reusable workflow run standalone)".to_string()
+                })
+            });
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),
             step: identity.label(),
@@ -350,11 +364,23 @@ fn first_failure(
             expected,
         });
     }
+    // No failing record: the run failed on engine errors alone — name them,
+    // or the report can only shrug.
+    let errors: Vec<String> = report
+        .state
+        .errors()
+        .iter()
+        .map(|e| format!("{e}"))
+        .collect();
     RunResult::Fail(FirstFailure {
         node: "(run)".to_string(),
         step: "(run)".to_string(),
         class: String::new(),
-        message: format!("run ended {:?} with no failing record", report.status),
+        message: if errors.is_empty() {
+            format!("run ended {:?} with no failing record", report.status)
+        } else {
+            format!("engine error: {}", errors.join(" | "))
+        },
         tail: Vec::new(),
         expected: None,
     })

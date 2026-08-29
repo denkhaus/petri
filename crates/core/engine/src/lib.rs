@@ -22,7 +22,7 @@ pub mod log;
 pub mod replay;
 pub mod state;
 
-pub use apply::apply;
+pub use apply::{FIRING_ENV_CLASS, apply};
 pub use event::{
     BoundaryViolation, Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice,
     UnresolvedConfig,

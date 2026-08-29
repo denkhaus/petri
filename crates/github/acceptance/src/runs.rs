@@ -139,6 +139,9 @@ impl StepIdentity {
             StepIdentity::LocalAction(path) => format!("./{}", path.trim_start_matches("./")),
             StepIdentity::DockerAction(image) => image.clone(),
             StepIdentity::Run => "run:".to_string(),
+            // A job's start/done marker: the failure is the job's environment,
+            // not any step's.
+            StepIdentity::Other(kind) if kind == "noop" => "job marker".to_string(),
             StepIdentity::Other(kind) => kind.clone(),
         }
     }
@@ -335,6 +338,20 @@ pub fn expected_from_tail(identity: &StepIdentity, tail: &[String]) -> Option<St
             .any(|line| line.contains("No files were found with the provided path"))
     {
         return Some("uploads outputs a stubbed build never produced".to_string());
+    }
+    // An unhandled exception inside a `github-script` inline script is the
+    // script's own business, never the runner's: the runner staged it, ran
+    // node, and handed it the toolkit. Locally these scripts break on the
+    // empty `github.event` — they act on the triggering pull request or issue
+    // (`context.payload.number`, `.labels`), which a local run does not have.
+    // GitHub with the same empty event would produce the identical throw:
+    // interpolation is not the difference, the event is.
+    if bare == "actions/github-script" && tail.iter().any(|line| line.contains("Unhandled error:"))
+    {
+        return Some(
+            "the inline script threw (it acts on the triggering event, which a local run lacks)"
+                .to_string(),
+        );
     }
     None
 }
@@ -761,6 +778,15 @@ mod tail_tests {
         assert!(expected_from_tail(&upload, &miss).is_some());
         // Any other upload failure stays a gap; so does the same tail elsewhere.
         assert!(expected_from_tail(&upload, &["ECONNREFUSED".to_string()]).is_none());
+        // github-script: an unhandled throw inside the inline script is the
+        // script's own business (locally, usually the empty event).
+        let script = StepIdentity::Action {
+            bare: "actions/github-script".to_string(),
+            cross_run: false,
+        };
+        let threw = vec!["Error: Unhandled error: SyntaxError: Unexpected token ';'".to_string()];
+        assert!(expected_from_tail(&script, &threw).is_some());
+        assert!(expected_from_tail(&script, &["exit 1".to_string()]).is_none());
         let other = StepIdentity::Action {
             bare: "actions/setup-node".to_string(),
             cross_run: false,

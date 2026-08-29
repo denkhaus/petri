@@ -152,3 +152,38 @@ fn a_scope_stays_held_while_a_join_waits() {
     assert_eq!(h.status, Some(RunStatus::Success));
     assert_eq!(h.state.held_scopes().count(), 0, "everything is released");
 }
+
+/// A scope-env expression that cannot evaluate fails the firing with the cause
+/// on the record — class `firing_env`, message naming the error — so a report
+/// over the log can say *which* expression broke, not only that one did.
+#[test]
+fn a_broken_scope_env_names_its_cause_on_the_record() {
+    let mut b = GraphBuilder::bare();
+    let bad = {
+        let t = b.exprs();
+        let arg = t.lit("{broken");
+        t.call("from_json", vec![arg])
+    };
+    let scope =
+        b.add_scope(Scope::new(ScopeId::new(0)).with_env("VERSION", ExprOrValue::Expr(bad)));
+    b.add_step("only", scope, NOOP);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph);
+    assert_eq!(h.run(), RunStatus::Failed);
+    let record = &h.state.history()[0];
+    let info = record.outcome.status.failure_info().expect("a failure");
+    assert_eq!(info.class, engine::FIRING_ENV_CLASS);
+    assert!(
+        info.message
+            .strip_prefix("could not build the firing environment: ")
+            .is_some_and(|cause| !cause.is_empty()),
+        "the cause rides the message: {}",
+        info.message
+    );
+    assert!(
+        !h.state.errors().is_empty(),
+        "the error list carries it too"
+    );
+}
