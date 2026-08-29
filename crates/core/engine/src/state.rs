@@ -186,7 +186,7 @@ impl EngineState {
         let next_edge = graph
             .edges()
             .map(|e| e.id.raw())
-            .filter(|id| *id != EdgeId::SEED.raw())
+            .filter(|id| *id != EdgeId::<ir::Live>::SEED.raw())
             .max()
             .map_or(0, |m| m + 1);
         let mut cancel_scopes = BTreeMap::new();

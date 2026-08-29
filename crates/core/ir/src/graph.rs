@@ -1,4 +1,9 @@
 //! The token-flow graph: nodes, explicit routing, joins, scopes.
+//!
+//! Every structure that carries a graph-structure id takes the id-space marker
+//! `S` (default [`Live`], so ordinary call sites never see it). A
+//! [`GraphFragment`](crate::GraphFragment) reuses these same types over
+//! [`Local`](crate::Local) ids rather than declaring a parallel mirror family.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -10,35 +15,36 @@ use smol_str::SmolStr;
 
 use crate::expr::ExprTable;
 use crate::flow::{Status, StatusKind};
-use crate::ids::{Attempt, EdgeId, ExprId, NodeId, ScopeId, StepKindId};
+use crate::ids::{Attempt, EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
+use crate::splice::SplicePolicy;
 
 // ── Guards & edges ────────────────────────────────────────────────────────
 
 /// Condition on an edge arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Guard {
+pub enum Guard<S = Live> {
     /// Always passes. May only appear as a group's final arm (invariant 2).
     Always,
     /// Boolean expression over the completing node's outcome and contexts.
-    Expr(ExprId),
+    Expr(ExprId<S>),
 }
 
 /// One arm of a select group: where a token goes, and when.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Edge {
-    pub id: EdgeId,
-    pub to: NodeId,
-    pub guard: Guard,
+pub struct Edge<S = Live> {
+    pub id: EdgeId<S>,
+    pub to: NodeId<S>,
+    pub guard: Guard<S>,
     /// Payload for the emitted token; `None` means the source outcome's `output`.
-    pub map: Option<ExprId>,
+    pub map: Option<ExprId<S>>,
     /// Back edge: traversal increments the token's `Generation`.
     /// Every cycle must contain at least one (invariant 1).
     pub back: bool,
 }
 
-impl Edge {
+impl<S> Edge<S> {
     /// An unconditional edge carrying the source output.
-    pub fn always(id: EdgeId, to: NodeId) -> Self {
+    pub fn always(id: EdgeId<S>, to: NodeId<S>) -> Self {
         Self {
             id,
             to,
@@ -49,7 +55,7 @@ impl Edge {
     }
 
     /// A guarded edge carrying the source output.
-    pub fn when(id: EdgeId, to: NodeId, guard: ExprId) -> Self {
+    pub fn when(id: EdgeId<S>, to: NodeId<S>, guard: ExprId<S>) -> Self {
         Self {
             id,
             to,
@@ -59,7 +65,7 @@ impl Edge {
         }
     }
 
-    pub fn with_map(mut self, map: ExprId) -> Self {
+    pub fn with_map(mut self, map: ExprId<S>) -> Self {
         self.map = Some(map);
         self
     }
@@ -75,15 +81,15 @@ impl Edge {
 
 /// One XOR-select: arms are tried in order and **at most one** token is emitted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SelectGroup {
+pub struct SelectGroup<S = Live> {
     /// Ordered; the first arm whose guard passes wins.
-    pub arms: Vec<Edge>,
+    pub arms: Vec<Edge<S>>,
     pub fallthrough: Fallthrough,
 }
 
-impl SelectGroup {
+impl<S> SelectGroup<S> {
     /// A group that emits nothing when no arm matches (OR-split, loop exit).
-    pub fn new(arms: Vec<Edge>) -> Self {
+    pub fn new(arms: Vec<Edge<S>>) -> Self {
         Self {
             arms,
             fallthrough: Fallthrough::NoEmit,
@@ -91,7 +97,7 @@ impl SelectGroup {
     }
 
     /// A group that must match: used by frontends requiring totality.
-    pub fn total(arms: Vec<Edge>) -> Self {
+    pub fn total(arms: Vec<Edge<S>>) -> Self {
         Self {
             arms,
             fallthrough: Fallthrough::Error,
@@ -114,32 +120,32 @@ pub enum Fallthrough {
 /// explicit fan-out: the groups emit concurrently. Fan-out is never implicit —
 /// it takes writing more than one group.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Routing {
-    pub groups: Vec<SelectGroup>,
+pub struct Routing<S = Live> {
+    pub groups: Vec<SelectGroup<S>>,
 }
 
-impl Routing {
+impl<S> Routing<S> {
     /// Terminal node: no outgoing tokens.
     pub fn terminal() -> Self {
         Self { groups: Vec::new() }
     }
 
     /// One group of one unconditional arm — a plain `next:`.
-    pub fn next(edge: Edge) -> Self {
+    pub fn next(edge: Edge<S>) -> Self {
         Self {
             groups: vec![SelectGroup::new(vec![edge])],
         }
     }
 
     /// One group of several guarded arms — pick exactly one successor.
-    pub fn select(arms: Vec<Edge>) -> Self {
+    pub fn select(arms: Vec<Edge<S>>) -> Self {
         Self {
             groups: vec![SelectGroup::new(arms)],
         }
     }
 
     /// One group per edge — an explicit AND-split.
-    pub fn fan_out(edges: Vec<Edge>) -> Self {
+    pub fn fan_out(edges: Vec<Edge<S>>) -> Self {
         Self {
             groups: edges
                 .into_iter()
@@ -148,11 +154,11 @@ impl Routing {
         }
     }
 
-    pub fn groups(groups: Vec<SelectGroup>) -> Self {
+    pub fn groups(groups: Vec<SelectGroup<S>>) -> Self {
         Self { groups }
     }
 
-    pub fn edges(&self) -> impl Iterator<Item = &Edge> {
+    pub fn edges(&self) -> impl Iterator<Item = &Edge<S>> {
         self.groups.iter().flat_map(|g| g.arms.iter())
     }
 }
@@ -237,9 +243,9 @@ impl Default for Budget {
 
 /// How many times a node may be attempted, and when.
 ///
-/// A retry is not a loop iteration: it advances [`Attempt`], never [`Generation`].
-/// Attempt counters never carry across firings, so a later generation retries from
-/// scratch.
+/// A retry is not a loop iteration: it advances [`Attempt`], never
+/// [`Generation`](crate::Generation). Attempt counters never carry across firings,
+/// so a later generation retries from scratch.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     /// 1 means no retries.
@@ -410,12 +416,12 @@ pub enum Exhaustion {
 /// Sequential `for_each` is **not** an expansion: it desugars to a cycle over back
 /// edges and generations. The engine has no loop primitive.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Expansion {
+pub enum Expansion<S = Live> {
     ForEach {
         /// Evaluates to an array at runtime; one clone per element, with `item` and
         /// `index` bound into the clone's expression context.
-        items: ExprId,
-        target: ExpandTarget,
+        items: ExprId<S>,
+        target: ExpandTarget<S>,
         /// Scheduler admission control across the spliced clones.
         max_parallel: Option<u32>,
         /// The first clone failure cancels sibling clones, via the splice's cancel scope.
@@ -424,26 +430,26 @@ pub enum Expansion {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExpandTarget {
+pub enum ExpandTarget<S = Live> {
     /// Clone this node only.
     Node,
     /// Clone the subgraph between `entry` and `exit` (loop bodies, matrix jobs).
-    Subgraph { entry: NodeId, exit: NodeId },
+    Subgraph { entry: NodeId<S>, exit: NodeId<S> },
 }
 
 /// A unit of work in the graph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Node {
-    pub id: NodeId,
+pub struct Node<S = Live> {
+    pub id: NodeId<S>,
     pub name: SmolStr,
-    pub scope: ScopeId,
+    pub scope: ScopeId<S>,
     pub step: StepRef,
     pub join: JoinPolicy,
     /// Precondition evaluated in the node's own context. False means the node
     /// completes `Skipped` without executing; routing still runs, so `always()` and
     /// `failure()` guards downstream still see it.
-    pub precondition: Option<ExprId>,
-    pub routing: Routing,
+    pub precondition: Option<ExprId<S>>,
+    pub routing: Routing<S>,
     pub budget: Budget,
     /// How many attempts this node gets. The default is one.
     pub retry: RetryPolicy,
@@ -462,16 +468,22 @@ pub struct Node {
     /// GHA's job-level `continue-on-error`.
     #[serde(default)]
     pub tolerates_failure: bool,
+    /// What outcome-driven splices this node's firings may request (§14 made real).
+    /// `Deny` — the default — rejects every request as `invalid_splice`; anything
+    /// higher authorizes operations up to it, per the total order on
+    /// [`SplicePolicy`].
+    #[serde(default)]
+    pub splice_policy: SplicePolicy,
     /// Frontend-supplied metadata: display label, source span, classes. Opaque to the
     /// engine; `apply` never reads it. Hosts and observers render with it.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub meta: Value,
     /// HIR only; lowered away before execution.
-    pub expand: Option<Expansion>,
+    pub expand: Option<Expansion<S>>,
 }
 
-impl Node {
-    pub fn new(id: NodeId, name: &str, scope: ScopeId, step: StepRef) -> Self {
+impl<S> Node<S> {
+    pub fn new(id: NodeId<S>, name: &str, scope: ScopeId<S>, step: StepRef) -> Self {
         Self {
             id,
             name: SmolStr::new(name),
@@ -484,6 +496,7 @@ impl Node {
             retry: RetryPolicy::none(),
             run_on_cancel: false,
             tolerates_failure: false,
+            splice_policy: SplicePolicy::Deny,
             meta: Value::Null,
             expand: None,
         }
@@ -494,12 +507,12 @@ impl Node {
         self
     }
 
-    pub fn with_precondition(mut self, expr: ExprId) -> Self {
+    pub fn with_precondition(mut self, expr: ExprId<S>) -> Self {
         self.precondition = Some(expr);
         self
     }
 
-    pub fn with_routing(mut self, routing: Routing) -> Self {
+    pub fn with_routing(mut self, routing: Routing<S>) -> Self {
         self.routing = routing;
         self
     }
@@ -520,13 +533,19 @@ impl Node {
         self
     }
 
+    /// Grant this node's firings splice authority. The default is `Deny`.
+    pub fn with_splice_policy(mut self, policy: SplicePolicy) -> Self {
+        self.splice_policy = policy;
+        self
+    }
+
     /// Attach frontend metadata. The core carries it and never reads it.
     pub fn with_meta(mut self, meta: Value) -> Self {
         self.meta = meta;
         self
     }
 
-    pub fn with_expansion(mut self, expand: Expansion) -> Self {
+    pub fn with_expansion(mut self, expand: Expansion<S>) -> Self {
         self.expand = Some(expand);
         self
     }
@@ -536,9 +555,9 @@ impl Node {
 
 /// Either a literal value or an expression resolved at firing time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ExprOrValue {
+pub enum ExprOrValue<S = Live> {
     Value(Value),
-    Expr(ExprId),
+    Expr(ExprId<S>),
 }
 
 /// Where a scope's steps run, plus the placement hints that go with it.
@@ -593,12 +612,12 @@ pub struct RegistryCredentials {
 /// the scope. Format-generic — "service container" is a concept, not a GitHub
 /// feature.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ServiceSpec {
+pub struct ServiceSpec<S = Live> {
     /// The alias other processes in the scope reach it by.
     pub name: SmolStr,
     pub image: SmolStr,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<SmolStr, ExprOrValue>,
+    pub env: BTreeMap<SmolStr, ExprOrValue<S>>,
     /// Port publications, as written (`host:container` or `container`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SmolStr>,
@@ -609,7 +628,7 @@ pub struct ServiceSpec {
     pub credentials: Option<RegistryCredentials>,
 }
 
-impl ServiceSpec {
+impl<S> ServiceSpec<S> {
     pub fn new(name: &str, image: &str) -> Self {
         Self {
             name: SmolStr::new(name),
@@ -665,18 +684,18 @@ pub enum WorkspacePolicy {
 
 /// "Job" generalized: a resource scope, not a sequence.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Scope {
-    pub id: ScopeId,
-    pub env: BTreeMap<SmolStr, ExprOrValue>,
+pub struct Scope<S = Live> {
+    pub id: ScopeId<S>,
+    pub env: BTreeMap<SmolStr, ExprOrValue<S>>,
     pub runtime: RuntimeSpec,
     pub workspace: WorkspacePolicy,
     /// Sidecar containers with this scope's lifetime, realized at acquisition.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<ServiceSpec>,
+    pub services: Vec<ServiceSpec<S>>,
 }
 
-impl Scope {
-    pub fn new(id: ScopeId) -> Self {
+impl<S> Scope<S> {
+    pub fn new(id: ScopeId<S>) -> Self {
         Self {
             id,
             env: BTreeMap::new(),
@@ -686,7 +705,7 @@ impl Scope {
         }
     }
 
-    pub fn with_env(mut self, key: &str, value: ExprOrValue) -> Self {
+    pub fn with_env(mut self, key: &str, value: ExprOrValue<S>) -> Self {
         self.env.insert(SmolStr::new(key), value);
         self
     }
@@ -710,7 +729,7 @@ impl Scope {
 /// is `Cancelled`, and an engine error fails the run — errors are never control
 /// flow.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Completion {
+pub enum Completion<S = Live> {
     /// Any failed node record fails the run. The CI rule; today's behavior.
     #[default]
     AnyFailure,
@@ -720,22 +739,22 @@ pub enum Completion {
     /// The node is *expected* to be terminal; the core does not require it —
     /// the semantics only need a final record — and frontends enforce their own
     /// shape.
-    TerminalNode(NodeId),
+    TerminalNode(NodeId<S>),
 }
 
-fn is_default_completion(completion: &Completion) -> bool {
-    *completion == Completion::AnyFailure
+fn is_default_completion<S>(completion: &Completion<S>) -> bool {
+    matches!(completion, Completion::AnyFailure)
 }
 
 /// A whole workflow. HIR and executable plans share this shape; a plan is a graph
 /// that carries no [`Node::expand`] and no unresolved config placeholders.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Graph {
-    pub nodes: Vec<Node>,
-    pub scopes: Vec<Scope>,
-    pub exprs: ExprTable,
+pub struct Graph<S = Live> {
+    pub nodes: Vec<Node<S>>,
+    pub scopes: Vec<Scope<S>>,
+    pub exprs: ExprTable<S>,
     /// Seeded with one `Generation(0)` token each.
-    pub entry: Vec<NodeId>,
+    pub entry: Vec<NodeId<S>>,
     /// Per-run parameters, visible to every expression as a static binding of the
     /// same name — the GHA `github`, `vars` and `runner` contexts, a native format's
     /// `params`. Frontends leave this empty; the host fills it in before the run
@@ -748,29 +767,32 @@ pub struct Graph {
     pub params: BTreeMap<SmolStr, Value>,
     /// How the run's status folds from node outcomes (§1).
     #[serde(default, skip_serializing_if = "is_default_completion")]
-    pub completion: Completion,
+    pub completion: Completion<S>,
 }
 
-impl Graph {
-    pub fn new() -> Self {
+impl<S> Graph<S> {
+    pub fn new() -> Self
+    where
+        S: Default,
+    {
         Self::default()
     }
 
-    pub fn node(&self, id: NodeId) -> Option<&Node> {
+    pub fn node(&self, id: NodeId<S>) -> Option<&Node<S>> {
         self.nodes.get(id.index())
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+    pub fn node_mut(&mut self, id: NodeId<S>) -> Option<&mut Node<S>> {
         self.nodes.get_mut(id.index())
     }
 
-    pub fn scope(&self, id: ScopeId) -> Option<&Scope> {
+    pub fn scope(&self, id: ScopeId<S>) -> Option<&Scope<S>> {
         self.scopes.get(id.index())
     }
 
     /// Ids of the edges pointing at `node`, in node order. Joins count these.
-    pub fn incoming(&self, node: NodeId) -> Vec<EdgeId> {
-        let mut ids: Vec<EdgeId> = self
+    pub fn incoming(&self, node: NodeId<S>) -> Vec<EdgeId<S>> {
+        let mut ids: Vec<EdgeId<S>> = self
             .nodes
             .iter()
             .flat_map(|n| n.routing.edges())
@@ -782,20 +804,20 @@ impl Graph {
     }
 
     /// How many distinct edges point at `node`.
-    pub fn in_degree(&self, node: NodeId) -> usize {
+    pub fn in_degree(&self, node: NodeId<S>) -> usize {
         self.incoming(node).len()
     }
 
-    pub fn edges(&self) -> impl Iterator<Item = &Edge> {
+    pub fn edges(&self) -> impl Iterator<Item = &Edge<S>> {
         self.nodes.iter().flat_map(|n| n.routing.edges())
     }
 
-    pub fn edge(&self, id: EdgeId) -> Option<&Edge> {
+    pub fn edge(&self, id: EdgeId<S>) -> Option<&Edge<S>> {
         self.edges().find(|e| e.id == id)
     }
 
     /// The node an edge leaves from.
-    pub fn edge_source(&self, id: EdgeId) -> Option<NodeId> {
+    pub fn edge_source(&self, id: EdgeId<S>) -> Option<NodeId<S>> {
         self.nodes
             .iter()
             .find(|n| n.routing.edges().any(|e| e.id == id))

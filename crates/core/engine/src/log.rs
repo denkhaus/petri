@@ -22,7 +22,12 @@ use crate::event::Event;
 /// v4 → v5: `ControlRequested` and `Control::Deliver` joined the vocabulary, so a
 /// pending host-delivered interaction is in the log and replay reproduces it.
 /// Standing policy, no migrator.
-pub const LOG_VERSION: u32 = 5;
+///
+/// v5 → v6: `Outcome` — serialized inside `StepFinished` — gained `splices`, and
+/// `Node` — serialized inside `NodeExpanded` splices — gained `splice_policy`, for
+/// the outcome-driven splice. Standing policy, no migrator: a v5 log is rejected
+/// cleanly.
+pub const LOG_VERSION: u32 = 6;
 
 /// Where an event came from.
 ///

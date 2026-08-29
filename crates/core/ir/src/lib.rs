@@ -18,6 +18,7 @@ pub mod flow;
 pub mod graph;
 pub mod ids;
 pub mod placeholder;
+pub mod splice;
 pub mod step;
 pub mod validate;
 
@@ -39,7 +40,13 @@ pub use graph::{
     Routing, RuntimeSpec, RuntimeTarget, Scope, SelectGroup, ServiceSpec, StepRef, WorkspacePolicy,
 };
 pub use ids::{
-    Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, NodeId, ScopeId, StepKindId,
+    Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, Live, Local, NodeId, ScopeId,
+    StepKindId,
+};
+pub use splice::{
+    Attachment, ExistingNodeRef, FragmentErrorKind, FragmentValidationError, GraphFragment,
+    ReplaceScope, SpliceMode, SplicePolicy, SpliceRequest, validate_fragment,
+    validate_fragment_with, validate_request, validate_request_with,
 };
 pub use step::{Digest, StepKind, StepKinds};
 pub use validate::{

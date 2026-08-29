@@ -8,6 +8,7 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::ids::{EdgeId, FiringId, Generation};
+use crate::splice::SpliceRequest;
 
 /// One unit of flow, sitting on an edge and waiting for a join.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -218,6 +219,12 @@ pub struct Outcome {
     /// only path that writes run-scoped key/value state.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub context_updates: BTreeMap<SmolStr, Value>,
+    /// Ordered splice requests. Only a firing's **final** attempt applies them, in
+    /// one transaction: every request prepares or none applies, and a rejection
+    /// converts the whole outcome to `Failure{class: invalid_splice}`. A non-final
+    /// attempt's requests are recorded in the event log and change nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub splices: Vec<SpliceRequest>,
 }
 
 impl Outcome {
@@ -227,6 +234,7 @@ impl Outcome {
             output,
             metrics: Metrics::default(),
             context_updates: BTreeMap::new(),
+            splices: Vec::new(),
         }
     }
 
@@ -258,6 +266,18 @@ impl Outcome {
 
     pub fn with_context_update(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.context_updates.insert(SmolStr::new(key), value.into());
+        self
+    }
+
+    /// Append one splice request. Order is preserved: a later request may
+    /// reference a node an earlier one added.
+    pub fn with_splice(mut self, request: SpliceRequest) -> Self {
+        self.splices.push(request);
+        self
+    }
+
+    pub fn with_splices(mut self, requests: Vec<SpliceRequest>) -> Self {
+        self.splices = requests;
         self
     }
 }

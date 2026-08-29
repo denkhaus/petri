@@ -19,34 +19,35 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_str::SmolStr;
 
-use crate::ids::ExprId;
+use crate::ids::{ExprId, Live};
 
 pub use builtins::{BUILTINS, Builtin, builtin};
 pub use eval::{EvalEnv, EvalError, StaticCtx, eval, eval_bool, truthy};
 pub use table::ExprTable;
 
-/// One expression node. Sub-expressions are referenced by [`ExprId`].
+/// One expression node. Sub-expressions are referenced by [`ExprId`], in the same
+/// id space `S` as the table that holds this expression.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Expr {
+pub enum Expr<S = Live> {
     /// A literal JSON value.
     Lit(Value),
     /// A binding looked up in the [`StaticCtx`] (`outcome`, `output`, `item`, `env`, ...).
     Var(SmolStr),
     /// Field access. Missing fields evaluate to `null` rather than erroring.
-    Field(ExprId, SmolStr),
+    Field(ExprId<S>, SmolStr),
     /// Index access on an array (by number) or object (by string key).
-    Index(ExprId, ExprId),
-    Unary(UnOp, ExprId),
-    Binary(BinOp, ExprId, ExprId),
+    Index(ExprId<S>, ExprId<S>),
+    Unary(UnOp, ExprId<S>),
+    Binary(BinOp, ExprId<S>, ExprId<S>),
     /// `cond ? then : otherwise`, with lazy branches.
     Cond {
-        cond: ExprId,
-        then: ExprId,
-        otherwise: ExprId,
+        cond: ExprId<S>,
+        then: ExprId<S>,
+        otherwise: ExprId<S>,
     },
-    Array(Vec<ExprId>),
-    Object(Vec<(SmolStr, ExprId)>),
-    Call(SmolStr, Vec<ExprId>),
+    Array(Vec<ExprId<S>>),
+    Object(Vec<(SmolStr, ExprId<S>)>),
+    Call(SmolStr, Vec<ExprId<S>>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,26 +5,32 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use super::{BinOp, Expr, UnOp};
-use crate::ids::ExprId;
+use crate::ids::{ExprId, Live};
 
 /// Flat store of every expression in a graph.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ExprTable {
-    exprs: Vec<Expr>,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExprTable<S = Live> {
+    exprs: Vec<Expr<S>>,
 }
 
-impl ExprTable {
+impl<S> Default for ExprTable<S> {
+    fn default() -> Self {
+        Self { exprs: Vec::new() }
+    }
+}
+
+impl<S> ExprTable<S> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn push(&mut self, expr: Expr) -> ExprId {
+    pub fn push(&mut self, expr: Expr<S>) -> ExprId<S> {
         let id = ExprId::new(u32::try_from(self.exprs.len()).expect("expression table overflow"));
         self.exprs.push(expr);
         id
     }
 
-    pub fn get(&self, id: ExprId) -> Option<&Expr> {
+    pub fn get(&self, id: ExprId<S>) -> Option<&Expr<S>> {
         self.exprs.get(id.index())
     }
 
@@ -36,7 +42,7 @@ impl ExprTable {
         self.exprs.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
+    pub fn iter(&self) -> impl Iterator<Item = (ExprId<S>, &Expr<S>)> {
         self.exprs
             .iter()
             .enumerate()
@@ -47,16 +53,16 @@ impl ExprTable {
     // Frontends build expressions through these; they read close to the source
     // syntax they lower from.
 
-    pub fn lit(&mut self, v: impl Into<Value>) -> ExprId {
+    pub fn lit(&mut self, v: impl Into<Value>) -> ExprId<S> {
         self.push(Expr::Lit(v.into()))
     }
 
-    pub fn var(&mut self, name: &str) -> ExprId {
+    pub fn var(&mut self, name: &str) -> ExprId<S> {
         self.push(Expr::Var(SmolStr::new(name)))
     }
 
     /// Dotted path over a binding: `path("outcome", ["status"])`.
-    pub fn path(&mut self, root: &str, fields: &[&str]) -> ExprId {
+    pub fn path(&mut self, root: &str, fields: &[&str]) -> ExprId<S> {
         let mut id = self.var(root);
         for f in fields {
             id = self.push(Expr::Field(id, SmolStr::new(*f)));
@@ -64,23 +70,23 @@ impl ExprTable {
         id
     }
 
-    pub fn field(&mut self, base: ExprId, name: &str) -> ExprId {
+    pub fn field(&mut self, base: ExprId<S>, name: &str) -> ExprId<S> {
         self.push(Expr::Field(base, SmolStr::new(name)))
     }
 
-    pub fn index(&mut self, base: ExprId, idx: ExprId) -> ExprId {
+    pub fn index(&mut self, base: ExprId<S>, idx: ExprId<S>) -> ExprId<S> {
         self.push(Expr::Index(base, idx))
     }
 
-    pub fn binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId) -> ExprId {
+    pub fn binary(&mut self, op: BinOp, lhs: ExprId<S>, rhs: ExprId<S>) -> ExprId<S> {
         self.push(Expr::Binary(op, lhs, rhs))
     }
 
-    pub fn unary(&mut self, op: UnOp, arg: ExprId) -> ExprId {
+    pub fn unary(&mut self, op: UnOp, arg: ExprId<S>) -> ExprId<S> {
         self.push(Expr::Unary(op, arg))
     }
 
-    pub fn cond(&mut self, cond: ExprId, then: ExprId, otherwise: ExprId) -> ExprId {
+    pub fn cond(&mut self, cond: ExprId<S>, then: ExprId<S>, otherwise: ExprId<S>) -> ExprId<S> {
         self.push(Expr::Cond {
             cond,
             then,
@@ -88,11 +94,11 @@ impl ExprTable {
         })
     }
 
-    pub fn array(&mut self, items: Vec<ExprId>) -> ExprId {
+    pub fn array(&mut self, items: Vec<ExprId<S>>) -> ExprId<S> {
         self.push(Expr::Array(items))
     }
 
-    pub fn object(&mut self, fields: Vec<(&str, ExprId)>) -> ExprId {
+    pub fn object(&mut self, fields: Vec<(&str, ExprId<S>)>) -> ExprId<S> {
         self.push(Expr::Object(
             fields
                 .into_iter()
@@ -101,7 +107,7 @@ impl ExprTable {
         ))
     }
 
-    pub fn call(&mut self, name: &str, args: Vec<ExprId>) -> ExprId {
+    pub fn call(&mut self, name: &str, args: Vec<ExprId<S>>) -> ExprId<S> {
         self.push(Expr::Call(SmolStr::new(name), args))
     }
 }

@@ -1,7 +1,111 @@
 //! Newtype identifiers used across the IR and the engine.
+//!
+//! Graph-structure ids (`NodeId`, `EdgeId`, `ScopeId`, `ExprId`) carry an id-space
+//! marker: [`Live`] for the run's live graph — the default everywhere, so ordinary
+//! call sites never name it — and [`Local`] for ids inside a
+//! [`GraphFragment`](crate::GraphFragment), which are meaningless against the live
+//! graph until the splice remapper converts them. The marker is how the type system
+//! refuses a mixed-space id without a parallel family of mirror types. Runtime ids
+//! (`FiringId`, `Generation`, `Attempt`, `CancelScopeId`) exist only at run time, so
+//! they have no space.
+
+use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+
+/// The live run graph's id space. The default for every spaced id, so existing
+/// call sites read and write `NodeId` and mean this.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct Live;
+
+/// A fragment's local id space: ids in a [`GraphFragment`](crate::GraphFragment)
+/// index the fragment's own tables and mean nothing against the live graph. Only
+/// the splice remapper converts them, by allocating fresh [`Live`] ids.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct Local;
+
+macro_rules! spaced_id_newtype {
+    ($(#[$meta:meta])* $name:ident, $repr:ty) => {
+        $(#[$meta])*
+        #[derive(Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name<S = Live>(pub $repr, PhantomData<S>);
+
+        impl<S> $name<S> {
+            pub const fn new(raw: $repr) -> Self {
+                Self(raw, PhantomData)
+            }
+
+            pub const fn raw(self) -> $repr {
+                self.0
+            }
+
+            pub const fn index(self) -> usize {
+                self.0 as usize
+            }
+        }
+
+        // Manual impls rather than derives: a derive would demand the same trait of
+        // the space marker, and the marker is phantom — the id is a `$repr` whatever
+        // the space says.
+        impl<S> Clone for $name<S> {
+            fn clone(&self) -> Self {
+                *self
+            }
+        }
+
+        impl<S> Copy for $name<S> {}
+
+        impl<S> PartialEq for $name<S> {
+            fn eq(&self, other: &Self) -> bool {
+                self.0 == other.0
+            }
+        }
+
+        impl<S> Eq for $name<S> {}
+
+        impl<S> PartialOrd for $name<S> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl<S> Ord for $name<S> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0.cmp(&other.0)
+            }
+        }
+
+        impl<S> std::hash::Hash for $name<S> {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+
+        impl<S> From<$repr> for $name<S> {
+            fn from(raw: $repr) -> Self {
+                Self::new(raw)
+            }
+        }
+
+        impl<S> std::fmt::Debug for $name<S> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, concat!(stringify!($name), "({})"), self.0)
+            }
+        }
+
+        impl<S> std::fmt::Display for $name<S> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+}
 
 macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident, $repr:ty) => {
@@ -46,19 +150,19 @@ macro_rules! id_newtype {
     };
 }
 
-id_newtype!(
+spaced_id_newtype!(
     /// Index of a node in [`Graph::nodes`](crate::Graph::nodes).
     NodeId, u32
 );
-id_newtype!(
+spaced_id_newtype!(
     /// Unique id of an outgoing edge. Joins count distinct incoming edge ids.
     EdgeId, u32
 );
-id_newtype!(
+spaced_id_newtype!(
     /// Index of a resource scope in [`Graph::scopes`](crate::Graph::scopes).
     ScopeId, u32
 );
-id_newtype!(
+spaced_id_newtype!(
     /// Index into the graph's [`ExprTable`](crate::ExprTable).
     ExprId, u32
 );
@@ -155,11 +259,11 @@ impl Attempt {
     }
 }
 
-impl EdgeId {
+impl<S> EdgeId<S> {
     /// Reserved: no edge declared in a graph may use this id. The engine allocates
     /// seed edges for entry nodes and expansion clones from the free id space, and
     /// keeps this one out of play as an unambiguous "not an edge" sentinel.
-    pub const SEED: EdgeId = EdgeId(u32::MAX);
+    pub const SEED: EdgeId<S> = EdgeId::new(u32::MAX);
 }
 
 impl CancelScopeId {

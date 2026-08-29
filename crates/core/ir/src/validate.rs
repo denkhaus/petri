@@ -9,74 +9,74 @@ use smol_str::SmolStr;
 
 use crate::expr::Expr;
 use crate::graph::{Completion, ExpandTarget, Expansion, ExprOrValue, Graph, Guard, JoinPolicy};
-use crate::ids::{EdgeId, ExprId, NodeId, ScopeId, StepKindId};
+use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 use crate::placeholder::placeholder_path;
 use crate::step::StepKinds;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ValidationError {
+pub enum ValidationError<S = Live> {
     // ── Structure ──────────────────────────────────────────────────────────
     #[error("node at index {index} declares id {declared:?}; node ids must equal their index")]
-    NodeIdMismatch { index: usize, declared: NodeId },
+    NodeIdMismatch { index: usize, declared: NodeId<S> },
     #[error("scope at index {index} declares id {declared:?}; scope ids must equal their index")]
-    ScopeIdMismatch { index: usize, declared: ScopeId },
+    ScopeIdMismatch { index: usize, declared: ScopeId<S> },
     #[error("node {node:?} refers to unknown scope {scope:?}")]
-    UnknownScope { node: NodeId, scope: ScopeId },
+    UnknownScope { node: NodeId<S>, scope: ScopeId<S> },
     #[error("edge {edge:?} on node {from:?} points at unknown node {to:?}")]
     UnknownTarget {
-        from: NodeId,
-        edge: EdgeId,
-        to: NodeId,
+        from: NodeId<S>,
+        edge: EdgeId<S>,
+        to: NodeId<S>,
     },
     #[error("node {node:?} uses step kind `{kind}` which is not registered")]
-    UnknownStepKind { node: NodeId, kind: StepKindId },
+    UnknownStepKind { node: NodeId<S>, kind: StepKindId },
     #[error("node {node:?} has an invalid step config: {message}")]
-    BadStepConfig { node: NodeId, message: String },
+    BadStepConfig { node: NodeId<S>, message: String },
     #[error("the graph has no entry nodes")]
     NoEntry,
     #[error("entry list refers to unknown node {0:?}")]
-    UnknownEntry(NodeId),
+    UnknownEntry(NodeId<S>),
     #[error("entry node {0:?} is listed twice")]
-    DuplicateEntry(NodeId),
+    DuplicateEntry(NodeId<S>),
     #[error(
         "entry node {0:?} has an incoming forward edge; entry nodes are seeded, and only \
          a back edge may point at one"
     )]
-    EntryHasIncoming(NodeId),
+    EntryHasIncoming(NodeId<S>),
     #[error("the completion policy names unknown node {0:?}")]
-    CompletionUnknownNode(NodeId),
+    CompletionUnknownNode(NodeId<S>),
 
     // ── Invariant 1 ────────────────────────────────────────────────────────
     #[error("cycle through {0:?} contains no back edge")]
-    CycleWithoutBackEdge(Vec<NodeId>),
+    CycleWithoutBackEdge(Vec<NodeId<S>>),
 
     // ── Invariant 2 ────────────────────────────────────────────────────────
     #[error("node {node:?}: Guard::Always on arm {arm} is not the final arm of its group")]
-    AlwaysNotLast { node: NodeId, arm: usize },
+    AlwaysNotLast { node: NodeId<S>, arm: usize },
 
     // ── Invariant 3 ────────────────────────────────────────────────────────
     #[error("node {node:?}: select group {group} has no arms")]
-    EmptyGroup { node: NodeId, group: usize },
+    EmptyGroup { node: NodeId<S>, group: usize },
 
     // ── Invariant 4 ────────────────────────────────────────────────────────
     #[error("node {0:?}: Budget.max_firings must be >= 1")]
-    ZeroBudget(NodeId),
+    ZeroBudget(NodeId<S>),
     #[error("node {0:?} is reachable through a back edge, so it needs a finite firing budget")]
-    UnboundedLoopBudget(NodeId),
+    UnboundedLoopBudget(NodeId<S>),
 
     // ── Invariant 5 ────────────────────────────────────────────────────────
     #[error("edge id {0:?} is used more than once")]
-    DuplicateEdgeId(EdgeId),
+    DuplicateEdgeId(EdgeId<S>),
     #[error("edge id {0:?} is reserved for seed tokens")]
-    ReservedEdgeId(EdgeId),
+    ReservedEdgeId(EdgeId<S>),
 
     // ── Invariant 6 ────────────────────────────────────────────────────────
     #[error("{site} refers to expression {expr:?}, which is not in the table")]
-    UnknownExpr { site: SmolStr, expr: ExprId },
+    UnknownExpr { site: SmolStr, expr: ExprId<S> },
     #[error("node {0:?} still carries an `expand`; executable plans are fully lowered")]
-    HirFieldInPlan(NodeId),
+    HirFieldInPlan(NodeId<S>),
     #[error("node {node:?} still carries an unresolved config placeholder at `{path}`")]
-    HirConfigInPlan { node: NodeId, path: String },
+    HirConfigInPlan { node: NodeId<S>, path: String },
 
     // ── Invariant 8 ────────────────────────────────────────────────────────
     #[error(
@@ -85,35 +85,35 @@ pub enum ValidationError {
          generations 1 and up, so no generation ever holds a token on both and any other \
          policy is unsatisfiable forever"
     )]
-    LoopHeadMustJoinAny(NodeId),
+    LoopHeadMustJoinAny(NodeId<S>),
 
     // ── Invariant 7 ────────────────────────────────────────────────────────
     #[error("node {node:?}: expansion subgraph entry {entry:?} does not reach exit {exit:?}")]
     ExitUnreachable {
-        node: NodeId,
-        entry: NodeId,
-        exit: NodeId,
+        node: NodeId<S>,
+        entry: NodeId<S>,
+        exit: NodeId<S>,
     },
     #[error(
         "node {node:?}: expansion subgraph exit {exit:?} does not postdominate entry {entry:?}; \
          {offender:?} can complete the region without reaching the exit"
     )]
     ExitNotPostdominator {
-        node: NodeId,
-        entry: NodeId,
-        exit: NodeId,
-        offender: NodeId,
+        node: NodeId<S>,
+        entry: NodeId<S>,
+        exit: NodeId<S>,
+        offender: NodeId<S>,
     },
     #[error(
         "node {node:?}: edge {edge:?} crosses the expansion subgraph boundary; \
          only edges into the entry and out of the exit may cross"
     )]
-    BoundaryCrossing { node: NodeId, edge: EdgeId },
+    BoundaryCrossing { node: NodeId<S>, edge: EdgeId<S> },
 }
 
 /// Something worth flagging that is still a legal graph.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ValidationWarning {
+pub enum ValidationWarning<S = Live> {
     #[error(
         "scope {scope:?} can be re-entered at {at:?}: a path leaves the scope through \
          {via:?} and comes back. A scope is released once nothing in it can run, and \
@@ -125,21 +125,21 @@ pub enum ValidationWarning {
          releasing state."
     )]
     ScopeReentry {
-        scope: ScopeId,
+        scope: ScopeId<S>,
         /// The node inside the scope the path comes back to.
-        at: NodeId,
+        at: NodeId<S>,
         /// The node outside the scope the path travels through.
-        via: NodeId,
+        via: NodeId<S>,
     },
     #[error(
         "node {node:?} sets `run_on_cancel` on an expansion node; a cancelled scope \
          never splices, so the flag is ignored (v1). Flag the template nodes inside \
          the region instead — clones inherit it"
     )]
-    RunOnCancelExpansion { node: NodeId },
+    RunOnCancelExpansion { node: NodeId<S> },
 }
 
-impl ValidationWarning {
+impl<S> ValidationWarning<S> {
     /// The diagnostic code a frontend reports this warning under.
     pub fn code(&self) -> &'static str {
         match self {
@@ -149,7 +149,7 @@ impl ValidationWarning {
     }
 
     /// The node a frontend anchors the diagnostic's span to.
-    pub fn at(&self) -> NodeId {
+    pub fn at(&self) -> NodeId<S> {
         match self {
             Self::ScopeReentry { at, .. } => *at,
             Self::RunOnCancelExpansion { node } => *node,
@@ -169,20 +169,29 @@ impl ValidationWarning {
 }
 
 /// Everything one validation pass found. Errors block a load; warnings do not.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ValidationReport {
-    pub errors: Vec<ValidationError>,
-    pub warnings: Vec<ValidationWarning>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidationReport<S = Live> {
+    pub errors: Vec<ValidationError<S>>,
+    pub warnings: Vec<ValidationWarning<S>>,
 }
 
-impl ValidationReport {
+impl<S> Default for ValidationReport<S> {
+    fn default() -> Self {
+        Self {
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+impl<S> ValidationReport<S> {
     /// No errors. Warnings may still be present.
     pub fn is_ok(&self) -> bool {
         self.errors.is_empty()
     }
 
     /// The warnings, or the errors that block the load.
-    pub fn into_result(self) -> Result<Vec<ValidationWarning>, Vec<ValidationError>> {
+    pub fn into_result(self) -> Result<Vec<ValidationWarning<S>>, Vec<ValidationError<S>>> {
         if self.errors.is_empty() {
             Ok(self.warnings)
         } else {
@@ -194,17 +203,17 @@ impl ValidationReport {
 /// Validate a graph in HIR form: `expand` and config placeholders are allowed.
 ///
 /// Errors only. Use [`check`] when the warnings matter too.
-pub fn validate(graph: &Graph) -> Result<(), Vec<ValidationError>> {
+pub fn validate<S>(graph: &Graph<S>) -> Result<(), Vec<ValidationError<S>>> {
     validate_with(graph, None)
 }
 
 /// Validate a graph and return both errors and warnings.
-pub fn check(graph: &Graph) -> ValidationReport {
+pub fn check<S>(graph: &Graph<S>) -> ValidationReport<S> {
     check_with(graph, None)
 }
 
 /// Validate a graph against a step registry and return both errors and warnings.
-pub fn check_with(graph: &Graph, registry: Option<&dyn StepKinds>) -> ValidationReport {
+pub fn check_with<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> ValidationReport<S> {
     let mut warnings = Vec::new();
     check_scope_reentry(graph, &mut warnings);
     check_run_on_cancel(graph, &mut warnings);
@@ -216,21 +225,21 @@ pub fn check_with(graph: &Graph, registry: Option<&dyn StepKinds>) -> Validation
 
 /// Validate an executable plan: everything [`validate`] checks, plus invariant 6's
 /// requirement that no HIR-only field survives.
-pub fn validate_plan(graph: &Graph) -> Result<(), Vec<ValidationError>> {
+pub fn validate_plan<S>(graph: &Graph<S>) -> Result<(), Vec<ValidationError<S>>> {
     let mut errors = collect(graph, None);
     check_fully_lowered(graph, &mut errors);
     done(errors)
 }
 
 /// Validate a graph and resolve every step kind against `registry`.
-pub fn validate_with(
-    graph: &Graph,
+pub fn validate_with<S>(
+    graph: &Graph<S>,
     registry: Option<&dyn StepKinds>,
-) -> Result<(), Vec<ValidationError>> {
+) -> Result<(), Vec<ValidationError<S>>> {
     done(collect(graph, registry))
 }
 
-fn done(errors: Vec<ValidationError>) -> Result<(), Vec<ValidationError>> {
+fn done<S>(errors: Vec<ValidationError<S>>) -> Result<(), Vec<ValidationError<S>>> {
     if errors.is_empty() {
         Ok(())
     } else {
@@ -238,7 +247,7 @@ fn done(errors: Vec<ValidationError>) -> Result<(), Vec<ValidationError>> {
     }
 }
 
-fn collect(graph: &Graph, registry: Option<&dyn StepKinds>) -> Vec<ValidationError> {
+pub(crate) fn collect<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> Vec<ValidationError<S>> {
     let mut errors = Vec::new();
     check_structure(graph, registry, &mut errors);
     check_completion(graph, &mut errors);
@@ -254,10 +263,10 @@ fn collect(graph: &Graph, registry: Option<&dyn StepKinds>) -> Vec<ValidationErr
 
 // ── Structure ─────────────────────────────────────────────────────────────
 
-fn check_structure(
-    graph: &Graph,
+fn check_structure<S>(
+    graph: &Graph<S>,
     registry: Option<&dyn StepKinds>,
-    errors: &mut Vec<ValidationError>,
+    errors: &mut Vec<ValidationError<S>>,
 ) {
     for (index, scope) in graph.scopes.iter().enumerate() {
         if scope.id.index() != index {
@@ -332,7 +341,7 @@ fn check_structure(
 /// `Completion::TerminalNode` must name a node that exists. Nothing more: the node
 /// is *expected* to be terminal, but the semantics only need a final record, so
 /// "terminal" and outside-expansion topology rules belong to frontends.
-fn check_completion(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_completion<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     if let Completion::TerminalNode(node) = graph.completion
         && graph.node(node).is_none()
     {
@@ -342,7 +351,7 @@ fn check_completion(graph: &Graph, errors: &mut Vec<ValidationError>) {
 
 /// Invariant 5: edge ids are unique across the whole graph, and none reuses the
 /// reserved seed id.
-fn check_edge_ids(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_edge_ids<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     let mut seen = HashSet::new();
     let mut reported = HashSet::new();
     for edge in graph.edges() {
@@ -356,7 +365,7 @@ fn check_edge_ids(graph: &Graph, errors: &mut Vec<ValidationError>) {
 }
 
 /// Invariants 2 and 3.
-fn check_routing_shape(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_routing_shape<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         for (group_index, group) in node.routing.groups.iter().enumerate() {
             if group.arms.is_empty() {
@@ -368,7 +377,7 @@ fn check_routing_shape(graph: &Graph, errors: &mut Vec<ValidationError>) {
             }
             let last = group.arms.len() - 1;
             for (arm_index, arm) in group.arms.iter().enumerate() {
-                if arm.guard == Guard::Always && arm_index != last {
+                if matches!(arm.guard, Guard::Always) && arm_index != last {
                     errors.push(ValidationError::AlwaysNotLast {
                         node: node.id,
                         arm: arm_index,
@@ -381,9 +390,9 @@ fn check_routing_shape(graph: &Graph, errors: &mut Vec<ValidationError>) {
 
 // ── Invariant 6 (references) ──────────────────────────────────────────────
 
-fn check_exprs_resolve(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_exprs_resolve<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     let table = &graph.exprs;
-    let check = |site: String, id: ExprId, errors: &mut Vec<ValidationError>| {
+    let check = |site: String, id: ExprId<S>, errors: &mut Vec<ValidationError<S>>| {
         if table.get(id).is_none() {
             errors.push(ValidationError::UnknownExpr {
                 site: SmolStr::new(&site),
@@ -425,7 +434,7 @@ fn check_exprs_resolve(graph: &Graph, errors: &mut Vec<ValidationError>) {
     }
 }
 
-fn children(expr: &Expr) -> Vec<ExprId> {
+fn children<S>(expr: &Expr<S>) -> Vec<ExprId<S>> {
     match expr {
         Expr::Lit(_) | Expr::Var(_) => Vec::new(),
         Expr::Field(base, _) => vec![*base],
@@ -443,7 +452,7 @@ fn children(expr: &Expr) -> Vec<ExprId> {
     }
 }
 
-fn check_fully_lowered(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_fully_lowered<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         if node.expand.is_some() {
             errors.push(ValidationError::HirFieldInPlan(node.id));
@@ -462,7 +471,7 @@ fn check_fully_lowered(graph: &Graph, errors: &mut Vec<ValidationError>) {
 /// Every cycle contains at least one back edge — equivalently, the graph with back
 /// edges removed is acyclic. Reports one representative cycle per offending
 /// strongly connected component.
-fn check_back_edges(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_back_edges<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     // Iterative DFS over forward edges only, tracking the current path so a
     // rediscovered grey node yields the cycle itself, not just "a cycle exists".
     #[derive(Clone, Copy, PartialEq)]
@@ -476,7 +485,7 @@ fn check_back_edges(graph: &Graph, errors: &mut Vec<ValidationError>) {
     let mut color = vec![Color::White; n];
     let mut reported: HashSet<BTreeSet<u32>> = HashSet::new();
 
-    let successors = |node: NodeId| -> Vec<NodeId> {
+    let successors = |node: NodeId<S>| -> Vec<NodeId<S>> {
         graph
             .node(node)
             .into_iter()
@@ -487,13 +496,13 @@ fn check_back_edges(graph: &Graph, errors: &mut Vec<ValidationError>) {
             .collect()
     };
 
-    for start in (0..n).map(|i| NodeId::new(i as u32)) {
+    for start in (0..n).map(|i| NodeId::<S>::new(i as u32)) {
         if color[start.index()] != Color::White {
             continue;
         }
         // (node, index of the next successor to visit)
-        let mut stack: Vec<(NodeId, usize)> = vec![(start, 0)];
-        let mut path: Vec<NodeId> = vec![start];
+        let mut stack: Vec<(NodeId<S>, usize)> = vec![(start, 0)];
+        let mut path: Vec<NodeId<S>> = vec![start];
         color[start.index()] = Color::Grey;
 
         while let Some((node, cursor)) = stack.pop() {
@@ -504,7 +513,7 @@ fn check_back_edges(graph: &Graph, errors: &mut Vec<ValidationError>) {
                 match color[next.index()] {
                     Color::Grey => {
                         let at = path.iter().position(|p| *p == next).unwrap_or(0);
-                        let cycle: Vec<NodeId> = path[at..].to_vec();
+                        let cycle: Vec<NodeId<S>> = path[at..].to_vec();
                         let key: BTreeSet<u32> = cycle.iter().map(|c| c.raw()).collect();
                         if reported.insert(key) {
                             errors.push(ValidationError::CycleWithoutBackEdge(cycle));
@@ -527,7 +536,7 @@ fn check_back_edges(graph: &Graph, errors: &mut Vec<ValidationError>) {
 
 // ── Invariant 4 ───────────────────────────────────────────────────────────
 
-fn check_budgets(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_budgets<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         if node.budget.max_firings == 0 {
             errors.push(ValidationError::ZeroBudget(node.id));
@@ -536,13 +545,13 @@ fn check_budgets(graph: &Graph, errors: &mut Vec<ValidationError>) {
 
     // Anything downstream of a back edge can fire once per generation, so its cap
     // is what makes the run terminate.
-    let mut queue: VecDeque<NodeId> = graph
+    let mut queue: VecDeque<NodeId<S>> = graph
         .edges()
         .filter(|e| e.back)
         .map(|e| e.to)
         .filter(|to| graph.node(*to).is_some())
         .collect();
-    let mut seen: HashSet<NodeId> = queue.iter().copied().collect();
+    let mut seen: HashSet<NodeId<S>> = queue.iter().copied().collect();
     while let Some(node) = queue.pop_front() {
         if let Some(nd) = graph.node(node) {
             if !nd.budget.is_finite() {
@@ -559,7 +568,7 @@ fn check_budgets(graph: &Graph, errors: &mut Vec<ValidationError>) {
 
 // ── Invariant 7 ───────────────────────────────────────────────────────────
 
-fn check_expansions(graph: &Graph, errors: &mut Vec<ValidationError>) {
+fn check_expansions<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
         let Some(Expansion::ForEach {
             target: ExpandTarget::Subgraph { entry, exit },
@@ -580,7 +589,7 @@ fn check_expansions(graph: &Graph, errors: &mut Vec<ValidationError>) {
 
         // The region: everything reachable from the entry without passing through
         // the exit. The exit belongs to it but is not traversed.
-        let mut region: HashSet<NodeId> = HashSet::from([entry]);
+        let mut region: HashSet<NodeId<S>> = HashSet::from([entry]);
         let mut queue = VecDeque::from([entry]);
         while let Some(node_id) = queue.pop_front() {
             if node_id == exit {
@@ -655,8 +664,8 @@ fn check_expansions(graph: &Graph, errors: &mut Vec<ValidationError>) {
 /// The corollary users meet first: a node cannot be both a multi-branch `All` join
 /// and a loop head. Put a dedicated join node in front of the loop head and let the
 /// back edge target the head.
-fn check_loop_head_joins(graph: &Graph, errors: &mut Vec<ValidationError>) {
-    let mut heads: BTreeSet<NodeId> = BTreeSet::new();
+fn check_loop_head_joins<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
+    let mut heads: BTreeSet<NodeId<S>> = BTreeSet::new();
     for edge in graph.edges() {
         if edge.back && graph.node(edge.to).is_some() {
             heads.insert(edge.to);
@@ -692,14 +701,14 @@ fn check_loop_head_joins(graph: &Graph, errors: &mut Vec<ValidationError>) {
 ///
 /// `Any` and `Quorum` re-entry nodes keep the warning: those can genuinely fire on
 /// the outside token alone, after the scope has been released.
-fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
-    let mut by_scope: BTreeMap<ScopeId, BTreeSet<NodeId>> = BTreeMap::new();
+fn check_scope_reentry<S>(graph: &Graph<S>, warnings: &mut Vec<ValidationWarning<S>>) {
+    let mut by_scope: BTreeMap<ScopeId<S>, BTreeSet<NodeId<S>>> = BTreeMap::new();
     for node in &graph.nodes {
         by_scope.entry(node.scope).or_default().insert(node.id);
     }
 
-    let mut successors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut incoming: HashMap<NodeId, Vec<(NodeId, bool)>> = HashMap::new();
+    let mut successors: HashMap<NodeId<S>, Vec<NodeId<S>>> = HashMap::new();
+    let mut incoming: HashMap<NodeId<S>, Vec<(NodeId<S>, bool)>> = HashMap::new();
     for node in &graph.nodes {
         for edge in node.routing.edges() {
             if graph.node(edge.to).is_some() {
@@ -711,7 +720,7 @@ fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
             }
         }
     }
-    let predecessors: HashMap<NodeId, Vec<NodeId>> = incoming
+    let predecessors: HashMap<NodeId<S>, Vec<NodeId<S>>> = incoming
         .iter()
         .map(|(node, sources)| (*node, sources.iter().map(|(from, _)| *from).collect()))
         .collect();
@@ -720,7 +729,7 @@ fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
         let downstream = reachable(members, &successors);
         let upstream = reachable(members, &predecessors);
         // Nodes outside the scope that sit on a leave-and-return path.
-        let outside: BTreeSet<NodeId> = downstream
+        let outside: BTreeSet<NodeId<S>> = downstream
             .intersection(&upstream)
             .filter(|node| !members.contains(node))
             .copied()
@@ -755,7 +764,7 @@ fn check_scope_reentry(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
 /// Warn where `run_on_cancel` sits on an expansion node: a cancelled scope never
 /// splices, so the flag can never admit anything there. v1 ignores it; the fix is to
 /// flag the template nodes inside the region, which clones inherit.
-fn check_run_on_cancel(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
+fn check_run_on_cancel<S>(graph: &Graph<S>, warnings: &mut Vec<ValidationWarning<S>>) {
     for node in &graph.nodes {
         if node.run_on_cancel && node.expand.is_some() {
             warnings.push(ValidationWarning::RunOnCancelExpansion { node: node.id });
@@ -764,9 +773,12 @@ fn check_run_on_cancel(graph: &Graph, warnings: &mut Vec<ValidationWarning>) {
 }
 
 /// Every node reachable from `seeds` in one or more steps.
-fn reachable(seeds: &BTreeSet<NodeId>, edges: &HashMap<NodeId, Vec<NodeId>>) -> BTreeSet<NodeId> {
+fn reachable<S>(
+    seeds: &BTreeSet<NodeId<S>>,
+    edges: &HashMap<NodeId<S>, Vec<NodeId<S>>>,
+) -> BTreeSet<NodeId<S>> {
     let mut seen = BTreeSet::new();
-    let mut queue: VecDeque<NodeId> = seeds
+    let mut queue: VecDeque<NodeId<S>> = seeds
         .iter()
         .flat_map(|node| edges.get(node).into_iter().flatten().copied())
         .collect();
@@ -780,7 +792,7 @@ fn reachable(seeds: &BTreeSet<NodeId>, edges: &HashMap<NodeId, Vec<NodeId>>) -> 
 }
 
 /// Map of edge id to the node it leaves, built once for callers that need it often.
-pub fn edge_sources(graph: &Graph) -> HashMap<EdgeId, NodeId> {
+pub fn edge_sources<S>(graph: &Graph<S>) -> HashMap<EdgeId<S>, NodeId<S>> {
     let mut map = HashMap::new();
     for node in &graph.nodes {
         for edge in node.routing.edges() {
