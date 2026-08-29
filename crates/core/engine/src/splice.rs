@@ -22,9 +22,7 @@ use ir::{
 use smol_str::SmolStr;
 
 use crate::event::Event;
-use crate::state::{
-    AdmissionKey, Allocators, AppliedSplice, EngineState, SpliceBatchId, SpliceProducer,
-};
+use crate::state::{AdmissionKey, Allocators, AppliedSplice, EngineState, SpliceProducer};
 
 /// The failure class every rejected splice transaction converts to. Registered
 /// in the §13 table; an ordinary retry class — a matching `retry_on` re-runs
@@ -612,6 +610,7 @@ pub(crate) fn apply_prepared_splice(
         state.graph.scopes.push(scope);
     }
 
+    let batch = state.next_splice_batch();
     let mut batch_nodes = BTreeSet::new();
     let mut bindings = prepared.bindings;
     for node in prepared.nodes {
@@ -620,10 +619,7 @@ pub(crate) fn apply_prepared_splice(
         debug_assert_eq!(node.id.index(), state.graph.nodes.len());
         let id = node.id;
         state.graph.nodes.push(node);
-        if let Some(node_bindings) = bindings.remove(&id) {
-            state.set_clone_bindings(id, node_bindings);
-        }
-        state.set_node_cancel_scope(id, prepared.cancel_scope);
+        state.register_spliced_node(id, prepared.cancel_scope, batch, bindings.remove(&id));
         batch_nodes.insert(id);
     }
     for seed in &prepared.seeds {
@@ -655,11 +651,12 @@ pub(crate) fn apply_prepared_splice(
     // Batch identity is apply-time bookkeeping, like ownership: the id is the
     // record's position in the applied list, stamped here for both producers.
     state.push_splice(AppliedSplice {
-        batch: SpliceBatchId(state.splices().len() as u32),
+        batch,
         owner: prepared.owner,
         nodes: batch_nodes,
         cancel_scope: prepared.cancel_scope,
         producer: prepared.producer,
+        live_count: 0,
     });
 
     for seed in prepared.seeds {

@@ -206,7 +206,7 @@ fn try_fire(
     if admitted
         && let Some(splice) = state.splice_for_node(node_id)
         && let Some(max) = splice.max_parallel()
-        && state.live_in_splice(splice) >= max.max(1)
+        && splice.live_count() >= max.max(1)
     {
         state.defer(key);
         return;

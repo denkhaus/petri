@@ -96,6 +96,8 @@ pub struct AppliedSplice {
     pub nodes: BTreeSet<NodeId>,
     pub cancel_scope: CancelScopeId,
     pub producer: SpliceProducer,
+    /// Firings currently occupying this batch's admission slots.
+    pub(crate) live_count: u32,
 }
 
 impl AppliedSplice {
@@ -112,6 +114,32 @@ impl AppliedSplice {
         match &self.producer {
             SpliceProducer::ForEach { fail_fast, .. } => *fail_fast,
             SpliceProducer::Outcome { .. } => false,
+        }
+    }
+
+    /// Firings currently occupying this batch's admission slots.
+    pub fn live_count(&self) -> u32 {
+        self.live_count
+    }
+}
+
+/// Runtime facts for one graph node. The vector holding these records stays
+/// aligned with `Graph::nodes`, so node metadata needs no parallel maps or scans.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct NodeRuntime {
+    cancel_scope: CancelScopeId,
+    batch: Option<SpliceBatchId>,
+    clone_bindings: Option<BTreeMap<SmolStr, Value>>,
+    superseded: bool,
+}
+
+impl NodeRuntime {
+    fn declared() -> Self {
+        Self {
+            cancel_scope: CancelScopeId::ROOT,
+            batch: None,
+            clone_bindings: None,
+            superseded: false,
         }
     }
 }
@@ -234,20 +262,14 @@ pub struct EngineState {
     run: RunContext,
 
     cancel_scopes: BTreeMap<CancelScopeId, CancelScope>,
-    /// Innermost cancel scope per node; anything unlisted belongs to the root.
-    node_cancel_scope: BTreeMap<NodeId, CancelScopeId>,
+    /// Per-node runtime facts, indexed directly by `NodeId`.
+    node_runtime: Vec<NodeRuntime>,
     splices: Vec<AppliedSplice>,
     /// Admissions retracted by a `Replace`: their parked tokens were dropped, and
     /// later tokens for these exact keys are swallowed. Kept flat beside the
     /// per-batch records because the swallow check runs per token.
     #[serde(default)]
     retracted_admissions: BTreeSet<AdmissionKey>,
-    /// Nodes replaced by expansion clones. They never fire, and their outgoing
-    /// edges stop counting toward downstream joins.
-    superseded: BTreeSet<NodeId>,
-    /// `item` / `index` bindings a clone's nodes see.
-    clone_bindings: BTreeMap<NodeId, BTreeMap<SmolStr, Value>>,
-
     /// Firings settled by a cancel or kill while awaiting a retry backoff. The
     /// driver's sleeper cannot be recalled, so the one matching late `RetryElapsed`
     /// consumes its tombstone silently; any other invalid `RetryElapsed` still
@@ -293,6 +315,7 @@ impl EngineState {
                 killed: false,
             },
         );
+        let node_runtime = vec![NodeRuntime::declared(); graph.nodes.len()];
         Self {
             graph,
             log: EventLog::new(),
@@ -305,11 +328,9 @@ impl EngineState {
             cancelled_outcomes: BTreeSet::new(),
             run: RunContext::new(),
             cancel_scopes,
-            node_cancel_scope: BTreeMap::new(),
+            node_runtime,
             splices: Vec::new(),
             retracted_admissions: BTreeSet::new(),
-            superseded: BTreeSet::new(),
-            clone_bindings: BTreeMap::new(),
             retry_tombstones: BTreeSet::new(),
             seed_edges: BTreeMap::new(),
             held_scopes: BTreeSet::new(),
@@ -427,7 +448,9 @@ impl EngineState {
 
     /// Nodes replaced by expansion clones.
     pub fn is_superseded(&self, node: NodeId) -> bool {
-        self.superseded.contains(&node)
+        self.node_runtime
+            .get(node.index())
+            .is_some_and(|runtime| runtime.superseded)
     }
 
     /// Nothing is running and nothing more can start.
@@ -560,7 +583,7 @@ impl EngineState {
             .graph
             .nodes
             .iter()
-            .filter(|n| !self.superseded.contains(&n.id))
+            .filter(|n| !self.is_superseded(n.id))
             .flat_map(|n| n.routing.edges())
             .filter(|e| e.to == node)
             .map(|e| e.id)
@@ -627,7 +650,12 @@ impl EngineState {
     }
 
     pub(crate) fn insert_firing(&mut self, firing: Firing) {
-        self.live.insert(firing.id, firing);
+        let node = firing.node;
+        let previous = self.live.insert(firing.id, firing);
+        debug_assert!(previous.is_none());
+        if previous.is_none() {
+            self.adjust_batch_live(node, 1);
+        }
     }
 
     pub(crate) fn firing_mut(&mut self, id: FiringId) -> Option<&mut Firing> {
@@ -635,7 +663,9 @@ impl EngineState {
     }
 
     pub(crate) fn remove_firing(&mut self, id: FiringId) -> Option<Firing> {
-        self.live.remove(&id)
+        let firing = self.live.remove(&id)?;
+        self.adjust_batch_live(firing.node, -1);
+        Some(firing)
     }
 
     /// Record a firing's final outcome: history, the node's run-context record, and
@@ -663,15 +693,15 @@ impl EngineState {
     }
 
     pub(crate) fn clone_bindings_for(&self, node: NodeId) -> Option<&BTreeMap<SmolStr, Value>> {
-        self.clone_bindings.get(&node)
-    }
-
-    pub(crate) fn set_clone_bindings(&mut self, node: NodeId, bindings: BTreeMap<SmolStr, Value>) {
-        self.clone_bindings.insert(node, bindings);
+        self.node_runtime
+            .get(node.index())
+            .and_then(|runtime| runtime.clone_bindings.as_ref())
     }
 
     pub(crate) fn supersede(&mut self, node: NodeId) {
-        self.superseded.insert(node);
+        if let Some(runtime) = self.node_runtime.get_mut(node.index()) {
+            runtime.superseded = true;
+        }
     }
 
     pub(crate) fn add_cancel_scope(
@@ -696,14 +726,10 @@ impl EngineState {
         }
     }
 
-    pub(crate) fn set_node_cancel_scope(&mut self, node: NodeId, scope: CancelScopeId) {
-        self.node_cancel_scope.insert(node, scope);
-    }
-
     pub(crate) fn cancel_scope_of(&self, node: NodeId) -> CancelScopeId {
-        self.node_cancel_scope
-            .get(&node)
-            .copied()
+        self.node_runtime
+            .get(node.index())
+            .map(|runtime| runtime.cancel_scope)
             .unwrap_or(CancelScopeId::ROOT)
     }
 
@@ -798,11 +824,54 @@ impl EngineState {
     }
 
     pub(crate) fn push_splice(&mut self, splice: AppliedSplice) {
+        debug_assert_eq!(splice.batch.0 as usize, self.splices.len());
         self.splices.push(splice);
     }
 
+    pub(crate) fn next_splice_batch(&self) -> SpliceBatchId {
+        SpliceBatchId(self.splices.len() as u32)
+    }
+
+    pub(crate) fn register_spliced_node(
+        &mut self,
+        node: NodeId,
+        cancel_scope: CancelScopeId,
+        batch: SpliceBatchId,
+        clone_bindings: Option<BTreeMap<SmolStr, Value>>,
+    ) {
+        debug_assert_eq!(node.index(), self.node_runtime.len());
+        self.node_runtime.push(NodeRuntime {
+            cancel_scope,
+            batch: Some(batch),
+            clone_bindings,
+            superseded: false,
+        });
+    }
+
     pub(crate) fn splice_for_node(&self, node: NodeId) -> Option<&AppliedSplice> {
-        self.splices.iter().find(|s| s.nodes.contains(&node))
+        let batch = self.node_runtime.get(node.index())?.batch?;
+        self.splices.get(batch.0 as usize)
+    }
+
+    fn adjust_batch_live(&mut self, node: NodeId, change: i32) {
+        let Some(batch) = self
+            .node_runtime
+            .get(node.index())
+            .and_then(|runtime| runtime.batch)
+        else {
+            return;
+        };
+        let splice = self
+            .splices
+            .get_mut(batch.0 as usize)
+            .expect("node references an applied splice batch");
+        if change > 0 {
+            splice.live_count += change as u32;
+        } else {
+            let decrease = change.unsigned_abs();
+            debug_assert!(splice.live_count >= decrease);
+            splice.live_count -= decrease;
+        }
     }
 
     /// A copy of the id allocators for a preparation transaction. Preparation
@@ -904,14 +973,6 @@ impl EngineState {
     pub(crate) fn is_admission_retracted(&self, node: NodeId, generation: Generation) -> bool {
         self.retracted_admissions
             .contains(&AdmissionKey { node, generation })
-    }
-
-    /// Live firings inside a splice, for `max_parallel` admission control.
-    pub(crate) fn live_in_splice(&self, splice: &AppliedSplice) -> u32 {
-        self.live
-            .values()
-            .filter(|f| splice.nodes.contains(&f.node))
-            .count() as u32
     }
 
     pub(crate) fn defer(&mut self, key: (NodeId, Generation)) {
