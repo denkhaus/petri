@@ -2,6 +2,7 @@
 name = "petri-github-actions"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "GitHub Actions step kinds: run: steps with the env-file protocol, and JavaScript actions fetched from their repositories."
 publish = false

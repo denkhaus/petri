@@ -2,6 +2,7 @@
 name = "petri-engine"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Pure, sans-IO token-flow state machine over the ir crate."
 publish = false

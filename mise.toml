@@ -8,6 +8,7 @@ minimum_release_age = "24h"
 [tools]
 rust = [
   { version = "1.97.1", profile = "minimal", components = ["clippy"] },
+  { version = "1.89.0", profile = "minimal" },
   { version = "nightly-2026-04-14", profile = "minimal", components = ["rustfmt"] },
 ]
 zizmor = "1.29.0"
@@ -45,6 +46,11 @@ run = "cargo test --locked --release --workspace --all-features"
 description = "Build the workspace in release mode"
 run = "cargo build --locked --workspace --release"
 
+[tasks."check:msrv"]
+description = "Check all targets with the declared minimum Rust version"
+env = { CARGO_TARGET_DIR = "{{config_root}}/target/msrv" }
+run = "cargo +1.89.0 check --locked --workspace --all-targets --all-features"
+
 [tasks."check:actions"]
 description = "Audit GitHub Actions workflows"
 run = "zizmor .github/workflows"
@@ -66,4 +72,4 @@ depends = [
 
 [tasks."check:nightly"]
 description = "Run the extended nightly verification gate"
-depends = ["check", "test:release"]
+depends = ["check", "check:msrv", "test:release"]

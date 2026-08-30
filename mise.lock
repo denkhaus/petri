@@ -16,6 +16,13 @@ backend = "core:rust"
 components = "rustfmt"
 profile = "minimal"
 
+[[tools.rust]]
+version = "1.89.0"
+backend = "core:rust"
+
+[tools.rust.options]
+profile = "minimal"
+
 [[tools.zizmor]]
 version = "1.29.0"
 backend = "aqua:zizmorcore/zizmor"

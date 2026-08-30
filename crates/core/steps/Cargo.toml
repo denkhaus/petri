@@ -2,6 +2,7 @@
 name = "petri-steps"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Step kinds. The process step, written once against ExecEnv."
 publish = false

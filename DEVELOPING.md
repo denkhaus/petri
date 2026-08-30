@@ -34,6 +34,7 @@ The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 | `mise run fmt:check` | Check formatting without changing files |
 | `mise run lint` | Run Clippy with warnings denied |
 | `mise run test` | Run the routine test suite |
+| `mise run check:msrv` | Check all targets with Rust 1.89 |
 | `mise run check` | Run the complete routine verification gate |
 | `mise run check:nightly` | Run the extended verification gate |
 
@@ -45,10 +46,11 @@ Petri follows the pinned Brynary Rust Style Guide. Run `mise run setup`, then re
 `.ai/style-guides/rust-style-guide/SKILL.md` before changing Rust code,
 configuration, project structure, or tests.
 
-Petri uses Rust 2024. Mise pins the development compiler and the nightly
-formatter. Tokio owns asynchronous subprocesses, timers, networking, and
-orchestration. Keep parsing, validation, graph transformations, and the engine
-state machine synchronous unless a real I/O boundary requires async.
+Petri uses Rust 2024 and supports Rust 1.89 or newer. Mise pins the minimum
+compiler, the development compiler, and the nightly formatter. Tokio owns
+asynchronous subprocesses, timers, networking, and orchestration. Keep parsing,
+validation, graph transformations, and the engine state machine synchronous
+unless a real I/O boundary requires async.
 
 The `petri-cli` crate owns Tokio runtime creation. Library crates can expose
 Tokio-based async APIs, but they must not create a process-wide runtime.
