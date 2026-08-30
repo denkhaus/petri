@@ -2,64 +2,63 @@
 
 The run-time counterpart of REPORT.md: every in-scope workflow that lowers, run end to end with `run:` scripts stubbed to `true` and `uses:` steps real. The outcome measures the runtime tier — checkout, action staging and execution, artifact and cache backends, cross-job flow — not the corpus projects' own builds.
 
-Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-2ea78b6f826c` (22.04/26.04 variants by label; the privileged dind flavor where the graph drives a Docker engine), matrices capped to their first leg, each workflow capped at 900s wall clock, parallelism 4. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied.
+Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-2ea78b6f826c` (22.04/26.04 variants by label; the privileged dind flavor where the graph drives a Docker engine), matrices capped to their first leg, each workflow capped at 900s wall clock, parallelism 4; the full-image list runs on the ubuntu-latest capture, since its workflows compile native gems against full-image packages. The artifact and cache backends are live: each run gets the distribution's ObjectService, cache and tool cache in the host store, persistent across sweeps. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied.
 
 249 workflows in scope; 240 lower and were run.
 
 | Result (of the 240 run) | Count | Share |
 |---|---|---|
-| passed | 134 | 56% |
-| **failed on a runtime-tier gap** | 22 | 9% |
-| expected failure (server-coupled) | 82 | 34% |
+| passed | 142 | 59% |
+| **failed on a runtime-tier gap** | 7 | 3% |
+| expected failure (server-coupled) | 89 | 37% |
 | **timed out** | 2 | 1% |
 
 ## First failures — gaps, ranked
 
 | First failing step · class | Workflows |
 |---|---|
-| `ghcr.io/ossf/scorecard-action:v2.4.4 · exit_status:1` | 3 |
-| `github/codeql-action/analyze · exit_status:1` | 3 |
-| `ruby/setup-ruby · exit_status:1` | 3 |
-| `Dockerfile · exit_status:126` | 2 |
-| `actions/checkout · exit_status:1` | 2 |
-| `actions/github-script · exit_status:1` | 2 |
-| `(run)` | 1 |
-| `Dockerfile · action_image` | 1 |
+| `Dockerfile · exit_status:1` | 1 |
 | `PyO3/maturin-action · exit_status:1` | 1 |
-| `actions/upload-artifact` | 1 |
-| `dorny/paths-filter · exit_status:1` | 1 |
+| `actions/setup-python · exit_status:1` | 1 |
+| `devcontainers/ci · exit_status:1` | 1 |
 | `github/checkout · exit_status:1` | 1 |
+| `github/codeql-action/analyze · exit_status:1` | 1 |
 | `liskin/gh-problem-matcher-wrap · exit_status:1` | 1 |
 
 ## Expected failures — server-coupled, ranked
 
-First failures the sweep's own stance produces or no token-less local run can fix: OIDC, GitHub App and repository secrets, git credentials for the real checkout action, third-party SaaS backends, cross-run artifact reads, and steps that read an output a stubbed `run:` script would have written. Kept out of the gap ranking so it never drowns in server-bound noise.
+First failures the sweep's own stance produces or no token-less local run can fix: OIDC, GitHub App and repository secrets, git credentials for the real checkout action, third-party SaaS backends, cross-run artifact reads, steps that read an output a stubbed `run:` script would have written, refs and event payloads only a real triggering run has, and actions that read or write only the hosted service can answer. Kept out of the gap ranking so it never drowns in server-bound noise.
 
 | First failing step · why | Workflows |
 |---|---|
 | `actions/create-github-app-token · needs a repository secret` | 9 |
-| `actions/download-artifact · cross-run artifact download (REST API)` | 8 |
 | `actions/upload-artifact · uploads outputs a stubbed build never produced` | 6 |
+| `actions/github-script · needs a repository secret` | 5 |
 | `actions/setup-node · needs a repository secret` | 5 |
 | `github/checkout · amd64-only image; this host's emulation cannot run it` | 5 |
 | `open-security-tools/ost-simple-sts · needs a repository secret` | 5 |
+| `actions/download-artifact · cross-run artifact download (REST API)` | 4 |
 | `job marker · requires its caller's inputs (a reusable workflow run standalone)` | 4 |
 | `actions/checkout · needs a repository secret` | 3 |
-| `actions/github-script · needs a repository secret` | 3 |
 | `actions/github-script · the inline script threw (it acts on the triggering event, which a local run lacks)` | 3 |
 | `actions/setup-go · reads a stubbed script's output` | 3 |
+| `ghcr.io/ossf/scorecard-action:v2.4.4 · signs results with the Actions-issued GITHUB_TOKEN` | 3 |
 | `gr2m/create-or-update-pull-request-action · needs a repository secret` | 3 |
 | `JamesIves/github-pages-deploy-action · pushes a deployment branch` | 2 |
+| `actions/checkout · checks out a ref built from an empty dispatch input` | 2 |
 | `dessant/lock-threads · mutates issues over the API` | 2 |
+| `github/codeql-action/analyze · reads its own workflow run (no server-side run exists)` | 2 |
 | `peter-evans/create-pull-request · needs a repository secret` | 2 |
 | `release-drafter/release-drafter · mutates releases over the API` | 2 |
 | `rust-lang/crates-io-auth-action · OIDC token exchange` | 2 |
 | `./.github/actions/upload-turboyet-data · needs a repository secret` | 1 |
 | `actions/publish-immutable-action · publishes to GitHub's registry` | 1 |
 | `actions/stale · needs a repository secret` | 1 |
+| `actions/upload-artifact · reads a stubbed script's output` | 1 |
 | `depot/build-push-action · builds on the depot.dev service (project token)` | 1 |
 | `dessant/lock-threads · needs a repository secret` | 1 |
 | `docker.io/chko/docker-pushrm:1 · needs a repository secret` | 1 |
+| `dorny/paths-filter · reads the triggering pull request (no local event)` | 1 |
 | `github/codeql-action/upload-sarif · uploads to GitHub code scanning` | 1 |
 | `github/issue-labeler · mutates issues over the API` | 1 |
 | `google-github-actions/auth · needs a repository secret` | 1 |
@@ -75,7 +74,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | Repository | Workflow | Result | First failure |
 |---|---|---|---|
 | actions/checkout | `check-dist.yml` | pass | — |
-| actions/checkout | `codeql-analysis.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run` |
+| actions/checkout | `codeql-analysis.yml` | expected failure | `github/codeql-action/analyze` — step exited with status 1 · `Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run` _(reads its own workflow run (no server-side run exists))_ |
 | actions/checkout | `licensed.yml` | pass | — |
 | actions/checkout | `publish-immutable-actions.yml` | expected failure | `actions/publish-immutable-action` — step exited with status 1 · `Error: Could not find Repository.` _(publishes to GitHub's registry)_ |
 | actions/checkout | `update-main-version.yml` | pass | — |
@@ -89,11 +88,11 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | astral-sh/ruff | `publish-docs.yml` | pass | — |
 | astral-sh/ruff | `publish-mirror.yml` | expected failure | `job marker` — could not build the firing environment: node NodeId(0): evaluating scope env `VERSION` failed: from_json needs valid JSON, got invalid JSON (EOF while parsing a value at line 1 column 0) _(requires its caller's inputs (a reusable workflow run standalone))_ |
 | astral-sh/ruff | `publish-playground.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: playground/ruff/dist. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
-| astral-sh/ruff | `publish-pypi.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
+| astral-sh/ruff | `publish-pypi.yml` | pass | — |
 | astral-sh/ruff | `publish-ty-playground.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: playground/ty/dist. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | astral-sh/ruff | `publish-versions.yml` | expected failure | `job marker` — could not build the firing environment: node NodeId(0): evaluating scope env `VERSION` failed: from_json needs valid JSON, got invalid JSON (EOF while parsing a value at line 1 column 0) _(requires its caller's inputs (a reusable workflow run standalone))_ |
-| astral-sh/ruff | `publish-wasm.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
-| astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
+| astral-sh/ruff | `publish-wasm.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Artifact not found for name: wasm-npm-web         Please ensure that your artifact is not expired and the artifact was uploaded using a compatible version of too…` _(cross-run artifact download (REST API))_ |
+| astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Artifact not found for name: ty-build-dependencies         Please ensure that your artifact is not expired and the artifact was uploaded using a compatible versi…` _(cross-run artifact download (REST API))_ |
 | astral-sh/ruff | `ty-ecosystem-report.yaml` | pass | — |
 | astral-sh/ruff | `typing_conformance.yaml` | pass | — |
 | astral-sh/uv | `bench.yml` | not lowered | `runs_on.unknown` |
@@ -113,27 +112,27 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | astral-sh/uv | `publish-crates.yml` | expected failure | `rust-lang/crates-io-auth-action` — step exited with status 1 · `Error: Please ensure the 'id-token' permission is set to 'write' in your workflow. For more information, see: https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-dep…` _(OIDC token exchange)_ |
 | astral-sh/uv | `publish-docs.yml` | pass | — |
 | astral-sh/uv | `publish-mirror.yml` | expected failure | `job marker` — could not build the firing environment: node NodeId(0): evaluating scope env `VERSION` failed: from_json needs valid JSON, got invalid JSON (EOF while parsing a value at line 1 column 0) _(requires its caller's inputs (a reusable workflow run standalone))_ |
-| astral-sh/uv | `publish-pypi.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
+| astral-sh/uv | `publish-pypi.yml` | pass | — |
 | astral-sh/uv | `publish-versions.yml` | expected failure | `job marker` — could not build the firing environment: node NodeId(0): evaluating scope env `VERSION` failed: from_json needs valid JSON, got invalid JSON (EOF while parsing a value at line 1 column 0) _(requires its caller's inputs (a reusable workflow run standalone))_ |
-| astral-sh/uv | `pull-request-conflicts.yml` | **fail** | `actions/upload-artifact` — step config failed to resolve |
-| astral-sh/uv | `pull-request-labels.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 128` |
+| astral-sh/uv | `pull-request-conflicts.yml` | expected failure | `actions/upload-artifact` — step config failed to resolve _(reads a stubbed script's output)_ |
+| astral-sh/uv | `pull-request-labels.yml` | expected failure | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 128` _(checks out a ref built from an empty dispatch input)_ |
 | astral-sh/uv | `pull-request-security-review.yml` | pass | — |
-| astral-sh/uv | `rebase-conflicted-pull-request.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /rebased.bundle. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
+| astral-sh/uv | `rebase-conflicted-pull-request.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /workspace/.ci/temp/rebased.bundle. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | astral-sh/uv | `release-prepare.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
 | astral-sh/uv | `reproduce-bug.yml` | pass | — |
 | astral-sh/uv | `sync-python-releases.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
 | astral-sh/uv | `sync-uv-dev.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
 | astral-sh/uv | `sync-uv-security.yml` | expected failure | `open-security-tools/ost-simple-sts` — no secret named `STS_API_URL` _(needs a repository secret)_ |
-| astral-sh/uv | `test-ecosystem.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
+| astral-sh/uv | `test-ecosystem.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Artifact not found for name: uv-linux-libc-         Please ensure that your artifact is not expired and the artifact was uploaded using a compatible version of t…` _(cross-run artifact download (REST API))_ |
 | astral-sh/uv | `update-issue-context.yml` | pass | — |
 | astral-sh/uv | `update-pull-request-parent.yml` | pass | — |
 | cli/cli | `agentics-maintenance.yml` | pass | — |
-| cli/cli | `bump-go.yml` | **fail** | `(run)` — engine error: unknown firing FiringId(1) |
+| cli/cli | `bump-go.yml` | pass | — |
 | cli/cli | `codeql.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Error: Encountered a fatal error while running "/opt/hostedtoolcache/CodeQL/2.26.3/x64/codeql/codeql database finalize --finalize-dataset --threads=18 --ram=14622 /workspace/.ci/temp/codeql_databases/…` |
 | cli/cli | `copilot-setup-steps.yml` | pass | — |
-| cli/cli | `dependabot-triage.lock.yml` | **fail** | `actions/github-script` — step exited with status 1 · `Error: ERR_CONFIG: ERR_CONFIG: Prompt output must stay within the runner temp directory` |
+| cli/cli | `dependabot-triage.lock.yml` | expected failure | `actions/github-script` — no secret named `GH_AW_GITHUB_MCP_SERVER_TOKEN` _(needs a repository secret)_ |
 | cli/cli | `govulncheck.yml` | expected failure | `github/codeql-action/upload-sarif` — step exited with status 1 · `Error: Path does not exist: gh.sarif` _(uploads to GitHub code scanning)_ |
-| cli/cli | `issue-triage.lock.yml` | **fail** | `actions/github-script` — step exited with status 1 · `Error: ERR_CONFIG: ERR_CONFIG: Prompt output must stay within the runner temp directory` |
+| cli/cli | `issue-triage.lock.yml` | expected failure | `actions/github-script` — no secret named `GH_AW_GITHUB_MCP_SERVER_TOKEN` _(needs a repository secret)_ |
 | cli/cli | `lint.yml` | pass | — |
 | cli/cli | `triage-issues.yml` | pass | — |
 | cli/cli | `triage-pull-requests.yml` | pass | — |
@@ -152,7 +151,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | django/django | `coverage_tests.yml` | pass | — |
 | django/django | `docs.yml` | pass | — |
 | django/django | `labels.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: Cannot read properties of undefined (reading 'title')` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
-| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: isort. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file mo…` |
+| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: flake8. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file m…` |
 | django/django | `new_contributor_pr.yml` | pass | — |
 | django/django | `playwright.yml` | pass | — |
 | django/django | `postgis.yml` | pass | — |
@@ -185,14 +184,14 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | hashicorp/terraform | `backport.yml` | pass | — |
 | hashicorp/terraform | `changelog-validation.yml` | pass | — |
 | hashicorp/terraform | `checks.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
-| hashicorp/terraform | `enforce-changelog.yml` | **fail** | `dorny/paths-filter` — step exited with status 1 · `Error: The process 'git rev-parse --abbrev-ref HEAD' failed with exit code 128` |
+| hashicorp/terraform | `enforce-changelog.yml` | expected failure | `dorny/paths-filter` — step exited with status 1 · `Error: The process 'git rev-parse --abbrev-ref HEAD' failed with exit code 128` _(reads the triggering pull request (no local event))_ |
 | hashicorp/terraform | `equivalence-test-diff.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
 | hashicorp/terraform | `equivalence-test-manual-update.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
 | hashicorp/terraform | `equivalence-test-update.yml` | pass | — |
 | hashicorp/terraform | `issue-comment-created.yml` | pass | — |
 | hashicorp/terraform | `lock.yml` | expected failure | `dessant/lock-threads` — step exited with status 1 · `Error: Must have admin rights to Repository. - https://docs.github.com/rest/issues/issues#lock-an-issue` _(mutates issues over the API)_ |
 | nodejs/node | `auto-start-ci.yml` | pass | — |
-| nodejs/node | `build-tarball.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
+| nodejs/node | `build-tarball.yml` | pass | — |
 | nodejs/node | `close-stalled.yml` | pass | — |
 | nodejs/node | `codeql.yml` | **timeout** | — |
 | nodejs/node | `comment-labeled.yml` | pass | — |
@@ -200,7 +199,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | nodejs/node | `commit-queue.yml` | pass | — |
 | nodejs/node | `coverage-linux-without-intl.yml` | pass | — |
 | nodejs/node | `coverage-linux.yml` | pass | — |
-| nodejs/node | `create-release-proposal.yml` | **fail** | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 1` |
+| nodejs/node | `create-release-proposal.yml` | expected failure | `actions/checkout` — step exited with status 1 · `Error: The process '/usr/bin/git' failed with exit code 1` _(checks out a ref built from an empty dispatch input)_ |
 | nodejs/node | `daily-wpt-fyi.yml` | pass | — |
 | nodejs/node | `daily.yml` | pass | — |
 | nodejs/node | `doc.yml` | pass | — |
@@ -216,7 +215,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | nodejs/node | `notify-on-push.yml` | pass | — |
 | nodejs/node | `notify-on-review-wanted.yml` | pass | — |
 | nodejs/node | `post-release.yml` | pass | — |
-| nodejs/node | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T15:19:28Z","repo":{"name":"github.com/nodejs/node","commit":"789c7fdc7c5180b58b215b81a2c1845d10379c61"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` |
+| nodejs/node | `scorecard.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T23:51:10Z","repo":{"name":"github.com/nodejs/node","commit":"045ff95365c8a65f8abc0a33efb055b6d9d93c03"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
 | nodejs/node | `stale.yml` | pass | — |
 | nodejs/node | `test-internet.yml` | pass | — |
 | nodejs/node | `test-linux-quic.yml` | not lowered | `action.local_missing` |
@@ -230,7 +229,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | ohmyzsh/ohmyzsh | `dependencies.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
 | ohmyzsh/ohmyzsh | `main.yml` | pass | — |
 | ohmyzsh/ohmyzsh | `project.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
-| ohmyzsh/ohmyzsh | `scorecard.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `2026/08/29 15:24:07 error SigningNew: invalid token: not a default GITHUB_TOKEN` |
+| ohmyzsh/ohmyzsh | `scorecard.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T23:53:45Z","repo":{"name":"github.com/ohmyzsh/ohmyzsh","commit":"4b657407c98bbc8830ae66c2ac7ff3d737c55a83"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
 | pola-rs/polars | `benchmark-remote.yml` | not lowered | `runs_on.unknown` |
 | pola-rs/polars | `benchmark.yml` | pass | — |
 | pola-rs/polars | `changes-dsl-labeler.yml` | pass | — |
@@ -251,14 +250,14 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | prometheus/prometheus | `buf-lint.yml` | pass | — |
 | prometheus/prometheus | `buf.yml` | pass | — |
 | prometheus/prometheus | `check_release_notes.yml` | pass | — |
-| prometheus/prometheus | `codeql-analysis.yml` | **fail** | `github/codeql-action/analyze` — step exited with status 1 · `Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run` |
+| prometheus/prometheus | `codeql-analysis.yml` | expected failure | `github/codeql-action/analyze` — step exited with status 1 · `Error: Not Found - https://docs.github.com/rest/actions/workflow-runs#get-a-workflow-run` _(reads its own workflow run (no server-side run exists))_ |
 | prometheus/prometheus | `container_description.yml` | expected failure | `docker.io/chko/docker-pushrm:1` — no secret named `DOCKER_HUB_PASSWORD` _(needs a repository secret)_ |
 | prometheus/prometheus | `fuzzing.yml` | pass | — |
 | prometheus/prometheus | `govulncheck.yml` | pass | — |
 | prometheus/prometheus | `lock.yml` | expected failure | `dessant/lock-threads` — no secret named `PROMBOT_LOCKTHREADS_TOKEN` _(needs a repository secret)_ |
 | prometheus/prometheus | `prombench.yml` | pass | — |
-| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container 6fbfb6a168e7044ee7fefe361e4bc6649f0dcbb23817eca40fc7b5a47ac29d47 is not running` |
-| prometheus/prometheus | `scorecards.yml` | **fail** | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T15:25:51Z","repo":{"name":"github.com/prometheus/prometheus","commit":"e06b2dc5a6149e20ca82fe936fb044a6dfe45958"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc6…` |
+| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container d9f5965ad6704c2514c711cad54e6928f632b372de96c08fce3bc7bcbc3755ff is not running` |
+| prometheus/prometheus | `scorecards.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T23:57:48Z","repo":{"name":"github.com/prometheus/prometheus","commit":"e06b2dc5a6149e20ca82fe936fb044a6dfe45958"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc6…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
 | prometheus/prometheus | `stale.yml` | pass | — |
 | python/cpython | `add-issue-header.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: issue_data.labels is not iterable` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
 | python/cpython | `lint.yml` | pass | — |
@@ -266,8 +265,8 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | python/cpython | `new-bugs-announce-notifier.yml` | expected failure | `actions/github-script` — no secret named `MAILGUN_PYTHON_ORG_MAILGUN_KEY` _(needs a repository secret)_ |
 | python/cpython | `require-pr-label.yml` | expected failure | `mheap/github-action-required-labels` — step exited with status 1 · `Error: Not Found` _(reads the triggering pull request (no local event))_ |
 | python/cpython | `reusable-check-c-api-docs.yml` | pass | — |
-| python/cpython | `reusable-check-html-ids.yml` | expected failure | `actions/download-artifact` — step exited with status 1 · `Error: Unable to download artifact(s): Unable to get the ACTIONS_RUNTIME_TOKEN env variable` _(cross-run artifact download (REST API))_ |
-| python/cpython | `reusable-cifuzz.yml` | **fail** | `Dockerfile` — unsafe action path `../../../build_fuzzers.Dockerfile`: every path component must be a normal name |
+| python/cpython | `reusable-check-html-ids.yml` | **fail** | `actions/setup-python` — step exited with status 1 · `Error: Unable to locate executable file: lsb_release. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the f…` |
+| python/cpython | `reusable-cifuzz.yml` | **fail** | `Dockerfile` — step exited with status 1 · `config_utils.ConfigError: Invalid Configuration.` |
 | python/cpython | `reusable-context.yml` | pass | — |
 | python/cpython | `reusable-docs.yml` | expected failure | `github/checkout` — step exited with status 2 · `tar: Exiting with failure status due to previous errors` _(amd64-only image; this host's emulation cannot run it)_ |
 | python/cpython | `reusable-emscripten.yml` | expected failure | `github/checkout` — step exited with status 2 · `tar: Exiting with failure status due to previous errors` _(amd64-only image; this host's emulation cannot run it)_ |
@@ -279,22 +278,22 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | python/cpython | `verify-expat.yml` | pass | — |
 | rails/rails | `check-markdown-api.yml` | pass | — |
 | rails/rails | `devcontainer-shellcheck.yml` | pass | — |
-| rails/rails | `devcontainer-smoke-test.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/bundle' failed with exit code 5` |
+| rails/rails | `devcontainer-smoke-test.yml` | **fail** | `devcontainers/ci` — step exited with status 1 · `Error: Dev container config (/workspace/repo/myapp_sqlite/.devcontainer/devcontainer.json) not found.` |
 | rails/rails | `labeler.yml` | pass | — |
 | rails/rails | `more-info-needed.yml` | pass | — |
-| rails/rails | `rail_inspector.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/bundle' failed with exit code 5` |
-| rails/rails | `rails-new-docker.yml` | **fail** | `ruby/setup-ruby` — step exited with status 1 · `Error: The process '/opt/hostedtoolcache/Ruby/4.0.6/x64/bin/bundle' failed with exit code 5` |
+| rails/rails | `rail_inspector.yml` | pass | — |
+| rails/rails | `rails-new-docker.yml` | pass | — |
 | rails/rails | `rails_releaser_tests.yml` | pass | — |
 | rails/rails | `release.yml` | expected failure | `rubygems/configure-rubygems-credentials` — step exited with status 1 · `Error: Error message: Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable` _(OIDC token exchange)_ |
 | rails/rails | `stale.yml` | pass | — |
 | rust-lang/cargo | `audit.yml` | not lowered | `continue_on_error.expression` |
-| rust-lang/cargo | `contrib.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /artifact.tar. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
+| rust-lang/cargo | `contrib.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /workspace/.ci/temp/artifact.tar. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | rust-lang/cargo | `release.yml` | pass | — |
 | sharkdp/bat | `require-changelog-for-PRs.yml` | pass | — |
-| tokio-rs/tokio | `audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (7)] exec /entrypoint.sh failed: Permission denied` |
+| tokio-rs/tokio | `audit.yml` | pass | — |
 | tokio-rs/tokio | `labeler.yml` | pass | — |
 | tokio-rs/tokio | `loom.yml` | pass | — |
-| tokio-rs/tokio | `pr-audit.yml` | **fail** | `Dockerfile` — step exited with status 126 · `[FATAL tini (7)] exec /entrypoint.sh failed: Permission denied` |
+| tokio-rs/tokio | `pr-audit.yml` | pass | — |
 | tokio-rs/tokio | `stress-test.yml` | pass | — |
 | tokio-rs/tokio | `uring-kernel-version-test.yml` | pass | — |
 | vercel/next.js | `automated_code_review.yml` | not lowered | — |
