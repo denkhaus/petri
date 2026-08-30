@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 305 references, 1
 | Result (of the in-scope 248) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 219 | 88% |
-| rejected with a specific `unsupported.*` code | 7 | 3% |
+| lowered with warnings | 221 | 89% |
+| rejected with a specific `unsupported.*` code | 5 | 2% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -67,7 +67,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 |---|---|
 | `action.local_missing` | 2 |
 | `runs_on.expression` | 2 |
-| `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
 | `step.background` | 1 |
 
@@ -108,7 +107,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | astral-sh/ruff | `ty-ecosystem-analyzer.yaml` | warnings | 29 | — |
 | astral-sh/ruff | `ty-ecosystem-report.yaml` | warnings | 11 | — |
 | astral-sh/ruff | `typing_conformance.yaml` | warnings | 14 | — |
-| astral-sh/uv | `bench.yml` | unsupported | — | `runs_on.unknown` |
+| astral-sh/uv | `bench.yml` | warnings | 40 | — |
 | astral-sh/uv | `build-dev-binaries.yml` | out of scope | — | — |
 | astral-sh/uv | `build-docker.yml` | warnings | 44 | — |
 | astral-sh/uv | `build-release-binaries.yml` | out of scope | — | — |
@@ -271,7 +270,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | ohmyzsh/ohmyzsh | `main.yml` | warnings | 8 | — |
 | ohmyzsh/ohmyzsh | `project.yml` | warnings | 11 | — |
 | ohmyzsh/ohmyzsh | `scorecard.yml` | warnings | 10 | — |
-| pola-rs/polars | `benchmark-remote.yml` | unsupported | — | `runs_on.unknown` |
+| pola-rs/polars | `benchmark-remote.yml` | warnings | 13 | — |
 | pola-rs/polars | `benchmark.yml` | warnings | 20 | — |
 | pola-rs/polars | `changes-dsl-labeler.yml` | warnings | 5 | — |
 | pola-rs/polars | `clear-caches.yml` | clean | 4 | — |

@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use frontend::{Diagnostic, DirFiles, Frontend, Severity};
-use frontend_gha::GitHubActions;
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
+use frontend_gha::{GitHubActions, RunnerMap};
 use smol_str::SmolStr;
 
 pub mod runs;
@@ -369,10 +369,18 @@ pub fn lower_one(
     let files = DirFiles {
         root: repo_root.to_path_buf(),
     };
+    // The corpus's two opaque benchmark pools, mapped onto the battery
+    // container: `codspeed-macro` (astral-sh/uv `bench.yml`) and `self-hosted`
+    // (pola-rs/polars `benchmark-remote.yml`) name vendor and self-hosted
+    // Linux benchmark hardware. Mapping them onto the slim runner image is
+    // honest for the compatibility metric — the machinery runs — and
+    // meaningless for their timings, which only the real pools could measure.
+    let runners = RunnerMap::builtin().allow_list("codspeed-macro self-hosted");
     let format = match actions {
         Some(actions) => GitHubActions::with_actions(Arc::clone(actions)),
         None => GitHubActions::new(),
-    };
+    }
+    .with_runners(runners);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         format.load(&rel, &text, &files)
     }));
