@@ -237,9 +237,9 @@ impl steps::StepRunner for Counting2 {
 fn chain_registry(first: &Arc<AtomicUsize>, second: &Arc<AtomicUsize>) -> Registry {
     let mut registry = runners();
     registry.register_runner(Arc::new(CountingStep {
-        runs: Arc::clone(first),
+        runs: first.clone(),
     }));
-    registry.register_runner(Arc::new(Counting2(Arc::clone(second))));
+    registry.register_runner(Arc::new(Counting2(second.clone())));
     registry
 }
 
@@ -381,7 +381,7 @@ async fn observers_see_the_regenerated_suffix_first() {
 
     let observer = Arc::new(SeqObserver::default());
     let resumed = driver
-        .observe(Arc::clone(&observer) as Arc<dyn driver::EventObserver>)
+        .observe(observer.clone() as Arc<dyn driver::EventObserver>)
         .await_run()
         .await;
     assert_eq!(resumed.status, RunStatus::Success);
@@ -426,9 +426,7 @@ async fn a_pending_retry_is_rearmed_not_restarted() {
         &dir,
         executor::MapSecrets::empty(),
         RunConfig::new(dir.path()),
-        registry_with(Arc::new(FlakyStep {
-            runs: Arc::clone(&runs),
-        })),
+        registry_with(Arc::new(FlakyStep { runs: runs.clone() })),
     )
     .await_run()
     .await;
@@ -462,9 +460,7 @@ async fn a_pending_retry_is_rearmed_not_restarted() {
         graph.clone(),
         prefix,
         &dir,
-        registry_with(Arc::new(FlakyStep {
-            runs: Arc::clone(&runs),
-        })),
+        registry_with(Arc::new(FlakyStep { runs: runs.clone() })),
     );
     let resumed = driver.await_run().await;
     assert_eq!(
@@ -499,7 +495,7 @@ async fn stopped_run(dir: &RunDir, kill: bool, runs: &Arc<AtomicUsize>) -> (Grap
         executor::MapSecrets::empty(),
         RunConfig::new(dir.path()),
         registry_with(Arc::new(WaitingStep {
-            runs: Arc::clone(runs),
+            runs: runs.clone(),
             hard: kill,
         })),
     );
@@ -545,7 +541,7 @@ async fn a_killed_firing_is_finished_not_respawned() {
         prefix,
         &dir,
         registry_with(Arc::new(WaitingStep {
-            runs: Arc::clone(&resumed_runs),
+            runs: resumed_runs.clone(),
             hard: true,
         })),
     );
@@ -584,7 +580,7 @@ async fn a_cancel_truncation_drives_to_a_quiescent_cancelled_report() {
         prefix,
         &dir,
         registry_with(Arc::new(WaitingStep {
-            runs: Arc::clone(&resumed_runs),
+            runs: resumed_runs.clone(),
             hard: false,
         })),
     );
@@ -626,11 +622,11 @@ async fn the_synthesized_cancel_routes_and_cleanup_redispatches() {
     let registry = |work_counter: &Arc<AtomicUsize>, cleanup_counter: &Arc<AtomicUsize>| {
         let mut registry = runners();
         registry.register_runner(Arc::new(WaitingStep {
-            runs: Arc::clone(work_counter),
+            runs: work_counter.clone(),
             hard: false,
         }));
         registry.register_runner(Arc::new(CountingStep {
-            runs: Arc::clone(cleanup_counter),
+            runs: cleanup_counter.clone(),
         }));
         registry
     };
@@ -743,7 +739,7 @@ async fn resume_reacquires_held_scopes() {
     let acquires = Arc::new(AtomicUsize::new(0));
     let executor: Arc<dyn executor::Executor> = Arc::new(CountingExecutor {
         inner:    executor_host::HostExecutor::new(dir.path()),
-        acquires: Arc::clone(&acquires),
+        acquires: acquires.clone(),
     });
     let (driver, _info) = Driver::resume(
         graph.clone(),
@@ -782,7 +778,7 @@ async fn a_gate_resumes_waiting_and_the_host_redelivers() {
         executor::MapSecrets::empty(),
         RunConfig::new(dir.path()),
         registry_with(Arc::new(GateStep {
-            received: Arc::clone(&received),
+            received: received.clone(),
         })),
     );
     let handle = driver.handle();
@@ -813,7 +809,7 @@ async fn a_gate_resumes_waiting_and_the_host_redelivers() {
         prefix,
         &dir,
         registry_with(Arc::new(GateStep {
-            received: Arc::clone(&resumed_received),
+            received: resumed_received.clone(),
         })),
     );
     assert_eq!(info.redispatched, vec![gate_firing]);
@@ -862,10 +858,10 @@ async fn a_dynamic_secret_must_be_reregistered_after_resume() {
     let driver = host_driver_shared(
         graph.clone(),
         &dir,
-        Arc::clone(&secrets),
+        secrets.clone(),
         RunConfig::new(dir.path()),
         registry_with(Arc::new(GateStep {
-            received: Arc::clone(&received),
+            received: received.clone(),
         })),
     );
     let handle = driver.handle();
@@ -930,7 +926,7 @@ async fn a_dynamic_secret_must_be_reregistered_after_resume() {
         &dir,
         fresh,
         registry_with(Arc::new(GateStep {
-            received: Arc::clone(&resumed_received),
+            received: resumed_received.clone(),
         })),
     );
     let handle = driver.handle();

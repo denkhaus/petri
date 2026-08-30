@@ -145,7 +145,7 @@ async fn corpus_run_sweep() {
                 &mut graph,
                 &repo,
                 &outcome.file,
-                pins.get(&repo),
+                pins.get(&repo).map(String::as_str),
                 &repo_root,
                 platform.as_deref(),
                 runner_arch,
@@ -175,8 +175,8 @@ async fn corpus_run_sweep() {
         // the completion loop below drains while work runs. Acquiring here
         // would stall spawning on the permits, and the first progress line
         // waited until nearly the whole sweep had finished.
-        let semaphore = Arc::clone(&semaphore);
-        let trees = Arc::clone(&trees);
+        let semaphore = semaphore.clone();
+        let trees = trees.clone();
         let repo = records[slot].repo.clone();
         let file = records[slot].file.clone();
         set.spawn(async move {
@@ -253,7 +253,7 @@ fn prepare(
     graph: &mut Graph,
     repo_slug: &str,
     file: &str,
-    pin: Option<&String>,
+    pin: Option<&str>,
     repo_root: &Path,
     platform: Option<&str>,
     runner_arch: &str,
@@ -528,7 +528,7 @@ fn display_tail(lines: &[String]) -> Vec<String> {
     if runs::error_line(&tail).is_none()
         && let Some(err) = runs::error_line(lines)
     {
-        tail.insert(0, err.clone());
+        tail.insert(0, err.to_string());
     }
     tail
 }

@@ -221,7 +221,7 @@ impl EnvHandle {
 
     /// The capability handed to step kinds.
     pub fn exec(&self) -> Arc<dyn ExecEnv> {
-        Arc::clone(&self.env)
+        self.env.clone()
     }
 
     /// The scope-bound one-shot container runner, when the executor provided

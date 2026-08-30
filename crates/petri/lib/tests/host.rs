@@ -397,7 +397,7 @@ impl EventObserver for Counting {
 async fn a_runtime_registered_observer_reaches_the_driver() {
     let dir = RunDir::new("host-runtime-observe");
     let counting = Arc::new(Counting::default());
-    let rt = test_runtime(&dir).observe(Arc::clone(&counting) as Arc<dyn EventObserver>);
+    let rt = test_runtime(&dir).observe(counting.clone() as Arc<dyn EventObserver>);
     let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
     let seen = counting.seen.lock().expect("not poisoned");

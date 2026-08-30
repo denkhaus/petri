@@ -175,7 +175,7 @@ pub(crate) async fn stage(
         return Ok(root);
     }
 
-    let source = Arc::clone(source);
+    let source = source.clone();
     let pinned_owned = pinned.clone();
     let host_dir = task::spawn_blocking(move || source.tree(&pinned_owned))
         .await

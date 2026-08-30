@@ -326,7 +326,7 @@ impl Runtime {
             graph,
             self.run_executor(),
             self.steps.clone(),
-            Arc::clone(&self.secrets),
+            self.secrets.clone(),
             self.run_config(),
         );
         self.equip(driver)
@@ -346,7 +346,7 @@ impl Runtime {
             log,
             self.run_executor(),
             self.steps.clone(),
-            Arc::clone(&self.secrets),
+            self.secrets.clone(),
             self.run_config(),
         )?;
         Ok((self.equip(driver), info))
@@ -380,10 +380,10 @@ impl Runtime {
         }
         driver = driver.with_capabilities(caps.build());
         for observer in &self.observers {
-            driver = driver.observe(Arc::clone(observer));
+            driver = driver.observe(observer.clone());
         }
         if let Some(progress) = &self.progress {
-            driver = driver.with_progress(Arc::clone(progress));
+            driver = driver.with_progress(progress.clone());
         }
         driver
     }

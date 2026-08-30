@@ -107,10 +107,10 @@ pub(crate) async fn serve(
             _ = &mut shutdown => break,
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { continue };
-                let backend = Arc::clone(&backend);
+                let backend = backend.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |req| {
-                        handle(Arc::clone(&backend), req)
+                        handle(backend.clone(), req)
                     });
                     let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
@@ -216,7 +216,7 @@ async fn twirp(
     // The stores do synchronous filesystem work (index rewrites, the prune
     // sweep); run it on the blocking pool so this thread — the service's only
     // event loop — keeps streaming concurrent blob uploads and downloads.
-    let backend = Arc::clone(backend);
+    let backend = backend.clone();
     let method = method.to_string();
     let result = task::spawn_blocking(move || match (service, method.as_str()) {
         (Service::Artifacts, "CreateArtifact") => create_artifact(&backend, &host, &request),

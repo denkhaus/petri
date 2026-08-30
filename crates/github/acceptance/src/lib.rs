@@ -382,7 +382,7 @@ pub fn lower_one(
         root: repo_root.to_path_buf(),
     };
     let format = match actions {
-        Some(actions) => GitHubActions::with_actions(Arc::clone(actions)),
+        Some(actions) => GitHubActions::with_actions(actions.clone()),
         None => GitHubActions::new(),
     };
     let result = panic::catch_unwind(AssertUnwindSafe(|| format.load(&rel, &text, &files)));

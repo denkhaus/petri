@@ -72,7 +72,7 @@ impl OneShotRunner {
             network,
             pull,
             scope: scope.id,
-            progress: Arc::clone(ctx.progress()),
+            progress: ctx.progress().clone(),
             marker,
             marked: OnceCell::new(),
             ensured: Mutex::new(HashSet::new()),

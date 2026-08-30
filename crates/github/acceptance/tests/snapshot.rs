@@ -90,7 +90,7 @@ fn refresh_action_snapshot() {
         inner: GitActionSource::new(root.join(".actions-cache")),
         seen:  Mutex::new(BTreeMap::new()),
     });
-    let source: Arc<dyn ActionSource> = Arc::clone(&recording) as Arc<dyn ActionSource>;
+    let source: Arc<dyn ActionSource> = recording.clone() as Arc<dyn ActionSource>;
     for (repo, repo_root, file) in workflows(&root) {
         eprintln!("== {repo} {}", file.display());
         let _ = check_one(&repo, &repo_root, &file, Some(&source));

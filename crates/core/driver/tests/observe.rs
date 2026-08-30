@@ -85,8 +85,8 @@ async fn every_observer_sees_every_record_in_seq_order() {
         ..Recording::default()
     });
     let report = host_driver(two_step_graph(), &dir)
-        .observe(Arc::clone(&fast) as Arc<dyn EventObserver>)
-        .observe(Arc::clone(&slow) as Arc<dyn EventObserver>)
+        .observe(fast.clone() as Arc<dyn EventObserver>)
+        .observe(slow.clone() as Arc<dyn EventObserver>)
         .await_run()
         .await;
     assert_eq!(
@@ -123,7 +123,7 @@ async fn the_state_resolves_finish_records_through_history() {
     let dir = RunDir::new("observe-resolve");
     let observer = Arc::new(Recording::default());
     let report = host_driver(two_step_graph(), &dir)
-        .observe(Arc::clone(&observer) as Arc<dyn EventObserver>)
+        .observe(observer.clone() as Arc<dyn EventObserver>)
         .await_run()
         .await;
     assert_eq!(report.status, RunStatus::Success);

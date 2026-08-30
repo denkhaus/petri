@@ -207,7 +207,7 @@ pub(crate) fn runner_temp_path(root: &str) -> String {
 impl Session {
     /// Create the step's files and read what the job has accumulated so far.
     pub async fn begin(ctx: &StepCtx, event: &Value) -> Result<Self, StepFailure> {
-        let env = Arc::clone(&ctx.env);
+        let env = ctx.env.clone();
         let workspace = env.workspace_path().to_string();
         let dir = PathBuf::from(RUNNER_DIR)
             .join("steps")

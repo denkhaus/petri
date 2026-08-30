@@ -136,7 +136,7 @@ pub(crate) fn corpus_action_source() -> Arc<GitActionSource> {
     reason = "the harness echoes lowering diagnostics so a failing battery shows why"
 )]
 pub(crate) fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> Graph {
-    let actions: Arc<dyn github_actions::ActionSource> = Arc::clone(source) as _;
+    let actions: Arc<dyn github_actions::ActionSource> = source.clone() as _;
     let lowered = frontend_gha::load_with(
         ".github/workflows/test.yml",
         text,

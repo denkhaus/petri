@@ -296,7 +296,7 @@ impl Executor for HostExecutor {
                 gen_dir,
                 env: scope.env.clone(),
                 grace: scope.grace,
-                groups: Arc::clone(&groups),
+                groups: groups.clone(),
                 seq: AtomicU64::new(0),
             }),
             HostTeardown {

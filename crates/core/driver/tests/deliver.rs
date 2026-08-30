@@ -108,7 +108,7 @@ const FIRST: FiringId = FiringId::new(1);
 fn gate_registry(received: &Arc<Mutex<Vec<Value>>>) -> Registry {
     let mut registry = runners();
     registry.register_runner(Arc::new(GateStep {
-        received: Arc::clone(received),
+        received: received.clone(),
     }));
     registry
 }
@@ -398,7 +398,7 @@ async fn a_sensitive_answer_crosses_as_a_reference_and_never_enters_the_log() {
     let driver = host_driver_shared(
         graph,
         &dir,
-        Arc::clone(&secrets),
+        secrets.clone(),
         RunConfig::new(dir.path()),
         gate_registry(&received),
     );

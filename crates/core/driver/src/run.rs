@@ -706,7 +706,7 @@ impl Driver {
             return;
         }
         let spec = self.scope_spec(scope);
-        let ctx = AcquireContext::new(Arc::clone(&self.secrets), Arc::clone(&self.progress));
+        let ctx = AcquireContext::new(self.secrets.clone(), self.progress.clone());
         match self.executor.acquire(&spec, &ctx).await {
             Ok(handle) => {
                 self.envs.insert(scope, handle);
@@ -727,7 +727,7 @@ impl Driver {
         } else {
             ScopeOutcome::Succeeded
         };
-        let executor = Arc::clone(&self.executor);
+        let executor = self.executor.clone();
         self.releases.push(tokio::spawn(async move {
             executor.release(handle, outcome).await
         }));
@@ -877,7 +877,7 @@ impl Driver {
             config: resolved.config().clone(),
             env,
             runner: container_runner,
-            secrets: Arc::clone(&self.secrets),
+            secrets: self.secrets.clone(),
             caps: self.caps.clone(),
             logs: log_tx,
             control: control_rx,

@@ -120,7 +120,7 @@ impl CommandSink {
     /// straggler holding stdout open and the sink never sees the end of the
     /// stream.
     pub fn effects(&self) -> Arc<Mutex<CommandEffects>> {
-        Arc::clone(&self.effects)
+        self.effects.clone()
     }
 
     /// Consume events until the sender side is gone.

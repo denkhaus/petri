@@ -1177,8 +1177,13 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
         let detail = match &record.result {
             RunResult::Fail(f) => {
                 let mut detail = format!("`{}` — {}", f.step, sanitize_cell(&f.message));
-                let named = error_line(&f.tail)
-                    .or_else(|| f.tail.iter().rev().find(|l| !l.trim().is_empty()));
+                let named = error_line(&f.tail).or_else(|| {
+                    f.tail
+                        .iter()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .map(String::as_str)
+                });
                 if let Some(line) = named {
                     let _ = write!(detail, " · `{}`", sanitize_cell(line));
                 }
@@ -1210,13 +1215,17 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
 /// output, a `::error::` command the runner rendered as `Error:`, or a nested
 /// runner's `##[error]`. Trailing noise — a deprecation warning's continuation,
 /// a stack frame — often outlives the error itself, so "last line" is not it.
-pub fn error_line(lines: &[String]) -> Option<&String> {
-    lines.iter().rev().find(|line| {
-        let l = line.trim_start();
-        l.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("error:"))
-            || l.starts_with("##[error]")
-            || l.starts_with("::error")
-    })
+pub fn error_line(lines: &[String]) -> Option<&str> {
+    lines
+        .iter()
+        .rev()
+        .find(|line| {
+            let l = line.trim_start();
+            l.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("error:"))
+                || l.starts_with("##[error]")
+                || l.starts_with("::error")
+        })
+        .map(String::as_str)
 }
 
 /// One Markdown table cell: no pipes, no newlines, bounded length.

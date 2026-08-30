@@ -31,8 +31,8 @@ async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
     let provisions = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
     let seen_dir = dir.clone();
-    let counter = Arc::clone(&provisions);
-    let flag = Arc::clone(&dropped);
+    let counter = provisions.clone();
+    let flag = dropped.clone();
 
     let rt = Runtime::standard()
         .options(RunOptions::new(&dir))
@@ -41,7 +41,7 @@ async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
             counter.fetch_add(1, Ordering::SeqCst);
             (
                 caps.provide(ProbeCap),
-                Some(Box::new(ProbeGuard(Arc::clone(&flag))) as _),
+                Some(Box::new(ProbeGuard(flag.clone())) as _),
             )
         });
 

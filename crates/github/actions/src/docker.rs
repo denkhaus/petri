@@ -103,7 +103,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     let resolver = TextResolver::begin(
         &config,
         &ctx,
-        runner.workspace_path().to_string(),
+        runner.workspace_path(),
         container_tool_cache.clone(),
         session.job_env().clone(),
     )
@@ -436,7 +436,7 @@ impl TextResolver {
     async fn begin(
         config: &DockerActionConfig,
         ctx: &StepCtx,
-        container_root: String,
+        container_root: &str,
         container_tool_cache: String,
         job_env: BTreeMap<String, String>,
     ) -> Result<Self, StepFailure> {
@@ -462,7 +462,7 @@ impl TextResolver {
         Ok(Self {
             hashes,
             container_workspace: format!("{container_root}/{REPO_DIR}"),
-            container_runner_temp: runner_temp_path(&container_root),
+            container_runner_temp: runner_temp_path(container_root),
             container_tool_cache,
             env_config: config.env.clone(),
             job_env,
