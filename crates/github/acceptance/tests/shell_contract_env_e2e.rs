@@ -393,3 +393,182 @@ async fn working_directories_resolve_against_the_workspace_in_a_container() {
     assert_success(&report);
     assert_lines(&report, &["runs-in-the-workspace"]);
 }
+
+// ── 4. Read-back edges ──────────────────────────────────────────────────────
+
+/// A step that deletes its `GITHUB_ENV` file, and one that replaces it
+/// outright: on GitHub a missing file reads as nothing written (the runner
+/// logs it at debug level), and the runner reads whatever is at the path when
+/// the step ends. Neither is a failure, and nothing is logged about them.
+const ENV_FILE_DELETED_WORKFLOW: &str = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "LOST=never-applied" >> "$GITHUB_ENV"
+          rm "$GITHUB_ENV"
+          echo deleted-ok
+      - run: |
+          echo "STALE=written-first" >> "$GITHUB_ENV"
+          rm "$GITHUB_ENV"
+          echo "REPLACED=from-the-new-file" > "$GITHUB_ENV"
+          echo replaced-ok
+      - run: |
+          echo "lost=[$LOST] stale=[$STALE] replaced=[$REPLACED]"
+"#;
+
+fn assert_env_file_deleted(report: &RunReportPlus) {
+    assert_success(report);
+    assert_lines(
+        report,
+        &[
+            "deleted-ok",
+            "replaced-ok",
+            "lost=[] stale=[] replaced=[from-the-new-file]",
+        ],
+    );
+    let noise: Vec<String> = log_lines(report)
+        .into_iter()
+        .filter(|l| l.starts_with("Warning:") || l.starts_with("Error:"))
+        .collect();
+    assert!(
+        noise.is_empty(),
+        "a missing file is not worth a line: {noise:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_or_replaced_env_file_is_not_a_failure() {
+    let graph = lower_ok(ENV_FILE_DELETED_WORKFLOW);
+    let report = run_host(graph, "shell-env-deleted").await;
+    assert_env_file_deleted(&report);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_or_replaced_env_file_is_not_a_failure_in_a_container() {
+    if !testkit::docker_ready().await {
+        return;
+    }
+    let graph = lower_ok(&containerized(ENV_FILE_DELETED_WORKFLOW));
+    let report = run_host(graph, "shell-env-deleted-boxed").await;
+    assert_env_file_deleted(&report);
+}
+
+/// A `GITHUB_ENV` line the runner cannot parse fails the step after its
+/// script has finished — GitHub's `FileCommandManager.ProcessFiles` catches
+/// the parse exception, logs `Error: Unable to process file command 'env'
+/// successfully.` and sets the step's `CommandResult` to failed — so the
+/// steps after it see a failure, and `continue-on-error` softens it exactly
+/// as it softens an exit status. The same holds for `GITHUB_OUTPUT`.
+///
+/// Ignored until `Session::conclude` fails the step instead of warning: the
+/// `GITHUB_OUTPUT` half already holds (the process step's `bad_output_file`
+/// failure); the `GITHUB_ENV` half logs `Warning:` and lets the next step
+/// run. The fix is in `session.rs`: `conclude` takes the outcome and the
+/// step's `soft_fail`, and on a read-back error logs `Error:` and overturns
+/// a success-like outcome — `Status::partial` under `continue-on-error`,
+/// `Status::Failure` (class `runner_files`) otherwise — leaving a failed or
+/// cancelled outcome as it is; a missing file stays a non-event.
+const MALFORMED_ENV_WORKFLOW: &str = r#"
+on: push
+jobs:
+  env_file:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bad
+        run: |
+          echo "no separator on this line" >> "$GITHUB_ENV"
+          echo bad-script-finished
+      - run: echo never-after-bad
+      - if: failure()
+        run: echo saw-env-failure
+  soft:
+    runs-on: ubuntu-latest
+    steps:
+      - id: soft
+        continue-on-error: true
+        run: |
+          echo "K<<" >> "$GITHUB_ENV"
+          echo soft-script-finished
+      - run: echo after-soft-ran
+  output_file:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bad_output
+        run: |
+          echo "unclosed<<EOF" >> "$GITHUB_OUTPUT"
+          echo "body" >> "$GITHUB_OUTPUT"
+          echo output-script-finished
+      - run: echo never-after-bad-output
+      - if: failure()
+        run: echo saw-output-failure
+"#;
+
+fn assert_malformed_env_fails(report: &RunReportPlus) {
+    assert_eq!(
+        report.status,
+        RunStatus::Failed,
+        "steps: {:#?}",
+        history_summary(report)
+    );
+    let lines = log_lines(report);
+    assert_lines(
+        report,
+        &[
+            "bad-script-finished",
+            "saw-env-failure",
+            "soft-script-finished",
+            "after-soft-ran",
+            "output-script-finished",
+            "saw-output-failure",
+        ],
+    );
+    for absent in ["never-after-bad", "never-after-bad-output"] {
+        assert!(!lines.iter().any(|l| l == absent), "{absent}: {lines:?}");
+    }
+    assert_eq!(
+        status_of(report, "env_file/bad").as_deref(),
+        Some("failure")
+    );
+    assert_eq!(
+        status_of(report, "soft/soft").as_deref(),
+        Some("partial_success"),
+        "continue-on-error softens a file-command failure: {:#?}",
+        history_summary(report)
+    );
+    assert_eq!(
+        status_of(report, "output_file/bad_output").as_deref(),
+        Some("failure")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("Error:") && l.contains("GITHUB_ENV")),
+        "the log names the file and the line: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("Warning:")),
+        "a failed file command is an error, not a warning: {lines:?}"
+    );
+}
+
+#[ignore = "divergence: a malformed GITHUB_ENV read-back logs a warning and the step's outcome stands; GitHub's FileCommandManager.ProcessFiles sets CommandResult=Failed and fails the step"]
+#[tokio::test]
+async fn a_malformed_env_file_fails_the_step() {
+    let graph = lower_ok(MALFORMED_ENV_WORKFLOW);
+    let report = run_host(graph, "shell-env-malformed").await;
+    assert_malformed_env_fails(&report);
+}
+
+#[ignore = "divergence: a malformed GITHUB_ENV read-back logs a warning and the step's outcome stands; GitHub's FileCommandManager.ProcessFiles sets CommandResult=Failed and fails the step"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_env_file_fails_the_step_in_a_container() {
+    if !testkit::docker_ready().await {
+        return;
+    }
+    let graph = lower_ok(&containerized(MALFORMED_ENV_WORKFLOW));
+    let report = run_host(graph, "shell-env-malformed-boxed").await;
+    assert_malformed_env_fails(&report);
+}
