@@ -63,13 +63,17 @@ run = "zizmor .github/workflows"
 description = "Check tracked and untracked patches for whitespace errors"
 run = ["git diff --check", "git diff --cached --check"]
 
+[tasks."check:release-build"]
+description = "Build release artifacts after the test suite completes"
+depends = ["test"]
+run = "mise run build:release"
+
 [tasks.check]
 description = "Run the complete routine verification gate"
 depends = [
   "fmt:check",
   "lint",
-  "test",
-  "build:release",
+  "check:release-build",
   "check:actions",
   "check:whitespace",
 ]
