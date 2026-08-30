@@ -62,7 +62,7 @@ async fn run_once(label: &str, store: &Path) -> Vec<String> {
 /// first run's `depot/seed.txt` before any step recreated it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cache_saved_by_one_run_restores_in_the_next() {
-    if !tool_ready("node") {
+    if !is_tool_ready("node") {
         return;
     }
     let store = canonical_temp()

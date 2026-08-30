@@ -141,7 +141,7 @@ impl GitActionSource {
 }
 
 fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
-    if upstream_refusal(&message) {
+    if is_upstream_refusal(&message) {
         return ActionSourceError::Unavailable {
             reference: reference.to_string(),
             reason:    Some(message),
@@ -162,7 +162,7 @@ fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
 /// it as `unsupported.action.upstream_gone` — the same code the snapshot
 /// source reports from its recorded refresh failures, keeping the two sources'
 /// verdicts on one reference identical.
-fn upstream_refusal(stderr: &str) -> bool {
+fn is_upstream_refusal(stderr: &str) -> bool {
     [
         "Repository not found",
         "could not read Username",
@@ -222,7 +222,7 @@ impl ActionSource for GitActionSource {
             None,
         )
         .map_err(|message| {
-            if upstream_refusal(&message) {
+            if is_upstream_refusal(&message) {
                 ActionSourceError::Unavailable {
                     reference: key.clone(),
                     reason:    Some(message),

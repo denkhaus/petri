@@ -69,7 +69,7 @@ async fn admitted(
     env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
     ctx: &StepCtx,
 ) -> Result<bool, StepFailure> {
-    let mut gate = Gate::from_value(gate).map_err(|message| StepFailure {
+    let mut gate = Gate::try_from(gate).map_err(|message| StepFailure {
         class:   GATE_CLASS,
         message: format!("the step's gate is not one this runner wrote: {message}"),
     })?;
@@ -140,7 +140,7 @@ async fn admitted(
     let value = eval(&gate, &mut |name| {
         env_value(name, env_config, &job_env, ctx)
     })?;
-    Ok(loose::truthy(&value))
+    Ok(loose::is_truthy(&value))
 }
 
 /// Whether the gate's literal prefix — the root, or the leading operands of a
@@ -149,7 +149,7 @@ async fn admitted(
 /// anything: an unresolved sentinel string is non-empty, so never falsy.
 fn refused_before_resolution(gate: &Gate) -> bool {
     match gate {
-        Gate::Lit(v) => !loose::truthy(v),
+        Gate::Lit(v) => !loose::is_truthy(v),
         Gate::Op {
             op: GateOp::And,
             args,
@@ -159,7 +159,7 @@ fn refused_before_resolution(gate: &Gate) -> bool {
                 Gate::Lit(v) => Some(v),
                 _ => None,
             })
-            .any(|v| !loose::truthy(v)),
+            .any(|v| !loose::is_truthy(v)),
         _ => false,
     }
 }

@@ -323,7 +323,7 @@ pub async fn ladder(
 /// signal is a `signal:N` failure, and a non-zero exit is a failure unless
 /// `soft_fail` claims the code.
 pub fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output: Value) -> Outcome {
-    if status.success() {
+    if status.is_success() {
         return Outcome::new(Status::Success, output);
     }
     if let Some(signal) = status.signal {

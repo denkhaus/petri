@@ -291,7 +291,7 @@ pub fn assert_one_terminal_per_firing(report: &RunReport) {
     );
 }
 
-pub async fn docker_available() -> bool {
+pub async fn is_docker_available() -> bool {
     DockerExecutor::is_available().await
 }
 
@@ -302,8 +302,8 @@ pub async fn docker_available() -> bool {
     clippy::print_stderr,
     reason = "the skip notice has to reach the test runner's output; testkit has no logging sink"
 )]
-pub async fn docker_ready() -> bool {
-    if docker_available().await {
+pub async fn is_docker_ready() -> bool {
+    if is_docker_available().await {
         return true;
     }
     assert!(

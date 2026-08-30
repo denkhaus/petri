@@ -1021,7 +1021,7 @@ jobs:
 /// runs on.
 #[tokio::test]
 async fn hashfiles_conditions_read_the_workspace() {
-    if !tool_ready("node") {
+    if !is_tool_ready("node") {
         return;
     }
     let text = r"
@@ -1158,7 +1158,7 @@ async fn step_config_reads_the_step_environment() {
 /// happens where the environment is known, so the mount point changes nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn step_config_reads_the_step_environment_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let text = STEP_ENV_CONFIG_WORKFLOW.replace(

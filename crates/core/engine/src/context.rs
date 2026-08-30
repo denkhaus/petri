@@ -94,7 +94,7 @@ pub(crate) fn firing_statics(
     ctx.set(
         "run",
         serde_json::json!({
-            "failed": state.any_failure(),
+            "failed": state.has_any_failure(),
             "cancelled": state.is_cancelled(),
         }),
     );

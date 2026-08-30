@@ -83,7 +83,7 @@ fn run_dir(label: &str) -> PathBuf {
     clippy::print_stderr,
     reason = "the skip note tells whoever runs the batteries why a test did nothing"
 )]
-pub(crate) fn tool_ready(program: &str) -> bool {
+pub(crate) fn is_tool_ready(program: &str) -> bool {
     let found = Command::new(program)
         .arg("--version")
         .output()

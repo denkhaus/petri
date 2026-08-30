@@ -18,7 +18,7 @@ use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
-use testkit::docker_ready;
+use testkit::is_docker_ready;
 use tokio::time;
 
 const IMAGE: &str = "alpine:3.20";
@@ -41,7 +41,7 @@ fn docker_graph(name: &str, run: &str) -> ir::Graph {
 /// A step runs inside the container, against the bind-mounted workspace.
 #[tokio::test]
 async fn a_step_runs_inside_the_container() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-basic");
@@ -80,7 +80,7 @@ async fn a_step_runs_inside_the_container() {
 /// it stop.
 #[tokio::test]
 async fn docker_cancel_kills_the_exec_process_group() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-group-kill");
@@ -144,7 +144,7 @@ sleep 300
 /// §7 test 10, Docker half. Release leaves no container behind.
 #[tokio::test]
 async fn docker_release_leaves_no_container() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-release");
@@ -176,7 +176,7 @@ async fn docker_release_leaves_no_container() {
 /// container behind.
 #[tokio::test]
 async fn docker_kill_leaves_no_container() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-kill");
@@ -236,7 +236,7 @@ while :; do sleep 0.1; done
 /// not re-minted.
 #[tokio::test]
 async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-fence");
@@ -301,7 +301,7 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
 /// A non-zero exit inside the container maps the same way it does on the host.
 #[tokio::test]
 async fn docker_exit_statuses_propagate() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-exit");
@@ -332,7 +332,7 @@ async fn docker_exit_statuses_propagate() {
 /// A bad image is an acquire failure, not a run abort.
 #[tokio::test]
 async fn a_bad_image_fails_the_scope() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-bad-image");
@@ -373,7 +373,7 @@ async fn a_bad_image_fails_the_scope() {
 /// here instead of a slow failure.
 #[tokio::test]
 async fn docker_wait_follows_the_step_not_the_client() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-wait");
@@ -415,7 +415,7 @@ async fn docker_wait_follows_the_step_not_the_client() {
 /// either way the container reports an x86_64 machine.
 #[tokio::test]
 async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-platform-fallback");
@@ -459,7 +459,7 @@ async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
 /// client attached.
 #[tokio::test]
 async fn docker_output_after_a_pause_is_captured() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-late-output");
@@ -505,7 +505,7 @@ async fn docker_output_after_a_pause_is_captured() {
 /// hanging on a status file that is not coming, or falling back to a default.
 #[tokio::test]
 async fn docker_cancel_without_a_recorded_status_still_reports_cancelled() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-killed-wrapper");

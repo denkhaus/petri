@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -272,6 +273,14 @@ impl ActionRef {
             validate_relative_action_path(path, false)?;
         }
         Ok(())
+    }
+}
+
+impl FromStr for ActionRef {
+    type Err = RefError;
+
+    fn from_str(uses: &str) -> Result<Self, Self::Err> {
+        Self::parse(uses)
     }
 }
 

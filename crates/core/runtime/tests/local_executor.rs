@@ -12,7 +12,7 @@ use executor_docker::{DockerExecutor, list_containers};
 use executor_host::HostExecutor;
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;
-use testkit::{RunDir, docker_ready, wait_for_file};
+use testkit::{RunDir, is_docker_ready, wait_for_file};
 use tokio::time;
 
 const IMAGE: &str = "alpine:3.20";
@@ -75,7 +75,7 @@ async fn a_local_host_scope_is_bound_to_a_runner() {
 /// workspace is mounted where the runner says it is.
 #[tokio::test]
 async fn a_one_shot_container_runs_in_a_host_scope() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("local-one-shot");
@@ -96,7 +96,7 @@ async fn a_one_shot_container_runs_in_a_host_scope() {
     let mut process = runner.run(spec).await.expect("docker run");
     let lines = drain(&mut process).await;
     let status = process.wait().await.expect("wait");
-    assert!(status.success(), "{status:?} {lines:?}");
+    assert!(status.is_success(), "{status:?} {lines:?}");
     assert!(lines.iter().any(|l| l == "one-shot ran"), "{lines:?}");
     assert!(
         dir.workspace().join("mark").exists(),
@@ -111,7 +111,7 @@ async fn a_one_shot_container_runs_in_a_host_scope() {
 /// one-shots see the same workspace as the job container.
 #[tokio::test]
 async fn a_pure_docker_scope_is_bound_to_a_runner() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-scope-runner");
@@ -132,7 +132,7 @@ async fn a_pure_docker_scope_is_bound_to_a_runner() {
     let mut process = runner.run(spec).await.expect("docker run");
     let _ = drain(&mut process).await;
     let status = process.wait().await.expect("wait");
-    assert!(status.success(), "{status:?}");
+    assert!(status.is_success(), "{status:?}");
     // The job container and the one-shot share the workspace bind mount.
     let shared = handle
         .exec()
@@ -150,7 +150,7 @@ async fn a_pure_docker_scope_is_bound_to_a_runner() {
 /// of it is left under the scope's one-shot prefix.
 #[tokio::test]
 async fn a_signalled_one_shot_dies_and_leaves_nothing() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("local-one-shot-cancel");
@@ -176,7 +176,7 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
         .await
         .expect("the signalled container ends")
         .expect("wait");
-    assert!(!status.success(), "TERM ended it: {status:?}");
+    assert!(!status.is_success(), "TERM ended it: {status:?}");
 
     let prefix = DockerExecutor::new(dir.path())
         .one_shot_prefix("scope-0")
@@ -195,7 +195,7 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
 /// whatever a live run abandons.
 #[tokio::test]
 async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("local-one-shot-crash");

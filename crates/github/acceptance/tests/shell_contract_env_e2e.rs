@@ -247,7 +247,7 @@ async fn shell_steps_write_and_read_the_env_files() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shell_steps_write_and_read_the_env_files_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&containerized(ENV_FILES_WORKFLOW));
@@ -374,7 +374,7 @@ async fn working_directories_resolve_against_the_workspace() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn working_directories_resolve_against_the_workspace_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&containerized(WORKING_DIRECTORY_WORKFLOW));
@@ -438,7 +438,7 @@ async fn a_deleted_or_replaced_env_file_is_not_a_failure() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deleted_or_replaced_env_file_is_not_a_failure_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&containerized(ENV_FILE_DELETED_WORKFLOW));
@@ -541,7 +541,7 @@ async fn a_malformed_env_file_fails_the_step() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_malformed_env_file_fails_the_step_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&containerized(MALFORMED_ENV_WORKFLOW));

@@ -415,7 +415,7 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
     reason = "the skip notice tells whoever runs the tests why this Docker battery did nothing; a test binary has no other sink"
 )]
 async fn resume_fences_the_crashed_container() {
-    if !testkit::docker_available().await {
+    if !testkit::is_docker_available().await {
         eprintln!("skipping: no Docker daemon reachable");
         return;
     }

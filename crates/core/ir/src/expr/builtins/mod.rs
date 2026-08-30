@@ -16,7 +16,7 @@ use smol_str::SmolStr;
 
 use super::ExprTable;
 use super::eval::{
-    EvalEnv, EvalError, concat, eval_at, index_into, num, to_display, truthy, type_err,
+    EvalEnv, EvalError, concat, eval_at, index_into, is_truthy, num, to_display, type_err,
 };
 use crate::ids::ExprId;
 
@@ -388,10 +388,12 @@ pub(super) fn eval_call(
             items.sort_by(|a, b| {
                 let (a, b) = (a.get(&key), b.get(&key));
                 match (a, b) {
+                    // `total_cmp`, not `partial_cmp`: `sort_by` needs a total
+                    // order, and a `None` folded into `Equal` would not be one.
                     (Some(Value::Number(x)), Some(Value::Number(y))) => x
                         .as_f64()
-                        .partial_cmp(&y.as_f64())
-                        .unwrap_or(Ordering::Equal),
+                        .unwrap_or(f64::NAN)
+                        .total_cmp(&y.as_f64().unwrap_or(f64::NAN)),
                     (Some(Value::String(x)), Some(Value::String(y))) => x.cmp(y),
                     _ => Ordering::Equal,
                 }
@@ -436,7 +438,7 @@ pub(super) fn eval_call(
             ))
         }
         // ── Loose semantics ───────────────────────────────────────────────
-        "loose_eq" => Ok(Value::Bool(loose::equal(&arg(0)?, &arg(1)?))),
+        "loose_eq" => Ok(Value::Bool(loose::is_equal(&arg(0)?, &arg(1)?))),
         "loose_lt" | "loose_le" | "loose_gt" | "loose_ge" => {
             let ord = loose::compare(&arg(0)?, &arg(1)?);
             Ok(Value::Bool(match (name.as_str(), ord) {
@@ -447,13 +449,13 @@ pub(super) fn eval_call(
                 (_, Some(o)) => o.is_ge(),
             }))
         }
-        "loose_truthy" => Ok(Value::Bool(loose::truthy(&arg(0)?))),
+        "loose_truthy" => Ok(Value::Bool(loose::is_truthy(&arg(0)?))),
         "loose_number" => Ok(num(loose::to_number(&arg(0)?))),
         "loose_string" => Ok(Value::String(loose::to_string(&arg(0)?))),
         "contains_ci" => {
             let (search, item) = (arg(0)?, arg(1)?);
             Ok(Value::Bool(match &search {
-                Value::Array(items) => items.iter().any(|i| loose::equal(i, &item)),
+                Value::Array(items) => items.iter().any(|i| loose::is_equal(i, &item)),
                 Value::Object(_) => false,
                 primitive => match &item {
                     Value::Array(_) | Value::Object(_) => false,
@@ -551,7 +553,7 @@ pub(super) fn eval_call(
             &arg(2)?,
         ))),
         "to_string" => Ok(Value::String(to_display(&arg(0)?))),
-        "not" => Ok(Value::Bool(!truthy(&arg(0)?))),
+        "not" => Ok(Value::Bool(!is_truthy(&arg(0)?))),
         // Unreachable: the table gated this call, so every entry has an arm above.
         // A new table entry with no arm lands here and fails its conformance test.
         _ => Err(EvalError::UnknownFunction(name.clone())),

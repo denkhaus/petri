@@ -52,7 +52,7 @@ impl<S> Arm<S> {
     }
 
     #[must_use]
-    pub fn as_back(mut self) -> Self {
+    pub fn with_back(mut self) -> Self {
         self.back = true;
         self
     }

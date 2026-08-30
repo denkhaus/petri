@@ -22,8 +22,8 @@
 //! comparison involving NaN is false.
 //!
 //! Falsy: `false`, `0`, `-0`, `""`, `null`, `NaN`. Empty arrays and objects are
-//! **truthy** — the opposite of this crate's own `truthy`, which is why the two
-//! are separate functions rather than one with a flag.
+//! **truthy** — the opposite of this crate's own `is_truthy`, which is why the
+//! two are separate functions rather than one with a flag.
 //!
 //! On string-to-number: the reference implementations parse with a leading
 //! sign, leading zeros and a trailing point allowed (`+1`, `01`, `1.`), which
@@ -150,7 +150,7 @@ pub fn format_number(n: f64) -> String {
 }
 
 /// Loose truthiness. Note that empty arrays and objects are truthy.
-pub fn truthy(value: &Value) -> bool {
+pub fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -160,7 +160,7 @@ pub fn truthy(value: &Value) -> bool {
     }
 }
 
-fn same_kind(a: &Value, b: &Value) -> bool {
+fn is_same_kind(a: &Value, b: &Value) -> bool {
     matches!(
         (a, b),
         (Value::Null, Value::Null)
@@ -178,8 +178,8 @@ fn same_kind(a: &Value, b: &Value) -> bool {
     reason = "the loose rules define `==` as exact numeric equality after coercion; a \
               tolerance would change which values compare equal"
 )]
-pub fn equal(a: &Value, b: &Value) -> bool {
-    if same_kind(a, b) {
+pub fn is_equal(a: &Value, b: &Value) -> bool {
+    if is_same_kind(a, b) {
         return match (a, b) {
             (Value::Null, Value::Null) => true,
             (Value::Bool(x), Value::Bool(y)) => x == y,

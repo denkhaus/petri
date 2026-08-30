@@ -165,8 +165,8 @@ fn a_root_cancel_folds_to_cancelled_under_both_policies() {
     }
 }
 
-/// A `RunError` sets `run.failed` for later guards: `any_failure` includes the
-/// error list, not just failed history records.
+/// A `RunError` sets `run.failed` for later guards: `has_any_failure` includes
+/// the error list, not just failed history records.
 #[test]
 fn a_run_error_sets_run_failed_for_later_guards() {
     let mut b = GraphBuilder::new();

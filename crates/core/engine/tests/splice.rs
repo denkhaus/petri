@@ -513,7 +513,7 @@ fn own_batches_retracts_the_same_uploaders_earlier_batch_across_generations() {
         let one = b.exprs().lit(1);
         b.exprs().binary(ir::BinOp::Lt, generation, one)
     };
-    b.select(up, vec![ir::Arm::when(up, again).as_back()]);
+    b.select(up, vec![ir::Arm::when(up, again).with_back()]);
     b.mark_entry(up);
     let graph = b.build();
 
@@ -585,7 +585,7 @@ fn a_retracted_admission_readmits_in_a_future_generation() {
         b2, second_lap,
     )]]);
     b.fan_out_groups(b1, vec![vec![ir::Arm::always(x)], vec![
-        ir::Arm::when(head, first_lap).as_back(),
+        ir::Arm::when(head, first_lap).with_back(),
     ]]);
     b.link(b2, x);
     b.graph_mut().entry = vec![head, up];

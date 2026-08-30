@@ -6,14 +6,14 @@
 //! with the code.
 //!
 //! The corpus itself is fetched, not committed, so this skips when it is
-//! absent. See `acceptance::corpus_present`.
+//! absent. See `acceptance::has_corpus`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{env, fs};
 
-use acceptance::{Class, SnapshotSource, check_all, corpus_present, report};
+use acceptance::{Class, SnapshotSource, check_all, has_corpus, report};
 use frontend_gha::ActionSource;
 
 fn corpus_root() -> PathBuf {
@@ -27,7 +27,7 @@ fn corpus_root() -> PathBuf {
 )]
 fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
     let root = corpus_root();
-    if !corpus_present(&root) {
+    if !has_corpus(&root) {
         assert!(
             !env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()),
             "PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched"
@@ -125,7 +125,7 @@ fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
 )]
 fn every_rejection_code_is_declared_in_support_md() {
     let root = corpus_root();
-    if !corpus_present(&root) {
+    if !has_corpus(&root) {
         assert!(
             !env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()),
             "PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched"

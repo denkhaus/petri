@@ -42,7 +42,7 @@ use acceptance::runs::{
     self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_from_log,
     expected_reason, identity_of, runs_report, step_identities,
 };
-use acceptance::{Class, corpus_present, lower_one, workflows};
+use acceptance::{Class, has_corpus, lower_one, workflows};
 use frontend_gha::identity;
 use github_actions::{ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource};
 use runtime::driver::RunReport;
@@ -90,11 +90,11 @@ fn env_num(name: &str, default: u64) -> u64 {
 )]
 async fn corpus_run_sweep() {
     let root = corpus_root();
-    if !corpus_present(&root) {
+    if !has_corpus(&root) {
         eprintln!("skipping: corpus not fetched (scripts/corpus-fetch.sh)");
         return;
     }
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
 
@@ -127,7 +127,7 @@ async fn corpus_run_sweep() {
     let mut queue: Vec<(usize, Graph, bool)> = Vec::new();
     for (repo, repo_root, file) in workflows(&root) {
         let (outcome, graph) = lower_one(&repo, &repo_root, &file, Some(&manifests));
-        if outcome.out_of_scope() || outcome.broken_upstream() || outcome.callee_only() {
+        if outcome.is_out_of_scope() || outcome.is_broken_upstream() || outcome.is_callee_only() {
             continue;
         }
         if !filter.is_empty() && !format!("{repo}/{}", outcome.file).contains(&filter) {
@@ -264,7 +264,7 @@ fn prepare(
     // picked — the only flavor the dind variant is built for. A workflow on
     // the full-image list outranks both: it needs the full runner's package
     // set, as on ubuntu-latest.
-    let full = runs::full_image_workflow(repo_slug, file);
+    let full = runs::is_full_image_workflow(repo_slug, file);
     let docker = runs::needs_docker(graph);
     runs::containerize(graph, platform, |requirements| {
         let image = battery_image(requirements);

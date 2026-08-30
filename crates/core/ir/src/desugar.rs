@@ -132,7 +132,7 @@ pub fn sequential_for_each_over(
     // One group, two arms: loop back while there is more, otherwise leave. Because
     // it is one group, exactly one of them fires.
     let ids = b.select(tail, vec![
-        Arm::when(head, exprs.more).with_map(exprs.next).as_back(),
+        Arm::when(head, exprs.more).with_map(exprs.next).with_back(),
         Arm::always(collector).with_map(exprs.result),
     ]);
 

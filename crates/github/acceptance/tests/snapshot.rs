@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use acceptance::{SnapshotEntry, SnapshotSource, check_one, corpus_present, workflows};
+use acceptance::{SnapshotEntry, SnapshotSource, check_one, has_corpus, workflows};
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 use github_actions::GitActionSource;
 
@@ -83,7 +83,7 @@ fn entry_for(pinned: &PinnedAction, result: &Result<String, ActionSourceError>) 
 fn refresh_action_snapshot() {
     let root = corpus_root();
     assert!(
-        corpus_present(&root),
+        has_corpus(&root),
         "fetch the corpus first: scripts/corpus-fetch.sh"
     );
     let recording = Arc::new(Recording {

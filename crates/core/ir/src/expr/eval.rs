@@ -156,13 +156,13 @@ pub fn eval(table: &ExprTable, id: ExprId, env: &EvalEnv<'_>) -> Result<Value, E
     eval_at(table, id, env, 0)
 }
 
-/// Evaluate `id` and read the result as a boolean, using [`truthy`].
+/// Evaluate `id` and read the result as a boolean, using [`is_truthy`].
 pub fn eval_bool(table: &ExprTable, id: ExprId, env: &EvalEnv<'_>) -> Result<bool, EvalError> {
-    Ok(truthy(&eval(table, id, env)?))
+    Ok(is_truthy(&eval(table, id, env)?))
 }
 
 /// JSON truthiness: `null`, `false`, `0`, `""` and empty containers are false.
-pub fn truthy(v: &Value) -> bool {
+pub fn is_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -218,7 +218,7 @@ pub(super) fn eval_at(
         Expr::Unary(op, arg) => {
             let v = eval_at(table, *arg, env, d)?;
             match op {
-                UnOp::Not => Ok(Value::Bool(!truthy(&v))),
+                UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
                 UnOp::Neg => as_f64("-", &v).map(|n| num(-n)),
             }
         }
@@ -228,7 +228,7 @@ pub(super) fn eval_at(
             then,
             otherwise,
         } => {
-            if truthy(&eval_at(table, *cond, env, d)?) {
+            if is_truthy(&eval_at(table, *cond, env, d)?) {
                 eval_at(table, *then, env, d)
             } else {
                 eval_at(table, *otherwise, env, d)
@@ -262,18 +262,18 @@ fn eval_binary(
     match op {
         BinOp::And => {
             let l = eval_at(table, lhs, env, depth)?;
-            return if truthy(&l) {
-                Ok(Value::Bool(truthy(&eval_at(table, rhs, env, depth)?)))
+            return if is_truthy(&l) {
+                Ok(Value::Bool(is_truthy(&eval_at(table, rhs, env, depth)?)))
             } else {
                 Ok(Value::Bool(false))
             };
         }
         BinOp::Or => {
             let l = eval_at(table, lhs, env, depth)?;
-            return if truthy(&l) {
+            return if is_truthy(&l) {
                 Ok(Value::Bool(true))
             } else {
-                Ok(Value::Bool(truthy(&eval_at(table, rhs, env, depth)?)))
+                Ok(Value::Bool(is_truthy(&eval_at(table, rhs, env, depth)?)))
             };
         }
         _ => {}

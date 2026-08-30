@@ -583,7 +583,7 @@ impl<'a> Lowering<'_, 'a> {
     /// file itself (not an inlined callee), `on.workflow_call` declares the
     /// input with no default, and no `workflow_dispatch` declaration offers a
     /// standalone way to run the file with it.
-    fn callee_only_input(&self, name: &str) -> bool {
+    fn is_callee_only_input(&self, name: &str) -> bool {
         if self.frames[self.current].call.is_some() {
             return false;
         }
@@ -625,7 +625,7 @@ impl<'a> Lowering<'_, 'a> {
                 // default: only a caller can place it, and every call site does
                 // (per-call-site resolution above). Its own class, so a corpus
                 // count never reads "cannot place by construction" as a gap.
-                if self.callee_only_input(&name) {
+                if self.is_callee_only_input(&name) {
                     self.diags.unsupported(
                         "runs_on.callee_input",
                         span,

@@ -215,7 +215,7 @@ async fn compute(
         .wait()
         .await
         .map_err(|e| fail(format!("the `hashFiles({display})` helper died: {e}")))?;
-    if !status.success() {
+    if !status.is_success() {
         return Err(fail(format!(
             "the `hashFiles({display})` helper failed: {}",
             tail.join(" / ")

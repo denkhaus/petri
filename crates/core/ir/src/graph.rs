@@ -75,7 +75,7 @@ impl<S> Edge<S> {
 
     /// Mark this edge as a back edge, so crossing it bumps the generation.
     #[must_use]
-    pub fn as_back(mut self) -> Self {
+    pub fn with_back(mut self) -> Self {
         self.back = true;
         self
     }

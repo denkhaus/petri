@@ -3,7 +3,7 @@
 use std::slice;
 
 use ir::expr::{EvalError, eval, eval_bool};
-use ir::{BinOp, EvalEnv, ExprTable, RunContext, StaticCtx, UnOp, truthy};
+use ir::{BinOp, EvalEnv, ExprTable, RunContext, StaticCtx, UnOp, is_truthy};
 use serde_json::{Value, json};
 
 /// A static-only environment: no token, no run context.
@@ -265,15 +265,15 @@ fn errors_are_values_not_panics() {
 
 #[test]
 fn truthiness_matches_the_documented_rules() {
-    assert!(!truthy(&Value::Null));
-    assert!(!truthy(&json!(false)));
-    assert!(!truthy(&json!(0)));
-    assert!(!truthy(&json!("")));
-    assert!(!truthy(&json!([])));
-    assert!(!truthy(&json!({})));
-    assert!(truthy(&json!(1)));
-    assert!(truthy(&json!("x")));
-    assert!(truthy(&json!([0])));
+    assert!(!is_truthy(&Value::Null));
+    assert!(!is_truthy(&json!(false)));
+    assert!(!is_truthy(&json!(0)));
+    assert!(!is_truthy(&json!("")));
+    assert!(!is_truthy(&json!([])));
+    assert!(!is_truthy(&json!({})));
+    assert!(is_truthy(&json!(1)));
+    assert!(is_truthy(&json!("x")));
+    assert!(is_truthy(&json!([0])));
 }
 
 #[test]

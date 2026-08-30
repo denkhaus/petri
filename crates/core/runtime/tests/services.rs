@@ -12,7 +12,7 @@ use executor_docker::{DockerExecutor, list_containers};
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;
 use smol_str::SmolStr;
-use testkit::{RunDir, docker_ready};
+use testkit::{RunDir, is_docker_ready};
 use tokio::process::Command;
 
 const REDIS: &str = "redis:7-alpine";
@@ -43,7 +43,7 @@ fn redis_service(published: Option<&str>) -> ServiceSpec {
 /// network, and release removes containers and network alike.
 #[tokio::test]
 async fn a_host_scope_realizes_and_tears_down_services() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("services-host");
@@ -64,7 +64,7 @@ async fn a_host_scope_realizes_and_tears_down_services() {
         OneShotContainer::registry("alpine:3.20").with_args(&["sh", "-c", "nslookup redis"]);
     let mut process = runner.run(one_shot).await.expect("docker run");
     let status = process.wait().await.expect("wait");
-    assert!(status.success(), "the service name resolves: {status:?}");
+    assert!(status.is_success(), "the service name resolves: {status:?}");
 
     let base = container_base(dir.path(), "scope-0").await;
     assert_eq!(list_containers(&format!("{base}-svc-")).await.len(), 1);
@@ -75,7 +75,7 @@ async fn a_host_scope_realizes_and_tears_down_services() {
         "release removed the service container"
     );
     assert!(
-        network_gone(&base).await,
+        is_network_gone(&base).await,
         "release removed the scope network"
     );
 }
@@ -84,7 +84,7 @@ async fn a_host_scope_realizes_and_tears_down_services() {
 /// and reaches the service by name; teardown removes the whole world.
 #[tokio::test]
 async fn a_container_scope_reaches_its_service_by_name() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("services-container");
@@ -103,13 +103,16 @@ async fn a_container_scope_reaches_its_service_by_name() {
         .await
         .expect("spawn in the job container");
     let status = process.wait().await.expect("wait");
-    assert!(status.success(), "the job resolves the service: {status:?}");
+    assert!(
+        status.is_success(),
+        "the job resolves the service: {status:?}"
+    );
 
     let base = container_base(dir.path(), "scope-0").await;
     let report = executor.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
     assert!(list_containers(&base).await.is_empty(), "nothing is left");
-    assert!(network_gone(&base).await, "the scope network is gone");
+    assert!(is_network_gone(&base).await, "the scope network is gone");
 }
 
 /// A service that exits before it is ready fails the acquire — routably, with
@@ -117,7 +120,7 @@ async fn a_container_scope_reaches_its_service_by_name() {
 /// returns.
 #[tokio::test]
 async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("services-dead");
@@ -137,7 +140,7 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
         "the failed acquire left no service container"
     );
     assert!(
-        network_gone(&base).await,
+        is_network_gone(&base).await,
         "the failed acquire left no network"
     );
 }
@@ -151,7 +154,7 @@ async fn container_base(run_dir: &Path, instance: &str) -> String {
     format!("{prefix}{instance}")
 }
 
-async fn network_gone(base: &str) -> bool {
+async fn is_network_gone(base: &str) -> bool {
     Command::new("docker")
         .args(["network", "inspect", base])
         .output()

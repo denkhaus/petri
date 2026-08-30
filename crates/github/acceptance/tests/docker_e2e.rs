@@ -8,7 +8,7 @@ mod support;
 use runtime::ir;
 use runtime::ir::RunStatus;
 use support::*;
-use testkit::docker_ready;
+use testkit::is_docker_ready;
 
 fn output_of(report: &RunReportPlus, name: &str) -> ir::Value {
     report
@@ -24,7 +24,7 @@ fn output_of(report: &RunReportPlus, name: &str) -> ir::Value {
 /// later step of the (host) job reads the output back.
 #[tokio::test]
 async fn a_docker_url_action_runs_in_a_host_job() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let text = r#"
@@ -57,7 +57,7 @@ jobs:
 /// the workspace — so an earlier step writes it.
 #[tokio::test]
 async fn a_local_dockerfile_action_builds_and_runs() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let files = files(&[(
@@ -105,7 +105,7 @@ jobs:
 /// wrote is visible to the action and the action's output comes back.
 #[tokio::test]
 async fn a_docker_action_runs_beside_a_containerized_job() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let text = r#"
@@ -142,7 +142,7 @@ jobs:
 /// expression-valued image resolves at lowering through the static contexts.
 #[tokio::test]
 async fn container_options_and_a_static_image_expression_apply() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let text = r#"
@@ -176,7 +176,7 @@ jobs:
 /// reaches its own by name — each healthy before the job's first step.
 #[tokio::test]
 async fn services_are_reachable_from_host_and_containerized_jobs() {
-    if !docker_ready().await {
+    if !is_docker_ready().await {
         return;
     }
     let text = r#"

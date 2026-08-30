@@ -385,7 +385,7 @@ fn budget_still_bounds_a_retrying_loop() {
     b.node_mut(spin).retry = RetryPolicy::attempts(2);
     let always_loop = b.exprs().lit(true);
     b.select(spin, vec![
-        Arm::when(spin, always_loop).as_back(),
+        Arm::when(spin, always_loop).with_back(),
         Arm::always(never),
     ]);
     let graph = b.build();

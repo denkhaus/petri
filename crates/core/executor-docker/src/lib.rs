@@ -199,7 +199,7 @@ impl DockerExecutor {
     /// Whether an acquisition over this run dir ever launched one-shot
     /// containers for `instance`. A `false` means the fence and release sweep
     /// have nothing to look for — no daemon roundtrip needed.
-    pub async fn one_shots_marked(&self, instance: &str) -> bool {
+    pub async fn has_one_shot_marker(&self, instance: &str) -> bool {
         fs::try_exists(self.one_shot_marker(instance))
             .await
             .unwrap_or(false)
@@ -298,7 +298,7 @@ const FALLBACK_PLATFORM: &str = "linux/amd64";
 
 /// Whether a failed pull says the image exists but not for this daemon's
 /// architecture — the error an arm64 host gets for an amd64-only CI image.
-fn missing_platform(error: &EnvError) -> bool {
+fn is_missing_platform(error: &EnvError) -> bool {
     matches!(error, EnvError::Backend { message, .. } if message.contains("no matching manifest"))
 }
 
@@ -312,7 +312,7 @@ pub(crate) async fn pull_image(config_args: &[&str], image: &str) -> Result<(), 
     let Err(error) = run_docker(&args).await else {
         return Ok(());
     };
-    if !missing_platform(&error) {
+    if !is_missing_platform(&error) {
         return Err(error);
     }
     let mut args: Vec<&str> = config_args.to_vec();
@@ -834,7 +834,7 @@ impl DockerProcess {
     }
 
     /// Whether the step's process group still has anything in it.
-    async fn group_alive(&self) -> bool {
+    async fn is_group_alive(&self) -> bool {
         let Some(pgid) = self.pgid else {
             return false;
         };
@@ -898,7 +898,7 @@ impl ProcessHandle for DockerProcess {
                     status = Some(recorded);
                     break;
                 }
-                if !self.group_alive().await {
+                if !self.is_group_alive().await {
                     // One last look: the wrapper may have written on its way out.
                     status = self.recorded_status().await;
                     break;
@@ -1132,12 +1132,12 @@ mod platform_fallback_tests {
             message:   "no matching manifest for linux/arm64/v8 in the manifest list entries"
                 .to_string(),
         };
-        assert!(missing_platform(&miss));
+        assert!(is_missing_platform(&miss));
         let denied = EnvError::Backend {
             backend:   SmolStr::new("docker"),
             operation: SmolStr::new("pull"),
             message:   "pull access denied for ghcr.io/x/y".to_string(),
         };
-        assert!(!missing_platform(&denied));
+        assert!(!is_missing_platform(&denied));
     }
 }

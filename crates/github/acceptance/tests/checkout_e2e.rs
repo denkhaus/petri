@@ -117,7 +117,7 @@ async fn run_checkout(label: &str, container: Option<&str>) {
 /// Host job, no action source configured — the substitution is offline.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_checkout_materializes_the_tree_you_have() {
-    if !tool_ready("git") {
+    if !is_tool_ready("git") {
         return;
     }
     run_checkout("host", None).await;
@@ -126,10 +126,10 @@ async fn local_checkout_materializes_the_tree_you_have() {
 /// The same tree in a containerized job, streamed through the workspace.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_checkout_reaches_containerized_jobs() {
-    if !tool_ready("git") {
+    if !is_tool_ready("git") {
         return;
     }
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     run_checkout("boxed", Some(RUNNER_IMAGE_2404)).await;
@@ -140,7 +140,7 @@ async fn local_checkout_reaches_containerized_jobs() {
 /// the git shape GitHub's checkout guarantees, whatever the source's own.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_detached_branchless_source_lands_on_the_run_branch() {
-    if !tool_ready("git") {
+    if !is_tool_ready("git") {
         return;
     }
     let fixture = Fixture::new("detached");

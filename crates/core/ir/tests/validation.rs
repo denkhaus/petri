@@ -70,7 +70,7 @@ fn a_cycle_without_a_back_edge_is_rejected() {
     let c = b.add_step("c", scope, NOOP);
     b.set_join(a, JoinPolicy::Any);
     b.link(a, c);
-    b.select(c, vec![Arm::always(a).as_back()]);
+    b.select(c, vec![Arm::always(a).with_back()]);
     b.set_budget(a, Budget::looped(5));
     b.set_budget(c, Budget::looped(5));
     b.mark_entry(a);
@@ -133,7 +133,7 @@ fn budgets_must_be_at_least_one_and_finite_inside_loops() {
     let tail = b.add_step("tail", scope, NOOP);
     b.set_join(head, JoinPolicy::Any);
     b.link(head, tail);
-    b.select(tail, vec![Arm::always(head).as_back()]);
+    b.select(tail, vec![Arm::always(head).with_back()]);
     b.set_budget(
         head,
         Budget::new(Budget::UNBOUNDED_FIRINGS, Duration::from_secs(1)),
@@ -414,7 +414,7 @@ fn a_loop_head_must_join_with_any() {
         let tail = b.add_step("tail", scope, NOOP);
         b.set_join(head, join);
         b.link(head, tail);
-        b.select(tail, vec![Arm::always(head).as_back()]);
+        b.select(tail, vec![Arm::always(head).with_back()]);
         b.set_budget(head, Budget::looped(5));
         b.set_budget(tail, Budget::looped(5));
         b.mark_entry(head);
@@ -449,7 +449,7 @@ fn a_multi_branch_join_needs_its_own_node_in_front_of_a_loop_head() {
     b.link(left, head);
     b.link(right, head);
     b.set_join(head, JoinPolicy::All);
-    b.select(head, vec![Arm::always(head).as_back()]);
+    b.select(head, vec![Arm::always(head).with_back()]);
     b.set_budget(head, Budget::looped(5));
     assert!(
         errors(&b.build())
@@ -470,7 +470,7 @@ fn a_multi_branch_join_needs_its_own_node_in_front_of_a_loop_head() {
     b.set_join(gate, JoinPolicy::All);
     b.link(gate, head);
     b.set_join(head, JoinPolicy::Any);
-    b.select(head, vec![Arm::always(head).as_back()]);
+    b.select(head, vec![Arm::always(head).with_back()]);
     b.set_budget(head, Budget::looped(5));
     validate(&b.build()).expect("valid");
 }
@@ -583,7 +583,7 @@ fn a_loop_head_can_never_suppress_the_re_entry_warning() {
     b.link(away, head);
     b.set_join(head, JoinPolicy::Any);
     b.link(head, tail);
-    b.select(tail, vec![Arm::always(head).as_back()]);
+    b.select(tail, vec![Arm::always(head).with_back()]);
     b.set_budget(head, Budget::looped(5));
     b.set_budget(tail, Budget::looped(5));
     b.mark_entry(start);
@@ -644,7 +644,7 @@ fn loop_head_normalization_rewrites_quorum_one_to_any() {
     let tail = b.add_step("tail", scope, NOOP);
     b.set_join(head, JoinPolicy::Quorum { n: 1 });
     b.link(head, tail);
-    b.select(tail, vec![Arm::always(head).as_back()]);
+    b.select(tail, vec![Arm::always(head).with_back()]);
     b.set_budget(head, Budget::looped(5));
     b.set_budget(tail, Budget::looped(5));
     b.mark_entry(head);

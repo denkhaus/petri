@@ -99,7 +99,7 @@ impl Executor for LocalExecutor {
                 // nothing of ours to remove. The one-shot marker gates the
                 // sweep, so a Docker-free scope never spawns a `docker` client
                 // for a fence with nothing to look for.
-                if self.docker.one_shots_marked(&scope.instance).await {
+                if self.docker.has_one_shot_marker(&scope.instance).await {
                     let prefix = self.docker.one_shot_prefix(&scope.instance).await?;
                     executor_docker::sweep_containers(&prefix).await;
                 }
@@ -150,7 +150,7 @@ impl Executor for LocalExecutor {
                 // (nothing of the scope uses it any more). The marker gates
                 // the sweep, as at acquire: no one-shot ever launched means
                 // nothing to look for.
-                if self.docker.one_shots_marked(env.instance()).await
+                if self.docker.has_one_shot_marker(env.instance()).await
                     && let Ok(prefix) = self.docker.one_shot_prefix(env.instance()).await
                 {
                     executor_docker::sweep_containers(&prefix).await;

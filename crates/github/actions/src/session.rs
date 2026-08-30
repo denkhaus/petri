@@ -830,7 +830,7 @@ pub const COMMAND_REFUSED_CLASS: &str = "command_refused";
 /// the step's resolved env or in the environment the process inherits — the
 /// job's `env:`, or the runner's own environment — which is the runner's
 /// `Environment.GetEnvironmentVariable(...) || env context` check.
-pub fn unsecure_commands_allowed(
+pub fn can_use_unsecure_commands(
     env: &BTreeMap<SmolStr, ValueOrSecretRef>,
     exec: &dyn ExecEnv,
 ) -> bool {
@@ -841,7 +841,7 @@ pub fn unsecure_commands_allowed(
     unsecure_flag(step.as_deref(), exec)
 }
 
-/// [`unsecure_commands_allowed`] over an already-stringified step value.
+/// [`can_use_unsecure_commands`] over an already-stringified step value.
 pub(crate) fn unsecure_flag(step_value: Option<&str>, exec: &dyn ExecEnv) -> bool {
     let is_true = |s: &str| s.trim().eq_ignore_ascii_case("true");
     step_value.is_some_and(is_true)
@@ -854,7 +854,7 @@ pub(crate) fn unsecure_flag(step_value: Option<&str>, exec: &dyn ExecEnv) -> boo
 pub(crate) const UNSECURE_COMMANDS_KEY: &str = "ACTIONS_ALLOW_UNSECURE_COMMANDS";
 
 /// Whether the resolved env sets a variable to a GitHub-truthy value.
-pub fn env_truthy(env: &BTreeMap<SmolStr, ValueOrSecretRef>, key: &str) -> bool {
+pub fn is_env_truthy(env: &BTreeMap<SmolStr, ValueOrSecretRef>, key: &str) -> bool {
     match env.get(key) {
         Some(ValueOrSecretRef::Literal(value)) => {
             let s = stringify(value);
@@ -933,9 +933,9 @@ mod tests {
             SmolStr::new("B"),
             ValueOrSecretRef::Literal(Value::String("false".into())),
         );
-        assert!(env_truthy(&env, "A"));
-        assert!(!env_truthy(&env, "B"));
-        assert!(!env_truthy(&env, "C"));
+        assert!(is_env_truthy(&env, "A"));
+        assert!(!is_env_truthy(&env, "B"));
+        assert!(!is_env_truthy(&env, "C"));
     }
 
     #[test]

@@ -15,8 +15,8 @@ use tokio::task;
 use crate::config::{ActionConfig, ActionLocation};
 use crate::gate;
 use crate::session::{
-    REPO_DIR, RUNNER_DIR, Session, fold_into_outcome, shell_quote, stringify,
-    unsecure_commands_allowed,
+    REPO_DIR, RUNNER_DIR, Session, can_use_unsecure_commands, fold_into_outcome, shell_quote,
+    stringify,
 };
 
 /// The action could not be fetched.
@@ -117,7 +117,7 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
             env.insert(key, literal(value.to_string()));
         }
     }
-    let allow_unsecure = unsecure_commands_allowed(&env, &*ctx.env);
+    let allow_unsecure = can_use_unsecure_commands(&env, &*ctx.env);
 
     let entry = format!("{action_dir}/{}", config.entry.trim_start_matches("./"));
     let process = ProcessConfig {

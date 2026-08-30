@@ -98,7 +98,7 @@ async fn run_artifact_flow(label: &str, container: Option<&str>) {
 /// Host jobs: upload in one job, download in the next, through loopback.
 #[tokio::test(flavor = "multi_thread")]
 async fn artifacts_flow_across_host_jobs() {
-    if !tool_ready("node") {
+    if !is_tool_ready("node") {
         return;
     }
     run_artifact_flow("host", None).await;
@@ -108,7 +108,7 @@ async fn artifacts_flow_across_host_jobs() {
 /// executor's guaranteed `host.docker.internal` alias.
 #[tokio::test(flavor = "multi_thread")]
 async fn artifacts_flow_across_containerized_jobs() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     run_artifact_flow("boxed", Some(RUNNER_IMAGE_2404)).await;
@@ -120,7 +120,7 @@ async fn artifacts_flow_across_containerized_jobs() {
 /// warm cache. No network beyond what a container image pull would need.
 #[tokio::test(flavor = "multi_thread")]
 async fn checkout_build_and_artifacts_run_to_success() {
-    if !tool_ready("node") {
+    if !is_tool_ready("node") {
         return;
     }
     let repo = env::temp_dir()

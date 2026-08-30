@@ -68,7 +68,7 @@ async fn host_jobs_use_the_persistent_tool_cache() {
 /// exported variable and the expression alike.
 #[tokio::test(flavor = "multi_thread")]
 async fn containerized_jobs_keep_the_image_tool_cache() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&workflow(Some(RUNNER_IMAGE_2404)));

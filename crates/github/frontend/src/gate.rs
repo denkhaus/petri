@@ -143,54 +143,6 @@ impl Gate {
         }
     }
 
-    /// Read a gate back from config JSON. The format is strict: every node is
-    /// an `op`, an `$env`, or a `lit` object, so a resolved engine value
-    /// can never be mistaken for structure.
-    pub fn from_value(value: &Value) -> Result<Self, String> {
-        let Some(map) = value.as_object() else {
-            return Err(format!("a gate node must be an object, got {value}"));
-        };
-        if let Some(inner) = map.get(LIT_KEY) {
-            return Ok(Self::Lit(inner.clone()));
-        }
-        if let Some(name) = map.get(ENV_KEY) {
-            let Some(name) = name.as_str() else {
-                return Err("`$env` must name a variable".to_string());
-            };
-            let or = match map.get(ENV_OR_KEY) {
-                Some(or) => Some(Box::new(Self::from_value(or)?)),
-                None => None,
-            };
-            return Ok(Self::Env {
-                name: name.to_string(),
-                or,
-            });
-        }
-        if let (Some(op), Some(args)) = (map.get(OP_KEY), map.get(ARGS_KEY)) {
-            let Some(op) = op.as_str().and_then(GateOp::parse) else {
-                return Err(format!("`{op}` is not a gate operator"));
-            };
-            let Some(args) = args.as_array() else {
-                return Err("`args` must be an array".to_string());
-            };
-            let args = args
-                .iter()
-                .map(Self::from_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            // `!` takes one operand, comparisons exactly two, `&&`/`||` two or more.
-            let ok = match op {
-                GateOp::Not => args.len() == 1,
-                GateOp::And | GateOp::Or => args.len() >= 2,
-                _ => args.len() == 2,
-            };
-            if !ok {
-                return Err(format!("`{}` has {} operand(s)", op.symbol(), args.len()));
-            }
-            return Ok(Self::Op { op, args });
-        }
-        Err("a gate node must be `op`/`args`, `$env`, or `lit`".to_string())
-    }
-
     /// Every string literal in the gate, for sentinel resolution.
     pub fn texts(&self) -> Vec<&str> {
         let mut out = Vec::new();
@@ -248,9 +200,61 @@ impl Gate {
     }
 }
 
+/// Read a gate back from config JSON. The format is strict: every node is an
+/// `op`, an `$env`, or a `lit` object, so a resolved engine value can never be
+/// mistaken for structure.
+impl TryFrom<&Value> for Gate {
+    type Error = String;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        let Some(map) = value.as_object() else {
+            return Err(format!("a gate node must be an object, got {value}"));
+        };
+        if let Some(inner) = map.get(LIT_KEY) {
+            return Ok(Self::Lit(inner.clone()));
+        }
+        if let Some(name) = map.get(ENV_KEY) {
+            let Some(name) = name.as_str() else {
+                return Err("`$env` must name a variable".to_string());
+            };
+            let or = match map.get(ENV_OR_KEY) {
+                Some(or) => Some(Box::new(Self::try_from(or)?)),
+                None => None,
+            };
+            return Ok(Self::Env {
+                name: name.to_string(),
+                or,
+            });
+        }
+        if let (Some(op), Some(args)) = (map.get(OP_KEY), map.get(ARGS_KEY)) {
+            let Some(op) = op.as_str().and_then(GateOp::parse) else {
+                return Err(format!("`{op}` is not a gate operator"));
+            };
+            let Some(args) = args.as_array() else {
+                return Err("`args` must be an array".to_string());
+            };
+            let args = args
+                .iter()
+                .map(Self::try_from)
+                .collect::<Result<Vec<_>, _>>()?;
+            // `!` takes one operand, comparisons exactly two, `&&`/`||` two or more.
+            let ok = match op {
+                GateOp::Not => args.len() == 1,
+                GateOp::And | GateOp::Or => args.len() >= 2,
+                _ => args.len() == 2,
+            };
+            if !ok {
+                return Err(format!("`{}` has {} operand(s)", op.symbol(), args.len()));
+            }
+            return Ok(Self::Op { op, args });
+        }
+        Err("a gate node must be `op`/`args`, `$env`, or `lit`".to_string())
+    }
+}
+
 /// Evaluate a gate to its value, GitHub-style: `&&` and `||` return operand
 /// values, comparisons use the loose rules, `!` negates loose truthiness. The
-/// caller applies [`loose::truthy`] to the result — GitHub truthiness at the
+/// caller applies [`loose::is_truthy`] to the result — GitHub truthiness at the
 /// root.
 ///
 /// `env` resolves an env leaf: `Ok(None)` means the name is unbound and the
@@ -272,7 +276,7 @@ pub fn eval<E>(
             GateOp::And => {
                 let mut acc = eval(&args[0], env)?;
                 for next in &args[1..] {
-                    if !loose::truthy(&acc) {
+                    if !loose::is_truthy(&acc) {
                         break;
                     }
                     acc = eval(next, env)?;
@@ -282,17 +286,17 @@ pub fn eval<E>(
             GateOp::Or => {
                 let mut acc = eval(&args[0], env)?;
                 for next in &args[1..] {
-                    if loose::truthy(&acc) {
+                    if loose::is_truthy(&acc) {
                         break;
                     }
                     acc = eval(next, env)?;
                 }
                 acc
             }
-            GateOp::Not => Value::Bool(!loose::truthy(&eval(&args[0], env)?)),
+            GateOp::Not => Value::Bool(!loose::is_truthy(&eval(&args[0], env)?)),
             GateOp::Eq | GateOp::Ne => {
                 let (l, r) = (eval(&args[0], env)?, eval(&args[1], env)?);
-                let eq = loose::equal(&l, &r);
+                let eq = loose::is_equal(&l, &r);
                 Value::Bool(if *op == GateOp::Eq { eq } else { !eq })
             }
             GateOp::Lt | GateOp::Le | GateOp::Gt | GateOp::Ge => {
@@ -318,9 +322,9 @@ pub fn eval<E>(
 /// `runner.tool_cache`.
 pub fn needs_lazy(expr: &Expr) -> bool {
     if env_leaf(expr).is_some()
-        || workspace_leaf(expr)
-        || runner_temp_leaf(expr)
-        || runner_tool_cache_leaf(expr)
+        || is_workspace_leaf(expr)
+        || is_runner_temp_leaf(expr)
+        || is_runner_tool_cache_leaf(expr)
     {
         return true;
     }
@@ -337,7 +341,7 @@ pub fn needs_lazy(expr: &Expr) -> bool {
 }
 
 /// `github.workspace`: runner-side truth only the step's environment knows.
-fn workspace_leaf(expr: &Expr) -> bool {
+fn is_workspace_leaf(expr: &Expr) -> bool {
     let Some((root, path)) = expr.dotted_path() else {
         return false;
     };
@@ -346,7 +350,7 @@ fn workspace_leaf(expr: &Expr) -> bool {
 }
 
 /// `runner.temp`: the same runner-side truth as `github.workspace`.
-fn runner_temp_leaf(expr: &Expr) -> bool {
+fn is_runner_temp_leaf(expr: &Expr) -> bool {
     let Some((root, path)) = expr.dotted_path() else {
         return false;
     };
@@ -355,7 +359,7 @@ fn runner_temp_leaf(expr: &Expr) -> bool {
 }
 
 /// `runner.tool_cache`: runner-side truth again, resolved by the step.
-fn runner_tool_cache_leaf(expr: &Expr) -> bool {
+fn is_runner_tool_cache_leaf(expr: &Expr) -> bool {
     let Some((root, path)) = expr.dotted_path() else {
         return false;
     };
@@ -403,18 +407,18 @@ pub fn condition_tree(
             or: Some(Box::new(or)),
         });
     }
-    if workspace_leaf(ast) {
+    if is_workspace_leaf(ast) {
         // A string leaf the step rewrites to its own workspace path before
         // evaluation; comparisons decompose around it (`needs_lazy`), so the
         // engine never evaluates over the marker.
         return Some(Gate::Lit(Value::String(WORKSPACE_SENTINEL.to_string())));
     }
-    if runner_temp_leaf(ast) {
+    if is_runner_temp_leaf(ast) {
         // The same shape for `runner.temp`: the step rewrites the marker to
         // its own `RUNNER_TEMP` before evaluation.
         return Some(Gate::Lit(Value::String(RUNNER_TEMP_SENTINEL.to_string())));
     }
-    if runner_tool_cache_leaf(ast) {
+    if is_runner_tool_cache_leaf(ast) {
         // And for `runner.tool_cache`: the step rewrites the marker to the
         // tool cache it resolved for its environment before evaluation.
         return Some(Gate::Lit(Value::String(
@@ -560,15 +564,15 @@ mod tests {
             }],
         };
         let value = gate.to_value();
-        assert_eq!(Gate::from_value(&value).unwrap(), gate);
+        assert_eq!(Gate::try_from(&value).unwrap(), gate);
         assert!(gate.reads_env());
 
-        assert!(Gate::from_value(&json!({"op": "??", "args": []})).is_err());
-        assert!(Gate::from_value(&json!({"op": "!", "args": []})).is_err());
-        assert!(Gate::from_value(&json!("bare")).is_err());
+        assert!(Gate::try_from(&json!({"op": "??", "args": []})).is_err());
+        assert!(Gate::try_from(&json!({"op": "!", "args": []})).is_err());
+        assert!(Gate::try_from(&json!("bare")).is_err());
         // A literal that *looks* like an operator node stays a literal.
         let tricky = Gate::Lit(json!({"op": "&&", "args": []}));
-        assert_eq!(Gate::from_value(&tricky.to_value()).unwrap(), tricky);
+        assert_eq!(Gate::try_from(&tricky.to_value()).unwrap(), tricky);
     }
 
     #[test]
@@ -609,7 +613,7 @@ mod tests {
             name: "MISSING".into(),
             or:   None,
         };
-        assert!(!loose::truthy(&eval(&bare, &mut no_env).unwrap()));
+        assert!(!loose::is_truthy(&eval(&bare, &mut no_env).unwrap()));
         // A bound one wins over the fallback.
         let mut bound = |name: &str| -> Result<Option<Value>, ()> {
             Ok((name == "MISSING").then(|| json!("set")))

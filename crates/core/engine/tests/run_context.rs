@@ -33,7 +33,7 @@ fn a_goal_gate_routes_on_the_run_context() {
     b.link(start, gate);
     b.set_join(gate, JoinPolicy::Any);
     b.select(gate, vec![Arm::when(exit, repaired), Arm::always(repair)]);
-    b.select(repair, vec![Arm::always(gate).as_back()]);
+    b.select(repair, vec![Arm::always(gate).with_back()]);
     b.set_budget(gate, Budget::looped(5));
     b.set_budget(repair, Budget::looped(5));
     b.set_budget(exit, Budget::looped(5));

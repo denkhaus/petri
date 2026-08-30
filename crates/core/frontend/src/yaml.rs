@@ -66,7 +66,7 @@ impl Document {
                 continue;
             }
             if message.contains("invalid indentation")
-                && multiline_flow_before(&current, line as usize)
+                && has_multiline_flow_before(&current, line as usize)
             {
                 // The underlying reader rejects a multi-line `[…]` or `{…}` value
                 // followed by a dedent, which GitHub accepts. The closer-only shape
@@ -186,7 +186,7 @@ fn flow_opener(lines: &[&str], close: usize, close_slice: &str) -> Option<usize>
 
 /// Whether the lines before `line` close a flow collection that opened on an
 /// earlier line — the shape the underlying reader gets wrong.
-fn multiline_flow_before(text: &str, line: usize) -> bool {
+fn has_multiline_flow_before(text: &str, line: usize) -> bool {
     let lines: Vec<&str> = text.lines().collect();
     if line == 0 {
         return false;

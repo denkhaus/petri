@@ -29,7 +29,7 @@ pub use desugar::{
     normalize_loop_heads, parallel_for_each, sequential_for_each, sequential_for_each_over,
 };
 pub use expr::{
-    BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, truthy,
+    BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, is_truthy,
 };
 pub use flow::{
     Control, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext, RunStatus, Status,

@@ -527,7 +527,7 @@ impl EngineState {
     /// under [`Completion::TerminalNode`] the fold reads `Failed` until the
     /// exit record exists, which would poison `run.failed` guards mid-run.
     /// Two names, two meanings.
-    pub fn any_failure(&self) -> bool {
+    pub fn has_any_failure(&self) -> bool {
         !self.errors.is_empty() || self.history.iter().any(|r| r.outcome.status.is_failure())
     }
 

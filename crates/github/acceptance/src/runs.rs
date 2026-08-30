@@ -83,7 +83,7 @@ pub const FULL_IMAGE_WORKFLOWS: &[(&str, &str)] = &[
 ];
 
 /// Whether the sweep routes this workflow to the full image.
-pub fn full_image_workflow(repo: &str, file: &str) -> bool {
+pub fn is_full_image_workflow(repo: &str, file: &str) -> bool {
     FULL_IMAGE_WORKFLOWS.contains(&(repo, file))
 }
 

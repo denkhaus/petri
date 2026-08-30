@@ -130,7 +130,7 @@ fn generations_partition_the_join() {
     b.node_mut(seed).routing =
         ir::Routing::next(ir::Edge::always(seed_edge, head).with_map(start_at_zero));
     b.link(head, tail);
-    b.select(tail, vec![Arm::when(head, more).with_map(bump).as_back()]);
+    b.select(tail, vec![Arm::when(head, more).with_map(bump).with_back()]);
     let graph = b.build();
     validate(&graph).expect("valid");
 

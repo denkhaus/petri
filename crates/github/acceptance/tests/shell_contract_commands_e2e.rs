@@ -449,7 +449,7 @@ async fn shells_fail_the_way_github_documents() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shells_fail_the_way_github_documents_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&in_container(SHELLS_WORKFLOW));
@@ -499,7 +499,7 @@ fn assert_python_ran(report: &RunReportPlus) {
 #[tokio::test]
 async fn the_python_shell_runs_python() {
     // GitHub's template is `python {0}`, not `python3`.
-    if !tool_ready("python") {
+    if !is_tool_ready("python") {
         return;
     }
     let graph = lower_ok(PYTHON_WORKFLOW);
@@ -509,7 +509,7 @@ async fn the_python_shell_runs_python() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_python_shell_runs_python_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&in_container(PYTHON_WORKFLOW));
@@ -521,7 +521,7 @@ async fn the_python_shell_runs_python_in_a_container() {
 /// no PowerShell, so this runs on the host and only where `pwsh` exists.
 #[tokio::test]
 async fn the_pwsh_shell_runs_powershell() {
-    if !tool_ready("pwsh") {
+    if !is_tool_ready("pwsh") {
         return;
     }
     let text = r#"
@@ -631,7 +631,7 @@ async fn secrets_and_runtime_masks_never_reach_the_log() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secrets_and_runtime_masks_never_reach_the_log_in_a_container() {
-    if !testkit::docker_ready().await {
+    if !testkit::is_docker_ready().await {
         return;
     }
     let graph = lower_ok(&in_container(MASKING_WORKFLOW));

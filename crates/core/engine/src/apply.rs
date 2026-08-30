@@ -190,7 +190,7 @@ fn try_fire(
         state.push_error(RunError::UnknownNode(node_id));
         return;
     };
-    if !join_satisfied(state, &node, key) {
+    if !is_join_satisfied(state, &node, key) {
         return;
     }
 
@@ -402,7 +402,7 @@ fn has_cancelled_input(state: &EngineState, key: (NodeId, Generation)) -> bool {
     tokens.values().any(|t| state.outcome_was_cancelled(t.from))
 }
 
-fn join_satisfied(state: &EngineState, node: &Node, key: (NodeId, Generation)) -> bool {
+fn is_join_satisfied(state: &EngineState, node: &Node, key: (NodeId, Generation)) -> bool {
     let Some(tokens) = state.tokens_for(key) else {
         return false;
     };

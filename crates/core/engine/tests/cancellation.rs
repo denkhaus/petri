@@ -368,7 +368,7 @@ fn a_back_edge_through_a_cancelled_region_stops_at_its_budget() {
     b.set_budget(spin, ir::Budget::looped(4));
     let always_loop = b.exprs().lit(true);
     b.select(spin, vec![
-        ir::Arm::when(spin, always_loop).as_back(),
+        ir::Arm::when(spin, always_loop).with_back(),
         ir::Arm::always(never),
     ]);
     let graph = b.build();

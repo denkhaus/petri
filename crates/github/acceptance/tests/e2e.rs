@@ -9,7 +9,7 @@
 //! itself.
 //!
 //! The corpus is fetched, not committed, so these skip when it is absent. See
-//! `acceptance::corpus_present` for the convention.
+//! `acceptance::has_corpus` for the convention.
 
 mod support;
 
@@ -38,7 +38,7 @@ fn corpus_root() -> PathBuf {
     clippy::print_stderr,
     reason = "a skipped test says why on the runner's stderr; a test binary has no other sink"
 )]
-fn corpus_repo_ready(repo: &str) -> bool {
+fn is_corpus_repo_ready(repo: &str) -> bool {
     if corpus_root().join(repo).join(".github/workflows").is_dir() {
         return true;
     }
@@ -122,7 +122,7 @@ fn fresh_dir(label: &str) -> PathBuf {
 /// two cache ids, the script deletes both.
 #[tokio::test]
 async fn react_cleanup_stale_branch_caches_runs() {
-    if !corpus_repo_ready("facebook__react") {
+    if !is_corpus_repo_ready("facebook__react") {
         return;
     }
     let dir = fresh_dir("react-cleanup");
@@ -187,7 +187,7 @@ async fn react_cleanup_stale_branch_caches_runs() {
 /// and posts through `gh`; the other two are skipped by their `if:`.
 #[tokio::test]
 async fn nodejs_comment_labeled_runs_the_matching_job() {
-    if !corpus_repo_ready("nodejs__node") {
+    if !is_corpus_repo_ready("nodejs__node") {
         return;
     }
     let dir = fresh_dir("node-comment-labeled");

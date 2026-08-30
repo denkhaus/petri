@@ -183,7 +183,7 @@ async fn the_sentinel_pins_the_group_until_release() {
         .await
         .expect("spawn");
     let status = handle.wait().await.expect("wait");
-    assert!(status.success());
+    assert!(status.is_success());
 
     // The workload is gone; the sentinel is not. Its command line names the
     // status file under this run's unique directory.

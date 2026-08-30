@@ -116,7 +116,7 @@ impl Loader {
     }
 
     /// Whether the next value event would land in key position of a mapping.
-    fn expecting_key(&self) -> bool {
+    fn is_expecting_key(&self) -> bool {
         matches!(self.frames.last(), Some(Frame::Mapping { key: None, .. }))
     }
 
@@ -171,7 +171,7 @@ impl MarkedEventReceiver for Loader {
             Event::MappingStart(aid, tag) => {
                 if tag.is_some() {
                     self.fail(mark, "YAML tags are not supported");
-                } else if self.expecting_key() {
+                } else if self.is_expecting_key() {
                     self.fail(mark, "mapping keys must be scalars");
                 } else {
                     self.frames.push(Frame::Mapping {
@@ -184,7 +184,7 @@ impl MarkedEventReceiver for Loader {
             Event::SequenceStart(aid, tag) => {
                 if tag.is_some() {
                     self.fail(mark, "YAML tags are not supported");
-                } else if self.expecting_key() {
+                } else if self.is_expecting_key() {
                     self.fail(mark, "mapping keys must be scalars");
                 } else if self.frames.is_empty() {
                     self.fail(mark, "the top level must be a mapping");

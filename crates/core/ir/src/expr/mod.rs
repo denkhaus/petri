@@ -17,7 +17,7 @@ mod eval;
 mod table;
 
 pub use builtins::{BUILTINS, Builtin, builtin};
-pub use eval::{EvalEnv, EvalError, StaticCtx, eval, eval_bool, truthy};
+pub use eval::{EvalEnv, EvalError, StaticCtx, eval, eval_bool, is_truthy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_str::SmolStr;

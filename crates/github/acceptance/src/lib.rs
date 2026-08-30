@@ -8,7 +8,7 @@
 //!
 //! The corpus data is not committed. `scripts/corpus-fetch.sh` downloads it, so
 //! on a fresh clone it is simply absent, and the corpus tests skip themselves
-//! rather than fail — see [`corpus_present`].
+//! rather than fail — see [`has_corpus`].
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -91,7 +91,7 @@ impl Outcome {
     /// The workflow needs a Windows or macOS runner or shell somewhere, so it
     /// is out of this corpus's scope by policy, whatever else it would
     /// need.
-    pub fn out_of_scope(&self) -> bool {
+    pub fn is_out_of_scope(&self) -> bool {
         self.unsupported_features()
             .iter()
             .any(|f| OUT_OF_SCOPE.contains(&f.as_str()))
@@ -100,7 +100,7 @@ impl Outcome {
     /// Every rejection is [`CALLEE_ONLY`]: a reusable file only its callers can
     /// place. "Every", not "any" — a file with another blocker besides is a
     /// real rejection and stays one.
-    pub fn callee_only(&self) -> bool {
+    pub fn is_callee_only(&self) -> bool {
         let features = self.unsupported_features();
         self.class == Class::Unsupported
             && !features.is_empty()
@@ -109,7 +109,7 @@ impl Outcome {
 
     /// The workflow references a repository that is gone upstream
     /// ([`BROKEN_UPSTREAM`]): broken on GitHub itself, whatever else it needs.
-    pub fn broken_upstream(&self) -> bool {
+    pub fn is_broken_upstream(&self) -> bool {
         self.unsupported_features()
             .iter()
             .any(|f| BROKEN_UPSTREAM.contains(&f.as_str()))
@@ -142,7 +142,7 @@ impl Outcome {
 /// corpus test skips with a message when this is false, and
 /// `PETRI_REQUIRE_CORPUS` turns that skip into a failure. CI sets it, because a
 /// silently skipped battery is indistinguishable from a passing one.
-pub fn corpus_present(root: &Path) -> bool {
+pub fn has_corpus(root: &Path) -> bool {
     let Ok(repos) = fs::read_dir(root) else {
         return false;
     };
@@ -459,18 +459,18 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
     // (nothing standalone to place), and workflows whose referenced repository
     // is gone upstream (broken on GitHub itself). Precedence in that order, so
     // a file lands in exactly one class.
-    let out_of_scope = outcomes.iter().filter(|o| o.out_of_scope()).count();
+    let out_of_scope = outcomes.iter().filter(|o| o.is_out_of_scope()).count();
     let broken_upstream = outcomes
         .iter()
-        .filter(|o| !o.out_of_scope() && o.broken_upstream())
+        .filter(|o| !o.is_out_of_scope() && o.is_broken_upstream())
         .count();
     let callee_only = outcomes
         .iter()
-        .filter(|o| !o.out_of_scope() && !o.broken_upstream() && o.callee_only())
+        .filter(|o| !o.is_out_of_scope() && !o.is_broken_upstream() && o.is_callee_only())
         .count();
     let in_scope: Vec<&Outcome> = outcomes
         .iter()
-        .filter(|o| !o.out_of_scope() && !o.broken_upstream() && !o.callee_only())
+        .filter(|o| !o.is_out_of_scope() && !o.is_broken_upstream() && !o.is_callee_only())
         .collect();
     let total = in_scope.len();
     let count = |c: Class| in_scope.iter().filter(|o| o.class == c).count();
@@ -599,12 +599,12 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
     for o in outcomes {
         // Excluded rows keep their place in the inventory but carry no
         // feature list: what else they would need is noise by policy.
-        let excluded = o.out_of_scope() || o.broken_upstream() || o.callee_only();
-        let class = if o.out_of_scope() {
+        let excluded = o.is_out_of_scope() || o.is_broken_upstream() || o.is_callee_only();
+        let class = if o.is_out_of_scope() {
             "out of scope"
-        } else if o.broken_upstream() {
+        } else if o.is_broken_upstream() {
             "broken upstream"
-        } else if o.callee_only() {
+        } else if o.is_callee_only() {
             "callee only"
         } else {
             match o.class {

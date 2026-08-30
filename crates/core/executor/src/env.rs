@@ -128,7 +128,7 @@ impl ExitStatus {
         }
     }
 
-    pub fn success(&self) -> bool {
+    pub fn is_success(&self) -> bool {
         self.code == Some(0) && self.signal.is_none()
     }
 }
