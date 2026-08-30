@@ -96,8 +96,18 @@ pub fn battery_image(requirements: &[SmolStr]) -> &'static str {
     RUNNER_IMAGE_2404
 }
 
+/// The meta key the stub leaves the original script text under. `Node.meta`
+/// is engine-opaque — carried, never read — so the sweep's classifiers can
+/// look back at what a stubbed step *would* have run
+/// ([`expected_from_stubbed_script`]).
+pub const STUBBED_SCRIPT_META: &str = "petri.stubbed_script";
+
 /// Stub every `github/run` script to `true`, keeping the step's gate and
-/// placement so control flow is exercised without executing corpus code.
+/// placement so control flow is exercised without executing corpus code. The
+/// original script text is stashed on the node's meta
+/// ([`STUBBED_SCRIPT_META`]): a later step's failure can be the stub's doing
+/// — a tool the script would have installed — and the classifier reads it
+/// back.
 ///
 /// The step's own `env` and `working-directory` go with the script: the env can
 /// name repository secrets no local run has, and the directory may only exist
@@ -111,11 +121,23 @@ pub fn stub_run_scripts(graph: &mut Graph) {
         let Some(config) = node.step.config.as_object_mut() else {
             continue;
         };
+        let original = config
+            .get("run")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         config.insert("run".into(), Value::from("true"));
         config.insert("shell".into(), Value::from("sh"));
         config.remove("shell_command");
         config.remove("env");
         config.remove("working_dir");
+        if let Some(script) = original {
+            match node.meta.as_object_mut() {
+                Some(meta) => {
+                    meta.insert(STUBBED_SCRIPT_META.into(), Value::from(script));
+                }
+                None => node.meta = serde_json::json!({ STUBBED_SCRIPT_META: script }),
+            }
+        }
     }
 }
 
@@ -977,6 +999,18 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
     {
         return Some("uploads outputs a stubbed build never produced".to_string());
     }
+    // maturin-action drives `rustup` to install its toolchain — a tool
+    // GitHub's full runner image preinstalls and the slim battery image
+    // deliberately does not carry (no installer script in the workflow puts
+    // it there; the action assumes the hosted image). The failure measures
+    // the image stance, not the runtime tier.
+    if bare == "PyO3/maturin-action"
+        && log
+            .iter()
+            .any(|line| line.contains("Unable to locate executable file: rustup"))
+    {
+        return Some("needs a tool GitHub's full runner image preinstalls (rustup)".to_string());
+    }
     // paths-filter run against no repository: on GitHub a pull-request event
     // routes it to the PR list-files API — the job checks nothing out — while
     // the sweep's synthesized event forces its git-diff mode, which fatals on
@@ -1015,6 +1049,110 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
         );
     }
     None
+}
+
+/// Every node with the script the stub stashed on it ([`STUBBED_SCRIPT_META`]),
+/// in graph order — the classifier's view of what each `run:` step *would*
+/// have run. `None` for nodes that stashed nothing (real steps, markers).
+pub fn stashed_scripts(graph: &Graph) -> Vec<(String, Option<String>)> {
+    graph
+        .nodes
+        .iter()
+        .map(|n| {
+            let script = n
+                .meta
+                .get(STUBBED_SCRIPT_META)
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            (n.name.to_string(), script)
+        })
+        .collect()
+}
+
+/// Why a real step's first failure is a stubbed installer's doing: the log
+/// says an executable is missing, and an **earlier** node in the same job
+/// stashed a `run:` script whose text names that tool — the `pip install
+/// isort` the sweep stubbed to `true`. The tool name is matched on word
+/// boundaries, so `isort` never matches inside an unrelated token; a missing
+/// tool no stashed script mentions (`lsb_release`, absent from every script)
+/// classifies nothing and stays a gap — the image's business, not the stub's.
+///
+/// `nodes` is [`stashed_scripts`]; `failing` is the failing record's
+/// [`clone_base`] (the stash holds template names). The job is the node
+/// name's first path segment, so an inlined composite's inner failure still
+/// finds the job's own installer steps.
+pub fn expected_from_stubbed_script(
+    nodes: &[(String, Option<String>)],
+    failing: &str,
+    log: &[String],
+) -> Option<String> {
+    let tool = missing_executable(log)?;
+    let job = failing.split('/').next()?;
+    let position = nodes.iter().position(|(name, _)| name == failing)?;
+    for (name, script) in &nodes[..position] {
+        if name.split('/').next() != Some(job) {
+            continue;
+        }
+        if let Some(script) = script
+            && contains_word(script, &tool)
+        {
+            return Some(format!("a stubbed script would have installed `{tool}`"));
+        }
+    }
+    None
+}
+
+/// The executable a failing log says it could not find, in the shapes the
+/// toolkit and the shells print: `Unable to locate executable file: <name>`,
+/// `<name>: command not found`, `command not found: <name>`.
+fn missing_executable(log: &[String]) -> Option<String> {
+    let word = |s: &str| -> String {
+        s.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+'))
+            .collect()
+    };
+    for line in log {
+        if let Some(rest) = line.split("Unable to locate executable file: ").nth(1) {
+            let name = word(rest);
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        if let Some(rest) = line.split("command not found: ").nth(1) {
+            let name = word(rest.trim_start());
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        if let Some(head) = line.split(": command not found").next()
+            && head.len() < line.len()
+        {
+            let name = head.rsplit([':', ' ']).next().unwrap_or("").trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Does `text` contain `word` on word boundaries? A word character is what a
+/// tool name is made of (`[A-Za-z0-9_+-]`), so `isort` matches in `pip
+/// install isort` and not in `nb-isort` or `isort2`.
+fn contains_word(text: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+');
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(word) {
+        let at = start + pos;
+        let end = at + word.len();
+        let before = text[..at].chars().next_back().is_none_or(|c| !is_word(c));
+        let after = text[end..].chars().next().is_none_or(|c| !is_word(c));
+        if before && after {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 // ── The report ────────────────────────────────────────────────────────────
@@ -1590,6 +1728,20 @@ mod tests {
         assert!(!config.contains_key("shell_command"));
         assert!(!config.contains_key("env"));
         assert!(!config.contains_key("working_dir"));
+        // The original script survives on the node's engine-opaque meta, and
+        // `stashed_scripts` reads it back by node.
+        assert_eq!(
+            step.meta.get(STUBBED_SCRIPT_META),
+            Some(&Value::from("import sys"))
+        );
+        let stashed = stashed_scripts(&graph);
+        assert!(
+            stashed
+                .iter()
+                .any(|(name, script)| name.starts_with("build/")
+                    && script.as_deref() == Some("import sys")),
+            "{stashed:?}"
+        );
     }
 
     #[test]
@@ -1830,6 +1982,93 @@ mod log_tests {
         assert!(expected_from_log(&script, &["exit 1".to_string()]).is_none());
         let other = StepIdentity::Action {
             bare:      "actions/setup-node".to_string(),
+            cross_run: false,
+        };
+        assert!(expected_from_log(&other, &miss).is_none());
+    }
+
+    /// A missing executable an earlier stubbed script in the same job would
+    /// have installed classifies as the stub's doing. The lsb_release shape —
+    /// a tool no stashed script mentions — stays a gap, as does a tool only
+    /// another job's script installs, one only a *later* script installs, or
+    /// a name that appears only inside an unrelated token.
+    #[test]
+    fn a_stubbed_installers_tool_classifies_and_an_unknown_tool_does_not() {
+        let nodes = vec![
+            ("lint/step-1".to_string(), None),
+            (
+                "lint/step-2".to_string(),
+                Some("python -m pip install isort".to_string()),
+            ),
+            ("lint/step-3".to_string(), None),
+            (
+                "other/step-1".to_string(),
+                Some("pip install flake8".to_string()),
+            ),
+            ("other/step-2".to_string(), None),
+        ];
+        let miss = |tool: &str| {
+            vec![format!(
+                "Error: Unable to locate executable file: {tool}. Please verify either the file \
+                 path exists or the file can be found within a directory specified by the PATH \
+                 environment variable."
+            )]
+        };
+        assert_eq!(
+            expected_from_stubbed_script(&nodes, "lint/step-3", &miss("isort")),
+            Some("a stubbed script would have installed `isort`".to_string())
+        );
+        // The shell's own spellings parse too.
+        let cnf = vec!["bash: isort: command not found".to_string()];
+        assert!(expected_from_stubbed_script(&nodes, "lint/step-3", &cnf).is_some());
+        let zsh = vec!["zsh: command not found: isort".to_string()];
+        assert!(expected_from_stubbed_script(&nodes, "lint/step-3", &zsh).is_some());
+        // lsb_release: no stashed script names it — the image's business.
+        assert!(
+            expected_from_stubbed_script(&nodes, "lint/step-3", &miss("lsb_release")).is_none()
+        );
+        // flake8 is installed only by another job's script.
+        assert!(expected_from_stubbed_script(&nodes, "lint/step-3", &miss("flake8")).is_none());
+        // The installer after the failing step explains nothing.
+        assert!(expected_from_stubbed_script(&nodes, "lint/step-1", &miss("isort")).is_none());
+        // Word boundaries: `nb-isort` does not provide `isort`.
+        let hyphenated = vec![
+            (
+                "j/step-1".to_string(),
+                Some("pip install nb-isort".to_string()),
+            ),
+            ("j/step-2".to_string(), None),
+        ];
+        assert!(expected_from_stubbed_script(&hyphenated, "j/step-2", &miss("isort")).is_none());
+        // A log naming no missing executable classifies nothing.
+        assert!(
+            expected_from_stubbed_script(&nodes, "lint/step-3", &["exit 1".to_string()]).is_none()
+        );
+    }
+
+    /// maturin-action failing on the absent `rustup` is the image stance —
+    /// GitHub's full runner preinstalls it, slim does not. Any other failure
+    /// of the same action stays a gap, and the same log under another action
+    /// is not this rule's business.
+    #[test]
+    fn maturin_without_rustup_classifies_as_the_image_stance() {
+        let maturin = StepIdentity::Action {
+            bare:      "PyO3/maturin-action".to_string(),
+            cross_run: false,
+        };
+        let miss = vec![
+            "Error: Unable to locate executable file: rustup. Please verify either the file path \
+             exists or the file can be found within a directory specified by the PATH environment \
+             variable."
+                .to_string(),
+        ];
+        assert_eq!(
+            expected_from_log(&maturin, &miss),
+            Some("needs a tool GitHub's full runner image preinstalls (rustup)".to_string())
+        );
+        assert!(expected_from_log(&maturin, &["error: build failed".to_string()]).is_none());
+        let other = StepIdentity::Action {
+            bare:      "actions/setup-python".to_string(),
             cross_run: false,
         };
         assert!(expected_from_log(&other, &miss).is_none());

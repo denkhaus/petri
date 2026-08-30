@@ -333,6 +333,7 @@ async fn run_one(
     let stub_consumers = runs::stubbed_output_consumers(&graph);
     let dispatch_refs = runs::dispatch_ref_checkouts(&graph);
     let empty_inputs = runs::empty_input_steps(&graph);
+    let scripts = runs::stashed_scripts(&graph);
     let label: String = format!("{repo}-{file}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -404,6 +405,7 @@ async fn run_one(
                 &stub_consumers,
                 &dispatch_refs,
                 &empty_inputs,
+                &scripts,
             ),
         },
     };
@@ -425,6 +427,7 @@ fn first_failure(
     stub_consumers: &std::collections::BTreeSet<String>,
     dispatch_refs: &std::collections::BTreeSet<String>,
     empty_inputs: &std::collections::BTreeSet<String>,
+    scripts: &[(String, Option<String>)],
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -471,6 +474,9 @@ fn first_failure(
                                 .to_string()
                         })
                     })
+                    // A missing executable an earlier stubbed script in the
+                    // same job would have installed is the stub's doing.
+                    .or_else(|| runs::expected_from_stubbed_script(scripts, &base, &lines))
             });
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),
