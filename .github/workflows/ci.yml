@@ -47,6 +47,11 @@ jobs:
           version: 2026.6.11
           install_args: --locked --jobs=1
 
+      # Hosted runners can already contain the pinned Rust toolchain without
+      # its optional components. Mise then sees the toolchain as installed.
+      - name: Ensure Clippy is installed
+        run: rustup component add clippy --toolchain 1.97.1
+
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
