@@ -1428,7 +1428,7 @@ fn sanitize_cell(text: &str) -> String {
 /// shas, paths — the fidelity this buys) see a full event, while an API call
 /// or ref fetch against the resource meets a clean not-found instead of a
 /// real repository object it could read or mutate.
-pub const SIMULATED_NUMBER: u64 = 999999;
+pub const SIMULATED_NUMBER: u64 = 999_999;
 
 /// The workflow's primary trigger and a simulated payload for it, from its
 /// own `on:` — `github.event_name` and `github.event` for the sweep, in place
@@ -1451,6 +1451,18 @@ pub fn simulated_event(
     use frontend::yaml::{Document, Node};
     use serde_json::json;
 
+    // First supported trigger, most event-shaped first.
+    const PRIORITY: &[&str] = &[
+        "pull_request",
+        "pull_request_target",
+        "push",
+        "schedule",
+        "release",
+        "issue_comment",
+        "issues",
+        "workflow_dispatch",
+    ];
+
     let mut diags = Diagnostics::new();
     let doc = Document::parse("<simulated-event>", workflow_text, &mut diags)?;
     let on = doc.root().as_mapping()?.get("on")?;
@@ -1470,17 +1482,6 @@ pub fn simulated_event(
         }
     }
 
-    // First supported trigger, most event-shaped first.
-    const PRIORITY: &[&str] = &[
-        "pull_request",
-        "pull_request_target",
-        "push",
-        "schedule",
-        "release",
-        "issue_comment",
-        "issues",
-        "workflow_dispatch",
-    ];
     let name = PRIORITY
         .iter()
         .find(|p| declared.iter().any(|d| d == *p))?
