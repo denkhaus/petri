@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{env, fs};
 
 use frontend::NoFiles;
 use frontend_gha::load_with;
@@ -22,7 +23,7 @@ use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
 
-const ACTION_YML: &str = r#"
+const ACTION_YML: &str = r"
 name: Hello
 description: A fixture action.
 inputs:
@@ -36,9 +37,9 @@ runs:
   using: node20
   main: dist/index.js
   post: dist/post.js
-"#;
+";
 
-const INDEX_JS: &str = r#"
+const INDEX_JS: &str = r"
 const fs = require('fs');
 const name = process.env.INPUT_NAME;
 let greeting = `Hello, ${name}`;
@@ -59,11 +60,11 @@ console.log('action_path_ok=' + fs.existsSync(process.env.GITHUB_ACTION_PATH + '
 console.log('tool=' + require('child_process').execFileSync(__dirname + '/tool.sh').toString().trim());
 console.log('action_ref=' + process.env.GITHUB_ACTION_REPOSITORY + '@' + process.env.GITHUB_ACTION_REF);
 console.log('event_name=' + JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')).action);
-"#;
+";
 
-const POST_JS: &str = r#"
+const POST_JS: &str = r"
 console.log('post saw ' + process.env.STATE_token + ' ' + process.env.STATE_saved);
-"#;
+";
 
 const WORKFLOW: &str = r#"
 on: push
@@ -110,25 +111,22 @@ fn git(dir: &Path, args: &[&str]) {
 /// `<base>/acme/hello`, a repository whose tag `v1` is the fixture action.
 fn fixture_action(base: &Path) {
     let dir = base.join("acme").join("hello");
-    std::fs::create_dir_all(dir.join("dist")).unwrap();
-    std::fs::write(dir.join("action.yml"), ACTION_YML).unwrap();
-    std::fs::write(dir.join("dist/index.js"), INDEX_JS).unwrap();
-    std::fs::write(dir.join("dist/post.js"), POST_JS).unwrap();
+    fs::create_dir_all(dir.join("dist")).expect("the fixture tree is writable");
+    fs::write(dir.join("action.yml"), ACTION_YML).expect("action.yml is written");
+    fs::write(dir.join("dist/index.js"), INDEX_JS).expect("index.js is written");
+    fs::write(dir.join("dist/post.js"), POST_JS).expect("post.js is written");
     // An executable the action ships and spawns: its mode must survive the
     // trip through git, the tree cache, and staging into the workspace.
-    std::fs::write(
+    fs::write(
         dir.join("dist/tool.sh"),
         "#!/bin/sh\necho exec-bit-survived\n",
     )
-    .unwrap();
+    .expect("tool.sh is written");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            dir.join("dist/tool.sh"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        fs::set_permissions(dir.join("dist/tool.sh"), fs::Permissions::from_mode(0o755))
+            .expect("tool.sh takes its mode bits");
     }
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
@@ -177,6 +175,10 @@ fn runtime(dir: &Path, source: &Arc<GitActionSource>) -> Runtime {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the skip note and the diagnostics"
+)]
 async fn a_javascript_action_runs_with_the_runner_contract() {
     if !have("git") || !have("node") {
         eprintln!("skipping: git and node are needed");
@@ -321,6 +323,10 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the note about the skipped test"
+)]
 fn a_moving_reference_is_resolved_again_for_a_later_load() {
     if !have("git") {
         eprintln!("skipping: git is needed");
@@ -336,7 +342,7 @@ fn a_moving_reference_is_resolved_again_for_a_later_load() {
     let reference = ActionRef::parse("acme/hello@main").unwrap();
     let first = github_actions::ActionSource::resolve(&source, &reference).unwrap();
 
-    std::fs::write(repo.join("dist/index.js"), "console.log('changed');\n").unwrap();
+    fs::write(repo.join("dist/index.js"), "console.log('changed');\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &[
         "-c",
@@ -358,8 +364,12 @@ fn a_moving_reference_is_resolved_again_for_a_later_load() {
 /// `--ignored`.
 #[tokio::test]
 #[ignore = "fetches real actions from github.com"]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the lowering diagnostics"
+)]
 async fn checkout_and_setup_node_run_for_real() {
-    let token = std::env::var("GITHUB_TOKEN").ok().or_else(|| {
+    let token = env::var("GITHUB_TOKEN").ok().or_else(|| {
         Command::new("gh")
             .args(["auth", "token"])
             .output()

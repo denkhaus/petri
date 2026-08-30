@@ -8,8 +8,10 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{env, fs, process};
 
 use github_actions::{ActionSourceCap, ActionTreeSource};
+use runtime::ir::RunStatus;
 use support::*;
 
 const CACHE: &str = "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830";
@@ -43,7 +45,7 @@ async fn run_once(label: &str, store: &Path) -> Vec<String> {
     .await;
     assert_eq!(
         report.status,
-        runtime::ir::RunStatus::Success,
+        RunStatus::Success,
         "statuses: {:?}\nlog: {:?}",
         report
             .state
@@ -65,8 +67,8 @@ async fn a_cache_saved_by_one_run_restores_in_the_next() {
     }
     let store = canonical_temp()
         .join("petri-cache-e2e")
-        .join(format!("store-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&store);
+        .join(format!("store-{}", process::id()));
+    let _ = fs::remove_dir_all(&store);
 
     let first = run_once("first", &store).await;
     assert!(
@@ -85,14 +87,14 @@ async fn a_cache_saved_by_one_run_restores_in_the_next() {
             .any(|l| l.contains("Cache restored from key: probe-fixed-key")),
         "the action reports the hit: {second:?}"
     );
-    let _ = std::fs::remove_dir_all(&store);
+    let _ = fs::remove_dir_all(&store);
 }
 
 /// The store rides the canonical temp path for the same reason the run dir
 /// does: macOS's `/var` → `/private/var` symlink breaks the cache action's
 /// relative-path math.
 fn canonical_temp() -> PathBuf {
-    std::env::temp_dir()
+    env::temp_dir()
         .canonicalize()
-        .unwrap_or_else(|_| std::env::temp_dir())
+        .unwrap_or_else(|_| env::temp_dir())
 }

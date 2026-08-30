@@ -11,9 +11,11 @@
 mod support;
 
 use std::sync::Arc;
+use std::{env, fs, process};
 
 use acceptance::runs::RUNNER_IMAGE_2404;
 use github_actions::{ActionSourceCap, ActionTreeSource};
+use runtime::ir::RunStatus;
 use support::*;
 
 /// Pinned at v4 of each — the era whose toolkit speaks the results service.
@@ -51,6 +53,10 @@ fn artifact_workflow(container: Option<&str>) -> String {
     )
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a failing job echoes the run's log on stderr; a test binary has no other sink"
+)]
 async fn run_artifact_flow(label: &str, container: Option<&str>) {
     let source = corpus_action_source();
     let graph = lower_with_actions(&artifact_workflow(container), &source);
@@ -86,7 +92,7 @@ async fn run_artifact_flow(label: &str, container: Option<&str>) {
         log_lines(&report).iter().any(|l| l == "payload-42"),
         "the artifact round-tripped",
     );
-    assert_eq!(report.status, runtime::ir::RunStatus::Success);
+    assert_eq!(report.status, RunStatus::Success);
 }
 
 /// Host jobs: upload in one job, download in the next, through loopback.
@@ -117,12 +123,12 @@ async fn checkout_build_and_artifacts_run_to_success() {
     if !tool_ready("node") {
         return;
     }
-    let repo = std::env::temp_dir()
+    let repo = env::temp_dir()
         .join("petri-full-flow")
-        .join(format!("repo-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&repo);
-    std::fs::create_dir_all(&repo).expect("create the fixture");
-    std::fs::write(repo.join("input.txt"), "source-of-truth\n").expect("write");
+        .join(format!("repo-{}", process::id()));
+    let _ = fs::remove_dir_all(&repo);
+    fs::create_dir_all(&repo).expect("create the fixture");
+    fs::write(repo.join("input.txt"), "source-of-truth\n").expect("write");
     commit_fixture(&repo);
 
     let text = format!(
@@ -160,7 +166,7 @@ async fn checkout_build_and_artifacts_run_to_success() {
     .await;
     assert_eq!(
         report.status,
-        runtime::ir::RunStatus::Success,
+        RunStatus::Success,
         "statuses: {:?}\nlog: {:?}",
         report
             .state
@@ -175,5 +181,5 @@ async fn checkout_build_and_artifacts_run_to_success() {
         "the build's output round-tripped: {:?}",
         log_lines(&report)
     );
-    let _ = std::fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&repo);
 }

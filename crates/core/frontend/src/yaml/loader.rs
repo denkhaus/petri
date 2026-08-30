@@ -21,7 +21,7 @@ use yaml_rust2::scanner::{Marker as YamlMarker, ScanError, TScalarStyle};
 
 /// Why a document did not load: a scanner error from the parser, or a shape the
 /// loader rejects, at the position it sits.
-pub enum ParseFailure {
+pub(super) enum ParseFailure {
     Scan(ScanError),
     Shape {
         line:    u32,
@@ -32,20 +32,23 @@ pub enum ParseFailure {
 
 impl ParseFailure {
     /// Where the failure sits: line and column, 1-based as spans report them.
-    pub fn position(&self) -> (u32, u32) {
+    pub(super) fn position(&self) -> (u32, u32) {
         match self {
-            ParseFailure::Scan(scan) => {
+            Self::Scan(scan) => {
                 let m = marker(*scan.marker());
-                (m.line() as u32, m.column() as u32)
+                (
+                    u32::try_from(m.line()).unwrap_or(u32::MAX),
+                    u32::try_from(m.column()).unwrap_or(u32::MAX),
+                )
             }
-            ParseFailure::Shape { line, column, .. } => (*line, *column),
+            Self::Shape { line, column, .. } => (*line, *column),
         }
     }
 
-    pub fn message(&self) -> String {
+    pub(super) fn message(&self) -> String {
         match self {
-            ParseFailure::Scan(scan) => scan.to_string(),
-            ParseFailure::Shape { message, .. } => message.clone(),
+            Self::Scan(scan) => scan.to_string(),
+            Self::Shape { message, .. } => message.clone(),
         }
     }
 }
@@ -58,7 +61,7 @@ fn marker(mark: YamlMarker) -> Marker {
 }
 
 /// Parse one YAML document into a positioned root node, resolving aliases.
-pub fn load(text: &str) -> Result<MarkedNode, ParseFailure> {
+pub(super) fn load(text: &str) -> Result<MarkedNode, ParseFailure> {
     let mut loader = Loader::default();
     let mut parser = Parser::new_from_str(text);
     parser
@@ -66,8 +69,12 @@ pub fn load(text: &str) -> Result<MarkedNode, ParseFailure> {
         .map_err(ParseFailure::Scan)?;
     if let Some((span, message)) = loader.error {
         return Err(ParseFailure::Shape {
-            line: span.start().map_or(0, |m| m.line() as u32),
-            column: span.start().map_or(0, |m| m.column() as u32),
+            line: span
+                .start()
+                .map_or(0, |m| u32::try_from(m.line()).unwrap_or(u32::MAX)),
+            column: span
+                .start()
+                .map_or(0, |m| u32::try_from(m.column()).unwrap_or(u32::MAX)),
             message,
         });
     }

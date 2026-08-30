@@ -13,6 +13,7 @@
 //! `**` and leading-`!` negation; symbolic links are not followed.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use executor::{ExecEnv, ProcessSpec};
 use frontend_gha::exprs::{has_hashfiles_sentinel, hashfiles_calls, replace_hashfiles_sentinels};
@@ -28,7 +29,7 @@ pub const HASHFILES_CLASS: &str = "hashfiles";
 const MARKER: &str = "petri-hashfiles=";
 
 /// The helper program. Kept dependency-free: `fs`, `path`, `crypto` only.
-const HELPER_JS: &str = r#"
+const HELPER_JS: &str = r"
 const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const root=process.env.PETRI_HASHFILES_ROOT;
 const calls=JSON.parse(process.env.PETRI_HASHFILES);
@@ -90,7 +91,7 @@ for(const f of files){
 }
 console.log('petri-hashfiles='+JSON.stringify(
   specs.map(s=>s.any?s.outer.digest('hex'):'')));
-"#;
+";
 
 /// Replace every hashFiles sentinel in the config's `run` and env values with
 /// the hash of the matched workspace files, computed in the job environment. A
@@ -106,7 +107,7 @@ pub(crate) async fn resolve_hashfiles(
     }
     try_map_process_texts(&mut process, |text| {
         if has_hashfiles_sentinel(text) {
-            Ok::<_, std::convert::Infallible>(Some(splice(text, &calls)))
+            Ok::<_, Infallible>(Some(splice(text, &calls)))
         } else {
             Ok(None)
         }
@@ -143,12 +144,9 @@ pub(crate) async fn resolved_calls<'a>(
 /// One text with its sentinels replaced by the resolved hashes; a call the map
 /// does not hold reads as the empty string, GitHub's "nothing matched".
 pub(crate) fn splice(text: &str, calls: &BTreeMap<Vec<String>, String>) -> String {
-    replace_hashfiles_sentinels(
-        text,
-        |patterns| -> Result<String, std::convert::Infallible> {
-            Ok(calls.get(patterns).cloned().unwrap_or_default())
-        },
-    )
+    replace_hashfiles_sentinels(text, |patterns| -> Result<String, Infallible> {
+        Ok(calls.get(patterns).cloned().unwrap_or_default())
+    })
     .expect("the resolver is infallible")
 }
 

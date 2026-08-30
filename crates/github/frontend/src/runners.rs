@@ -64,6 +64,7 @@ impl RunnerMap {
     }
 
     /// Add one label that resolves to the local Linux environment.
+    #[must_use]
     pub fn allow(mut self, label: &str) -> Self {
         let label = label.trim();
         if !label.is_empty() {
@@ -74,6 +75,7 @@ impl RunnerMap {
 
     /// Add a written list — labels separated by commas or whitespace, the shape
     /// an environment variable or a flag carries.
+    #[must_use]
     pub fn allow_list(mut self, list: &str) -> Self {
         for label in list.split([',', ' ', '\t', '\n']) {
             self = self.allow(label);

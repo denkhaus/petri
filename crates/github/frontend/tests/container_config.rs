@@ -6,6 +6,11 @@ use frontend::NoFiles;
 use frontend_gha::load;
 use ir::RuntimeTarget;
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the helper echoes the lowering's diagnostics so a failed assertion below shows \
+              why the workflow did not lower"
+)]
 fn lower(text: &str) -> frontend::Lowered {
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
     for d in lowered.diagnostics.iter() {
@@ -63,7 +68,7 @@ jobs:
 
 #[test]
 fn container_env_lands_on_the_scope_and_its_secrets_push_down() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -77,7 +82,7 @@ jobs:
       NODE_ENV: from-the-job
     steps:
       - run: echo hi
-"#;
+";
     let graph = lower(text).graph.expect("lowers");
     let scope = container_scope(&graph);
     // Job env wins over container env for the shared scope map.
@@ -100,7 +105,7 @@ jobs:
 
 #[test]
 fn an_input_valued_image_resolves_at_lowering() {
-    let text = r#"
+    let text = r"
 on:
   workflow_dispatch:
     inputs:
@@ -112,7 +117,7 @@ jobs:
     container: ${{ inputs.base }}:3.20
     steps:
       - run: echo hi
-"#;
+";
     let graph = lower(text).graph.expect("lowers");
     let scope = container_scope(&graph);
     assert!(
@@ -122,7 +127,7 @@ jobs:
 
 #[test]
 fn a_matrix_valued_image_stays_rejected() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -133,7 +138,7 @@ jobs:
     container: ${{ matrix.base }}:latest
     steps:
       - run: echo hi
-"#;
+";
     let lowered = lower(text);
     assert!(lowered.graph.is_none());
     assert!(
@@ -148,7 +153,7 @@ jobs:
 
 #[test]
 fn a_non_secret_password_is_rejected() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -160,7 +165,7 @@ jobs:
         password: hunter2
     steps:
       - run: echo hi
-"#;
+";
     let lowered = lower(text);
     assert!(lowered.graph.is_none());
     assert!(
@@ -175,7 +180,7 @@ jobs:
 
 #[test]
 fn service_credentials_map_the_same_way() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   test:
@@ -188,7 +193,7 @@ jobs:
           password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - run: echo hi
-"#;
+";
     let graph = lower(text).graph.expect("lowers");
     let scope = graph
         .scopes

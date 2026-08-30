@@ -11,6 +11,7 @@
 
 mod support;
 
+use acceptance::runs::RUNNER_IMAGE_2404;
 use runtime::ir::RunStatus;
 use serde_json::json;
 use support::*;
@@ -40,10 +41,7 @@ fn no_line_contains(lines: &[String], fragment: &str) {
 fn in_container(text: &str) -> String {
     text.replace(
         "    runs-on: ubuntu-latest\n",
-        &format!(
-            "    runs-on: ubuntu-latest\n    container: {}\n",
-            acceptance::runs::RUNNER_IMAGE_2404
-        ),
+        &format!("    runs-on: ubuntu-latest\n    container: {RUNNER_IMAGE_2404}\n"),
     )
 }
 

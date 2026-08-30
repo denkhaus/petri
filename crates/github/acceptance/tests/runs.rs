@@ -29,9 +29,12 @@
 //! only: corpus code then runs with that identity, bounded by the token's own
 //! permissions.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::env::{self, consts};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, process};
 
 mod support;
 
@@ -40,12 +43,19 @@ use acceptance::runs::{
     expected_reason, identity_of, runs_report, step_identities,
 };
 use acceptance::{Class, corpus_present, lower_one, workflows};
+use frontend_gha::identity;
 use github_actions::{ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource};
 use runtime::driver::RunReport;
+use runtime::engine::{Event, FIRING_ENV_CLASS};
+use runtime::executor::docker::RUN_ID_FILE;
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{self, Graph};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
+use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio::time;
 
 /// The sweep's `GITHUB_TOKEN`: `PETRI_SWEEP_TOKEN` when the operator opted a
 /// real one in, else **empty**. Empty still resolves `${{ secrets.GITHUB_TOKEN
@@ -58,7 +68,7 @@ use serde_json::json;
 /// tier is rate-limited (60/hour/IP), which a whole-corpus sweep exceeds —
 /// hence the opt-in.
 fn sweep_token() -> String {
-    std::env::var("PETRI_SWEEP_TOKEN").unwrap_or_default()
+    env::var("PETRI_SWEEP_TOKEN").unwrap_or_default()
 }
 
 fn corpus_root() -> PathBuf {
@@ -66,7 +76,7 @@ fn corpus_root() -> PathBuf {
 }
 
 fn env_num(name: &str, default: u64) -> u64 {
-    std::env::var(name)
+    env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
@@ -74,6 +84,10 @@ fn env_num(name: &str, default: u64) -> u64 {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "network + docker: runs the corpus end to end and rewrites crates/github/corpus/RUNS.md"]
+#[expect(
+    clippy::print_stderr,
+    reason = "the sweep narrates its progress and names the report it wrote; a test binary has no other sink"
+)]
 async fn corpus_run_sweep() {
     let root = corpus_root();
     if !corpus_present(&root) {
@@ -88,12 +102,13 @@ async fn corpus_run_sweep() {
     let manifests: Arc<dyn ActionSource> = source.clone();
     let trees: Arc<dyn ActionTreeSource> = source;
 
-    let filter = std::env::var("PETRI_SWEEP_FILTER").unwrap_or_default();
-    let jobs = env_num("PETRI_SWEEP_JOBS", 4) as usize;
+    let filter = env::var("PETRI_SWEEP_FILTER").unwrap_or_default();
+    let jobs = usize::try_from(env_num("PETRI_SWEEP_JOBS", 4))
+        .expect("PETRI_SWEEP_JOBS names a workflow parallelism that fits a usize");
     let timeout = Duration::from_secs(env_num("PETRI_SWEEP_TIMEOUT", 900));
 
     let pins = corpus_pins(&root);
-    let platform = std::env::var("PETRI_SWEEP_PLATFORM")
+    let platform = env::var("PETRI_SWEEP_PLATFORM")
         .ok()
         .filter(|p| !p.is_empty());
     // `runner.arch` is the architecture the containers actually run: the
@@ -101,7 +116,7 @@ async fn corpus_run_sweep() {
     let runner_arch = match platform.as_deref() {
         Some(p) if p.ends_with("/amd64") => "X64",
         Some(p) if p.ends_with("/arm64") => "ARM64",
-        _ => frontend_gha::runner_arch(std::env::consts::ARCH),
+        _ => frontend_gha::runner_arch(consts::ARCH),
     };
 
     // Lower everything serially first: it fills the action caches while the
@@ -141,7 +156,7 @@ async fn corpus_run_sweep() {
             // hybrid-trigger files whose env broke on absent inputs would
             // break on GitHub's own non-call triggers too.)
             let caller_coupled =
-                std::fs::read_to_string(&file).is_ok_and(|text| text.contains("workflow_call"));
+                fs::read_to_string(&file).is_ok_and(|text| text.contains("workflow_call"));
             queue.push((records.len(), graph, caller_coupled));
         }
         records.push(record);
@@ -153,8 +168,8 @@ async fn corpus_run_sweep() {
         records.len() - to_run
     );
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs));
-    let mut set = tokio::task::JoinSet::new();
+    let semaphore = Arc::new(Semaphore::new(jobs));
+    let mut set = JoinSet::new();
     for (slot, graph, caller_coupled) in queue {
         // The permit is acquired inside the task: every task spawns at once and
         // the completion loop below drains while work runs. Acquiring here
@@ -223,7 +238,7 @@ async fn corpus_run_sweep() {
     );
     let markdown = runs_report(&records, &note);
     let path = root.join("RUNS.md");
-    std::fs::write(&path, &markdown).expect("write the runs report");
+    fs::write(&path, &markdown).expect("write the runs report");
     eprintln!("wrote {}", path.display());
 }
 
@@ -265,7 +280,7 @@ fn prepare(
         runs::privilege(graph, runs::RUNNER_IMAGE_2404_DIND);
     }
     runs::cap_expansions(graph);
-    let mut github = frontend_gha::identity::github_context(Some(repo_slug));
+    let mut github = identity::github_context(Some(repo_slug));
     github["event"] = json!({});
     if let Some(sha) = pin {
         let branch = default_branch(repo_root).unwrap_or_else(|| "main".to_string());
@@ -290,8 +305,8 @@ fn prepare(
 
 /// `corpus-pins.txt`: `owner/repo <sha>` per line — the commit each corpus
 /// repo was fetched at, which is the commit its workflows describe.
-fn corpus_pins(corpus_root: &Path) -> std::collections::BTreeMap<String, String> {
-    let text = std::fs::read_to_string(corpus_root.join("../corpus-pins.txt")).unwrap_or_default();
+fn corpus_pins(corpus_root: &Path) -> BTreeMap<String, String> {
+    let text = fs::read_to_string(corpus_root.join("../corpus-pins.txt")).unwrap_or_default();
     text.lines()
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| {
@@ -304,7 +319,7 @@ fn corpus_pins(corpus_root: &Path) -> std::collections::BTreeMap<String, String>
 
 /// The default branch the fetch recorded in the repo's PROVENANCE.md.
 fn default_branch(repo_root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(repo_root.join("PROVENANCE.md")).ok()?;
+    let text = fs::read_to_string(repo_root.join("PROVENANCE.md")).ok()?;
     let line = text.lines().find(|l| l.contains("default branch:"))?;
     let (_, rest) = line.split_once("default branch:")?;
     Some(rest.trim().trim_end_matches(')').to_string())
@@ -325,10 +340,10 @@ async fn run_one(
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let dir = std::env::temp_dir()
+    let dir = env::temp_dir()
         .join("petri-sweep")
-        .join(format!("{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+        .join(format!("{label}-{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
 
     let mut options = RunOptions::new(&dir);
     options.grace = Duration::from_secs(2);
@@ -343,7 +358,7 @@ async fn run_one(
     // so warm-cache effects are real, as they are on GitHub.
     let store = github_objects::default_store_dir();
     let tool_cache = github_objects::tool_cache_dir(&store);
-    let _ = std::fs::create_dir_all(&tool_cache);
+    let _ = fs::create_dir_all(&tool_cache);
     let rt = Runtime::standard()
         .options(options)
         .step(github_actions::RunStep)
@@ -361,21 +376,18 @@ async fn run_one(
 
     let outcome = tokio::select! {
         joined = &mut run => Finished::Ran(Box::new(joined.expect("the driver task never panics"))),
-        _ = tokio::time::sleep(timeout) => {
+        () = time::sleep(timeout) => {
             handle.cancel(ir::CancelScopeId::ROOT).await;
-            match tokio::time::timeout(Duration::from_secs(90), &mut run).await {
-                Ok(joined) => {
-                    let _ = joined.expect("the driver task never panics");
-                    Finished::TimedOut
-                }
-                Err(_) => {
-                    // The cancel did not bring the run down. Abandon the task and
-                    // remove whatever containers the run dir's id names, since no
-                    // release will.
-                    run.abort();
-                    sweep_leftovers(&dir).await;
-                    Finished::Wedged
-                }
+            if let Ok(joined) = time::timeout(Duration::from_secs(90), &mut run).await {
+                let _ = joined.expect("the driver task never panics");
+                Finished::TimedOut
+            } else {
+                // The cancel did not bring the run down. Abandon the task and
+                // remove whatever containers the run dir's id names, since no
+                // release will.
+                run.abort();
+                sweep_leftovers(&dir).await;
+                Finished::Wedged
             }
         }
     };
@@ -394,7 +406,7 @@ async fn run_one(
             ),
         },
     };
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
     result
 }
 
@@ -407,10 +419,10 @@ enum Finished {
 /// The run's first failing record, read against the graph's step identities.
 fn first_failure(
     report: &RunReport,
-    identities: &std::collections::BTreeMap<String, StepIdentity>,
+    identities: &BTreeMap<String, StepIdentity>,
     caller_coupled: bool,
-    stub_consumers: &std::collections::BTreeSet<String>,
-    dispatch_refs: &std::collections::BTreeSet<String>,
+    stub_consumers: &BTreeSet<String>,
+    dispatch_refs: &BTreeSet<String>,
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -428,7 +440,7 @@ fn first_failure(
         let expected = expected_reason(&identity, &class, !sweep_token().is_empty())
             .or_else(|| expected_from_log(&identity, &lines))
             .or_else(|| {
-                (caller_coupled && class == runtime::engine::FIRING_ENV_CLASS).then(|| {
+                (caller_coupled && class == FIRING_ENV_CLASS).then(|| {
                     "requires its caller's inputs (a reusable workflow run standalone)".to_string()
                 })
             })
@@ -482,20 +494,24 @@ fn first_failure(
 /// The failing firing's whole log — what the classifiers read (the line that
 /// names the cause can sit far above the end). With `PETRI_SWEEP_LOG` set, it
 /// also goes to stderr — the dev loop for one workflow's failure.
+#[expect(
+    clippy::print_stderr,
+    reason = "`PETRI_SWEEP_LOG` asks for the failing step's log on stderr; a test binary has no other sink"
+)]
 fn step_log(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
     let lines: Vec<String> = report
         .state
         .log
         .events()
         .filter_map(|e| match e {
-            runtime::engine::Event::StepProgress {
+            Event::StepProgress {
                 firing: f,
                 ev: ir::StepEvent::Log { line, .. },
             } if *f == firing => Some(line.clone()),
             _ => None,
         })
         .collect();
-    if std::env::var("PETRI_SWEEP_LOG").is_ok_and(|v| !v.is_empty()) {
+    if env::var("PETRI_SWEEP_LOG").is_ok_and(|v| !v.is_empty()) {
         for line in &lines {
             eprintln!("    | {line}");
         }
@@ -520,11 +536,11 @@ fn display_tail(lines: &[String]) -> Vec<String> {
 /// Remove the containers a wedged, abandoned run left behind: everything under
 /// the run dir's recorded container-name prefix.
 async fn sweep_leftovers(dir: &Path) {
-    let Ok(id) = std::fs::read_to_string(dir.join(runtime::executor::docker::RUN_ID_FILE)) else {
+    let Ok(id) = fs::read_to_string(dir.join(RUN_ID_FILE)) else {
         return;
     };
     let prefix = format!("petri-{}-", id.trim());
-    let Ok(listed) = tokio::process::Command::new("docker")
+    let Ok(listed) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()
         .await
@@ -533,7 +549,7 @@ async fn sweep_leftovers(dir: &Path) {
     };
     for name in String::from_utf8_lossy(&listed.stdout).lines() {
         if name.starts_with(&prefix) {
-            let _ = tokio::process::Command::new("docker")
+            let _ = Command::new("docker")
                 .args(["rm", "-f", name])
                 .output()
                 .await;

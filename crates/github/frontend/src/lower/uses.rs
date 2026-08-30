@@ -2,6 +2,7 @@
 //! actions planned and placed (`pre`, main, `post`), composites inlined.
 
 use std::collections::{BTreeMap, HashSet};
+use std::mem;
 
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::{Document, Node};
@@ -34,7 +35,7 @@ pub(super) enum ResolveFailure {
     Failed(String),
 }
 
-impl<'w, 'a> Lowering<'w, 'a> {
+impl<'a> Lowering<'_, 'a> {
     /// Resolve `owner/repo@ref` to its commit and manifest, once per reference.
     fn resolve_remote(&mut self, name: &str) -> Result<(PinnedAction, String), ResolveFailure> {
         if let Some(cached) = self.resolved.get(name) {
@@ -95,7 +96,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     self.diags.unsupported(
                         "action.remote",
                         span.clone(),
-                        name.to_string(),
+                        name.clone(),
                         "no action source is configured, so actions from other repositories cannot be fetched",
                     );
                     None
@@ -112,7 +113,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     self.diags.unsupported(
                         code,
                         span.clone(),
-                        name.to_string(),
+                        name.clone(),
                         &unavailable_hint(reason),
                     );
                     None
@@ -134,9 +135,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// main pass reports problems.
     pub(super) fn action_plan(&mut self, step: &Step<'_>) -> Option<ActionPlan> {
         let (reference, span) = step.uses.as_ref()?;
-        let saved = std::mem::replace(&mut self.diags, Diagnostics::new());
+        let saved = mem::replace(&mut self.diags, Diagnostics::new());
         let plan = self.action_plan_inner(reference, span);
-        let plan_diags = std::mem::replace(&mut self.diags, saved);
+        let plan_diags = mem::replace(&mut self.diags, saved);
         if plan.is_some() {
             self.diags.extend(plan_diags);
         }
@@ -271,17 +272,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
         for input in &plan.inputs {
             let key = input.name.to_lowercase();
             declared.insert(key.clone());
-            let value = match with.get(&key) {
-                Some(node) => self.with_value(*node, &step_site),
-                None => match &input.default {
-                    Some(text) => self.text_value(text, span.clone(), &step_site),
-                    None => {
-                        if input.required && phase == Phase::Main {
-                            self.warn_missing_input(uses, &input.name, span.clone());
-                        }
-                        None
-                    }
-                },
+            let value = if let Some(node) = with.get(&key) {
+                self.with_value(*node, &step_site)
+            } else if let Some(text) = &input.default {
+                self.text_value(text, span.clone(), &step_site)
+            } else {
+                if input.required && phase == Phase::Main {
+                    self.warn_missing_input(uses, &input.name, span.clone());
+                }
+                None
             };
             if let Some(value) = value {
                 inputs.insert(input.name.clone(), value);
@@ -369,30 +368,26 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // Declared inputs (or their defaults) as expressions: the `INPUT_*`
         // values, and the `inputs` context the manifest's own text lowers in.
-        let inputs =
-            self.docker_action_inputs(plan, step, &with, &step_site, span.clone(), uses, phase);
+        let inputs = self.docker_action_inputs(plan, step, &with, &step_site, &span, uses, phase);
         let mut manifest_site = step_site.clone();
         manifest_site.action_inputs = Some(inputs.clone());
 
         let mut config = Map::new();
-        match docker.image.strip_prefix("docker://") {
-            Some(registry) => {
-                config.insert("image".into(), json!({ "registry": registry }));
-            }
-            None => {
-                let location = plan
-                    .location
-                    .as_ref()
-                    .expect("a Dockerfile action has files");
-                config.insert(
-                    "image".into(),
-                    json!({ "dockerfile": {
-                        "action": serde_json::to_value(location)
-                            .expect("an action location serializes"),
-                        "file": docker.image,
-                    }}),
-                );
-            }
+        if let Some(registry) = docker.image.strip_prefix("docker://") {
+            config.insert("image".into(), json!({ "registry": registry }));
+        } else {
+            let location = plan
+                .location
+                .as_ref()
+                .expect("a Dockerfile action has files");
+            config.insert(
+                "image".into(),
+                json!({ "dockerfile": {
+                    "action": serde_json::to_value(location)
+                        .expect("an action location serializes"),
+                    "file": docker.image,
+                }}),
+            );
         }
 
         // `with.entrypoint` and `with.args` override the manifest for the main
@@ -493,14 +488,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// through as GitHub's do. A whole-value secret rides as its sentinel,
     /// resolved by the step at spawn. Missing required inputs are reported on
     /// the main phase only, like a JavaScript action's.
-    #[allow(clippy::too_many_arguments)]
     fn docker_action_inputs(
         &mut self,
         plan: &ActionPlan,
         step: &Step<'_>,
         with: &BTreeMap<String, Node<'_>>,
         site: &Site,
-        span: Span,
+        span: &Span,
         uses: &str,
         phase: Phase,
     ) -> BTreeMap<String, ExprId> {
@@ -509,17 +503,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
         for input in &plan.inputs {
             let key = input.name.to_lowercase();
             declared.insert(key.clone());
-            let id = match with.get(&key) {
-                Some(node) => self.input_expr_from_node(*node, site),
-                None => match &input.default {
-                    Some(text) => self.input_expr_from_text(text, span.clone(), site),
-                    None => {
-                        if input.required && phase == Phase::Main {
-                            self.warn_missing_input(uses, &input.name, span.clone());
-                        }
-                        None
-                    }
-                },
+            let id = if let Some(node) = with.get(&key) {
+                self.input_expr_from_node(*node, site)
+            } else if let Some(text) = &input.default {
+                self.input_expr_from_text(text, span.clone(), site)
+            } else {
+                if input.required && phase == Phase::Main {
+                    self.warn_missing_input(uses, &input.name, span.clone());
+                }
+                None
             };
             if let Some(id) = id {
                 inputs.insert(input.name.clone(), id);
@@ -536,12 +528,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     fn input_expr_from_node(&mut self, node: Node<'_>, site: &Site) -> Option<ExprId> {
-        match node.as_str() {
-            Some(text) => self.input_expr_from_text(text, node.span(), site),
-            None => {
-                let text = scalar_text(node);
-                Some(self.b.exprs().lit(text))
-            }
+        if let Some(text) = node.as_str() {
+            self.input_expr_from_text(text, node.span(), site)
+        } else {
+            let text = scalar_text(node);
+            Some(self.b.exprs().lit(text))
         }
     }
 
@@ -600,6 +591,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// else — another repository, a non-matching or expression value,
     /// `submodules:`, a `token:` — falls through to the real action, which
     /// needs real credentials. No diagnostics: the fall-through is the design.
+    #[expect(
+        clippy::option_option,
+        reason = "the two levels answer different questions: the outer whether the step is a \
+                  substitutable checkout at all, the inner whether it named a literal `path:`. \
+                  One `Option` would lose the difference"
+    )]
     pub(super) fn substitutable_checkout(&self, step: &Step<'_>) -> Option<Option<String>> {
         if !self.substitute_checkout {
             return None;
@@ -757,7 +754,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
     /// `uses:` — a composite (local or remote) is inlined; a JavaScript action
     /// becomes a `github/action` node; a Docker action is rejected.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn uses_step(
         &mut self,
         job: &Job<'a>,
@@ -976,7 +972,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     .map(|n| n.name.to_string())
                     .unwrap_or_default();
                 names_so_far.push(name);
-                inner_site.earlier_steps = names_so_far.clone();
+                inner_site.earlier_steps.clone_from(&names_so_far);
                 ids.push(id);
             }
         }

@@ -6,9 +6,11 @@
 //! own thread, and every response carries a `Content-Length`, so no async
 //! machinery is needed to test it.
 
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::{env, fs, process};
 
 use github_objects::ObjectService;
 use serde_json::{Value, json};
@@ -17,17 +19,17 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir()
+        let dir = env::temp_dir()
             .join("petri-objects-e2e")
-            .join(format!("{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+            .join(format!("{label}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
         Self(dir)
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -48,9 +50,9 @@ fn exchange(port: u16, method: &str, target: &str, headers: &[(&str, &str)], bod
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     let mut request = format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
     for (name, value) in headers {
-        request.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(request, "{name}: {value}\r\n");
     }
-    request.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+    let _ = write!(request, "Content-Length: {}\r\n\r\n", body.len());
     stream.write_all(request.as_bytes()).expect("send head");
     stream.write_all(body).expect("send body");
 

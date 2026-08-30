@@ -15,15 +15,18 @@
 //! store and an upload that never finalized leaves only staging debris.
 
 use std::collections::BTreeMap;
-use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::SystemTime;
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
+use crate::index;
+
 /// One finalized artifact, as the index records it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Artifact {
+pub(crate) struct Artifact {
     pub id:         i64,
     pub name:       String,
     pub size:       u64,
@@ -47,16 +50,16 @@ struct State {
     pending: BTreeMap<String, i64>,
 }
 
-pub struct ArtifactStore {
+pub(crate) struct ArtifactStore {
     dir:   PathBuf,
     state: Mutex<State>,
 }
 
 impl ArtifactStore {
     /// Open (or create) the store under `dir`.
-    pub fn open(dir: PathBuf) -> io::Result<Self> {
-        std::fs::create_dir_all(&dir)?;
-        let index: Index = crate::index::read(&dir, "artifact")?;
+    pub(crate) fn open(dir: PathBuf) -> io::Result<Self> {
+        fs::create_dir_all(&dir)?;
+        let index: Index = index::read(&dir, "artifact")?;
         Ok(Self {
             dir,
             state: Mutex::new(State {
@@ -68,7 +71,7 @@ impl ArtifactStore {
 
     /// Begin an upload: allocate the artifact's id. The id high-water mark is
     /// persisted now, so a resumed run never re-issues an id.
-    pub fn begin(&self, name: &str) -> io::Result<i64> {
+    pub(crate) fn begin(&self, name: &str) -> io::Result<i64> {
         let mut state = self.state.lock().expect("the store lock");
         state.index.next_id += 1;
         let id = state.index.next_id;
@@ -80,12 +83,16 @@ impl ArtifactStore {
     /// Finalize `name`: the committed content becomes the artifact. `None`
     /// when no upload for that name was begun or no content was committed.
     /// An earlier artifact with the same name is replaced, content and all.
-    pub fn finalize(&self, name: &str, digest: Option<String>) -> io::Result<Option<Artifact>> {
+    pub(crate) fn finalize(
+        &self,
+        name: &str,
+        digest: Option<String>,
+    ) -> io::Result<Option<Artifact>> {
         let mut state = self.state.lock().expect("the store lock");
         let Some(id) = state.pending.remove(name) else {
             return Ok(None);
         };
-        let size = match std::fs::metadata(self.content_path(id)) {
+        let size = match fs::metadata(self.content_path(id)) {
             Ok(meta) => meta.len(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -94,12 +101,12 @@ impl ArtifactStore {
             id,
             name: name.to_string(),
             size,
-            created_at: humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string(),
+            created_at: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
             digest,
         };
         if let Some(previous) = state.index.artifacts.iter().position(|a| a.name == name) {
             let old = state.index.artifacts.remove(previous);
-            let _ = std::fs::remove_file(self.content_path(old.id));
+            let _ = fs::remove_file(self.content_path(old.id));
         }
         state.index.artifacts.push(artifact.clone());
         self.persist(&state.index)?;
@@ -107,7 +114,7 @@ impl ArtifactStore {
     }
 
     /// The finalized artifacts, oldest first.
-    pub fn list(&self) -> Vec<Artifact> {
+    pub(crate) fn list(&self) -> Vec<Artifact> {
         self.state
             .lock()
             .expect("the store lock")
@@ -116,7 +123,7 @@ impl ArtifactStore {
             .clone()
     }
 
-    pub fn find(&self, name: &str) -> Option<Artifact> {
+    pub(crate) fn find(&self, name: &str) -> Option<Artifact> {
         self.state
             .lock()
             .expect("the store lock")
@@ -128,41 +135,43 @@ impl ArtifactStore {
     }
 
     /// Remove `name`, content and index entry both.
-    pub fn delete(&self, name: &str) -> io::Result<Option<i64>> {
+    pub(crate) fn delete(&self, name: &str) -> io::Result<Option<i64>> {
         let mut state = self.state.lock().expect("the store lock");
         let Some(position) = state.index.artifacts.iter().position(|a| a.name == name) else {
             return Ok(None);
         };
         let artifact = state.index.artifacts.remove(position);
-        let _ = std::fs::remove_file(self.content_path(artifact.id));
+        let _ = fs::remove_file(self.content_path(artifact.id));
         self.persist(&state.index)?;
         Ok(Some(artifact.id))
     }
 
     /// Where an artifact's content lives.
-    pub fn content_path(&self, id: i64) -> PathBuf {
+    pub(crate) fn content_path(&self, id: i64) -> PathBuf {
         self.dir.join(format!("{id}.zip"))
     }
 
     /// Where an in-flight upload's blocks stage.
-    pub fn staging_dir(&self, id: i64) -> PathBuf {
+    pub(crate) fn staging_dir(&self, id: i64) -> PathBuf {
         self.dir.join("staging").join(id.to_string())
     }
 
     fn persist(&self, index: &Index) -> io::Result<()> {
-        crate::index::write(&self.dir, index)
+        index::write(&self.dir, index)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs, process};
+
     use super::*;
 
     fn scratch(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
+        let dir = env::temp_dir()
             .join("petri-objects-store")
-            .join(format!("{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+            .join(format!("{label}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
         dir
     }
 
@@ -171,7 +180,7 @@ mod tests {
         let dir = scratch("lifecycle");
         let store = ArtifactStore::open(dir.clone()).expect("open");
         let id = store.begin("dist").expect("begin");
-        std::fs::write(store.content_path(id), b"zip bytes").expect("content");
+        fs::write(store.content_path(id), b"zip bytes").expect("content");
         let artifact = store
             .finalize("dist", Some("sha256:abc".into()))
             .expect("finalize")
@@ -188,7 +197,7 @@ mod tests {
 
         store.delete("dist").expect("delete");
         assert!(store.find("dist").is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -199,6 +208,6 @@ mod tests {
         store.begin("ghost").expect("begin");
         // Begun, but nothing committed.
         assert!(store.finalize("ghost", None).expect("io ok").is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

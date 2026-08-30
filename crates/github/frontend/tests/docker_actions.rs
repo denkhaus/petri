@@ -11,7 +11,7 @@ use serde_json::json;
 
 const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
-const DOCKER_MANIFEST: &str = r#"
+const DOCKER_MANIFEST: &str = r"
 name: Publish
 inputs:
   message:
@@ -30,8 +30,12 @@ runs:
     - literal
   env:
     GREETING: ${{ inputs.message }}
-"#;
+";
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a failing test needs the lowering diagnostics on stderr to be readable"
+)]
 fn lower(text: &str, source: &MapActionSource) -> frontend::Lowered {
     let lowered = load_with(".github/workflows/ci.yml", text, &NoFiles, Some(source));
     for d in lowered.diagnostics.iter() {
@@ -49,8 +53,12 @@ fn node<'g>(graph: &'g ir::Graph, name: &str) -> &'g ir::Node {
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a failing test needs the lowering diagnostics on stderr to be readable"
+)]
 fn a_docker_url_step_lowers_with_args_and_entrypoint() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -61,7 +69,7 @@ jobs:
           entrypoint: /bin/echo
           args: hello ${{ github.ref_name }}
           who: world
-"#;
+";
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
@@ -82,7 +90,7 @@ jobs:
 #[test]
 fn a_manifest_docker_action_places_pre_and_post_and_binds_inputs() {
     let source = MapActionSource::new().with("acme/publish@v1", TEST_SHA, DOCKER_MANIFEST);
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -93,7 +101,7 @@ jobs:
           message: from-caller
           token: ${{ secrets.PUBLISH_TOKEN }}
       - run: echo after
-"#;
+";
     let graph = lower(text, &source).graph.expect("lowers");
     let names: Vec<&str> = graph
         .nodes
@@ -134,6 +142,10 @@ jobs:
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a failing test needs the lowering diagnostics on stderr to be readable"
+)]
 fn a_local_docker_action_builds_from_the_repository() {
     let files = MapFiles(
         [(
@@ -143,14 +155,14 @@ fn a_local_docker_action_builds_from_the_repository() {
         .into_iter()
         .collect(),
     );
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/box
-"#;
+";
     let lowered = load(".github/workflows/ci.yml", text, &files);
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
@@ -167,14 +179,14 @@ jobs:
 #[test]
 fn a_missing_required_input_warns_and_still_lowers() {
     let source = MapActionSource::new().with("acme/publish@v1", TEST_SHA, DOCKER_MANIFEST);
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: acme/publish@v1
-"#;
+";
     let lowered = lower(text, &source);
     // GitHub's runner warns about a missing required input and runs anyway;
     // real workflows rely on that.
@@ -190,23 +202,23 @@ jobs:
 
 #[test]
 fn a_docker_step_inside_a_composite_lowers_its_main_phase() {
-    let composite = r#"
+    let composite = r"
 runs:
   using: composite
   steps:
     - uses: docker://alpine:3.21
       with:
         args: echo inner
-"#;
+";
     let source = MapActionSource::new().with("acme/wrap@v1", TEST_SHA, composite);
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: acme/wrap@v1
-"#;
+";
     let graph = lower(text, &source).graph.expect("lowers");
     let inner = node(&graph, "build/step-1/step-1");
     assert_eq!(inner.step.kind.to_string(), DOCKER_ACTION_KIND);

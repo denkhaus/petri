@@ -83,8 +83,8 @@ impl SecretMap {
             return Ok(Some(GITHUB_TOKEN_SECRET.to_string()));
         }
         match self {
-            SecretMap::Inherit => Ok(Some(name.to_string())),
-            SecretMap::Explicit(map) => match map.get(&name.to_lowercase()) {
+            Self::Inherit => Ok(Some(name.to_string())),
+            Self::Explicit(map) => match map.get(&name.to_lowercase()) {
                 Some(provider) => Ok(provider.clone()),
                 None => Err(UndeclaredSecret),
             },
@@ -510,7 +510,7 @@ impl Roots for GhaRoots<'_> {
                     let inner = table.cond(cancelled, c, s);
                     Some(table.cond(failed, f, inner))
                 }
-                Some("container") | Some("services") => {
+                Some("container" | "services") => {
                     self.diags.unsupported(
                         "job_context",
                         self.span.clone(),
@@ -753,18 +753,18 @@ pub(crate) fn undeclared_secret(diags: &mut Diagnostics, span: Span, name: &str)
 /// GitHub's combined-conclusion rule over a set of results: any failure wins,
 /// then any cancellation, then any success; nothing at all is `skipped`.
 pub(crate) fn result_priority(
-    t: &mut ExprTable,
+    table: &mut ExprTable,
     any_failure: ExprId,
     any_cancelled: ExprId,
     any_success: ExprId,
 ) -> ExprId {
-    let f = t.lit("failure");
-    let c = t.lit("cancelled");
-    let s = t.lit("success");
-    let k = t.lit("skipped");
-    let inner2 = t.cond(any_success, s, k);
-    let inner1 = t.cond(any_cancelled, c, inner2);
-    t.cond(any_failure, f, inner1)
+    let failure = table.lit("failure");
+    let cancelled = table.lit("cancelled");
+    let success = table.lit("success");
+    let skipped = table.lit("skipped");
+    let inner2 = table.cond(any_success, success, skipped);
+    let inner1 = table.cond(any_cancelled, cancelled, inner2);
+    table.cond(any_failure, failure, inner1)
 }
 
 /// The patterns of a `hashFiles(...)` call when every argument is a literal
@@ -783,19 +783,17 @@ pub(crate) fn literal_hashfiles_patterns(
             _ => None,
         })
         .collect();
-    match patterns.filter(|p| !p.is_empty()) {
-        Some(patterns) => Some(patterns),
-        None => {
-            diags.unsupported(
-                "expression.hashFiles",
-                span.clone(),
-                "`hashFiles()` with computed patterns",
-                "the step resolves `hashFiles` against the workspace at spawn, so its \
-                 patterns must be literal strings in the workflow",
-            );
-            None
-        }
-    }
+    let Some(patterns) = patterns.filter(|p| !p.is_empty()) else {
+        diags.unsupported(
+            "expression.hashFiles",
+            span.clone(),
+            "`hashFiles()` with computed patterns",
+            "the step resolves `hashFiles` against the workspace at spawn, so its \
+             patterns must be literal strings in the workflow",
+        );
+        return None;
+    };
+    Some(patterns)
 }
 
 /// One parsed expression lowered through the GHA roots, with the flags a caller
@@ -929,12 +927,9 @@ pub fn lower_scalar(
         };
         return Some(LoweredScalar::Literal(Value::String(text)));
     }
-    let segments = match split_template(text) {
-        Ok(s) => s,
-        Err(_) => {
-            diags.error("expr.unterminated", span, "unterminated `${{`");
-            return None;
-        }
+    let Ok(segments) = split_template(text) else {
+        diags.error("expr.unterminated", span, "unterminated `${{`");
+        return None;
     };
 
     // A whole-value secret reference is the one permitted form. The name maps
@@ -1117,12 +1112,13 @@ pub fn unescape_sentinel_text(text: &str) -> String {
         match chars.next() {
             Some('0') => out.push('\u{E000}'),
             Some('1') => out.push('\u{E001}'),
-            Some('2') => out.push(SENTINEL_ESCAPE),
+            // An escaped escape, and a text that ends mid-escape: both keep the
+            // one character.
+            Some('2') | None => out.push(SENTINEL_ESCAPE),
             Some(other) => {
                 out.push(SENTINEL_ESCAPE);
                 out.push(other);
             }
-            None => out.push(SENTINEL_ESCAPE),
         }
     }
     out
@@ -1296,16 +1292,13 @@ fn replace_marked<E>(
     while let Some(start) = rest.find(open) {
         out.push_str(&rest[..start]);
         let after = &rest[start + open.len()..];
-        match after.find(SENTINEL_CLOSE) {
-            Some(end) => {
-                out.push_str(&resolve(&after[..end])?);
-                rest = &after[end + SENTINEL_CLOSE.len()..];
-            }
-            None => {
-                // An opener with no closer is not ours; keep it as text.
-                out.push_str(&rest[start..start + open.len()]);
-                rest = after;
-            }
+        if let Some(end) = after.find(SENTINEL_CLOSE) {
+            out.push_str(&resolve(&after[..end])?);
+            rest = &after[end + SENTINEL_CLOSE.len()..];
+        } else {
+            // An opener with no closer is not ours; keep it as text.
+            out.push_str(&rest[start..start + open.len()]);
+            rest = after;
         }
     }
     out.push_str(rest);

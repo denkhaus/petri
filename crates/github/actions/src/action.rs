@@ -1,5 +1,7 @@
 //! `github/action`: one phase of a JavaScript action.
 
+use std::collections::{BTreeMap, VecDeque};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,17 +10,19 @@ use ir::{Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{ProcessConfig, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
+use tokio::task;
 
 use crate::config::{ActionConfig, ActionLocation};
+use crate::gate;
 use crate::session::{
     REPO_DIR, RUNNER_DIR, Session, fold_into_outcome, shell_quote, stringify,
     unsecure_commands_allowed,
 };
 
 /// The action could not be fetched.
-pub const FETCH_CLASS: &str = "action_fetch";
+pub(crate) const FETCH_CLASS: &str = "action_fetch";
 /// The action's files could not be put into the job environment.
-pub const STAGE_CLASS: &str = "action_stage";
+pub(crate) const STAGE_CLASS: &str = "action_stage";
 
 /// The runtime half of an action source. Manifest-only sources used by the
 /// frontend do not need to invent a host tree.
@@ -54,7 +58,7 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     // The gate first: a phase whose condition is false stages nothing and spawns
     // nothing.
     if let Some(outcome) =
-        crate::gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
+        gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
     {
         return Ok(outcome);
     }
@@ -141,7 +145,7 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
 }
 
 /// `INPUT_<NAME>`: uppercased, spaces to underscores, as the toolkit reads it.
-pub fn input_variable(name: &str) -> String {
+pub(crate) fn input_variable(name: &str) -> String {
     format!("INPUT_{}", name.replace(' ', "_").to_uppercase())
 }
 
@@ -173,7 +177,7 @@ pub(crate) async fn stage(
 
     let source = Arc::clone(source);
     let pinned_owned = pinned.clone();
-    let host_dir = tokio::task::spawn_blocking(move || source.tree(&pinned_owned))
+    let host_dir = task::spawn_blocking(move || source.tree(&pinned_owned))
         .await
         .map_err(|e| StepFailure {
             class:   FETCH_CLASS,
@@ -189,7 +193,7 @@ pub(crate) async fn stage(
     // a shipped `setup.sh` arrived unexecutable and the action died spawning
     // it. One write also beats hundreds.
     let destination = root.to_string_lossy().into_owned();
-    let tarball = tokio::task::spawn_blocking(move || pack_tree(&destination, &host_dir))
+    let tarball = task::spawn_blocking(move || pack_tree(&destination, &host_dir))
         .await
         .map_err(|e| stage_error(format!("packing `{pinned}` did not complete: {e}")))?
         .map_err(|e| stage_error(format!("could not pack `{pinned}`: {e}")))?;
@@ -215,7 +219,7 @@ pub(crate) async fn stage(
 /// `destination`. Symlinks are archived as symlinks, never followed — a link
 /// pointing outside the tree carries no target bytes, exactly as a git
 /// checkout of the action would behave on GitHub's runners.
-fn pack_tree(destination: &str, dir: &Path) -> std::io::Result<Vec<u8>> {
+fn pack_tree(destination: &str, dir: &Path) -> io::Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
     builder.follow_symlinks(false);
     builder
@@ -245,13 +249,13 @@ async fn unpack(ctx: &StepCtx, tar_rel: &Path, pinned: &PinnedAction) -> Result<
                 SmolStr::new("-C"),
                 SmolStr::new(&workspace),
             ],
-            env:     Default::default(),
+            env:     BTreeMap::default(),
             cwd:     None,
         })
         .await
         .map_err(|e| stage_error(format!("could not run `tar` for `{pinned}`: {e}")))?;
     // Silent on success; on failure the last lines are the diagnosis.
-    let mut said = std::collections::VecDeque::with_capacity(4);
+    let mut said = VecDeque::with_capacity(4);
     if let Some(mut lines) = handle.lines() {
         while let Some(line) = lines.recv().await {
             if said.len() == 4 {
@@ -287,13 +291,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn staging_archives_symlinks_without_following_them() {
+        use std::fs;
         use std::os::unix::fs::symlink;
 
         let run = testkit::RunDir::new("action-staging-symlink");
         let root = run.path().join("action");
-        std::fs::create_dir_all(&root).expect("action directory");
-        std::fs::write(root.join("index.js"), "safe").expect("action file");
-        std::fs::write(run.path().join("outside"), "secret-bytes").expect("outside file");
+        fs::create_dir_all(&root).expect("action directory");
+        fs::write(root.join("index.js"), "safe").expect("action file");
+        fs::write(run.path().join("outside"), "secret-bytes").expect("outside file");
         symlink(run.path().join("outside"), root.join("linked")).expect("symbolic link");
 
         let bytes = pack_tree("staged", &root).expect("pack");

@@ -72,6 +72,10 @@ fn runtime(dir: &Path) -> Runtime {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the skip note and the diagnostics"
+)]
 async fn hashfiles_resolves_against_the_workspace_at_spawn() {
     if !have("node") {
         eprintln!("skipping: node is needed");

@@ -89,6 +89,7 @@ impl Diagnostic {
         Self::error(&format!("unsupported.{feature}"), span, message).with_hint(hint)
     }
 
+    #[must_use]
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
@@ -184,7 +185,7 @@ impl Diagnostics {
         self.items
     }
 
-    pub fn extend(&mut self, other: Diagnostics) {
+    pub fn extend(&mut self, other: Self) {
         self.items.extend(other.items);
     }
 }

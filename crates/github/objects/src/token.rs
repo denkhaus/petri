@@ -7,17 +7,19 @@
 //! checked, so minting costs nothing; the `nonce` claim carries the real
 //! randomness that makes the exact string a credential.
 
+use std::fmt::Write;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 /// The backend ids this runner mints into every token. Fixed: the store is
 /// per-run already, so the ids only need to be self-consistent (and free of
 /// the `:` and space the toolkit splits on).
-pub const WORKFLOW_RUN_BACKEND_ID: &str = "petri-wf-run";
-pub const JOB_RUN_BACKEND_ID: &str = "petri-job";
+pub(crate) const WORKFLOW_RUN_BACKEND_ID: &str = "petri-wf-run";
+pub(crate) const JOB_RUN_BACKEND_ID: &str = "petri-job";
 
 /// `N` bytes from the operating system's generator.
-pub fn random<const N: usize>() -> [u8; N] {
+pub(crate) fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).expect("the OS random source answers");
     bytes
@@ -25,11 +27,14 @@ pub fn random<const N: usize>() -> [u8; N] {
 
 /// Lowercase hex — the one spelling of the codec for the whole crate.
 pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 /// Mint the run's token: `header.payload.` with no signature.
-pub fn mint() -> String {
+pub(crate) fn mint() -> String {
     let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\",\"typ\":\"JWT\"}");
     let payload = format!(
         "{{\"scp\":\"Actions.Results:{WORKFLOW_RUN_BACKEND_ID}:{JOB_RUN_BACKEND_ID}\",\"nonce\":\"{}\"}}",

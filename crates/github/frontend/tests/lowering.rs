@@ -5,25 +5,26 @@
 mod support;
 
 use frontend::Severity;
+use frontend_gha::exprs::{self, RUNNER_TEMP_SENTINEL, RUNNER_TOOL_CACHE_SENTINEL};
 use serde_json::json;
 use support::*;
 
 #[test]
 fn composite_depth_cap_is_a_diagnostic() {
-    let recursive = r#"
+    let recursive = r"
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/loop
-"#;
-    let text = r#"
+";
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/loop
-"#;
+";
     let files = files(&[(".github/actions/loop/action.yml", recursive)]);
     let diags = diagnostics_with(text, &files);
     let depth = diags
@@ -118,7 +119,7 @@ jobs:
 
     for bad in ["    if: ${{ secrets.X == 'y' }}", "    if: secrets.X"] {
         let text = format!(
-            r#"
+            r"
 on: push
 jobs:
   j:
@@ -126,7 +127,7 @@ jobs:
 {bad}
     steps:
       - run: echo hi
-"#
+"
         );
         let diags = diagnostics(&text);
         assert!(
@@ -139,7 +140,7 @@ jobs:
     // Inside a larger string in step config it lowers: the step resolves the
     // secret's sentinel at spawn, and the log never sees the value.
     let diags = diagnostics(
-        r#"
+        r"
 on: push
 jobs:
   j:
@@ -148,7 +149,7 @@ jobs:
       - env:
           URL: https://user:${{ secrets.PW }}@host
         run: echo hi
-"#,
+",
     );
     assert!(
         !diags
@@ -184,7 +185,7 @@ fn concurrency_lowers_with_a_warning() {
 /// written: an ignored field is never evaluated.
 #[test]
 fn environment_lowers_with_a_warning_and_the_target_is_preserved() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   simple:
@@ -200,7 +201,7 @@ jobs:
       deployment: true
     steps:
       - run: echo
-"#;
+";
     let graph = lower_ok(text);
     let meta = |name: &str| {
         graph
@@ -266,7 +267,7 @@ jobs:
 /// node, and their union becomes the scope's placement requirements.
 #[test]
 fn expression_runs_on_resolves_per_matrix_leg() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   test:
@@ -280,7 +281,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - run: echo
-"#;
+";
     let graph = lower_ok(text);
     let start = graph
         .nodes
@@ -352,7 +353,7 @@ jobs:
 /// code, named per leg — and does not stop the supported legs from resolving.
 #[test]
 fn unsupported_legs_are_named_and_do_not_corrupt_supported_ones() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   test:
@@ -362,7 +363,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - run: echo
-"#;
+";
     let diags = diagnostics(text);
     let windows = diags
         .iter()
@@ -422,7 +423,7 @@ fn the_runner_map_places_configured_labels() {
     use frontend::NoFiles;
     use frontend_gha::{RunnerMap, load_configured};
 
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   hosted:
@@ -440,7 +441,7 @@ jobs:
     runs-on: ${{ matrix.pool }}
     steps:
       - run: echo
-"#;
+";
     let configured = RunnerMap::builtin().allow_list("depot-ubuntu-24.04-8, self-hosted linux,x64");
     let lowered = load_configured(
         ".github/workflows/test.yml",
@@ -545,7 +546,7 @@ jobs:
 /// wherever the token appears, and only genuinely opaque labels need the map.
 #[test]
 fn labels_place_by_their_own_tokens() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   depot:
@@ -556,7 +557,7 @@ jobs:
     runs-on: [ubuntu-24.04-xl, ubuntu-26.04-arm]
     steps:
       - run: echo
-"#;
+";
     let graph = lower_ok(text);
     assert!(!graph.nodes.is_empty());
     assert!(diagnostics(text).is_empty(), "{:?}", diagnostics(text));
@@ -598,7 +599,7 @@ fn windows_and_macos_runners_are_rejected() {
 /// stays rejected (the node flag is a lowering-time decision).
 #[test]
 fn step_continue_on_error_expressions_resolve_at_firing() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -611,7 +612,7 @@ jobs:
         continue-on-error: ${{ matrix.checks == 'advisories' }}
       - run: echo
         continue-on-error: true
-"#;
+";
     let diags = diagnostics(text);
     assert!(
         !diags.iter().any(|d| d.code.starts_with("unsupported.")),
@@ -645,7 +646,7 @@ jobs:
 /// flag stays rejected, as at step level.
 #[test]
 fn a_continue_on_error_job_tolerates_failure() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   experimental:
@@ -657,7 +658,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo
-"#;
+";
     let graph = lower_ok(text);
     for node in &graph.nodes {
         let expected = node.name.starts_with("experimental/");
@@ -873,7 +874,7 @@ jobs:
 /// all; their condition is the `gate` in their config.
 #[test]
 fn run_on_cancel_lands_exactly_where_github_keeps_going() {
-    let action = r#"
+    let action = r"
 runs:
   using: composite
   steps:
@@ -881,8 +882,8 @@ runs:
       run: echo one
     - shell: bash
       run: echo two
-"#;
-    let text = r#"
+";
+    let text = r"
 on: push
 jobs:
   build:
@@ -914,7 +915,7 @@ jobs:
         n: [1, 2]
     steps:
       - run: echo ${{ matrix.n }}
-"#;
+";
     let files = files(&[(".github/actions/sweeper/action.yml", action)]);
     let graph = lower_ok_with(text, &files);
 
@@ -974,7 +975,7 @@ jobs:
 /// `hashFiles` become step-resolved leaves under the GitHub operators.
 #[test]
 fn step_conditions_lower_to_gates() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -991,7 +992,7 @@ jobs:
         run: echo hashy
       - id: bare
         run: echo bare
-"#;
+";
     let graph = lower_ok(text);
     let gate = |name: &str| {
         graph
@@ -1029,10 +1030,7 @@ jobs:
     let cmp = hashy["args"].as_array().unwrap().last().unwrap();
     assert_eq!(cmp["op"], json!("!="));
     let sentinel = cmp["args"][0]["lit"].as_str().unwrap();
-    assert!(
-        frontend_gha::exprs::has_hashfiles_sentinel(sentinel),
-        "{sentinel:?}"
-    );
+    assert!(exprs::has_hashfiles_sentinel(sentinel), "{sentinel:?}");
     // The steps' `cancelled` bit is the engine's scope_cancelled static.
     let bare = graph.nodes.iter().find(|n| n.name == "j/bare").unwrap();
     assert!(bare.step.config["cancelled"].get("$expr").is_some());
@@ -1099,7 +1097,7 @@ fn conditions_follow_the_context_availability_matrix() {
 /// starts, a `fail_fast` scope cancel — still reads as cancelled.
 #[test]
 fn cancelled_lowers_with_scope_cancelled() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   a:
@@ -1113,7 +1111,7 @@ jobs:
     steps:
       - if: cancelled()
         run: echo b
-"#;
+";
     let graph = lower_ok(text);
     let printed = frontend::print_graph(&graph);
     assert!(
@@ -1143,7 +1141,7 @@ jobs:
     let graph = lower_ok(text);
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(
-        encoded.contains(frontend_gha::exprs::RUNNER_TEMP_SENTINEL),
+        encoded.contains(RUNNER_TEMP_SENTINEL),
         "step config carries the sentinel: {encoded}"
     );
     let diags = diagnostics(text);
@@ -1156,7 +1154,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
-        !encoded.contains(frontend_gha::exprs::RUNNER_TEMP_SENTINEL),
+        !encoded.contains(RUNNER_TEMP_SENTINEL),
         "a job-level env stays a parameter read: {encoded}"
     );
 }
@@ -1181,7 +1179,7 @@ jobs:
     let graph = lower_ok(text);
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(
-        encoded.contains(frontend_gha::exprs::RUNNER_TOOL_CACHE_SENTINEL),
+        encoded.contains(RUNNER_TOOL_CACHE_SENTINEL),
         "step config carries the sentinel: {encoded}"
     );
     let diags = diagnostics(text);
@@ -1192,7 +1190,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
-        !encoded.contains(frontend_gha::exprs::RUNNER_TOOL_CACHE_SENTINEL),
+        !encoded.contains(RUNNER_TOOL_CACHE_SENTINEL),
         "a job-level env stays a parameter read: {encoded}"
     );
 }
@@ -1219,7 +1217,7 @@ jobs:
     let graph = lower_ok(text);
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(
-        encoded.contains(&frontend_gha::exprs::env_sentinel("PROBE")),
+        encoded.contains(&exprs::env_sentinel("PROBE")),
         "step config carries the sentinel: {encoded}"
     );
     let diags = diagnostics(text);
@@ -1232,7 +1230,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&complex).unwrap();
     assert!(
-        !encoded.contains(&frontend_gha::exprs::env_sentinel("PROBE")),
+        !encoded.contains(&exprs::env_sentinel("PROBE")),
         "an env reference under a function stays engine-side: {encoded}"
     );
 
@@ -1242,7 +1240,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
-        !encoded.contains(&frontend_gha::exprs::env_sentinel("PROBE")),
+        !encoded.contains(&exprs::env_sentinel("PROBE")),
         "a job-level env stays an engine read: {encoded}"
     );
 }

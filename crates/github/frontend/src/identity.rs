@@ -16,6 +16,7 @@
 //! honest `sha`/`ref` values there change no lowering and break no replay —
 //! and they are what lets `actions/checkout` fetch a commit that exists.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use frontend::FileSource;
@@ -84,7 +85,7 @@ pub struct HeadIdentity {
 /// are host business, outside the [`FileSource`] the lowering sees.
 pub fn head_identity(repo: &Path) -> Option<HeadIdentity> {
     let (git_dir, common_dir) = git_dirs(repo)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     if let Some(reference) = head.strip_prefix("ref: ") {
         let reference = reference.trim().to_string();
@@ -108,7 +109,7 @@ fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
     let git_dir = if dot_git.is_dir() {
         dot_git
     } else {
-        let link = std::fs::read_to_string(&dot_git).ok()?;
+        let link = fs::read_to_string(&dot_git).ok()?;
         let target = link.strip_prefix("gitdir:")?.trim();
         let target = PathBuf::from(target);
         if target.is_absolute() {
@@ -117,7 +118,7 @@ fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
             repo.join(target)
         }
     };
-    let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
+    let common_dir = match fs::read_to_string(git_dir.join("commondir")) {
         Ok(common) => {
             let common = PathBuf::from(common.trim());
             if common.is_absolute() {
@@ -133,11 +134,11 @@ fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
 
 /// A ref's commit: the loose file when it exists, else its `packed-refs` line.
 fn resolve_ref(common_dir: &Path, reference: &str) -> Option<String> {
-    if let Ok(sha) = std::fs::read_to_string(common_dir.join(reference)) {
+    if let Ok(sha) = fs::read_to_string(common_dir.join(reference)) {
         let sha = sha.trim().to_string();
         return is_full_sha(&sha).then_some(sha);
     }
-    let packed = std::fs::read_to_string(common_dir.join("packed-refs")).ok()?;
+    let packed = fs::read_to_string(common_dir.join("packed-refs")).ok()?;
     for line in packed.lines() {
         // Comment header lines and `^` peel lines are not refs.
         if line.starts_with(['#', '^']) {
@@ -189,6 +190,8 @@ pub fn github_context(repository: Option<&str>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs, process};
+
     use super::*;
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -198,24 +201,24 @@ mod tests {
 
     impl Scratch {
         fn new(label: &str) -> Self {
-            let dir = std::env::temp_dir()
+            let dir = env::temp_dir()
                 .join("petri-identity")
-                .join(format!("{label}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("create the scratch dir");
+                .join(format!("{label}-{}", process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("create the scratch dir");
             Self(dir)
         }
 
         fn write(&self, relative: &str, contents: &str) {
             let path = self.0.join(relative);
-            std::fs::create_dir_all(path.parent().expect("a parent")).expect("create parents");
-            std::fs::write(path, contents).expect("write the fixture");
+            fs::create_dir_all(path.parent().expect("a parent")).expect("create parents");
+            fs::write(path, contents).expect("write the fixture");
         }
     }
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

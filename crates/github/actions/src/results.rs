@@ -13,6 +13,8 @@
 //! environment at injection time (`ExecEnv::host_address`,
 //! `ContainerRunner::host_address`), never baked in.
 
+use std::path::PathBuf;
+
 use smol_str::SmolStr;
 
 /// Where the run's results service listens, and the exact bearer string it
@@ -48,7 +50,7 @@ impl ResultsServiceCap {
 /// (`<store>/toolcache/<os>` — the toolkit's layout has no OS segment, so the
 /// store splits per OS above it). Host-scoped: registered once on the runtime,
 /// not per run. Absent means every run re-downloads into its workspace.
-pub struct ToolCacheCap(pub std::path::PathBuf);
+pub struct ToolCacheCap(pub PathBuf);
 
 #[cfg(test)]
 mod tests {

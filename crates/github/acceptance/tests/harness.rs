@@ -9,22 +9,29 @@
 //! absent. See `acceptance::corpus_present`.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{env, fs};
 
 use acceptance::{Class, SnapshotSource, check_all, corpus_present, report};
 use frontend_gha::ActionSource;
 
-fn corpus_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
+fn corpus_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped test says why on the runner's stderr; a test binary has no other sink"
+)]
 fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
     let root = corpus_root();
     if !corpus_present(&root) {
-        if std::env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()) {
-            panic!("PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched");
-        }
+        assert!(
+            !env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()),
+            "PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched"
+        );
         eprintln!("skipping: corpus not fetched; run scripts/corpus-fetch.sh");
         return;
     }
@@ -59,7 +66,7 @@ fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
     );
 
     let markdown = report(&outcomes, &census, &note);
-    std::fs::write(root.join("REPORT.md"), &markdown).expect("write the report");
+    fs::write(root.join("REPORT.md"), &markdown).expect("write the report");
 
     let panics: Vec<_> = outcomes
         .iter()
@@ -112,17 +119,21 @@ fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
 /// `crates/github/SUPPORT.md`, so the support doc cannot silently drift from
 /// what the code does.
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped test says why on the runner's stderr; a test binary has no other sink"
+)]
 fn every_rejection_code_is_declared_in_support_md() {
     let root = corpus_root();
     if !corpus_present(&root) {
-        if std::env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()) {
-            panic!("PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched");
-        }
+        assert!(
+            !env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()),
+            "PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched"
+        );
         eprintln!("skipping: corpus not fetched; run scripts/corpus-fetch.sh");
         return;
     }
-    let support =
-        std::fs::read_to_string(root.join("../SUPPORT.md")).expect("crates/github/SUPPORT.md");
+    let support = fs::read_to_string(root.join("../SUPPORT.md")).expect("crates/github/SUPPORT.md");
 
     let source = SnapshotSource::load(&root).map(|s| Arc::new(s) as Arc<dyn ActionSource>);
     let outcomes = check_all(&root, source.as_ref());

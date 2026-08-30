@@ -69,6 +69,10 @@ fn write(expr: &Expr, out: &mut String) {
 }
 
 /// Numbers print in a form the lexer reads back to the same double.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the cast runs only where `n` is integral and under 1e15 in magnitude, a range i64 holds exactly"
+)]
 fn print_number(n: f64) -> String {
     if n.is_nan() {
         // Not expressible as a literal; the closest total answer.

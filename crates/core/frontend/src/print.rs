@@ -7,7 +7,9 @@
 
 use std::fmt::Write;
 
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{Expr, ExprId, ExprTable, Graph, Guard, JoinPolicy, RuntimeTarget};
+use smol_str::SmolStr;
 
 pub fn print_graph(graph: &Graph) -> String {
     let mut out = String::new();
@@ -30,7 +32,7 @@ pub fn print_graph(graph: &Graph) -> String {
             graph
                 .params
                 .keys()
-                .map(|k| k.as_str())
+                .map(SmolStr::as_str)
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -49,7 +51,7 @@ pub fn print_graph(graph: &Graph) -> String {
                     .runtime
                     .requirements
                     .iter()
-                    .map(|r| r.as_str())
+                    .map(SmolStr::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -151,9 +153,13 @@ fn print_config(table: &ExprTable, value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
             if let Some(id) = map
-                .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
-                .and_then(|v| v.as_u64())
+                .get(EXPR_PLACEHOLDER_KEY)
+                .and_then(serde_json::Value::as_u64)
             {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a `$expr` placeholder holds an `ExprId`, whose raw value is a u32"
+                )]
                 return format!("${{{{ {} }}}}", print_expr(table, ExprId::new(id as u32)));
             }
             let inner: Vec<String> = map

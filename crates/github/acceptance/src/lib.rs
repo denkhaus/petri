@@ -11,6 +11,9 @@
 //! rather than fail — see [`corpus_present`].
 
 use std::collections::BTreeMap;
+use std::fs::{self, DirEntry};
+use std::io;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -139,7 +142,7 @@ impl Outcome {
 /// `PETRI_REQUIRE_CORPUS` turns that skip into a failure. CI sets it, because a
 /// silently skipped battery is indistinguishable from a passing one.
 pub fn corpus_present(root: &Path) -> bool {
-    let Ok(repos) = std::fs::read_dir(root) else {
+    let Ok(repos) = fs::read_dir(root) else {
         return false;
     };
     repos
@@ -150,25 +153,33 @@ pub fn corpus_present(root: &Path) -> bool {
 /// Every workflow under `crates/github/corpus/*/.github/workflows/`.
 pub fn workflows(corpus_root: &Path) -> Vec<(String, PathBuf, PathBuf)> {
     let mut out = Vec::new();
-    let Ok(repos) = std::fs::read_dir(corpus_root) else {
+    let Ok(repos) = fs::read_dir(corpus_root) else {
         return out;
     };
     let mut repos: Vec<_> = repos.flatten().filter(|e| e.path().is_dir()).collect();
-    repos.sort_by_key(|e| e.file_name());
+    repos.sort_by_key(DirEntry::file_name);
     for repo in repos {
         let repo_root = repo.path();
         let dir = repo_root.join(".github").join("workflows");
-        let Ok(files) = std::fs::read_dir(&dir) else {
+        let Ok(files) = fs::read_dir(&dir) else {
             continue;
         };
         let mut files: Vec<_> = files
             .flatten()
             .filter(|f| {
-                let name = f.file_name().to_string_lossy().into_owned();
-                name.ends_with(".yml") || name.ends_with(".yaml")
+                #[expect(
+                    clippy::case_sensitive_file_extension_comparisons,
+                    reason = "GitHub reads `.yml` and `.yaml` as written, so `.YML` is not a \
+                              workflow file; matching without case would pull files into the \
+                              corpus bar that GitHub itself would ignore"
+                )]
+                {
+                    let name = f.file_name().to_string_lossy().into_owned();
+                    name.ends_with(".yml") || name.ends_with(".yaml")
+                }
             })
             .collect();
-        files.sort_by_key(|f| f.file_name());
+        files.sort_by_key(DirEntry::file_name);
         for file in files {
             out.push((
                 repo.file_name().to_string_lossy().replace("__", "/"),
@@ -212,11 +223,11 @@ struct FailedSnapshotEntry {
 impl<'de> serde::Deserialize<'de> for SnapshotEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match RawSnapshotEntry::deserialize(deserializer)? {
-            RawSnapshotEntry::Resolved(entry) => SnapshotEntry::Resolved {
+            RawSnapshotEntry::Resolved(entry) => Self::Resolved {
                 sha:      entry.sha,
                 manifest: entry.manifest,
             },
-            RawSnapshotEntry::Failed(entry) => SnapshotEntry::Failed { error: entry.error },
+            RawSnapshotEntry::Failed(entry) => Self::Failed { error: entry.error },
         })
     }
 }
@@ -244,7 +255,7 @@ impl SnapshotSource {
     /// run.
     pub fn load(corpus_root: &Path) -> Option<Self> {
         let path = corpus_root.join(Self::FILE);
-        let text = std::fs::read_to_string(&path).ok()?;
+        let text = fs::read_to_string(&path).ok()?;
         let entries = serde_json::from_str(&text)
             .expect("the action snapshot is a map of resolved or failed references");
         Some(Self { entries })
@@ -272,10 +283,10 @@ impl SnapshotSource {
     pub fn write(
         corpus_root: &Path,
         entries: &BTreeMap<String, SnapshotEntry>,
-    ) -> std::io::Result<PathBuf> {
+    ) -> io::Result<PathBuf> {
         let path = corpus_root.join(Self::FILE);
         let text = serde_json::to_string_pretty(entries).expect("the snapshot encodes");
-        std::fs::write(&path, text)?;
+        fs::write(&path, text)?;
         Ok(path)
     }
 }
@@ -346,7 +357,7 @@ pub fn lower_one(
         .unwrap_or(file)
         .to_string_lossy()
         .into_owned();
-    let text = match std::fs::read_to_string(file) {
+    let text = match fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -373,15 +384,13 @@ pub fn lower_one(
         Some(actions) => GitHubActions::with_actions(Arc::clone(actions)),
         None => GitHubActions::new(),
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        format.load(&rel, &text, &files)
-    }));
+    let result = panic::catch_unwind(AssertUnwindSafe(|| format.load(&rel, &text, &files)));
     match result {
         Err(payload) => {
             let message = payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .or_else(|| payload.downcast_ref::<&str>().map(ToString::to_string))
                 .unwrap_or_else(|| "unknown panic".to_string());
             (
                 Outcome {
@@ -473,7 +482,7 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
         outcomes.len(),
         {
             let mut repos: Vec<&str> = outcomes.iter().map(|o| o.repo.as_str()).collect();
-            repos.sort();
+            repos.sort_unstable();
             repos.dedup();
             repos.len()
         }

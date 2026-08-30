@@ -5,6 +5,7 @@
 //! `{"$secret": NAME}` reference in an env-shaped position.
 
 use std::collections::BTreeMap;
+use std::iter;
 use std::path::PathBuf;
 
 pub use frontend_gha::action::ActionLocation;
@@ -148,7 +149,7 @@ impl<'de> Deserialize<'de> for ActionConfig {
         match &raw.action {
             ActionLocation::Pinned(pinned) => pinned.validate().map_err(de::Error::custom)?,
             ActionLocation::Local { local } => {
-                validate_relative_action_path(local, true).map_err(de::Error::custom)?
+                validate_relative_action_path(local, true).map_err(de::Error::custom)?;
             }
         }
         validate_entry(&raw.action, &raw.entry).map_err(de::Error::custom)?;
@@ -228,12 +229,10 @@ pub struct DockerfileImage {
 /// Every string in a process config that can carry a lowered GitHub
 /// placeholder.
 pub(crate) fn process_texts(process: &ProcessConfig) -> impl Iterator<Item = &str> {
-    std::iter::once(process.run.as_str()).chain(process.env.values().filter_map(
-        |value| match value {
-            ValueOrSecretRef::Literal(Value::String(text)) => Some(text.as_str()),
-            _ => None,
-        },
-    ))
+    iter::once(process.run.as_str()).chain(process.env.values().filter_map(|value| match value {
+        ValueOrSecretRef::Literal(Value::String(text)) => Some(text.as_str()),
+        _ => None,
+    }))
 }
 
 /// Replace selected text-bearing fields without duplicating the field walk in
@@ -290,13 +289,13 @@ mod tests {
 
 #[cfg(test)]
 mod entry_tests {
-    use frontend_gha::action::ActionRef;
+    use frontend_gha::action::{ActionRef, PinnedAction};
     use smol_str::SmolStr;
 
     use super::*;
 
     fn pinned(reference: &str) -> ActionLocation {
-        ActionLocation::Pinned(frontend_gha::action::PinnedAction {
+        ActionLocation::Pinned(PinnedAction {
             reference: ActionRef::parse(reference).expect("valid"),
             sha:       SmolStr::new("0123456789012345678901234567890123456789"),
         })

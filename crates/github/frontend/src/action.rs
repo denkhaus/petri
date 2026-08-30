@@ -126,6 +126,12 @@ fn validate_repository_component(value: &str) -> Result<(), ActionPathError> {
     Ok(())
 }
 
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "git's own rule is a literal, case-sensitive `.lock` suffix on a reference \
+              component; this is a reference, not a filename, and an ASCII-insensitive \
+              match would reject references git accepts"
+)]
 fn validate_git_ref(value: &str) -> Result<(), ActionPathError> {
     let invalid_char = |c: char| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c);
     if value.is_empty()
@@ -387,6 +393,7 @@ impl MapActionSource {
 
     /// Register `uses` (as written, `owner/repo@ref`) as resolving to `sha`
     /// with this manifest text.
+    #[must_use]
     pub fn with(self, uses: &str, sha: &str, manifest: &str) -> Self {
         self.manifests
             .lock()

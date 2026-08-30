@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use super::print;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Literal {
     Null,
@@ -31,24 +33,24 @@ pub enum BinaryOp {
 impl BinaryOp {
     pub fn symbol(self) -> &'static str {
         match self {
-            BinaryOp::Lt => "<",
-            BinaryOp::Le => "<=",
-            BinaryOp::Gt => ">",
-            BinaryOp::Ge => ">=",
-            BinaryOp::Eq => "==",
-            BinaryOp::Ne => "!=",
-            BinaryOp::And => "&&",
-            BinaryOp::Or => "||",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::And => "&&",
+            Self::Or => "||",
         }
     }
 
     /// Binding strength; higher binds tighter.
     pub fn precedence(self) -> u8 {
         match self {
-            BinaryOp::Or => 1,
-            BinaryOp::And => 2,
-            BinaryOp::Eq | BinaryOp::Ne => 3,
-            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 4,
+            Self::Or => 1,
+            Self::And => 2,
+            Self::Eq | Self::Ne => 3,
+            Self::Lt | Self::Le | Self::Gt | Self::Ge => 4,
         }
     }
 }
@@ -60,61 +62,62 @@ pub enum Expr {
     /// an engine binding (`nodes`, `item`).
     Ident(String),
     /// `a.b` — property access by name.
-    Property(Box<Expr>, String),
+    Property(Box<Self>, String),
     /// `a[expr]` — index by a computed key.
-    Index(Box<Expr>, Box<Expr>),
+    Index(Box<Self>, Box<Self>),
     /// `a.*` or `a[*]` — the object filter: an object's values, or an array's
     /// elements.
-    Wildcard(Box<Expr>),
-    Unary(UnaryOp, Box<Expr>),
-    Binary(BinaryOp, Box<Expr>, Box<Expr>),
-    Call(String, Vec<Expr>),
+    Wildcard(Box<Self>),
+    Unary(UnaryOp, Box<Self>),
+    Binary(BinaryOp, Box<Self>, Box<Self>),
+    Call(String, Vec<Self>),
     /// `(expr)`, kept so the printer round-trips exactly and precedence is
     /// explicit.
-    Group(Box<Expr>),
+    Group(Box<Self>),
 }
 
 impl Expr {
     pub fn null() -> Self {
-        Expr::Literal(Literal::Null)
+        Self::Literal(Literal::Null)
     }
 
     pub fn boolean(b: bool) -> Self {
-        Expr::Literal(Literal::Bool(b))
+        Self::Literal(Literal::Bool(b))
     }
 
     pub fn string(s: &str) -> Self {
-        Expr::Literal(Literal::Str(s.to_string()))
+        Self::Literal(Literal::Str(s.to_string()))
     }
 
     pub fn number(n: f64) -> Self {
-        Expr::Literal(Literal::Number(n))
+        Self::Literal(Literal::Number(n))
     }
 
     pub fn ident(name: &str) -> Self {
-        Expr::Ident(name.to_string())
+        Self::Ident(name.to_string())
     }
 
+    #[must_use]
     pub fn property(self, name: &str) -> Self {
-        Expr::Property(Box::new(self), name.to_string())
+        Self::Property(Box::new(self), name.to_string())
     }
 
-    pub fn call(name: &str, args: Vec<Expr>) -> Self {
-        Expr::Call(name.to_string(), args)
+    pub fn call(name: &str, args: Vec<Self>) -> Self {
+        Self::Call(name.to_string(), args)
     }
 
     /// The chain of property names from a root identifier: `a.b.c` → `("a", [b,
     /// c])`. `None` when the expression is not a plain dotted path.
     pub fn dotted_path(&self) -> Option<(&str, Vec<&str>)> {
         match self {
-            Expr::Ident(name) => Some((name, Vec::new())),
-            Expr::Property(base, name) => {
+            Self::Ident(name) => Some((name, Vec::new())),
+            Self::Property(base, name) => {
                 let (root, mut path) = base.dotted_path()?;
                 path.push(name);
                 Some((root, path))
             }
-            Expr::Index(base, key) => {
-                let Expr::Literal(Literal::Str(key)) = key.as_ref() else {
+            Self::Index(base, key) => {
+                let Self::Literal(Literal::Str(key)) = key.as_ref() else {
                     return None;
                 };
                 let (root, mut path) = base.dotted_path()?;
@@ -128,8 +131,8 @@ impl Expr {
     /// The root identifier of a property/index chain, if any.
     pub fn root_ident(&self) -> Option<&str> {
         match self {
-            Expr::Ident(name) => Some(name),
-            Expr::Property(base, _) | Expr::Index(base, _) | Expr::Wildcard(base) => {
+            Self::Ident(name) => Some(name),
+            Self::Property(base, _) | Self::Index(base, _) | Self::Wildcard(base) => {
                 base.root_ident()
             }
             _ => None,
@@ -145,21 +148,21 @@ impl Expr {
 
     fn collect_roots<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
-            Expr::Literal(_) => {}
-            Expr::Ident(name) => out.push(name),
-            Expr::Property(base, _) | Expr::Wildcard(base) | Expr::Group(base) => {
-                base.collect_roots(out)
+            Self::Literal(_) => {}
+            Self::Ident(name) => out.push(name),
+            Self::Property(base, _) | Self::Wildcard(base) | Self::Group(base) => {
+                base.collect_roots(out);
             }
-            Expr::Index(base, key) => {
+            Self::Index(base, key) => {
                 base.collect_roots(out);
                 key.collect_roots(out);
             }
-            Expr::Unary(_, inner) => inner.collect_roots(out),
-            Expr::Binary(_, l, r) => {
+            Self::Unary(_, inner) => inner.collect_roots(out),
+            Self::Binary(_, l, r) => {
                 l.collect_roots(out);
                 r.collect_roots(out);
             }
-            Expr::Call(_, args) => {
+            Self::Call(_, args) => {
                 for a in args {
                     a.collect_roots(out);
                 }
@@ -176,20 +179,20 @@ impl Expr {
 
     fn collect_calls<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
-            Expr::Literal(_) | Expr::Ident(_) => {}
-            Expr::Property(base, _) | Expr::Wildcard(base) | Expr::Group(base) => {
-                base.collect_calls(out)
+            Self::Literal(_) | Self::Ident(_) => {}
+            Self::Property(base, _) | Self::Wildcard(base) | Self::Group(base) => {
+                base.collect_calls(out);
             }
-            Expr::Index(base, key) => {
+            Self::Index(base, key) => {
                 base.collect_calls(out);
                 key.collect_calls(out);
             }
-            Expr::Unary(_, inner) => inner.collect_calls(out),
-            Expr::Binary(_, l, r) => {
+            Self::Unary(_, inner) => inner.collect_calls(out),
+            Self::Binary(_, l, r) => {
                 l.collect_calls(out);
                 r.collect_calls(out);
             }
-            Expr::Call(name, args) => {
+            Self::Call(name, args) => {
                 out.push(name);
                 for a in args {
                     a.collect_calls(out);
@@ -201,6 +204,6 @@ impl Expr {
 
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&crate::expr::print::print(self))
+        f.write_str(&print::print(self))
     }
 }

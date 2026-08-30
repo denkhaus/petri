@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 use frontend::diag::{Diagnostics, Span};
-use frontend::expr::parse;
+use frontend::expr::{Expr, parse};
 use frontend::yaml::Node;
-use ir::placeholder::EXPR_PLACEHOLDER_KEY;
+use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{BinOp, Budget, ExprId, ExprOrValue, NodeId, ScopeId, StepRef, Value};
 use serde_json::{Map, json};
 
@@ -17,12 +17,11 @@ use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, Step};
 
 /// GitHub's default job timeout.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(360 * 60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_hours(6);
 
-impl<'w, 'a> Lowering<'w, 'a> {
+impl<'a> Lowering<'_, 'a> {
     /// The node(s) for one step: one `github/run` node, one `github/action`
     /// node, or a composite's inlined chain.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn step_nodes(
         &mut self,
         job: &Job<'a>,
@@ -35,9 +34,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         depth: usize,
         action_plan: Option<&ActionPlan>,
     ) -> Vec<NodeId> {
-        let node_name = match site.action_inputs.is_some() {
-            true => format!("{}{SEP}{}", site.job_id, step.node_name()),
-            false => format!("{}{SEP}{}", job.id, step.node_name()),
+        let node_name = if site.action_inputs.is_some() {
+            format!("{}{SEP}{}", site.job_id, step.node_name())
+        } else {
+            format!("{}{SEP}{}", job.id, step.node_name())
         };
 
         if let Some((reference, span)) = &step.uses {
@@ -197,7 +197,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
             LoweredScalar::Literal(v) => match v.as_str() {
                 Some("true") => Some(json!(true)),
-                Some("false") | Some("") => None,
+                Some("false" | "") => None,
                 _ => {
                     if !quiet {
                         self.diags.unsupported(
@@ -235,10 +235,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
     ) -> Map<String, Value> {
         let mut env_config = Map::new();
         for (key, name) in job_secret_env {
-            env_config.insert(
-                key.clone(),
-                json!({ ir::placeholder::SECRET_REF_KEY: name }),
-            );
+            env_config.insert(key.clone(), json!({ SECRET_REF_KEY: name }));
         }
         for (key, node) in &step.env {
             match self.env_value(node, step_site, true) {
@@ -250,10 +247,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     });
                 }
                 Some(EnvValue::Secret(name)) => {
-                    env_config.insert(
-                        key.clone(),
-                        json!({ ir::placeholder::SECRET_REF_KEY: name }),
-                    );
+                    env_config.insert(key.clone(), json!({ SECRET_REF_KEY: name }));
                 }
                 None => {}
             }
@@ -315,7 +309,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Ok(ast) = parse(source)
             && gate::needs_lazy(&ast)
         {
-            return self.lazy_gate(&ast, site, span, prereqs);
+            return self.lazy_gate(&ast, site, &span, prereqs);
         }
         let cond = self.condition_text(source, site, true, span);
         self.collapse_gate(prereqs, cond)
@@ -340,20 +334,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// function) as engine leaves, then the condition split on its
     /// operators. GitHub truthiness lands at the root, in the step's
     /// evaluator.
-    fn lazy_gate(
-        &mut self,
-        ast: &frontend::expr::Expr,
-        site: &Site,
-        span: Span,
-        prereqs: &[ExprId],
-    ) -> Value {
+    fn lazy_gate(&mut self, ast: &Expr, site: &Site, span: &Span, prereqs: &[ExprId]) -> Value {
         let mut terms: Vec<Gate> = prereqs.iter().map(|id| Gate::expr(*id)).collect();
         if !names_status_function(ast) {
             let success = site.status_function(self.b.exprs(), "success", true);
             terms.push(Gate::expr(success));
         }
-        if let Some(tree) = gate::condition_tree(ast, site, &span, self.b.exprs(), &mut self.diags)
-        {
+        if let Some(tree) = gate::condition_tree(ast, site, span, self.b.exprs(), &mut self.diags) {
             terms.push(tree);
         }
         let gate = match terms.len() {

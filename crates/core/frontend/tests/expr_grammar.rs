@@ -5,8 +5,8 @@
 //! functions.
 
 use frontend::expr::lower::{EngineBindings, strict};
-use frontend::expr::{BinaryOp, Expr, Segment, parse, print, split_template};
-use ir::ExprTable;
+use frontend::expr::{BinaryOp, Expr, Segment, UnaryOp, parse, print, split_template};
+use ir::{ExprTable, expr as ir_expr};
 use proptest::prelude::*;
 
 fn parses_to(source: &str) -> Expr {
@@ -220,7 +220,7 @@ fn strict_lowering_emits_only_table_functions() {
         strict(&ast, &mut table, &mut EngineBindings).unwrap_or_else(|e| panic!("`{source}`: {e}"));
         for (_, expr) in table.iter() {
             if let ir::Expr::Call(fname, args) = expr {
-                let spec = ir::expr::builtin(fname).unwrap_or_else(|| {
+                let spec = ir_expr::builtin(fname).unwrap_or_else(|| {
                     panic!("`{source}` emitted `{fname}`, which is not in BUILTINS")
                 });
                 assert_eq!(spec.arity, args.len(), "`{fname}` arity in `{source}`");
@@ -247,7 +247,7 @@ fn arb_literal() -> impl Strategy<Value = Expr> {
         any::<bool>().prop_map(Expr::boolean),
         // Finite doubles that print and reparse exactly.
         (-1.0e12f64..1.0e12).prop_map(|n| Expr::number((n * 1000.0).round() / 1000.0)),
-        (0i64..100000).prop_map(|n| Expr::number(n as f64)),
+        (0i64..100_000).prop_map(|n| Expr::number(n as f64)),
         "[ -~]{0,12}".prop_map(|s| Expr::string(&s)),
     ]
 }
@@ -274,10 +274,9 @@ fn arb_expr() -> impl Strategy<Value = Expr> {
             inner
                 .clone()
                 .prop_map(|b| Expr::Wildcard(Box::new(postfixable(b)))),
-            inner.clone().prop_map(|b| Expr::Unary(
-                frontend::expr::UnaryOp::Not,
-                Box::new(Expr::Group(Box::new(b)))
-            )),
+            inner
+                .clone()
+                .prop_map(|b| Expr::Unary(UnaryOp::Not, Box::new(Expr::Group(Box::new(b))))),
             (
                 prop_oneof![
                     Just(BinaryOp::Lt),
@@ -360,7 +359,7 @@ proptest! {
         if strict(&expr, &mut table, &mut EngineBindings).is_ok() {
             for (_, e) in table.iter() {
                 if let ir::Expr::Call(name, _) = e {
-                    prop_assert!(ir::expr::builtin(name).is_some(), "`{name}` escaped the table");
+                    prop_assert!(ir_expr::builtin(name).is_some(), "`{name}` escaped the table");
                 }
             }
         }

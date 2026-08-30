@@ -50,9 +50,9 @@ pub enum LexError {
 impl LexError {
     pub fn offset(&self) -> usize {
         match self {
-            LexError::Unexpected { offset, .. }
-            | LexError::UnterminatedString { offset }
-            | LexError::BadNumber { offset, .. } => *offset,
+            Self::Unexpected { offset, .. }
+            | Self::UnterminatedString { offset }
+            | Self::BadNumber { offset, .. } => *offset,
         }
     }
 }
@@ -84,7 +84,6 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         match c {
             ' ' | '\t' | '\r' | '\n' => {
                 i += 1;
-                continue;
             }
             '(' => {
                 push(TokenKind::LParen, 1);
@@ -108,7 +107,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
             '.' => {
                 // A leading `.` followed by a digit is a number (`.5`).
-                if bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
+                if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
                     let (n, len) = lex_number(source, i)?;
                     push(TokenKind::Number(n), len);
                     i += len;
@@ -252,7 +251,7 @@ fn lex_number(source: &str, start: usize) -> Result<(f64, usize), LexError> {
     }
     let body_start = i;
     // Hex.
-    if bytes.get(i) == Some(&b'0') && matches!(bytes.get(i + 1), Some(b'x') | Some(b'X')) {
+    if bytes.get(i) == Some(&b'0') && matches!(bytes.get(i + 1), Some(b'x' | b'X')) {
         i += 2;
         let hex_start = i;
         while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
@@ -281,16 +280,16 @@ fn lex_number(source: &str, start: usize) -> Result<(f64, usize), LexError> {
     }
     // A `.` belongs to the number only when a digit follows: `1.5` is one token,
     // `1.x` is a number and then a property access.
-    if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
+    if bytes.get(i) == Some(&b'.') && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
         i += 1;
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
     }
-    if matches!(bytes.get(i), Some(b'e') | Some(b'E')) {
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
         let save = i;
         i += 1;
-        if matches!(bytes.get(i), Some(b'+') | Some(b'-')) {
+        if matches!(bytes.get(i), Some(b'+' | b'-')) {
             i += 1;
         }
         let digits = i;

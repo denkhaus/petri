@@ -7,13 +7,14 @@
 
 mod support;
 
+use frontend::print;
 use ir::expr::{EvalEnv, StaticCtx, eval};
 use ir::flow::{NodeRecord, RunContext, Status};
 use serde_json::{Value, json};
 use smol_str::SmolStr;
 use support::*;
 
-const TEXT: &str = r#"
+const TEXT: &str = r"
 on: push
 jobs:
   identify:
@@ -29,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo go
-"#;
+";
 
 fn rebase_precondition(graph: &ir::Graph) -> ir::ExprId {
     graph
@@ -47,7 +48,7 @@ fn rebase_precondition(graph: &ir::Graph) -> ir::ExprId {
 fn user_comparisons_lower_loose_and_internal_ones_stay_strict() {
     let graph = lower_ok(TEXT);
     let pre = rebase_precondition(&graph);
-    let printed = frontend::print::print_expr(&graph.exprs, pre);
+    let printed = print::print_expr(&graph.exprs, pre);
     assert!(
         printed.contains("loose_eq("),
         "the user comparison is loose: {printed}"

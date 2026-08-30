@@ -10,7 +10,7 @@ use super::{CallEdge, Entry, EntryKind, Frame, FrameCtx, Lowering};
 use crate::call::{self, CallGraph, CalleeSource};
 use crate::exprs::{SEP, SecretMap, undeclared_secret, whole_value_secret};
 use crate::inputs;
-use crate::model::{CallInterface, Job, SecretsArg, Workflow, WorkflowCall};
+use crate::model::{CallInterface, InputDecl, Job, SecretsArg, Workflow, WorkflowCall};
 
 /// A job under its frame's prefix: the id and every `needs` entry prefixed, so
 /// names, `JobNodes` keys and wiring stay collision-free across inlined
@@ -113,7 +113,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let Some(CallEdge { caller, entry }) = self.frames[i].call else {
             // The root: `workflow_call` and `workflow_dispatch` declarations
             // both bind from run parameters, through one typed path.
-            let mut decls: Vec<&crate::model::InputDecl<'_>> = Vec::new();
+            let mut decls: Vec<&InputDecl<'_>> = Vec::new();
             if let Some(interface) = &frame_wf.call {
                 decls.extend(interface.inputs.iter());
             }
@@ -140,7 +140,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         self.enter(caller);
         let caller_site = self.base_site(call_job);
         let interface = frame_wf.call.as_ref();
-        let decls = interface.map(|i| i.inputs.as_slice()).unwrap_or(&[]);
+        let decls: &[InputDecl<'_>] = interface.map_or(&[], |i| i.inputs.as_slice());
         let bound = inputs::bind_call_inputs(
             decls,
             &call.with,
@@ -221,13 +221,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     );
                     None
                 }
-                Some(provider) => match caller_secrets.resolve(&provider) {
-                    Ok(entry) => entry,
-                    Err(crate::exprs::UndeclaredSecret) => {
+                Some(provider) => {
+                    if let Ok(entry) = caller_secrets.resolve(&provider) {
+                        entry
+                    } else {
                         undeclared_secret(&mut self.diags, node.span(), &provider);
                         None
                     }
-                },
+                }
             };
             map.insert(lowered, entry);
         }

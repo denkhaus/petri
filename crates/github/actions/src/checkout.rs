@@ -20,19 +20,27 @@
 //! A repository without `.git` — the corpus's fetched workflow trees — copies
 //! as a plain tree: no history to clone, nothing ignored to skip.
 
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{env, fs, io, process};
 
 use ir::{LogStream, Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Ending, Step, StepCtx, StepFailure, ending_outcome, ladder};
+use tokio::process::Command;
+use tokio::{fs as async_fs, task};
 
 use crate::config::CheckoutConfig;
-use crate::session::REPO_DIR;
+use crate::gate;
+use crate::session::{self, REPO_DIR};
 
 /// The failure class for everything checkout-shaped: a missing source, a git
 /// that cannot snapshot, an extraction that failed.
-pub const CHECKOUT_CLASS: &str = "checkout";
+pub(crate) const CHECKOUT_CLASS: &str = "checkout";
 
 /// The step kind. `NAME` must match what the frontend emits.
 pub struct CheckoutStep;
@@ -51,9 +59,15 @@ impl Step for CheckoutStep {
 }
 
 async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
-    let no_env = std::collections::BTreeMap::new();
+    // The snapshot's name carries a process-global counter, not the firing
+    // id: concurrent *runs* in one process (the corpus sweep) each count
+    // firings from zero, and a shared name would let one run's cleanup delete
+    // another's snapshot mid-copy.
+    static SNAPSHOT: AtomicU64 = AtomicU64::new(0);
+
+    let no_env = BTreeMap::new();
     if let Some(outcome) =
-        crate::gate::refusal(config.gate.as_ref(), config.cancelled, &no_env, &ctx).await?
+        gate::refusal(config.gate.as_ref(), config.cancelled, &no_env, &ctx).await?
     {
         return Ok(outcome);
     }
@@ -71,19 +85,15 @@ async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, St
     let source = PathBuf::from(source);
 
     // The snapshot, assembled beside nothing the run owns and removed on the
-    // way out whatever happens. The name carries a process-global counter, not
-    // the firing id: concurrent *runs* in one process (the corpus sweep) each
-    // count firings from zero, and a shared name would let one run's cleanup
-    // delete another's snapshot mid-copy.
-    static SNAPSHOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let scratch = std::env::temp_dir().join(format!(
+    // way out whatever happens.
+    let scratch = env::temp_dir().join(format!(
         "petri-checkout-{}-{}",
-        std::process::id(),
-        SNAPSHOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        process::id(),
+        SNAPSHOT.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let _ = async_fs::remove_dir_all(&scratch).await;
     let result = materialize(&source, &scratch, &config, &mut ctx).await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let _ = async_fs::remove_dir_all(&scratch).await;
     result
 }
 
@@ -94,7 +104,7 @@ async fn materialize(
     ctx: &mut StepCtx,
 ) -> Result<Outcome, StepFailure> {
     let clone = scratch.join("clone");
-    tokio::fs::create_dir_all(&clone)
+    async_fs::create_dir_all(&clone)
         .await
         .map_err(|e| checkout_error(format!("could not create a scratch dir: {e}")))?;
 
@@ -139,7 +149,7 @@ async fn materialize(
     let ending = extract(&tar_rel, ctx).await?;
     let mut output = Map::new();
     output.insert("commit".into(), Value::String(commit));
-    Ok(ending_outcome(ending, &config.soft_fail, output))
+    Ok(ending_outcome(&ending, &config.soft_fail, output))
 }
 
 /// The committed HEAD plus the working tree's uncommitted state, as a fresh
@@ -175,16 +185,16 @@ async fn snapshot_repository(
             let to = clone_dir.join(&entry);
             if from.symlink_metadata().is_ok() {
                 if let Some(parent) = to.parent() {
-                    std::fs::create_dir_all(parent)
+                    fs::create_dir_all(parent)
                         .map_err(|e| checkout_error(format!("overlay `{entry}`: {e}")))?;
                 }
-                let _ = std::fs::remove_file(&to);
+                let _ = fs::remove_file(&to);
                 copy_entry(&from, &to)
                     .map_err(|e| checkout_error(format!("overlay `{entry}`: {e}")))?;
                 copied += 1;
             } else {
                 // Deleted in the working tree: deleted in the snapshot.
-                let _ = std::fs::remove_file(&to);
+                let _ = fs::remove_file(&to);
             }
         }
         Ok(copied)
@@ -253,26 +263,26 @@ fn porcelain_paths(bytes: &[u8]) -> Vec<String> {
     out
 }
 
-fn copy_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+fn copy_entry(from: &Path, to: &Path) -> io::Result<()> {
     let meta = from.symlink_metadata()?;
     if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(from)?;
+        let target = fs::read_link(from)?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink(target, to)?;
+        unix_fs::symlink(target, to)?;
         return Ok(());
     }
-    std::fs::copy(from, to).map(|_| ())
+    fs::copy(from, to).map(|_| ())
 }
 
 /// A plain tree, copied whole (skipping nothing: with no git there is no
 /// ignore file semantics to honor).
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(from)? {
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            std::fs::create_dir_all(&target)?;
+            fs::create_dir_all(&target)?;
             copy_tree(&entry.path(), &target)?;
         } else {
             copy_entry(&entry.path(), &target)?;
@@ -295,12 +305,12 @@ async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure
                 SmolStr::new("-C"),
                 SmolStr::new(workspace),
             ],
-            env:     Default::default(),
+            env:     BTreeMap::default(),
             cwd:     None,
         })
         .await
         .map_err(|e| checkout_error(format!("could not run `tar`: {e}")))?;
-    let _ = crate::session::forward_lines(handle.lines(), ctx.logs.clone());
+    let _ = session::forward_lines(handle.lines(), ctx.logs.clone());
     let grace = ctx.env.grace();
     Ok(ladder(&mut *handle, &mut ctx.control, grace).await)
 }
@@ -310,13 +320,13 @@ async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, StepFailure> + Send + 'static,
 ) -> Result<T, StepFailure> {
-    tokio::task::spawn_blocking(work)
+    task::spawn_blocking(work)
         .await
         .unwrap_or_else(|e| Err(checkout_error(format!("a snapshot task failed: {e}"))))
 }
 
 async fn git(dir: Option<&Path>, args: &[&str]) -> Result<String, StepFailure> {
-    let mut command = tokio::process::Command::new("git");
+    let mut command = Command::new("git");
     if let Some(dir) = dir {
         command.arg("-C").arg(dir);
     }

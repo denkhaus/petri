@@ -7,8 +7,10 @@
 mod support;
 
 use std::path::PathBuf;
+use std::{env, fs, process};
 
 use acceptance::runs::RUNNER_IMAGE_2404;
+use runtime::ir::RunStatus;
 use serde_json::json;
 use support::*;
 
@@ -18,36 +20,34 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir()
+        let dir = env::temp_dir()
             .join("petri-checkout-fixture")
-            .join(format!("{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create the fixture dir");
-        std::fs::write(dir.join("a.txt"), "committed\n").expect("write");
-        std::fs::write(dir.join(".gitignore"), "*.log\n").expect("write");
-        std::fs::write(dir.join("script.sh"), "#!/bin/sh\necho ran-script\n").expect("write");
+            .join(format!("{label}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create the fixture dir");
+        fs::write(dir.join("a.txt"), "committed\n").expect("write");
+        fs::write(dir.join(".gitignore"), "*.log\n").expect("write");
+        fs::write(dir.join("script.sh"), "#!/bin/sh\necho ran-script\n").expect("write");
         #[cfg(unix)]
         {
+            use std::fs::Permissions;
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                dir.join("script.sh"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .expect("chmod");
+            fs::set_permissions(dir.join("script.sh"), Permissions::from_mode(0o755))
+                .expect("chmod");
         }
         commit_fixture(&dir);
         // The tree you have: a dirty tracked edit, an untracked file, an
         // ignored file that must never travel.
-        std::fs::write(dir.join("a.txt"), "dirty-edit\n").expect("write");
-        std::fs::write(dir.join("b.txt"), "untracked\n").expect("write");
-        std::fs::write(dir.join("noise.log"), "ignored bulk\n").expect("write");
+        fs::write(dir.join("a.txt"), "dirty-edit\n").expect("write");
+        fs::write(dir.join("b.txt"), "untracked\n").expect("write");
+        fs::write(dir.join("noise.log"), "ignored bulk\n").expect("write");
         Self(dir)
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -91,7 +91,7 @@ async fn run_checkout(label: &str, container: Option<&str>) {
     let lines = log_lines(&report);
     assert_eq!(
         report.status,
-        runtime::ir::RunStatus::Success,
+        RunStatus::Success,
         "statuses: {:?}\nlog: {lines:?}",
         report
             .state
@@ -161,11 +161,7 @@ async fn a_detached_branchless_source_lands_on_the_run_branch() {
     );
     let report = run_host(graph, "detached").await;
     let lines = log_lines(&report);
-    assert_eq!(
-        report.status,
-        runtime::ir::RunStatus::Success,
-        "log: {lines:?}"
-    );
+    assert_eq!(report.status, RunStatus::Success, "log: {lines:?}");
     assert!(lines.iter().any(|l| l == "on-run-branch"), "{lines:?}");
     assert!(lines.iter().any(|l| l == "tracking-ref-set"), "{lines:?}");
 }

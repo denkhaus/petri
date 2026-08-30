@@ -16,11 +16,12 @@ mod uses;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::mem;
 
 use frontend::FileSource;
 use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
-use frontend::expr::parse;
+use frontend::expr::{self, parse};
 use frontend::yaml::Node;
 use ir::{BinOp, ExprId, ExprOrValue, GraphBuilder, NodeId, ScopeId, Value};
 
@@ -32,6 +33,7 @@ use crate::composite::{DockerAction, NodeAction};
 use crate::exprs::{LoweredScalar, SEP, SecretMap, Site, lower_scalar};
 use crate::model::{Job, Step, Workflow};
 use crate::runners::RunnerMap;
+use crate::{identity, runs_on};
 
 struct JobNodes {
     scope:  ScopeId,
@@ -242,9 +244,7 @@ pub fn lower(
         jobs: HashMap::new(),
         spans: HashMap::new(),
         leg_runs_on: None,
-        github_identity: crate::identity::github_context(
-            crate::identity::repository_slug(files).as_deref(),
-        ),
+        github_identity: identity::github_context(identity::repository_slug(files).as_deref()),
         current: 0,
     };
 
@@ -276,7 +276,7 @@ pub fn lower(
     if lw.diags.has_errors() {
         return Lowered::rejected(lw.diags);
     }
-    let builder = std::mem::replace(&mut lw.b, GraphBuilder::bare());
+    let builder = mem::replace(&mut lw.b, GraphBuilder::bare());
     let mut graph = builder.build();
     ir::normalize_loop_heads(&mut graph);
     let report = ir::check(&graph);
@@ -306,7 +306,7 @@ pub fn lower(
     Lowered::from_parts(graph, lw.diags)
 }
 
-impl<'w, 'a> Lowering<'w, 'a> {
+impl<'a> Lowering<'_, 'a> {
     /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs`
     /// known, matrix-ness known, the frame's inputs and secret map in scope, no
     /// steps yet. The `needs.*` context keys are the names as written — the
@@ -317,14 +317,15 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let frame = &self.frames[self.current];
         let mut site = Site::new(&job.id);
         site.matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
-        site.workflow_inputs = ctx.inputs.clone();
+        site.workflow_inputs.clone_from(&ctx.inputs);
         site.secrets = ctx.secrets.clone();
         site.in_expansion = frame.in_expansion;
         let strip = format!("{}{SEP}", frame.prefix);
         for (need, _) in &job.needs {
-            let key = match frame.prefix.is_empty() {
-                true => need.clone(),
-                false => need.strip_prefix(&strip).unwrap_or(need).to_string(),
+            let key = if frame.prefix.is_empty() {
+                need.clone()
+            } else {
+                need.strip_prefix(&strip).unwrap_or(need).to_string()
             };
             site.needs.insert(key, format!("{need}{SEP}done"));
         }
@@ -341,7 +342,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             for name in bound.keys() {
                 let value = match ctx.static_inputs.get(name) {
                     Some(value) => value.clone(),
-                    None => Value::String(crate::runs_on::dynamic_placeholder(name)),
+                    None => Value::String(runs_on::dynamic_placeholder(name)),
                 };
                 inputs.insert(name.clone(), value);
             }
@@ -410,9 +411,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         at_step: bool,
         span: Span,
     ) -> Option<ExprId> {
-        let uses_status_function = parse(source)
-            .map(|ast| names_status_function(&ast))
-            .unwrap_or(false);
+        let uses_status_function = parse(source).is_ok_and(|ast| names_status_function(&ast));
         let lowered = lower_scalar(
             &format!("${{{{ {source} }}}}"),
             span,
@@ -510,9 +509,9 @@ fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
     if !text.contains("${{") {
         return Ok(text.to_string());
     }
-    match frontend::expr::split_template(text) {
+    match expr::split_template(text) {
         Ok(segments) => match segments.as_slice() {
-            [frontend::expr::Segment::Expr { source, .. }] => Ok(source.clone()),
+            [expr::Segment::Expr { source, .. }] => Ok(source.clone()),
             _ => Err(IfTemplateError::Mixed),
         },
         Err(_) => Err(IfTemplateError::Unterminated),
@@ -524,7 +523,7 @@ fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
 const STATUS_FUNCTIONS: &[&str] = &["success", "failure", "cancelled", "always"];
 
 /// Whether the expression calls any status function.
-fn names_status_function(ast: &frontend::expr::Expr) -> bool {
+fn names_status_function(ast: &expr::Expr) -> bool {
     ast.calls()
         .iter()
         .any(|c| STATUS_FUNCTIONS.contains(&c.to_lowercase().as_str()))

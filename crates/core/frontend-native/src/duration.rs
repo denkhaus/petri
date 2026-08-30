@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-pub fn parse(text: &str) -> Option<Duration> {
+pub(crate) fn parse(text: &str) -> Option<Duration> {
     let text = text.trim();
     if let Ok(secs) = text.parse::<u64>() {
         return Some(Duration::from_secs(secs));
@@ -21,5 +21,14 @@ pub fn parse(text: &str) -> Option<Duration> {
         "d" => number * 86_400_000.0,
         _ => return None,
     };
-    Some(Duration::from_millis(millis as u64))
+    // `number` was checked non-negative, so no sign is lost. Anything finer
+    // than a millisecond is dropped on purpose, and a value past `u64::MAX`
+    // milliseconds saturates there.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the guard above keeps number non-negative; saturating at u64::MAX is wanted"
+    )]
+    let millis = millis as u64;
+    Some(Duration::from_millis(millis))
 }

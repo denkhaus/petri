@@ -5,6 +5,10 @@
 //! read them. It does so through [`FileSource`], so the caller decides what
 //! "the repository" is: a directory on disk, or a map in a test.
 
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+
 /// Where the frontend reads a repository file from, by repository-relative
 /// path.
 pub trait FileSource {
@@ -22,17 +26,17 @@ impl FileSource for NoFiles {
 
 /// A repository rooted at a directory.
 pub struct DirFiles {
-    pub root: std::path::PathBuf,
+    pub root: PathBuf,
 }
 
 impl FileSource for DirFiles {
     fn read(&self, path: &str) -> Option<String> {
-        std::fs::read_to_string(self.root.join(path)).ok()
+        fs::read_to_string(self.root.join(path)).ok()
     }
 }
 
 /// An in-memory repository, for tests.
-pub struct MapFiles(pub std::collections::BTreeMap<String, String>);
+pub struct MapFiles(pub BTreeMap<String, String>);
 
 impl FileSource for MapFiles {
     fn read(&self, path: &str) -> Option<String> {

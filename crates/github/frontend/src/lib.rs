@@ -75,13 +75,16 @@ pub mod model;
 pub mod runners;
 pub mod runs_on;
 
+use std::env::consts;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::{fs, mem};
 
 pub use action::{
     ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, REPO_PARAM_CONTEXT,
     REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
 };
+use frontend::yaml::Document;
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 pub use runners::RunnerMap;
 use serde_json::Value;
@@ -119,7 +122,7 @@ pub fn load_configured(
     substitute_checkout: bool,
 ) -> Lowered {
     let mut diags = Diagnostics::new();
-    let Some(doc) = frontend::yaml::Document::parse(file, text, &mut diags) else {
+    let Some(doc) = Document::parse(file, text, &mut diags) else {
         return Lowered::rejected(diags);
     };
     let Some(workflow) = model::read(&doc, &mut diags) else {
@@ -173,6 +176,7 @@ impl GitHubActions {
     }
 
     /// The host's runner-label map: which `runs-on` labels place here.
+    #[must_use]
     pub fn with_runners(mut self, runners: RunnerMap) -> Self {
         self.runners = runners;
         self
@@ -180,6 +184,7 @@ impl GitHubActions {
 
     /// The local-checkout off-switch: `false` keeps every `actions/checkout`
     /// the real action, credentials, network and all.
+    #[must_use]
     pub fn with_checkout_substitution(mut self, substitute: bool) -> Self {
         self.substitute_checkout = substitute;
         self
@@ -187,6 +192,11 @@ impl GitHubActions {
 }
 
 impl Frontend for GitHubActions {
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `Frontend` trait fixes this signature; an impl cannot widen the \
+                  returned lifetime"
+    )]
     fn name(&self) -> &str {
         "gha"
     }
@@ -230,14 +240,13 @@ impl Frontend for GitHubActions {
     /// the real commit at run time. Placement never reads HEAD by design — a
     /// commit must not change what a file lowers to.
     fn default_params(&self, repo: &Path) -> Vec<(SmolStr, Value)> {
-        let slug = std::fs::read_to_string(repo.join(".git").join("config"))
+        let slug = fs::read_to_string(repo.join(".git").join("config"))
             .ok()
             .and_then(|config| identity::slug_from_config(&config))
             .unwrap_or_else(|| {
                 let name = repo
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "repo".to_string());
+                    .map_or_else(|| "repo".to_string(), |n| n.to_string_lossy().into_owned());
                 format!("local/{name}")
             });
         let mut github = identity::github_context(Some(&slug));
@@ -255,8 +264,8 @@ impl Frontend for GitHubActions {
             (
                 SmolStr::new("runner"),
                 serde_json::json!({
-                    "os": runner_os(std::env::consts::OS),
-                    "arch": runner_arch(std::env::consts::ARCH),
+                    "os": runner_os(consts::OS),
+                    "arch": runner_arch(consts::ARCH),
                     "name": "local",
                 }),
             ),
@@ -281,6 +290,12 @@ impl Frontend for GitHubActions {
 
 /// `runner.os` as GitHub spells it: `Linux`, `macOS`, `Windows`. Workflows
 /// compare against these literally, and actions read `RUNNER_OS`.
+#[expect(
+    clippy::match_same_arms,
+    reason = "the arms are a lookup table from Rust's os names to GitHub's spelling; the \
+              `linux` row states that mapping, and the wildcard is the separate default for \
+              a platform this runner does not know"
+)]
 pub fn runner_os(os: &str) -> &'static str {
     match os {
         "linux" => "Linux",
@@ -291,6 +306,12 @@ pub fn runner_os(os: &str) -> &'static str {
 }
 
 /// `runner.arch` as GitHub spells it: `X64`, `ARM64`, `X86`, `ARM`.
+#[expect(
+    clippy::match_same_arms,
+    reason = "the arms are a lookup table from Rust's arch names to GitHub's spelling; the \
+              `x86_64` row states that mapping, and the wildcard is the separate default for \
+              an architecture this runner does not know"
+)]
 pub fn runner_arch(arch: &str) -> &'static str {
     match arch {
         "x86_64" => "X64",
@@ -314,7 +335,7 @@ pub fn split_shell_words(text: &str) -> Vec<String> {
         match c {
             c if c.is_whitespace() => {
                 if started {
-                    words.push(std::mem::take(&mut current));
+                    words.push(mem::take(&mut current));
                     started = false;
                 }
             }
@@ -362,8 +383,7 @@ pub fn split_shell_words(text: &str) -> Vec<String> {
 fn repo_root(file: &Path) -> PathBuf {
     let mut dir = file
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let start = dir.clone();
     loop {
         if dir.join(".github").is_dir() {

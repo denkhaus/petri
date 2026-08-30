@@ -14,7 +14,7 @@
 //! Capabilities live entirely on the effects side, where steps already are:
 //! nothing here touches the engine, the log, or determinism.
 
-use std::any::{Any, TypeId};
+use std::any::{self, Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,7 +51,7 @@ impl Capabilities {
             class:   CAPABILITY_UNAVAILABLE_CLASS,
             message: format!(
                 "no capability of type `{}` is registered for this run",
-                std::any::type_name::<T>()
+                any::type_name::<T>()
             ),
         })
     }
@@ -69,12 +69,13 @@ impl CapabilitiesBuilder {
     ///
     /// On a duplicate type — registration is configuration, the same rule as
     /// `Registry::register`.
+    #[must_use]
     pub fn provide<T: Send + Sync + 'static>(mut self, value: T) -> Self {
         let replaced = self.map.insert(TypeId::of::<T>(), Arc::new(value));
         assert!(
             replaced.is_none(),
             "a capability of type `{}` is already registered",
-            std::any::type_name::<T>()
+            any::type_name::<T>()
         );
         self
     }

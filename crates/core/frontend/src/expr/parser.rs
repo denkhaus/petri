@@ -30,11 +30,11 @@ impl ParseError {
     /// Byte offset the error points at, within the expression source.
     pub fn offset(&self) -> usize {
         match self {
-            ParseError::Lex(e) => e.offset(),
-            ParseError::Unexpected { offset, .. }
-            | ParseError::ChainedComparison { offset }
-            | ParseError::TooDeep { offset } => *offset,
-            ParseError::Empty => 0,
+            Self::Lex(e) => e.offset(),
+            Self::Unexpected { offset, .. }
+            | Self::ChainedComparison { offset }
+            | Self::TooDeep { offset } => *offset,
+            Self::Empty => 0,
         }
     }
 }

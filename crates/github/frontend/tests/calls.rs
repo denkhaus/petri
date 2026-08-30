@@ -130,6 +130,10 @@ jobs:
 /// A reusable file loaded on its own binds `inputs` from run parameters, so it
 /// can be run directly — with typed defaults filling the gaps.
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; the lowering diagnostics explain a failed load"
+)]
 fn a_reusable_file_lowers_standalone() {
     let files = files(&[]);
     let lowered = frontend_gha::load(".github/workflows/build.yml", CALLEE, &files);
@@ -257,7 +261,7 @@ jobs:
         "the call start is the expansion head"
     );
 
-    let nested_callee = r#"
+    let nested_callee = r"
 on:
   workflow_call: {}
 jobs:
@@ -268,7 +272,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - run: echo
-"#;
+";
     let caller = r#"
 on: push
 jobs:
@@ -293,7 +297,7 @@ jobs:
 /// call sites place two ways; a computed value names its input and rejects.
 #[test]
 fn input_valued_runs_on_resolves_per_call_site() {
-    let callee = r#"
+    let callee = r"
 on:
   workflow_call:
     inputs:
@@ -305,8 +309,8 @@ jobs:
     runs-on: ${{ inputs.runner }}
     steps:
       - run: echo
-"#;
-    let caller = r#"
+";
+    let caller = r"
 on: push
 jobs:
   fast:
@@ -315,7 +319,7 @@ jobs:
       runner: depot-ubuntu-22.04-16
   default:
     uses: ./.github/workflows/build.yml
-"#;
+";
     let call_files = files(&[(".github/workflows/build.yml", callee)]);
     let graph = lower_ok_with(caller, &call_files);
     let requirements = |job: &str| {
@@ -362,8 +366,12 @@ jobs:
 /// A reusable file run directly places by its declared defaults — placement is
 /// a lowering decision, so that is what a bare run gets.
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; the lowering diagnostics explain a failed load"
+)]
 fn a_standalone_reusable_file_places_by_its_defaults() {
-    let callee = r#"
+    let callee = r"
 on:
   workflow_call:
     inputs:
@@ -375,7 +383,7 @@ jobs:
     runs-on: ${{ inputs.os }}
     steps:
       - run: echo
-"#;
+";
     let lowered = frontend_gha::load(".github/workflows/build.yml", callee, &frontend::NoFiles);
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
@@ -412,6 +420,10 @@ jobs:
 /// A remote call resolves through the action source: pinned, fetched, inlined —
 /// and the pin lands on the call's start meta.
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; the lowering diagnostics explain a failed load"
+)]
 fn a_remote_call_resolves_through_the_action_source() {
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let callee = "on:\n  workflow_call: {}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo remote\n";

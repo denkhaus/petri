@@ -8,6 +8,7 @@ use smol_str::SmolStr;
 use steps::{ProcessConfig, Step, StepCtx, StepFailure, ValueOrSecretRef};
 
 use crate::config::RunConfig;
+use crate::gate;
 use crate::session::{REPO_DIR, Session, fold_into_outcome, unsecure_commands_allowed};
 
 /// The process step, with the `GITHUB_*` files around it.
@@ -25,8 +26,7 @@ impl Step for RunStep {
     async fn run(&self, config: RunConfig, ctx: StepCtx) -> Outcome {
         // The gate first: nothing is created and nothing spawns for a step whose
         // condition is false.
-        match crate::gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await
-        {
+        match gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await {
             Ok(None) => {}
             Ok(Some(outcome)) => return outcome,
             Err(failure) => return failure.into(),

@@ -16,8 +16,7 @@ fn output_of(report: &RunReportPlus, name: &str) -> ir::Value {
         .history()
         .iter()
         .find(|r| r.name == name)
-        .map(|r| r.outcome.output.clone())
-        .unwrap_or(ir::Value::Null)
+        .map_or(ir::Value::Null, |r| r.outcome.output.clone())
 }
 
 /// A `docker://` step runs in the daemon with the workspace mounted, sees the
@@ -63,7 +62,7 @@ async fn a_local_dockerfile_action_builds_and_runs() {
     }
     let files = files(&[(
         ".github/actions/box/action.yml",
-        r#"
+        r"
 inputs:
   greeting:
     default: built
@@ -72,7 +71,7 @@ runs:
   image: Dockerfile
   args:
     - ${{ inputs.greeting }}
-"#,
+",
     )]);
     let text = r#"
 on: push

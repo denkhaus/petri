@@ -36,12 +36,15 @@
 
 use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::literal_value;
-use frontend::expr::{Expr, UnaryOp};
+use frontend::expr::{BinaryOp, Expr, UnaryOp};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{ExprTable, Value};
 use serde_json::json;
 
-use crate::exprs::{Site, hashfiles_sentinel, literal_hashfiles_patterns, lower_expr};
+use crate::exprs::{
+    RUNNER_TEMP_SENTINEL, RUNNER_TOOL_CACHE_SENTINEL, Site, WORKSPACE_SENTINEL, hashfiles_sentinel,
+    literal_hashfiles_patterns, lower_expr,
+};
 
 /// Config key for an interior node's operator.
 pub const OP_KEY: &str = "op";
@@ -73,29 +76,29 @@ pub enum GateOp {
 impl GateOp {
     pub fn symbol(self) -> &'static str {
         match self {
-            GateOp::Eq => "==",
-            GateOp::Ne => "!=",
-            GateOp::Lt => "<",
-            GateOp::Le => "<=",
-            GateOp::Gt => ">",
-            GateOp::Ge => ">=",
-            GateOp::And => "&&",
-            GateOp::Or => "||",
-            GateOp::Not => "!",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::And => "&&",
+            Self::Or => "||",
+            Self::Not => "!",
         }
     }
 
     pub fn parse(symbol: &str) -> Option<Self> {
         Some(match symbol {
-            "==" => GateOp::Eq,
-            "!=" => GateOp::Ne,
-            "<" => GateOp::Lt,
-            "<=" => GateOp::Le,
-            ">" => GateOp::Gt,
-            ">=" => GateOp::Ge,
-            "&&" => GateOp::And,
-            "||" => GateOp::Or,
-            "!" => GateOp::Not,
+            "==" => Self::Eq,
+            "!=" => Self::Ne,
+            "<" => Self::Lt,
+            "<=" => Self::Le,
+            ">" => Self::Gt,
+            ">=" => Self::Ge,
+            "&&" => Self::And,
+            "||" => Self::Or,
+            "!" => Self::Not,
             _ => return None,
         })
     }
@@ -112,29 +115,29 @@ pub enum Gate {
     /// environment does not bind it.
     Env {
         name: String,
-        or:   Option<Box<Gate>>,
+        or:   Option<Box<Self>>,
     },
     /// A GitHub operator over sub-gates.
-    Op { op: GateOp, args: Vec<Gate> },
+    Op { op: GateOp, args: Vec<Self> },
 }
 
 impl Gate {
     /// An engine-expression leaf: `{"lit": {"$expr": id}}`.
-    pub fn expr(id: ir::ExprId) -> Gate {
-        Gate::Lit(json!({ EXPR_PLACEHOLDER_KEY: id.raw() }))
+    pub fn expr(id: ir::ExprId) -> Self {
+        Self::Lit(json!({ EXPR_PLACEHOLDER_KEY: id.raw() }))
     }
 
     /// The gate as config JSON.
     pub fn to_value(&self) -> Value {
         match self {
-            Gate::Lit(v) => json!({ LIT_KEY: v }),
-            Gate::Env { name, or } => match or {
+            Self::Lit(v) => json!({ LIT_KEY: v }),
+            Self::Env { name, or } => match or {
                 Some(or) => json!({ ENV_KEY: name, ENV_OR_KEY: or.to_value() }),
                 None => json!({ ENV_KEY: name }),
             },
-            Gate::Op { op, args } => json!({
+            Self::Op { op, args } => json!({
                 OP_KEY: op.symbol(),
-                ARGS_KEY: args.iter().map(Gate::to_value).collect::<Vec<_>>(),
+                ARGS_KEY: args.iter().map(Self::to_value).collect::<Vec<_>>(),
             }),
         }
     }
@@ -142,22 +145,22 @@ impl Gate {
     /// Read a gate back from config JSON. The format is strict: every node is
     /// an `op`, an `$env`, or a `lit` object, so a resolved engine value
     /// can never be mistaken for structure.
-    pub fn from_value(value: &Value) -> Result<Gate, String> {
+    pub fn from_value(value: &Value) -> Result<Self, String> {
         let Some(map) = value.as_object() else {
             return Err(format!("a gate node must be an object, got {value}"));
         };
         if let Some(inner) = map.get(LIT_KEY) {
-            return Ok(Gate::Lit(inner.clone()));
+            return Ok(Self::Lit(inner.clone()));
         }
         if let Some(name) = map.get(ENV_KEY) {
             let Some(name) = name.as_str() else {
                 return Err("`$env` must name a variable".to_string());
             };
             let or = match map.get(ENV_OR_KEY) {
-                Some(or) => Some(Box::new(Gate::from_value(or)?)),
+                Some(or) => Some(Box::new(Self::from_value(or)?)),
                 None => None,
             };
-            return Ok(Gate::Env {
+            return Ok(Self::Env {
                 name: name.to_string(),
                 or,
             });
@@ -171,7 +174,7 @@ impl Gate {
             };
             let args = args
                 .iter()
-                .map(Gate::from_value)
+                .map(Self::from_value)
                 .collect::<Result<Vec<_>, _>>()?;
             // `!` takes one operand, comparisons exactly two, `&&`/`||` two or more.
             let ok = match op {
@@ -182,7 +185,7 @@ impl Gate {
             if !ok {
                 return Err(format!("`{}` has {} operand(s)", op.symbol(), args.len()));
             }
-            return Ok(Gate::Op { op, args });
+            return Ok(Self::Op { op, args });
         }
         Err("a gate node must be `op`/`args`, `$env`, or `lit`".to_string())
     }
@@ -196,14 +199,14 @@ impl Gate {
 
     fn collect_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
-            Gate::Lit(Value::String(s)) => out.push(s),
-            Gate::Lit(_) => {}
-            Gate::Env { or, .. } => {
+            Self::Lit(Value::String(s)) => out.push(s),
+            Self::Lit(_) => {}
+            Self::Env { or, .. } => {
                 if let Some(or) = or {
                     or.collect_texts(out);
                 }
             }
-            Gate::Op { args, .. } => {
+            Self::Op { args, .. } => {
                 for arg in args {
                     arg.collect_texts(out);
                 }
@@ -214,18 +217,18 @@ impl Gate {
     /// Rewrite every string literal; `None` keeps a string unchanged.
     pub fn map_texts(&mut self, map: &mut dyn FnMut(&str) -> Option<String>) {
         match self {
-            Gate::Lit(Value::String(s)) => {
+            Self::Lit(Value::String(s)) => {
                 if let Some(new) = map(s) {
                     *s = new;
                 }
             }
-            Gate::Lit(_) => {}
-            Gate::Env { or, .. } => {
+            Self::Lit(_) => {}
+            Self::Env { or, .. } => {
                 if let Some(or) = or {
                     or.map_texts(map);
                 }
             }
-            Gate::Op { args, .. } => {
+            Self::Op { args, .. } => {
                 for arg in args {
                     arg.map_texts(map);
                 }
@@ -237,9 +240,9 @@ impl Gate {
     /// environment when none does.
     pub fn reads_env(&self) -> bool {
         match self {
-            Gate::Lit(_) => false,
-            Gate::Env { .. } => true,
-            Gate::Op { args, .. } => args.iter().any(Gate::reads_env),
+            Self::Lit(_) => false,
+            Self::Env { .. } => true,
+            Self::Op { args, .. } => args.iter().any(Self::reads_env),
         }
     }
 }
@@ -404,22 +407,18 @@ pub fn condition_tree(
         // A string leaf the step rewrites to its own workspace path before
         // evaluation; comparisons decompose around it (`needs_lazy`), so the
         // engine never evaluates over the marker.
-        return Some(Gate::Lit(Value::String(
-            crate::exprs::WORKSPACE_SENTINEL.to_string(),
-        )));
+        return Some(Gate::Lit(Value::String(WORKSPACE_SENTINEL.to_string())));
     }
     if runner_temp_leaf(ast) {
         // The same shape for `runner.temp`: the step rewrites the marker to
         // its own `RUNNER_TEMP` before evaluation.
-        return Some(Gate::Lit(Value::String(
-            crate::exprs::RUNNER_TEMP_SENTINEL.to_string(),
-        )));
+        return Some(Gate::Lit(Value::String(RUNNER_TEMP_SENTINEL.to_string())));
     }
     if runner_tool_cache_leaf(ast) {
         // And for `runner.tool_cache`: the step rewrites the marker to the
         // tool cache it resolved for its environment before evaluation.
         return Some(Gate::Lit(Value::String(
-            crate::exprs::RUNNER_TOOL_CACHE_SENTINEL.to_string(),
+            RUNNER_TOOL_CACHE_SENTINEL.to_string(),
         )));
     }
     match ast {
@@ -450,7 +449,7 @@ pub fn condition_tree(
     }
 }
 
-fn gate_op(op: frontend::expr::BinaryOp) -> GateOp {
+fn gate_op(op: BinaryOp) -> GateOp {
     use frontend::expr::BinaryOp as B;
     match op {
         B::Eq => GateOp::Eq,
@@ -537,6 +536,11 @@ fn engine_leaf(
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "`eval` takes an env callback that reports lookup failure, so this stand-in must \
+                  keep the `Result` even though it never fails"
+    )]
     fn no_env(_: &str) -> Result<Option<Value>, ()> {
         Ok(None)
     }

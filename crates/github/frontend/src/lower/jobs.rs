@@ -2,6 +2,7 @@
 //! them, the `needs` edges, and the summary each job's last edge carries.
 
 use std::collections::BTreeMap;
+use std::mem;
 
 use frontend::diag::Diagnostics;
 use frontend::yaml::Node;
@@ -14,7 +15,7 @@ use crate::action::Phase;
 use crate::call::CalleeSource;
 use crate::exprs::{LoweredScalar, SEP, Site, lower_scalar, result_priority, whole_value_secret};
 use crate::model::{Defaults, Job};
-use crate::runs_on;
+use crate::{expr_lower, runs_on};
 
 impl<'w, 'a> Lowering<'w, 'a> {
     /// Inside a called workflow, every job gate carries the call's own
@@ -290,7 +291,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .map(|s| (s.as_i64(), s.as_str().to_string()))
         {
             None => None,
-            Some((Some(n), _)) if n >= 1 => Some(n as u32),
+            Some((Some(n), _)) if n >= 1 => match u32::try_from(n) {
+                Ok(n) => Some(n),
+                // Wider than the id space: take the widest cap rather than
+                // wrapping to a narrow one.
+                Err(_) => Some(u32::MAX),
+            },
             Some((_, text)) => {
                 self.diags.unsupported(
                     "strategy.max_parallel.expression",
@@ -301,7 +307,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 None
             }
         };
-        matrix_expr.and_then(|m| crate::expr_lower::matrix_legs(self.b.exprs(), m).ok())
+        matrix_expr.and_then(|m| expr_lower::matrix_legs(self.b.exprs(), m).ok())
     }
 
     /// Steps, preconditions, config, and the matrix expansion.
@@ -321,9 +327,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
             // Lowered once already for the scope; here only to find the secrets, whose
             // diagnostics (if any) were reported then.
             let mut scratch = Diagnostics::new();
-            let saved = std::mem::replace(&mut self.diags, scratch);
+            let saved = mem::replace(&mut self.diags, scratch);
             let value = self.env_value(&node, &site, false);
-            scratch = std::mem::replace(&mut self.diags, saved);
+            scratch = mem::replace(&mut self.diags, saved);
             let _ = scratch;
             if let Some(EnvValue::Secret(name)) = value {
                 job_secret_env.push((key, name));
@@ -533,7 +539,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .map(|n| n.name.to_string())
             .unwrap_or_default();
         names.push(name);
-        site.earlier_steps = names.clone();
+        site.earlier_steps.clone_from(names);
     }
 
     /// Job-level `continue-on-error`, read once per job: a literal `true`
@@ -544,18 +550,16 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let Some(coe) = job.continue_on_error else {
             return false;
         };
-        match coe.as_scalar().and_then(|s| s.as_bool()) {
-            Some(v) => v,
-            None => {
-                self.diags.unsupported(
-                    "continue_on_error.expression",
-                    coe.span(),
-                    "an expression-valued `continue-on-error`",
-                    "use a literal true or false",
-                );
-                false
-            }
-        }
+        let Some(tolerated) = coe.as_scalar().and_then(|s| s.as_bool()) else {
+            self.diags.unsupported(
+                "continue_on_error.expression",
+                coe.span(),
+                "an expression-valued `continue-on-error`",
+                "use a literal true or false",
+            );
+            return false;
+        };
+        tolerated
     }
 
     /// The `{ result, outputs }` summary the last step's edge carries into

@@ -24,14 +24,17 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{index, token};
+
 /// The default size budget: 10 GiB, pruned LRU on write.
-pub const DEFAULT_BUDGET: u64 = 10 * 1024 * 1024 * 1024;
+pub(crate) const DEFAULT_BUDGET: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CacheEntry {
+pub(crate) struct CacheEntry {
     pub key:     String,
     pub version: String,
     /// The blob's file name: hex of a digest over `(key, version)`.
@@ -48,7 +51,7 @@ struct Index {
     entries:    Vec<CacheEntry>,
 }
 
-pub struct CacheStore {
+pub(crate) struct CacheStore {
     dir:    PathBuf,
     budget: u64,
     /// Serializes this process's read-modify-write of the index.
@@ -57,8 +60,8 @@ pub struct CacheStore {
 
 impl CacheStore {
     /// Open (or create) the store under `dir`, pruning to `budget` on writes.
-    pub fn open(dir: PathBuf, budget: u64) -> std::io::Result<Self> {
-        std::fs::create_dir_all(dir.join("blobs"))?;
+    pub(crate) fn open(dir: PathBuf, budget: u64) -> io::Result<Self> {
+        fs::create_dir_all(dir.join("blobs"))?;
         Ok(Self {
             dir,
             budget,
@@ -67,18 +70,18 @@ impl CacheStore {
     }
 
     /// The blob id for a `(key, version)` pair.
-    pub fn blob_id(key: &str, version: &str) -> String {
+    pub(crate) fn blob_id(key: &str, version: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         hasher.update([0]);
         hasher.update(version.as_bytes());
-        crate::token::hex(&hasher.finalize())
+        token::hex(&hasher.finalize())
     }
 
     /// Reserve an upload. `None` when the entry already exists — immutable, as
     /// on GitHub — else the blob id the signed upload URL names.
-    pub fn reserve(&self, key: &str, version: &str) -> std::io::Result<Option<String>> {
+    pub(crate) fn reserve(&self, key: &str, version: &str) -> io::Result<Option<String>> {
         let _guard = self.lock.lock().expect("the store lock");
         let index = self.read_index()?;
         if index
@@ -93,11 +96,11 @@ impl CacheStore {
 
     /// Record the committed upload as a live entry and prune to budget.
     /// `None` when nothing was committed for the pair.
-    pub fn finalize(&self, key: &str, version: &str) -> std::io::Result<Option<i64>> {
+    pub(crate) fn finalize(&self, key: &str, version: &str) -> io::Result<Option<i64>> {
         let id = Self::blob_id(key, version);
-        let size = match std::fs::metadata(self.blob_path(&id)) {
+        let size = match fs::metadata(self.blob_path(&id)) {
             Ok(meta) => meta.len(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
         let _guard = self.lock.lock().expect("the store lock");
@@ -123,12 +126,12 @@ impl CacheStore {
 
     /// The toolkit's lookup: exact key, then each restore key as a prefix,
     /// newest first — always within `version`. A hit stamps the LRU.
-    pub fn lookup(
+    pub(crate) fn lookup(
         &self,
         key: &str,
         restore_keys: &[String],
         version: &str,
-    ) -> std::io::Result<Option<CacheEntry>> {
+    ) -> io::Result<Option<CacheEntry>> {
         let _guard = self.lock.lock().expect("the store lock");
         let mut index = self.read_index()?;
         let found = {
@@ -163,12 +166,12 @@ impl CacheStore {
     }
 
     /// Where an entry's content lives.
-    pub fn blob_path(&self, id: &str) -> PathBuf {
+    pub(crate) fn blob_path(&self, id: &str) -> PathBuf {
         self.dir.join("blobs").join(id)
     }
 
     /// Where an in-flight upload's blocks stage.
-    pub fn staging_dir(&self, id: &str) -> PathBuf {
+    pub(crate) fn staging_dir(&self, id: &str) -> PathBuf {
         self.dir.join("staging").join(id)
     }
 
@@ -190,47 +193,49 @@ impl CacheStore {
             }
             index.entries.retain(|e| !dropped.contains(&e.id));
         }
-        if let Ok(blobs) = std::fs::read_dir(self.dir.join("blobs")) {
+        if let Ok(blobs) = fs::read_dir(self.dir.join("blobs")) {
             for blob in blobs.flatten() {
                 let name = blob.file_name().to_string_lossy().into_owned();
                 if !index.entries.iter().any(|e| e.id == name) {
-                    let _ = std::fs::remove_file(blob.path());
+                    let _ = fs::remove_file(blob.path());
                 }
             }
         }
     }
 
-    fn read_index(&self) -> std::io::Result<Index> {
-        crate::index::read(&self.dir, "cache")
+    fn read_index(&self) -> io::Result<Index> {
+        index::read(&self.dir, "cache")
     }
 
-    fn write_index(&self, index: &Index) -> std::io::Result<()> {
-        crate::index::write(&self.dir, index)
+    fn write_index(&self, index: &Index) -> io::Result<()> {
+        index::write(&self.dir, index)
     }
 }
 
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use std::{env, process, thread};
+
     use super::*;
 
     fn store(label: &str, budget: u64) -> CacheStore {
-        let dir = std::env::temp_dir()
+        let dir = env::temp_dir()
             .join("petri-cache-store")
-            .join(format!("{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+            .join(format!("{label}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
         CacheStore::open(dir, budget).expect("open")
     }
 
     fn put(store: &CacheStore, key: &str, version: &str, bytes: &[u8]) {
         let id = store.reserve(key, version).expect("io").expect("fresh");
-        std::fs::write(store.blob_path(&id), bytes).expect("blob");
+        fs::write(store.blob_path(&id), bytes).expect("blob");
         store.finalize(key, version).expect("io").expect("entry");
     }
 
@@ -238,7 +243,7 @@ mod tests {
     fn exact_then_prefix_newest_wins_within_version() {
         let store = store("lookup", DEFAULT_BUDGET);
         put(&store, "deps-linux-abc", "v1", b"old");
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        thread::sleep(Duration::from_millis(1100));
         put(&store, "deps-linux-def", "v1", b"new");
         put(&store, "deps-linux-def", "v2", b"other-version");
 
@@ -271,7 +276,7 @@ mod tests {
             store.reserve("a", "v1").expect("io").is_none(),
             "immutable, as on GitHub"
         );
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        thread::sleep(Duration::from_millis(1100));
         put(&store, "b", "v1", b"bbbbbb");
         // Budget 10 holds one six-byte entry, not two: `a` (older) was pruned,
         // its blob with it.

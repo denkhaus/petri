@@ -1,7 +1,7 @@
 //! Native document → HIR.
 
-use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::mem;
 
 use frontend::diag::{Diagnostics, Lowered, Span};
 use frontend::expr::lower::{LowerError, Roots, strict};
@@ -17,7 +17,10 @@ use serde_json::{Map, Value};
 use smol_str::SmolStr;
 
 use crate::duration;
-use crate::model::*;
+use crate::model::{
+    ARM_KEYS, BACKOFF_KEYS, BUDGET_KEYS, FOR_EACH_KEYS, KNOWN_BINDINGS, NODE_KEYS, RETRY_KEYS,
+    RETRY_ON_KEYS, SCOPE_KEYS, TOP_KEYS,
+};
 
 /// Resolves identifiers for the native format: engine bindings by name, with
 /// `item` / `index` rewritten to the loop-state shape inside a sequential body.
@@ -60,7 +63,7 @@ struct Ctx<'a> {
     scope_ids:         HashMap<String, ScopeId>,
     /// Nodes that are the body of a sequential `for_each`, so their expressions
     /// get the loop-state rewrite.
-    sequential_bodies: std::collections::HashSet<NodeId>,
+    sequential_bodies: HashSet<NodeId>,
     _doc:              &'a Document,
 }
 
@@ -71,7 +74,7 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
         ids: HashMap::new(),
         spans: HashMap::new(),
         scope_ids: HashMap::new(),
-        sequential_bodies: Default::default(),
+        sequential_bodies: HashSet::new(),
         _doc: doc,
     };
     let root = doc.root();
@@ -185,7 +188,7 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
         return Lowered::rejected(ctx.diags);
     }
 
-    let builder = std::mem::replace(&mut ctx.b, GraphBuilder::bare());
+    let builder = mem::replace(&mut ctx.b, GraphBuilder::bare());
     let mut graph = builder.build();
     // Normalize, don't relax: `Quorum{1}` on a loop head becomes `Any`.
     ir::normalize_loop_heads(&mut graph);
@@ -216,7 +219,7 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
     Lowered::from_parts(graph, ctx.diags)
 }
 
-impl<'a> Ctx<'a> {
+impl Ctx<'_> {
     // ── Top level ──────────────────────────────────────────────────────────
 
     fn params(&mut self, node: Option<Node<'_>>) {
@@ -342,16 +345,15 @@ impl<'a> Ctx<'a> {
             None => *self.scope_ids.values().min().expect("at least one scope"),
             Some(s) => {
                 let text = s.as_str().unwrap_or("");
-                match self.scope_ids.get(text) {
-                    Some(id) => *id,
-                    None => {
-                        self.diags.error(
-                            "native.unknown_scope",
-                            s.span(),
-                            format!("node `{name}` names an unknown scope `{text}`"),
-                        );
-                        ScopeId::new(0)
-                    }
+                if let Some(id) = self.scope_ids.get(text) {
+                    *id
+                } else {
+                    self.diags.error(
+                        "native.unknown_scope",
+                        s.span(),
+                        format!("node `{name}` names an unknown scope `{text}`"),
+                    );
+                    ScopeId::new(0)
                 }
             }
         }
@@ -449,8 +451,8 @@ impl<'a> Ctx<'a> {
             .and_then(|m| m.get("quorum"))
             .and_then(|q| q.as_scalar())
             .and_then(|s| s.as_i64());
-        match n {
-            Some(n) if n >= 1 => JoinPolicy::Quorum { n: n as u32 },
+        match n.and_then(|n| u32::try_from(n).ok()) {
+            Some(n) if n >= 1 => JoinPolicy::Quorum { n },
             _ => {
                 self.diags.error(
                     "native.bad_join",
@@ -469,8 +471,12 @@ impl<'a> Ctx<'a> {
         };
         m.reject_unknown_keys(BUDGET_KEYS, &mut self.diags, "`budget`");
         if let Some(n) = m.get("max_firings") {
-            match n.as_scalar().and_then(|s| s.as_i64()) {
-                Some(v) if v >= 1 => budget.max_firings = v as u32,
+            match n
+                .as_scalar()
+                .and_then(|s| s.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+            {
+                Some(v) if v >= 1 => budget.max_firings = v,
                 _ => self.diags.error(
                     "native.bad_budget",
                     n.span(),
@@ -498,8 +504,12 @@ impl<'a> Ctx<'a> {
         };
         m.reject_unknown_keys(RETRY_KEYS, &mut self.diags, "`retry`");
         if let Some(n) = m.get("max_attempts") {
-            match n.as_scalar().and_then(|s| s.as_i64()) {
-                Some(v) if v >= 1 => policy = RetryPolicy::attempts(v as u32),
+            match n
+                .as_scalar()
+                .and_then(|s| s.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+            {
+                Some(v) if v >= 1 => policy = RetryPolicy::attempts(v),
                 _ => self.diags.error(
                     "native.bad_retry",
                     n.span(),
@@ -738,16 +748,15 @@ impl<'a> Ctx<'a> {
     }
 
     fn node_ref(&mut self, name: &str, span: Span) -> Option<NodeId> {
-        match self.ids.get(name) {
-            Some(id) => Some(*id),
-            None => {
-                self.diags.error(
-                    "native.unknown_node",
-                    span,
-                    format!("unknown node `{name}`"),
-                );
-                None
-            }
+        if let Some(id) = self.ids.get(name) {
+            Some(*id)
+        } else {
+            self.diags.error(
+                "native.unknown_node",
+                span,
+                format!("unknown node `{name}`"),
+            );
+            None
         }
     }
 
@@ -799,7 +808,7 @@ impl<'a> Ctx<'a> {
                 .get("max_parallel")
                 .and_then(|n| n.as_scalar())
                 .and_then(|s| s.as_i64())
-                .map(|n| n.max(1) as u32);
+                .map(|n| u32::try_from(n.max(1)).unwrap_or(u32::MAX));
             let fail_fast = m
                 .get("fail_fast")
                 .and_then(|n| n.as_scalar())
@@ -883,8 +892,7 @@ impl<'a> Ctx<'a> {
             .get("max_iterations")
             .and_then(|n| n.as_scalar())
             .and_then(|s| s.as_i64())
-            .map(|n| n.max(1) as u32)
-            .unwrap_or(100);
+            .map_or(100, |n| u32::try_from(n.max(1)).unwrap_or(u32::MAX));
         // `items` is evaluated on the source's outcome, where `output` is the
         // source's output.
         let Some(items) = self.expression(items_node, false) else {
@@ -953,22 +961,20 @@ impl<'a> Ctx<'a> {
             return Some(self.b.exprs().lit(b));
         }
         let text = scalar.as_str();
-        let source = match split_template(text) {
-            Ok(segments) => match segments.as_slice() {
-                [Segment::Expr { source, .. }] => source.clone(),
-                _ if !text.contains("${{") => text.to_string(),
-                _ => {
-                    self.diags.error(
-                        "expr.mixed_condition",
-                        node.span(),
-                        "a condition is one expression: either bare, or a single `${{ }}`",
-                    );
-                    return None;
-                }
-            },
-            Err(_) => {
-                self.diags
-                    .error("expr.unterminated", node.span(), "unterminated `${{`");
+        let Ok(segments) = split_template(text) else {
+            self.diags
+                .error("expr.unterminated", node.span(), "unterminated `${{`");
+            return None;
+        };
+        let source = match segments.as_slice() {
+            [Segment::Expr { source, .. }] => source.clone(),
+            _ if !text.contains("${{") => text.to_string(),
+            _ => {
+                self.diags.error(
+                    "expr.mixed_condition",
+                    node.span(),
+                    "a condition is one expression: either bare, or a single `${{ }}`",
+                );
                 return None;
             }
         };
@@ -1064,13 +1070,10 @@ impl<'a> Ctx<'a> {
         params_only: bool,
         in_loop: bool,
     ) -> Option<ExprId> {
-        let segments = match split_template(text) {
-            Ok(s) => s,
-            Err(_) => {
-                self.diags
-                    .error("expr.unterminated", span, "unterminated `${{`");
-                return None;
-            }
+        let Ok(segments) = split_template(text) else {
+            self.diags
+                .error("expr.unterminated", span, "unterminated `${{`");
+            return None;
         };
         let mut pieces: Vec<ExprId> = Vec::new();
         let whole = matches!(segments.as_slice(), [Segment::Expr { .. }]);
@@ -1136,6 +1139,3 @@ impl<'a> Ctx<'a> {
         Some(acc)
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: BTreeMap<String, Duration>) {}

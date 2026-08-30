@@ -12,7 +12,7 @@
 //! repositories.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use acceptance::{SnapshotEntry, SnapshotSource, check_one, corpus_present, workflows};
@@ -20,7 +20,7 @@ use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAct
 use github_actions::GitActionSource;
 
 fn corpus_root() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
 /// Passes every call to git and records what came back, keyed by the reference
@@ -76,6 +76,10 @@ fn entry_for(pinned: &PinnedAction, result: &Result<String, ActionSourceError>) 
 
 #[test]
 #[ignore = "network: refreshes crates/github/corpus/actions-snapshot.json"]
+#[expect(
+    clippy::print_stderr,
+    reason = "the refresh is run by hand and reports progress and failures on stderr"
+)]
 fn refresh_action_snapshot() {
     let root = corpus_root();
     assert!(

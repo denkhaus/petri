@@ -7,7 +7,7 @@ use frontend::expr::parse;
 use frontend_gha::expr_lower::{
     GHA_FUNCTIONS, GHA_FUNCTIONS_UNSUPPORTED, gha, gha_function, matrix_legs,
 };
-use ir::{EvalEnv, ExprTable, RunContext, StaticCtx, eval};
+use ir::{EvalEnv, ExprTable, RunContext, StaticCtx, eval, expr as ir_expr};
 use serde_json::json;
 
 fn eval_gha(source: &str, statics: &StaticCtx) -> serde_json::Value {
@@ -88,7 +88,7 @@ fn every_gha_function_has_a_home() {
         for (_, expr) in table.iter() {
             if let ir::Expr::Call(fname, _) = expr {
                 assert!(
-                    ir::expr::builtin(fname).is_some(),
+                    ir_expr::builtin(fname).is_some(),
                     "{name} lowered to `{fname}`, not in BUILTINS"
                 );
             }
@@ -126,7 +126,7 @@ fn gha_lowering_emits_only_table_functions() {
         gha(&ast, &mut table, &mut EngineBindings).unwrap_or_else(|e| panic!("{source}: {e}"));
         for (_, expr) in table.iter() {
             if let ir::Expr::Call(fname, args) = expr {
-                let spec = ir::expr::builtin(fname)
+                let spec = ir_expr::builtin(fname)
                     .unwrap_or_else(|| panic!("`{source}` emitted `{fname}`"));
                 assert_eq!(spec.arity, args.len(), "`{fname}` in `{source}`");
             }

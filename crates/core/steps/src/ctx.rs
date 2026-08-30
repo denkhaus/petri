@@ -7,6 +7,8 @@
 //! registry, so a kind with no runner or a config that cannot deserialize is
 //! caught by `petri check` rather than at firing time.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use executor::{CONTAINER_RUNTIME_CLASS, ContainerRunner, ExecEnv, SecretProvider};
@@ -15,6 +17,8 @@ use ir::{Attempt, Control, FiringId, Outcome, StepEvent, StepKind, StepKindId, S
 use serde::de::DeserializeOwned;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
+
+use crate::caps::Capabilities;
 
 /// The step's config did not deserialize.
 pub const BAD_CONFIG_CLASS: &str = "bad_config";
@@ -37,7 +41,7 @@ pub struct StepCtx {
     pub secrets: Arc<dyn SecretProvider>,
     /// Host services, looked up by type ([`StepCtx::capability`]). The core
     /// never names one.
-    pub caps:    crate::caps::Capabilities,
+    pub caps:    Capabilities,
     /// Progress out: logs and artifacts, in arrival order.
     pub logs:    mpsc::Sender<StepEvent>,
     /// Control in. A `Cancel` starts the ladder.
@@ -94,7 +98,7 @@ pub struct StepFailure {
 
 impl From<StepFailure> for Outcome {
     fn from(failure: StepFailure) -> Self {
-        Outcome::new(
+        Self::new(
             ir::Status::Failure(ir::FailureInfo::new(failure.message).with_class(failure.class)),
             Value::Null,
         )
@@ -199,7 +203,7 @@ impl<S: Step> StepRunner for Erased<S> {
 /// get past load.
 #[derive(Clone, Default)]
 pub struct Registry {
-    runners: std::collections::HashMap<StepKindId, Arc<dyn StepRunner>>,
+    runners: HashMap<StepKindId, Arc<dyn StepRunner>>,
 }
 
 impl Registry {
@@ -247,8 +251,8 @@ impl StepKinds for Registry {
     }
 }
 
-impl std::fmt::Debug for Registry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Registry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut names: Vec<_> = self.runners.values().map(|r| r.name()).collect();
         names.sort_unstable();
         f.debug_struct("Registry").field("kinds", &names).finish()

@@ -44,8 +44,7 @@ pub trait Frontend: Send + Sync {
     /// from the name spans carry.
     fn repo_root(&self, file: &Path) -> PathBuf {
         file.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     }
 }
 

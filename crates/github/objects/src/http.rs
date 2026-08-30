@@ -25,6 +25,7 @@
 
 use std::convert::Infallible;
 use std::io;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -33,13 +34,22 @@ use std::task::{Context, Poll};
 use hmac::{Hmac, Mac};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Frame, Incoming};
+use hyper::body::{Body as HttpBody, Bytes, Frame, Incoming};
+use hyper::header::{
+    ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HOST, RANGE,
+};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::net::TcpListener as AsyncTcpListener;
+use tokio::sync::{mpsc, oneshot};
+use tokio::{fs as async_fs, io as async_io, runtime, task};
 
-use crate::cache::CacheStore;
+use crate::cache::{CacheStore, DEFAULT_BUDGET};
 use crate::store::ArtifactStore;
 use crate::token;
 
@@ -61,7 +71,7 @@ impl Backend {
             key: token::random(),
             port,
             artifacts: ArtifactStore::open(artifacts_dir)?,
-            cache: CacheStore::open(cache_dir, crate::cache::DEFAULT_BUDGET)?,
+            cache: CacheStore::open(cache_dir, DEFAULT_BUDGET)?,
         })
     }
 
@@ -89,17 +99,16 @@ impl Backend {
 /// `shutdown` fires. Dropping the runtime aborts in-flight connections — the
 /// run is over, its steps are done.
 pub(crate) fn serve(
-    listener: std::net::TcpListener,
+    listener: TcpListener,
     backend: Arc<Backend>,
-    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    mut shutdown: oneshot::Receiver<()>,
 ) {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a runtime for the object service");
     rt.block_on(async move {
-        let listener =
-            tokio::net::TcpListener::from_std(listener).expect("the bound listener registers");
+        let listener = AsyncTcpListener::from_std(listener).expect("the bound listener registers");
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
@@ -107,11 +116,11 @@ pub(crate) fn serve(
                     let Ok((stream, _)) = accepted else { continue };
                     let backend = Arc::clone(&backend);
                     tokio::spawn(async move {
-                        let service = hyper::service::service_fn(move |req| {
+                        let service = service_fn(move |req| {
                             handle(Arc::clone(&backend), req)
                         });
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        let _ = http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service)
                             .await;
                     });
                 }
@@ -183,7 +192,7 @@ async fn twirp(
 ) -> io::Result<Response<Body>> {
     let bearer = req
         .headers()
-        .get(hyper::header::AUTHORIZATION)
+        .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     if bearer != Some(backend.token()) {
@@ -195,10 +204,9 @@ async fn twirp(
     }
     let host = req
         .headers()
-        .get(hyper::header::HOST)
+        .get(HOST)
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("127.0.0.1:{}", backend.port));
+        .map_or_else(|| format!("127.0.0.1:{}", backend.port), str::to_string);
     let body = req
         .into_body()
         .collect()
@@ -218,7 +226,7 @@ async fn twirp(
     // event loop — keeps streaming concurrent blob uploads and downloads.
     let backend = Arc::clone(backend);
     let method = method.to_string();
-    let result = tokio::task::spawn_blocking(move || match (service, method.as_str()) {
+    let result = task::spawn_blocking(move || match (service, method.as_str()) {
         (Service::Artifacts, "CreateArtifact") => create_artifact(&backend, &host, &request),
         (Service::Artifacts, "FinalizeArtifact") => finalize_artifact(&backend, &request),
         (Service::Artifacts, "ListArtifacts") => list_artifacts(&backend, &request),
@@ -274,6 +282,11 @@ fn finalize_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp>
     Ok(json!({ "ok": true, "artifact_id": artifact.id.to_string() }))
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "one entry in the twirp dispatch table, where every method handler shares the \
+              same `Result<Value, Twirp>` signature so the match arms unify"
+)]
 fn list_artifacts(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
     let name_filter = request["name_filter"].as_str();
     let id_filter = request["id_filter"]
@@ -324,6 +337,11 @@ fn delete_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
     Ok(json!({ "ok": true, "artifact_id": id.to_string() }))
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "every store call site reads `.map_err(store_error)`; a reference argument would \
+              force a closure at each one"
+)]
 fn store_error(e: io::Error) -> Twirp {
     Twirp {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -455,7 +473,7 @@ async fn upload(
             let Some((_, block_id)) = query.iter().find(|(k, _)| k == "blockid") else {
                 return Ok(plain(StatusCode::BAD_REQUEST, "blockid is required"));
             };
-            tokio::fs::create_dir_all(&target.staging).await?;
+            async_fs::create_dir_all(&target.staging).await?;
             let path = target.staging.join(token::hex(block_id.as_bytes()));
             body_to_file(req.into_body(), &path).await?;
             Ok(empty(StatusCode::CREATED))
@@ -470,24 +488,21 @@ async fn upload(
                 .to_bytes();
             let ids = block_list(&String::from_utf8_lossy(&xml));
             if let Some(parent) = target.content.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+                async_fs::create_dir_all(parent).await?;
             }
-            let mut out = tokio::fs::File::create(&target.content).await?;
+            let mut out = async_fs::File::create(&target.content).await?;
             for block in &ids {
                 let block_path = target.staging.join(token::hex(block.as_bytes()));
-                let mut file = match tokio::fs::File::open(&block_path).await {
-                    Ok(file) => file,
-                    Err(_) => {
-                        drop(out);
-                        let _ = tokio::fs::remove_file(&target.content).await;
-                        return Ok(plain(StatusCode::BAD_REQUEST, "unknown block in the list"));
-                    }
+                let Ok(mut file) = async_fs::File::open(&block_path).await else {
+                    drop(out);
+                    let _ = async_fs::remove_file(&target.content).await;
+                    return Ok(plain(StatusCode::BAD_REQUEST, "unknown block in the list"));
                 };
-                tokio::io::copy(&mut file, &mut out).await?;
+                async_io::copy(&mut file, &mut out).await?;
             }
             out.flush().await?;
             drop(out);
-            let _ = tokio::fs::remove_dir_all(&target.staging).await;
+            let _ = async_fs::remove_dir_all(&target.staging).await;
             Ok(empty(StatusCode::CREATED))
         }
         // A single-shot block-blob PUT: the body is the whole content.
@@ -504,7 +519,7 @@ async fn upload(
 
 async fn download(target: &BlobTarget, req: Request<Incoming>) -> io::Result<Response<Body>> {
     let path = target.content.clone();
-    let total = match tokio::fs::metadata(&path).await {
+    let total = match async_fs::metadata(&path).await {
         Ok(meta) => meta.len(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(plain(StatusCode::NOT_FOUND, "no such content"));
@@ -513,7 +528,7 @@ async fn download(target: &BlobTarget, req: Request<Incoming>) -> io::Result<Res
     };
     let range = req
         .headers()
-        .get(hyper::header::RANGE)
+        .get(RANGE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_range(v, total));
     let (status, start, len) = match range {
@@ -522,14 +537,11 @@ async fn download(target: &BlobTarget, req: Request<Incoming>) -> io::Result<Res
     };
     let mut response = Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_LENGTH, len)
-        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
-        .header(hyper::header::ACCEPT_RANGES, "bytes");
+        .header(CONTENT_LENGTH, len)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(ACCEPT_RANGES, "bytes");
     if let Some((s, e)) = range {
-        response = response.header(
-            hyper::header::CONTENT_RANGE,
-            format!("bytes {s}-{e}/{total}"),
-        );
+        response = response.header(CONTENT_RANGE, format!("bytes {s}-{e}/{total}"));
     }
     let body = if req.method() == Method::HEAD {
         full(Bytes::new())
@@ -554,7 +566,7 @@ fn parse_range(header: &str, total: u64) -> Option<(u64, u64)> {
 // ── Bodies and small codecs ───────────────────────────────────────────────
 
 async fn body_to_file(mut body: Incoming, path: &Path) -> io::Result<()> {
-    let mut file = tokio::fs::File::create(path).await?;
+    let mut file = async_fs::File::create(path).await?;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(io::Error::other)?;
         if let Some(data) = frame.data_ref() {
@@ -567,7 +579,7 @@ async fn body_to_file(mut body: Incoming, path: &Path) -> io::Result<()> {
 /// Stream `len` bytes of `path` from `start`, without holding the file in
 /// memory: a reader task feeds frames through a small channel.
 fn file_body(path: PathBuf, start: u64, len: u64) -> Body {
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, io::Error>>(8);
+    let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, io::Error>>(8);
     tokio::spawn(async move {
         if let Err(e) = read_into(&path, start, len, &tx).await {
             let _ = tx.send(Err(e)).await;
@@ -580,9 +592,9 @@ async fn read_into(
     path: &Path,
     start: u64,
     len: u64,
-    tx: &tokio::sync::mpsc::Sender<Result<Frame<Bytes>, io::Error>>,
+    tx: &mpsc::Sender<Result<Frame<Bytes>, io::Error>>,
 ) -> io::Result<()> {
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut file = async_fs::File::open(path).await?;
     if start > 0 {
         file.seek(io::SeekFrom::Start(start)).await?;
     }
@@ -604,9 +616,9 @@ async fn read_into(
     Ok(())
 }
 
-struct ChannelBody(tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, io::Error>>);
+struct ChannelBody(mpsc::Receiver<Result<Frame<Bytes>, io::Error>>);
 
-impl hyper::body::Body for ChannelBody {
+impl HttpBody for ChannelBody {
     type Data = Bytes;
     type Error = io::Error;
 
@@ -632,7 +644,7 @@ fn empty(status: StatusCode) -> Response<Body> {
 fn plain(status: StatusCode, message: &str) -> Response<Body> {
     Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/plain")
+        .header(CONTENT_TYPE, "text/plain")
         .body(full(message.to_string()))
         .expect("a valid response")
 }
@@ -640,7 +652,7 @@ fn plain(status: StatusCode, message: &str) -> Response<Body> {
 fn json_response(status: StatusCode, value: &Value) -> Response<Body> {
     Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .header(CONTENT_TYPE, "application/json")
         .body(full(value.to_string()))
         .expect("a valid response")
 }
@@ -685,6 +697,10 @@ fn parse_query(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`to_digit(16)` answers with 0..=15, so `hi * 16 + lo` is at most 255"
+)]
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -706,6 +722,10 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`to_digit(16)` answers with 0..=15, so `hi * 16 + lo` is at most 255"
+)]
 fn decode_hex(text: &str) -> Result<Vec<u8>, ()> {
     if !text.len().is_multiple_of(2) {
         return Err(());

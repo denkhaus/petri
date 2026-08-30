@@ -13,8 +13,9 @@
 
 mod support;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{env, fs, process};
 
 use frontend_gha::load;
 use runtime::driver::RunReport;
@@ -25,29 +26,38 @@ use runtime::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
 use support::install_gh_stub;
 
-fn corpus_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
+fn corpus_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
 /// Is this corpus repo fetched? These tests name specific files, so it is that
 /// repo's workflows that have to be on disk, not merely some of the corpus.
 ///
 /// `PETRI_REQUIRE_CORPUS` turns the skip into a failure; CI sets it.
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped test says why on the runner's stderr; a test binary has no other sink"
+)]
 fn corpus_repo_ready(repo: &str) -> bool {
     if corpus_root().join(repo).join(".github/workflows").is_dir() {
         return true;
     }
-    if std::env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()) {
-        panic!("PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched ({repo} is missing)");
-    }
+    assert!(
+        !env::var("PETRI_REQUIRE_CORPUS").is_ok_and(|v| !v.is_empty()),
+        "PETRI_REQUIRE_CORPUS is set, but the corpus is not fetched ({repo} is missing)"
+    );
     eprintln!("skipping: corpus not fetched; run scripts/corpus-fetch.sh");
     false
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the lowering diagnostics belong on stderr, where a failing corpus test shows them"
+)]
 fn lower(repo: &str, workflow: &str) -> Graph {
     let root = corpus_root().join(repo);
     let file = root.join(".github/workflows").join(workflow);
-    let text = std::fs::read_to_string(&file).expect("corpus workflow");
+    let text = fs::read_to_string(&file).expect("corpus workflow");
     let lowered = load(&format!(".github/workflows/{workflow}"), &text, &DirFiles {
         root,
     });
@@ -59,16 +69,11 @@ fn lower(repo: &str, workflow: &str) -> Graph {
 
 /// Point every scope's `PATH` at the stub, and give the run its `github`
 /// context.
-fn prepare(
-    mut graph: Graph,
-    bin: &std::path::Path,
-    stub_log: &std::path::Path,
-    github: serde_json::Value,
-) -> Graph {
+fn prepare(mut graph: Graph, bin: &Path, stub_log: &Path, github: serde_json::Value) -> Graph {
     let path = format!(
         "{}:{}",
         bin.display(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+        env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     for scope in &mut graph.scopes {
         scope
@@ -82,7 +87,7 @@ fn prepare(
     graph.params.insert("github".into(), github);
     graph.params.insert(
         "runner".into(),
-        json!({ "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "name": "local" }),
+        json!({ "os": env::consts::OS, "arch": env::consts::ARCH, "name": "local" }),
     );
     graph.params.insert("vars".into(), json!({}));
     graph
@@ -103,12 +108,12 @@ async fn run(graph: Graph, dir: &Path) -> RunReport {
     rt.run(graph).await.expect("replay is byte-identical")
 }
 
-fn fresh_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir()
+fn fresh_dir(label: &str) -> PathBuf {
+    let dir = env::temp_dir()
         .join("petri-corpus")
-        .join(format!("{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+        .join(format!("{label}-{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("the temp dir for this run is creatable");
     dir
 }
 
@@ -139,7 +144,7 @@ async fn react_cleanup_stale_branch_caches_runs() {
         report.state.errors()
     );
 
-    let calls = std::fs::read_to_string(&stub_log).unwrap_or_default();
+    let calls = fs::read_to_string(&stub_log).unwrap_or_default();
     assert!(calls.contains("gh cache list"), "{calls}");
     assert!(calls.contains("gh cache delete 101"), "{calls}");
     assert!(calls.contains("gh cache delete 202"), "{calls}");
@@ -174,7 +179,7 @@ async fn react_cleanup_stale_branch_caches_runs() {
             .contains("ghs_dummy_token"),
         "the secret stayed out of the state"
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// nodejs/node `comment-labeled.yml`: three jobs gated on
@@ -207,7 +212,7 @@ async fn nodejs_comment_labeled_runs_the_matching_job() {
         report.state.errors()
     );
 
-    let calls = std::fs::read_to_string(&stub_log).unwrap_or_default();
+    let calls = fs::read_to_string(&stub_log).unwrap_or_default();
     assert!(
         calls.contains("gh issue comment 4242 --repo nodejs/node"),
         "the stalled job ran with the issue number from the event: {calls}"
@@ -235,5 +240,5 @@ async fn nodejs_comment_labeled_runs_the_matching_job() {
         ctx.node("notable-change/done").unwrap().output["result"],
         json!("skipped")
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
 }

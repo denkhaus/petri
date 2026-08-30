@@ -1,23 +1,30 @@
 //! The GHA end-to-end harness: lower with the real frontend, run on the
 //! standard runtime.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses only the harness helpers its own battery needs"
+)]
 
 use std::collections::BTreeMap;
+use std::env::{self, consts};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{self, Command};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use frontend_gha::load;
 use github_actions::GitActionSource;
 use runtime::driver::RunReport;
-use runtime::executor::Retention;
+use runtime::executor::{MapSecrets, Retention};
 use runtime::frontend::{FileSource, MapFiles, NoFiles};
 use runtime::ir::Graph;
 use runtime::{RunOptions, Runtime, engine, ir};
 use serde_json::json;
+use tokio::time;
 
-pub fn files(pairs: &[(&str, &str)]) -> MapFiles {
+pub(crate) fn files(pairs: &[(&str, &str)]) -> MapFiles {
     MapFiles(
         pairs
             .iter()
@@ -26,11 +33,15 @@ pub fn files(pairs: &[(&str, &str)]) -> MapFiles {
     )
 }
 
-pub fn lower_ok(text: &str) -> Graph {
+pub(crate) fn lower_ok(text: &str) -> Graph {
     lower_ok_with(text, &NoFiles)
 }
 
-pub fn lower_ok_with(text: &str, files: &dyn FileSource) -> Graph {
+#[expect(
+    clippy::print_stderr,
+    reason = "the harness echoes lowering diagnostics so a failing battery shows why"
+)]
+pub(crate) fn lower_ok_with(text: &str, files: &dyn FileSource) -> Graph {
     let lowered = load(".github/workflows/test.yml", text, files);
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
@@ -39,7 +50,7 @@ pub fn lower_ok_with(text: &str, files: &dyn FileSource) -> Graph {
 }
 
 /// Run parameters a real host would supply.
-pub fn with_params(graph: Graph) -> Graph {
+pub(crate) fn with_params(graph: Graph) -> Graph {
     let mut graph = graph;
     graph.params.entry("github".into()).or_insert(json!({
         "sha": "0123456789abcdef", "ref": "refs/heads/main", "ref_name": "main",
@@ -47,7 +58,7 @@ pub fn with_params(graph: Graph) -> Graph {
         "run_id": "1", "run_number": "1", "server_url": "https://github.com",
     }));
     graph.params.entry("runner".into()).or_insert(json!({
-        "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "name": "local",
+        "os": consts::OS, "arch": consts::ARCH, "name": "local",
     }));
     graph.params.entry("vars".into()).or_insert(json!({}));
     graph
@@ -56,20 +67,24 @@ pub fn with_params(graph: Graph) -> Graph {
 fn run_dir(label: &str) -> PathBuf {
     // Canonical, or macOS's `/var` → `/private/var` symlink makes toolkit
     // actions compute relative archive paths that resolve nowhere.
-    let temp = std::env::temp_dir()
+    let temp = env::temp_dir()
         .canonicalize()
-        .unwrap_or_else(|_| std::env::temp_dir());
+        .unwrap_or_else(|_| env::temp_dir());
     let dir = temp
         .join("petri-gha")
-        .join(format!("{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+        .join(format!("{label}-{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
     dir
 }
 
 /// Whether `program --version` answers on this machine, with the skip note the
 /// batteries share (`node` for JavaScript actions, `git` for fixtures).
-pub fn tool_ready(program: &str) -> bool {
-    let found = std::process::Command::new(program)
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip note tells whoever runs the batteries why a test did nothing"
+)]
+pub(crate) fn tool_ready(program: &str) -> bool {
+    let found = Command::new(program)
         .arg("--version")
         .output()
         .is_ok_and(|out| out.status.success());
@@ -83,11 +98,11 @@ pub fn tool_ready(program: &str) -> bool {
 /// a corpus workflow runs for real without reaching GitHub's API. Returns the
 /// bin dir to prepend to `PATH`; invocations append to the file named by
 /// `GH_STUB_LOG`.
-pub fn install_gh_stub(dir: &Path) -> PathBuf {
+pub(crate) fn install_gh_stub(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&bin).expect("the run dir is fresh, so it accepts a bin directory");
     let stub = bin.join("gh");
-    std::fs::write(
+    fs::write(
         &stub,
         r#"#!/bin/sh
 echo "gh $*" >> "$GH_STUB_LOG"
@@ -97,24 +112,30 @@ esac
 exit 0
 "#,
     )
-    .unwrap();
+    .expect("the bin directory was just created, so the stub is writable");
     #[cfg(unix)]
     {
+        use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&stub, Permissions::from_mode(0o755))
+            .expect("the stub was just written, so its mode is ours to set");
     }
     bin
 }
 
 /// The corpus's shared action cache: the acceptance batteries and the sweep
 /// pull the same pinned trees once.
-pub fn corpus_action_source() -> Arc<GitActionSource> {
+pub(crate) fn corpus_action_source() -> Arc<GitActionSource> {
     let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus/.actions-cache");
     Arc::new(GitActionSource::new(cache))
 }
 
 /// [`lower_ok`], with remote `uses:` resolved through `source`.
-pub fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> Graph {
+#[expect(
+    clippy::print_stderr,
+    reason = "the harness echoes lowering diagnostics so a failing battery shows why"
+)]
+pub(crate) fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> Graph {
     let actions: Arc<dyn github_actions::ActionSource> = Arc::clone(source) as _;
     let lowered = frontend_gha::load_with(
         ".github/workflows/test.yml",
@@ -132,7 +153,11 @@ pub fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> Graph {
 /// component's tests may not depend on the distribution: the service starts
 /// beside the run dir and its capability reaches the steps. `cache_store` is
 /// the host-scoped half; `None` keeps it per run, under the run dir.
-pub fn with_object_service(rt: Runtime, cache_store: Option<PathBuf>) -> Runtime {
+#[expect(
+    clippy::print_stderr,
+    reason = "the harness warns when the results service will not start; the run goes on"
+)]
+pub(crate) fn with_object_service(rt: Runtime, cache_store: Option<PathBuf>) -> Runtime {
     rt.run_services(move |run_dir, caps| {
         let cache = cache_store.clone().unwrap_or_else(|| run_dir.join("cache"));
         match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
@@ -153,8 +178,8 @@ pub fn with_object_service(rt: Runtime, cache_store: Option<PathBuf>) -> Runtime
 
 /// Run `git -C <dir>` under the batteries' fixed fixture identity, asserting
 /// success.
-pub fn git_in(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
+pub(crate) fn git_in(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -172,7 +197,7 @@ pub fn git_in(dir: &Path, args: &[&str]) {
 }
 
 /// `init -b main`, `add .`, `commit`: the committed half of a fixture tree.
-pub fn commit_fixture(dir: &Path) {
+pub(crate) fn commit_fixture(dir: &Path) {
     git_in(dir, &["init", "--quiet", "-b", "main"]);
     git_in(dir, &["add", "."]);
     git_in(dir, &["commit", "--quiet", "-m", "fixture"]);
@@ -181,7 +206,7 @@ pub fn commit_fixture(dir: &Path) {
 /// The standard runtime plus the GitHub step kinds the frontend lowers to —
 /// what the distribution registers, assembled here because a component's tests
 /// may not depend on the distribution.
-fn runtime(dir: &std::path::Path) -> Runtime {
+fn runtime(dir: &Path) -> Runtime {
     let mut options = RunOptions::new(dir);
     options.grace = Duration::from_secs(1);
     options.retention = Retention::Never;
@@ -194,13 +219,13 @@ fn runtime(dir: &std::path::Path) -> Runtime {
 }
 
 /// Run on the standard runtime, which verifies replay itself.
-pub async fn run_host(graph: Graph, label: &str) -> RunReportPlus {
+pub(crate) async fn run_host(graph: Graph, label: &str) -> RunReportPlus {
     run_host_with_secrets(graph, label, &[]).await
 }
 
 /// [`run_host`], with the runtime customized before the run — an extra
 /// capability, an option — for batteries that probe host wiring.
-pub async fn run_host_with(
+pub(crate) async fn run_host_with(
     graph: Graph,
     label: &str,
     customize: impl FnOnce(Runtime) -> Runtime,
@@ -211,12 +236,12 @@ pub async fn run_host_with(
         .run(graph)
         .await
         .expect("replay is byte-identical");
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
     RunReportPlus::from(report)
 }
 
 /// [`run_host`], with named secrets configured for the run.
-pub async fn run_host_with_secrets(
+pub(crate) async fn run_host_with_secrets(
     graph: Graph,
     label: &str,
     secrets: &[(&str, &str)],
@@ -224,11 +249,11 @@ pub async fn run_host_with_secrets(
     let graph = with_params(graph);
     let dir = run_dir(label);
     let report = runtime(&dir)
-        .secrets(runtime::executor::MapSecrets::from_pairs(secrets))
+        .secrets(MapSecrets::from_pairs(secrets))
         .run(graph)
         .await
         .expect("replay is byte-identical");
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
     RunReportPlus::from(report)
 }
 
@@ -237,7 +262,11 @@ pub async fn run_host_with_secrets(
 /// The step must print something once it is under way (`echo ready && sleep
 /// 30`): the cancel is triggered by its log file appearing. Replay
 /// byte-identity is verified on the way out, cancellation included.
-pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (RunReportPlus, ()) {
+pub(crate) async fn run_host_then_cancel(
+    graph: Graph,
+    label: &str,
+    node: &str,
+) -> (RunReportPlus, ()) {
     let graph = with_params(graph);
     let original = graph.clone();
     let dir = run_dir(label);
@@ -245,31 +274,29 @@ pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (Run
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     // Wait for the named step's log file to appear, then cancel.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(20);
     let logs = dir.join("logs");
     let want = node.replace('/', "_");
     loop {
-        let seen = std::fs::read_dir(&logs)
-            .map(|rd| {
-                rd.flatten()
-                    .any(|e| e.file_name().to_string_lossy().starts_with(&want))
-            })
-            .unwrap_or(false);
-        if seen || std::time::Instant::now() > deadline {
+        let seen = fs::read_dir(&logs).is_ok_and(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(&want))
+        });
+        if seen || Instant::now() > deadline {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    time::sleep(Duration::from_millis(200)).await;
     handle.cancel(ir::CancelScopeId::ROOT).await;
     let report = run.await.expect("run finished");
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
     testkit::assert_replay_identical(&original, &report);
     (RunReportPlus::from(report), ())
 }
 
 /// A report in the shape the tests read.
-pub struct RunReportPlus {
+pub(crate) struct RunReportPlus {
     pub status:   ir::RunStatus,
     pub state:    engine::EngineState,
     pub commands: Vec<engine::Command>,
@@ -289,7 +316,7 @@ impl From<RunReport> for RunReportPlus {
 /// its gate inside the step kind, so `StepStarted` no longer separates ran from
 /// self-skipped: the recorded status does. A step cancelled mid-run is not
 /// listed either; a test that cares reads its status directly.
-pub fn started(report: &RunReportPlus) -> Vec<String> {
+pub(crate) fn started(report: &RunReportPlus) -> Vec<String> {
     report
         .state
         .history()
@@ -299,7 +326,7 @@ pub fn started(report: &RunReportPlus) -> Vec<String> {
         .collect()
 }
 
-pub fn status_of(report: &RunReportPlus, name: &str) -> Option<String> {
+pub(crate) fn status_of(report: &RunReportPlus, name: &str) -> Option<String> {
     report
         .state
         .history()
@@ -308,7 +335,7 @@ pub fn status_of(report: &RunReportPlus, name: &str) -> Option<String> {
         .map(|r| r.outcome.status.tag().to_string())
 }
 
-pub fn log_lines(report: &RunReportPlus) -> Vec<String> {
+pub(crate) fn log_lines(report: &RunReportPlus) -> Vec<String> {
     report
         .state
         .log

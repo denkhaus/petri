@@ -61,6 +61,10 @@ fn with_params(mut graph: Graph) -> Graph {
     graph
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; the lowering diagnostics explain a failed load"
+)]
 async fn run(label: &str, workflow: &str) -> Vec<String> {
     let run_dir = testkit::RunDir::new(label);
     let lowered = load(".github/workflows/ci.yml", workflow, &NoFiles);
@@ -95,6 +99,10 @@ fn has(lines: &[String], want: &str) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; the skip note says the test passed without bash"
+)]
 async fn a_custom_shell_template_runs_the_script_from_a_file() {
     if !have("bash") {
         eprintln!("skipping: bash is needed");
@@ -119,6 +127,10 @@ async fn a_custom_shell_template_runs_the_script_from_a_file() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; the skip note says the test passed without python3"
+)]
 async fn a_python_shell_template_runs_python() {
     if !have("python3") {
         eprintln!("skipping: python3 is needed");

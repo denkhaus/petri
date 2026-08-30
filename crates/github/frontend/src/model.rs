@@ -248,7 +248,6 @@ pub fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'
 /// The two triggers that declare inputs: `workflow_call` (the reusable-workflow
 /// interface) and `workflow_dispatch`. Every other trigger stays metadata — a
 /// local run fires the workflow directly.
-#[allow(clippy::type_complexity)]
 fn read_triggers<'a>(
     on: Option<Node<'a>>,
     diags: &mut Diagnostics,
@@ -287,19 +286,18 @@ fn read_call_interface<'a>(wc: Node<'a>, diags: &mut Diagnostics) -> CallInterfa
         .and_then(|o| o.as_mapping())
         .map(|om| {
             om.iter()
-                .filter_map(
-                    |(name, spec)| match spec.as_mapping().and_then(|sm| sm.get("value")) {
-                        Some(value) => Some((name.to_string(), value)),
-                        None => {
-                            diags.error(
-                                "gha.bad_call_output",
-                                spec.span(),
-                                format!("workflow output `{name}` needs a `value`"),
-                            );
-                            None
-                        }
-                    },
-                )
+                .filter_map(|(name, spec)| {
+                    if let Some(value) = spec.as_mapping().and_then(|sm| sm.get("value")) {
+                        Some((name.to_string(), value))
+                    } else {
+                        diags.error(
+                            "gha.bad_call_output",
+                            spec.span(),
+                            format!("workflow output `{name}` needs a `value`"),
+                        );
+                        None
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -515,9 +513,10 @@ fn read_call<'a>(
     let secrets = match m.get("secrets") {
         None => SecretsArg::None,
         Some(s) if s.as_str() == Some("inherit") => SecretsArg::Inherit,
-        Some(s) => match s.as_mapping() {
-            Some(sm) => SecretsArg::Map(sm.iter().map(|(k, v)| (k.to_string(), v)).collect()),
-            None => {
+        Some(s) => {
+            if let Some(sm) = s.as_mapping() {
+                SecretsArg::Map(sm.iter().map(|(k, v)| (k.to_string(), v)).collect())
+            } else {
                 diags.error(
                     "gha.bad_call",
                     s.span(),
@@ -525,7 +524,7 @@ fn read_call<'a>(
                 );
                 SecretsArg::None
             }
-        },
+        }
     };
     Some(WorkflowCall {
         uses: (reference.to_string(), uses.span()),

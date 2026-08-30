@@ -10,7 +10,8 @@ use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::{Document, Node};
 
-use crate::model::Step;
+use crate::action;
+use crate::model::{self, Step};
 
 /// How deep composites may nest before the lowering reports rather than
 /// recurses.
@@ -105,7 +106,7 @@ pub fn read_document(
     span: &Span,
     diags: &mut Diagnostics,
 ) -> Option<Document> {
-    if let Err(error) = crate::action::validate_relative_action_path(path, true) {
+    if let Err(error) = action::validate_relative_action_path(path, true) {
         diags.error("gha.bad_action_path", span.clone(), error.to_string());
         return None;
     }
@@ -284,7 +285,7 @@ fn read_composite<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Acti
         Some(s) => {
             if let Some(seq) = s.expect_sequence(diags, "`runs.steps`") {
                 for (index, step) in seq.iter().enumerate() {
-                    if let Some(step) = crate::model::read_step("<composite>", index, step, diags) {
+                    if let Some(step) = model::read_step("<composite>", index, step, diags) {
                         if step.run.is_some() && step.shell.is_none() {
                             diags.error(
                                 "gha.bad_action",
@@ -320,7 +321,7 @@ mod tests {
     #[test]
     fn reads_a_node_action() {
         let (doc, mut diags) = parse(
-            r#"
+            r"
 name: Hello
 inputs:
   who:
@@ -332,7 +333,7 @@ runs:
   main: dist/index.js
   post: dist/post.js
   post-if: success()
-"#,
+",
         );
         let manifest = read_manifest(&doc, &mut diags).expect("a manifest");
         assert!(diags.is_empty(), "{:?}", diags.into_vec());

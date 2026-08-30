@@ -91,8 +91,8 @@ enum CallTarget {
 impl CallTarget {
     fn identity(&self) -> String {
         match self {
-            CallTarget::Local { path } => path.clone(),
-            CallTarget::Remote { reference } => reference.to_string(),
+            Self::Local { path } => path.clone(),
+            Self::Remote { reference } => reference.to_string(),
         }
     }
 }
@@ -114,6 +114,12 @@ fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
         });
     }
     let reference = ActionRef::parse(uses).map_err(|e| e.to_string())?;
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "the reference names a file in another repository as written, and `.YML` is a \
+                  different name there — matching without case would swap this precise format \
+                  error for a failed fetch"
+    )]
     if !reference
         .path
         .as_deref()
@@ -200,7 +206,7 @@ fn walk(
             diags.error(
                 "gha.workflow_depth",
                 span.clone(),
-                format!("reusable workflows nest more than {MAX_DEPTH} deep at `{identity}`",),
+                format!("reusable workflows nest more than {MAX_DEPTH} deep at `{identity}`"),
             );
             continue;
         }
@@ -253,9 +259,10 @@ fn fetch(
     diags: &mut Diagnostics,
 ) -> Option<(CalleeSource, String)> {
     match target {
-        CallTarget::Local { path } => match files.read(path) {
-            Some(text) => Some((CalleeSource::Local { path: path.clone() }, text)),
-            None => {
+        CallTarget::Local { path } => {
+            if let Some(text) = files.read(path) {
+                Some((CalleeSource::Local { path: path.clone() }, text))
+            } else {
                 diags.error(
                     "gha.bad_call",
                     span.clone(),
@@ -263,7 +270,7 @@ fn fetch(
                 );
                 None
             }
-        },
+        }
         CallTarget::Remote { reference } => {
             let Some(actions) = actions else {
                 diags.unsupported(

@@ -21,6 +21,8 @@ use ir::expr::{EvalEnv, StaticCtx, eval};
 use ir::flow::RunContext;
 use ir::{ExprId, ExprTable, Value};
 
+use crate::{expr_lower, exprs};
+
 /// The matrix's static legs: the matrix through the same expansion the engine
 /// runs at firing time, evaluated now. A value carrying an expression resolves
 /// against the same static contexts `runs-on` reads — the frame's known
@@ -31,7 +33,7 @@ pub fn static_legs(matrix: Node<'_>, inputs: &Value, github: &Value) -> Option<V
     let mut table = ExprTable::new();
     let value = static_value(matrix, &mut table, inputs, github)?;
     let m = table.lit(value);
-    let legs = crate::expr_lower::matrix_legs(&mut table, m).ok()?;
+    let legs = expr_lower::matrix_legs(&mut table, m).ok()?;
     match eval_static(&table, legs, inputs, github, &Value::Null) {
         Ok(Value::Array(legs)) => Some(legs),
         _ => None,
@@ -268,14 +270,14 @@ fn compile_with(
         return Ok(table.lit(text));
     }
     let segments = split_template(text).map_err(|_| bad("unterminated `${{`".into()))?;
-    crate::exprs::fold_template(
+    exprs::fold_template(
         &segments,
         table,
-        |t| t.to_string(),
+        str::to_string,
         |source, table| {
             let ast = parse(source)
                 .map_err(|e| bad(format!("could not parse `{}`: {e}", source.trim())))?;
-            crate::expr_lower::gha(&ast, table, roots).map_err(|e| match e {
+            expr_lower::gha(&ast, table, roots).map_err(|e| match e {
                 LowerError::UnknownIdent(name) => Failure::RunTimeContext {
                     name,
                     span: span.clone(),

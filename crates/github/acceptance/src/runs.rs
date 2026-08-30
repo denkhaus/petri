@@ -24,11 +24,14 @@
 //! is an expected failure, kept out of the gap ranking — the same denominator
 //! discipline that keeps REPORT.md honest.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::convert::Infallible;
+use std::env::consts::ARCH;
 
 use frontend_gha::action::{
     ACTION_KIND, ActionLocation, DOCKER_ACTION_KIND, PinnedAction, RUN_KIND,
 };
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{Expansion, Graph, RuntimeTarget, Value};
 use smol_str::SmolStr;
 
@@ -53,7 +56,7 @@ pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:di
 /// architecture (`ubuntu-24.04` / `ubuntu-24.04-arm`) with its own
 /// ImageVersion, so the pin is per architecture, chosen by the host's.
 pub fn runner_image_2404_full() -> &'static str {
-    match std::env::consts::ARCH {
+    match ARCH {
         "aarch64" => "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.101.1-arm64",
         _ => "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.283.1-amd64",
     }
@@ -136,10 +139,37 @@ pub fn stub_run_scripts(graph: &mut Graph) {
 /// job outputs fed by stubbed steps to a fixpoint (an output built from
 /// another job's tainted output is tainted too), then reads of tainted
 /// outputs, then expansions whose items ride one.
-pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<String> {
+pub fn stubbed_output_consumers(graph: &Graph) -> BTreeSet<String> {
     use ir::{BinOp, ExpandTarget, Expr, ExprId, NodeId};
 
-    let stubbed: std::collections::BTreeSet<&str> = graph
+    // The tainted job outputs, by `(<job>/done node, output name)`.
+    type Tainted = BTreeSet<(String, String)>;
+
+    // Every `$expr` placeholder in a config, by id.
+    fn expr_ids(value: &Value, out: &mut Vec<ExprId>) {
+        match value {
+            Value::Object(map) => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a `$expr` placeholder holds an `ExprId`, whose raw value is a u32"
+                )]
+                if let Some(raw) = map.get(EXPR_PLACEHOLDER_KEY).and_then(Value::as_u64) {
+                    out.push(ExprId::new(raw as u32));
+                }
+                for child in map.values() {
+                    expr_ids(child, out);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    expr_ids(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let stubbed: BTreeSet<&str> = graph
         .nodes
         .iter()
         .filter(|n| n.step.kind.as_ref() == RUN_KIND)
@@ -186,7 +216,6 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
 
     // Does the tree under `root` read a stubbed node's `output` — directly, or
     // as a tainted job output's projection?
-    type Tainted = std::collections::BTreeSet<(String, String)>;
     let reads_stubbed = |root: ExprId, tainted: &Tainted| -> bool {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
@@ -254,36 +283,13 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
         }
     }
 
-    // Every `$expr` placeholder in a config, by id.
-    fn expr_ids(value: &Value, out: &mut Vec<ExprId>) {
-        match value {
-            Value::Object(map) => {
-                if let Some(raw) = map
-                    .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
-                    .and_then(Value::as_u64)
-                {
-                    out.push(ExprId::new(raw as u32));
-                }
-                for child in map.values() {
-                    expr_ids(child, out);
-                }
-            }
-            Value::Array(items) => {
-                for child in items {
-                    expr_ids(child, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
     let config_reads = |node: &ir::Node, pred: &dyn Fn(ExprId) -> bool| -> bool {
         let mut ids = Vec::new();
         expr_ids(&node.step.config, &mut ids);
         ids.into_iter().any(pred)
     };
 
-    let mut consumers = std::collections::BTreeSet::new();
+    let mut consumers = BTreeSet::new();
     for node in &graph.nodes {
         if node.step.kind.as_ref() == RUN_KIND {
             continue;
@@ -300,9 +306,9 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
     // in the engine's apply): reachable from `entry` along routing edges
     // without passing through `exit`, plus `exit`.
     let region_of = |entry: NodeId, exit: NodeId| -> Vec<NodeId> {
-        let mut seen = std::collections::BTreeSet::from([entry]);
+        let mut seen = BTreeSet::from([entry]);
         let mut order = vec![entry];
-        let mut queue = std::collections::VecDeque::from([entry]);
+        let mut queue = VecDeque::from([entry]);
         while let Some(id) = queue.pop_front() {
             if id == exit {
                 continue;
@@ -368,8 +374,70 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
 /// server-coupled, not a gap. A ref read routed through scope `env:` is chased
 /// to the env value's own expression. A ref reading only *defaulted* inputs
 /// resolves to a real ref and is not collected: its failures stay gaps.
-pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<String> {
+pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
     use ir::{Expr, ExprId};
+
+    // Does the ref expression read an empty-falling dispatch input, chasing
+    // `env.<name>` into the scope's env expressions? `seen` breaks env cycles.
+    fn reads_empty_input(
+        graph: &Graph,
+        scope: ir::ScopeId,
+        root: ir::ExprId,
+        seen: &mut BTreeSet<String>,
+        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
+        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
+    ) -> bool {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(expr) = graph.exprs.get(id) else {
+                continue;
+            };
+            if event_inputs_default(expr) {
+                return true;
+            }
+            for name in env_names(expr) {
+                if seen.insert(name.clone())
+                    && scope_env_reads_empty_input(
+                        graph,
+                        scope,
+                        &name,
+                        seen,
+                        event_inputs_default,
+                        env_names,
+                    )
+                {
+                    return true;
+                }
+            }
+            push_children(expr, &mut stack);
+        }
+        false
+    }
+
+    // Chase one env-var name into the scope's own `env:` expression for it.
+    fn scope_env_reads_empty_input(
+        graph: &Graph,
+        scope: ir::ScopeId,
+        name: &str,
+        seen: &mut BTreeSet<String>,
+        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
+        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
+    ) -> bool {
+        let Some(scope) = graph.scopes.iter().find(|s| s.id == scope) else {
+            return false;
+        };
+        match scope.env.get(name) {
+            Some(ir::ExprOrValue::Expr(env_expr)) => reads_empty_input(
+                graph,
+                scope.id,
+                *env_expr,
+                seen,
+                event_inputs_default,
+                env_names,
+            ),
+            _ => false,
+        }
+    }
 
     let zero = |v: &Value| match v {
         Value::Number(n) => n.as_f64() == Some(0.0),
@@ -419,12 +487,12 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
         match expr {
             Expr::Field(base, name) if is_env(*base) => vec![name.to_string()],
             Expr::Index(base, key) if is_env(*base) => match graph.exprs.get(*key) {
-                Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
+                Some(Expr::Lit(Value::String(s))) => vec![s.clone()],
                 _ => Vec::new(),
             },
             Expr::Call(name, args) if name == "get_ci" && args.len() == 2 && is_env(args[0]) => {
                 match graph.exprs.get(args[1]) {
-                    Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
+                    Some(Expr::Lit(Value::String(s))) => vec![s.clone()],
                     _ => Vec::new(),
                 }
             }
@@ -432,68 +500,6 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
             _ => Vec::new(),
         }
     };
-
-    // Does the ref expression read an empty-falling dispatch input, chasing
-    // `env.<name>` into the scope's env expressions? `seen` breaks env cycles.
-    fn reads_empty_input(
-        graph: &Graph,
-        scope: ir::ScopeId,
-        root: ir::ExprId,
-        seen: &mut std::collections::BTreeSet<String>,
-        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
-        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
-    ) -> bool {
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            let Some(expr) = graph.exprs.get(id) else {
-                continue;
-            };
-            if event_inputs_default(expr) {
-                return true;
-            }
-            for name in env_names(expr) {
-                if seen.insert(name.clone())
-                    && scope_env_reads_empty_input(
-                        graph,
-                        scope,
-                        &name,
-                        seen,
-                        event_inputs_default,
-                        env_names,
-                    )
-                {
-                    return true;
-                }
-            }
-            push_children(expr, &mut stack);
-        }
-        false
-    }
-
-    // Chase one env-var name into the scope's own `env:` expression for it.
-    fn scope_env_reads_empty_input(
-        graph: &Graph,
-        scope: ir::ScopeId,
-        name: &str,
-        seen: &mut std::collections::BTreeSet<String>,
-        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
-        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
-    ) -> bool {
-        let Some(scope) = graph.scopes.iter().find(|s| s.id == scope) else {
-            return false;
-        };
-        match scope.env.get(name) {
-            Some(ir::ExprOrValue::Expr(env_expr)) => reads_empty_input(
-                graph,
-                scope.id,
-                *env_expr,
-                seen,
-                event_inputs_default,
-                env_names,
-            ),
-            _ => false,
-        }
-    }
 
     // `default(<reads github.event.inputs>, <zero literal>)`: an undeclared
     // default zero-fills exactly here; a declared default puts its real value
@@ -508,7 +514,7 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
             && contains_event_inputs(args[0])
     };
 
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = BTreeSet::new();
     for node in &graph.nodes {
         if node.step.kind.as_ref() != ACTION_KIND {
             continue;
@@ -522,13 +528,14 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
         let Some(reference) = node.step.config.get("inputs").and_then(|i| i.get("ref")) else {
             continue;
         };
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         // The ref is a placeholder where the engine evaluates it, or a string
         // whose only expressions were bare `env.NAME` reads, left as sentinels.
-        let coupled = match reference
-            .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
-            .and_then(Value::as_u64)
-        {
+        let coupled = match reference.get(EXPR_PLACEHOLDER_KEY).and_then(Value::as_u64) {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a `$expr` placeholder holds an `ExprId`, whose raw value is a u32"
+            )]
             Some(raw) => reads_empty_input(
                 graph,
                 node.scope,
@@ -566,7 +573,7 @@ fn env_sentinel_names(text: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut names = Vec::new();
-    let _ = replace_env_sentinels(text, |name| -> Result<String, std::convert::Infallible> {
+    let _ = replace_env_sentinels(text, |name| -> Result<String, Infallible> {
         names.push(name.to_string());
         Ok(String::new())
     });
@@ -688,14 +695,14 @@ impl StepIdentity {
     /// The label the report ranks by.
     pub fn label(&self) -> String {
         match self {
-            StepIdentity::Action { bare, .. } => bare.clone(),
-            StepIdentity::LocalAction(path) => format!("./{}", path.trim_start_matches("./")),
-            StepIdentity::DockerAction(image) => image.clone(),
-            StepIdentity::Run => "run:".to_string(),
+            Self::Action { bare, .. } => bare.clone(),
+            Self::LocalAction(path) => format!("./{}", path.trim_start_matches("./")),
+            Self::DockerAction(image) => image.clone(),
+            Self::Run => "run:".to_string(),
             // A job's start/done marker: the failure is the job's environment,
             // not any step's.
-            StepIdentity::Other(kind) if kind == "noop" => "job marker".to_string(),
-            StepIdentity::Other(kind) => kind.clone(),
+            Self::Other(kind) if kind == "noop" => "job marker".to_string(),
+            Self::Other(kind) => kind.clone(),
         }
     }
 }
@@ -1013,12 +1020,12 @@ pub struct FirstFailure {
 impl RunResult {
     fn label(&self) -> String {
         match self {
-            RunResult::Pass => "pass".to_string(),
-            RunResult::Fail(f) if f.expected.is_some() => "expected failure".to_string(),
-            RunResult::Fail(_) => "**fail**".to_string(),
-            RunResult::TimedOut { wedged: false } => "**timeout**".to_string(),
-            RunResult::TimedOut { wedged: true } => "**timeout (wedged)**".to_string(),
-            RunResult::NotLowered { .. } => "not lowered".to_string(),
+            Self::Pass => "pass".to_string(),
+            Self::Fail(f) if f.expected.is_some() => "expected failure".to_string(),
+            Self::Fail(_) => "**fail**".to_string(),
+            Self::TimedOut { wedged: false } => "**timeout**".to_string(),
+            Self::TimedOut { wedged: true } => "**timeout (wedged)**".to_string(),
+            Self::NotLowered { .. } => "not lowered".to_string(),
         }
     }
 }
@@ -1098,7 +1105,7 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
                 Some(why) => {
                     *expected_classes
                         .entry(format!("{} · {why}", f.step))
-                        .or_default() += 1
+                        .or_default() += 1;
                 }
                 None => *gap_classes.entry(key).or_default() += 1,
             }
@@ -1153,10 +1160,10 @@ pub fn runs_report(records: &[RunRecord], note: &str) -> String {
                 let named = error_line(&f.tail)
                     .or_else(|| f.tail.iter().rev().find(|l| !l.trim().is_empty()));
                 if let Some(line) = named {
-                    detail.push_str(&format!(" · `{}`", sanitize_cell(line)));
+                    let _ = write!(detail, " · `{}`", sanitize_cell(line));
                 }
                 if let Some(why) = &f.expected {
-                    detail.push_str(&format!(" _({why})_"));
+                    let _ = write!(detail, " _({why})_");
                 }
                 detail
             }
@@ -1208,7 +1215,7 @@ fn sanitize_cell(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use frontend_gha::action::ActionRef;
+    use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError};
     use frontend_gha::load;
     use ir::Expr;
 
@@ -1223,21 +1230,15 @@ mod tests {
     /// reference pins as-is, every manifest is a minimal node action.
     struct StubActions;
 
-    impl frontend_gha::action::ActionSource for StubActions {
-        fn resolve(
-            &self,
-            reference: &ActionRef,
-        ) -> Result<PinnedAction, frontend_gha::action::ActionSourceError> {
+    impl ActionSource for StubActions {
+        fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
             Ok(PinnedAction {
                 reference: reference.clone(),
                 sha:       "0123456789012345678901234567890123456789".into(),
             })
         }
 
-        fn manifest(
-            &self,
-            _pinned: &PinnedAction,
-        ) -> Result<String, frontend_gha::action::ActionSourceError> {
+        fn manifest(&self, _pinned: &PinnedAction) -> Result<String, ActionSourceError> {
             Ok("name: checkout\n\
                 inputs:\n\
                 \x20 ref: { description: r }\n\

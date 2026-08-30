@@ -8,7 +8,7 @@ use frontend_gha::action::MapActionSource;
 use frontend_gha::{ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY, load, load_with};
 use serde_json::json;
 
-const CHECKOUT: &str = r#"
+const CHECKOUT: &str = r"
 name: Checkout
 inputs:
   repository:
@@ -21,9 +21,9 @@ runs:
   using: node20
   main: dist/index.js
   post: dist/cleanup.js
-"#;
+";
 
-const WITH_PRE: &str = r#"
+const WITH_PRE: &str = r"
 name: Pre and post
 runs:
   using: node24
@@ -32,10 +32,15 @@ runs:
   pre-if: runner.os == 'Linux'
   post: post.js
   post-if: success()
-"#;
+";
 
 const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the lowering diagnostics that \
+              explain a failed assertion below"
+)]
 fn lower(text: &str, source: &MapActionSource) -> frontend::Lowered {
     let lowered = load_with(".github/workflows/ci.yml", text, &NoFiles, Some(source));
     for d in lowered.diagnostics.iter() {
@@ -58,7 +63,7 @@ fn chain(graph: &ir::Graph) -> Vec<&str> {
 #[test]
 fn a_node_action_lowers_to_a_main_node_and_a_trailing_post_node() {
     let source = MapActionSource::new().with("octo/tool@v4", TEST_SHA, CHECKOUT);
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -68,7 +73,7 @@ jobs:
         with:
           fetch-depth: 0
       - run: echo hi
-"#;
+";
     let graph = lower(text, &source).graph.expect("lowers");
     assert_eq!(chain(&graph), vec![
         "build/step-1",
@@ -127,7 +132,7 @@ fn pre_nodes_come_first_and_post_nodes_last_in_reverse() {
     let source = MapActionSource::new()
         .with("acme/prepost@v1", TEST_SHA, WITH_PRE)
         .with("octo/tool@v4", TEST_SHA, CHECKOUT);
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -138,7 +143,7 @@ jobs:
         uses: acme/prepost@v1
       - id: b
         uses: octo/tool@v4
-"#;
+";
     let graph = lower(text, &source).graph.expect("lowers");
     assert_eq!(chain(&graph), vec![
         "j/a/pre", "j/step-1", "j/a", "j/b", "j/b/post", "j/a/post"
@@ -166,14 +171,14 @@ fn a_required_input_without_a_value_warns_and_lowers() {
         TEST_SHA,
         "inputs:\n  who:\n    required: true\nruns:\n  using: node20\n  main: index.js\n",
     );
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: acme/needs@v1
-"#;
+";
     let lowered = lower(text, &source);
     // GitHub's runner warns about a missing required action input and runs
     // anyway; real workflows rely on that. (A workflow_call input stays an
@@ -196,14 +201,14 @@ fn a_required_input_with_an_empty_default_is_satisfied() {
         TEST_SHA,
         "inputs:\n  github_token:\n    description: 'a token'\n    required: true\n    default: ''\nruns:\n  using: node20\n  main: index.js\n",
     );
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: acme/needy@v1
-"#;
+";
     let lowered = lower(text, &source);
     let graph = lowered.graph.expect("an empty default satisfies the input");
     let node = graph.nodes.iter().find(|n| n.name == "j/step-1").unwrap();
@@ -217,14 +222,14 @@ fn a_required_input_with_a_null_default_is_still_missing() {
         TEST_SHA,
         "inputs:\n  who:\n    required: true\n    default:\nruns:\n  using: node20\n  main: index.js\n",
     );
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: acme/nully@v1
-"#;
+";
     let lowered = lower(text, &source);
     // A null default does not satisfy the input; the runner-faithful warning
     // still names it.
@@ -241,14 +246,14 @@ jobs:
 
 #[test]
 fn without_a_source_remote_actions_stay_unsupported() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: octo/tool@v4
-"#;
+";
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
     assert!(lowered.graph.is_none());
     assert!(
@@ -289,14 +294,14 @@ fn an_unavailable_reference_is_unsupported_and_the_hint_says_why() {
         }
     }
 
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: octo/tool@v4
-"#;
+";
     for (reason, code, wants) in [
         (None, "action.remote", "refreshing it"),
         (
@@ -328,14 +333,14 @@ jobs:
 #[test]
 fn an_unresolvable_reference_is_an_error_not_an_unsupported_feature() {
     let source = MapActionSource::new();
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
       - uses: nobody/nothing@v9
-"#;
+";
     let lowered = lower(text, &source);
     assert!(lowered.graph.is_none());
     assert!(
@@ -351,7 +356,7 @@ jobs:
 #[test]
 fn secrets_lower_in_step_config_and_nowhere_else() {
     // Whole value: a `$secret` reference the process step resolves.
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -360,7 +365,7 @@ jobs:
       - run: echo hi
         env:
           T: ${{ github.token }}
-"#;
+";
     let graph = load(".github/workflows/ci.yml", text, &NoFiles)
         .graph
         .expect("lowers");
@@ -390,7 +395,7 @@ jobs:
     assert!(run.step.config["env"]["AUTH"].get("$expr").is_some());
 
     // Where the engine would evaluate it — an `if:` — a secret is rejected.
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -398,7 +403,7 @@ jobs:
     steps:
       - run: echo hi
         if: secrets.DEPLOY_KEY != ''
-"#;
+";
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
     assert!(lowered.graph.is_none());
     assert!(

@@ -5,7 +5,7 @@
 //! executor, and never assumes the workspace is on this machine.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use executor::{ExitStatus, LogLine, ProcessSpec, Sig};
@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::Map;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
+use tokio::time;
 
 use crate::ctx::{Step, StepCtx, StepFailure};
 use crate::outputs::{BAD_OUTPUT_CLASS, parse};
@@ -52,8 +53,8 @@ impl Shell {
     /// Fail on error, and fail a pipeline on any stage's error.
     fn invocation(self) -> (&'static str, Vec<&'static str>) {
         match self {
-            Shell::Bash => ("bash", vec!["-eo", "pipefail", "-c"]),
-            Shell::Sh => ("sh", vec!["-e", "-c"]),
+            Self::Bash => ("bash", vec!["-eo", "pipefail", "-c"]),
+            Self::Sh => ("sh", vec!["-e", "-c"]),
         }
     }
 }
@@ -72,9 +73,9 @@ pub enum SoftFail {
 impl SoftFail {
     fn matches(&self, code: i32) -> bool {
         match self {
-            SoftFail::Off => false,
-            SoftFail::All(all) => *all,
-            SoftFail::ExitStatuses(codes) => codes.contains(&code),
+            Self::Off => false,
+            Self::All(all) => *all,
+            Self::ExitStatuses(codes) => codes.contains(&code),
         }
     }
 }
@@ -197,7 +198,7 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
 
     if let Some(drain) = drain {
-        let _ = tokio::time::timeout(DRAIN_LIMIT, drain).await;
+        let _ = time::timeout(DRAIN_LIMIT, drain).await;
     }
 
     let output = match read_outputs(&*ctx.env, &output_rel_path).await {
@@ -205,7 +206,7 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         Err(message) => return Err(fail(BAD_OUTPUT_CLASS, message)),
     };
 
-    Ok(ending_outcome(ending, &config.soft_fail, output))
+    Ok(ending_outcome(&ending, &config.soft_fail, output))
 }
 
 /// Fold an [`Ending`] into the step's outcome: the exit status into the output
@@ -215,20 +216,20 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
 /// Public for the same reason [`ladder`] is: every step kind that waits on a
 /// process reports what happened through this one contract.
 pub fn ending_outcome(
-    ending: Ending,
+    ending: &Ending,
     soft_fail: &SoftFail,
     mut output: Map<String, Value>,
 ) -> Outcome {
     match ending {
         Ending::Natural(status) => {
-            output.insert("exit_status".into(), exit_value(&status));
-            natural_outcome(&status, soft_fail, Value::Object(output))
+            output.insert("exit_status".into(), exit_value(status));
+            natural_outcome(status, soft_fail, Value::Object(output))
         }
         Ending::Signalled {
             escalation,
             status: exit,
         } => {
-            if let Some(exit) = &exit {
+            if let Some(exit) = exit {
                 output.insert("exit_status".into(), exit_value(exit));
             }
             // The escalation goes in the output: `Status::Cancelled` carries no
@@ -279,7 +280,7 @@ pub async fn ladder(
                 };
             }
             ctl = control.recv() => match ctl {
-                Some(Control::Deliver(_)) => continue,
+                Some(Control::Deliver(_)) => {}
                 stop => break stop,
             },
         }
@@ -287,7 +288,7 @@ pub async fn ladder(
 
     if !matches!(stop, Some(Control::Kill)) {
         let _ = handle.signal(Sig::Term).await;
-        let deadline = tokio::time::sleep(grace);
+        let deadline = time::sleep(grace);
         tokio::pin!(deadline);
         loop {
             tokio::select! {
@@ -304,7 +305,7 @@ pub async fn ladder(
                         break;
                     }
                 }
-                _ = &mut deadline => break,
+                () = &mut deadline => break,
             }
         }
     }
@@ -355,7 +356,7 @@ async fn forward_lines(mut lines: executor::LineStream, out: mpsc::Sender<StepEv
 
 async fn read_outputs(
     env: &dyn executor::ExecEnv,
-    path: &std::path::Path,
+    path: &Path,
 ) -> Result<Map<String, Value>, String> {
     match env.read_file(path).await {
         Ok(Some(bytes)) => parse(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string()),

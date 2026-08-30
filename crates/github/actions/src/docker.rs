@@ -25,17 +25,20 @@ use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder, parse_outputs};
 use tokio::sync::mpsc;
+use tokio::time;
 
-use crate::action::{ActionSourceCap, stage};
+use crate::action::{ActionSourceCap, input_variable, stage};
 use crate::commands::CommandSink;
-use crate::config::{DockerActionConfig, DockerActionImage, DockerfileImage};
+use crate::config::{ActionLocation, DockerActionConfig, DockerActionImage, DockerfileImage};
 use crate::session::{
-    REPO_DIR, SINK_LIMIT, Session, UNSECURE_COMMANDS_KEY, ci_get, fold_into_outcome,
-    github_workspace_path, resolve_sentinel_text, settle_sink, stringify, unsecure_flag,
+    REPO_DIR, SINK_LIMIT, Session, UNSECURE_COMMANDS_KEY, ci_get, fold_into_outcome, forward_lines,
+    github_workspace_path, resolve_sentinel_text, runner_temp_path, settle_sink, stringify,
+    unsecure_flag,
 };
+use crate::{gate, hashfiles};
 
 /// The action's image could not be prepared.
-pub const IMAGE_CLASS: &str = "action_image";
+pub(crate) const IMAGE_CLASS: &str = "action_image";
 
 /// Where the once-per-run build markers live, relative to the workspace: a
 /// local action's Dockerfile builds fresh once per scope, then its tag is
@@ -66,7 +69,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     // The gate first: a phase whose condition is false pulls nothing and
     // creates nothing.
     if let Some(outcome) =
-        crate::gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
+        gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
     {
         return Ok(outcome);
     }
@@ -125,7 +128,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     }
     for (name, value) in &config.inputs {
         env.insert(
-            SmolStr::new(crate::action::input_variable(name)),
+            SmolStr::new(input_variable(name)),
             SmolStr::new(resolve(value)?),
         );
     }
@@ -180,7 +183,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
         SmolStr::new(format!("{root}/{output_rel}")),
     );
     let allow_unsecure = unsecure_flag(
-        env.get(UNSECURE_COMMANDS_KEY).map(|v| v.as_str()),
+        env.get(UNSECURE_COMMANDS_KEY).map(SmolStr::as_str),
         &*ctx.env,
     );
 
@@ -188,18 +191,17 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
         Some(value) => Some(resolve(value)?),
         None => None,
     };
-    let args: Vec<SmolStr> = match &config.args_text {
-        Some(text) => frontend_gha::split_shell_words(&resolve(text)?)
+    let args: Vec<SmolStr> = if let Some(text) = &config.args_text {
+        frontend_gha::split_shell_words(&resolve(text)?)
             .into_iter()
             .map(SmolStr::new)
-            .collect(),
-        None => {
-            let mut args = Vec::with_capacity(config.args.len());
-            for arg in &config.args {
-                args.push(SmolStr::new(resolve(arg)?));
-            }
-            args
+            .collect()
+    } else {
+        let mut args = Vec::with_capacity(config.args.len());
+        for arg in &config.args {
+            args.push(SmolStr::new(resolve(arg)?));
         }
+        args
     };
 
     // GitHub runs the container in `GITHUB_WORKSPACE`; the engine creates the
@@ -219,13 +221,13 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     let sink = CommandSink::new(ctx.logs.clone(), ctx.secrets.masker(), allow_unsecure);
     let collected = sink.effects();
     let sink_task = tokio::spawn(sink.run(rx));
-    let drain = crate::session::forward_lines(handle.lines(), tx);
+    let drain = forward_lines(handle.lines(), tx);
 
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
 
     if let Some(drain) = drain {
-        let _ = tokio::time::timeout(SINK_LIMIT, drain).await;
+        let _ = time::timeout(SINK_LIMIT, drain).await;
     }
     let commands = settle_sink(sink_task, &collected).await;
 
@@ -240,7 +242,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
         _ => Map::new(),
     };
 
-    let outcome = ending_outcome(ending, &config.soft_fail, output);
+    let outcome = ending_outcome(&ending, &config.soft_fail, output);
 
     let (outcome, effects) = session
         .conclude(outcome, &config.soft_fail, commands, &ctx.logs)
@@ -284,17 +286,17 @@ async fn prepare_image(
             // The action's own location first — it is the climb budget the
             // Dockerfile path resolves against, so it must hold no `..` itself.
             match action {
-                crate::config::ActionLocation::Pinned(pinned) => {
+                ActionLocation::Pinned(pinned) => {
                     pinned.validate().map_err(|e| StepFailure {
                         class:   IMAGE_CLASS,
                         message: e.to_string(),
-                    })?
+                    })?;
                 }
-                crate::config::ActionLocation::Local { local } => {
+                ActionLocation::Local { local } => {
                     validate_relative_action_path(local, true).map_err(|e| StepFailure {
                         class:   IMAGE_CLASS,
                         message: e.to_string(),
-                    })?
+                    })?;
                 }
             }
             // GitHub builds with the *Dockerfile's parent directory* as the
@@ -313,7 +315,7 @@ async fn prepare_image(
             let (parent, file) = normalized.rsplit_once('/').unwrap_or(("", &normalized));
             let dockerfile = (file != "Dockerfile").then(|| SmolStr::new(file));
             match action {
-                crate::config::ActionLocation::Pinned(pinned) => {
+                ActionLocation::Pinned(pinned) => {
                     let source = ctx.require_capability::<ActionSourceCap>()?;
                     let staged = stage(ctx, &source.0, pinned).await?;
                     let context = join_context(staged, parent);
@@ -340,7 +342,7 @@ async fn prepare_image(
                         pinned.reference.git_ref.to_string(),
                     ))
                 }
-                crate::config::ActionLocation::Local { local } => {
+                ActionLocation::Local { local } => {
                     let tag = image_tag(&format!("local-{local}"));
                     // The tag is not content-addressed: rebuild on the scope's
                     // first use, then the marker lets later phases and steps of
@@ -417,7 +419,7 @@ fn image_tag(key: &str) -> String {
 /// `GITHUB_WORKSPACE`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` — under the
 /// mount point, not the job environment's paths.
 struct TextResolver {
-    hashes:                std::collections::BTreeMap<Vec<String>, String>,
+    hashes:                BTreeMap<Vec<String>, String>,
     container_workspace:   String,
     container_runner_temp: String,
     container_tool_cache:  String,
@@ -452,19 +454,15 @@ impl TextResolver {
             .collect();
         let workspace = github_workspace_path(&*ctx.env);
         let hashes = if texts.iter().any(|t| has_hashfiles_sentinel(t)) {
-            crate::hashfiles::resolved_calls(
-                texts.iter().map(String::as_str),
-                &*ctx.env,
-                &workspace,
-            )
-            .await?
+            hashfiles::resolved_calls(texts.iter().map(String::as_str), &*ctx.env, &workspace)
+                .await?
         } else {
-            Default::default()
+            BTreeMap::default()
         };
         Ok(Self {
             hashes,
             container_workspace: format!("{container_root}/{REPO_DIR}"),
-            container_runner_temp: crate::session::runner_temp_path(&container_root),
+            container_runner_temp: runner_temp_path(&container_root),
             container_tool_cache,
             env_config: config.env.clone(),
             job_env,
@@ -473,7 +471,7 @@ impl TextResolver {
 
     fn resolve(&self, text: &str, ctx: &StepCtx) -> Result<String, StepFailure> {
         let text = if has_hashfiles_sentinel(text) {
-            crate::hashfiles::splice(text, &self.hashes)
+            hashfiles::splice(text, &self.hashes)
         } else {
             text.to_string()
         };

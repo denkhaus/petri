@@ -10,6 +10,7 @@
 
 mod support;
 
+use runtime::ir::RunStatus;
 use support::*;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -25,7 +26,7 @@ async fn hyphenated_env_names_reach_the_step() {
          \x20         not-a-shell-name: survived\n",
     );
     let report = run_host(graph, "env-names").await;
-    assert_eq!(report.status, runtime::ir::RunStatus::Success);
+    assert_eq!(report.status, RunStatus::Success);
     assert!(
         log_lines(&report).iter().any(|l| l == "survived"),
         "the hyphenated name reached the step: {:?}",

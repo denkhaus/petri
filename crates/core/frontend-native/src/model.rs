@@ -23,14 +23,14 @@ pub const KNOWN_BINDINGS: &[&str] = &[
 ];
 
 /// Keys the format understands at each level, for unknown-key rejection.
-pub const TOP_KEYS: &[&str] = &["name", "params", "scopes", "entry", "nodes"];
-pub const SCOPE_KEYS: &[&str] = &["runtime", "requirements", "env", "workspace", "grace"];
-pub const NODE_KEYS: &[&str] = &[
+pub(crate) const TOP_KEYS: &[&str] = &["name", "params", "scopes", "entry", "nodes"];
+pub(crate) const SCOPE_KEYS: &[&str] = &["runtime", "requirements", "env", "workspace", "grace"];
+pub(crate) const NODE_KEYS: &[&str] = &[
     "scope", "step", "run", "shell", "config", "join", "if", "budget", "retry", "next", "select",
     "parallel", "for_each",
 ];
-pub const ARM_KEYS: &[&str] = &["to", "when", "map", "back"];
-pub const FOR_EACH_KEYS: &[&str] = &[
+pub(crate) const ARM_KEYS: &[&str] = &["to", "when", "map", "back"];
+pub(crate) const FOR_EACH_KEYS: &[&str] = &[
     "items",
     "parallel",
     "until",
@@ -38,7 +38,7 @@ pub const FOR_EACH_KEYS: &[&str] = &[
     "fail_fast",
     "max_iterations",
 ];
-pub const BUDGET_KEYS: &[&str] = &["max_firings", "timeout"];
-pub const RETRY_KEYS: &[&str] = &["max_attempts", "backoff", "retry_on", "on_exhaustion"];
-pub const BACKOFF_KEYS: &[&str] = &["initial", "factor", "max", "jitter"];
-pub const RETRY_ON_KEYS: &[&str] = &["statuses", "classes"];
+pub(crate) const BUDGET_KEYS: &[&str] = &["max_firings", "timeout"];
+pub(crate) const RETRY_KEYS: &[&str] = &["max_attempts", "backoff", "retry_on", "on_exhaustion"];
+pub(crate) const BACKOFF_KEYS: &[&str] = &["initial", "factor", "max", "jitter"];
+pub(crate) const RETRY_ON_KEYS: &[&str] = &["statuses", "classes"];

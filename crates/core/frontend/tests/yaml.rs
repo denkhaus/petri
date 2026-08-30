@@ -4,6 +4,10 @@
 use frontend::diag::Diagnostics;
 use frontend::yaml::Document;
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no diagnostic sink; stderr is where the reader's diagnostics explain a parse the test expected to succeed"
+)]
 fn parse(text: &str) -> Document {
     let mut diags = Diagnostics::new();
     let doc = Document::parse("test.yml", text, &mut diags);

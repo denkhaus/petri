@@ -33,7 +33,10 @@ use ir::{Outcome, Value};
 use smol_str::SmolStr;
 use steps::{StepCtx, StepFailure, ValueOrSecretRef};
 
-use crate::session::{ci_get, env_tool_cache, github_workspace_path, read_job_env};
+use crate::hashfiles;
+use crate::session::{
+    ci_get, env_tool_cache, github_workspace_path, read_job_env, runner_temp_path, stringify,
+};
 
 /// The step's gate could not be read or evaluated.
 pub const GATE_CLASS: &str = "gate";
@@ -118,7 +121,7 @@ async fn admitted(
             match replace_env_sentinels(text, |name| {
                 env_value(name, env_config, &job_env, ctx).map(|value| match value {
                     Some(Value::String(s)) => s,
-                    Some(other) => crate::session::stringify(&other),
+                    Some(other) => stringify(&other),
                     None => ctx.env.ambient_env(name).unwrap_or_default(),
                 })
             }) {
@@ -180,7 +183,7 @@ fn env_value(
                 })?;
                 Value::String(secret.expose().to_string())
             }
-            ValueOrSecretRef::Literal(v) => Value::String(crate::session::stringify(v)),
+            ValueOrSecretRef::Literal(v) => Value::String(stringify(v)),
         }));
     }
     Ok(ci_get(job_env, name).map(|v| Value::String(v.clone())))
@@ -195,17 +198,16 @@ async fn resolve_hashfiles(gate: &mut Gate, ctx: &StepCtx) -> Result<(), StepFai
     gate.map_texts(&mut |text| {
         has_workspace_sentinel(text).then(|| replace_workspace_sentinels(text, &workspace))
     });
-    let runner_temp = crate::session::runner_temp_path(ctx.env.workspace_path());
+    let runner_temp = runner_temp_path(ctx.env.workspace_path());
     gate.map_texts(&mut |text| {
         has_runner_temp_sentinel(text).then(|| replace_runner_temp_sentinels(text, &runner_temp))
     });
-    let calls =
-        crate::hashfiles::resolved_calls(gate.texts().into_iter(), &*ctx.env, &workspace).await?;
+    let calls = hashfiles::resolved_calls(gate.texts().into_iter(), &*ctx.env, &workspace).await?;
     if calls.is_empty() {
         return Ok(());
     }
     gate.map_texts(&mut |text| {
-        has_hashfiles_sentinel(text).then(|| crate::hashfiles::splice(text, &calls))
+        has_hashfiles_sentinel(text).then(|| hashfiles::splice(text, &calls))
     });
     Ok(())
 }

@@ -5,6 +5,8 @@
 //! up keys, iterate sequences, read scalars as the type the format expects, and
 //! complain with a span when the shape is wrong.
 
+use std::borrow::Cow;
+
 use marked_yaml::Node as MarkedNode;
 use marked_yaml::types::{MarkedMappingNode, MarkedScalarNode, MarkedSequenceNode};
 use serde_json::Value;
@@ -34,14 +36,14 @@ impl Document {
     /// flow collection whose closing `]`/`}` sits at its key's indentation
     /// — which GitHub accepts — is re-indented (whitespace only, so nothing
     /// moves but the bracket) and parsed again. See [`pad_flow_close`].
-    pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Document> {
-        let mut current = std::borrow::Cow::Borrowed(text);
+    pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Self> {
+        let mut current = Cow::Borrowed(text);
         // Bounded: each repair pads one closer line, and a file has finitely many;
         // the bound only caps pathological input.
         for _ in 0..16 {
             let failure = match loader::load(&current) {
                 Ok(root) => {
-                    return Some(Document {
+                    return Some(Self {
                         file: SmolStr::new(file),
                         root,
                     });
@@ -60,7 +62,7 @@ impl Document {
             if message.contains("invalid indentation")
                 && let Some(repaired) = pad_flow_close(&current, line)
             {
-                current = std::borrow::Cow::Owned(repaired);
+                current = Cow::Owned(repaired);
                 continue;
             }
             if message.contains("invalid indentation")
@@ -221,8 +223,8 @@ impl<'a> Node<'a> {
         let start = self.inner.span().start();
         Span::new(
             self.file,
-            start.map_or(0, |m| m.line() as u32),
-            start.map_or(0, |m| m.column() as u32),
+            start.map_or(0, |m| u32::try_from(m.line()).unwrap_or(u32::MAX)),
+            start.map_or(0, |m| u32::try_from(m.column()).unwrap_or(u32::MAX)),
         )
     }
 
@@ -251,7 +253,7 @@ impl<'a> Node<'a> {
 
     /// The raw text of a scalar, whatever its type.
     pub fn as_str(&self) -> Option<&'a str> {
-        self.inner.as_scalar().map(|s| s.as_str())
+        self.inner.as_scalar().map(MarkedScalarNode::as_str)
     }
 
     pub fn is_mapping(&self) -> bool {
@@ -384,8 +386,8 @@ impl<'a> Mapping<'a> {
                 k.as_str(),
                 Span::new(
                     self.file,
-                    start.map_or(0, |m| m.line() as u32),
-                    start.map_or(0, |m| m.column() as u32),
+                    start.map_or(0, |m| u32::try_from(m.line()).unwrap_or(u32::MAX)),
+                    start.map_or(0, |m| u32::try_from(m.column()).unwrap_or(u32::MAX)),
                 ),
             )
         })

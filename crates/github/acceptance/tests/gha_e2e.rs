@@ -5,6 +5,7 @@
 
 mod support;
 
+use acceptance::runs::RUNNER_IMAGE_2404;
 use runtime::ir::RunStatus;
 use runtime::{engine, frontend, ir};
 use serde_json::json;
@@ -16,7 +17,7 @@ use support::*;
 /// function. Which of them ran is the truth table.
 fn status_table_workflow(a_step: &str) -> String {
     format!(
-        r#"
+        r"
 on: push
 jobs:
   j:
@@ -38,7 +39,7 @@ jobs:
       - id: f
         if: success() || failure()
         run: echo f
-"#
+"
     )
 }
 
@@ -65,7 +66,7 @@ async fn status_functions_truth_table() {
         let ran: Vec<String> = ["b", "c", "d", "e", "f"]
             .iter()
             .filter(|s| started(&report).iter().any(|n| n == &format!("j/{s}")))
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
             .collect();
         assert_eq!(
             ran,
@@ -84,14 +85,14 @@ async fn status_functions_truth_table() {
 async fn cancelled_steps_run_after_a_cancel() {
     let text = status_table_workflow("        run: echo ready && sleep 30");
     let graph = lower_ok(&text);
-    let (report, _) = run_host_then_cancel(graph, "truth-cancelled", "j/a").await;
+    let (report, ()) = run_host_then_cancel(graph, "truth-cancelled", "j/a").await;
     assert_eq!(report.status, RunStatus::Cancelled);
     assert_eq!(status_of(&report, "j/a").as_deref(), Some("cancelled"));
 
     let ran: Vec<String> = ["b", "c", "d", "e", "f"]
         .iter()
         .filter(|s| started(&report).iter().any(|n| n == &format!("j/{s}")))
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
     assert_eq!(
         ran,
@@ -112,7 +113,7 @@ async fn cancelled_steps_run_after_a_cancel() {
 /// steps run normally. An un-gated dependent job does not start.
 #[tokio::test]
 async fn an_always_job_runs_after_a_run_cancel() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   main:
@@ -132,9 +133,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo never
-"#;
+";
     let graph = lower_ok(text);
-    let (report, _) = run_host_then_cancel(graph, "always-job", "main/work").await;
+    let (report, ()) = run_host_then_cancel(graph, "always-job", "main/work").await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
     let ran = started(&report);
@@ -164,7 +165,7 @@ jobs:
 /// steps record `Cancelled` rather than running.
 #[tokio::test]
 async fn a_cancelled_step_fires_via_scope_cancelled() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   w:
@@ -186,9 +187,9 @@ jobs:
         if: cancelled()
         run: echo never-ran
     runs-on: ubuntu-latest
-"#;
+";
     let graph = lower_ok(text);
-    let (report, _) = run_host_then_cancel(graph, "between-steps", "w/step-1").await;
+    let (report, ()) = run_host_then_cancel(graph, "between-steps", "w/step-1").await;
     assert_eq!(report.status, RunStatus::Cancelled);
     assert!(
         log_lines(&report).contains(&"witness-ran".to_string()),
@@ -233,7 +234,7 @@ jobs:
       - run: echo "saw ${{ needs.main.result }} with ${{ needs.main.outputs.artifact }}"
 "#;
     let graph = lower_ok(text);
-    let (report, _) = run_host_then_cancel(graph, "summaries", "main/slow").await;
+    let (report, ()) = run_host_then_cancel(graph, "summaries", "main/slow").await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
     assert!(
@@ -262,7 +263,7 @@ jobs:
 /// composite's inlined steps record `Cancelled`.
 #[tokio::test]
 async fn composite_cleanup_runs_after_a_cancel() {
-    let sweeper = r#"
+    let sweeper = r"
 runs:
   using: composite
   steps:
@@ -270,15 +271,15 @@ runs:
       run: echo sweeping-1
     - shell: bash
       run: echo sweeping-2
-"#;
-    let echoer = r#"
+";
+    let echoer = r"
 runs:
   using: composite
   steps:
     - shell: bash
       run: echo plain-ran
-"#;
-    let text = r#"
+";
+    let text = r"
 on: push
 jobs:
   j:
@@ -294,13 +295,13 @@ jobs:
       - id: sweep2
         if: cancelled()
         uses: ./.github/actions/echoer
-"#;
+";
     let files = files(&[
         (".github/actions/sweeper/action.yml", sweeper),
         (".github/actions/echoer/action.yml", echoer),
     ]);
     let graph = lower_ok_with(text, &files);
-    let (report, _) = run_host_then_cancel(graph, "composite-cleanup", "j/slow").await;
+    let (report, ()) = run_host_then_cancel(graph, "composite-cleanup", "j/slow").await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
     let lines = log_lines(&report);
@@ -378,7 +379,7 @@ jobs:
 /// Job-level status functions read the needed jobs' summaries.
 #[tokio::test]
 async fn job_level_status_functions_read_needs() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   build:
@@ -408,7 +409,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo never
-"#;
+";
     let graph = lower_ok(text).with_param("github", json!({"event_name": "push"}));
     let report = run_host(graph, "job-status").await;
     assert_eq!(report.status, RunStatus::Failed);
@@ -685,14 +686,14 @@ jobs:
         env:
           KEY: ${{ secrets.deploy_key }}
 "#;
-    let caller = r#"
+    let caller = r"
 on: push
 jobs:
   ship:
     uses: ./.github/workflows/inner.yml
     secrets:
       deploy_key: ${{ secrets.REAL_KEY }}
-"#;
+";
     let files = files(&[(".github/workflows/inner.yml", callee)]);
     let graph = lower_ok_with(caller, &files);
     let encoded = serde_json::to_string(&graph).unwrap();
@@ -1023,7 +1024,7 @@ async fn hashfiles_conditions_read_the_workspace() {
     if !tool_ready("node") {
         return;
     }
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -1036,7 +1037,7 @@ jobs:
       - id: without_lock
         if: hashFiles('nope.lock') != ''
         run: echo no-lock
-"#;
+";
     let graph = lower_ok(text);
     let report = run_host(graph, "hashfiles-if").await;
     assert_eq!(
@@ -1162,10 +1163,7 @@ async fn step_config_reads_the_step_environment_in_a_container() {
     }
     let text = STEP_ENV_CONFIG_WORKFLOW.replace(
         "    runs-on: ubuntu-latest\n",
-        &format!(
-            "    runs-on: ubuntu-latest\n    container: {}\n",
-            acceptance::runs::RUNNER_IMAGE_2404
-        ),
+        &format!("    runs-on: ubuntu-latest\n    container: {RUNNER_IMAGE_2404}\n"),
     );
     let graph = lower_ok(&text);
     let report = run_host(graph, "env-config-boxed").await;
@@ -1177,7 +1175,7 @@ async fn step_config_reads_the_step_environment_in_a_container() {
 /// secret at spawn, step-side, so nothing of it reaches the log.
 #[tokio::test]
 async fn a_secret_passed_through_env_gates_a_step() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   j:
@@ -1191,7 +1189,7 @@ jobs:
       - id: absent
         if: env.NOT_SET != ''
         run: echo never
-"#;
+";
     let graph = lower_ok(text);
     let report =
         run_host_with_secrets(graph, "secret-env-if", &[("DEPLOY_TOKEN", "t0ps3cret")]).await;

@@ -1,15 +1,18 @@
 //! A job's scope: `runs-on` placement and `container`, and the environment
 //! GitHub gives every step of the job.
 
+use std::mem;
+
 use frontend::diag::Span;
-use frontend::yaml::Node;
+use frontend::yaml::{Mapping, Node};
 use ir::{ExprOrValue, RuntimeSpec, Scope, ScopeId, Value};
 use serde_json::json;
 use smol_str::SmolStr;
 
 use super::{EnvValue, Lowering};
 use crate::model::{Job, Workflow};
-use crate::runs_on;
+use crate::runners::{self, LabelClass};
+use crate::{exprs, runs_on};
 
 /// The job container's `env:` entries, when the job has a container mapping.
 /// Read here for the scope and again by `job_body`'s secret scan, so a secret
@@ -35,7 +38,7 @@ pub(super) fn scope_env<'x>(wf: &Workflow<'x>, job: &Job<'x>) -> Vec<(String, No
     entries
 }
 
-impl<'w, 'a> Lowering<'w, 'a> {
+impl<'a> Lowering<'_, 'a> {
     pub(super) fn scope_for(&mut self, job: &Job<'a>) -> ScopeId {
         let mut scope = Scope::new(ScopeId::new(0));
         scope.runtime = self.runtime_for(job);
@@ -109,11 +112,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 Some(EnvValue::Plain(v)) => {
                     scope.env.insert(SmolStr::new(&key), v);
                 }
-                Some(EnvValue::Secret(_)) => {
-                    // Recorded in job_body via the same lookup; nothing to do
-                    // here.
+                Some(EnvValue::Secret(_)) | None => {
+                    // A secret is recorded in job_body via the same lookup, and
+                    // a value that did not lower already reported itself.
                 }
-                None => {}
             }
         }
         self.b.add_scope(scope)
@@ -204,7 +206,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             match image_node.and_then(|n| n.as_str().map(|s| (s.to_string(), n.span()))) {
                 Some((text, span)) => {
                     if let Some(image) = self.static_scope_text(&text, span, "container image") {
-                        let requirements = std::mem::take(&mut spec.requirements);
+                        let requirements = mem::take(&mut spec.requirements);
                         spec = RuntimeSpec::container(&image);
                         spec.requirements = requirements;
                         if let ir::RuntimeTarget::Container {
@@ -305,23 +307,22 @@ impl<'w, 'a> Lowering<'w, 'a> {
             return None;
         };
         let mut field = |key: &str| -> Option<(String, Span)> {
-            match m.get(key) {
-                Some(n) => n.as_str().map(|s| (s.to_string(), n.span())),
-                None => {
-                    self.diags.error(
-                        "gha.bad_container",
-                        node.span(),
-                        format!("`{what}` credentials need `{key}`"),
-                    );
-                    None
-                }
+            if let Some(n) = m.get(key) {
+                n.as_str().map(|s| (s.to_string(), n.span()))
+            } else {
+                self.diags.error(
+                    "gha.bad_container",
+                    node.span(),
+                    format!("`{what}` credentials need `{key}`"),
+                );
+                None
             }
         };
         let (username_text, username_span) = field("username")?;
         let (password_text, password_span) = field("password")?;
         let username =
             self.static_scope_text(&username_text, username_span, "registry username")?;
-        let Some(password_secret) = crate::exprs::whole_value_secret(&password_text) else {
+        let Some(password_secret) = exprs::whole_value_secret(&password_text) else {
             self.diags.unsupported(
                 "container.credentials",
                 password_span,
@@ -390,7 +391,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     .get("env")
                     .and_then(|e| e.as_mapping())
                     .iter()
-                    .flat_map(|em| em.iter())
+                    .flat_map(Mapping::iter)
                 {
                     match self.env_value(&value, &site, false) {
                         Some(EnvValue::Plain(v)) => {
@@ -431,23 +432,21 @@ impl<'w, 'a> Lowering<'w, 'a> {
             } else {
                 None
             };
-            match image.and_then(|i| i.as_str().map(|s| (s.to_string(), i.span()))) {
-                Some((text, span)) => {
-                    let what = format!("service `{alias}` image");
-                    let Some(image) = self.static_scope_text(&text, span, &what) else {
-                        continue;
-                    };
-                    service.image = SmolStr::new(image);
-                }
-                None => {
-                    self.diags.error(
-                        "gha.bad_service",
-                        spec.span(),
-                        format!("service `{alias}` needs an `image`"),
-                    );
-                    continue;
-                }
-            }
+            let Some((text, span)) =
+                image.and_then(|i| i.as_str().map(|s| (s.to_string(), i.span())))
+            else {
+                self.diags.error(
+                    "gha.bad_service",
+                    spec.span(),
+                    format!("service `{alias}` needs an `image`"),
+                );
+                continue;
+            };
+            let what = format!("service `{alias}` image");
+            let Some(image) = self.static_scope_text(&text, span, &what) else {
+                continue;
+            };
+            service.image = SmolStr::new(image);
             services.push(service);
         }
         services
@@ -536,14 +535,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
             leg.map(|l| format!(" (matrix leg {l})"))
                 .unwrap_or_default()
         };
-        match crate::runners::classify(label) {
-            crate::runners::LabelClass::Windows => self.diags.unsupported(
+        match runners::classify(label) {
+            LabelClass::Windows => self.diags.unsupported(
                 "runs_on.windows",
                 span,
                 format!("`runs-on: {label}`{}", place()),
                 "Windows runners are out of scope; the local executor emulates Linux runners",
             ),
-            crate::runners::LabelClass::MacOs => self.diags.unsupported(
+            LabelClass::MacOs => self.diags.unsupported(
                 "runs_on.macos",
                 span,
                 format!("`runs-on: {label}`{}", place()),
@@ -551,8 +550,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
             ),
             // Named Linux by its own tokens: the environment the local executor
             // stands in for, config not required.
-            crate::runners::LabelClass::Linux => {}
-            crate::runners::LabelClass::Opaque => {
+            LabelClass::Linux => {}
+            LabelClass::Opaque => {
                 if !self.runners.knows(label) {
                     let configured = self.runners.configured();
                     self.diags.unsupported(

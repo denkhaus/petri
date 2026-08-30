@@ -30,29 +30,32 @@ mod index;
 mod store;
 mod token;
 
-use std::io;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::JoinHandle;
+use std::thread::{Builder, JoinHandle};
+use std::{env, io};
+
+use tokio::sync::oneshot;
 
 /// The persistent store root — the host-scoped half of the object world: the
 /// cache entries and the tool cache, owned by one root so one component prunes
 /// them. `$PETRI_STORE` overrides; the default rides the same platform
 /// convention as the action cache (`$XDG_CACHE_HOME`, else `~/.cache`).
 pub fn default_store_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("PETRI_STORE") {
+    if let Some(dir) = env::var_os("PETRI_STORE") {
         return PathBuf::from(dir);
     }
-    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
         return PathBuf::from(xdg).join("petri").join("store");
     }
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = env::var_os("HOME") {
         return PathBuf::from(home)
             .join(".cache")
             .join("petri")
             .join("store");
     }
-    std::env::temp_dir().join("petri-store")
+    env::temp_dir().join("petri-store")
 }
 
 /// The cache half of a store root — where [`ObjectService::start`] expects its
@@ -65,14 +68,14 @@ pub fn cache_dir(store: &Path) -> PathBuf {
 /// The tool-cache half of a store root, for this machine's OS. The toolkit's
 /// own layout has no OS segment, so the store splits per OS above it.
 pub fn tool_cache_dir(store: &Path) -> PathBuf {
-    store.join("toolcache").join(std::env::consts::OS)
+    store.join("toolcache").join(env::consts::OS)
 }
 
 /// A running object service: listener, token, stores. Drop tears it down.
 pub struct ObjectService {
     port:     u16,
     token:    String,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<oneshot::Sender<()>>,
     thread:   Option<JoinHandle<()>>,
 }
 
@@ -81,13 +84,13 @@ impl ObjectService {
     /// under `artifacts` (run-scoped; created if absent, reopened on resume),
     /// the cache store under `cache` (host-scoped, shared across runs).
     pub fn start(artifacts: PathBuf, cache: PathBuf) -> io::Result<Self> {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0))?;
+        let listener = TcpListener::bind(("0.0.0.0", 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let backend = Arc::new(http::Backend::new(artifacts, cache, port)?);
         let token = backend.token().to_string();
-        let (shutdown, rx) = tokio::sync::oneshot::channel();
-        let thread = std::thread::Builder::new()
+        let (shutdown, rx) = oneshot::channel();
+        let thread = Builder::new()
             .name("petri-objects".into())
             .spawn(move || http::serve(listener, backend, rx))?;
         Ok(Self {

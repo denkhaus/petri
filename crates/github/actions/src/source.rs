@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, Weak};
+use std::{env, fs};
 
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 use smol_str::SmolStr;
@@ -38,6 +39,7 @@ impl GitActionSource {
     }
 
     /// Where `owner/repo` is found: `<base>/owner/repo`.
+    #[must_use]
     pub fn with_remote_base(mut self, base: impl Into<String>) -> Self {
         self.remote_base = base.into();
         self
@@ -86,7 +88,7 @@ impl GitActionSource {
             .map_err(|e| fetch_error(reference, e.to_string()))?;
         let dir = self.bare_dir(reference);
         if !dir.join("HEAD").is_file() {
-            std::fs::create_dir_all(&dir).map_err(|e| fetch_error(reference, e.to_string()))?;
+            fs::create_dir_all(&dir).map_err(|e| fetch_error(reference, e.to_string()))?;
             git(&["init", "--bare", "-q"], Some(&dir)).map_err(|e| fetch_error(reference, e))?;
         }
         Ok(dir)
@@ -312,14 +314,12 @@ impl ActionTreeSource for GitActionSource {
         let dir = self.tree_entry_dir(pinned);
         let complete = dir.with_extension("complete");
         if !complete.is_file() || !dir.is_dir() {
-            let _ = std::fs::remove_file(&complete);
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
+            let _ = fs::remove_file(&complete);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
             extract(&bare, pinned.sha.as_str(), &dir)
                 .map_err(|e| fetch_error(&pinned.reference, e))?;
-            std::fs::write(&complete, b"")
-                .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
+            fs::write(&complete, b"").map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
         }
         Ok(dir)
     }
@@ -367,16 +367,16 @@ fn extract(bare: &Path, sha: &str, dir: &Path) -> Result<(), String> {
 /// Where fetched actions live between runs: `$PETRI_CACHE_DIR`, else
 /// `$XDG_CACHE_HOME/petri`, else `~/.cache/petri`, else under the temp dir.
 pub fn default_cache_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("PETRI_CACHE_DIR") {
+    if let Some(dir) = env::var_os("PETRI_CACHE_DIR") {
         return PathBuf::from(dir);
     }
-    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
         return PathBuf::from(xdg).join("petri");
     }
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = env::var_os("HOME") {
         return PathBuf::from(home).join(".cache").join("petri");
     }
-    std::env::temp_dir().join("petri-cache")
+    env::temp_dir().join("petri-cache")
 }
 
 #[cfg(test)]

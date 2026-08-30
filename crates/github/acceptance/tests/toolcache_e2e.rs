@@ -7,6 +7,7 @@
 mod support;
 
 use std::path::PathBuf;
+use std::{env, fs, process};
 
 use acceptance::runs::RUNNER_IMAGE_2404;
 use github_actions::ToolCacheCap;
@@ -45,10 +46,10 @@ fn tool_cache_line(report: &RunReportPlus) -> String {
 /// workspace stays out of the picture.
 #[tokio::test(flavor = "multi_thread")]
 async fn host_jobs_use_the_persistent_tool_cache() {
-    let store = std::env::temp_dir()
+    let store = env::temp_dir()
         .join("petri-toolcache-e2e")
-        .join(format!("store-{}", std::process::id()));
-    std::fs::create_dir_all(&store).expect("create the store");
+        .join(format!("store-{}", process::id()));
+    fs::create_dir_all(&store).expect("create the store");
     let graph = lower_ok(&workflow(None));
     let report = run_host_with(graph, "toolcache-host", |rt| {
         rt.capability(ToolCacheCap(PathBuf::from(&store)))
@@ -58,7 +59,7 @@ async fn host_jobs_use_the_persistent_tool_cache() {
         tool_cache_line(&report),
         format!("tool-cache={}", store.display())
     );
-    let _ = std::fs::remove_dir_all(&store);
+    let _ = fs::remove_dir_all(&store);
 }
 
 /// A runner image that ships a populated tool cache keeps it: the image's env

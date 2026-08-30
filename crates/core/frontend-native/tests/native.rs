@@ -5,6 +5,10 @@ use frontend::Severity;
 use frontend_native::load;
 use ir::JoinPolicy;
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a failing test needs the lowering diagnostics on stderr to be readable"
+)]
 fn lower_ok(text: &str) -> ir::Graph {
     let lowered = load("test.yml", text);
     for d in lowered.diagnostics.iter() {
@@ -62,7 +66,7 @@ fn a_cycle_with_xor_routing_and_an_any_join_lowers() {
 #[test]
 fn an_all_loop_head_gets_the_hinted_diagnostic() {
     let diags = diagnostics(
-        r#"
+        r"
 nodes:
   start:
     run: echo go
@@ -84,7 +88,7 @@ nodes:
       - to: done
   done:
     run: echo done
-"#,
+",
     );
     let error = diags
         .iter()
@@ -103,7 +107,7 @@ nodes:
 #[test]
 fn quorum_one_on_a_loop_head_is_normalized_to_any() {
     let graph = lower_ok(
-        r#"
+        r"
 nodes:
   start:
     run: echo go
@@ -119,7 +123,7 @@ nodes:
       - to: done
   done:
     run: echo done
-"#,
+",
     );
     let head = graph.nodes.iter().find(|n| n.name == "head").unwrap();
     assert_eq!(head.join, JoinPolicy::Any);
@@ -156,7 +160,7 @@ nodes:
 #[test]
 fn sequential_for_each_desugars_to_the_documented_cycle() {
     let graph = lower_ok(
-        r#"
+        r"
 nodes:
   plan:
     run: echo plan
@@ -170,7 +174,7 @@ nodes:
     next: report
   report:
     run: echo done
-"#,
+",
     );
     let plan = graph.nodes.iter().find(|n| n.name == "plan").unwrap();
     let deploy = graph.nodes.iter().find(|n| n.name == "deploy").unwrap();
@@ -195,7 +199,7 @@ nodes:
 #[test]
 fn parallel_for_each_becomes_an_expansion() {
     let graph = lower_ok(
-        r#"
+        r"
 nodes:
   plan:
     run: echo plan
@@ -210,7 +214,7 @@ nodes:
   report:
     join: all
     run: echo done
-"#,
+",
     );
     let deploy = graph.nodes.iter().find(|n| n.name == "deploy").unwrap();
     match &deploy.expand {
@@ -231,14 +235,14 @@ nodes:
 #[test]
 fn unknown_bindings_and_keys_are_errors_with_hints() {
     let diags = diagnostics(
-        r#"
+        r"
 nodes:
   a:
     run: echo ${{ github.sha }}
     nxt: b
   b:
     run: echo b
-"#,
+",
     );
     let binding = diags
         .iter()

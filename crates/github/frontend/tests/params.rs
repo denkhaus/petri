@@ -4,6 +4,7 @@
 //! the fixed values, so a run without a checkout still has a full identity.
 
 use std::path::PathBuf;
+use std::{env, fs, process};
 
 use frontend::Frontend;
 use frontend_gha::GitHubActions;
@@ -14,24 +15,24 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir()
+        let dir = env::temp_dir()
             .join("petri-params")
-            .join(format!("{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create the scratch dir");
+            .join(format!("{label}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create the scratch dir");
         Self(dir)
     }
 
     fn write(&self, relative: &str, contents: &str) {
         let path = self.0.join(relative);
-        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create parents");
-        std::fs::write(path, contents).expect("write the fixture");
+        fs::create_dir_all(path.parent().expect("a parent")).expect("create parents");
+        fs::write(path, contents).expect("write the fixture");
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

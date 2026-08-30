@@ -19,6 +19,7 @@ mod model;
 
 use std::path::Path;
 
+use frontend::yaml::Document;
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 pub use lower::lower;
 pub use model::KNOWN_BINDINGS;
@@ -27,7 +28,7 @@ pub use model::KNOWN_BINDINGS;
 /// diagnostics out.
 pub fn load(file: &str, text: &str) -> Lowered {
     let mut diags = Diagnostics::new();
-    let Some(doc) = frontend::yaml::Document::parse(file, text, &mut diags) else {
+    let Some(doc) = Document::parse(file, text, &mut diags) else {
         return Lowered::rejected(diags);
     };
     lower(&doc, diags)
@@ -38,6 +39,10 @@ pub fn load(file: &str, text: &str) -> Lowered {
 pub struct Native;
 
 impl Frontend for Native {
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the trait fixes this signature; an impl cannot widen the returned lifetime"
+    )]
     fn name(&self) -> &str {
         "native"
     }

@@ -8,7 +8,7 @@
 //! in `ir::expr::BUILTINS` first, so it cannot produce a call the engine will
 //! not take.
 
-use ir::{BinOp, ExprId, ExprTable, UnOp};
+use ir::{BinOp, ExprId, ExprTable, UnOp, expr as ir_expr};
 use serde_json::Value;
 
 use super::ast::{BinaryOp, Expr, Literal, UnaryOp};
@@ -78,6 +78,10 @@ pub fn literal_value(lit: &Literal) -> Value {
     match lit {
         Literal::Null => Value::Null,
         Literal::Bool(b) => Value::Bool(*b),
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the guard proves the number is integral and inside i64's range"
+        )]
         Literal::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 9.0e15 {
                 Value::from(*n as i64)
@@ -91,7 +95,7 @@ pub fn literal_value(lit: &Literal) -> Value {
 
 fn check_builtin(name: &str, got: usize) -> Result<(), LowerError> {
     let spec =
-        ir::expr::builtin(name).ok_or_else(|| LowerError::UnknownFunction(name.to_string()))?;
+        ir_expr::builtin(name).ok_or_else(|| LowerError::UnknownFunction(name.to_string()))?;
     if spec.arity != got {
         return Err(LowerError::Arity {
             name: name.to_string(),

@@ -24,9 +24,11 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{borrow, mem};
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
@@ -37,13 +39,17 @@ use frontend_gha::exprs::{
     secret_sentinel, unescape_sentinel_text,
 };
 use ir::{LogStream, Outcome, StepEvent, Value};
+use serde::de::DeserializeOwned;
 use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{ProcessConfig, ProcessStep, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time;
 
 use crate::commands::{CommandEffects, CommandSink};
 use crate::config::try_map_process_texts;
+use crate::hashfiles;
 
 /// The runner's own directory, relative to the workspace root.
 pub const RUNNER_DIR: &str = ".ci/github";
@@ -83,7 +89,7 @@ pub struct Session {
     /// The host's persistent tool cache, when the host registered one
     /// ([`crate::ToolCacheCap`]): [`resolved_tool_cache`] points steps at it
     /// where this environment's filesystem has it.
-    tool_cache: Option<std::path::PathBuf>,
+    tool_cache: Option<PathBuf>,
 }
 
 /// What the step left behind, for the step kind to fold into its outcome.
@@ -225,7 +231,7 @@ impl Session {
         let event_bytes = serde_json::to_vec(&event).unwrap_or_else(|_| b"{}".to_vec());
         let temp_keep = Path::new(TEMP_DIR).join(".keep");
         let tool_keep = Path::new(TOOL_CACHE_DIR).join(".keep");
-        let (_, _, _, job_env, job_path) = tokio::try_join!(
+        let ((), (), (), job_env, job_path) = tokio::try_join!(
             write(&*env, Path::new(EVENT_FILE), &event_bytes),
             write(&*env, &temp_keep, b""),
             write(&*env, &tool_keep, b""),
@@ -382,7 +388,7 @@ impl Session {
                 .map(|p| shell_quote(p))
                 .collect::<Vec<_>>()
                 .join(":");
-            out.push_str(&format!("export PATH={joined}:\"$PATH\"\n"));
+            let _ = writeln!(out, "export PATH={joined}:\"$PATH\"");
         }
         // A runner image that ships a Docker engine leaves its daemon stopped
         // (containers get no init to supervise one) and provides a
@@ -441,13 +447,16 @@ impl Session {
     ) -> (Outcome, Effects) {
         // `hashFiles` sentinels first: the hash is computed in the job
         // environment against the workspace, before any secret enters the config.
-        let process =
-            match crate::hashfiles::resolve_hashfiles(process, &*ctx.env, &self.github_workspace())
-                .await
-            {
-                Ok(process) => process,
-                Err(failure) => return (failure.into(), Effects::default()),
-            };
+        let process = match hashfiles::resolve_hashfiles(
+            process,
+            &*ctx.env,
+            &self.github_workspace(),
+        )
+        .await
+        {
+            Ok(process) => process,
+            Err(failure) => return (failure.into(), Effects::default()),
+        };
         // The tool cache, from the config as it will execute (the hashes are
         // already spliced; a path sentinel in the configured value resolves
         // inside), then substituted and exported in one breath.
@@ -620,7 +629,7 @@ impl Session {
 pub(crate) fn forward_lines(
     lines: Option<executor::LineStream>,
     sink: mpsc::Sender<StepEvent>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<JoinHandle<()>> {
     lines.map(|mut lines| {
         tokio::spawn(async move {
             while let Some(line) = lines.recv().await {
@@ -642,17 +651,14 @@ pub(crate) fn forward_lines(
 /// Join the command sink and take what it collected; a sink that will not stop
 /// is abandoned rather than waited on forever.
 pub(crate) async fn settle_sink(
-    mut sink_task: tokio::task::JoinHandle<()>,
+    mut sink_task: JoinHandle<()>,
     collected: &Arc<Mutex<CommandEffects>>,
 ) -> CommandEffects {
-    if tokio::time::timeout(SINK_LIMIT, &mut sink_task)
-        .await
-        .is_err()
-    {
+    if time::timeout(SINK_LIMIT, &mut sink_task).await.is_err() {
         sink_task.abort();
         let _ = sink_task.await;
     }
-    std::mem::take(&mut *collected.lock().expect("effects are not poisoned"))
+    mem::take(&mut *collected.lock().expect("effects are not poisoned"))
 }
 
 /// Resolve the secret sentinels in one text, from the run's provider — which
@@ -695,26 +701,25 @@ fn resolve_workspace_sentinels(
     runner_temp: &str,
     tool_cache: &str,
 ) -> ProcessConfig {
-    let infallible: Result<(), std::convert::Infallible> =
-        try_map_process_texts(&mut process, |text| {
-            let ws = has_workspace_sentinel(text);
-            let temp = has_runner_temp_sentinel(text);
-            let tool = has_runner_tool_cache_sentinel(text);
-            if !ws && !temp && !tool {
-                return Ok(None);
-            }
-            let mut out = text.to_string();
-            if ws {
-                out = replace_workspace_sentinels(&out, workspace);
-            }
-            if temp {
-                out = replace_runner_temp_sentinels(&out, runner_temp);
-            }
-            if tool {
-                out = replace_runner_tool_cache_sentinels(&out, tool_cache);
-            }
-            Ok(Some(out))
-        });
+    let infallible: Result<(), Infallible> = try_map_process_texts(&mut process, |text| {
+        let ws = has_workspace_sentinel(text);
+        let temp = has_runner_temp_sentinel(text);
+        let tool = has_runner_tool_cache_sentinel(text);
+        if !ws && !temp && !tool {
+            return Ok(None);
+        }
+        let mut out = text.to_string();
+        if ws {
+            out = replace_workspace_sentinels(&out, workspace);
+        }
+        if temp {
+            out = replace_runner_temp_sentinels(&out, runner_temp);
+        }
+        if tool {
+            out = replace_runner_tool_cache_sentinels(&out, tool_cache);
+        }
+        Ok(Some(out))
+    });
     let _ = infallible;
     process
 }
@@ -723,7 +728,7 @@ fn resolve_workspace_sentinels(
 /// the `env` context's lookups are.
 pub(crate) fn ci_get<'m, K, V>(map: &'m BTreeMap<K, V>, name: &str) -> Option<&'m V>
 where
-    K: std::borrow::Borrow<str> + Ord,
+    K: borrow::Borrow<str> + Ord,
 {
     if let Some(value) = map.get(name) {
         return Some(value);
@@ -881,7 +886,7 @@ async fn read_text(env: &dyn ExecEnv, relative: &Path) -> Result<String, StepFai
         .unwrap_or_default())
 }
 
-async fn read_json<T: serde::de::DeserializeOwned>(
+async fn read_json<T: DeserializeOwned>(
     env: &dyn ExecEnv,
     relative: &Path,
 ) -> Result<Option<T>, StepFailure> {
@@ -932,6 +937,8 @@ mod tests {
 
     #[test]
     fn the_tool_cache_resolution_orders_its_defaults() {
+        use frontend_gha::exprs::RUNNER_TEMP_SENTINEL;
+
         let store = Path::new("/store/toolcache");
         let none: BTreeMap<SmolStr, ValueOrSecretRef> = BTreeMap::new();
         let no_job: BTreeMap<String, String> = BTreeMap::new();
@@ -958,10 +965,7 @@ mod tests {
         assert_eq!(cache(&none, &job, Some("/opt/tc"), None), "/job/tc");
         let config: BTreeMap<SmolStr, ValueOrSecretRef> = [(
             SmolStr::new("RUNNER_TOOL_CACHE"),
-            ValueOrSecretRef::Literal(Value::String(format!(
-                "{}/tc",
-                frontend_gha::exprs::RUNNER_TEMP_SENTINEL
-            ))),
+            ValueOrSecretRef::Literal(Value::String(format!("{RUNNER_TEMP_SENTINEL}/tc"))),
         )]
         .into();
         assert_eq!(

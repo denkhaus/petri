@@ -5,6 +5,10 @@
 use frontend::NoFiles;
 use frontend_gha::load;
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a failing test needs the lowering diagnostics on stderr to be readable"
+)]
 fn lower(text: &str) -> frontend::Lowered {
     let lowered = load(".github/workflows/ci.yml", text, &NoFiles);
     for d in lowered.diagnostics.iter() {
@@ -15,7 +19,7 @@ fn lower(text: &str) -> frontend::Lowered {
 
 #[test]
 fn services_land_on_the_scope() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   test:
@@ -33,7 +37,7 @@ jobs:
           --health-interval 10s
     steps:
       - run: echo hi
-"#;
+";
     let graph = lower(text).graph.expect("lowers");
     let scope = graph
         .scopes
@@ -59,7 +63,7 @@ jobs:
 
 #[test]
 fn an_expression_image_is_rejected_specifically() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   test:
@@ -72,7 +76,7 @@ jobs:
         image: postgres:${{ matrix.version }}-alpine
     steps:
       - run: echo hi
-"#;
+";
     let lowered = lower(text);
     assert!(lowered.graph.is_none());
     assert!(
@@ -87,7 +91,7 @@ jobs:
 
 #[test]
 fn a_secret_service_env_is_rejected_specifically() {
-    let text = r#"
+    let text = r"
 on: push
 jobs:
   test:
@@ -99,7 +103,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
     steps:
       - run: echo hi
-"#;
+";
     let lowered = lower(text);
     assert!(lowered.graph.is_none());
     assert!(
