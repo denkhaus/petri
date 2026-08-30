@@ -314,20 +314,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Some(from) = state_from {
             config.insert("state".into(), self.state_config(site, from));
         }
-        if let Some(coe) = step.continue_on_error {
-            match coe.as_scalar().and_then(|s| s.as_bool()) {
-                Some(true) => {
-                    config.insert("soft_fail".into(), json!(true));
-                }
-                Some(false) => {}
-                None if phase == Phase::Main => self.diags.unsupported(
-                    "continue_on_error.expression",
-                    coe.span(),
-                    "an expression-valued `continue-on-error`",
-                    "use a literal true or false",
-                ),
-                None => {}
-            }
+        if let Some(v) =
+            self.soft_fail_value(step.continue_on_error, &step_site, phase != Phase::Main)
+        {
+            config.insert("soft_fail".into(), v);
         }
 
         let id = self.b.add_node(
@@ -483,20 +473,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Some(from) = state_from {
             config.insert("state".into(), self.state_config(site, from));
         }
-        if let Some(coe) = step.continue_on_error {
-            match coe.as_scalar().and_then(|s| s.as_bool()) {
-                Some(true) => {
-                    config.insert("soft_fail".into(), json!(true));
-                }
-                Some(false) => {}
-                None if phase == Phase::Main => self.diags.unsupported(
-                    "continue_on_error.expression",
-                    coe.span(),
-                    "an expression-valued `continue-on-error`",
-                    "use a literal true or false",
-                ),
-                None => {}
-            }
+        if let Some(v) =
+            self.soft_fail_value(step.continue_on_error, &step_site, phase != Phase::Main)
+        {
+            config.insert("soft_fail".into(), v);
         }
 
         let id = self.b.add_node(
@@ -718,12 +698,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let Some(path) = path {
             config.insert("path".into(), json!(path));
         }
-        if step
-            .continue_on_error
-            .and_then(|coe| coe.as_scalar().and_then(|s| s.as_bool()))
-            == Some(true)
-        {
-            config.insert("soft_fail".into(), json!(true));
+        if let Some(v) = self.soft_fail_value(step.continue_on_error, &step_site, false) {
+            config.insert("soft_fail".into(), v);
         }
         let id = self.b.add_node(
             &node_name,

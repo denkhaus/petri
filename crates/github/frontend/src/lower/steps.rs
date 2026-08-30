@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use frontend::diag::Span;
+use frontend::diag::{Diagnostics, Span};
 use frontend::expr::parse;
 use frontend::yaml::Node;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
@@ -11,7 +11,7 @@ use ir::{BinOp, Budget, ExprId, ExprOrValue, NodeId, ScopeId, StepRef, Value};
 use serde_json::{Map, json};
 
 use crate::action::RUN_KIND;
-use crate::exprs::{SEP, Site, config_value, lower_scalar};
+use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar};
 use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, Step};
 
@@ -139,19 +139,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
 
         // continue-on-error → soft_fail.
-        if let Some(coe) = step.continue_on_error {
-            match coe.as_scalar().and_then(|s| s.as_bool()) {
-                Some(true) => {
-                    config.insert("soft_fail".into(), json!(true));
-                }
-                Some(false) => {}
-                None => self.diags.unsupported(
-                    "continue_on_error.expression",
-                    coe.span(),
-                    "an expression-valued `continue-on-error`",
-                    "use a literal true or false",
-                ),
-            }
+        if let Some(v) = self.soft_fail_value(step.continue_on_error, &step_site, false) {
+            config.insert("soft_fail".into(), v);
         }
         if !env_config.is_empty() {
             config.insert("env".into(), Value::Object(env_config));
@@ -167,6 +156,73 @@ impl<'w, 'a> Lowering<'w, 'a> {
         self.set_step_budget(id, job, step);
         self.gate_main_node(id, step, &step_site);
         vec![id]
+    }
+
+    /// `continue-on-error` → the step's `soft_fail` config value. A literal
+    /// bool stays literal. An expression lowers and resolves when the step
+    /// fires — GitHub evaluates it at step time, so `matrix.*` and `steps.*`
+    /// are visible per leg — wrapped in `loose_truthy` so the resolved value
+    /// is always a bool for the step's `SoftFail`. `quiet` suppresses
+    /// diagnostics where a lifecycle phase repeats the main phase's value.
+    pub(super) fn soft_fail_value(
+        &mut self,
+        coe: Option<Node<'_>>,
+        site: &Site,
+        quiet: bool,
+    ) -> Option<Value> {
+        let coe = coe?;
+        if let Some(b) = coe.as_scalar().and_then(|s| s.as_bool()) {
+            return b.then(|| json!(true));
+        }
+        let Some(text) = coe.as_str() else {
+            if !quiet {
+                self.diags.unsupported(
+                    "continue_on_error.expression",
+                    coe.span(),
+                    "a non-boolean `continue-on-error`",
+                    "use a boolean, or an expression evaluating to one",
+                );
+            }
+            return None;
+        };
+        let mut scratch = Diagnostics::new();
+        let lowered = {
+            let diags = if quiet { &mut scratch } else { &mut self.diags };
+            lower_scalar(text, coe.span(), site, true, false, self.b.exprs(), diags)?
+        };
+        match lowered {
+            LoweredScalar::Expr(id) => {
+                let t = self.b.exprs();
+                let truthy = t.call("loose_truthy", vec![id]);
+                Some(json!({ EXPR_PLACEHOLDER_KEY: truthy.raw() }))
+            }
+            LoweredScalar::Literal(v) => match v.as_str() {
+                Some("true") => Some(json!(true)),
+                Some("false") | Some("") => None,
+                _ => {
+                    if !quiet {
+                        self.diags.unsupported(
+                            "continue_on_error.expression",
+                            coe.span(),
+                            "a non-boolean `continue-on-error` value",
+                            "use true, false, or an expression evaluating to one",
+                        );
+                    }
+                    None
+                }
+            },
+            LoweredScalar::Secret(_) => {
+                if !quiet {
+                    self.diags.unsupported(
+                        "continue_on_error.expression",
+                        coe.span(),
+                        "a secret-valued `continue-on-error`",
+                        "use a boolean expression",
+                    );
+                }
+                None
+            }
+        }
     }
 
     /// The step's `env:` as config, secrets from the job pushed down first. Step env

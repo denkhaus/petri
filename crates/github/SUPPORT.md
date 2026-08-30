@@ -16,9 +16,11 @@ specific code and a hint. `gha.*` codes are malformed-file errors (a missing
 **Workflow structure.** `jobs`, `needs`, job and step `if:` with the status
 functions (`success`, `failure`, `always`, `cancelled` — cleanup steps really run
 after a cancel), `env` at workflow/job/step level, `defaults.run`, job `outputs`,
-`timeout-minutes`, `continue-on-error` (literal, step and job level — a
-tolerated job's failure reports `success` to its dependents and the run, and
-does not trigger matrix fail-fast, as on GitHub; its steps' own outcomes stay
+`timeout-minutes`, `continue-on-error` (step level: a literal bool or an
+expression, evaluated when the step fires — so `matrix.*` and `steps.*` are
+visible per leg, as on GitHub; job level: literal only — a tolerated job's
+failure reports `success` to its dependents and the run, and does not trigger
+matrix fail-fast, as on GitHub; its steps' own outcomes stay
 as they fell), `strategy.matrix` with
 `include`/`exclude`, `fail-fast` and `max-parallel`. `runs-on: ${{ matrix.os }}`
 — and any `runs-on` over `matrix` values, `inputs` (a literal call site's
@@ -245,7 +247,7 @@ workflow counts in brackets rank the pressure.
 | `container.credentials` | A registry password that is not a `${{ secrets.* }}` reference [0] | Only a secret name may cross into the graph; a computed password would need a resolution seam inside acquire. |
 | `container.ports`, `container.volumes`, `services.secret_env`, `services.volumes` | Container and service corners [0] | Job-container port mappings and volumes name runner-machine resources to map; secret-valued service env needs a resolution point inside acquire. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
-| `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [3] | Evaluate at lowering where the value is static, reject the rest. |
+| `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [0] | Evaluate at lowering where the value is static, reject the rest. Step-level `continue-on-error` expressions resolve at firing now; the code remains for the job level and degenerate values. |
 | `step.background` | Background steps [2] | GitHub shipped these June 2026. |
 | `action.nested_local` | `./` actions inside a fetched composite or called workflow [2] | Stage the fetched repository so relative references resolve. |
 | `job_context` | `job.container` / `job.services` in an expression [0] | Service containers run (above), but their ids, networks and host port mappings are run-time facts the expression environment does not carry yet. Reach a service by its name and declared ports. |

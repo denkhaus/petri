@@ -593,6 +593,53 @@ fn windows_and_macos_runners_are_rejected() {
     }
 }
 
+/// A step's `continue-on-error` may be an expression: it lowers to a
+/// `soft_fail` placeholder the engine resolves when the step fires, per matrix
+/// leg — the cargo audit.yml shape. A literal stays literal, and the job level
+/// stays rejected (the node flag is a lowering-time decision).
+#[test]
+fn step_continue_on_error_expressions_resolve_at_firing() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks: [advisories, bans]
+    steps:
+      - run: echo
+        continue-on-error: ${{ matrix.checks == 'advisories' }}
+      - run: echo
+        continue-on-error: true
+"#;
+    let diags = diagnostics(text);
+    assert!(
+        !diags.iter().any(|d| d.code.starts_with("unsupported.")),
+        "{diags:?}"
+    );
+    let graph = lower_ok(text);
+    let step1 = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "j/step-1")
+        .expect("step-1");
+    let soft_fail = step1.step.config.get("soft_fail").expect("soft_fail set");
+    assert!(
+        soft_fail.get("$expr").is_some(),
+        "an expression-valued continue-on-error is a placeholder: {soft_fail:?}"
+    );
+    let step2 = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "j/step-2")
+        .expect("step-2");
+    assert_eq!(
+        step2.step.config.get("soft_fail"),
+        Some(&serde_json::json!(true))
+    );
+}
+
 /// Job-level `continue-on-error: true`: every node of the job tolerates
 /// failure — the run status and matrix fail-fast pass over it, and the job's
 /// summary reports `success` to dependents, as on GitHub. An expression-valued
