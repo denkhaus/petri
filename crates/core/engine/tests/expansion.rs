@@ -3,6 +3,9 @@
 
 mod support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, CancelScopeId, ExpandTarget, GraphBuilder, JoinPolicy, Outcome, RunStatus, StepRef, Value,
@@ -110,7 +113,7 @@ fn clones_carry_item_and_index_and_the_collector_orders_results() {
     let graph = b.build();
     validate(&graph).expect("valid");
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+    let seen = Rc::new(RefCell::new(Value::Null));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
         "plan" => Outcome::success(json!(["alpha", "beta", "gamma"])),
@@ -237,7 +240,7 @@ fn fail_fast_still_fires_a_marked_collector() {
         .run_on_cancel = true;
     validate(&graph).expect("valid");
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    let seen = Rc::new(RefCell::new(0usize));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
         "plan" => Outcome::success(json!(["a", "b", "c"])),

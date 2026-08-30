@@ -1,14 +1,15 @@
 //! §7: the invariants checked at load. Every check runs, so one call reports
 //! every problem rather than stopping at the first.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::validate::{ValidationError, ValidationLocation, ValidationWarning};
 use ir::{
-    Arm, Budget, Edge, ExpandTarget, Expansion, ExprId, Graph, GraphBuilder, Guard, JoinPolicy,
-    Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef, Value, validate,
-    validate_plan,
+    Arm, Budget, Completion, Edge, ExpandTarget, Expansion, ExprId, ExprTable, Graph, GraphBuilder,
+    Guard, JoinPolicy, Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef,
+    Value, validate, validate_plan,
 };
 use serde_json::json;
 
@@ -318,11 +319,11 @@ fn structural_problems_are_reported() {
                 StepRef::new(NOOP, Value::Null),
             )],
             scopes: vec![Scope::new(ScopeId::new(0))],
-            exprs:  Default::default(),
+            exprs:  ExprTable::default(),
             entry:  vec![],
         },
-        params:     Default::default(),
-        completion: Default::default(),
+        params:     BTreeMap::default(),
+        completion: Completion::default(),
     };
     let found = errors(&graph);
     assert!(
@@ -348,18 +349,19 @@ fn structural_problems_are_reported() {
 /// A step kind that is not registered is reported when a registry is supplied.
 #[test]
 fn unknown_step_kinds_are_reported() {
-    let mut b = GraphBuilder::new();
-    let scope = ScopeId::new(0);
-    b.add_step("a", scope, StepKindId::new("unregistered"));
-    let graph = b.build();
-
-    validate(&graph).expect("valid without a registry");
     struct NoKinds;
     impl ir::StepKinds for NoKinds {
         fn get(&self, _id: &ir::StepKindId) -> Option<&dyn ir::StepKind> {
             None
         }
     }
+
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_step("a", scope, StepKindId::new("unregistered"));
+    let graph = b.build();
+
+    validate(&graph).expect("valid without a registry");
     assert!(
         ir::validate_with(&graph, Some(&NoKinds))
             .expect_err("kind `unregistered` is not registered")

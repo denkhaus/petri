@@ -3,6 +3,9 @@
 
 mod support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ir::{Arm, BinOp, Fallthrough, GraphBuilder, JoinPolicy, Outcome, RunStatus, Value, validate};
 use support::{Harness, NOOP, registry};
 
@@ -167,7 +170,7 @@ fn map_rewrites_the_token_payload() {
     let graph = b.build();
     validate(&graph).expect("valid");
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+    let seen = Rc::new(RefCell::new(Value::Null));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| {
         if info.base == "c" {

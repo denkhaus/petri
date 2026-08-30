@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -66,12 +67,14 @@ impl<S> Edge<S> {
         }
     }
 
+    #[must_use]
     pub fn with_map(mut self, map: ExprId<S>) -> Self {
         self.map = Some(map);
         self
     }
 
     /// Mark this edge as a back edge, so crossing it bumps the generation.
+    #[must_use]
     pub fn as_back(mut self) -> Self {
         self.back = true;
         self
@@ -225,12 +228,12 @@ impl Budget {
 
     /// A node that fires once, with a one-hour ceiling.
     pub fn once() -> Self {
-        Self::new(1, Duration::from_secs(3600))
+        Self::new(1, Duration::from_hours(1))
     }
 
     /// A node inside a loop: capped at `max_firings` iterations.
     pub fn looped(max_firings: u32) -> Self {
-        Self::new(max_firings, Duration::from_secs(3600))
+        Self::new(max_firings, Duration::from_hours(1))
     }
 
     /// Whether the firing cap is finite (invariant 4 for looped nodes).
@@ -284,17 +287,20 @@ impl RetryPolicy {
         }
     }
 
+    #[must_use]
     pub fn with_backoff(mut self, backoff: Backoff) -> Self {
         self.backoff = backoff;
         self
     }
 
+    #[must_use]
     pub fn with_retry_on(mut self, retry_on: RetryOn) -> Self {
         self.retry_on = retry_on;
         self
     }
 
     /// Exhausting the attempts yields `PartialSuccess` instead of failing.
+    #[must_use]
     pub fn accepting_partial(mut self) -> Self {
         self.on_exhaustion = Exhaustion::AcceptPartial;
         self
@@ -327,6 +333,13 @@ impl RetryPolicy {
     /// Computed by repeated multiplication rather than `powi`, so the result is
     /// bit-identical on every replay. The driver adds jitter and does the
     /// waiting; the core never sees a clock or an RNG.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the delay is clamped non-negative and never exceeds the configured cap, \
+                  and a float-to-integer cast saturates, so an out-of-range cap yields the \
+                  longest representable delay rather than a wrapped one"
+    )]
     pub fn base_delay(&self, failed_attempt: Attempt) -> Duration {
         let mut nanos = self.backoff.initial.as_nanos() as f64;
         let cap = self.backoff.max.as_nanos() as f64;
@@ -360,7 +373,7 @@ impl Default for Backoff {
         Self {
             initial: Duration::from_secs(1),
             factor:  2.0,
-            max:     Duration::from_secs(60),
+            max:     Duration::from_mins(1),
             jitter:  true,
         }
     }
@@ -398,6 +411,7 @@ impl RetryOn {
         }
     }
 
+    #[must_use]
     pub fn with_classes(mut self, classes: &[&str]) -> Self {
         self.failure_classes = classes.iter().map(|c| SmolStr::new(*c)).collect();
         self
@@ -509,49 +523,58 @@ impl<S> Node<S> {
         }
     }
 
+    #[must_use]
     pub fn with_join(mut self, join: JoinPolicy) -> Self {
         self.join = join;
         self
     }
 
+    #[must_use]
     pub fn with_precondition(mut self, expr: ExprId<S>) -> Self {
         self.precondition = Some(expr);
         self
     }
 
+    #[must_use]
     pub fn with_routing(mut self, routing: Routing<S>) -> Self {
         self.routing = routing;
         self
     }
 
+    #[must_use]
     pub fn with_budget(mut self, budget: Budget) -> Self {
         self.budget = budget;
         self
     }
 
+    #[must_use]
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
     }
 
     /// Opt in to firing inside a cancelled scope (§5).
+    #[must_use]
     pub fn with_run_on_cancel(mut self) -> Self {
         self.run_on_cancel = true;
         self
     }
 
     /// Grant this node's firings splice authority. The default is `Deny`.
+    #[must_use]
     pub fn with_splice_policy(mut self, policy: SplicePolicy) -> Self {
         self.splice_policy = policy;
         self
     }
 
     /// Attach frontend metadata. The core carries it and never reads it.
+    #[must_use]
     pub fn with_meta(mut self, meta: Value) -> Self {
         self.meta = meta;
         self
     }
 
+    #[must_use]
     pub fn with_expansion(mut self, expand: Expansion<S>) -> Self {
         self.expand = Some(expand);
         self
@@ -675,6 +698,7 @@ impl RuntimeSpec {
     }
 
     /// Attach placement labels a frontend collected.
+    #[must_use]
     pub fn requiring(mut self, labels: &[&str]) -> Self {
         self.requirements = labels.iter().map(|l| SmolStr::new(*l)).collect();
         self
@@ -713,16 +737,19 @@ impl<S> Scope<S> {
         }
     }
 
+    #[must_use]
     pub fn with_env(mut self, key: &str, value: ExprOrValue<S>) -> Self {
         self.env.insert(SmolStr::new(key), value);
         self
     }
 
+    #[must_use]
     pub fn with_runtime(mut self, runtime: RuntimeSpec) -> Self {
         self.runtime = runtime;
         self
     }
 
+    #[must_use]
     pub fn with_workspace(mut self, workspace: WorkspacePolicy) -> Self {
         self.workspace = workspace;
         self
@@ -850,7 +877,7 @@ pub struct Graph<S = Live> {
     pub completion: Completion<S>,
 }
 
-impl<S> std::ops::Deref for Graph<S> {
+impl<S> Deref for Graph<S> {
     type Target = GraphBody<S>;
 
     fn deref(&self) -> &Self::Target {
@@ -858,7 +885,7 @@ impl<S> std::ops::Deref for Graph<S> {
     }
 }
 
-impl<S> std::ops::DerefMut for Graph<S> {
+impl<S> DerefMut for Graph<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.body
     }
@@ -874,6 +901,7 @@ impl<S> Graph<S> {
 
     /// Set a run parameter. Chainable, for hosts filling the graph in before a
     /// run.
+    #[must_use]
     pub fn with_param(mut self, name: &str, value: Value) -> Self {
         self.params.insert(SmolStr::new(name), value);
         self

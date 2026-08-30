@@ -10,6 +10,10 @@
 //! exceeds its uploader's. Both reject loudly as `invalid_splice` — never a
 //! silent clamp.
 
+use std::collections::BTreeSet;
+use std::fmt;
+use std::ops::{Deref, DerefMut};
+
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smol_str::SmolStr;
@@ -62,7 +66,7 @@ impl SplicePolicy {
     /// The delegation check: a fragment node may declare at most its uploader's
     /// policy. This is a legality check, never a mutation — excess authority
     /// rejects, and the declared policy is never silently changed.
-    pub fn may_delegate(self, granted: SplicePolicy) -> bool {
+    pub fn may_delegate(self, granted: Self) -> bool {
         granted <= self
     }
 }
@@ -82,8 +86,8 @@ impl SpliceMode {
     /// The least policy that authorizes this operation.
     pub fn required_policy(&self) -> SplicePolicy {
         match self {
-            SpliceMode::Append => SplicePolicy::Append,
-            SpliceMode::Replace { scope } => SplicePolicy::Replace { scope: *scope },
+            Self::Append => SplicePolicy::Append,
+            Self::Replace { scope } => SplicePolicy::Replace { scope: *scope },
         }
     }
 }
@@ -106,7 +110,7 @@ pub struct GraphFragment {
     pub exits: Vec<NodeId<Local>>,
 }
 
-impl std::ops::Deref for GraphFragment {
+impl Deref for GraphFragment {
     type Target = GraphBody<Local>;
 
     fn deref(&self) -> &Self::Target {
@@ -114,7 +118,7 @@ impl std::ops::Deref for GraphFragment {
     }
 }
 
-impl std::ops::DerefMut for GraphFragment {
+impl DerefMut for GraphFragment {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.body
     }
@@ -245,8 +249,8 @@ impl ExistingNodeRef {
     }
 }
 
-impl std::fmt::Display for ExistingNodeRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ExistingNodeRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -294,6 +298,7 @@ impl SpliceRequest {
         }
     }
 
+    #[must_use]
     pub fn with_attachment(mut self, attachment: Attachment) -> Self {
         self.attachments.push(attachment);
         self
@@ -360,7 +365,7 @@ pub fn validate_fragment_with(
         }
     }
 
-    let mut seen_exits = std::collections::BTreeSet::new();
+    let mut seen_exits = BTreeSet::new();
     for exit in &fragment.exits {
         if exit.index() >= fragment.nodes.len() {
             errors.push(FragmentValidationError {

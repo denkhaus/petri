@@ -202,7 +202,8 @@ impl EventLog {
     /// The rewind/fork helper: resuming a truncated log is rewind, doing it in
     /// a fresh run dir is fork — replay regenerates everything past the
     /// prefix. One method, no policy.
-    pub fn prefix(&self, len: usize) -> EventLog {
+    #[must_use]
+    pub fn prefix(&self, len: usize) -> Self {
         Self {
             version: self.version,
             records: self.records[..len.min(self.records.len())].to_vec(),

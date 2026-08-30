@@ -9,6 +9,8 @@
 pub mod combine;
 pub mod loose;
 
+use std::cmp::Ordering;
+
 use serde_json::Value;
 use smol_str::SmolStr;
 
@@ -389,9 +391,9 @@ pub(super) fn eval_call(
                     (Some(Value::Number(x)), Some(Value::Number(y))) => x
                         .as_f64()
                         .partial_cmp(&y.as_f64())
-                        .unwrap_or(std::cmp::Ordering::Equal),
+                        .unwrap_or(Ordering::Equal),
                     (Some(Value::String(x)), Some(Value::String(y))) => x.cmp(y),
-                    _ => std::cmp::Ordering::Equal,
+                    _ => Ordering::Equal,
                 }
             });
             Ok(Value::Array(items))

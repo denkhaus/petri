@@ -1,5 +1,7 @@
 //! §3: expressions are evaluated in the pure core. Total, deterministic, no IO.
 
+use std::slice;
+
 use ir::expr::{EvalError, eval, eval_bool};
 use ir::{BinOp, EvalEnv, ExprTable, RunContext, StaticCtx, UnOp, truthy};
 use serde_json::{Value, json};
@@ -572,7 +574,7 @@ fn the_builtin_table_matches_the_implementation() {
         assert!(
             matches!(
                 eval(&t, call, &c.env()),
-                Err(EvalError::UnknownFunction(_)) | Err(EvalError::Arity { .. })
+                Err(EvalError::UnknownFunction(_) | EvalError::Arity { .. })
             ),
             "`{name}` dispatched without being in the table"
         );
@@ -590,7 +592,7 @@ fn arity_comes_from_the_table() {
     let mut t = ExprTable::new();
     let c = empty();
     for spec in BUILTINS {
-        let too_many: Vec<_> = (0..spec.arity + 1).map(|_| t.lit(1)).collect();
+        let too_many: Vec<_> = (0..=spec.arity).map(|_| t.lit(1)).collect();
         let call = t.call(spec.name, too_many);
         assert!(
             matches!(eval(&t, call, &c.env()), Err(EvalError::Arity { .. })),
@@ -645,7 +647,7 @@ fn loose_number_coercion_table() {
     ];
     for (input, expected) in cases {
         assert_eq!(
-            &run("loose_number", std::slice::from_ref(input)),
+            &run("loose_number", slice::from_ref(input)),
             expected,
             "loose_number({input})"
         );
@@ -658,7 +660,7 @@ fn loose_number_coercion_table() {
 fn loose_truthy_matrix() {
     for falsy in [json!(false), json!(0), json!(-0.0), json!(""), json!(null)] {
         assert_eq!(
-            run("loose_truthy", std::slice::from_ref(&falsy)),
+            run("loose_truthy", slice::from_ref(&falsy)),
             json!(false),
             "{falsy}"
         );
@@ -674,7 +676,7 @@ fn loose_truthy_matrix() {
         json!([0]),
     ] {
         assert_eq!(
-            run("loose_truthy", std::slice::from_ref(&truthy)),
+            run("loose_truthy", slice::from_ref(&truthy)),
             json!(true),
             "{truthy}"
         );

@@ -2,6 +2,7 @@
 //! does.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 
 use ir::{
     Attempt, CancelScopeId, Completion, EdgeId, EvalError, FiringId, Generation, Graph, NodeId,
@@ -70,8 +71,8 @@ pub struct CancelScope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SpliceBatchId(pub u32);
 
-impl std::fmt::Display for SpliceBatchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SpliceBatchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -137,6 +138,11 @@ impl NodeRuntime {
 /// The engine's id allocators. Splice preparation copies this value and
 /// advances the copy, so a rejected transaction cannot move canonical state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`Allocators` flattens into the serialized `EngineState`, so these names are the \
+              state's own field names; each also says it holds the next id, not a count"
+)]
 pub(crate) struct Allocators {
     /// High-water mark for splice-allocated node ids.
     pub next_node:         u32,
@@ -145,6 +151,10 @@ pub(crate) struct Allocators {
 }
 
 impl Allocators {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`NodeId` is a `u32`, so a graph can never hold more nodes than a `u32` counts"
+    )]
     pub(crate) fn reserve_nodes(&mut self, count: usize) -> u32 {
         let base = self.next_node;
         self.next_node += count as u32;
@@ -421,7 +431,7 @@ impl EngineState {
         self.pending
             .values()
             .flat_map(|g| g.values())
-            .map(|t| t.len())
+            .map(BTreeMap::len)
             .sum()
     }
 
@@ -558,6 +568,10 @@ impl EngineState {
     /// same cascade both build their splices before either applies, so a plain
     /// `nodes.len()` read would hand the second one the first one's ids — this
     /// counter is what keeps every clone at the slot its id names.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`NodeId` is a `u32`, so a graph can never hold more nodes than a `u32` counts"
+    )]
     pub(crate) fn next_node_id(&mut self) -> NodeId {
         self.allocators.next_node = self.allocators.next_node.max(self.graph.nodes.len() as u32);
         NodeId::new(self.allocators.reserve_nodes(1))
@@ -724,8 +738,7 @@ impl EngineState {
     pub(crate) fn cancel_scope_of(&self, node: NodeId) -> CancelScopeId {
         self.node_runtime
             .get(node.index())
-            .map(|runtime| runtime.cancel_scope)
-            .unwrap_or(CancelScopeId::ROOT)
+            .map_or(CancelScopeId::ROOT, |runtime| runtime.cancel_scope)
     }
 
     /// A scope and everything nested inside it.
@@ -826,6 +839,11 @@ impl EngineState {
         self.splices.push(splice);
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`SpliceBatchId` is a `u32`, so a run can never apply more batches than a \
+                  `u32` counts"
+    )]
     pub(crate) fn next_splice_batch(&self) -> SpliceBatchId {
         SpliceBatchId(self.splices.len() as u32)
     }
@@ -864,7 +882,7 @@ impl EngineState {
             .get_mut(batch.0 as usize)
             .expect("node references an applied splice batch");
         if change > 0 {
-            splice.live_count += change as u32;
+            splice.live_count += change.cast_unsigned();
         } else {
             let decrease = change.unsigned_abs();
             debug_assert!(splice.live_count >= decrease);
@@ -875,6 +893,10 @@ impl EngineState {
     /// A copy of the id allocators for a preparation transaction. Preparation
     /// advances the copy; a rejected transaction drops it, so canonical state
     /// never moves — not even allocator movement leaks.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`NodeId` is a `u32`, so a graph can never hold more nodes than a `u32` counts"
+    )]
     pub(crate) fn allocator_snapshot(&self) -> Allocators {
         let mut allocators = self.allocators;
         allocators.next_node = allocators.next_node.max(self.graph.nodes.len() as u32);

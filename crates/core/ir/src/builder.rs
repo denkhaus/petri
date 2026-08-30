@@ -6,6 +6,8 @@
 //! [`GraphBuilder::fan_out`], so fan-out is as explicit here as it is in the
 //! IR.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::expr::ExprTable;
@@ -43,11 +45,13 @@ impl<S> Arm<S> {
         }
     }
 
+    #[must_use]
     pub fn with_map(mut self, map: ExprId<S>) -> Self {
         self.map = Some(map);
         self
     }
 
+    #[must_use]
     pub fn as_back(mut self) -> Self {
         self.back = true;
         self
@@ -65,7 +69,7 @@ impl<S> Default for GraphBuilder<S> {
         Self {
             graph:     Graph {
                 body:       GraphBody::default(),
-                params:     Default::default(),
+                params:     BTreeMap::default(),
                 completion: Completion::AnyFailure,
             },
             next_edge: 0,
@@ -105,7 +109,9 @@ impl<S> GraphBuilder<S> {
     }
 
     pub fn add_scope(&mut self, scope: Scope<S>) -> ScopeId<S> {
-        let id = ScopeId::new(self.graph.scopes.len() as u32);
+        let id = ScopeId::new(
+            u32::try_from(self.graph.scopes.len()).expect("a graph never exceeds u32::MAX scopes"),
+        );
         let mut scope = scope;
         scope.id = id;
         self.graph.scopes.push(scope);
@@ -114,7 +120,9 @@ impl<S> GraphBuilder<S> {
 
     /// Add a node with terminal routing; wire it up afterwards.
     pub fn add_node(&mut self, name: &str, scope: ScopeId<S>, step: StepRef) -> NodeId<S> {
-        let id = NodeId::new(self.graph.nodes.len() as u32);
+        let id = NodeId::new(
+            u32::try_from(self.graph.nodes.len()).expect("a graph never exceeds u32::MAX nodes"),
+        );
         self.graph.nodes.push(Node::new(id, name, scope, step));
         id
     }

@@ -3,6 +3,9 @@
 
 mod support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ir::{Arm, BinOp, Budget, GraphBuilder, JoinPolicy, Outcome, RunStatus, Value, validate};
 use serde_json::json;
 use support::{Harness, NOOP};
@@ -81,7 +84,7 @@ fn context_updates_merge_in_event_order() {
     let graph = b.build();
     validate(&graph).expect("valid");
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+    let seen = Rc::new(RefCell::new(Value::Null));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
         "first" => Outcome::success(Value::Null)

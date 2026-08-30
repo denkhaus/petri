@@ -2,9 +2,14 @@
 //! and feeds them back, so tests read as "run this graph and see what
 //! happened".
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary compiles the whole module, and no one test uses every helper"
+)]
 
 use std::collections::BTreeMap;
+use std::mem;
+use std::time::Duration;
 
 use engine::{Command, EngineState, Event, apply};
 use ir::{
@@ -14,7 +19,7 @@ use ir::{
 
 /// What the host is being asked to run.
 #[derive(Clone, Debug)]
-pub struct StartInfo {
+pub(crate) struct StartInfo {
     pub firing:     FiringId,
     pub node:       NodeId,
     /// Node name, including the `#index` suffix on expansion clones.
@@ -32,44 +37,47 @@ pub struct StartInfo {
 
 impl StartInfo {
     /// The payload of the first input token.
-    pub fn input(&self) -> Value {
+    pub(crate) fn input(&self) -> Value {
         self.inputs
             .first()
-            .map(|t| t.payload.clone())
-            .unwrap_or(Value::Null)
+            .map_or(Value::Null, |t| t.payload.clone())
     }
 }
 
 /// The single step kind the tests use. Nodes differ by config, not by kind.
-pub struct Noop;
+pub(crate) struct Noop;
 
 impl StepKind for Noop {
     fn id(&self) -> StepKindId {
         NOOP
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "noop"
     }
 }
 
 /// The load-time lookup `validate_with` takes, over the one test kind.
-pub struct Kinds(Vec<Box<dyn StepKind>>);
+pub(crate) struct Kinds(Vec<Box<dyn StepKind>>);
 
 impl StepKinds for Kinds {
     fn get(&self, id: &StepKindId) -> Option<&dyn StepKind> {
-        self.0.iter().find(|k| k.id() == *id).map(|k| k.as_ref())
+        self.0.iter().find(|k| k.id() == *id).map(AsRef::as_ref)
     }
 }
 
-pub fn registry() -> Kinds {
+pub(crate) fn registry() -> Kinds {
     Kinds(vec![Box::new(Noop)])
 }
 
-pub const NOOP: StepKindId = StepKindId::new_static("noop");
+pub(crate) const NOOP: StepKindId = StepKindId::new_static("noop");
 
 type Responder = Box<dyn FnMut(&StartInfo) -> Outcome>;
 
-pub struct Harness {
+pub(crate) struct Harness {
     pub state:             EngineState,
     /// The graph the run started from, before any splice. Replay needs this
     /// one.
@@ -82,12 +90,12 @@ pub struct Harness {
     /// The most steps that were running at the same time.
     pub max_concurrent:    usize,
     /// Every `ScheduleRetry` the core issued, in order.
-    pub scheduled_retries: Vec<(FiringId, Attempt, std::time::Duration)>,
+    pub scheduled_retries: Vec<(FiringId, Attempt, Duration)>,
     pub status:            Option<RunStatus>,
 }
 
 impl Harness {
-    pub fn new(graph: Graph) -> Self {
+    pub(crate) fn new(graph: Graph) -> Self {
         Self {
             original_graph:    graph.clone(),
             state:             EngineState::new(graph),
@@ -101,14 +109,14 @@ impl Harness {
     }
 
     /// Decide each step's result from the request.
-    pub fn respond_with(mut self, f: impl FnMut(&StartInfo) -> Outcome + 'static) -> Self {
+    pub(crate) fn respond_with(mut self, f: impl FnMut(&StartInfo) -> Outcome + 'static) -> Self {
         self.responder = Box::new(f);
         self
     }
 
     /// Fixed results per node base name; anything unlisted succeeds with
     /// `null`.
-    pub fn results(self, results: BTreeMap<&'static str, Outcome>) -> Self {
+    pub(crate) fn results(self, results: BTreeMap<&'static str, Outcome>) -> Self {
         let table: BTreeMap<String, Outcome> = results
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
@@ -122,7 +130,7 @@ impl Harness {
     }
 
     /// Start the run and pump until the core reports it finished.
-    pub fn run(&mut self) -> RunStatus {
+    pub(crate) fn run(&mut self) -> RunStatus {
         self.feed(Event::RunStarted);
         // Steps are held until the whole batch is issued, so `max_concurrent`
         // reflects what the core allowed to run at once, not the order the host
@@ -184,9 +192,9 @@ impl Harness {
 
     /// Answer every outstanding `ScheduleRetry` at once. The driver would sleep
     /// and add jitter; a test just feeds the event straight back.
-    pub fn drain_retries(&mut self) {
+    pub(crate) fn drain_retries(&mut self) {
         loop {
-            let pending: Vec<(FiringId, Attempt, std::time::Duration)> = self
+            let pending: Vec<(FiringId, Attempt, Duration)> = self
                 .commands
                 .iter()
                 .filter_map(|c| match c {
@@ -214,8 +222,8 @@ impl Harness {
     }
 
     /// Push one event through the core, keeping the commands it produced.
-    pub fn feed(&mut self, event: Event) {
-        let state = std::mem::replace(&mut self.state, EngineState::new(Graph::new()));
+    pub(crate) fn feed(&mut self, event: Event) {
+        let state = mem::replace(&mut self.state, EngineState::new(Graph::new()));
         let (state, commands) = apply(state, event);
         self.state = state;
         for command in &commands {
@@ -227,13 +235,13 @@ impl Harness {
     }
 
     /// Cancel a scope mid-run, then keep pumping.
-    pub fn cancel(&mut self, scope: ir::CancelScopeId) {
+    pub(crate) fn cancel(&mut self, scope: ir::CancelScopeId) {
         self.feed(Event::CancelRequested { scope });
     }
 
     /// Pull the `StartStep` commands issued so far, as `(firing, node name)`.
     /// Used by tests that drive the core one event at a time.
-    pub fn take_starts(&mut self) -> Vec<(FiringId, String)> {
+    pub(crate) fn take_starts(&mut self) -> Vec<(FiringId, String)> {
         let starts: Vec<(FiringId, String)> = self
             .commands
             .iter()
@@ -258,12 +266,11 @@ impl Harness {
     }
 
     /// Report a step's result to the core, for the attempt it is running.
-    pub fn finish(&mut self, firing: FiringId, outcome: Outcome) {
+    pub(crate) fn finish(&mut self, firing: FiringId, outcome: Outcome) {
         let attempt = self
             .state
             .firing(firing)
-            .map(|f| f.attempt)
-            .unwrap_or(Attempt::FIRST);
+            .map_or(Attempt::FIRST, |f| f.attempt);
         self.feed(Event::StepStarted { firing, attempt });
         self.feed(Event::StepFinished {
             firing,
@@ -277,25 +284,25 @@ impl Harness {
     ///
     /// The determinism canary: if any core decision depended on a clock, on
     /// iteration order, or on anything outside the state, the logs diverge.
-    pub fn verify_replay(&self) {
+    pub(crate) fn verify_replay(&self) {
         if let Err(mismatch) = engine::verify_replay(self.original_graph.clone(), &self.state.log) {
             panic!("replay was not byte-identical: {mismatch}");
         }
     }
 
-    pub fn output(&self, node: &str) -> Value {
+    pub(crate) fn output(&self, node: &str) -> Value {
         self.state.output(node).cloned().unwrap_or(Value::Null)
     }
 
     /// How many times a node base name was started.
-    pub fn start_count(&self, base: &str) -> usize {
+    pub(crate) fn start_count(&self, base: &str) -> usize {
         self.started
             .iter()
             .filter(|n| split_clone_name(n).0 == base)
             .count()
     }
 
-    pub fn statuses(&self) -> Vec<(String, String)> {
+    pub(crate) fn statuses(&self) -> Vec<(String, String)> {
         self.state
             .history()
             .iter()
@@ -303,7 +310,7 @@ impl Harness {
             .collect()
     }
 
-    pub fn status_of(&self, name: &str) -> Option<String> {
+    pub(crate) fn status_of(&self, name: &str) -> Option<String> {
         self.state
             .history()
             .iter()
@@ -311,7 +318,7 @@ impl Harness {
             .map(|r| r.outcome.status.tag().to_string())
     }
 
-    pub fn commands_of<T>(&self, f: impl Fn(&Command) -> Option<T>) -> Vec<T> {
+    pub(crate) fn commands_of<T>(&self, f: impl Fn(&Command) -> Option<T>) -> Vec<T> {
         self.commands.iter().filter_map(f).collect()
     }
 }
@@ -321,7 +328,7 @@ impl Harness {
 /// Producing `PartialSuccess` is a step-kind decision, not a core one: there is
 /// no node-level policy. This is the shape BuildKite's `soft_fail` and GHA's
 /// `continue-on-error` both lower onto.
-pub fn process_outcome(config: &Value, exit_code: i32) -> Outcome {
+pub(crate) fn process_outcome(config: &Value, exit_code: i32) -> Outcome {
     if exit_code == 0 {
         return Outcome::success(serde_json::json!({ "exit_code": 0 }));
     }

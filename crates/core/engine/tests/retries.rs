@@ -480,13 +480,12 @@ fn a_discarded_attempts_updates_never_reach_the_run_context() {
         .state
         .log
         .events()
-        .filter_map(|e| match e {
+        .find_map(|e| match e {
             Event::StepFinished {
                 attempt, outcome, ..
             } if *attempt == Attempt::FIRST => Some(outcome.clone()),
             _ => None,
         })
-        .next()
         .expect("the first attempt is in the log");
     assert_eq!(
         discarded.context_updates.get("marker").map(|v| v.as_str()),

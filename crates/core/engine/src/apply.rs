@@ -6,6 +6,7 @@
 //! is applied, so the log is a complete, replayable account of the run.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::mem;
 
 use ir::{
     Attempt, CancelScopeId, Control, EvalEnv, Exhaustion, ExpandTarget, Expansion, FailureInfo,
@@ -22,7 +23,10 @@ use smol_str::SmolStr;
 use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};
 use crate::event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice};
 use crate::log::EventSource;
-use crate::splice::{PreparedSeed, PreparedSplice, apply_prepared_splice};
+use crate::splice::{
+    PreparedSeed, PreparedSplice, apply_prepared_splice, commit_splice_plan,
+    prepare_outcome_splices, reject_splices,
+};
 use crate::state::{
     BatchPolicy, EngineState, Firing, FiringRecord, RunError, SpliceEffect, SpliceOrigin, synthetic,
 };
@@ -239,7 +243,7 @@ fn try_fire(
             &node,
             generation,
             &inputs,
-            synthetic(Status::Cancelled),
+            &synthetic(Status::Cancelled),
             queue,
         );
         return;
@@ -264,7 +268,7 @@ fn try_fire(
                 Value::Null,
             );
             state.push_error(error);
-            complete_without_running(state, &node, generation, &inputs, outcome, queue);
+            complete_without_running(state, &node, generation, &inputs, &outcome, queue);
             return;
         }
     };
@@ -290,7 +294,7 @@ fn try_fire(
                     &node,
                     generation,
                     &inputs,
-                    synthetic(status),
+                    &synthetic(status),
                     queue,
                 );
                 return;
@@ -306,7 +310,7 @@ fn try_fire(
                     &node,
                     generation,
                     &inputs,
-                    Outcome::failure("precondition failed to evaluate"),
+                    &Outcome::failure("precondition failed to evaluate"),
                     queue,
                 );
                 return;
@@ -331,7 +335,7 @@ fn try_fire(
                 &node,
                 generation,
                 &inputs,
-                Outcome::failure("step config failed to resolve"),
+                &Outcome::failure("step config failed to resolve"),
                 queue,
             );
             return;
@@ -362,7 +366,7 @@ fn try_fire(
                 &node,
                 generation,
                 &inputs,
-                Outcome::failure("step config still holds an unresolved expression"),
+                &Outcome::failure("step config still holds an unresolved expression"),
                 queue,
             );
             return;
@@ -410,7 +414,7 @@ fn join_satisfied(state: &EngineState, node: &Node, key: (NodeId, Generation)) -
     match node.join {
         JoinPolicy::All => incoming.iter().all(|edge| tokens.contains_key(edge)),
         JoinPolicy::Any => true,
-        JoinPolicy::Quorum { n } => tokens.len() as u32 >= n.max(1),
+        JoinPolicy::Quorum { n } => tokens.len() >= n.max(1) as usize,
     }
 }
 
@@ -420,7 +424,7 @@ fn complete_without_running(
     node: &Node,
     generation: Generation,
     inputs: &[Token],
-    outcome: Outcome,
+    outcome: &Outcome,
     queue: &mut VecDeque<Event>,
 ) {
     let firing = state.next_firing_id();
@@ -439,7 +443,7 @@ fn complete_without_running(
         generation,
         Attempt::FIRST,
         inputs,
-        &outcome,
+        outcome,
         queue,
     );
 }
@@ -508,9 +512,9 @@ fn on_step_finished(
     let mut outcome = outcome;
     let mut plan = None;
     if !outcome.splices.is_empty() {
-        let requests = std::mem::take(&mut outcome.splices);
+        let requests = mem::take(&mut outcome.splices);
         if !cancelled {
-            match crate::splice::prepare_outcome_splices(
+            match prepare_outcome_splices(
                 state,
                 &node,
                 firing.generation,
@@ -519,7 +523,7 @@ fn on_step_finished(
             ) {
                 Ok(prepared) => plan = Some(prepared),
                 Err(error) => {
-                    outcome = crate::splice::reject_splices(outcome, error.to_string());
+                    outcome = reject_splices(outcome, error.to_string());
                     // The converted failure gets the ordinary retry decision.
                     if node.retry.should_retry(&outcome.status)
                         && node.retry.has_attempt_after(attempt)
@@ -571,7 +575,7 @@ fn on_step_finished(
     // engine tests quiescence, so there is no lost-upload race. The uploader's
     // routing may have gained entry groups, so route with the refreshed node.
     let node = if let Some(plan) = plan {
-        crate::splice::commit_splice_plan(state, plan, queue);
+        commit_splice_plan(state, plan, queue);
         state.graph.node(firing.node).cloned().unwrap_or(node)
     } else {
         node
@@ -751,7 +755,6 @@ fn fail_live_firing(
 
 /// Evaluate a node's routing: each group emits at most one token, and groups
 /// emit concurrently.
-#[allow(clippy::too_many_arguments)]
 fn route(
     state: &mut EngineState,
     node: &Node,
@@ -907,13 +910,15 @@ fn expand(
     };
     let region_entry = node.id;
 
-    let payload = inputs
-        .first()
-        .map(|t| t.payload.clone())
-        .unwrap_or(Value::Null);
+    let payload = inputs.first().map_or(Value::Null, |t| t.payload.clone());
 
     let mut clones = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "every clone reserves node ids from the graph's `u32` id space, so a run \
+                      can never hold more clones than a `u32` counts"
+        )]
         let index = index as u32;
         // Old id to new id, decided before any edge is rewritten so edges inside
         // the region point at clones and edges leaving it still point outward.

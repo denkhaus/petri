@@ -135,10 +135,7 @@ pub(crate) fn with_outcome(base: &StaticCtx, outcome: &Outcome) -> StaticCtx {
 
 /// The token an expression reads: the payload of the first input edge.
 pub(crate) fn primary_token(inputs: &[Token]) -> Value {
-    inputs
-        .first()
-        .map(|t| t.payload.clone())
-        .unwrap_or(Value::Null)
+    inputs.first().map_or(Value::Null, |t| t.payload.clone())
 }
 
 /// Fold the statuses of the nodes whose edges fed this firing.

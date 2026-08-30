@@ -17,7 +17,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use ir::{
     BinOp, CancelScopeId, Edge, EdgeId, Expr, ExprId, ExprOrValue, FailureInfo, Generation, Guard,
     JoinPolicy, Local, Node, NodeId, Outcome, Scope, ScopeId, SelectGroup, SpliceMode,
-    SplicePolicy, SpliceRequest, Status, StepRef, Token, Value, validate_request,
+    SplicePolicy, SpliceRequest, Status, StepRef, Token, Value, placeholder, validate,
+    validate_request,
 };
 use smol_str::SmolStr;
 
@@ -214,6 +215,11 @@ struct BatchDraft {
 }
 
 impl<'a> SpliceTransaction<'a> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`ExprId` and `ScopeId` are `u32`, so the live tables they index can never \
+                  hold more entries than a `u32` counts"
+    )]
     fn new(
         state: &'a EngineState,
         uploader: &'a Node,
@@ -520,7 +526,7 @@ impl<'a> SpliceTransaction<'a> {
                 let state = self.state;
                 let ambiguous = *self.ambiguous_references.entry(target).or_insert_with(|| {
                     loop_nodes
-                        .get_or_init(|| ir::validate::loop_reachable(&state.graph))
+                        .get_or_init(|| validate::loop_reachable(&state.graph))
                         .contains(&target)
                         || state.has_multiple_admission_generations(target)
                 });
@@ -551,6 +557,11 @@ impl<'a> SpliceTransaction<'a> {
         Ok(())
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a batch appends to the same `u32`-indexed expression and scope tables, so \
+                  neither length can outgrow a `u32`"
+    )]
     fn push_batch(&mut self, draft: BatchDraft) {
         let BatchDraft {
             expr_base,
@@ -684,6 +695,11 @@ pub(crate) fn apply_prepared_splice(
 /// Append a synthesized expression to the batch's segment and return its live
 /// id.
 fn push_expr(exprs: &mut Vec<Expr>, expr_base: u32, expr: Expr) -> ExprId {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`ExprId` is a `u32`, so the expression table can never hold more entries \
+                  than a `u32` counts"
+    )]
     let id = ExprId::new(expr_base + exprs.len() as u32);
     exprs.push(expr);
     id
@@ -740,7 +756,7 @@ fn shift_expr(expr: &Expr<Local>, offset: u32) -> Expr {
 }
 
 fn remap_scope(scope: &Scope<Local>, scope_base: u32, expr_base: u32) -> Scope {
-    let shift_env = |env: &std::collections::BTreeMap<SmolStr, ExprOrValue<Local>>| {
+    let shift_env = |env: &BTreeMap<SmolStr, ExprOrValue<Local>>| {
         env.iter()
             .map(|(key, value)| {
                 let value = match value {
@@ -777,9 +793,9 @@ fn remap_scope(scope: &Scope<Local>, scope_base: u32, expr_base: u32) -> Scope {
             } = service;
             let mut s = ir::ServiceSpec::new(name, image);
             s.env = shift_env(env);
-            s.ports = ports.clone();
-            s.options = options.clone();
-            s.credentials = credentials.clone();
+            s.ports.clone_from(ports);
+            s.options.clone_from(options);
+            s.credentials.clone_from(credentials);
             s
         })
         .collect();
@@ -819,7 +835,7 @@ fn remap_node(
         ScopeId::new(scope_base + scope.raw()),
         StepRef::new(
             step.kind.clone(),
-            ir::placeholder::map_expr_ids(&step.config, &|id| id + u64::from(expr_base)),
+            placeholder::map_expr_ids(&step.config, &|id| id + u64::from(expr_base)),
         ),
     );
     node.join = *join;

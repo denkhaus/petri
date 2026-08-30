@@ -9,6 +9,7 @@
 //! types. Runtime ids (`FiringId`, `Generation`, `Attempt`, `CancelScopeId`)
 //! exist only at run time, so they have no space.
 
+use std::fmt;
 use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,12 @@ macro_rules! impl_id_api {
                 self.0
             }
 
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "every id that indexes a table is `u32` and widens cleanly; the \
+                          one `u64` id is the firing counter, which identifies a firing \
+                          rather than addressing a table"
+            )]
             pub const fn index(self) -> usize {
                 self.0 as usize
             }
@@ -193,14 +200,14 @@ impl AsRef<str> for StepKindId {
     }
 }
 
-impl std::fmt::Debug for StepKindId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for StepKindId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "StepKindId({:?})", self.as_str())
     }
 }
 
-impl std::fmt::Display for StepKindId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for StepKindId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -216,21 +223,23 @@ id_newtype!(
 );
 
 impl Generation {
-    pub const ZERO: Generation = Generation(0);
+    pub const ZERO: Self = Self(0);
 
     /// Generation carried across a `back` edge.
-    pub const fn next(self) -> Generation {
-        Generation(self.0 + 1)
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
     }
 }
 
 impl Attempt {
     /// Every firing starts here. Counters never carry across firings, so a
     /// later generation retries from scratch.
-    pub const FIRST: Attempt = Attempt(1);
+    pub const FIRST: Self = Self(1);
 
-    pub const fn next(self) -> Attempt {
-        Attempt(self.0 + 1)
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
     }
 }
 
@@ -239,10 +248,10 @@ impl<S> EdgeId<S> {
     /// allocates seed edges for entry nodes and expansion clones from the
     /// free id space, and keeps this one out of play as an unambiguous "not
     /// an edge" sentinel.
-    pub const SEED: EdgeId<S> = EdgeId::new(u32::MAX);
+    pub const SEED: Self = Self::new(u32::MAX);
 }
 
 impl CancelScopeId {
     /// The run's own cancel scope. Cancelling it cancels everything.
-    pub const ROOT: CancelScopeId = CancelScopeId(0);
+    pub const ROOT: Self = Self(0);
 }

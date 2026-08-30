@@ -4,7 +4,9 @@
 
 mod support;
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use ir::{
     Arm, EdgeId, ExpandTarget, GraphBuilder, JoinPolicy, Outcome, RunStatus, Value,
@@ -28,7 +30,7 @@ fn an_all_join_entry_node_fires_from_its_seed_token_alone() {
     validate(&graph).expect("valid");
     assert_eq!(graph.in_degree(entry), 0, "no declared incoming edge");
 
-    let inputs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let inputs = Rc::new(RefCell::new(Vec::new()));
     let sink = inputs.clone();
     let mut h = Harness::new(graph).respond_with(move |info| {
         if info.base == "entry" {

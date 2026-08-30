@@ -8,7 +8,7 @@ use engine::{Command, EngineState, Event, ResolvedFiring, RunError, apply};
 use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{
     Attempt, FiringId, Generation, GraphBuilder, NodeId, RunStatus, ScopeId, StepRef, Value,
-    validate,
+    placeholder, validate,
 };
 use serde_json::json;
 use support::{Harness, NOOP};
@@ -125,7 +125,7 @@ fn the_core_resolves_config_before_the_boundary() {
     // Every command the run produced carries a placeholder-free config.
     for command in &h.commands {
         if let Command::StartStep(resolved) = command {
-            assert!(!ir::placeholder::contains_placeholder(resolved.config()));
+            assert!(!placeholder::contains_placeholder(resolved.config()));
         }
     }
 }

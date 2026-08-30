@@ -44,10 +44,10 @@ impl<S> ExprTable<S> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ExprId<S>, &Expr<S>)> {
-        self.exprs
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (ExprId::new(i as u32), e))
+        self.exprs.iter().enumerate().map(|(i, e)| {
+            let id = u32::try_from(i).expect("an expression table never exceeds u32::MAX entries");
+            (ExprId::new(id), e)
+        })
     }
 
     // ── Construction helpers ──────────────────────────────────────────────

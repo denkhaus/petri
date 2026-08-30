@@ -3,6 +3,9 @@
 
 mod support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     Arm, Budget, GraphBuilder, JoinPolicy, Outcome, RunStatus, StepRef, Value, sequential_for_each,
@@ -83,7 +86,7 @@ fn the_loop_exit_carries_every_result_in_order() {
     let graph = b.build();
     validate(&graph).expect("valid");
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+    let seen = Rc::new(RefCell::new(Value::Null));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
         "plan" => Outcome::success(json!([2, 3, 4])),

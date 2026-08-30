@@ -135,109 +135,116 @@ pub enum ValidationLocation<S = Live> {
 impl<S> ValidationError<S> {
     /// The diagnostic code a frontend reports this error under.
     pub fn code(&self) -> &'static str {
-        use ValidationError as E;
         match self {
-            E::CycleWithoutBackEdge(_) => "validate.cycle_without_back_edge",
-            E::AlwaysNotLast { .. } => "validate.always_not_last",
-            E::EmptyGroup { .. } => "validate.empty_group",
-            E::ZeroBudget(_) => "validate.zero_budget",
-            E::UnboundedLoopBudget(_) => "validate.unbounded_loop_budget",
-            E::LoopHeadMustJoinAny(_) => "validate.loop_head_must_join_any",
-            E::DuplicateEdgeId(_) | E::ReservedEdgeId(_) => "validate.edge_id",
-            E::UnknownExpr { .. } => "validate.unknown_expr",
-            E::HirFieldInPlan(_) | E::HirConfigInPlan { .. } => "validate.hir_in_plan",
-            E::ExitUnreachable { .. }
-            | E::ExitNotPostdominator { .. }
-            | E::BoundaryCrossing { .. } => "validate.expansion_region",
-            E::EntryHasIncoming(_) => "validate.entry_has_incoming",
+            Self::CycleWithoutBackEdge(_) => "validate.cycle_without_back_edge",
+            Self::AlwaysNotLast { .. } => "validate.always_not_last",
+            Self::EmptyGroup { .. } => "validate.empty_group",
+            Self::ZeroBudget(_) => "validate.zero_budget",
+            Self::UnboundedLoopBudget(_) => "validate.unbounded_loop_budget",
+            Self::LoopHeadMustJoinAny(_) => "validate.loop_head_must_join_any",
+            Self::DuplicateEdgeId(_) | Self::ReservedEdgeId(_) => "validate.edge_id",
+            Self::UnknownExpr { .. } => "validate.unknown_expr",
+            Self::HirFieldInPlan(_) | Self::HirConfigInPlan { .. } => "validate.hir_in_plan",
+            Self::ExitUnreachable { .. }
+            | Self::ExitNotPostdominator { .. }
+            | Self::BoundaryCrossing { .. } => "validate.expansion_region",
+            Self::EntryHasIncoming(_) => "validate.entry_has_incoming",
             _ => "validate.structure",
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the index names a slot in the node or scope table, and those ids are \
+                  `u32`, so no index that table can hold exceeds `u32::MAX`"
+    )]
     pub fn location(&self) -> ValidationLocation<S> {
-        use ValidationError as E;
         match self {
-            E::NodeIdMismatch { index, .. } => ValidationLocation::Node(NodeId::new(*index as u32)),
-            E::ScopeIdMismatch { index, .. } => {
+            Self::NodeIdMismatch { index, .. } => {
+                ValidationLocation::Node(NodeId::new(*index as u32))
+            }
+            Self::ScopeIdMismatch { index, .. } => {
                 ValidationLocation::Scope(ScopeId::new(*index as u32))
             }
-            E::UnknownScope { node, .. }
-            | E::UnknownStepKind { node, .. }
-            | E::BadStepConfig { node, .. }
-            | E::AlwaysNotLast { node, .. }
-            | E::EmptyGroup { node, .. }
-            | E::ExitUnreachable { node, .. }
-            | E::ExitNotPostdominator { node, .. }
-            | E::BoundaryCrossing { node, .. }
-            | E::HirConfigInPlan { node, .. } => ValidationLocation::Node(*node),
-            E::UnknownTarget { edge, .. } | E::DuplicateEdgeId(edge) | E::ReservedEdgeId(edge) => {
-                ValidationLocation::Edge(*edge)
-            }
-            E::NoEntry | E::CompletionUnknownNode(_) => ValidationLocation::Graph,
-            E::UnknownEntry(node) | E::DuplicateEntry(node) | E::EntryHasIncoming(node) => {
-                ValidationLocation::Entry(*node)
-            }
-            E::CycleWithoutBackEdge(nodes) => nodes
+            Self::UnknownScope { node, .. }
+            | Self::UnknownStepKind { node, .. }
+            | Self::BadStepConfig { node, .. }
+            | Self::AlwaysNotLast { node, .. }
+            | Self::EmptyGroup { node, .. }
+            | Self::ExitUnreachable { node, .. }
+            | Self::ExitNotPostdominator { node, .. }
+            | Self::BoundaryCrossing { node, .. }
+            | Self::HirConfigInPlan { node, .. }
+            | Self::ZeroBudget(node)
+            | Self::UnboundedLoopBudget(node)
+            | Self::LoopHeadMustJoinAny(node)
+            | Self::HirFieldInPlan(node) => ValidationLocation::Node(*node),
+            Self::UnknownTarget { edge, .. }
+            | Self::DuplicateEdgeId(edge)
+            | Self::ReservedEdgeId(edge) => ValidationLocation::Edge(*edge),
+            Self::NoEntry | Self::CompletionUnknownNode(_) => ValidationLocation::Graph,
+            Self::UnknownEntry(node)
+            | Self::DuplicateEntry(node)
+            | Self::EntryHasIncoming(node) => ValidationLocation::Entry(*node),
+            Self::CycleWithoutBackEdge(nodes) => nodes
                 .first()
                 .copied()
-                .map(ValidationLocation::Node)
-                .unwrap_or(ValidationLocation::Graph),
-            E::ZeroBudget(node)
-            | E::UnboundedLoopBudget(node)
-            | E::LoopHeadMustJoinAny(node)
-            | E::HirFieldInPlan(node) => ValidationLocation::Node(*node),
-            E::UnknownExpr { site, .. } => ValidationLocation::Site(site.clone()),
+                .map_or(ValidationLocation::Graph, ValidationLocation::Node),
+            Self::UnknownExpr { site, .. } => ValidationLocation::Site(site.clone()),
         }
     }
 
     /// The node a source frontend should use as the primary diagnostic span.
     /// Errors without a meaningful node return `None` and use the document
     /// span.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the index names a slot in the node table, and node ids are `u32`, so no \
+                  index that table can hold exceeds `u32::MAX`"
+    )]
     pub fn primary_node(&self) -> Option<NodeId<S>> {
-        use ValidationError as E;
         match self {
-            E::NodeIdMismatch { index, .. } => Some(NodeId::new(*index as u32)),
-            E::UnknownScope { node, .. }
-            | E::UnknownStepKind { node, .. }
-            | E::BadStepConfig { node, .. }
-            | E::AlwaysNotLast { node, .. }
-            | E::EmptyGroup { node, .. }
-            | E::ExitUnreachable { node, .. }
-            | E::ExitNotPostdominator { node, .. }
-            | E::BoundaryCrossing { node, .. }
-            | E::HirConfigInPlan { node, .. } => Some(*node),
-            E::UnknownTarget { from, .. } => Some(*from),
-            E::UnknownEntry(node)
-            | E::DuplicateEntry(node)
-            | E::EntryHasIncoming(node)
-            | E::ZeroBudget(node)
-            | E::UnboundedLoopBudget(node)
-            | E::LoopHeadMustJoinAny(node)
-            | E::HirFieldInPlan(node) => Some(*node),
-            E::CycleWithoutBackEdge(nodes) => nodes.first().copied(),
-            E::ScopeIdMismatch { .. }
-            | E::NoEntry
-            | E::CompletionUnknownNode(_)
-            | E::DuplicateEdgeId(_)
-            | E::ReservedEdgeId(_)
-            | E::UnknownExpr { .. } => None,
+            Self::NodeIdMismatch { index, .. } => Some(NodeId::new(*index as u32)),
+            Self::UnknownScope { node, .. }
+            | Self::UnknownStepKind { node, .. }
+            | Self::BadStepConfig { node, .. }
+            | Self::AlwaysNotLast { node, .. }
+            | Self::EmptyGroup { node, .. }
+            | Self::ExitUnreachable { node, .. }
+            | Self::ExitNotPostdominator { node, .. }
+            | Self::BoundaryCrossing { node, .. }
+            | Self::HirConfigInPlan { node, .. }
+            | Self::UnknownEntry(node)
+            | Self::DuplicateEntry(node)
+            | Self::EntryHasIncoming(node)
+            | Self::ZeroBudget(node)
+            | Self::UnboundedLoopBudget(node)
+            | Self::LoopHeadMustJoinAny(node)
+            | Self::HirFieldInPlan(node) => Some(*node),
+            Self::UnknownTarget { from, .. } => Some(*from),
+            Self::CycleWithoutBackEdge(nodes) => nodes.first().copied(),
+            Self::ScopeIdMismatch { .. }
+            | Self::NoEntry
+            | Self::CompletionUnknownNode(_)
+            | Self::DuplicateEdgeId(_)
+            | Self::ReservedEdgeId(_)
+            | Self::UnknownExpr { .. } => None,
         }
     }
 
     /// A hint to attach beneath the message, if the error has one.
     pub fn hint(&self) -> Option<&'static str> {
-        use ValidationError as E;
         match self {
-            E::LoopHeadMustJoinAny(_) => Some(
+            Self::LoopHeadMustJoinAny(_) => Some(
                 "put a dedicated join node in front of the loop head, and let the back edge target the loop head",
             ),
-            E::CycleWithoutBackEdge(_) => {
+            Self::CycleWithoutBackEdge(_) => {
                 Some("mark the edge that closes the cycle as a back edge")
             }
-            E::UnboundedLoopBudget(_) => {
+            Self::UnboundedLoopBudget(_) => {
                 Some("give every node in the loop a finite `Budget.max_firings`")
             }
-            E::AlwaysNotLast { .. } => {
+            Self::AlwaysNotLast { .. } => {
                 Some("move the `Guard::Always` arm to the end of its select group")
             }
             _ => None,
@@ -651,6 +658,11 @@ fn check_back_edges<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>
             .collect()
     };
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`n` counts the nodes and node ids are `u32`, so no index into that \
+                  table exceeds `u32::MAX`"
+    )]
     for start in (0..n).map(|i| NodeId::<S>::new(i as u32)) {
         if color[start.index()] != Color::White {
             continue;
@@ -906,7 +918,7 @@ fn check_scope_reentry<S>(graph: &GraphBody<S>, warnings: &mut Vec<ValidationWar
         }
 
         for member in members {
-            let sources = incoming.get(member).map(Vec::as_slice).unwrap_or(&[]);
+            let sources = incoming.get(member).map_or(&[][..], Vec::as_slice);
             let Some((via, _)) = sources.iter().find(|(from, _)| outside.contains(from)) else {
                 continue;
             };

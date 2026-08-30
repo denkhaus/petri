@@ -85,12 +85,12 @@ pub enum StatusKind {
 impl From<&Status> for StatusKind {
     fn from(status: &Status) -> Self {
         match status {
-            Status::Success => StatusKind::Success,
-            Status::PartialSuccess { .. } => StatusKind::PartialSuccess,
-            Status::Failure(_) => StatusKind::Failure,
-            Status::Skipped => StatusKind::Skipped,
-            Status::Cancelled => StatusKind::Cancelled,
-            Status::TimedOut => StatusKind::TimedOut,
+            Status::Success => Self::Success,
+            Status::PartialSuccess { .. } => Self::PartialSuccess,
+            Status::Failure(_) => Self::Failure,
+            Status::Skipped => Self::Skipped,
+            Status::Cancelled => Self::Cancelled,
+            Status::TimedOut => Self::TimedOut,
         }
     }
 }
@@ -99,12 +99,12 @@ impl Status {
     /// The lowercase tag the status functions in expressions match on.
     pub fn tag(&self) -> &'static str {
         match self {
-            Status::Success => "success",
-            Status::PartialSuccess { .. } => "partial_success",
-            Status::Failure(_) => "failure",
-            Status::Skipped => "skipped",
-            Status::Cancelled => "cancelled",
-            Status::TimedOut => "timed_out",
+            Self::Success => "success",
+            Self::PartialSuccess { .. } => "partial_success",
+            Self::Failure(_) => "failure",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
         }
     }
 
@@ -121,39 +121,39 @@ impl Status {
     /// A guard that needs to tell the two apart tests `partial_success()`
     /// explicitly.
     pub fn is_success_like(&self) -> bool {
-        matches!(self, Status::Success | Status::PartialSuccess { .. })
+        matches!(self, Self::Success | Self::PartialSuccess { .. })
     }
 
     /// Whether this status counts as a failure when folding the run status.
     /// `PartialSuccess`, `Skipped` and `Cancelled` do not.
     pub fn is_failure(&self) -> bool {
-        matches!(self, Status::Failure(_) | Status::TimedOut)
+        matches!(self, Self::Failure(_) | Self::TimedOut)
     }
 
     /// The failure behind this status, if any: the failure itself, or the one a
     /// `PartialSuccess` was converted from.
     pub fn failure_info(&self) -> Option<&FailureInfo> {
         match self {
-            Status::Failure(info) => Some(info),
-            Status::PartialSuccess { underlying } => underlying.as_ref(),
+            Self::Failure(info) => Some(info),
+            Self::PartialSuccess { underlying } => underlying.as_ref(),
             _ => None,
         }
     }
 
-    pub fn failure(message: impl Into<String>) -> Status {
-        Status::Failure(FailureInfo::new(message))
+    pub fn failure(message: impl Into<String>) -> Self {
+        Self::Failure(FailureInfo::new(message))
     }
 
     /// A soft failure that keeps the real failure on the record.
-    pub fn partial(underlying: FailureInfo) -> Status {
-        Status::PartialSuccess {
+    pub fn partial(underlying: FailureInfo) -> Self {
+        Self::PartialSuccess {
             underlying: Some(underlying),
         }
     }
 
     /// A partial completion that was never a failure to begin with.
-    pub fn partial_clean() -> Status {
-        Status::PartialSuccess { underlying: None }
+    pub fn partial_clean() -> Self {
+        Self::PartialSuccess { underlying: None }
     }
 }
 
@@ -175,6 +175,7 @@ impl FailureInfo {
         }
     }
 
+    #[must_use]
     pub fn with_class(mut self, class: &str) -> Self {
         self.class = SmolStr::new(class);
         self
@@ -199,11 +200,13 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    #[must_use]
     pub fn with_duration_ms(mut self, ms: u64) -> Self {
         self.duration_ms = Some(ms);
         self
     }
 
+    #[must_use]
     pub fn with_exit_code(mut self, code: i32) -> Self {
         self.exit_code = Some(code);
         self
@@ -263,11 +266,13 @@ impl Outcome {
         Self::new(Status::Cancelled, Value::Null)
     }
 
+    #[must_use]
     pub fn with_metrics(mut self, metrics: Metrics) -> Self {
         self.metrics = metrics;
         self
     }
 
+    #[must_use]
     pub fn with_context_update(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.context_updates.insert(SmolStr::new(key), value.into());
         self
@@ -275,11 +280,13 @@ impl Outcome {
 
     /// Append one splice request. Order is preserved: a later request may
     /// reference a node an earlier one added.
+    #[must_use]
     pub fn with_splice(mut self, request: SpliceRequest) -> Self {
         self.splices.push(request);
         self
     }
 
+    #[must_use]
     pub fn with_splices(mut self, requests: Vec<SpliceRequest>) -> Self {
         self.splices = requests;
         self

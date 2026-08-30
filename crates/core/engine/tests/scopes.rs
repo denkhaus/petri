@@ -4,7 +4,11 @@
 
 mod support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use engine::Command;
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
     ExprOrValue, GraphBuilder, JoinPolicy, Outcome, RunStatus, RuntimeSpec, Scope, ScopeId,
     StepRef, Value, WorkspacePolicy, validate,
@@ -28,11 +32,11 @@ fn scope_events(h: &Harness) -> Vec<(String, u32)> {
 fn a_scope_is_held_across_its_whole_chain() {
     let mut b = GraphBuilder::new();
     let scope = ScopeId::new(0);
-    let a = b.add_step("a", scope, NOOP);
-    let c = b.add_step("c", scope, NOOP);
-    let d = b.add_step("d", scope, NOOP);
-    b.link(a, c);
-    b.link(c, d);
+    let step_a = b.add_step("a", scope, NOOP);
+    let step_c = b.add_step("c", scope, NOOP);
+    let step_d = b.add_step("d", scope, NOOP);
+    b.link(step_a, step_c);
+    b.link(step_c, step_d);
     let graph = b.build();
     validate(&graph).expect("valid");
 
@@ -83,14 +87,12 @@ fn scope_env_reaches_the_step_config() {
     );
     let node = b.add_step("deploy", scope, NOOP);
     let env = b.exprs().var("env");
-    b.node_mut(node).step = StepRef::new(
-        NOOP,
-        json!({ "env": { ir::placeholder::EXPR_PLACEHOLDER_KEY: env.raw() } }),
-    );
+    b.node_mut(node).step =
+        StepRef::new(NOOP, json!({ "env": { EXPR_PLACEHOLDER_KEY: env.raw() } }));
     let graph = b.build();
     validate(&graph).expect("valid");
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+    let seen = Rc::new(RefCell::new(Value::Null));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| {
         *sink.borrow_mut() = info.config.clone();

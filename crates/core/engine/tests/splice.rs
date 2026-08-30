@@ -8,9 +8,9 @@ use std::collections::BTreeMap;
 
 use engine::INVALID_SPLICE_CLASS;
 use ir::{
-    Attachment, Edge, EdgeId, ExistingNodeRef, Graph, GraphBuilder, GraphFragment, JoinPolicy,
-    Local, Node, NodeId, Outcome, ReplaceScope, RunStatus, Scope, ScopeId, SplicePolicy,
-    SpliceRequest, StepRef, Value,
+    Attachment, Edge, EdgeId, ExistingNodeRef, ExprTable, Graph, GraphBuilder, GraphFragment,
+    JoinPolicy, Local, Node, NodeId, Outcome, ReplaceScope, RunStatus, Scope, ScopeId,
+    SplicePolicy, SpliceRequest, StepRef, Value,
 };
 use support::{Harness, NOOP};
 
@@ -377,7 +377,7 @@ fn parking_fragment(prefix: &str) -> GraphFragment {
         body:  ir::GraphBody {
             nodes:  vec![wa, wb, wj],
             scopes: vec![Scope::new(ScopeId::new(0))],
-            exprs:  Default::default(),
+            exprs:  ExprTable::default(),
             entry:  vec![NodeId::new(0), NodeId::new(1)],
         },
         exits: vec![NodeId::new(2)],

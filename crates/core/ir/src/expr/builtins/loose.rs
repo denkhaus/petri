@@ -42,9 +42,8 @@ use serde_json::Value;
 /// Coerce a value to a number by the loose rules.
 pub fn to_number(value: &Value) -> f64 {
     match value {
-        Value::Null => 0.0,
+        Value::Null | Value::Bool(false) => 0.0,
         Value::Bool(true) => 1.0,
-        Value::Bool(false) => 0.0,
         Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
         Value::String(s) => parse_number(s),
         Value::Array(_) | Value::Object(_) => f64::NAN,
@@ -134,6 +133,10 @@ pub fn to_string(value: &Value) -> String {
 
 /// How a coerced number prints. Integral values drop the decimal point, so
 /// `format('{0}', 3)` is `3`, not `3.0`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the guard proves `n` is integral and below 1e21, far inside `i128`"
+)]
 pub fn format_number(n: f64) -> String {
     if n.is_nan() {
         "NaN".to_string()
@@ -170,6 +173,11 @@ fn same_kind(a: &Value, b: &Value) -> bool {
 }
 
 /// Loose `==`.
+#[expect(
+    clippy::float_cmp,
+    reason = "the loose rules define `==` as exact numeric equality after coercion; a \
+              tolerance would change which values compare equal"
+)]
 pub fn equal(a: &Value, b: &Value) -> bool {
     if same_kind(a, b) {
         return match (a, b) {

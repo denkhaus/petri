@@ -1,6 +1,7 @@
 //! Evaluation: the environment an expression reads, and the walker that reduces
 //! it to a [`Value`]. Function calls dispatch through [`super::builtins`].
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -73,11 +74,7 @@ impl<'a> EvalEnv<'a> {
     /// entry included.
     fn run_entry(&self, map: RunMap, key: &str) -> Value {
         match map {
-            RunMap::Nodes => self
-                .run
-                .node(key)
-                .map(NodeRecord::to_value)
-                .unwrap_or(Value::Null),
+            RunMap::Nodes => self.run.node(key).map_or(Value::Null, NodeRecord::to_value),
             RunMap::Kv => self.run.get(key).cloned().unwrap_or(Value::Null),
         }
     }
@@ -107,6 +104,7 @@ impl StaticCtx {
         Self::default()
     }
 
+    #[must_use]
     pub fn bind(mut self, name: &str, value: Value) -> Self {
         self.vars.insert(SmolStr::new(name), value);
         self
@@ -333,7 +331,8 @@ pub(super) fn index_into(base: &Value, idx: &Value) -> Value {
     match (base, idx) {
         (Value::Array(a), Value::Number(n)) => n
             .as_u64()
-            .and_then(|i| a.get(i as usize))
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| a.get(i))
             .cloned()
             .unwrap_or(Value::Null),
         (Value::Object(o), Value::String(k)) => o.get(k.as_str()).cloned().unwrap_or(Value::Null),
@@ -360,7 +359,7 @@ pub(super) fn concat(l: &Value, r: &Value) -> Result<Value, EvalError> {
     }
 }
 
-fn compare(op: &str, l: &Value, r: &Value) -> Result<std::cmp::Ordering, EvalError> {
+fn compare(op: &str, l: &Value, r: &Value) -> Result<Ordering, EvalError> {
     match (l, r) {
         (Value::Number(_), Value::Number(_)) => {
             let (a, b) = (as_f64(op, l)?, as_f64(op, r)?);
@@ -376,6 +375,10 @@ fn as_f64(op: &str, v: &Value) -> Result<f64, EvalError> {
     v.as_f64().ok_or_else(|| type_err(op, "a number", v))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the guard proves `f` is integral and below 2^53, far inside `i64`"
+)]
 pub(super) fn num(f: f64) -> Value {
     // Integral results stay integers so `idx + 1` indexes arrays cleanly.
     if f.fract() == 0.0 && f.is_finite() && f.abs() < 9.007_199_254_740_992e15 {

@@ -165,6 +165,10 @@ fn fingerprint_defaults_to_none() {
         fn id(&self) -> StepKindId {
             StepKindId::new("plain")
         }
+        #[expect(
+            clippy::unnecessary_literal_bound,
+            reason = "the trait fixes this signature; an impl cannot widen the returned lifetime"
+        )]
         fn name(&self) -> &str {
             "plain"
         }
@@ -174,6 +178,10 @@ fn fingerprint_defaults_to_none() {
         fn id(&self) -> StepKindId {
             StepKindId::new("cacheable")
         }
+        #[expect(
+            clippy::unnecessary_literal_bound,
+            reason = "the trait fixes this signature; an impl cannot widen the returned lifetime"
+        )]
         fn name(&self) -> &str {
             "cacheable"
         }

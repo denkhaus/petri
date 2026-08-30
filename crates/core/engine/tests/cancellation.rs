@@ -9,6 +9,9 @@
 
 mod support;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use engine::{Command, Event};
 use ir::{
     Attempt, CancelScopeId, Control, ExpandTarget, FiringId, GraphBuilder, JoinPolicy, Outcome,
@@ -841,7 +844,7 @@ fn scope_cancelled_and_run_cancelled_read_correctly() {
     parallel_for_each(&mut b, work, items, ExpandTarget::Node, Some(1), true);
     let graph = b.build();
 
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, Value)>::new()));
+    let seen = Rc::new(RefCell::new(Vec::<(String, Value)>::new()));
     let sink = seen.clone();
     let mut h = Harness::new(graph).respond_with(move |info| match info.base.as_str() {
         "plan" => Outcome::success(json!(["a", "b"])),
@@ -862,8 +865,7 @@ fn scope_cancelled_and_run_cancelled_read_correctly() {
     let of = |name: &str| {
         seen.iter()
             .find(|(n, _)| n == name)
-            .map(|(_, c)| c.clone())
-            .unwrap_or(Value::Null)
+            .map_or(Value::Null, |(_, c)| c.clone())
     };
     assert_eq!(
         of("work#0"),

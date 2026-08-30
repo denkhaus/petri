@@ -92,7 +92,7 @@ pub fn extend_where(records: &Value, partials: &Value, protected: &Value) -> Vec
     let mut appended: Vec<Map<String, Value>> = Vec::new();
     for partial in partials.iter().filter_map(Value::as_object) {
         let mut applied = false;
-        for record in records.iter_mut() {
+        for record in &mut records {
             let conflicts = partial.iter().any(|(k, v)| {
                 protected.contains(&k.as_str()) && record.get(k).is_some_and(|have| have != v)
             });

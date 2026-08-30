@@ -5,11 +5,12 @@
 //! blocks. A host turns commands into effects and feeds the results back as
 //! events.
 
+use std::fmt;
 use std::time::Duration;
 
 use ir::{
     Attempt, CancelScopeId, Control, EdgeId, FiringId, Generation, Node, NodeId, Outcome,
-    RunStatus, ScopeId, StepEvent, Token, Value,
+    RunStatus, ScopeId, StepEvent, Token, Value, placeholder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -115,14 +116,14 @@ impl ResolvedFiring {
         inputs: Vec<Token>,
         config: Value,
     ) -> Result<Self, UnresolvedConfig> {
-        if let Some(path) = ir::placeholder::placeholder_path(&config) {
+        if let Some(path) = placeholder::placeholder_path(&config) {
             return Err(UnresolvedConfig {
                 node,
                 path,
                 reason: BoundaryViolation::UnresolvedExpression,
             });
         }
-        if let Some(path) = ir::placeholder::malformed_secret_ref(&config) {
+        if let Some(path) = placeholder::malformed_secret_ref(&config) {
             return Err(UnresolvedConfig {
                 node,
                 path,
@@ -187,11 +188,11 @@ pub enum BoundaryViolation {
     MalformedSecretRef,
 }
 
-impl std::fmt::Display for BoundaryViolation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for BoundaryViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BoundaryViolation::UnresolvedExpression => f.write_str("an unresolved expression"),
-            BoundaryViolation::MalformedSecretRef => {
+            Self::UnresolvedExpression => f.write_str("an unresolved expression"),
+            Self::MalformedSecretRef => {
                 f.write_str("a secret reference whose name is not a string")
             }
         }
@@ -238,7 +239,7 @@ impl TryFrom<ResolvedFiringRepr> for ResolvedFiring {
     type Error = UnresolvedConfig;
 
     fn try_from(r: ResolvedFiringRepr) -> Result<Self, Self::Error> {
-        ResolvedFiring::new(
+        Self::new(
             r.id,
             r.node,
             r.generation,
