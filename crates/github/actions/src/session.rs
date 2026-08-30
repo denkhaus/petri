@@ -168,27 +168,22 @@ pub(crate) fn resolved_tool_cache(
 }
 
 /// [`resolved_tool_cache`] for a process running in `env` itself — a shell or
-/// node step: the ambient env is the executor's fact, and the host store
-/// counts only where this environment's filesystem has it (petri mounts
-/// nothing but the workspace into containers, so a containerized job never
-/// sees host paths).
+/// node step. An isolated environment owns its ambient cache path. A host job
+/// instead uses Petri's registered store and must not inherit the cache path of
+/// the process that launched Petri. Petri mounts nothing but the workspace into
+/// containers, so a containerized job never sees host paths.
 pub(crate) fn env_tool_cache(
     env: &dyn ExecEnv,
     store: Option<&Path>,
     env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
     job_env: &BTreeMap<String, String>,
 ) -> String {
-    resolved_tool_cache(
-        env.workspace_path(),
-        env.ambient_env("RUNNER_TOOL_CACHE"),
-        if env.shares_host_filesystem() {
-            store
-        } else {
-            None
-        },
-        env_config,
-        job_env,
-    )
+    let (ambient, store) = if env.shares_host_filesystem() {
+        (None, store)
+    } else {
+        (env.ambient_env("RUNNER_TOOL_CACHE"), None)
+    };
+    resolved_tool_cache(env.workspace_path(), ambient, store, env_config, job_env)
 }
 
 /// `RUNNER_TEMP` under `root`: the one computation behind both the exported
