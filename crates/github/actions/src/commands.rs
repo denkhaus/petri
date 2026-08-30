@@ -198,15 +198,15 @@ impl CommandSink {
                 "set-env" | "add-path" => {
                     effects.refused.push(cmd.name.clone());
                     vec![
-                    format!("Error: Unable to process command '{line}' successfully."),
-                    format!(
-                        "Error: The `{}` command is disabled. Please upgrade to using \
+                        format!("Error: Unable to process command '{line}' successfully."),
+                        format!(
+                            "Error: The `{}` command is disabled. Please upgrade to using \
                          Environment Files or opt into unsecure command execution by \
                          setting the `ACTIONS_ALLOW_UNSECURE_COMMANDS` environment \
                          variable to `true`. For more information see: \
                          https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/",
-                        cmd.name
-                    ),
+                            cmd.name
+                        ),
                     ]
                 }
                 "debug" | "add-matcher" | "remove-matcher" | "endgroup" => vec![],

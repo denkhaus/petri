@@ -809,9 +809,8 @@ pub fn fold_into_outcome(
              (set `ACTIONS_ALLOW_UNSECURE_COMMANDS: true` to allow them)",
             effects.refused.join("::`, `::")
         );
-        outcome.status = ir::Status::Failure(
-            ir::FailureInfo::new(message).with_class(COMMAND_REFUSED_CLASS),
-        );
+        outcome.status =
+            ir::Status::Failure(ir::FailureInfo::new(message).with_class(COMMAND_REFUSED_CLASS));
     }
     outcome
 }
