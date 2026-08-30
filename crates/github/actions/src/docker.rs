@@ -242,7 +242,9 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
 
     let outcome = ending_outcome(ending, &config.soft_fail, output);
 
-    let effects = session.conclude(commands, &ctx.logs).await;
+    let (outcome, effects) = session
+        .conclude(outcome, &config.soft_fail, commands, &ctx.logs)
+        .await;
     let mut state: Map<String, Value> = config
         .state
         .into_iter()

@@ -517,37 +517,47 @@ impl Session {
             logs: tx,
             control,
         };
+        let soft_fail = process.soft_fail.clone();
         let outcome = Step::run(&ProcessStep, process, delegate).await;
         let commands = settle_sink(sink_task, &collected).await;
-        let effects = self.conclude(commands, &logs).await;
-        (outcome, effects)
+        self.conclude(outcome, &soft_fail, commands, &logs).await
     }
 
-    /// Finish the session and surface what it left behind: a warning into the
-    /// step's log when the runner files cannot be read back — the step's own
-    /// outcome stands either way — and the step-summary event when the step
-    /// wrote one.
+    /// Finish the session and surface what it left behind: the step-summary
+    /// event when the step wrote one, and — when a runner file cannot be read
+    /// back — an error in the step's log and a failed step, as the runner's
+    /// `FileCommandManager.ProcessFiles` does when a file command throws
+    /// (`CommandResult = TaskResult.Failed`, merged into the step's result).
+    /// A success-like outcome is overturned ([`runner_files_failure`]); one
+    /// that already failed or was cancelled stands. A file the step deleted
+    /// is not a failure on either runner: nothing was written.
     pub(crate) async fn conclude(
         &mut self,
+        outcome: Outcome,
+        soft_fail: &steps::SoftFail,
         commands: CommandEffects,
         logs: &mpsc::Sender<StepEvent>,
-    ) -> Effects {
+    ) -> (Outcome, Effects) {
         // A refusal outlives a read-back failure: the verdict came from the
-        // command stream, not the files.
+        // command stream, not the files, and the fold reports it in its own
+        // words when the outcome is still success-like.
         let refused = commands.refused.clone();
-        let effects = match self.finish(commands).await {
-            Ok(effects) => effects,
+        let (outcome, effects) = match self.finish(commands).await {
+            Ok(effects) => (outcome, effects),
             Err(failure) => {
                 let _ = logs
                     .send(StepEvent::Log {
                         stream: LogStream::Stderr,
-                        line: format!("Warning: {}", failure.message),
+                        line: format!("Error: {}", failure.message),
                     })
                     .await;
-                Effects {
-                    refused,
-                    ..Effects::default()
-                }
+                (
+                    runner_files_failure(outcome, soft_fail, failure),
+                    Effects {
+                        refused,
+                        ..Effects::default()
+                    },
+                )
             }
         };
         if !effects.summary.is_empty() {
@@ -557,7 +567,7 @@ impl Session {
                 ))
                 .await;
         }
-        effects
+        (outcome, effects)
     }
 
     /// Read the files back and apply them: env and path to the job, state and
@@ -745,6 +755,28 @@ fn parse_env_file(text: &str, what: &str) -> Result<Map<String, Value>, StepFail
         class: RUNNER_FILES_CLASS,
         message: format!("could not read what the step wrote to `{what}`: {e}"),
     })
+}
+
+/// A step whose runner files could not be read back, as the runner reports
+/// it: the file-command failure merges into the step's result. A success-like
+/// outcome becomes this failure — softened by `continue-on-error` exactly as
+/// an exit status would be — while a step that already failed, or was
+/// cancelled, keeps its own status. The output the process produced stays on
+/// the record either way.
+fn runner_files_failure(
+    mut outcome: Outcome,
+    soft_fail: &steps::SoftFail,
+    failure: StepFailure,
+) -> Outcome {
+    if !outcome.status.is_success_like() {
+        return outcome;
+    }
+    let info = ir::FailureInfo::new(failure.message).with_class(failure.class);
+    outcome.status = match soft_fail {
+        steps::SoftFail::All(true) => ir::Status::partial(info),
+        _ => ir::Status::Failure(info),
+    };
+    outcome
 }
 
 /// Fold what a step left into its outcome: `set-output` values that the outputs
