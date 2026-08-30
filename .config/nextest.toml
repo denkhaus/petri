@@ -1,8 +1,8 @@
-# Acceptance tests share the corpus action cache. Git cannot safely fetch the
-# same bare repository from multiple test processes at once.
-[test-groups.acceptance]
+# These tests share external resources: the corpus action cache and the Docker
+# daemon, including its container networks. Run them one at a time.
+[test-groups.external]
 max-threads = 1
 
 [[profile.default.overrides]]
-filter = "package(petri-github-acceptance)"
-test-group = "acceptance"
+filter = "package(petri-github-acceptance) | (package(petri-driver) & binary(docker)) | (package(petri-runtime) & (binary(local_executor) | binary(services)))"
+test-group = "external"
