@@ -95,6 +95,9 @@ pub struct Effects {
     pub state: Map<String, Value>,
     /// `GITHUB_STEP_SUMMARY`, when the step wrote one.
     pub summary: String,
+    /// Commands the sink refused (`set-env`/`add-path` without the opt-in):
+    /// each fails the step, as the runner's `CommandResult` does.
+    pub refused: Vec<String>,
 }
 
 /// The job's accumulated `GITHUB_ENV`, read without creating any session files:
@@ -529,6 +532,9 @@ impl Session {
         commands: CommandEffects,
         logs: &mpsc::Sender<StepEvent>,
     ) -> Effects {
+        // A refusal outlives a read-back failure: the verdict came from the
+        // command stream, not the files.
+        let refused = commands.refused.clone();
         let effects = match self.finish(commands).await {
             Ok(effects) => effects,
             Err(failure) => {
@@ -538,7 +544,10 @@ impl Session {
                         line: format!("Warning: {}", failure.message),
                     })
                     .await;
-                Effects::default()
+                Effects {
+                    refused,
+                    ..Effects::default()
+                }
             }
         };
         if !effects.summary.is_empty() {
@@ -593,6 +602,7 @@ impl Session {
             outputs: commands.outputs,
             state,
             summary,
+            refused: commands.refused,
         })
     }
 }
@@ -757,8 +767,55 @@ pub fn fold_into_outcome(
             Value::Object(state),
         );
     }
+    // A refused command fails the step whatever its process reported: the
+    // runner's `TryProcessCommand` sets `CommandResult = Failed` when an
+    // extension throws, and the step's result folds that in after the process
+    // ends. A failure the process already earned stands as it is.
+    if !effects.refused.is_empty() && outcome.status.is_success_like() {
+        let message = format!(
+            "the step's `::{}::` command was refused: unsecure commands are disabled \
+             (set `ACTIONS_ALLOW_UNSECURE_COMMANDS: true` to allow them)",
+            effects.refused.join("::`, `::")
+        );
+        outcome.status = ir::Status::Failure(
+            ir::FailureInfo::new(message).with_class(COMMAND_REFUSED_CLASS),
+        );
+    }
     outcome
 }
+
+/// A step whose process succeeded but whose command stream carried a refused
+/// `set-env`/`add-path`.
+pub const COMMAND_REFUSED_CLASS: &str = "command_refused";
+
+/// Whether unsecure `::set-env`/`::add-path` commands are allowed, by the
+/// runner's rule: `ACTIONS_ALLOW_UNSECURE_COMMANDS` parses as `true`
+/// (`bool.TryParse` — `true`/`false`, any case; nothing else counts) either in
+/// the step's resolved env or in the environment the process inherits — the
+/// job's `env:`, or the runner's own environment — which is the runner's
+/// `Environment.GetEnvironmentVariable(...) || env context` check.
+pub fn unsecure_commands_allowed(
+    env: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    exec: &dyn ExecEnv,
+) -> bool {
+    let step = match env.get(UNSECURE_COMMANDS_KEY) {
+        Some(ValueOrSecretRef::Literal(value)) => Some(stringify(value)),
+        _ => None,
+    };
+    unsecure_flag(step.as_deref(), exec)
+}
+
+/// [`unsecure_commands_allowed`] over an already-stringified step value.
+pub(crate) fn unsecure_flag(step_value: Option<&str>, exec: &dyn ExecEnv) -> bool {
+    let is_true = |s: &str| s.trim().eq_ignore_ascii_case("true");
+    step_value.is_some_and(is_true)
+        || exec
+            .ambient_env(UNSECURE_COMMANDS_KEY)
+            .as_deref()
+            .is_some_and(is_true)
+}
+
+pub(crate) const UNSECURE_COMMANDS_KEY: &str = "ACTIONS_ALLOW_UNSECURE_COMMANDS";
 
 /// Whether the resolved env sets a variable to a GitHub-truthy value.
 pub fn env_truthy(env: &BTreeMap<SmolStr, ValueOrSecretRef>, key: &str) -> bool {

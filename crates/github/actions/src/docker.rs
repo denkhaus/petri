@@ -30,8 +30,8 @@ use crate::action::{ActionSourceCap, stage};
 use crate::commands::CommandSink;
 use crate::config::{DockerActionConfig, DockerActionImage, DockerfileImage};
 use crate::session::{
-    REPO_DIR, SINK_LIMIT, Session, ci_get, fold_into_outcome, github_workspace_path,
-    resolve_sentinel_text, settle_sink, stringify,
+    REPO_DIR, SINK_LIMIT, Session, UNSECURE_COMMANDS_KEY, ci_get, fold_into_outcome,
+    github_workspace_path, resolve_sentinel_text, settle_sink, stringify, unsecure_flag,
 };
 
 /// The action's image could not be prepared.
@@ -179,9 +179,10 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
         SmolStr::new("GITHUB_OUTPUT"),
         SmolStr::new(format!("{root}/{output_rel}")),
     );
-    let allow_unsecure = env
-        .get("ACTIONS_ALLOW_UNSECURE_COMMANDS")
-        .is_some_and(|v| !v.is_empty() && v != "false" && v != "0");
+    let allow_unsecure = unsecure_flag(
+        env.get(UNSECURE_COMMANDS_KEY).map(|v| v.as_str()),
+        &*ctx.env,
+    );
 
     let entrypoint = match &config.entrypoint {
         Some(value) => Some(resolve(value)?),

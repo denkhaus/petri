@@ -8,7 +8,7 @@ use smol_str::SmolStr;
 use steps::{ProcessConfig, Step, StepCtx, StepFailure, ValueOrSecretRef};
 
 use crate::config::RunConfig;
-use crate::session::{REPO_DIR, Session, env_truthy, fold_into_outcome};
+use crate::session::{REPO_DIR, Session, fold_into_outcome, unsecure_commands_allowed};
 
 /// The process step, with the `GITHUB_*` files around it.
 pub struct RunStep;
@@ -40,7 +40,7 @@ impl Step for RunStep {
             env.entry(key)
                 .or_insert_with(|| ValueOrSecretRef::Literal(Value::String(value.to_string())));
         }
-        let allow_unsecure = env_truthy(&env, "ACTIONS_ALLOW_UNSECURE_COMMANDS");
+        let allow_unsecure = unsecure_commands_allowed(&env, &*ctx.env);
         // `.` components drop out: `create_dir_all("repo/.")` cannot make
         // `repo` (its parent is the workspace, not `repo`), and
         // `working-directory: .` is how workflows spell the workspace itself.

@@ -81,6 +81,11 @@ pub struct CommandEffects {
     pub env: Map<String, Value>,
     /// `::add-path::dir`, only when unsecure commands are allowed.
     pub path: Vec<String>,
+    /// The names of commands the sink refused — `set-env`/`add-path` without
+    /// the opt-in. The runner's extension throws, `TryProcessCommand` records
+    /// `CommandResult = Failed`, and the step fails once its process ends,
+    /// whatever the exit code; the fold applies the same verdict.
+    pub refused: Vec<String>,
 }
 
 /// The sink one step's log events pass through.
@@ -190,7 +195,9 @@ impl CommandSink {
                 // The runner's `SetEnvCommandExtension` / `AddPathCommandExtension`
                 // throw when the opt-in is absent, and `TryProcessCommand` logs
                 // the two errors below (the step then fails).
-                "set-env" | "add-path" => vec![
+                "set-env" | "add-path" => {
+                    effects.refused.push(cmd.name.clone());
+                    vec![
                     format!("Error: Unable to process command '{line}' successfully."),
                     format!(
                         "Error: The `{}` command is disabled. Please upgrade to using \
@@ -200,7 +207,8 @@ impl CommandSink {
                          https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/",
                         cmd.name
                     ),
-                ],
+                    ]
+                }
                 "debug" | "add-matcher" | "remove-matcher" | "endgroup" => vec![],
                 "group" => vec![format!("▶ {}", cmd.message)],
                 level @ ("notice" | "warning" | "error") => {

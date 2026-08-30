@@ -11,7 +11,8 @@ use steps::{ProcessConfig, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
 
 use crate::config::{ActionConfig, ActionLocation};
 use crate::session::{
-    REPO_DIR, RUNNER_DIR, Session, env_truthy, fold_into_outcome, shell_quote, stringify,
+    REPO_DIR, RUNNER_DIR, Session, fold_into_outcome, shell_quote, stringify,
+    unsecure_commands_allowed,
 };
 
 /// The action could not be fetched.
@@ -112,7 +113,7 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
             env.insert(key, literal(value.to_string()));
         }
     }
-    let allow_unsecure = env_truthy(&env, "ACTIONS_ALLOW_UNSECURE_COMMANDS");
+    let allow_unsecure = unsecure_commands_allowed(&env, &*ctx.env);
 
     let entry = format!("{action_dir}/{}", config.entry.trim_start_matches("./"));
     let process = ProcessConfig {

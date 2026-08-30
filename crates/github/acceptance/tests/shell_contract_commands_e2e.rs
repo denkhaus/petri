@@ -228,7 +228,6 @@ fn assert_unsecure_commands_applied(report: &RunReportPlus) {
 }
 
 #[tokio::test]
-#[ignore = "divergence: the job-level env opt-in is not seen — run.rs reads ACTIONS_ALLOW_UNSECURE_COMMANDS from the step env and the session env, and the job's `env:` is scope env (ExecEnv::ambient_env)"]
 async fn set_env_and_add_path_apply_with_the_job_level_opt_in() {
     let graph = lower_ok(UNSECURE_ALLOWED_WORKFLOW);
     let report = run_host(graph, "cmd-unsecure-job").await;
@@ -303,7 +302,6 @@ async fn set_env_and_add_path_are_refused_without_the_opt_in() {
 /// The failure half of the refusal: `context.CommandResult = TaskResult.Failed`
 /// fails the step even though its process exited 0.
 #[tokio::test]
-#[ignore = "divergence: a refused set-env/add-path does not fail the step (CommandEffects → outcome fold lives in session.rs)"]
 async fn a_refused_set_env_fails_the_step() {
     let graph = lower_ok(UNSECURE_DISABLED_WORKFLOW);
     let report = run_host(graph, "cmd-unsecure-fails").await;
