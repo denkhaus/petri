@@ -24,6 +24,8 @@ pub enum OutputError {
     },
     #[error("line {line}: empty key")]
     EmptyKey { line: usize },
+    #[error("line {line}: heredoc for `{key}` names no delimiter")]
+    EmptyDelimiter { line: usize, key: String },
 }
 
 /// The failure class recorded when the outputs file cannot be read.
@@ -45,11 +47,26 @@ pub fn parse(text: &str) -> Result<Map<String, Value>, OutputError> {
             continue;
         }
 
-        if let Some((key, delimiter)) = raw.split_once("<<") {
+        // Whichever of `=` and `<<` comes first decides the form, as GitHub's
+        // runner does: `URL=a<<b` is a plain pair, `K<<EOF` a heredoc even
+        // when its body carries `=`.
+        let is_heredoc = match (raw.find('='), raw.find("<<")) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(equals), Some(heredoc)) => heredoc < equals,
+        };
+        if is_heredoc {
+            let (key, delimiter) = raw.split_once("<<").expect("the marker was found");
             let key = key.trim();
             let delimiter = delimiter.trim();
             if key.is_empty() {
                 return Err(OutputError::EmptyKey { line: line_number });
+            }
+            if delimiter.is_empty() {
+                return Err(OutputError::EmptyDelimiter {
+                    line: line_number,
+                    key: key.to_string(),
+                });
             }
             let mut body: Vec<&str> = Vec::new();
             let mut closed = false;
