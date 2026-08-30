@@ -9,7 +9,7 @@ use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{ProcessConfig, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
 
-use crate::config::{ActionConfig, ActionLocation};
+use crate::config::{ActionConfig, ActionLocation, ShellScript};
 use crate::session::{
     REPO_DIR, RUNNER_DIR, Session, fold_into_outcome, shell_quote, stringify,
     unsecure_commands_allowed,
@@ -127,7 +127,9 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
         soft_fail: config.soft_fail,
         output_env_aliases: vec![SmolStr::new("GITHUB_OUTPUT")],
     };
-    let (outcome, effects) = session.run(process, None, ctx, allow_unsecure).await;
+    let (outcome, effects) = session
+        .run(process, None, ShellScript::Plain, ctx, allow_unsecure)
+        .await;
 
     // State accumulates across phases: what this phase inherited plus what it
     // saved.

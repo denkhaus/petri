@@ -43,7 +43,7 @@ use steps::{ProcessConfig, ProcessStep, Shell, Step, StepCtx, StepFailure, Value
 use tokio::sync::mpsc;
 
 use crate::commands::{CommandEffects, CommandSink};
-use crate::config::try_map_process_texts;
+use crate::config::{ShellScript, try_map_process_texts};
 
 /// The runner's own directory, relative to the workspace root.
 pub const RUNNER_DIR: &str = ".ci/github";
@@ -402,6 +402,7 @@ impl Session {
         &self,
         mut process: ProcessConfig,
         template: &str,
+        shell_script: ShellScript,
     ) -> Result<ProcessConfig, StepFailure> {
         let step_id = self
             .files
@@ -409,13 +410,24 @@ impl Session {
             .parent()
             .and_then(Path::file_name)
             .expect("step files have a firing directory");
-        let script_arg = PathBuf::from(".petri").join(step_id).join("script");
+        let (script_name, contents) = match shell_script {
+            ShellScript::Plain => ("script", process.run),
+            ShellScript::PowerShell => (
+                "script.ps1",
+                format!(
+                    "$ErrorActionPreference = 'stop'\n{}\n\
+                     if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}\n",
+                    process.run
+                ),
+            ),
+        };
+        let script_arg = PathBuf::from(".petri").join(step_id).join(script_name);
         let script = process
             .working_dir
             .as_deref()
             .unwrap_or_else(|| Path::new(""))
             .join(&script_arg);
-        write(&*self.env, &script, process.run.as_bytes()).await?;
+        write(&*self.env, &script, contents.as_bytes()).await?;
         process.run = format!(
             "{}exec {}\n",
             self.prologue(),
@@ -436,6 +448,7 @@ impl Session {
         mut self,
         process: ProcessConfig,
         shell_command: Option<String>,
+        shell_script: ShellScript,
         ctx: StepCtx,
         allow_unsecure: bool,
     ) -> (Outcome, Effects) {
@@ -495,7 +508,7 @@ impl Session {
             Err(failure) => return (failure.into(), Effects::default()),
         };
         let process = match shell_command {
-            Some(template) => match self.stage_script(process, &template).await {
+            Some(template) => match self.stage_script(process, &template, shell_script).await {
                 Ok(process) => process,
                 Err(failure) => return (failure.into(), Effects::default()),
             },

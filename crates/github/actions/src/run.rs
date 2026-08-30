@@ -64,7 +64,13 @@ impl Step for RunStep {
             output_env_aliases: vec![SmolStr::new("GITHUB_OUTPUT")],
         };
         let (outcome, effects) = session
-            .run(process, config.shell_command, ctx, allow_unsecure)
+            .run(
+                process,
+                config.shell_command,
+                config.shell_script,
+                ctx,
+                allow_unsecure,
+            )
             .await;
         fold_into_outcome(outcome, effects, Map::new())
     }

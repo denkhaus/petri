@@ -103,6 +103,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
             "pwsh" => {
                 config.insert("shell_command".into(), json!("pwsh -command \". '{0}'\""));
+                config.insert("shell_script".into(), json!("power_shell"));
             }
             other if other.contains("{0}") && !other.contains("${{") => {
                 config.insert("shell_command".into(), json!(other));
