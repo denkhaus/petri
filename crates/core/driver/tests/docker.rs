@@ -20,6 +20,25 @@ use support::*;
 use testkit::docker_ready;
 
 const IMAGE: &str = "alpine:3.20";
+const AMD64_EMULATION_PROBE_IMAGE: &str = "amd64/busybox:1.36.1";
+
+async fn amd64_emulation_ready() -> bool {
+    if cfg!(target_arch = "x86_64") {
+        return true;
+    }
+    tokio::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--platform",
+            "linux/amd64",
+            AMD64_EMULATION_PROBE_IMAGE,
+            "true",
+        ])
+        .output()
+        .await
+        .is_ok_and(|output| output.status.success())
+}
 
 fn docker_graph(name: &str, run: &str) -> ir::Graph {
     let mut b = GraphBuilder::bare();
@@ -414,6 +433,10 @@ async fn docker_wait_follows_the_step_not_the_client() {
 #[tokio::test]
 async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
     if !docker_ready().await {
+        return;
+    }
+    if !amd64_emulation_ready().await {
+        eprintln!("skipping: the Docker daemon cannot execute linux/amd64 binaries");
         return;
     }
     let dir = RunDir::new("docker-platform-fallback");
