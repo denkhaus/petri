@@ -254,32 +254,9 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
         }
     }
 
-    // Every `$expr` placeholder in a config, by id.
-    fn expr_ids(value: &Value, out: &mut Vec<ExprId>) {
-        match value {
-            Value::Object(map) => {
-                if let Some(raw) = map
-                    .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
-                    .and_then(Value::as_u64)
-                {
-                    out.push(ExprId::new(raw as u32));
-                }
-                for child in map.values() {
-                    expr_ids(child, out);
-                }
-            }
-            Value::Array(items) => {
-                for child in items {
-                    expr_ids(child, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
     let config_reads = |node: &ir::Node, pred: &dyn Fn(ExprId) -> bool| -> bool {
         let mut ids = Vec::new();
-        expr_ids(&node.step.config, &mut ids);
+        config_expr_ids(&node.step.config, &mut ids);
         ids.into_iter().any(pred)
     };
 
@@ -369,145 +346,6 @@ pub fn stubbed_output_consumers(graph: &Graph) -> std::collections::BTreeSet<Str
 /// to the env value's own expression. A ref reading only *defaulted* inputs
 /// resolves to a real ref and is not collected: its failures stay gaps.
 pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<String> {
-    use ir::{Expr, ExprId};
-
-    let zero = |v: &Value| match v {
-        Value::Number(n) => n.as_f64() == Some(0.0),
-        Value::String(s) => s.is_empty(),
-        Value::Bool(b) => !b,
-        _ => false,
-    };
-    let lit_str = |id: ExprId, want: &str| matches!(graph.exprs.get(id), Some(Expr::Lit(Value::String(s))) if s == want);
-    // `get_ci(get_ci(github, "event"), "inputs")` — the one read
-    // `bind_param_inputs` builds for a run-parameter lookup.
-    let event_inputs = |id: ExprId| -> bool {
-        let Some(Expr::Call(name, args)) = graph.exprs.get(id) else {
-            return false;
-        };
-        name == "get_ci"
-            && args.len() == 2
-            && lit_str(args[1], "inputs")
-            && match graph.exprs.get(args[0]) {
-                Some(Expr::Call(inner_name, inner)) => {
-                    inner_name == "get_ci"
-                        && inner.len() == 2
-                        && matches!(graph.exprs.get(inner[0]), Some(Expr::Var(v)) if v == "github")
-                        && lit_str(inner[1], "event")
-                }
-                _ => false,
-            }
-    };
-    // Does this subtree contain the run-parameter read at all?
-    let contains_event_inputs = |root: ExprId| -> bool {
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            if event_inputs(id) {
-                return true;
-            }
-            if let Some(expr) = graph.exprs.get(id) {
-                push_children(expr, &mut stack);
-            }
-        }
-        false
-    };
-    // The env-var names an expression reads, in every lowered spelling: an
-    // engine-side `env.<name>` read (under a function or operator), or the env
-    // sentinels a bare `${{ env.NAME }}` leaves in a string literal for the
-    // step to substitute at spawn.
-    let env_names = |expr: &Expr| -> Vec<String> {
-        let is_env = |id: ExprId| matches!(graph.exprs.get(id), Some(Expr::Var(v)) if v == "env");
-        match expr {
-            Expr::Field(base, name) if is_env(*base) => vec![name.to_string()],
-            Expr::Index(base, key) if is_env(*base) => match graph.exprs.get(*key) {
-                Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
-                _ => Vec::new(),
-            },
-            Expr::Call(name, args) if name == "get_ci" && args.len() == 2 && is_env(args[0]) => {
-                match graph.exprs.get(args[1]) {
-                    Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
-                    _ => Vec::new(),
-                }
-            }
-            Expr::Lit(Value::String(s)) => env_sentinel_names(s),
-            _ => Vec::new(),
-        }
-    };
-
-    // Does the ref expression read an empty-falling dispatch input, chasing
-    // `env.<name>` into the scope's env expressions? `seen` breaks env cycles.
-    fn reads_empty_input(
-        graph: &Graph,
-        scope: ir::ScopeId,
-        root: ir::ExprId,
-        seen: &mut std::collections::BTreeSet<String>,
-        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
-        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
-    ) -> bool {
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            let Some(expr) = graph.exprs.get(id) else {
-                continue;
-            };
-            if event_inputs_default(expr) {
-                return true;
-            }
-            for name in env_names(expr) {
-                if seen.insert(name.clone())
-                    && scope_env_reads_empty_input(
-                        graph,
-                        scope,
-                        &name,
-                        seen,
-                        event_inputs_default,
-                        env_names,
-                    )
-                {
-                    return true;
-                }
-            }
-            push_children(expr, &mut stack);
-        }
-        false
-    }
-
-    // Chase one env-var name into the scope's own `env:` expression for it.
-    fn scope_env_reads_empty_input(
-        graph: &Graph,
-        scope: ir::ScopeId,
-        name: &str,
-        seen: &mut std::collections::BTreeSet<String>,
-        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
-        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
-    ) -> bool {
-        let Some(scope) = graph.scopes.iter().find(|s| s.id == scope) else {
-            return false;
-        };
-        match scope.env.get(name) {
-            Some(ir::ExprOrValue::Expr(env_expr)) => reads_empty_input(
-                graph,
-                scope.id,
-                *env_expr,
-                seen,
-                event_inputs_default,
-                env_names,
-            ),
-            _ => false,
-        }
-    }
-
-    // `default(<reads github.event.inputs>, <zero literal>)`: an undeclared
-    // default zero-fills exactly here; a declared default puts its real value
-    // in the fallback slot and does not match.
-    let event_inputs_default = |expr: &Expr| -> bool {
-        let Expr::Call(name, args) = expr else {
-            return false;
-        };
-        name == "default"
-            && args.len() == 2
-            && matches!(graph.exprs.get(args[1]), Some(Expr::Lit(v)) if zero(v))
-            && contains_event_inputs(args[0])
-    };
-
     let mut out = std::collections::BTreeSet::new();
     for node in &graph.nodes {
         if node.step.kind.as_ref() != ACTION_KIND {
@@ -529,25 +367,13 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
             .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
             .and_then(Value::as_u64)
         {
-            Some(raw) => reads_empty_input(
-                graph,
-                node.scope,
-                ir::ExprId::new(raw as u32),
-                &mut seen,
-                &event_inputs_default,
-                &env_names,
-            ),
+            Some(raw) => {
+                reads_empty_input(graph, node.scope, ir::ExprId::new(raw as u32), &mut seen)
+            }
             None => reference.as_str().is_some_and(|text| {
                 env_sentinel_names(text).iter().any(|name| {
                     seen.insert(name.clone())
-                        && scope_env_reads_empty_input(
-                            graph,
-                            node.scope,
-                            name,
-                            &mut seen,
-                            &event_inputs_default,
-                            &env_names,
-                        )
+                        && scope_env_reads_empty_input(graph, node.scope, name, &mut seen)
                 })
             }),
         };
@@ -556,6 +382,213 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
         }
     }
     out
+}
+
+/// The nodes whose config reads a declared input the sweep leaves empty — the
+/// same `default(<reads github.event.inputs>, <type zero>)` a defaultless
+/// input lowers to when its file runs directly ([`dispatch_ref_checkouts`]
+/// keys checkout refs on it; this collects every step carrying one, in any
+/// config position — an action's inputs, a Docker action's env — chasing
+/// scope `env:` the same way). The sweep classifies a first failure here as
+/// caller-coupled only for a file declaring `workflow_call`: run standalone
+/// it has no caller to fill the input, so the zero the step read is the
+/// stance's doing, not a gap. An input with a declared default lowers its
+/// real value into the fallback slot and never matches, so its readers'
+/// failures stay gaps — as does a failure on a step reading no input at all.
+pub fn empty_input_steps(graph: &Graph) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for node in &graph.nodes {
+        let mut ids = Vec::new();
+        config_expr_ids(&node.step.config, &mut ids);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut coupled = ids
+            .into_iter()
+            .any(|id| reads_empty_input(graph, node.scope, id, &mut seen));
+        if !coupled {
+            // Config strings whose only expressions were bare `env.NAME`
+            // reads, left as sentinels for the step to substitute at spawn.
+            let mut names = Vec::new();
+            config_sentinel_names(&node.step.config, &mut names);
+            coupled = names.iter().any(|name| {
+                seen.insert(name.clone())
+                    && scope_env_reads_empty_input(graph, node.scope, name, &mut seen)
+            });
+        }
+        if coupled {
+            out.insert(node.name.to_string());
+        }
+    }
+    out
+}
+
+// ── The empty-input walk, shared by the detectors above ───────────────────
+
+/// Every `$expr` placeholder in a config, by id.
+fn config_expr_ids(value: &Value, out: &mut Vec<ir::ExprId>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(raw) = map
+                .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
+                .and_then(Value::as_u64)
+            {
+                out.push(ir::ExprId::new(raw as u32));
+            }
+            for child in map.values() {
+                config_expr_ids(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                config_expr_ids(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every env sentinel name in a config's string leaves.
+fn config_sentinel_names(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.extend(env_sentinel_names(s)),
+        Value::Object(map) => {
+            for child in map.values() {
+                config_sentinel_names(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                config_sentinel_names(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Is `v` its type's zero — the fill an input with no declared default gets?
+fn zero_value(v: &Value) -> bool {
+    match v {
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.is_empty(),
+        Value::Bool(b) => !b,
+        _ => false,
+    }
+}
+
+/// `get_ci(get_ci(github, "event"), "inputs")` — the one read
+/// `bind_param_inputs` builds for a run-parameter lookup.
+fn event_inputs_read(graph: &Graph, id: ir::ExprId) -> bool {
+    use ir::Expr;
+    let lit_str = |id: ir::ExprId, want: &str| matches!(graph.exprs.get(id), Some(Expr::Lit(Value::String(s))) if s == want);
+    let Some(Expr::Call(name, args)) = graph.exprs.get(id) else {
+        return false;
+    };
+    name == "get_ci"
+        && args.len() == 2
+        && lit_str(args[1], "inputs")
+        && match graph.exprs.get(args[0]) {
+            Some(Expr::Call(inner_name, inner)) => {
+                inner_name == "get_ci"
+                    && inner.len() == 2
+                    && matches!(graph.exprs.get(inner[0]), Some(Expr::Var(v)) if v == "github")
+                    && lit_str(inner[1], "event")
+            }
+            _ => false,
+        }
+}
+
+/// Does this subtree contain the run-parameter read at all?
+fn contains_event_inputs(graph: &Graph, root: ir::ExprId) -> bool {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if event_inputs_read(graph, id) {
+            return true;
+        }
+        if let Some(expr) = graph.exprs.get(id) {
+            push_children(expr, &mut stack);
+        }
+    }
+    false
+}
+
+/// `default(<reads github.event.inputs>, <zero literal>)`: an undeclared
+/// default zero-fills exactly here; a declared default puts its real value
+/// in the fallback slot and does not match.
+fn event_inputs_default(graph: &Graph, expr: &ir::Expr) -> bool {
+    let ir::Expr::Call(name, args) = expr else {
+        return false;
+    };
+    name == "default"
+        && args.len() == 2
+        && matches!(graph.exprs.get(args[1]), Some(ir::Expr::Lit(v)) if zero_value(v))
+        && contains_event_inputs(graph, args[0])
+}
+
+/// The env-var names an expression reads, in every lowered spelling: an
+/// engine-side `env.<name>` read (under a function or operator), or the env
+/// sentinels a bare `${{ env.NAME }}` leaves in a string literal for the
+/// step to substitute at spawn.
+fn expr_env_names(graph: &Graph, expr: &ir::Expr) -> Vec<String> {
+    use ir::Expr;
+    let is_env = |id: ir::ExprId| matches!(graph.exprs.get(id), Some(Expr::Var(v)) if v == "env");
+    match expr {
+        Expr::Field(base, name) if is_env(*base) => vec![name.to_string()],
+        Expr::Index(base, key) if is_env(*base) => match graph.exprs.get(*key) {
+            Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
+            _ => Vec::new(),
+        },
+        Expr::Call(name, args) if name == "get_ci" && args.len() == 2 && is_env(args[0]) => {
+            match graph.exprs.get(args[1]) {
+                Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
+                _ => Vec::new(),
+            }
+        }
+        Expr::Lit(Value::String(s)) => env_sentinel_names(s),
+        _ => Vec::new(),
+    }
+}
+
+/// Does the expression read an empty-falling input, chasing `env.<name>` into
+/// the scope's env expressions? `seen` breaks env cycles.
+fn reads_empty_input(
+    graph: &Graph,
+    scope: ir::ScopeId,
+    root: ir::ExprId,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let Some(expr) = graph.exprs.get(id) else {
+            continue;
+        };
+        if event_inputs_default(graph, expr) {
+            return true;
+        }
+        for name in expr_env_names(graph, expr) {
+            if seen.insert(name.clone()) && scope_env_reads_empty_input(graph, scope, &name, seen) {
+                return true;
+            }
+        }
+        push_children(expr, &mut stack);
+    }
+    false
+}
+
+/// Chase one env-var name into the scope's own `env:` expression for it.
+fn scope_env_reads_empty_input(
+    graph: &Graph,
+    scope: ir::ScopeId,
+    name: &str,
+    seen: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    let Some(scope) = graph.scopes.iter().find(|s| s.id == scope) else {
+        return false;
+    };
+    match scope.env.get(name) {
+        Some(ir::ExprOrValue::Expr(env_expr)) => {
+            reads_empty_input(graph, scope.id, *env_expr, seen)
+        }
+        _ => false,
+    }
 }
 
 /// The names of every env sentinel in `text` — a bare `${{ env.NAME }}` in
@@ -1477,6 +1510,57 @@ mod tests {
         let found = dispatch_ref_checkouts(&graph);
         assert!(
             found.iter().any(|n| n.contains("step-1")),
+            "the env-routed input read is chased: {found:?}"
+        );
+    }
+
+    /// A `workflow_call` file run standalone: a step reading a defaultless
+    /// input — directly, or through a scope `env:` — is collected, since the
+    /// input lowered to the type's zero. A *defaulted* input's reader gets a
+    /// real value and stays out, and a step reading no input at all stays
+    /// out: their failures stay gaps.
+    #[test]
+    fn empty_input_readers_are_found_and_defaulted_ones_are_not() {
+        let graph = lower(
+            "on:\n\
+             \x20 workflow_call:\n\
+             \x20   inputs:\n\
+             \x20     sanitizer: { required: true, type: string }\n\
+             \x20     seconds: { type: number, default: 600 }\n\
+             jobs:\n\
+             \x20 j:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   env:\n\
+             \x20     SAN: ${{ inputs.sanitizer }}\n\
+             \x20   steps:\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ inputs.sanitizer }}\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ inputs.seconds }}\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: fixed\n\
+             \x20     - uses: docker://alpine:3.20\n\
+             \x20       with:\n\
+             \x20         args: ${{ env.SAN }}\n",
+        );
+        let found = empty_input_steps(&graph);
+        assert!(
+            found.iter().any(|n| n.contains("step-1")),
+            "the defaultless input's reader is collected: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|n| n.contains("step-2")),
+            "a defaulted input carries a real value: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|n| n.contains("step-3")),
+            "a literal input reads nothing: {found:?}"
+        );
+        assert!(
+            found.iter().any(|n| n.contains("step-4")),
             "the env-routed input read is chased: {found:?}"
         );
     }

@@ -332,6 +332,7 @@ async fn run_one(
     let identities = step_identities(&graph);
     let stub_consumers = runs::stubbed_output_consumers(&graph);
     let dispatch_refs = runs::dispatch_ref_checkouts(&graph);
+    let empty_inputs = runs::empty_input_steps(&graph);
     let label: String = format!("{repo}-{file}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -402,6 +403,7 @@ async fn run_one(
                 caller_coupled,
                 &stub_consumers,
                 &dispatch_refs,
+                &empty_inputs,
             ),
         },
     };
@@ -422,6 +424,7 @@ fn first_failure(
     caller_coupled: bool,
     stub_consumers: &std::collections::BTreeSet<String>,
     dispatch_refs: &std::collections::BTreeSet<String>,
+    empty_inputs: &std::collections::BTreeSet<String>,
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -456,6 +459,16 @@ fn first_failure(
                         // ever succeed locally.
                         dispatch_refs.contains(&base).then(|| {
                             "checks out a ref built from an empty dispatch input".to_string()
+                        })
+                    })
+                    .or_else(|| {
+                        // A step reading a defaultless declared input got the
+                        // type's zero; when the file is a reusable one run
+                        // standalone, the missing caller — not the runtime —
+                        // is what left it empty.
+                        (caller_coupled && empty_inputs.contains(&base)).then(|| {
+                            "reads a caller input left empty (a reusable workflow run standalone)"
+                                .to_string()
                         })
                     })
             });
