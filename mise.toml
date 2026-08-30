@@ -76,7 +76,8 @@ depends = [
 
 [tasks."check:nightly"]
 description = "Run the extended nightly verification gate"
-depends = ["check", "check:msrv", "test:release"]
+depends = ["check", "check:msrv"]
+run = "mise run test:release"
 
 [tasks.release]
 description = "Build and package a Petri release for the current platform"
