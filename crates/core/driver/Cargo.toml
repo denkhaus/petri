@@ -6,6 +6,9 @@ license.workspace = true
 description = "The IO loop between the pure core and real processes."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-driver`; the crate is `driver`, so code reads `driver::…`.
 name = "driver"

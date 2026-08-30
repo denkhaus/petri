@@ -6,6 +6,9 @@ license.workspace = true
 description = "Pure, sans-IO token-flow state machine over the ir crate."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-engine`; the crate is `engine`, so code reads `engine::…`.
 name = "engine"

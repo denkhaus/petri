@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The petri command line."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "petri"
 path = "src/main.rs"

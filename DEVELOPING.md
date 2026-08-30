@@ -53,6 +53,35 @@ state machine synchronous unless a real I/O boundary requires async.
 The `petri-cli` crate owns Tokio runtime creation. Library crates can expose
 Tokio-based async APIs, but they must not create a process-wide runtime.
 
+## Lints and unsafe code
+
+The root `Cargo.toml` holds the workspace lint tables, and every member crate
+opts in with `[lints] workspace = true`. Workspace lints are not inherited
+automatically, so a new crate must add that table or the policy does nothing
+for it. The root `clippy.toml` allows `unwrap` in tests and on
+`std::sync::LockResult`, and nowhere else.
+
+`mise run lint` runs the whole policy with warnings denied. It is the source of
+truth. Repair a diagnostic with a small, behavior-preserving code change first.
+When the code is intentionally different from the policy, put
+`#[expect(LINT, reason = "...")]` on the narrowest item or expression and state
+the real constraint in the reason. Do not add a workspace-wide exemption to
+silence one site.
+
+Project-written unsafe code is denied by default: `unsafe_code = "deny"` in the
+workspace lint table. `petri-executor-host` is the only exception. It is
+limited to POSIX process control (`killpg`) and the macOS `libproc` queries
+that the host executor uses to observe a process group without signalling it.
+The crate takes the exception with a reasoned `#![allow(unsafe_code, ...)]` at
+the top of its `lib.rs`.
+
+Every unsafe operation carries an adjacent `SAFETY:` comment. The comment must
+prove the preconditions that operation relies on: pointer validity, initialized
+storage, buffer size, exclusive borrow, and the operating system's own
+contract. Keep each unsafe block around only the operation that requires it.
+Ordinary filtering and iteration stay outside. Adding unsafe code to any other
+crate needs a project decision, not a local attribute.
+
 ## Crate policy
 
 The external distribution surface is:

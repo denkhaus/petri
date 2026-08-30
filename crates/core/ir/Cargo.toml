@@ -6,6 +6,9 @@ license.workspace = true
 description = "Token-flow graph IR: nodes, explicit routing, joins, expressions, validation."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-ir`; the crate is `ir`, so code reads `ir::…`.
 name = "ir"

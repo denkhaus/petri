@@ -6,6 +6,9 @@ license.workspace = true
 description = "GitHub Actions step kinds: run: steps with the env-file protocol, and JavaScript actions fetched from their repositories."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-github-actions`; the crate is `github_actions`, so code reads `github_actions::…`.
 name = "github_actions"

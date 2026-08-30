@@ -6,6 +6,9 @@ license.workspace = true
 description = "The interface between the driver and the environments that run steps."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-executor`; the crate is `executor`, so code reads `executor::…`.
 name = "executor"

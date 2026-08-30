@@ -6,6 +6,9 @@ license.workspace = true
 description = "The acceptance battery: the compatibility corpus, and real workflows run end to end."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-github-acceptance`; the crate is `acceptance`, so code reads `acceptance::…`.
 name = "acceptance"

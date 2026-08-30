@@ -6,6 +6,9 @@ license.workspace = true
 description = "The per-run ObjectService: local stand-ins for GitHub's results backends (artifacts, cache)."
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The package is `petri-github-objects`; the crate is `github_objects`.
 name = "github_objects"

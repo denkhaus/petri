@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "A token-flow workflow engine: core, plus every component it ships with."
 
+[lints]
+workspace = true
+
 [dependencies]
 runtime = { workspace = true }
 frontend-gha = { workspace = true }
