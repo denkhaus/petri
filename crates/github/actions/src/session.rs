@@ -99,6 +99,30 @@ pub struct Effects {
     /// Commands the sink refused (`set-env`/`add-path` without the opt-in):
     /// each fails the step, as the runner's `CommandResult` does.
     pub refused: Vec<String>,
+    /// The runner's error annotations for `GITHUB_ENV` names on its block
+    /// list ([`set_env_blocked`]): the pair is dropped and the message logged,
+    /// but — unlike a refusal — the step's result stands.
+    pub blocked: Vec<String>,
+}
+
+/// The names the runner refuses to set from a step's own writes —
+/// `_setEnvBlockList` in `FileCommandManager.cs` (the `GITHUB_ENV` file) and
+/// `ActionCommandManager.cs` (the legacy `::set-env::` command), compared
+/// `OrdinalIgnoreCase`: `NODE_OPTIONS` would splice code into every later
+/// Node process, action executions included. A workflow's declared `env:` is
+/// author-controlled and stays unrestricted, as on GitHub.
+const SET_ENV_BLOCK_LIST: &[&str] = &["NODE_OPTIONS"];
+
+/// The block list's own spelling when `name` is on it — the runner's error
+/// names the list entry, not the step's casing. A blocked pair is dropped
+/// with an error annotation and nothing more: `SetEnvFileCommand` `continue`s
+/// rather than throwing, so `ProcessFiles`' catch never fires and the step's
+/// result is untouched.
+pub(crate) fn set_env_blocked(name: &str) -> Option<&'static str> {
+    SET_ENV_BLOCK_LIST
+        .iter()
+        .copied()
+        .find(|blocked| blocked.eq_ignore_ascii_case(name))
 }
 
 /// The job's accumulated `GITHUB_ENV`, read without creating any session files:
@@ -553,7 +577,19 @@ impl Session {
         // words when the outcome is still success-like.
         let refused = commands.refused.clone();
         let (outcome, effects) = match self.finish(commands).await {
-            Ok(effects) => (outcome, effects),
+            Ok(effects) => {
+                // Block-list drops annotate without failing: the runner
+                // `AddIssue`s and moves on, so the outcome stands as it is.
+                for message in &effects.blocked {
+                    let _ = logs
+                        .send(StepEvent::Log {
+                            stream: LogStream::Stderr,
+                            line:   format!("Error: {message}"),
+                        })
+                        .await;
+                }
+                (outcome, effects)
+            }
             Err(failure) => {
                 let _ = logs
                     .send(StepEvent::Log {
@@ -591,8 +627,17 @@ impl Session {
         )?;
 
         let mut env = parse_env_file(&env_text, "GITHUB_ENV")?;
+        // The sink already blocked `::set-env::` names in-stream, with that
+        // path's own message; whatever is blocked here came from the file.
         env.extend(commands.env);
+        let mut blocked = Vec::new();
         for (key, value) in env {
+            if let Some(name) = set_env_blocked(&key) {
+                blocked.push(format!(
+                    "Can't store {name} output parameter using '$GITHUB_ENV' command."
+                ));
+                continue;
+            }
             self.job_env.insert(key, stringify(&value));
         }
         // Each entry goes in front of the ones before it.
@@ -620,6 +665,7 @@ impl Session {
             state,
             summary,
             refused: commands.refused,
+            blocked,
         })
     }
 }
@@ -938,6 +984,16 @@ mod tests {
         assert!(env_truthy(&env, "A"));
         assert!(!env_truthy(&env, "B"));
         assert!(!env_truthy(&env, "C"));
+    }
+
+    #[test]
+    fn the_block_list_matches_any_casing_and_answers_with_its_own() {
+        assert_eq!(set_env_blocked("NODE_OPTIONS"), Some("NODE_OPTIONS"));
+        assert_eq!(set_env_blocked("node_options"), Some("NODE_OPTIONS"));
+        assert_eq!(set_env_blocked("Node_Options"), Some("NODE_OPTIONS"));
+        assert_eq!(set_env_blocked("NODE_OPTIONS2"), None);
+        assert_eq!(set_env_blocked("NODEOPTIONS"), None);
+        assert_eq!(set_env_blocked(""), None);
     }
 
     #[test]

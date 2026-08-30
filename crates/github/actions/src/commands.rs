@@ -186,11 +186,24 @@ impl CommandSink {
                     }
                     vec![]
                 }
+                // With the opt-in, the runner's block list still holds: a
+                // blocked name gets an error issue and is not applied — no
+                // throw, so the step's result is untouched. The message
+                // carries the list's spelling, not the command's.
                 "set-env" if self.allow_unsecure => {
                     if let Some(name) = name_prop {
-                        effects.env.insert(name, Value::String(cmd.message));
+                        if let Some(blocked) = crate::session::set_env_blocked(&name) {
+                            vec![format!(
+                                "Error: Can't update {blocked} environment variable \
+                                 using ::set-env:: command."
+                            )]
+                        } else {
+                            effects.env.insert(name, Value::String(cmd.message));
+                            vec![]
+                        }
+                    } else {
+                        vec![]
                     }
-                    vec![]
                 }
                 "add-path" if self.allow_unsecure => {
                     effects.path.push(cmd.message);
@@ -340,6 +353,37 @@ mod tests {
             (LogStream::Stdout, "::tok::".to_string()),
             (LogStream::Stdout, "Error: live".to_string()),
         ]);
+    }
+
+    /// Even with the unsecure opt-in, the runner's block list refuses
+    /// `NODE_OPTIONS` in any casing: the error names the list's spelling, the
+    /// variable is not applied, and — the runner `AddIssue`s rather than
+    /// throwing — nothing lands in `refused`, so the step's result stands.
+    #[tokio::test]
+    async fn set_env_blocks_node_options_even_when_unsecure_commands_are_allowed() {
+        let (out, effects, _) = drive(true, &[
+            (
+                LogStream::Stdout,
+                "::set-env name=NODE_OPTIONS::--require=/e.js",
+            ),
+            (
+                LogStream::Stdout,
+                "::set-env name=node_options::--require=/e.js",
+            ),
+            (LogStream::Stdout, "::set-env name=GOOD::applies"),
+        ])
+        .await;
+        let blocked =
+            "Error: Can't update NODE_OPTIONS environment variable using ::set-env:: command.";
+        assert_eq!(out, vec![
+            (LogStream::Stdout, blocked.to_string()),
+            (LogStream::Stdout, blocked.to_string()),
+        ]);
+        let effects = effects.lock().unwrap();
+        assert!(!effects.env.contains_key("NODE_OPTIONS"));
+        assert!(!effects.env.contains_key("node_options"));
+        assert_eq!(effects.env["GOOD"], "applies");
+        assert!(effects.refused.is_empty(), "an annotation, not a refusal");
     }
 
     #[tokio::test]
