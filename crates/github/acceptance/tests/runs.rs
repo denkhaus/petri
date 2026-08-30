@@ -22,6 +22,12 @@
 //! `linux/amd64`) forces the runner containers' platform: unset, the daemon
 //! runs its native architecture and `runner.arch` says so; set to amd64 on an
 //! arm64 host, the sweep reproduces GitHub's x64 runners under emulation.
+//! Each workflow fires as its own primary trigger with a simulated event
+//! payload — fields real (identity from the pin), resources fabricated
+//! (#999999 exists nowhere server-side, so nothing real can be read or
+//! mutated) — which is what lets `github.event.*` reads and `event_name`
+//! conditions behave as they do on GitHub; `PETRI_SWEEP_EVENT=dispatch`
+//! restores the bare dispatch + empty event.
 //!
 //! The sweep is token-less by default (see [`sweep_token`]);
 //! `PETRI_SWEEP_TOKEN` opts a real token in — `PETRI_SWEEP_TOKEN=$(gh auth
@@ -108,6 +114,7 @@ async fn corpus_run_sweep() {
     let timeout = Duration::from_secs(env_num("PETRI_SWEEP_TIMEOUT", 900));
 
     let pins = corpus_pins(&root);
+    let event_mode = env::var("PETRI_SWEEP_EVENT").unwrap_or_default();
     let platform = env::var("PETRI_SWEEP_PLATFORM")
         .ok()
         .filter(|p| !p.is_empty());
@@ -155,8 +162,25 @@ async fn corpus_run_sweep() {
             // caller-coupled, not a gap. (The word in the file is the signal:
             // hybrid-trigger files whose env broke on absent inputs would
             // break on GitHub's own non-call triggers too.)
-            let caller_coupled =
-                fs::read_to_string(&file).is_ok_and(|text| text.contains("workflow_call"));
+            let text = fs::read_to_string(&file).unwrap_or_default();
+            let caller_coupled = text.contains("workflow_call");
+            // The workflow fires as its own primary trigger with a simulated
+            // payload (fields real, resources fabricated), unless the
+            // operator restores the bare dispatch. A caller-coupled file
+            // keeps standalone semantics: no fabricated caller.
+            if !caller_coupled && event_mode != "dispatch" {
+                let sha = pins
+                    .get(&repo)
+                    .map(String::as_str)
+                    .unwrap_or("0000000000000000000000000000000000000000");
+                let branch = default_branch(&repo_root).unwrap_or_else(|| "main".to_string());
+                if let Some((name, payload)) = runs::simulated_event(&text, &repo, sha, &branch) {
+                    if let Some(github) = graph.params.get_mut("github") {
+                        github["event_name"] = json!(name);
+                        github["event"] = payload;
+                    }
+                }
+            }
             queue.push((records.len(), graph, caller_coupled));
         }
         records.push(record);
@@ -232,7 +256,8 @@ async fn corpus_run_sweep() {
          store, persistent across sweeps. Identity: \
          `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the \
          sweep's analog of `default_params` reading HEAD — so `checkout` fetches \
-         real state; {auth}.",
+         real state; {auth}. Each workflow fired as its own primary trigger with \
+         a simulated event payload (fabricated resource #999999).",
         runs::RUNNER_IMAGE_2404,
         timeout.as_secs(),
     );

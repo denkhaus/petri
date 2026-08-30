@@ -982,6 +982,24 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
                 .to_string(),
         );
     }
+    // The simulated event's fabricated resource: payloads name #999999 by
+    // design, so an API call or ref fetch against it meets not-found. The
+    // payload's *fields* were the fidelity; the resource never existed.
+    // Cross-line: the request names the number ("Fetching … PR#999999") and
+    // the API's answer is its own bare line ("Error: Not Found").
+    let fabricated = SIMULATED_NUMBER.to_string();
+    if log.iter().any(|line| line.contains(&fabricated))
+        && log.iter().any(|line| {
+            line.contains("Not Found")
+                || line.contains("404")
+                || line.contains("couldn't find remote ref")
+        })
+    {
+        return Some(format!(
+            "reads the simulated event's fabricated resource (nothing exists server-side \
+             as #{SIMULATED_NUMBER})"
+        ));
+    }
     // The scorecard action's publish path signs its results, and the signing
     // service takes only the Actions-issued ephemeral `GITHUB_TOKEN` — any
     // PAT, which is all the sweep can supply, is rejected on shape alone. The
@@ -1403,6 +1421,246 @@ fn sanitize_cell(text: &str) -> String {
         cell.push('…');
     }
     cell
+}
+
+/// The resource number every simulated payload fabricates. Nothing exists
+/// server-side under it, by design: payload-*field* readers (titles, labels,
+/// shas, paths — the fidelity this buys) see a full event, while an API call
+/// or ref fetch against the resource meets a clean not-found instead of a
+/// real repository object it could read or mutate.
+pub const SIMULATED_NUMBER: u64 = 999999;
+
+/// The workflow's primary trigger and a simulated payload for it, from its
+/// own `on:` — `github.event_name` and `github.event` for the sweep, in place
+/// of the bare `workflow_dispatch` + `{}` that leaves 120 corpus workflows'
+/// `github.event.*` reads empty and 54 workflows' `event_name` conditions
+/// false (silently skipping their jobs).
+///
+/// Identity fields substitute from the run's own pin, and the payload's head
+/// sha IS the pin, so an action fetching the event's commit finds it. `None`
+/// keeps the caller's default: `on:` absent or unparsable, or none of its
+/// triggers has a builder here (`workflow_call` deliberately among them — a
+/// standalone reusable file keeps its runs-without-a-caller semantics).
+pub fn simulated_event(
+    workflow_text: &str,
+    repo_slug: &str,
+    sha: &str,
+    branch: &str,
+) -> Option<(String, Value)> {
+    use frontend::diag::Diagnostics;
+    use frontend::yaml::{Document, Node};
+    use serde_json::json;
+
+    let mut diags = Diagnostics::new();
+    let doc = Document::parse("<simulated-event>", workflow_text, &mut diags)?;
+    let on = doc.root().as_mapping()?.get("on")?;
+
+    let mut declared: Vec<String> = Vec::new();
+    if let Some(one) = on.as_str() {
+        declared.push(one.to_string());
+    } else if let Some(seq) = on.as_sequence() {
+        for item in seq.iter() {
+            if let Some(name) = item.as_str() {
+                declared.push(name.to_string());
+            }
+        }
+    } else if let Some(map) = on.as_mapping() {
+        for (name, _) in map.iter() {
+            declared.push(name.to_string());
+        }
+    }
+
+    // First supported trigger, most event-shaped first.
+    const PRIORITY: &[&str] = &[
+        "pull_request",
+        "pull_request_target",
+        "push",
+        "schedule",
+        "release",
+        "issue_comment",
+        "issues",
+        "workflow_dispatch",
+    ];
+    let name = PRIORITY
+        .iter()
+        .find(|p| declared.iter().any(|d| d == *p))?
+        .to_string();
+
+    let (owner, repo_name) = repo_slug.split_once('/').unwrap_or(("owner", repo_slug));
+    let url = format!("https://github.com/{repo_slug}");
+    let repository = json!({
+        "name": repo_name,
+        "full_name": repo_slug,
+        "owner": { "login": owner },
+        "html_url": url,
+        "default_branch": branch,
+    });
+    let sender = json!({ "login": "petri-simulated" });
+    let n = SIMULATED_NUMBER;
+
+    let payload = match name.as_str() {
+        "push" => json!({
+            "ref": format!("refs/heads/{branch}"),
+            "before": "0000000000000000000000000000000000000000",
+            "after": sha,
+            "created": false, "deleted": false, "forced": false,
+            "compare": format!("{url}/compare"),
+            "head_commit": {
+                "id": sha,
+                "message": "petri simulated push",
+                "author": { "name": "petri-simulated", "email": "petri@invalid" },
+                "committer": { "name": "petri-simulated", "email": "petri@invalid" },
+            },
+            "commits": [{
+                "id": sha,
+                "message": "petri simulated push",
+                "author": { "name": "petri-simulated", "email": "petri@invalid" },
+            }],
+            "pusher": { "name": "petri-simulated" },
+            "repository": repository, "sender": sender,
+        }),
+        "pull_request" | "pull_request_target" => json!({
+            "action": "opened",
+            "number": n,
+            "pull_request": {
+                "number": n,
+                "state": "open",
+                "title": "petri simulated pull request",
+                "body": "",
+                "draft": false,
+                "merged": false,
+                "html_url": format!("{url}/pull/{n}"),
+                "user": { "login": "petri-simulated" },
+                "labels": [],
+                "head": {
+                    "ref": "petri/simulated",
+                    "sha": sha,
+                    "repo": repository,
+                },
+                "base": { "ref": branch, "sha": sha, "repo": repository },
+            },
+            "repository": repository, "sender": sender,
+        }),
+        "schedule" => json!({
+            "schedule": "0 0 * * *",
+            "repository": repository, "sender": sender,
+        }),
+        "release" => json!({
+            "action": "published",
+            "release": {
+                "tag_name": "v0.0.0-petri-simulated",
+                "name": "petri simulated release",
+                "draft": false,
+                "prerelease": false,
+                "html_url": format!("{url}/releases/tag/v0.0.0-petri-simulated"),
+                "author": { "login": "petri-simulated" },
+            },
+            "repository": repository, "sender": sender,
+        }),
+        "issue_comment" | "issues" => {
+            let issue = json!({
+                "number": n,
+                "state": "open",
+                "title": "petri simulated issue",
+                "body": "",
+                "html_url": format!("{url}/issues/{n}"),
+                "user": { "login": "petri-simulated" },
+                "labels": [],
+            });
+            if name == "issues" {
+                json!({ "action": "opened", "issue": issue,
+                        "repository": repository, "sender": sender })
+            } else {
+                json!({ "action": "created", "issue": issue,
+                        "comment": {
+                            "id": 1,
+                            "body": "petri simulated comment",
+                            "user": { "login": "petri-simulated" },
+                        },
+                        "repository": repository, "sender": sender })
+            }
+        }
+        "workflow_dispatch" => {
+            // Declared inputs get plausible values — GitHub delivers dispatch
+            // inputs as strings — so required-input refs stop rendering from
+            // zeros. The fabricated number keeps ref fetches server-missing.
+            let mut inputs = serde_json::Map::new();
+            if let Some(decls) = on
+                .as_mapping()
+                .and_then(|m| m.get("workflow_dispatch"))
+                .and_then(|d| d.as_mapping())
+                .and_then(|d| d.get("inputs"))
+                .and_then(|i| i.as_mapping())
+            {
+                for (input, decl) in decls.iter() {
+                    let decl = decl.as_mapping();
+                    let get = |k: &str| -> Option<String> {
+                        decl.as_ref()
+                            .and_then(|d| d.get(k))
+                            .and_then(|v: Node<'_>| v.as_str().map(str::to_string))
+                    };
+                    let value = get("default").unwrap_or_else(|| match get("type").as_deref() {
+                        Some("number") => n.to_string(),
+                        Some("boolean") => "false".to_string(),
+                        Some("choice") => decl
+                            .as_ref()
+                            .and_then(|d| d.get("options"))
+                            .and_then(|o| o.as_sequence())
+                            .and_then(|s| s.iter().next())
+                            .and_then(|f| f.as_str().map(str::to_string))
+                            .unwrap_or_else(|| "petri-simulated".to_string()),
+                        _ => "petri-simulated".to_string(),
+                    });
+                    inputs.insert(input.to_string(), Value::String(value));
+                }
+            }
+            json!({
+                "ref": format!("refs/heads/{branch}"),
+                "inputs": inputs,
+                "repository": repository, "sender": sender,
+            })
+        }
+        _ => return None,
+    };
+    Some((name, payload))
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    #[test]
+    fn the_primary_trigger_wins_and_identity_substitutes() {
+        let text = "on: [push, pull_request]\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n";
+        let (name, payload) = simulated_event(text, "o/r", "abc123", "main").expect("simulated");
+        assert_eq!(name, "pull_request");
+        assert_eq!(payload["pull_request"]["head"]["sha"], "abc123");
+        assert_eq!(payload["pull_request"]["base"]["ref"], "main");
+        assert_eq!(payload["repository"]["full_name"], "o/r");
+        assert_eq!(payload["number"], SIMULATED_NUMBER);
+
+        let push_only = "on: push\njobs: {}\n";
+        let (name, payload) =
+            simulated_event(push_only, "o/r", "abc123", "dev").expect("simulated");
+        assert_eq!(name, "push");
+        assert_eq!(payload["after"], "abc123");
+        assert_eq!(payload["ref"], "refs/heads/dev");
+    }
+
+    #[test]
+    fn dispatch_inputs_fabricate_by_type_and_unsupported_triggers_defer() {
+        let text = "on:\n  workflow_dispatch:\n    inputs:\n      who: { type: string }\n      n: { type: number }\n      pick: { type: choice, options: [a, b] }\n      set: { type: string, default: kept }\njobs: {}\n";
+        let (name, payload) = simulated_event(text, "o/r", "s", "main").expect("simulated");
+        assert_eq!(name, "workflow_dispatch");
+        let inputs = &payload["inputs"];
+        assert_eq!(inputs["who"], "petri-simulated");
+        assert_eq!(inputs["n"], SIMULATED_NUMBER.to_string());
+        assert_eq!(inputs["pick"], "a");
+        assert_eq!(inputs["set"], "kept");
+
+        assert!(simulated_event("on: status\njobs: {}\n", "o/r", "s", "m").is_none());
+        assert!(simulated_event("on: workflow_call\njobs: {}\n", "o/r", "s", "m").is_none());
+    }
 }
 
 #[cfg(test)]
