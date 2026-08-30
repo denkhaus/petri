@@ -50,9 +50,23 @@ formatter. Tokio owns asynchronous subprocesses, timers, networking, and
 orchestration. Keep parsing, validation, graph transformations, and the engine
 state machine synchronous unless a real I/O boundary requires async.
 
-The workspace contains internal crates, a distribution library, a CLI, and test
-support. Treat shared in-repository crates as application code unless the
-project explicitly gives an API to independent consumers.
+The `petri-cli` crate owns Tokio runtime creation. Library crates can expose
+Tokio-based async APIs, but they must not create a process-wide runtime.
+
+## Crate policy
+
+The external distribution surface is:
+
+- `crates/petri/lib`, the `petri` library that re-exports the supported API;
+- `crates/petri/cli`, the shipped `petri` executable.
+
+All crates under `crates/core/` and `crates/github/` are internal components or
+test support. Their manifests set `publish = false`. Treat their public items as
+in-repository APIs unless a later project decision gives independent consumers
+a direct contract.
+
+Do not publish either distribution crate manually. Crates.io publication and
+binary release automation require a separate release decision.
 
 ## Project structure
 

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Core assembled: the standard runtime, and the facade over core's layers."
+publish = false
 
 [lib]
 # The package is `petri-runtime`; the crate is `runtime`, so code reads `runtime::…`.

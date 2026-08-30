@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Shared frontend machinery: diagnostics, spanned YAML, the expression grammar, graph printing."
+publish = false
 
 [lib]
 # The package is `petri-frontend`; the crate is `frontend`, so code reads `frontend::…`.
