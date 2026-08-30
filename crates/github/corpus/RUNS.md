@@ -4,13 +4,13 @@ The run-time counterpart of REPORT.md: every in-scope workflow that lowers, run 
 
 Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-2ea78b6f826c` (22.04/26.04 variants by label; the privileged dind flavor where the graph drives a Docker engine), matrices capped to their first leg, each workflow capped at 900s wall clock, parallelism 4; the full-image list runs on the ubuntu-latest capture, since its workflows compile native gems against full-image packages. The artifact and cache backends are live: each run gets the distribution's ObjectService, cache and tool cache in the host store, persistent across sweeps. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied.
 
-249 workflows in scope; 240 lower and were run.
+248 workflows in scope; 241 lower and were run.
 
-| Result (of the 240 run) | Count | Share |
+| Result (of the 241 run) | Count | Share |
 |---|---|---|
-| passed | 142 | 59% |
+| passed | 144 | 60% |
 | **failed on a runtime-tier gap** | 7 | 3% |
-| expected failure (server-coupled) | 89 | 37% |
+| expected failure (server-coupled) | 88 | 37% |
 | **timed out** | 2 | 1% |
 
 ## First failures — gaps, ranked
@@ -46,7 +46,6 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | `gr2m/create-or-update-pull-request-action · needs a repository secret` | 3 |
 | `JamesIves/github-pages-deploy-action · pushes a deployment branch` | 2 |
 | `actions/checkout · checks out a ref built from an empty dispatch input` | 2 |
-| `dessant/lock-threads · mutates issues over the API` | 2 |
 | `github/codeql-action/analyze · reads its own workflow run (no server-side run exists)` | 2 |
 | `peter-evans/create-pull-request · needs a repository secret` | 2 |
 | `release-drafter/release-drafter · mutates releases over the API` | 2 |
@@ -56,6 +55,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | `actions/stale · needs a repository secret` | 1 |
 | `actions/upload-artifact · reads a stubbed script's output` | 1 |
 | `depot/build-push-action · builds on the depot.dev service (project token)` | 1 |
+| `dessant/lock-threads · mutates issues over the API` | 1 |
 | `dessant/lock-threads · needs a repository secret` | 1 |
 | `docker.io/chko/docker-pushrm:1 · needs a repository secret` | 1 |
 | `dorny/paths-filter · reads the triggering pull request (no local event)` | 1 |
@@ -79,7 +79,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | actions/checkout | `publish-immutable-actions.yml` | expected failure | `actions/publish-immutable-action` — step exited with status 1 · `Error: Could not find Repository.` _(publishes to GitHub's registry)_ |
 | actions/checkout | `update-main-version.yml` | pass | — |
 | actions/checkout | `update-test-ubuntu-git.yml` | pass | — |
-| astral-sh/ruff | `build-docker.yml` | **timeout** | — |
+| astral-sh/ruff | `build-docker.yml` | **timeout (wedged)** | — |
 | astral-sh/ruff | `build-wasm.yml` | pass | — |
 | astral-sh/ruff | `daily_fuzz.yaml` | pass | — |
 | astral-sh/ruff | `memory_report.yaml` | pass | — |
@@ -151,7 +151,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | django/django | `coverage_tests.yml` | pass | — |
 | django/django | `docs.yml` | pass | — |
 | django/django | `labels.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: Cannot read properties of undefined (reading 'title')` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
-| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: flake8. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file m…` |
+| django/django | `linters.yml` | **fail** | `liskin/gh-problem-matcher-wrap` — step exited with status 1 · `Error: Unable to locate executable file: isort. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file mo…` |
 | django/django | `new_contributor_pr.yml` | pass | — |
 | django/django | `playwright.yml` | pass | — |
 | django/django | `postgis.yml` | pass | — |
@@ -189,7 +189,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | hashicorp/terraform | `equivalence-test-manual-update.yml` | expected failure | `actions/setup-go` — step exited with status 1 · `Error: Command failed:  version /bin/sh: 1: version: not found ` _(reads a stubbed script's output)_ |
 | hashicorp/terraform | `equivalence-test-update.yml` | pass | — |
 | hashicorp/terraform | `issue-comment-created.yml` | pass | — |
-| hashicorp/terraform | `lock.yml` | expected failure | `dessant/lock-threads` — step exited with status 1 · `Error: Must have admin rights to Repository. - https://docs.github.com/rest/issues/issues#lock-an-issue` _(mutates issues over the API)_ |
+| hashicorp/terraform | `lock.yml` | pass | — |
 | nodejs/node | `auto-start-ci.yml` | pass | — |
 | nodejs/node | `build-tarball.yml` | pass | — |
 | nodejs/node | `close-stalled.yml` | pass | — |
@@ -215,7 +215,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | nodejs/node | `notify-on-push.yml` | pass | — |
 | nodejs/node | `notify-on-review-wanted.yml` | pass | — |
 | nodejs/node | `post-release.yml` | pass | — |
-| nodejs/node | `scorecard.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T23:51:10Z","repo":{"name":"github.com/nodejs/node","commit":"045ff95365c8a65f8abc0a33efb055b6d9d93c03"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
+| nodejs/node | `scorecard.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-30T04:08:38Z","repo":{"name":"github.com/nodejs/node","commit":"045ff95365c8a65f8abc0a33efb055b6d9d93c03"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a94bc…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
 | nodejs/node | `stale.yml` | pass | — |
 | nodejs/node | `test-internet.yml` | pass | — |
 | nodejs/node | `test-linux-quic.yml` | not lowered | `action.local_missing` |
@@ -229,7 +229,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | ohmyzsh/ohmyzsh | `dependencies.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
 | ohmyzsh/ohmyzsh | `main.yml` | pass | — |
 | ohmyzsh/ohmyzsh | `project.yml` | expected failure | `actions/create-github-app-token` — no secret named `OHMYZSH_CLIENT_ID` _(needs a repository secret)_ |
-| ohmyzsh/ohmyzsh | `scorecard.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T23:53:45Z","repo":{"name":"github.com/ohmyzsh/ohmyzsh","commit":"4b657407c98bbc8830ae66c2ac7ff3d737c55a83"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
+| ohmyzsh/ohmyzsh | `scorecard.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-30T04:11:20Z","repo":{"name":"github.com/ohmyzsh/ohmyzsh","commit":"4b657407c98bbc8830ae66c2ac7ff3d737c55a83"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc60a013a…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
 | pola-rs/polars | `benchmark-remote.yml` | not lowered | `runs_on.unknown` |
 | pola-rs/polars | `benchmark.yml` | pass | — |
 | pola-rs/polars | `changes-dsl-labeler.yml` | pass | — |
@@ -256,8 +256,8 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | prometheus/prometheus | `govulncheck.yml` | pass | — |
 | prometheus/prometheus | `lock.yml` | expected failure | `dessant/lock-threads` — no secret named `PROMBOT_LOCKTHREADS_TOKEN` _(needs a repository secret)_ |
 | prometheus/prometheus | `prombench.yml` | pass | — |
-| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container d9f5965ad6704c2514c711cad54e6928f632b372de96c08fce3bc7bcbc3755ff is not running` |
-| prometheus/prometheus | `scorecards.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-29T23:57:48Z","repo":{"name":"github.com/prometheus/prometheus","commit":"e06b2dc5a6149e20ca82fe936fb044a6dfe45958"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc6…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
+| prometheus/prometheus | `repo_sync.yml` | **fail** | `github/checkout` — step exited with status 1 · `Error response from daemon: container 942185c1c9712d9b9e7242aeaadbc722fe3d150a2c9440a5bfd71716d6781bcc is not running` |
+| prometheus/prometheus | `scorecards.yml` | expected failure | `ghcr.io/ossf/scorecard-action:v2.4.4` — step exited with status 1 · `{"date":"2026-08-30T04:14:35Z","repo":{"name":"github.com/prometheus/prometheus","commit":"e06b2dc5a6149e20ca82fe936fb044a6dfe45958"},"scorecard":{"version":"v5.5.0","commit":"c395761df6afe1a69e476bc6…` _(signs results with the Actions-issued GITHUB_TOKEN)_ |
 | prometheus/prometheus | `stale.yml` | pass | — |
 | python/cpython | `add-issue-header.yml` | expected failure | `actions/github-script` — step exited with status 1 · `Error: Unhandled error: TypeError: issue_data.labels is not iterable` _(the inline script threw (it acts on the triggering event, which a local run lacks))_ |
 | python/cpython | `lint.yml` | pass | — |
@@ -286,7 +286,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | rails/rails | `rails_releaser_tests.yml` | pass | — |
 | rails/rails | `release.yml` | expected failure | `rubygems/configure-rubygems-credentials` — step exited with status 1 · `Error: Error message: Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable` _(OIDC token exchange)_ |
 | rails/rails | `stale.yml` | pass | — |
-| rust-lang/cargo | `audit.yml` | not lowered | `continue_on_error.expression` |
+| rust-lang/cargo | `audit.yml` | pass | — |
 | rust-lang/cargo | `contrib.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: /workspace/.ci/temp/artifact.tar. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | rust-lang/cargo | `release.yml` | pass | — |
 | sharkdp/bat | `require-changelog-for-PRs.yml` | pass | — |
@@ -296,7 +296,6 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | tokio-rs/tokio | `pr-audit.yml` | pass | — |
 | tokio-rs/tokio | `stress-test.yml` | pass | — |
 | tokio-rs/tokio | `uring-kernel-version-test.yml` | pass | — |
-| vercel/next.js | `automated_code_review.yml` | not lowered | — |
 | vercel/next.js | `code_freeze.yml` | pass | — |
 | vercel/next.js | `create_release_branch.yml` | expected failure | `actions/create-github-app-token` — no secret named `RELEASE_GITHUB_APP_PRIVATE_KEY` _(needs a repository secret)_ |
 | vercel/next.js | `issue_lock.yml` | expected failure | `dessant/lock-threads` — step exited with status 1 · `Error: Must have admin rights to Repository.` _(mutates issues over the API)_ |
