@@ -34,12 +34,23 @@ fn containerized(text: &str) -> String {
     )
 }
 
+/// Every step's recorded status, for a failing assertion to point at.
+fn history_summary(report: &RunReportPlus) -> Vec<String> {
+    report
+        .state
+        .history()
+        .iter()
+        .map(|h| format!("{}: {:?}", h.name, h.outcome.status))
+        .collect()
+}
+
 fn assert_success(report: &RunReportPlus) {
     assert_eq!(
         report.status,
         RunStatus::Success,
-        "errors: {:?}\nlog: {:?}",
+        "errors: {:?}\nsteps: {:#?}\nlog: {:?}",
         report.state.errors(),
+        history_summary(report),
         log_lines(report)
     );
 }
@@ -246,4 +257,114 @@ async fn shell_steps_write_and_read_the_env_files_in_a_container() {
     let graph = lower_ok(&containerized(ENV_FILES_WORKFLOW));
     let report = run_host(graph, "shell-env-files-boxed").await;
     assert_env_files(&report);
+}
+
+// ── 2. Working directories ──────────────────────────────────────────────────
+
+/// `defaults.run.working-directory` at the workflow, overridden at the job,
+/// overridden at the step; every relative path resolves against
+/// `GITHUB_WORKSPACE`. The directories are made by an earlier real step —
+/// which is itself the test that a script's filesystem effects reach the
+/// next step. `pwd -P` on both sides keeps symlinked temp dirs honest.
+const WORKING_DIRECTORY_WORKFLOW: &str = r#"
+on: push
+defaults:
+  run:
+    working-directory: wf-dir
+jobs:
+  inherits:
+    runs-on: ubuntu-latest
+    steps:
+      - id: prepare
+        working-directory: .
+        run: |
+          mkdir -p wf-dir
+          echo persisted > wf-dir/marker.txt
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE" && pwd -P)" ] && echo dot-is-the-workspace
+      - run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/wf-dir" && pwd -P)" ] && echo inherits-workflow-default
+          [ "$(cat marker.txt)" = persisted ] && echo marker-persisted
+  overrides:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: job-dir
+    steps:
+      - working-directory: .
+        run: mkdir -p job-dir step-dir tpl-dir sub/deeper
+      - run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/job-dir" && pwd -P)" ] && echo inherits-job-default
+      - working-directory: step-dir
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/step-dir" && pwd -P)" ] && echo step-overrides-job
+      - working-directory: sub/deeper
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/sub/deeper" && pwd -P)" ] && echo nested-relative-resolves
+      - working-directory: tpl-dir
+        shell: bash --noprofile --norc -euo pipefail {0}
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/tpl-dir" && pwd -P)" ] && echo template-runs-in-step-dir
+          ( echo "${UNSET_VARIABLE_XYZ}" ) 2>/dev/null || echo template-flags-active
+      - run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/job-dir" && pwd -P)" ] && echo job-default-again
+"#;
+
+fn assert_working_directories(report: &RunReportPlus) {
+    assert_success(report);
+    assert_lines(
+        report,
+        &[
+            "dot-is-the-workspace",
+            "inherits-workflow-default",
+            "marker-persisted",
+            "inherits-job-default",
+            "step-overrides-job",
+            "nested-relative-resolves",
+            // A custom `{0}` template with a working directory: the script is
+            // staged and run from that directory, with the template's own
+            // flags (`-u` here, which the direct bash invocation lacks).
+            "template-runs-in-step-dir",
+            "template-flags-active",
+            // A step override does not leak into the step after it.
+            "job-default-again",
+        ],
+    );
+}
+
+/// A workflow with no defaults anywhere: the step runs in `GITHUB_WORKSPACE`.
+const NO_DEFAULTS_WORKFLOW: &str = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE" && pwd -P)" ] && echo runs-in-the-workspace
+"#;
+
+#[tokio::test]
+async fn working_directories_resolve_against_the_workspace() {
+    let graph = lower_ok(WORKING_DIRECTORY_WORKFLOW);
+    let report = run_host(graph, "shell-workdir").await;
+    assert_working_directories(&report);
+
+    let graph = lower_ok(NO_DEFAULTS_WORKFLOW);
+    let report = run_host(graph, "shell-workdir-plain").await;
+    assert_success(&report);
+    assert_lines(&report, &["runs-in-the-workspace"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn working_directories_resolve_against_the_workspace_in_a_container() {
+    if !testkit::docker_ready().await {
+        return;
+    }
+    let graph = lower_ok(&containerized(WORKING_DIRECTORY_WORKFLOW));
+    let report = run_host(graph, "shell-workdir-boxed").await;
+    assert_working_directories(&report);
+
+    let graph = lower_ok(&containerized(NO_DEFAULTS_WORKFLOW));
+    let report = run_host(graph, "shell-workdir-plain-boxed").await;
+    assert_success(&report);
+    assert_lines(&report, &["runs-in-the-workspace"]);
 }
