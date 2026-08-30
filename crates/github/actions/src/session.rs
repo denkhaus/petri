@@ -57,6 +57,7 @@ const JOB_PATH_FILE: &str = ".ci/github/job-path.json";
 const EVENT_FILE: &str = ".ci/github/event.json";
 const TEMP_DIR: &str = ".ci/temp";
 const TOOL_CACHE_DIR: &str = ".ci/toolcache";
+const SCRIPT_PATH_ENV: &str = "PETRI_GITHUB_SCRIPT";
 /// GitHub command files are control input, not general artifact storage.
 const COMMAND_FILE_LIMIT: usize = 1024 * 1024;
 
@@ -391,20 +392,16 @@ impl Session {
         out
     }
 
-    /// Write the resolved script to the step's `script` file and turn the
-    /// process into `sh` running the shell template over it.
+    /// Write the resolved script to the step's runner-owned directory and turn
+    /// the process into `sh` running the shell template over it. The script
+    /// cannot live below `working-directory`: a preceding container step can
+    /// create that directory as a uid that the host process cannot write as.
     async fn stage_script(
         &self,
         mut process: ProcessConfig,
         template: &str,
         shell_script: ShellScript,
     ) -> Result<ProcessConfig, StepFailure> {
-        let step_id = self
-            .files
-            .env
-            .parent()
-            .and_then(Path::file_name)
-            .expect("step files have a firing directory");
         let (script_name, contents) = match shell_script {
             ShellScript::Plain => ("script", process.run),
             ShellScript::PowerShell => (
@@ -416,17 +413,22 @@ impl Session {
                 ),
             ),
         };
-        let script_arg = PathBuf::from(".petri").join(step_id).join(script_name);
-        let script = process
-            .working_dir
-            .as_deref()
-            .unwrap_or_else(|| Path::new(""))
-            .join(&script_arg);
+        let script = self
+            .files
+            .env
+            .parent()
+            .expect("step files have a firing directory")
+            .join(script_name);
         write(&*self.env, &script, contents.as_bytes()).await?;
+        let script_path = format!("{}/{}", self.workspace, script.display());
+        process.env.insert(
+            SmolStr::new(SCRIPT_PATH_ENV),
+            ValueOrSecretRef::Literal(Value::String(script_path)),
+        );
         process.run = format!(
             "{}exec {}\n",
             self.prologue(),
-            template.replace("{0}", &script_arg.to_string_lossy())
+            template.replace("{0}", &format!("\"${SCRIPT_PATH_ENV}\""))
         );
         process.shell = Shell::Sh;
         Ok(process)
