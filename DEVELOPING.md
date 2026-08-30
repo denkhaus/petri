@@ -37,6 +37,7 @@ The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 | `mise run check:msrv` | Check all targets with Rust 1.89 |
 | `mise run check` | Run the complete routine verification gate |
 | `mise run check:nightly` | Run the extended verification gate |
+| `mise run release <target> <version>` | Build a native release archive |
 
 Run `mise run check` before opening a pull request.
 
@@ -67,8 +68,8 @@ test support. Their manifests set `publish = false`. Treat their public items as
 in-repository APIs unless a later project decision gives independent consumers
 a direct contract.
 
-Do not publish either distribution crate manually. Crates.io publication and
-binary release automation require a separate release decision.
+Do not publish either distribution crate to crates.io. The binary release
+workflow packages the `petri` executable. It does not publish a crate.
 
 ## Project structure
 
@@ -104,3 +105,19 @@ The scheduled Nightly workflow also checks the Rust 1.89 compiler floor and
 runs the full test suite in release mode. You can start it manually from GitHub
 Actions. Nightly includes Linux arm64 coverage. Keep arm64 in Nightly until its
 Docker and corpus runs are reliable enough for the routine gate.
+
+## Releases
+
+A `v*` tag builds native `petri` archives for macOS arm64, Linux x86_64, and
+Linux arm64. The workflow adds a SHA-256 file for each archive and creates a
+draft GitHub release. Review and publish the draft manually.
+
+To test packaging locally, run the release task with your native Rust target
+and a version that starts with `v`, for example:
+
+```sh
+mise run release aarch64-apple-darwin v0.1.0-test
+```
+
+The task writes ignored artifacts under `dist-release/`. It refuses to build a
+target that does not match the host runner.
