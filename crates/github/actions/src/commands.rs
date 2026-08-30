@@ -1,10 +1,12 @@
 //! Workflow commands: `::name key=value,key2=value2::message` on stdout.
 //!
 //! [`CommandSink`] sits between the process step and the driver. Every log event
-//! the process step emits passes through it; a stdout line that is a command is
-//! applied and swallowed, everything else is forwarded unchanged. `::add-mask::`
-//! registers with the run's masker before the next line is forwarded, so the value
-//! is masked from then on.
+//! the process step emits passes through it; a line that is a command is applied
+//! and swallowed, everything else is forwarded unchanged. Both streams are read:
+//! the runner attaches its command-aware output manager to stdout and stderr
+//! alike (`ScriptHandler.cs`), so a `::error::` echoed to stderr is a command
+//! there too. `::add-mask::` registers with the run's masker before the next
+//! line is forwarded, so the value is masked from then on.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -21,9 +23,10 @@ pub struct WorkflowCommand {
     pub message: String,
 }
 
-/// Parse one stdout line. `None` when it is not a command.
+/// Parse one output line. `None` when it is not a command. Leading whitespace
+/// is ignored, as the runner's `TryParseV2` trims it before looking for `::`.
 pub fn parse(line: &str) -> Option<WorkflowCommand> {
-    let rest = line.strip_prefix("::")?;
+    let rest = line.trim_start().strip_prefix("::")?;
     let (head, message) = rest.split_once("::")?;
     let (name, props) = match head.split_once(' ') {
         Some((n, p)) => (n, Some(p)),
@@ -115,10 +118,7 @@ impl CommandSink {
     pub async fn run(mut self, mut rx: mpsc::Receiver<StepEvent>) {
         while let Some(event) = rx.recv().await {
             match event {
-                StepEvent::Log {
-                    stream: LogStream::Stdout,
-                    line,
-                } => self.on_stdout(line).await,
+                StepEvent::Log { stream, line } => self.on_line(stream, line).await,
                 other => {
                     let _ = self.out.send(other).await;
                 }
@@ -126,17 +126,11 @@ impl CommandSink {
         }
     }
 
-    async fn forward(&self, line: String) {
-        let _ = self
-            .out
-            .send(StepEvent::Log {
-                stream: LogStream::Stdout,
-                line,
-            })
-            .await;
+    async fn forward(&self, stream: LogStream, line: String) {
+        let _ = self.out.send(StepEvent::Log { stream, line }).await;
     }
 
-    async fn on_stdout(&mut self, line: String) {
+    async fn on_line(&mut self, stream: LogStream, line: String) {
         if let Some(token) = &self.stopped {
             let resume = line
                 .trim()
@@ -144,77 +138,92 @@ impl CommandSink {
                 .and_then(|rest| rest.strip_suffix("::"));
             if resume == Some(token.as_str()) {
                 self.stopped = None;
-            } else {
-                self.forward(line).await;
             }
-            return;
+            // The resume line itself is output — the runner's
+            // `TryProcessCommand` writes it before resuming.
+            return self.forward(stream, line).await;
         }
         let Some(cmd) = parse(&line) else {
-            return self.forward(line).await;
+            return self.forward(stream, line).await;
         };
-        if self.echo && cmd.name != "add-mask" {
-            self.forward(line.clone()).await;
+        // The runner's `OmitEcho` set: the value-bearing mask, and the commands
+        // that already render into the log.
+        let omit_echo = matches!(
+            cmd.name.as_str(),
+            "add-mask" | "debug" | "notice" | "warning" | "error"
+        );
+        if self.echo && !omit_echo {
+            self.forward(stream, line.clone()).await;
         }
         let name_prop = cmd.properties.get("name").cloned();
         // Apply under the lock, forward after it: the guard must not live across
         // the send.
-        let forward: Option<String> = {
+        let forward: Vec<String> = {
             let mut effects = self.effects.lock().expect("effects are not poisoned");
             match cmd.name.as_str() {
                 "add-mask" => {
                     self.masker.register(&cmd.message);
-                    None
+                    vec![]
                 }
                 "save-state" => {
                     if let Some(name) = name_prop {
                         effects.state.insert(name, Value::String(cmd.message));
                     }
-                    None
+                    vec![]
                 }
                 "set-output" => {
                     if let Some(name) = name_prop {
                         effects.outputs.insert(name, Value::String(cmd.message));
                     }
-                    None
+                    vec![]
                 }
                 "set-env" if self.allow_unsecure => {
                     if let Some(name) = name_prop {
                         effects.env.insert(name, Value::String(cmd.message));
                     }
-                    None
+                    vec![]
                 }
                 "add-path" if self.allow_unsecure => {
                     effects.path.push(cmd.message);
-                    None
+                    vec![]
                 }
-                "set-env" | "add-path" => Some(format!(
-                    "Warning: `::{}::` is disabled; use the `GITHUB_ENV` / `GITHUB_PATH` files \
-                     (ACTIONS_ALLOW_UNSECURE_COMMANDS enables the old commands)",
-                    cmd.name
-                )),
-                "debug" | "add-matcher" | "remove-matcher" | "endgroup" => None,
-                "group" => Some(format!("▶ {}", cmd.message)),
+                // The runner's `SetEnvCommandExtension` / `AddPathCommandExtension`
+                // throw when the opt-in is absent, and `TryProcessCommand` logs
+                // the two errors below (the step then fails).
+                "set-env" | "add-path" => vec![
+                    format!("Error: Unable to process command '{line}' successfully."),
+                    format!(
+                        "Error: The `{}` command is disabled. Please upgrade to using \
+                         Environment Files or opt into unsecure command execution by \
+                         setting the `ACTIONS_ALLOW_UNSECURE_COMMANDS` environment \
+                         variable to `true`. For more information see: \
+                         https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/",
+                        cmd.name
+                    ),
+                ],
+                "debug" | "add-matcher" | "remove-matcher" | "endgroup" => vec![],
+                "group" => vec![format!("▶ {}", cmd.message)],
                 level @ ("notice" | "warning" | "error") => {
                     let label = match level {
                         "notice" => "Notice",
                         "warning" => "Warning",
                         _ => "Error",
                     };
-                    Some(format!("{label}: {}", cmd.message))
+                    vec![format!("{label}: {}", cmd.message)]
                 }
                 "echo" => {
                     self.echo = cmd.message.trim().eq_ignore_ascii_case("on");
-                    None
+                    vec![]
                 }
                 "stop-commands" => {
                     self.stopped = Some(cmd.message);
-                    None
+                    vec![]
                 }
-                _ => Some(line),
+                _ => vec![line],
             }
         };
-        if let Some(text) = forward {
-            self.forward(text).await;
+        for text in forward {
+            self.forward(stream, text).await;
         }
     }
 }
@@ -246,6 +255,85 @@ mod tests {
         assert_eq!(parse("::not a command"), None);
         assert_eq!(parse("::::"), None);
         assert_eq!(parse(":: spaced::x"), None);
+        assert_eq!(parse("prefix ::warning::x"), None);
+    }
+
+    #[test]
+    fn leading_whitespace_is_trimmed() {
+        let cmd = parse("   ::warning::indented").unwrap();
+        assert_eq!(cmd.name, "warning");
+        assert_eq!(cmd.message, "indented");
+    }
+
+    async fn drive(
+        allow_unsecure: bool,
+        lines: &[(LogStream, &str)],
+    ) -> (Vec<(LogStream, String)>, Arc<Mutex<CommandEffects>>, Masker) {
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(64);
+        let masker = Masker::new();
+        let sink = CommandSink::new(out_tx, masker.clone(), allow_unsecure);
+        let effects = sink.effects();
+        let task = tokio::spawn(sink.run(rx));
+        for (stream, line) in lines {
+            tx.send(StepEvent::Log {
+                stream: *stream,
+                line: (*line).into(),
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        task.await.unwrap();
+        let mut out = Vec::new();
+        while let Ok(ev) = out_rx.try_recv() {
+            if let StepEvent::Log { stream, line } = ev {
+                out.push((stream, line));
+            }
+        }
+        (out, effects, masker)
+    }
+
+    /// Commands on stderr are commands too, forwarded on their own stream;
+    /// the echo set omits what the runner omits; the resume token is output.
+    #[tokio::test]
+    async fn both_streams_carry_commands_and_echo_omits_the_runners_set() {
+        let (out, _, _) = drive(
+            false,
+            &[
+                (LogStream::Stderr, "::error::from stderr"),
+                (LogStream::Stderr, "plain stderr"),
+                (LogStream::Stdout, "::echo::on"),
+                (LogStream::Stdout, "::set-output name=o::v"),
+                (LogStream::Stdout, "::add-mask::hidden-value"),
+                (LogStream::Stdout, "::debug::quiet"),
+                (LogStream::Stdout, "::warning::loud"),
+                (LogStream::Stdout, "::group::g"),
+                (LogStream::Stdout, "::echo::off"),
+                (LogStream::Stdout, "::set-output name=p::w"),
+                (LogStream::Stdout, "::stop-commands::tok"),
+                (LogStream::Stdout, "::error::inert"),
+                (LogStream::Stdout, "::tok::"),
+                (LogStream::Stdout, "::error::live"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            out,
+            vec![
+                (LogStream::Stderr, "Error: from stderr".to_string()),
+                (LogStream::Stderr, "plain stderr".to_string()),
+                (LogStream::Stdout, "::set-output name=o::v".to_string()),
+                (LogStream::Stdout, "Warning: loud".to_string()),
+                (LogStream::Stdout, "::group::g".to_string()),
+                (LogStream::Stdout, "▶ g".to_string()),
+                // `::echo::off` is still echoed: echo is on when it is checked.
+                (LogStream::Stdout, "::echo::off".to_string()),
+                (LogStream::Stdout, "::error::inert".to_string()),
+                (LogStream::Stdout, "::tok::".to_string()),
+                (LogStream::Stdout, "Error: live".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -290,11 +378,16 @@ mod tests {
             lines,
             vec![
                 "plain",
-                "Warning: `::set-env::` is disabled; use the `GITHUB_ENV` / `GITHUB_PATH` files \
-                 (ACTIONS_ALLOW_UNSECURE_COMMANDS enables the old commands)",
+                "Error: Unable to process command '::set-env name=E::1' successfully.",
+                "Error: The `set-env` command is disabled. Please upgrade to using \
+                 Environment Files or opt into unsecure command execution by setting \
+                 the `ACTIONS_ALLOW_UNSECURE_COMMANDS` environment variable to `true`. \
+                 For more information see: \
+                 https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/",
                 "▶ title",
                 "Error: bad",
                 "::save-state name=ignored::x",
+                "::tok::",
                 "after",
             ]
         );
