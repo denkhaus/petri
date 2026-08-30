@@ -36,15 +36,19 @@ jobs:
       - id: bf
         background: true
         run: sleep 3 && exit 1
-      - run: echo "before wait, success()=${{ success() }}"
+      - if: success()
+        run: echo "before wait, success() is true"
       - id: w
         wait: bf
       - run: echo "plain step after failed wait"
+      - if: success()
+        run: echo "after wait, success() still true"
+      - if: failure()
+        run: echo "after wait, failure() is true"
       - if: always()
         run: |
           echo "bf outcome=${{ steps.bf.outcome }} conclusion=${{ steps.bf.conclusion }}"
           echo "wait outcome=${{ steps.w.outcome }} conclusion=${{ steps.w.conclusion }}"
-          echo "success()=${{ success() }} failure()=${{ failure() }}"
 
   # Q3: outcome/outputs/env visibility before and after the wait. The
   # background step writes its output and GITHUB_ENV export immediately,
