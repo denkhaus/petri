@@ -1859,7 +1859,7 @@ mod log_tests {
     #[test]
     fn an_architecture_refusal_classifies_as_the_hosts_limit() {
         let init = StepIdentity::Action {
-            bare: "github/codeql-action/init".to_string(),
+            bare:      "github/codeql-action/init".to_string(),
             cross_run: false,
         };
         let refusal = vec![
