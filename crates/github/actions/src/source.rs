@@ -159,9 +159,13 @@ fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
 /// source reports from its recorded refresh failures, keeping the two sources'
 /// verdicts on one reference identical.
 fn upstream_refusal(stderr: &str) -> bool {
-    ["Repository not found", "could not read Username", "Authentication failed"]
-        .iter()
-        .any(|needle| stderr.contains(needle))
+    [
+        "Repository not found",
+        "could not read Username",
+        "Authentication failed",
+    ]
+    .iter()
+    .any(|needle| stderr.contains(needle))
 }
 
 /// Run git and return its stdout, or its stderr as the error.
