@@ -1,3 +1,8 @@
+#![allow(
+    unsafe_code,
+    reason = "host process management requires POSIX killpg and macOS libproc FFI; every unsafe operation has a local SAFETY comment"
+)]
+
 //! The host executor: a workspace directory and real processes on this machine.
 //!
 //! Implements the [`executor`] interface with nothing in between a step and the
@@ -60,9 +65,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{env, fs, io, process};
+#[cfg(target_os = "macos")]
+use std::{mem, ptr};
 
 use async_trait::async_trait;
 use executor::lines::pump;
@@ -72,7 +81,9 @@ use executor::{
 };
 use smol_str::SmolStr;
 use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+use tokio::{fs as async_fs, time as async_time};
 
 /// How often `wait` re-checks for a recorded status or group death.
 pub const LIVENESS_POLL: Duration = Duration::from_millis(25);
@@ -100,9 +111,9 @@ const FENCED_MARKER: &str = "fenced";
 /// (`INPUT_INCLUDE-HIDDEN-FILES`). Bash passes them through. The script itself
 /// is plain POSIX either way.
 fn sentinel_shell() -> &'static str {
-    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    static SHELL: OnceLock<&'static str> = OnceLock::new();
     SHELL.get_or_init(|| {
-        if std::path::Path::new("/bin/bash").exists() {
+        if Path::new("/bin/bash").exists() {
             "/bin/bash"
         } else {
             "/bin/sh"
@@ -184,12 +195,14 @@ impl HostExecutor {
         }
     }
 
+    #[must_use]
     pub fn with_retention(mut self, retention: Retention) -> Self {
         self.retention = retention;
         self
     }
 
     /// Override how long the fence waits for a discovered group to drain.
+    #[must_use]
     pub fn with_fence_drain(mut self, deadline: Duration) -> Self {
         self.fence_drain = deadline;
         self
@@ -212,7 +225,7 @@ impl HostExecutor {
 #[derive(Debug)]
 struct PinnedGroup {
     pgid:     i32,
-    sentinel: tokio::process::Child,
+    sentinel: Child,
 }
 
 /// What release needs: the workspace, whether to keep it, and every process
@@ -245,7 +258,7 @@ impl Executor for HostExecutor {
             });
         }
         let workspace = self.workspace_for(&scope.instance);
-        tokio::fs::create_dir_all(&workspace)
+        async_fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    workspace.display().to_string(),
@@ -255,11 +268,11 @@ impl Executor for HostExecutor {
         // so steps never see them and workspace teardown never races the
         // sentinel's rename — one generation dir per acquisition, which is what
         // isolates a dead run's status files from this one's.
-        let groups_root = workspace
-            .parent()
-            .map(|p| p.join(GROUPS_DIR))
-            .unwrap_or_else(|| workspace.join(format!(".{GROUPS_DIR}")));
-        tokio::fs::create_dir_all(&groups_root)
+        let groups_root = workspace.parent().map_or_else(
+            || workspace.join(format!(".{GROUPS_DIR}")),
+            |p| p.join(GROUPS_DIR),
+        );
+        async_fs::create_dir_all(&groups_root)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    groups_root.display().to_string(),
@@ -267,7 +280,7 @@ impl Executor for HostExecutor {
             })?;
         fence_prior_generations(&groups_root, self.fence_drain).await?;
         let gen_dir = groups_root.join(fresh_generation_id());
-        tokio::fs::create_dir_all(&gen_dir)
+        async_fs::create_dir_all(&gen_dir)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    gen_dir.display().to_string(),
@@ -316,10 +329,14 @@ impl Executor for HostExecutor {
         // killed before any is observed, so a straggler in one never delays the
         // kill of the next.
         //
-        // SAFETY: killpg takes a pgid and a signal number and has no memory
-        // effects. Errors are ignored: an unsignallable member (root-owned) is
-        // caught by the observation below.
         for group in &groups {
+            // SAFETY: `killpg` takes the process-group id and the signal number
+            // by value. It dereferences no pointer, so it reads and writes no
+            // Rust memory, and the only precondition is that both arguments are
+            // integers the kernel can reject on its own. Its result is handled:
+            // a failure here — an unsignallable root-owned member, or a group
+            // that is already gone — is deliberately ignored because the
+            // observation below reports any group that actually survives.
             unsafe {
                 libc::killpg(group.pgid, libc::SIGKILL);
             }
@@ -333,7 +350,7 @@ impl Executor for HostExecutor {
         }
         // Observe group death — non-signalling, all groups under one shared
         // deadline. A group that outlives it is a leak to report.
-        let deadline = tokio::time::Instant::now() + OBSERVE_DEADLINE;
+        let deadline = async_time::Instant::now() + OBSERVE_DEADLINE;
         let leaked = await_drain(pgids.clone(), deadline).await;
         for pgid in pgids {
             report = if leaked.contains(&pgid) {
@@ -347,10 +364,10 @@ impl Executor for HostExecutor {
         if retention.keeps(outcome) {
             return report.kept(workspace);
         }
-        match tokio::fs::remove_dir_all(&path).await {
+        match async_fs::remove_dir_all(&path).await {
             Ok(()) => report = report.released(workspace),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                report = report.released(workspace)
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                report = report.released(workspace);
             }
             Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
         }
@@ -377,7 +394,7 @@ impl ExecEnv for HostEnv {
             Some(rel) => self.workspace.join(rel),
             None => self.workspace.clone(),
         };
-        tokio::fs::create_dir_all(&cwd)
+        async_fs::create_dir_all(&cwd)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    cwd.display().to_string(),
@@ -389,7 +406,7 @@ impl ExecEnv for HostEnv {
         let group_file = self.gen_dir.join(format!("{n}.group"));
         let fence = self.gen_dir.join(FENCED_MARKER);
 
-        let mut command = tokio::process::Command::new(sentinel_shell());
+        let mut command = Command::new(sentinel_shell());
         command
             .arg("-c")
             .arg(SENTINEL_SCRIPT)
@@ -398,11 +415,11 @@ impl ExecEnv for HostEnv {
             .arg(&group_file) // $2
             .arg(&fence) // $3
             .arg(spec.program.as_str())
-            .args(spec.args.iter().map(|a| a.as_str()))
+            .args(spec.args.iter().map(SmolStr::as_str))
             .current_dir(&cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command.env(key.as_str(), value.as_str());
         }
@@ -416,10 +433,13 @@ impl ExecEnv for HostEnv {
             program: spec.program.clone(),
             message: e.to_string(),
         })?;
-        let pgid = child.id().ok_or_else(|| EnvError::Spawn {
-            program: spec.program.clone(),
-            message: "the child exited before its pid could be read".into(),
-        })? as i32;
+        let pgid = child
+            .id()
+            .ok_or_else(|| EnvError::Spawn {
+                program: spec.program.clone(),
+                message: "the child exited before its pid could be read".into(),
+            })?
+            .cast_signed();
 
         let (tx, rx) = mpsc::channel(256);
         if let Some(stdout) = child.stdout.take() {
@@ -455,8 +475,8 @@ impl ExecEnv for HostEnv {
         // `spawn` applies them.
         self.env
             .get(name)
-            .map(|v| v.to_string())
-            .or_else(|| std::env::var(name).ok())
+            .map(ToString::to_string)
+            .or_else(|| env::var(name).ok())
     }
 
     fn shares_host_filesystem(&self) -> bool {
@@ -464,9 +484,9 @@ impl ExecEnv for HostEnv {
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
-        match tokio::fs::read(self.workspace.join(relative)).await {
+        match async_fs::read(self.workspace.join(relative)).await {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(EnvError::Workspace {
                 path:    relative.display().to_string(),
                 message: e.to_string(),
@@ -480,9 +500,9 @@ impl ExecEnv for HostEnv {
         limit: usize,
     ) -> Result<Option<Vec<u8>>, EnvError> {
         let path = self.workspace.join(relative);
-        let file = match tokio::fs::File::open(path).await {
+        let file = match async_fs::File::open(path).await {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(EnvError::Workspace {
                     path:    relative.display().to_string(),
@@ -510,14 +530,14 @@ impl ExecEnv for HostEnv {
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
         let path = self.workspace.join(relative);
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
+            async_fs::create_dir_all(parent)
                 .await
                 .map_err(|e| EnvError::Workspace {
                     path:    parent.display().to_string(),
                     message: e.to_string(),
                 })?;
         }
-        tokio::fs::write(&path, contents)
+        async_fs::write(&path, contents)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    relative.display().to_string(),
@@ -571,7 +591,7 @@ impl ProcessHandle for HostProcess {
                 self.status = Some(status);
                 return Ok(status);
             }
-            tokio::time::sleep(LIVENESS_POLL).await;
+            async_time::sleep(LIVENESS_POLL).await;
         }
     }
 
@@ -579,14 +599,18 @@ impl ProcessHandle for HostProcess {
         // killpg, never kill: the group is the unit. The sentinel ignores TERM, so
         // the polite rung passes through it to the workload.
         //
-        // SAFETY: `killpg` takes a pgid and a signal number and has no memory
-        // effects. ESRCH means the group is already gone, which is success for our
-        // purposes — the ladder is idempotent.
+        // SAFETY: `killpg` takes the process-group id and the signal number by
+        // value. It dereferences no pointer, so it reads and writes no Rust
+        // memory, and the only precondition is that both arguments are
+        // integers the kernel can reject on its own. Its result is handled
+        // below: `ESRCH` means the group is already gone, which is success for
+        // our purposes — the ladder is idempotent — and every other errno
+        // becomes an `EnvError`.
         let result = unsafe { libc::killpg(self.pgid, sig.number()) };
         if result == 0 {
             return Ok(());
         }
-        let error = std::io::Error::last_os_error();
+        let error = io::Error::last_os_error();
         match error.raw_os_error() {
             Some(libc::ESRCH) => Ok(()),
             _ => Err(EnvError::Signal(format!(
@@ -601,13 +625,12 @@ impl ProcessHandle for HostProcess {
 /// A generation id unique across acquisitions and process restarts.
 fn fresh_generation_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     format!(
         "g{nanos:x}-{}-{}",
-        std::process::id(),
+        process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -626,12 +649,12 @@ fn fresh_generation_id() -> String {
 /// already-fenced (or already-dead) generation is a no-op, which is what makes
 /// the fence idempotent.
 async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<(), EnvError> {
-    let Ok(entries) = std::fs::read_dir(groups_root) else {
+    let Ok(entries) = fs::read_dir(groups_root) else {
         return Ok(());
     };
     let mut discovered: Vec<(SmolStr, i32)> = Vec::new();
     for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let gen_dir = entry.path();
@@ -639,13 +662,13 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
         // The marker lands before any record is read — the publication race
         // closes on this ordering.
         let marker = gen_dir.join(FENCED_MARKER);
-        if let Err(e) = std::fs::write(&marker, b"") {
+        if let Err(e) = fs::write(&marker, b"") {
             return Err(EnvError::Workspace {
                 path:    marker.display().to_string(),
                 message: e.to_string(),
             });
         }
-        let Ok(records) = std::fs::read_dir(&gen_dir) else {
+        let Ok(records) = fs::read_dir(&gen_dir) else {
             continue;
         };
         for record in records.flatten() {
@@ -653,7 +676,7 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
             if path.extension().is_none_or(|ext| ext != "group") {
                 continue;
             }
-            let Some(pgid) = std::fs::read_to_string(&path)
+            let Some(pgid) = fs::read_to_string(&path)
                 .ok()
                 .and_then(|text| text.trim().parse::<i32>().ok())
             else {
@@ -663,7 +686,7 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
         }
     }
 
-    let deadline = tokio::time::Instant::now() + drain;
+    let deadline = async_time::Instant::now() + drain;
     let pgids = discovered.iter().map(|(_, pgid)| *pgid).collect();
     let leaked = await_drain(pgids, deadline).await;
     let Some((generation, pgid)) = discovered
@@ -689,18 +712,18 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
 /// Wait for process groups to drain without signalling any of them: the groups
 /// still alive at `deadline`, empty when all are gone. Members a KILL reached
 /// are zombies at worst (init reaps them); only live members count.
-async fn await_drain(mut pgids: Vec<i32>, deadline: tokio::time::Instant) -> Vec<i32> {
+async fn await_drain(mut pgids: Vec<i32>, deadline: async_time::Instant) -> Vec<i32> {
     loop {
         pgids.retain(|&pgid| live_group_members(pgid) > 0);
-        if pgids.is_empty() || tokio::time::Instant::now() >= deadline {
+        if pgids.is_empty() || async_time::Instant::now() >= deadline {
             return pgids;
         }
-        tokio::time::sleep(LIVENESS_POLL).await;
+        async_time::sleep(LIVENESS_POLL).await;
     }
 }
 
 async fn recorded_status(path: &Path) -> Option<i32> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let text = async_fs::read_to_string(path).await.ok()?;
     text.trim().parse::<i32>().ok()
 }
 
@@ -730,14 +753,14 @@ fn group_is_live(pgid: i32) -> bool {
 /// group.
 #[cfg(target_os = "linux")]
 fn sentinel_is_live(pgid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pgid}/stat"))
+    fs::read_to_string(format!("/proc/{pgid}/stat"))
         .is_ok_and(|stat| stat_is_live_in_group(&stat, pgid))
 }
 
 /// One libproc query: the sentinel, not yet a zombie.
 #[cfg(target_os = "macos")]
 fn sentinel_is_live(pgid: i32) -> bool {
-    unsafe { is_live(pgid) }
+    is_live(pgid)
 }
 
 /// How many *live* processes remain in the group. Non-signalling, and zombies
@@ -745,7 +768,7 @@ fn sentinel_is_live(pgid: i32) -> bool {
 /// one.
 #[cfg(target_os = "linux")]
 fn live_group_members(pgid: i32) -> usize {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    let Ok(entries) = fs::read_dir("/proc") else {
         return 0;
     };
     entries
@@ -757,7 +780,7 @@ fn live_group_members(pgid: i32) -> usize {
                 .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))
         })
         .filter(|entry| {
-            std::fs::read_to_string(entry.path().join("stat"))
+            fs::read_to_string(entry.path().join("stat"))
                 .is_ok_and(|stat| stat_is_live_in_group(&stat, pgid))
         })
         .count()
@@ -784,34 +807,74 @@ fn stat_is_live_in_group(stat: &str, pgid: i32) -> bool {
 #[cfg(target_os = "macos")]
 fn live_group_members(pgid: i32) -> usize {
     const PROC_PGRP_ONLY: u32 = 2;
-    unsafe {
-        let bytes = libc::proc_listpids(PROC_PGRP_ONLY, pgid as u32, std::ptr::null_mut(), 0);
-        if bytes <= 0 {
-            return 0;
-        }
-        let mut pids = vec![0i32; bytes as usize / size_of::<i32>() + 8];
-        let bytes = libc::proc_listpids(
-            PROC_PGRP_ONLY,
-            pgid as u32,
-            pids.as_mut_ptr().cast(),
-            (pids.len() * size_of::<i32>()) as i32,
-        );
-        if bytes <= 0 {
-            return 0;
-        }
-        pids.truncate(bytes as usize / size_of::<i32>());
-        pids.into_iter()
-            .filter(|&pid| pid > 0 && is_live(pid))
-            .count()
+    let group = pgid.cast_unsigned();
+
+    // SAFETY: this is `proc_listpids`' documented size-query form. A null
+    // buffer paired with a zero byte count asks only how many bytes a full
+    // listing would need, so libproc writes nothing and there is no storage
+    // whose validity, size, or lifetime could be violated. The reply is a byte
+    // count, or a non-positive value the code below treats as an empty group.
+    let sized = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, group, ptr::null_mut(), 0) };
+    if sized <= 0 {
+        return 0;
     }
+    // Headroom above the reported size: the group can gain members between the
+    // two calls, and a full buffer is indistinguishable from a truncated one.
+    let capacity = sized.cast_unsigned() as usize / size_of::<i32>() + 8;
+    let mut pids = vec![0i32; capacity];
+    let Ok(byte_capacity) = i32::try_from(capacity * size_of::<i32>()) else {
+        return 0;
+    };
+
+    // SAFETY: `pids.as_mut_ptr()` points to `capacity` initialized `i32`s in a
+    // live allocation this thread borrows exclusively for the whole call, so
+    // libproc's writes cannot race or dangle. `byte_capacity` is exactly that
+    // allocation's size in bytes, so libproc cannot write past its end. Only
+    // the returned byte count is used below, so no element libproc left
+    // untouched is read as a pid.
+    let filled = unsafe {
+        libc::proc_listpids(
+            PROC_PGRP_ONLY,
+            group,
+            pids.as_mut_ptr().cast(),
+            byte_capacity,
+        )
+    };
+    if filled <= 0 {
+        return 0;
+    }
+
+    pids.truncate(filled.cast_unsigned() as usize / size_of::<i32>());
+    pids.into_iter()
+        .filter(|&pid| pid > 0 && is_live(pid))
+        .count()
 }
 
+/// One libproc query: is this pid a process that still runs? A caller may pass
+/// any `i32`, including a pid that has already gone, so this is a safe
+/// function; the unsafe operations it needs are proved individually below.
 #[cfg(target_os = "macos")]
-unsafe fn is_live(pid: i32) -> bool {
+fn is_live(pid: i32) -> bool {
     // sys/proc.h: SZOMB. libproc reports it through proc_bsdinfo.pbi_status.
     const SZOMB: u32 = 5;
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = size_of::<libc::proc_bsdinfo>() as i32;
+
+    // SAFETY: `proc_bsdinfo` is a plain C output struct of integers and
+    // fixed-size byte arrays, with no reference, `NonZero`, or enum field, so
+    // every bit pattern — all zeros included — is a valid value of the type.
+    // Zeroing therefore produces initialized storage the FFI call may
+    // overwrite, and the zeros themselves are never trusted: nothing is read
+    // out unless the call reports a complete structure.
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+    let Ok(size) = i32::try_from(size_of::<libc::proc_bsdinfo>()) else {
+        return false;
+    };
+
+    // SAFETY: `&raw mut info` points at the initialized, writable
+    // `proc_bsdinfo` above. It is a local this thread borrows exclusively, and
+    // it outlives the call, so libproc's write can neither race nor dangle.
+    // `size` is exactly that value's size in bytes, so libproc cannot write
+    // past its end. `info` is read only where `got == size` proves libproc
+    // filled the whole structure.
     let got =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
     // A process that vanished between the listing and this query is not live.
