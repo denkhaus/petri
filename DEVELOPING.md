@@ -33,7 +33,7 @@ The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 | `mise run fmt` | Format Rust code |
 | `mise run fmt:check` | Check formatting without changing files |
 | `mise run lint` | Run Clippy with warnings denied |
-| `mise run test` | Run the routine test suite |
+| `mise run test` | Run the routine suite with Nextest, then run doctests |
 | `mise run check:msrv` | Check all targets with Rust 1.89 |
 | `mise run check` | Run the complete routine verification gate |
 | `mise run check:nightly` | Run the extended verification gate |
@@ -80,6 +80,9 @@ crate dependencies consistent with the layering rules described there.
 
 The routine suite runs without Docker or the corpus. It reports skips when those
 resources are absent.
+
+Nextest is the normal test runner. `mise run test` also uses Cargo to run
+doctests, which Nextest does not run.
 
 CI sets `PETRI_REQUIRE_DOCKER=1` on Linux and `PETRI_REQUIRE_CORPUS=1` on all
 runners. These variables turn an unexpected skip into a failure. Do not set

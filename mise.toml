@@ -6,6 +6,7 @@ lockfile_platforms = ["macos-arm64", "linux-x64", "linux-arm64"]
 minimum_release_age = "24h"
 
 [tools]
+"cargo:cargo-nextest" = { version = "0.9.140", locked = true }
 rust = [
   { version = "1.97.1", profile = "minimal", components = ["clippy"] },
   { version = "1.89.0", profile = "minimal" },
@@ -35,12 +36,15 @@ env = { CARGO_TARGET_DIR = "{{config_root}}/target/clippy" }
 run = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.test]
-description = "Run the routine Rust test suite"
-run = "cargo test --locked --workspace --all-features"
+description = "Run all Rust tests with Nextest and Cargo doctests"
+run = [
+  "cargo nextest run --locked --workspace --all-targets --all-features --no-tests=pass",
+  "cargo test --locked --workspace --all-features --doc",
+]
 
 [tasks."test:release"]
 description = "Run all Rust tests in release mode"
-run = "cargo test --locked --release --workspace --all-features"
+run = "cargo nextest run --locked --release --workspace --all-targets --all-features --no-tests=pass"
 
 [tasks."build:release"]
 description = "Build the workspace in release mode"
