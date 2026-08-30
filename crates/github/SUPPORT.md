@@ -198,7 +198,12 @@ workflows you did not write; the corpus sweep runs token-less by policy. A
 default-deny proxy stays future work if real demand appears.
 
 **Known deltas from GitHub.** The local executor emulates a Linux runner
-(`ubuntu-*` labels) on this machine; `runner.os` reports the actual host.
+(`ubuntu-*` labels) on this machine; `runner.os` reports the actual host, and
+`runner.arch` the architecture the job actually runs on — an arm64 host is
+GitHub's `ubuntu-*-arm` runner, so a workflow that hardcodes x64 downloads
+meets its own arm64 reality here, as it would there. The runner images are
+multi-arch; a workflow's own `container:` image built for one architecture
+only runs under the daemon's emulation (Docker Desktop ships it).
 JavaScript actions and `hashFiles` need `node` on `PATH`; Docker container
 actions (and `container:` jobs) need a reachable Docker daemon — its absence is
 one routable failure on the step or scope, never a run abort. **Artifacts and the cache run against local

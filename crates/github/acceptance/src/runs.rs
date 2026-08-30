@@ -34,24 +34,32 @@ use smol_str::SmolStr;
 
 /// The pinned battery images: flavor tags (`:slim`) move after maintained
 /// builds, so the battery pins flavor+commit — reproducible runs, refreshed
-/// deliberately. From lithoscomputer/sandbox-images; linux/amd64 only, so an
-/// Apple-Silicon host runs them emulated (fine for the correctness metric,
-/// noted for speed).
-pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-2ea78b6f826c";
-pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-2ea78b6f826c";
-pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-2ea78b6f826c";
+/// deliberately. From lithoscomputer/sandbox-images; multi-arch manifests
+/// (linux/amd64 and linux/arm64), so the daemon runs its own architecture
+/// natively and `runner.arch` reports it — an arm64 host is GitHub's
+/// `ubuntu-*-arm` runner, an amd64 host its `ubuntu-*` one.
+pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-e38f48b4bcd5";
+pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-e38f48b4bcd5";
+pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-e38f48b4bcd5";
 
 /// The dind flavor of the 24.04 runner: slim plus a Docker engine and its
 /// `start-docker` helper. The daemon is not running when the container starts
 /// — the session prologue brings it up lazily on the first step — and it needs
 /// `--privileged` ([`privilege`]). Only the 24.04 flavor is built.
-pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-2ea78b6f826c";
+pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-e38f48b4bcd5";
 
-/// The full 24.04 runner capture — GitHub's own ubuntu-latest filesystem,
-/// ~21 GB to pull once. Pinned by the runner release's ImageVersion.
-pub const RUNNER_IMAGE_2404_FULL: &str = "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.283.1";
+/// The full 24.04 runner capture — GitHub's own runner filesystem, ~20 GB to
+/// pull once. Each architecture is a capture of GitHub's runner for that
+/// architecture (`ubuntu-24.04` / `ubuntu-24.04-arm`) with its own
+/// ImageVersion, so the pin is per architecture, chosen by the host's.
+pub fn runner_image_2404_full() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.101.1-arm64",
+        _ => "ghcr.io/lithoscomputer/ubuntu-24.04-full:20260823.283.1-amd64",
+    }
+}
 
-/// Workflows the sweep runs on [`RUNNER_IMAGE_2404_FULL`] instead of slim. On
+/// Workflows the sweep runs on [`runner_image_2404_full`] instead of slim. On
 /// GitHub they run on ubuntu-latest — the full image — and their setup-ruby
 /// bundler step compiles native gems (libxml-ruby, mysql2) against packages
 /// (`libxml2-dev`, `libmysqlclient-dev`) the slim image deliberately does not
@@ -585,9 +593,15 @@ fn push_children(expr: &ir::Expr, stack: &mut Vec<ir::ExprId>) {
 
 /// Rewrite every host scope to a runner container, chosen per scope from its
 /// placement labels. A workflow's own `container:` stays its own image — the
-/// stand-in is only for scopes that would have run on the host. The explicit
-/// `--platform` keeps the amd64-only images working on an arm64 daemon.
-pub fn containerize(graph: &mut Graph, image_for: impl Fn(&[SmolStr]) -> String) {
+/// stand-in is only for scopes that would have run on the host. With no
+/// `platform` the daemon runs its native architecture; `Some("linux/amd64")`
+/// forces GitHub's x64 runner shape under emulation, for a fidelity
+/// comparison against the hosted default.
+pub fn containerize(
+    graph: &mut Graph,
+    platform: Option<&str>,
+    image_for: impl Fn(&[SmolStr]) -> String,
+) {
     for scope in &mut graph.scopes {
         if !matches!(scope.runtime.target, RuntimeTarget::HostProcess) {
             continue;
@@ -595,7 +609,9 @@ pub fn containerize(graph: &mut Graph, image_for: impl Fn(&[SmolStr]) -> String)
         let image = image_for(&scope.runtime.requirements);
         scope.runtime.target = RuntimeTarget::Container {
             image: SmolStr::new(&image),
-            options: vec![SmolStr::new("--platform"), SmolStr::new("linux/amd64")],
+            options: platform
+                .map(|p| vec![SmolStr::new("--platform"), SmolStr::new(p)])
+                .unwrap_or_default(),
             credentials: None,
         };
     }
@@ -880,11 +896,11 @@ pub fn expected_reason(
 /// build outputs never are.
 pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<String> {
     // ENOSYS from basic syscalls (`mkdir: Function not implemented`) means the
-    // image's binaries don't run under this host's amd64 emulation — the 26.04
-    // runner is amd64-only, an arm64 daemon pulls it through the platform
-    // fallback and then cannot execute it. A host-architecture limit, not a
-    // petri gap: an amd64 host runs these rows. Any step can hit it, so this
-    // look precedes the action-only ones.
+    // image's binaries don't run under this host's emulation: a workflow's own
+    // `container:` image built for one architecture only, pulled through the
+    // executor's platform fallback on a host of the other. A host-architecture
+    // limit, not a petri gap — a host of the image's architecture runs these
+    // rows. Any step can hit it, so this look precedes the action-only ones.
     if log
         .iter()
         .any(|line| line.contains("Function not implemented"))
@@ -1488,7 +1504,7 @@ mod tests {
              \x20   container: alpine:3.20\n\
              \x20   steps: [{run: echo}]\n",
         );
-        containerize(&mut graph, |req| battery_image(req).to_string());
+        containerize(&mut graph, None, |req| battery_image(req).to_string());
         let images: Vec<String> = graph
             .scopes
             .iter()
@@ -1562,7 +1578,7 @@ mod tests {
         });
         assert!(needs_docker(&graph));
         // The sweep's selection: dind where 24.04 would have been picked.
-        containerize(&mut graph, |req| {
+        containerize(&mut graph, None, |req| {
             let image = battery_image(req);
             if image == RUNNER_IMAGE_2404 {
                 RUNNER_IMAGE_2404_DIND.to_string()

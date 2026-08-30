@@ -15,10 +15,13 @@
 //! Scale controls, so the sweep stays runnable after every commit:
 //! `PETRI_SWEEP_JOBS` bounds workflow parallelism (default 4),
 //! `PETRI_SWEEP_TIMEOUT` caps each workflow's wall clock in seconds (default
-//! 900 — real toolchain installs run emulated on an arm64 host and outlive a
-//! tighter cap) so one wedged workflow cannot stall the battery, and
-//! `PETRI_SWEEP_FILTER` narrows the sweep to workflows whose `repo/file`
-//! contains the substring — the dev loop for a single repository.
+//! 900 — real toolchain installs and image builds outlive a tighter cap) so
+//! one wedged workflow cannot stall the battery, `PETRI_SWEEP_FILTER` narrows
+//! the sweep to workflows whose `repo/file` contains the substring — the dev
+//! loop for a single repository — and `PETRI_SWEEP_PLATFORM` (e.g.
+//! `linux/amd64`) forces the runner containers' platform: unset, the daemon
+//! runs its native architecture and `runner.arch` says so; set to amd64 on an
+//! arm64 host, the sweep reproduces GitHub's x64 runners under emulation.
 //!
 //! The sweep is token-less by default (see [`sweep_token`]); `PETRI_SWEEP_TOKEN`
 //! opts a real token in — `PETRI_SWEEP_TOKEN=$(gh auth token)` — for a
@@ -89,6 +92,16 @@ async fn corpus_run_sweep() {
     let timeout = Duration::from_secs(env_num("PETRI_SWEEP_TIMEOUT", 900));
 
     let pins = corpus_pins(&root);
+    let platform = std::env::var("PETRI_SWEEP_PLATFORM")
+        .ok()
+        .filter(|p| !p.is_empty());
+    // `runner.arch` is the architecture the containers actually run: the
+    // host's, unless a platform is forced.
+    let runner_arch = match platform.as_deref() {
+        Some(p) if p.ends_with("/amd64") => "X64",
+        Some(p) if p.ends_with("/arm64") => "ARM64",
+        _ => frontend_gha::runner_arch(std::env::consts::ARCH),
+    };
 
     // Lower everything serially first: it fills the action caches while the
     // classification decides what runs. Excluded files (Windows/macOS,
@@ -118,6 +131,8 @@ async fn corpus_run_sweep() {
                 &outcome.file,
                 pins.get(&repo),
                 &repo_root,
+                platform.as_deref(),
+                runner_arch,
             );
             // A reusable file run standalone has no caller to supply its
             // declared inputs; a firing-environment failure there is
@@ -218,7 +233,15 @@ async fn corpus_run_sweep() {
 /// workflows without a checkout, so the honest identity comes from
 /// `corpus-pins.txt` and the fetch's recorded default branch; `checkout` then
 /// fetches a commit that exists.
-fn prepare(graph: &mut Graph, repo_slug: &str, file: &str, pin: Option<&String>, repo_root: &Path) {
+fn prepare(
+    graph: &mut Graph,
+    repo_slug: &str,
+    file: &str,
+    pin: Option<&String>,
+    repo_root: &Path,
+    platform: Option<&str>,
+    runner_arch: &str,
+) {
     runs::stub_run_scripts(graph);
     // A graph that drives a Docker engine gets the dind runner (and the
     // `--privileged` its daemon needs) where the 24.04 image would have been
@@ -227,10 +250,10 @@ fn prepare(graph: &mut Graph, repo_slug: &str, file: &str, pin: Option<&String>,
     // set, as on ubuntu-latest.
     let full = runs::full_image_workflow(repo_slug, file);
     let docker = runs::needs_docker(graph);
-    runs::containerize(graph, |requirements| {
+    runs::containerize(graph, platform, |requirements| {
         let image = battery_image(requirements);
         if full && image == runs::RUNNER_IMAGE_2404 {
-            runs::RUNNER_IMAGE_2404_FULL.to_string()
+            runs::runner_image_2404_full().to_string()
         } else if docker && image == runs::RUNNER_IMAGE_2404 {
             runs::RUNNER_IMAGE_2404_DIND.to_string()
         } else {
@@ -252,7 +275,7 @@ fn prepare(graph: &mut Graph, repo_slug: &str, file: &str, pin: Option<&String>,
     graph.params.insert("github".into(), github);
     graph.params.insert(
         "runner".into(),
-        json!({"os": "Linux", "arch": "X64", "name": "petri-sweep"}),
+        json!({"os": "Linux", "arch": runner_arch, "name": "petri-sweep"}),
     );
     graph.params.insert("vars".into(), json!({}));
     // The corpus dir is the "repository" the substituted checkout materializes:
