@@ -52,16 +52,7 @@ async fn assert_action_workload(yaml: &str, label: &str, expected: &str) {
     let source = corpus_action_source();
     let graph = lower_with_actions(&text, &source);
     let trees: Arc<dyn ActionTreeSource> = source;
-    // An empty GITHUB_TOKEN, the distribution's token-less stance: setup-*
-    // actions default their `token` input to `${{ github.token }}`, and the
-    // toolkit treats empty as "no auth" — version manifests read anonymously.
-    let report =
-        run_host_with(graph, label, |rt| {
-            rt.capability(ActionSourceCap(trees)).secrets(
-                runtime::executor::MapSecrets::from_pairs(&[("GITHUB_TOKEN", "")]),
-            )
-        })
-        .await;
+    let report = run_host_with(graph, label, |rt| rt.capability(ActionSourceCap(trees))).await;
     assert_success(&report);
     let lines = log_lines(&report);
     assert!(

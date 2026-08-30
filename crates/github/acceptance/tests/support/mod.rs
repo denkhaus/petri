@@ -191,6 +191,16 @@ fn runtime(dir: &std::path::Path) -> Runtime {
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
         .step(github_actions::CheckoutStep)
+        // The distribution's token-less stance, so batteries test the shipped
+        // semantics: `github.token` resolves to the empty string — the toolkit
+        // treats it as "no auth" and reads anonymously — never a missing
+        // secret. A bare runtime has no secrets at all, and a setup-* action's
+        // `token: ${{ github.token }}` default then fails `secret_unavailable`
+        // where the shipped product proceeds.
+        .secrets(runtime::executor::MapSecrets::from_pairs(&[(
+            "GITHUB_TOKEN",
+            "",
+        )]))
 }
 
 /// Run on the standard runtime, which verifies replay itself.
@@ -223,8 +233,14 @@ pub async fn run_host_with_secrets(
 ) -> RunReportPlus {
     let graph = with_params(graph);
     let dir = run_dir(label);
+    // `.secrets()` replaces the provider, so the default empty GITHUB_TOKEN
+    // rides along unless the test names its own.
+    let mut pairs: Vec<(&str, &str)> = secrets.to_vec();
+    if !pairs.iter().any(|(k, _)| *k == "GITHUB_TOKEN") {
+        pairs.push(("GITHUB_TOKEN", ""));
+    }
     let report = runtime(&dir)
-        .secrets(runtime::executor::MapSecrets::from_pairs(secrets))
+        .secrets(runtime::executor::MapSecrets::from_pairs(&pairs))
         .run(graph)
         .await
         .expect("replay is byte-identical");
