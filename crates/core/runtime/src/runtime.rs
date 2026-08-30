@@ -6,9 +6,11 @@
 //! written once. The CLI, the acceptance harness, and an external repository
 //! all configure the same builder; extension is registration, not new plumbing.
 
+use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{env, fs, process};
 
 use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunReport};
 use engine::{EventLog, ReplayMismatch};
@@ -58,7 +60,7 @@ impl RunOptions {
 /// What a per-run service provisioner returns beside the capabilities: the
 /// running service, opaque to the runtime. The driver holds it for the run's
 /// lifetime; drop is teardown.
-pub type RunServiceGuard = Box<dyn std::any::Any + Send + Sync>;
+pub type RunServiceGuard = Box<dyn Any + Send + Sync>;
 
 /// A per-run service provisioner — see [`Runtime::run_services`].
 type RunProvisioner = Arc<
@@ -96,6 +98,12 @@ impl Runtime {
     ///
     /// The default run directory is under the system temp dir; set a real one
     /// with [`Runtime::options`].
+    #[expect(
+        clippy::absolute_paths,
+        reason = "this crate's own `steps` module and the external `steps` crate differ only \
+                  by the leading `::`; spelling the local one in full keeps the two apart \
+                  beside the `::steps::` uses a few lines below"
+    )]
     pub fn standard() -> Self {
         Self {
             frontends:    vec![Arc::new(frontend_native::Native)],
@@ -107,7 +115,7 @@ impl Runtime {
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
             options:      RunOptions::new(
-                std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
+                env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
         }
     }
@@ -125,25 +133,28 @@ impl Runtime {
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
             options:      RunOptions::new(
-                std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
+                env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
         }
     }
 
     /// Register a frontend. It goes to the front of the list, so a specific
     /// format is asked before the native catch-all.
+    #[must_use]
     pub fn frontend(mut self, frontend: impl Frontend + 'static) -> Self {
         self.frontends.insert(0, Arc::new(frontend));
         self
     }
 
     /// Replace the step registry.
+    #[must_use]
     pub fn steps(mut self, registry: ::steps::Registry) -> Self {
         self.steps = registry;
         self
     }
 
     /// Register one step kind on the current registry.
+    #[must_use]
     pub fn step<S: ::steps::Step>(mut self, step: S) -> Self {
         self.steps.register(step);
         self
@@ -151,11 +162,13 @@ impl Runtime {
 
     /// Use one executor for every scope, whatever its target — the composed
     /// [`LocalExecutor`] included.
+    #[must_use]
     pub fn executor(mut self, executor: impl Executor + 'static) -> Self {
         self.executor = Some(Arc::new(executor));
         self
     }
 
+    #[must_use]
     pub fn secrets(mut self, secrets: impl SecretProvider + 'static) -> Self {
         self.secrets = Arc::new(secrets);
         self
@@ -163,6 +176,7 @@ impl Runtime {
 
     /// Register an event observer on every driver this runtime builds: it sees
     /// every appended record, in seq order, with the post-apply state.
+    #[must_use]
     pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
         self
@@ -171,6 +185,7 @@ impl Runtime {
     /// Register a progress sink on every driver this runtime builds: live
     /// acquisition events — image pulls, service health — which never enter
     /// the replay log.
+    #[must_use]
     pub fn progress(mut self, sink: Arc<dyn ProgressSink>) -> Self {
         self.progress = Some(sink);
         self
@@ -186,6 +201,7 @@ impl Runtime {
     /// [`Runtime::run_services`] provisioner instead; a host assembling its
     /// own driver can also build its own [`::steps::Capabilities`] and call
     /// `Driver::with_capabilities` directly.
+    #[must_use]
     pub fn capability<T: Send + Sync + 'static>(mut self, value: T) -> Self {
         self.caps = self.caps.provide(value);
         self
@@ -198,6 +214,7 @@ impl Runtime {
     /// is the teardown. A provisioner that cannot start its service returns
     /// the capabilities unchanged and no guard — the steps that need it then
     /// fail routably (`capability_unavailable`), never the run.
+    #[must_use]
     pub fn run_services<F>(mut self, provision: F) -> Self
     where
         F: Fn(
@@ -212,6 +229,7 @@ impl Runtime {
         self
     }
 
+    #[must_use]
     pub fn options(mut self, options: RunOptions) -> Self {
         self.options = options;
         self
@@ -233,7 +251,7 @@ impl Runtime {
     /// The frontend for a file: by `name` when given, else the first that
     /// claims the path.
     pub fn frontend_for(&self, path: &Path, name: Option<&str>) -> Result<&dyn Frontend, String> {
-        let all: Vec<&dyn Frontend> = self.frontends.iter().map(|f| f.as_ref()).collect();
+        let all: Vec<&dyn Frontend> = self.frontends.iter().map(AsRef::as_ref).collect();
         match name {
             Some(name) => frontend::by_name(&all, name).ok_or_else(|| {
                 let known: Vec<&str> = all.iter().map(|f| f.name()).collect();
@@ -256,10 +274,8 @@ impl Runtime {
         repo: Option<&Path>,
     ) -> Result<Lowered, String> {
         let frontend = self.frontend_for(file, format)?;
-        let repo = repo
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| frontend.repo_root(file));
-        let text = std::fs::read_to_string(file)
+        let repo = repo.map_or_else(|| frontend.repo_root(file), Path::to_path_buf);
+        let text = fs::read_to_string(file)
             .map_err(|e| format!("could not read {}: {e}", file.display()))?;
         let name = file
             .strip_prefix(&repo)

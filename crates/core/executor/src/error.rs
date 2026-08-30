@@ -60,16 +60,19 @@ pub struct ReleaseReport {
 }
 
 impl ReleaseReport {
+    #[must_use]
     pub fn released(mut self, what: impl Into<String>) -> Self {
         self.released.push(what.into());
         self
     }
 
+    #[must_use]
     pub fn kept(mut self, what: impl Into<String>) -> Self {
         self.kept.push(what.into());
         self
     }
 
+    #[must_use]
     pub fn problem(mut self, message: impl Into<String>) -> Self {
         self.problems.push(message.into());
         self

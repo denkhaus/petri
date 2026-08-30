@@ -6,13 +6,17 @@
 
 mod support;
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use executor::{EnvError, Executor, ExitStatus, ProcessSpec, ScopeOutcome, ScopeSpec};
 use executor_host::HostExecutor;
 use ir::ScopeId;
 use support::*;
+use tokio::process::Command;
+use tokio::time;
 
 fn spec() -> ScopeSpec {
     ScopeSpec::new(ScopeId::new(0), "scope-0")
@@ -24,11 +28,11 @@ fn groups_root(dir: &RunDir) -> PathBuf {
 
 /// The generation dirs currently under the scope, sorted by name.
 fn generations(dir: &RunDir) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(groups_root(dir))
+    let mut dirs: Vec<PathBuf> = fs::read_dir(groups_root(dir))
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .map(|e| e.path())
                 .collect()
         })
@@ -39,7 +43,7 @@ fn generations(dir: &RunDir) -> Vec<PathBuf> {
 
 async fn settles(path: &Path) -> bool {
     let before = file_len(path);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    time::sleep(Duration::from_millis(500)).await;
     file_len(path) == before
 }
 
@@ -90,7 +94,7 @@ async fn reacquire_fences_the_survivor_and_isolates_status() {
 
     // The new acquisition's first spawn gets its own status file: the stale
     // `exit 5` from the dead generation is not read as this one's exit.
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let mut fresh_proc = env2
         .exec()
         .spawn(ProcessSpec::new("sh", &["-c", "sleep 0.3; exit 7"]))
@@ -118,7 +122,7 @@ async fn a_prefenced_generation_never_starts_the_workload() {
 
     let gen_dirs = generations(&dir);
     assert_eq!(gen_dirs.len(), 1, "one generation per acquisition");
-    std::fs::write(gen_dirs[0].join("fenced"), b"").expect("the marker");
+    fs::write(gen_dirs[0].join("fenced"), b"").expect("the marker");
 
     let mut process = env
         .exec()
@@ -130,7 +134,7 @@ async fn a_prefenced_generation_never_starts_the_workload() {
         .expect("spawn");
     // The group ends on its own — the sentinel exited at its check — and the
     // workload never ran.
-    let status = tokio::time::timeout(Duration::from_secs(10), process.wait())
+    let status = time::timeout(Duration::from_secs(10), process.wait())
         .await
         .expect("the group ends without outside help")
         .expect("wait");
@@ -154,23 +158,23 @@ async fn an_unkillable_group_fails_acquire_without_a_signal() {
     let dir = RunDir::new("fence-leak");
     // A live process group with no sentinel and no watcher: nothing inside it
     // will ever honor the marker.
-    let mut rogue = tokio::process::Command::new("sh");
+    let mut rogue = Command::new("sh");
     rogue
         .arg("-c")
         .arg("while :; do echo tick >> rogue-heartbeat; sleep 0.05; done")
         .current_dir(dir.path())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0);
     let mut rogue = rogue.spawn().expect("spawn");
-    let pgid = rogue.id().expect("pid") as i32;
+    let pgid = rogue.id().expect("pid").cast_signed();
     let heartbeat = dir.path().join("rogue-heartbeat");
     assert!(wait_for_file(&heartbeat, Duration::from_secs(10)).await);
 
     let fake = groups_root(&dir).join("gone");
-    std::fs::create_dir_all(&fake).expect("fake generation");
-    std::fs::write(fake.join("0.group"), format!("{pgid}\n")).expect("record");
+    fs::create_dir_all(&fake).expect("fake generation");
+    fs::write(fake.join("0.group"), format!("{pgid}\n")).expect("record");
 
     let executor = HostExecutor::new(dir.path()).with_fence_drain(Duration::from_millis(300));
     match executor
@@ -186,7 +190,7 @@ async fn an_unkillable_group_fails_acquire_without_a_signal() {
 
     // The decisive half: nothing was signalled. The rogue group still beats.
     let before = file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(300)).await;
     assert!(
         file_len(&heartbeat) > before,
         "no signal is ever sent to a bare recorded pgid"

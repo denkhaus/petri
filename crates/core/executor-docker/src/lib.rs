@@ -46,11 +46,13 @@ mod oneshot;
 mod services;
 
 use std::collections::BTreeMap;
+use std::env;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{self, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use executor::lines::pump;
@@ -61,8 +63,11 @@ use executor::{
 use ir::RuntimeTarget;
 pub use services::SERVICE_HEALTH_WAIT;
 use smol_str::SmolStr;
+use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, mpsc};
+use tokio::time::{self, Instant};
 
 use crate::oneshot::OneShotRunner;
 
@@ -132,11 +137,13 @@ impl DockerExecutor {
         }
     }
 
+    #[must_use]
     pub fn with_retention(mut self, retention: Retention) -> Self {
         self.retention = retention;
         self
     }
 
+    #[must_use]
     pub fn with_pull_policy(mut self, pull: PullPolicy) -> Self {
         self.pull = pull;
         self
@@ -193,7 +200,7 @@ impl DockerExecutor {
     /// containers for `instance`. A `false` means the fence and release sweep
     /// have nothing to look for — no daemon roundtrip needed.
     pub async fn one_shots_marked(&self, instance: &str) -> bool {
-        tokio::fs::try_exists(self.one_shot_marker(instance))
+        fs::try_exists(self.one_shot_marker(instance))
             .await
             .unwrap_or(false)
     }
@@ -352,12 +359,12 @@ async fn pull_with_credentials(
             operation: SmolStr::new("login"),
             message:   e.to_string(),
         })?;
-    let config_dir = std::env::temp_dir().join(format!(
+    let config_dir = env::temp_dir().join(format!(
         "petri-docker-login-{}-{}",
-        std::process::id(),
+        process::id(),
         next_token()
     ));
-    tokio::fs::create_dir_all(&config_dir)
+    fs::create_dir_all(&config_dir)
         .await
         .map_err(|e| EnvError::Workspace {
             path:    config_dir.display().to_string(),
@@ -379,7 +386,7 @@ async fn pull_with_credentials(
         Ok(_) => pull_image(&["--config", &config], image).await,
         Err(error) => Err(error),
     };
-    let _ = tokio::fs::remove_dir_all(&config_dir).await;
+    let _ = fs::remove_dir_all(&config_dir).await;
     result
 }
 
@@ -433,7 +440,7 @@ impl Executor for DockerExecutor {
         };
 
         let workspace = self.workspace_for(&scope.instance);
-        tokio::fs::create_dir_all(&workspace)
+        fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    workspace.display().to_string(),
@@ -481,7 +488,7 @@ impl Executor for DockerExecutor {
             create.push(format!("{key}={value}"));
         }
         // The scope's raw engine flags, passed through as declared.
-        create.extend(options.iter().map(|o| o.to_string()));
+        create.extend(options.iter().map(ToString::to_string));
         create.push(image.to_string());
         // A long-lived init command, so the container outlives any one step.
         create.extend(["sleep".to_string(), "infinity".to_string()]);
@@ -580,10 +587,10 @@ impl Executor for DockerExecutor {
         if retention.keeps(outcome) {
             return report.kept(workspace);
         }
-        match tokio::fs::remove_dir_all(path).await {
+        match fs::remove_dir_all(path).await {
             Ok(()) => report = report.released(workspace),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                report = report.released(workspace)
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                report = report.released(workspace);
             }
             Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
         }
@@ -630,9 +637,9 @@ impl ExecEnv for DockerEnv {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
         // The pgid file lives on the bind mount, so the container writes it and the
         // host reads it.
-        let token = format!("{}-{}", std::process::id(), next_token());
+        let token = format!("{}-{}", process::id(), next_token());
         let pgid_dir = self.workspace.join(".ci").join("pg");
-        tokio::fs::create_dir_all(&pgid_dir)
+        fs::create_dir_all(&pgid_dir)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    pgid_dir.display().to_string(),
@@ -647,7 +654,7 @@ impl ExecEnv for DockerEnv {
         let workdir = match &spec.cwd {
             Some(rel) => {
                 let host = self.workspace.join(rel);
-                tokio::fs::create_dir_all(&host)
+                fs::create_dir_all(&host)
                     .await
                     .map_err(|e| EnvError::Workspace {
                         path:    host.display().to_string(),
@@ -692,9 +699,9 @@ impl ExecEnv for DockerEnv {
             pgid_in_container,
         ]);
         argv.push(spec.program.to_string());
-        argv.extend(spec.args.iter().map(|a| a.to_string()));
+        argv.extend(spec.args.iter().map(ToString::to_string));
 
-        let mut command = tokio::process::Command::new("docker");
+        let mut command = Command::new("docker");
         command
             .args(&argv)
             .stdin(Stdio::null())
@@ -744,9 +751,9 @@ impl ExecEnv for DockerEnv {
     // The workspace is bind-mounted from the run directory, so the host filesystem
     // answers for the container. A remote executor would go through its transport.
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
-        match tokio::fs::read(self.workspace.join(relative)).await {
+        match fs::read(self.workspace.join(relative)).await {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(EnvError::Workspace {
                 path:    relative.display().to_string(),
                 message: e.to_string(),
@@ -760,9 +767,9 @@ impl ExecEnv for DockerEnv {
         limit: usize,
     ) -> Result<Option<Vec<u8>>, EnvError> {
         let path = self.workspace.join(relative);
-        let file = match tokio::fs::File::open(path).await {
+        let file = match File::open(path).await {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(EnvError::Workspace {
                     path:    relative.display().to_string(),
@@ -790,14 +797,14 @@ impl ExecEnv for DockerEnv {
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
         let path = self.workspace.join(relative);
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
                 .await
                 .map_err(|e| EnvError::Workspace {
                     path:    parent.display().to_string(),
                     message: e.to_string(),
                 })?;
         }
-        tokio::fs::write(&path, contents)
+        fs::write(&path, contents)
             .await
             .map_err(|e| EnvError::Workspace {
                 path:    relative.display().to_string(),
@@ -812,7 +819,7 @@ impl ExecEnv for DockerEnv {
 
 struct DockerProcess {
     container:   String,
-    child:       tokio::process::Child,
+    child:       Child,
     pgid_file:   PathBuf,
     status_file: PathBuf,
     pgid:        Option<i32>,
@@ -822,7 +829,7 @@ struct DockerProcess {
 impl DockerProcess {
     /// The exit status the wrapper recorded, if it got that far.
     async fn recorded_status(&self) -> Option<ExitStatus> {
-        let text = tokio::fs::read_to_string(&self.status_file).await.ok()?;
+        let text = fs::read_to_string(&self.status_file).await.ok()?;
         text.trim().parse::<i32>().ok().map(ExitStatus::code)
     }
 
@@ -842,16 +849,16 @@ impl DockerProcess {
         if let Some(pgid) = self.pgid {
             return Some(pgid);
         }
-        let deadline = tokio::time::Instant::now() + PGID_WAIT;
-        while tokio::time::Instant::now() < deadline {
-            if let Ok(text) = tokio::fs::read_to_string(&self.pgid_file).await
+        let deadline = Instant::now() + PGID_WAIT;
+        while Instant::now() < deadline {
+            if let Ok(text) = fs::read_to_string(&self.pgid_file).await
                 && let Ok(pgid) = text.trim().parse::<i32>()
                 && pgid > 0
             {
                 self.pgid = Some(pgid);
                 return Some(pgid);
             }
-            tokio::time::sleep(LIVENESS_POLL).await;
+            time::sleep(LIVENESS_POLL).await;
         }
         None
     }
@@ -896,12 +903,12 @@ impl ProcessHandle for DockerProcess {
                     status = self.recorded_status().await;
                     break;
                 }
-                tokio::time::sleep(LIVENESS_POLL).await;
+                time::sleep(LIVENESS_POLL).await;
             }
         }
 
-        let _ = tokio::fs::remove_file(&self.pgid_file).await;
-        let _ = tokio::fs::remove_file(&self.status_file).await;
+        let _ = fs::remove_file(&self.pgid_file).await;
+        let _ = fs::remove_file(&self.status_file).await;
         Ok(status.unwrap_or_else(|| ExitStatus::from(client)))
     }
 
@@ -917,12 +924,10 @@ impl ProcessHandle for DockerProcess {
         // miss the step entirely.
         let target = format!("-{pgid}");
         let signal = format!("-{}", sig.number());
-        let result = run_docker(&["exec", &self.container, "kill", &signal, "--", &target]).await;
-        match result {
-            Ok(_) => Ok(()),
-            // The group is already gone, which is what we wanted anyway.
-            Err(_) => Ok(()),
-        }
+        // An error means the group is already gone, which is what we wanted
+        // anyway.
+        let _ = run_docker(&["exec", &self.container, "kill", &signal, "--", &target]).await;
+        Ok(())
     }
 }
 
@@ -966,7 +971,7 @@ pub(crate) fn next_token() -> u64 {
 }
 
 pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
-    let output = tokio::process::Command::new("docker")
+    let output = Command::new("docker")
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -999,7 +1004,7 @@ async fn run_docker_stdin(
         operation: operation.clone(),
         message,
     };
-    let mut child = tokio::process::Command::new("docker")
+    let mut child = Command::new("docker")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1031,30 +1036,30 @@ async fn run_docker_stdin(
 /// reader sees the whole id or none.
 async fn load_or_record_run_id(run_dir: &Path) -> Result<SmolStr, EnvError> {
     let path = run_dir.join(RUN_ID_FILE);
-    let io_error = |path: &Path, e: std::io::Error| EnvError::Workspace {
+    let io_error = |path: &Path, e: io::Error| EnvError::Workspace {
         path:    path.display().to_string(),
         message: e.to_string(),
     };
-    match tokio::fs::read_to_string(&path).await {
+    match fs::read_to_string(&path).await {
         Ok(recorded) if !recorded.trim().is_empty() => return Ok(SmolStr::new(recorded.trim())),
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(io_error(&path, e)),
     }
 
     let minted = fresh_run_id();
-    tokio::fs::create_dir_all(run_dir)
+    fs::create_dir_all(run_dir)
         .await
         .map_err(|e| io_error(run_dir, e))?;
     let staged = run_dir.join(format!("{RUN_ID_FILE}.tmp"));
-    let mut file = tokio::fs::File::create(&staged)
+    let mut file = File::create(&staged)
         .await
         .map_err(|e| io_error(&staged, e))?;
     file.write_all(minted.as_bytes())
         .await
         .map_err(|e| io_error(&staged, e))?;
     file.sync_all().await.map_err(|e| io_error(&staged, e))?;
-    tokio::fs::rename(&staged, &path)
+    fs::rename(&staged, &path)
         .await
         .map_err(|e| io_error(&path, e))?;
     Ok(SmolStr::new(minted))
@@ -1064,13 +1069,12 @@ async fn load_or_record_run_id(run_dir: &Path) -> Result<SmolStr, EnvError> {
 /// container name, or one run's fence would remove the other's containers.
 fn fresh_run_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     format!(
         "{nanos:x}-{}-{}",
-        std::process::id(),
+        process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }

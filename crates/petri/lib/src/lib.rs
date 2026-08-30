@@ -28,6 +28,12 @@
 //! # }
 //! ```
 
+use std::process::{Command, Stdio};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use std::{env, fs, thread};
+
+use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 pub use runtime::{LocalExecutor, RunOptions, Runtime, driver, engine, ir};
 
 pub mod host;
@@ -75,21 +81,21 @@ pub mod github {
 /// `Runtime::standard()` for core alone, `Runtime::bare()` for nothing — and
 /// registers what it wants.
 pub fn runtime() -> Runtime {
-    let actions = std::sync::Arc::new(github::GitActionSource::new(github::default_cache_dir()));
-    let manifests: std::sync::Arc<dyn github::ActionSource> = actions.clone();
-    let trees: std::sync::Arc<dyn github::ActionTreeSource> = actions;
+    let actions = Arc::new(github::GitActionSource::new(github::default_cache_dir()));
+    let manifests: Arc<dyn github::ActionSource> = actions.clone();
+    let trees: Arc<dyn github::ActionTreeSource> = actions;
     let runners = frontend_gha::RunnerMap::builtin()
-        .allow_list(&std::env::var("PETRI_RUNNER_LABELS").unwrap_or_default());
+        .allow_list(&env::var("PETRI_RUNNER_LABELS").unwrap_or_default());
     // `PETRI_REAL_CHECKOUT` (non-empty) turns the local-checkout substitution
     // off: every `actions/checkout` stays the real action, credentials,
     // network and all.
-    let substitute_checkout = !std::env::var("PETRI_REAL_CHECKOUT").is_ok_and(|v| !v.is_empty());
+    let substitute_checkout = !env::var("PETRI_REAL_CHECKOUT").is_ok_and(|v| !v.is_empty());
     // The persistent store: cache entries and the per-OS tool cache under one
     // root ($PETRI_STORE overrides). Created now so the tool-cache prologue's
     // existence probe finds it on the host.
     let store = github_objects::default_store_dir();
     let tool_cache = github_objects::tool_cache_dir(&store);
-    let _ = std::fs::create_dir_all(&tool_cache);
+    let _ = fs::create_dir_all(&tool_cache);
     Runtime::standard()
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests)
@@ -112,6 +118,11 @@ pub fn runtime() -> Runtime {
                     };
                     (caps.provide(cap), Some(Box::new(service) as _))
                 }
+                #[expect(
+                    clippy::print_stderr,
+                    reason = "the run goes on without the backend, and only the user can tell \
+                              whether that matters; this distribution has no logging sink"
+                )]
                 Err(error) => {
                     eprintln!("warning: no results service for this run: {error}");
                     (caps, None)
@@ -124,14 +135,14 @@ pub fn runtime() -> Runtime {
 /// A runtime-registerable secret map plus a lazily loaded `GITHUB_TOKEN`.
 struct GithubSecrets {
     registered: executor::MapSecrets,
-    token:      std::sync::OnceLock<Option<String>>,
+    token:      OnceLock<Option<String>>,
 }
 
 impl GithubSecrets {
     fn new() -> Self {
         Self {
             registered: executor::MapSecrets::empty(),
-            token:      std::sync::OnceLock::new(),
+            token:      OnceLock::new(),
         }
     }
 
@@ -141,8 +152,13 @@ impl GithubSecrets {
     /// their API calls go anonymous (public reads work, rate-limited; writes
     /// fail with the API's own error). A missing-secret failure would instead
     /// stop every action that merely *names* the token, setup-* included.
+    #[expect(
+        clippy::print_stderr,
+        reason = "a token-less run changes how every action behaves, so the user is told once; \
+                  this distribution has no logging sink"
+    )]
     fn load_token() -> Option<String> {
-        let token = std::env::var("GITHUB_TOKEN")
+        let token = env::var("GITHUB_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty())
             .or_else(gh_auth_token);
@@ -163,7 +179,7 @@ impl executor::SecretProvider for GithubSecrets {
             Err(executor::SecretError::Unknown(_)) => {}
             Err(error) => return Err(error),
         }
-        if name != frontend_gha::exprs::GITHUB_TOKEN_SECRET {
+        if name != GITHUB_TOKEN_SECRET {
             return Err(executor::SecretError::Unknown(name.into()));
         }
         let value = self
@@ -189,13 +205,13 @@ impl executor::SecretProvider for GithubSecrets {
 /// Ask `gh` for a token without letting a broken credential helper block
 /// forever.
 fn gh_auth_token() -> Option<String> {
-    let mut child = std::process::Command::new("gh")
+    let mut child = Command::new("gh")
         .args(["auth", "token"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
@@ -206,8 +222,8 @@ fn gh_auth_token() -> Option<String> {
                     .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
                     .filter(|token| !token.is_empty());
             }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
             }
             _ => {
                 let _ = child.kill();

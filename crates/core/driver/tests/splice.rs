@@ -40,7 +40,7 @@ fn upload_graph(requests: &[SpliceRequest]) -> Graph {
     let up = b.add_node(
         "up",
         scope,
-        StepRef::new(SPLICE_KIND, splice_config(requests, json!("uploaded"))),
+        StepRef::new(SPLICE_KIND, splice_config(requests, &json!("uploaded"))),
     );
     let down = add_script(&mut b, "down", scope, "echo downstream");
     b.link(up, down);
@@ -98,6 +98,11 @@ impl ir::StepKind for LeakyUpload {
         LEAKY_KIND
     }
 
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the returned \
+                  lifetime"
+    )]
     fn name(&self) -> &str {
         "leaky-upload"
     }

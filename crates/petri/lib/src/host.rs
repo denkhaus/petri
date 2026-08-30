@@ -29,11 +29,12 @@
 //! line — and resume tolerates any lost suffix as a shorter prefix. A host that
 //! needs a stronger bar owns its own sink.
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 use runtime::Runtime;
 use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
@@ -41,6 +42,7 @@ use runtime::engine::{self, EngineState, EventLog, EventRecord, InvalidRecords};
 use runtime::executor::Masker;
 use runtime::ir::Graph;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 /// The event stream's file name under the run dir.
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -56,7 +58,7 @@ pub enum HostError {
         action: &'static str,
         path:   PathBuf,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
     #[error("`{path}`: {source}")]
     Events {
@@ -169,7 +171,7 @@ pub fn encode_events(log: &EventLog) -> Vec<u8> {
 
 /// Read and decode a run dir's `events.jsonl`.
 pub fn read_events(path: &Path) -> Result<DecodedEvents, HostError> {
-    let bytes = std::fs::read(path).map_err(|e| HostError::Io {
+    let bytes = fs::read(path).map_err(|e| HostError::Io {
         action: "read",
         path:   path.to_path_buf(),
         source: e,
@@ -185,7 +187,7 @@ pub fn read_events(path: &Path) -> Result<DecodedEvents, HostError> {
 /// What reaches the writer thread.
 enum Msg {
     Record(Box<EventRecord>),
-    Finish(tokio::sync::oneshot::Sender<Result<(), ObserveError>>),
+    Finish(oneshot::Sender<Result<(), ObserveError>>),
 }
 
 /// The provided observer: streams every record to `events.jsonl`.
@@ -204,7 +206,7 @@ pub struct JsonlEventLog {
 
 impl JsonlEventLog {
     /// Start a fresh file: the header now, records as they arrive.
-    pub fn create(path: impl Into<PathBuf>) -> std::io::Result<Self> {
+    pub fn create(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let mut file = File::create(&path)?;
         file.write_all(&encode_events(&EventLog::new()))?;
@@ -215,22 +217,22 @@ impl JsonlEventLog {
     /// Continue a file that already holds `high_water` records. The caller has
     /// already truncated any torn tail ([`DecodedEvents::clean_len`]), so every
     /// append starts on a fresh line.
-    pub fn append_to(path: impl Into<PathBuf>, high_water: u64) -> std::io::Result<Self> {
+    pub fn append_to(path: impl Into<PathBuf>, high_water: u64) -> io::Result<Self> {
         let path = path.into();
         let file = OpenOptions::new().append(true).open(&path)?;
         Ok(Self::over(file, path, high_water))
     }
 
     fn over(file: File, path: PathBuf, high_water: u64) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || write_records(file, path, rx));
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || write_records(file, &path, &rx));
         Self { tx, high_water }
     }
 }
 
 /// The writer thread: one record per line, flushed as it lands. The first write
 /// failure sticks — later records are dropped and `finish` reports it.
-fn write_records(mut file: File, path: PathBuf, rx: Receiver<Msg>) {
+fn write_records(mut file: File, path: &Path, rx: &Receiver<Msg>) {
     let mut failure: Option<String> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -273,7 +275,7 @@ impl EventObserver for JsonlEventLog {
     }
 
     async fn finish(&self) -> Result<(), ObserveError> {
-        let (reply, done) = tokio::sync::oneshot::channel();
+        let (reply, done) = oneshot::channel();
         let dead = || ObserveError::new(EVENTS_FILE, "the writer thread died");
         if self.tx.send(Msg::Finish(reply)).is_err() {
             return Err(dead());
@@ -296,7 +298,7 @@ fn encode_graph_checked(graph: &Graph, masker: &Masker) -> Result<Vec<u8>, HostE
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
-    std::fs::write(path, bytes).map_err(|e| HostError::Io {
+    fs::write(path, bytes).map_err(|e| HostError::Io {
         action: "write",
         path:   path.to_path_buf(),
         source: e,
@@ -310,7 +312,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
 /// running.
 pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
-    std::fs::create_dir_all(&run_dir).map_err(|e| HostError::Io {
+    fs::create_dir_all(&run_dir).map_err(|e| HostError::Io {
         action: "create",
         path:   run_dir.clone(),
         source: e,
@@ -337,7 +339,7 @@ pub async fn run(rt: &Runtime, graph: Graph) -> Result<RunReport, HostError> {
 
 fn read_graph(rt: &Runtime) -> Result<Graph, HostError> {
     let path = rt.run_options().run_dir.join(GRAPH_FILE);
-    let bytes = std::fs::read(&path).map_err(|e| HostError::Io {
+    let bytes = fs::read(&path).map_err(|e| HostError::Io {
         action: "read",
         path:   path.clone(),
         source: e,

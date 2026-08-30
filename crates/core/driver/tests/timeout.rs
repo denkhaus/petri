@@ -59,7 +59,7 @@ async fn the_timeout_applies_per_attempt() {
         scope,
         StepRef::new(
             PROCESS_KIND,
-            script(r#"if [ -f attempted ]; then echo second; else touch attempted; sleep 30; fi"#),
+            script(r"if [ -f attempted ]; then echo second; else touch attempted; sleep 30; fi"),
         ),
     );
     b.set_budget(node, Budget::new(1, Duration::from_millis(400)));

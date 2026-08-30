@@ -7,9 +7,10 @@
 //! `setsid` machinery long-lived scope containers need — and the `docker run`
 //! client's exit code is the container's own.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{self, Stdio};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -20,6 +21,8 @@ use executor::{
 };
 use ir::ScopeId;
 use smol_str::SmolStr;
+use tokio::fs;
+use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, mpsc};
 
 use crate::{CONTAINER_WORKSPACE, PullPolicy, next_token, prepare_registry_image, run_docker};
@@ -33,7 +36,7 @@ pub(crate) struct OneShotRunner {
     workspace: PathBuf,
     /// The scope's resolved env: one-shots live in the scope's world, so they
     /// see what every process of the scope sees. A spec's own env wins.
-    env:       std::collections::BTreeMap<SmolStr, SmolStr>,
+    env:       BTreeMap<SmolStr, SmolStr>,
     /// `--network` value — the job container's namespace for a containerized
     /// scope, the scope's network for a host scope with services. `None` is the
     /// daemon default.
@@ -136,17 +139,17 @@ impl OneShotRunner {
     async fn mark(&self) -> Result<(), EnvError> {
         self.marked
             .get_or_try_init(|| async {
-                let io_error = |e: std::io::Error| EnvError::Workspace {
+                let io_error = |e: io::Error| EnvError::Workspace {
                     path:    self.marker.display().to_string(),
                     message: e.to_string(),
                 };
                 if let Some(parent) = self.marker.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
+                    fs::create_dir_all(parent).await.map_err(io_error)?;
                 }
-                tokio::fs::write(&self.marker, b"").await.map_err(io_error)
+                fs::write(&self.marker, b"").await.map_err(io_error)
             })
-            .await
-            .map(|_| ())
+            .await?;
+        Ok(())
     }
 }
 
@@ -163,7 +166,7 @@ impl ContainerRunner for OneShotRunner {
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         self.mark().await?;
         let image = self.prepare(&spec.image).await?;
-        let name = format!("{}{}-{}", self.prefix, std::process::id(), next_token());
+        let name = format!("{}{}-{}", self.prefix, process::id(), next_token());
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", self.workspace.display());
         let workdir = spec
@@ -214,9 +217,9 @@ impl ContainerRunner for OneShotRunner {
             argv.push(format!("{key}={value}"));
         }
         argv.push(image.to_string());
-        argv.extend(spec.args.iter().map(|a| a.to_string()));
+        argv.extend(spec.args.iter().map(ToString::to_string));
 
-        let mut command = tokio::process::Command::new("docker");
+        let mut command = Command::new("docker");
         command
             .args(&argv)
             .stdin(Stdio::null())
@@ -248,7 +251,7 @@ impl ContainerRunner for OneShotRunner {
 
 struct OneShotProcess {
     name:  String,
-    child: tokio::process::Child,
+    child: Child,
     lines: Option<LineStream>,
 }
 

@@ -4,6 +4,7 @@
 
 mod support;
 
+use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,6 +21,7 @@ use ir::{
 use serde_json::json;
 use steps::Registry;
 use support::*;
+use tokio::time;
 
 // ── Helpers over the log ──────────────────────────────────────────────────
 
@@ -93,6 +95,10 @@ impl ir::StepKind for CountingStep {
     fn id(&self) -> ir::StepKindId {
         COUNTING
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "counting"
     }
@@ -118,6 +124,10 @@ impl ir::StepKind for FlakyStep {
     fn id(&self) -> ir::StepKindId {
         FLAKY
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "flaky"
     }
@@ -149,6 +159,10 @@ impl ir::StepKind for WaitingStep {
     fn id(&self) -> ir::StepKindId {
         WAITING
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "waiting"
     }
@@ -159,7 +173,7 @@ impl steps::StepRunner for WaitingStep {
     async fn run(&self, mut ctx: steps::StepCtx) -> Outcome {
         self.runs.fetch_add(1, Ordering::SeqCst);
         if let Some(path) = ctx.config.get("marker").and_then(|v| v.as_str()) {
-            std::fs::write(path, b"here").expect("marker");
+            fs::write(path, b"here").expect("marker");
         }
         loop {
             match ctx.control.recv().await {
@@ -203,6 +217,10 @@ impl ir::StepKind for Counting2 {
     fn id(&self) -> ir::StepKindId {
         ir::StepKindId::new_static("counting2")
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "counting2"
     }
@@ -803,7 +821,7 @@ async fn a_gate_resumes_waiting_and_the_host_redelivers() {
     let run = tokio::spawn(driver.run());
 
     // No automatic re-delivery: the resumed gate waits again.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    time::sleep(Duration::from_millis(200)).await;
     assert!(
         resumed_received.lock().expect("not poisoned").is_empty(),
         "the logged answer was not re-forwarded"
@@ -878,7 +896,7 @@ async fn a_dynamic_secret_must_be_reregistered_after_resume() {
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     handle
         .deliver(
             gate_firing,
@@ -917,7 +935,7 @@ async fn a_dynamic_secret_must_be_reregistered_after_resume() {
     );
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     handle
         .deliver(
             gate_firing,
@@ -1011,7 +1029,7 @@ async fn a_rewound_run_diverges_and_still_verifies() {
         .state
         .log
         .prefix(finish_seq(&report.state.log, decide_firing));
-    std::fs::write(dir.workspace().join("choice"), b"B").expect("the changed world");
+    fs::write(dir.workspace().join("choice"), b"B").expect("the changed world");
 
     let executor: Arc<dyn executor::Executor> =
         Arc::new(executor_host::HostExecutor::new(dir.path()).with_retention(RETAIN));

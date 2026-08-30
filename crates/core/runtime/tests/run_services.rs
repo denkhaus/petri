@@ -6,8 +6,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{env, fs, process};
 
-use runtime::ir::{GraphBuilder, RunStatus, ScopeId};
+use runtime::ir::{GraphBuilder, RunStatus, Scope, ScopeId};
 use runtime::{RunOptions, Runtime};
 
 /// The capability a provisioned service hands the run.
@@ -24,8 +25,8 @@ impl Drop for ProbeGuard {
 
 #[tokio::test]
 async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
-    let dir = std::env::temp_dir().join(format!("petri-run-services-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = env::temp_dir().join(format!("petri-run-services-{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
 
     let provisions = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
@@ -45,7 +46,7 @@ async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
         });
 
     let mut b = GraphBuilder::bare();
-    let scope = b.add_scope(runtime::ir::Scope::new(ScopeId::new(0)));
+    let scope = b.add_scope(Scope::new(ScopeId::new(0)));
     b.add_step("only", scope, "noop");
     let graph = b.build();
 
@@ -62,5 +63,5 @@ async fn provision_runs_per_driver_and_the_guard_dies_with_the_run() {
     // The capability type itself is exercised end to end by the GitHub
     // component's batteries; here the seam's mechanics are the subject.
     let _ = ProbeCap;
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
 }

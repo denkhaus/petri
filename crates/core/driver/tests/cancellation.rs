@@ -11,14 +11,15 @@ use ir::{CancelScopeId, GraphBuilder, RunStatus, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
+use tokio::time;
 
 /// A script that backgrounds a grandchild, ticks a heartbeat file, and then
 /// waits forever. If the group is signalled as a unit, the heartbeat stops.
-const BACKGROUNDER: &str = r#"
+const BACKGROUNDER: &str = r"
 ( while :; do echo tick >> heartbeat; sleep 0.05; done ) &
 echo ready > ready
 sleep 300
-"#;
+";
 
 fn one_step(name: &str, run: &str) -> ir::Graph {
     let mut b = GraphBuilder::new();
@@ -64,9 +65,9 @@ async fn cancel_kills_the_whole_process_group() {
     assert_eq!(report.status, RunStatus::Cancelled);
 
     // Give anything that survived a chance to prove it.
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    time::sleep(Duration::from_millis(600)).await;
     let before = file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    time::sleep(Duration::from_millis(600)).await;
     assert_eq!(
         file_len(&heartbeat),
         before,
@@ -132,11 +133,11 @@ async fn a_step_that_ignores_term_is_killed_after_grace() {
         .with_retention(Retention::Always);
     let workspace = dir.workspace();
 
-    let script = r#"
+    let script = r"
 trap '' TERM
 echo ready > ready
 while :; do sleep 0.1; done
-"#;
+";
     let driver = host_driver_with(
         one_step("stubborn", script),
         &dir,
@@ -187,10 +188,10 @@ async fn a_wedged_step_kind_cannot_wedge_the_run() {
     let run = tokio::spawn(driver.run());
 
     // Let the step get going, then cancel it and watch it refuse.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    time::sleep(Duration::from_millis(200)).await;
     handle.cancel(CancelScopeId::ROOT).await;
 
-    let report = tokio::time::timeout(Duration::from_secs(10), run)
+    let report = time::timeout(Duration::from_secs(10), run)
         .await
         .expect("the run must not hang")
         .expect("the run finished");
@@ -213,11 +214,11 @@ async fn repeated_cancels_join_the_ladder() {
         .with_retention(Retention::Always);
     let workspace = dir.workspace();
 
-    let script = r#"
+    let script = r"
 trap '' TERM
 echo ready > ready
 while :; do sleep 0.1; done
-"#;
+";
     let driver = host_driver_with(
         one_step("stubborn", script),
         &dir,

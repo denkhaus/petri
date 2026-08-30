@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{env, fs, process};
 
 use driver::RunReport;
 use executor::Retention;
@@ -16,6 +17,7 @@ use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
 use serde::Deserialize;
 use serde_json::json;
 use steps::PROCESS_KIND;
+use tokio::time;
 
 /// A process-unique counter, for run ids and directory names.
 pub fn unique_id() -> u64 {
@@ -31,9 +33,9 @@ pub struct RunDir {
 
 impl RunDir {
     pub fn new(label: &str) -> Self {
-        let unique = format!("{label}-{}-{}", std::process::id(), unique_id());
-        let path = std::env::temp_dir().join("petri-tests").join(unique);
-        std::fs::create_dir_all(&path).expect("run dir");
+        let unique = format!("{label}-{}-{}", process::id(), unique_id());
+        let path = env::temp_dir().join("petri-tests").join(unique);
+        fs::create_dir_all(&path).expect("run dir");
         Self { path }
     }
 
@@ -60,7 +62,7 @@ impl RunDir {
 
 impl Drop for RunDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -69,7 +71,7 @@ pub fn script(run: &str) -> Value {
     json!({ "run": run })
 }
 
-pub fn script_with(run: &str, extra: Value) -> Value {
+pub fn script_with(run: &str, extra: &Value) -> Value {
     let mut config = json!({ "run": run });
     if let (Some(base), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
         for (key, value) in extra {
@@ -95,6 +97,10 @@ impl ir::StepKind for WedgedStep {
         WEDGED_KIND
     }
 
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "wedged"
     }
@@ -108,7 +114,7 @@ impl steps::StepRunner for WedgedStep {
         // Receive the cancel and deliberately do nothing about it.
         let _ = ctx.control.recv().await;
         loop {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            time::sleep(Duration::from_hours(1)).await;
         }
     }
 }
@@ -122,7 +128,7 @@ pub struct SpliceStep;
 pub const SPLICE_KIND: ir::StepKindId = ir::StepKindId::new_static("splice");
 
 /// The config a [`SpliceStep`] node takes, for building graphs in tests.
-pub fn splice_config(requests: &[ir::SpliceRequest], output: Value) -> Value {
+pub fn splice_config(requests: &[ir::SpliceRequest], output: &Value) -> Value {
     json!({
         "requests": requests,
         "output": output,
@@ -166,6 +172,10 @@ impl ir::StepKind for GreetStep {
         GREET_KIND
     }
 
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "greet"
     }
@@ -183,18 +193,18 @@ impl steps::StepRunner for GreetStep {
 
 /// Wait for a file to appear, so a test can act once a step is really running.
 pub async fn wait_for_file(path: &Path, limit: Duration) -> bool {
-    let deadline = std::time::Instant::now() + limit;
-    while std::time::Instant::now() < deadline {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
         if path.exists() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        time::sleep(Duration::from_millis(20)).await;
     }
     false
 }
 
 pub fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    fs::metadata(path).map_or(0, |m| m.len())
 }
 
 /// Every log line the run recorded, in order.
@@ -229,8 +239,7 @@ pub fn output_of(report: &RunReport, name: &str) -> Value {
         .history()
         .iter()
         .find(|r| r.name == name)
-        .map(|r| r.outcome.output.clone())
-        .unwrap_or(Value::Null)
+        .map_or(Value::Null, |r| r.outcome.output.clone())
 }
 
 /// Names of the nodes that actually started, in order.
@@ -284,13 +293,18 @@ pub async fn docker_available() -> bool {
 /// The skip-or-require convention every Docker battery shares: skip loudly
 /// without a daemon, unless `PETRI_REQUIRE_DOCKER` says a silent skip must be
 /// a failure (CI cannot tell a skipped battery from a passing one).
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice has to reach the test runner's output; testkit has no logging sink"
+)]
 pub async fn docker_ready() -> bool {
     if docker_available().await {
         return true;
     }
-    if std::env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()) {
-        panic!("PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable");
-    }
+    assert!(
+        !env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()),
+        "PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable"
+    );
     eprintln!("skipping: no Docker daemon reachable");
     false
 }

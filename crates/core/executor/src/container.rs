@@ -90,21 +90,25 @@ impl OneShotContainer {
         }
     }
 
+    #[must_use]
     pub fn with_entrypoint(mut self, entrypoint: &str) -> Self {
         self.entrypoint = Some(SmolStr::new(entrypoint));
         self
     }
 
+    #[must_use]
     pub fn with_args(mut self, args: &[&str]) -> Self {
         self.args = args.iter().map(|a| SmolStr::new(*a)).collect();
         self
     }
 
+    #[must_use]
     pub fn with_env(mut self, env: BTreeMap<SmolStr, SmolStr>) -> Self {
         self.env = env;
         self
     }
 
+    #[must_use]
     pub fn with_workdir(mut self, workdir: &str) -> Self {
         self.workdir = Some(SmolStr::new(workdir));
         self

@@ -2,12 +2,17 @@
 
 mod support;
 
+use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
+
 use driver::RunConfig;
 use executor::{MapSecrets, Retention};
 use ir::{GraphBuilder, RunStatus, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
+use tokio::time;
 
 const SECRET: &str = "sk-live-9f3a2b7c1d4e";
 
@@ -89,9 +94,9 @@ async fn a_secret_reaches_the_process_and_nothing_else() {
     // Nor on disk, in the persisted step log.
     let log_dir = dir.logs();
     let mut found_masked = false;
-    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+    if let Ok(entries) = fs::read_dir(&log_dir) {
         for entry in entries.flatten() {
-            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            let text = fs::read_to_string(entry.path()).unwrap_or_default();
             assert!(
                 !text.contains(SECRET),
                 "the secret leaked into {:?}",
@@ -233,6 +238,10 @@ impl ir::StepKind for LeakyStep {
     fn id(&self) -> ir::StepKindId {
         LEAKY_KIND
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the trait fixes this signature; an impl cannot widen the returned lifetime"
+    )]
     fn name(&self) -> &str {
         "leaky"
     }
@@ -259,7 +268,7 @@ impl steps::StepRunner for LeakyStep {
             .await;
         // Progress rides its own pump task; give it time to reach the driver
         // before the finish signal races it there.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        time::sleep(Duration::from_millis(200)).await;
         ir::Outcome::success(json!("done"))
     }
 }
@@ -278,7 +287,7 @@ async fn an_artifact_carrying_a_registered_value_is_masked() {
     let graph = b.build();
 
     let mut registry = runners();
-    registry.register_runner(std::sync::Arc::new(LeakyStep));
+    registry.register_runner(Arc::new(LeakyStep));
     let report = host_driver_full(
         graph,
         &dir,

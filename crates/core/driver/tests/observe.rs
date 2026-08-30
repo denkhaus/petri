@@ -5,6 +5,7 @@
 mod support;
 
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use driver::{EventObserver, ObserveError};
@@ -32,7 +33,7 @@ struct Recording {
 impl EventObserver for Recording {
     fn on_record(&self, record: &EventRecord, state: &EngineState) {
         if let Some(delay) = self.delay {
-            std::thread::sleep(delay);
+            thread::sleep(delay);
         }
         if let engine::Event::StepFinished { firing, .. } = &record.event {
             let resolved = state

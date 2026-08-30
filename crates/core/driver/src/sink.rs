@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use executor::Masker;
 use ir::{LogStream, Value};
+use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
 /// Writes step output to the run directory, and optionally echoes it.
@@ -26,6 +27,7 @@ impl LogSink {
     }
 
     /// Also write lines to this process's stdout.
+    #[must_use]
     pub fn echoing(mut self, echo: bool) -> Self {
         self.echo = echo;
         self
@@ -37,11 +39,16 @@ impl LogSink {
 
     /// Mask a line and persist it. The masked line is what the caller should
     /// then hand to the core.
+    #[expect(
+        clippy::print_stdout,
+        reason = "echoing step output to the user's terminal is the whole point of the \
+                  `echo` option, and the driver has no other stdout path"
+    )]
     pub async fn record(&self, node: &str, firing: u64, stream: LogStream, line: &str) -> String {
         let masked = self.masker.mask(line);
-        let _ = tokio::fs::create_dir_all(&self.dir).await;
+        let _ = fs::create_dir_all(&self.dir).await;
         let path = self.dir.join(format!("{}-{firing}.log", sanitize(node)));
-        if let Ok(mut file) = tokio::fs::OpenOptions::new()
+        if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)

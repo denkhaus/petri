@@ -2,12 +2,16 @@
 //! before acquire returns, reachable from the scope's world, torn down with
 //! release — and a failed service fails the acquire without leaking.
 
+use std::net::TcpStream;
+use std::path::Path;
+
 use executor::{AcquireContext, Executor, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec};
 use executor_docker::{DockerExecutor, list_containers};
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;
 use smol_str::SmolStr;
 use testkit::{RunDir, docker_ready};
+use tokio::process::Command;
 
 const REDIS: &str = "redis:7-alpine";
 
@@ -50,7 +54,7 @@ async fn a_host_scope_realizes_and_tears_down_services() {
         .expect("acquire realizes the service");
 
     // Healthy before acquire returned: the published port answers now.
-    std::net::TcpStream::connect("127.0.0.1:29811").expect("the published port answers");
+    TcpStream::connect("127.0.0.1:29811").expect("the published port answers");
 
     // One-shots run on the scope's network and resolve the service by name.
     let runner = handle.container_runner().expect("a runner");
@@ -137,7 +141,7 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
 }
 
 /// The scope's base container name, computed the way the executors compute it.
-async fn container_base(run_dir: &std::path::Path, instance: &str) -> String {
+async fn container_base(run_dir: &Path, instance: &str) -> String {
     let prefix = DockerExecutor::new(run_dir)
         .container_prefix()
         .await
@@ -146,10 +150,9 @@ async fn container_base(run_dir: &std::path::Path, instance: &str) -> String {
 }
 
 async fn network_gone(base: &str) -> bool {
-    tokio::process::Command::new("docker")
+    Command::new("docker")
         .args(["network", "inspect", base])
         .output()
         .await
-        .map(|out| !out.status.success())
-        .unwrap_or(true)
+        .map_or(true, |out| !out.status.success())
 }

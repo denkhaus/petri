@@ -29,8 +29,12 @@ pub fn jittered(base: Duration, firing: FiringId, attempt: Attempt) -> Duration 
     hash ^= hash >> 33;
 
     let span = 2 * SPREAD_PERCENT + 1;
-    let offset = (hash % span) as i64 - SPREAD_PERCENT as i64;
-    let nanos = base.as_nanos() as i128;
+    let offset = (hash % span).cast_signed() - SPREAD_PERCENT.cast_signed();
+    let nanos = base.as_nanos().cast_signed();
     let adjusted = nanos + nanos * i128::from(offset) / 100;
-    Duration::from_nanos(adjusted.max(0) as u64)
+    // Saturating, the way `base_delay` already saturates its own cap: a backoff
+    // past `u64` nanoseconds — about 584 years — yields the longest delay this
+    // can represent rather than a wrapped, far shorter one.
+    let jittered_nanos = u64::try_from(adjusted.max(0)).unwrap_or(u64::MAX);
+    Duration::from_nanos(jittered_nanos)
 }

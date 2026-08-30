@@ -3,6 +3,9 @@
 //! frontend, in `crates/core/frontend-native/tests/native.rs` (which lowers
 //! this same document).
 
+use std::{env, fs, process};
+
+use runtime::executor::Retention;
 use runtime::frontend::native::load;
 use runtime::ir::RunStatus;
 use runtime::{RunOptions, Runtime};
@@ -35,6 +38,10 @@ nodes:
 /// The same graph the lowering tests inspect, on the real engine and executor:
 /// three generations of `poll`, then `done`. Replay is verified by the runtime.
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the lowering diagnostics explain a failed `expect` below, and stderr is the only sink a test binary has"
+)]
 async fn the_cycle_runs_end_to_end() {
     let lowered = load("test.yml", CYCLE_XOR_ANY);
     for d in lowered.diagnostics.iter() {
@@ -42,10 +49,10 @@ async fn the_cycle_runs_end_to_end() {
     }
     let graph = lowered.graph.expect("lowers");
 
-    let dir = std::env::temp_dir().join(format!("petri-native-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = env::temp_dir().join(format!("petri-native-{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
     let mut options = RunOptions::new(&dir);
-    options.retention = runtime::executor::Retention::Never;
+    options.retention = Retention::Never;
     let rt = Runtime::standard().options(options);
     let report = rt.run(graph).await.expect("replay is byte-identical");
     assert_eq!(
@@ -72,5 +79,5 @@ async fn the_cycle_runs_end_to_end() {
             .count(),
         1
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&dir);
 }

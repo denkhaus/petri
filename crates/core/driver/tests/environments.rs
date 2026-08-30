@@ -152,7 +152,12 @@ async fn workspace_retention_follows_the_outcome() {
         !workspace.exists(),
         "a successful scope's workspace is removed"
     );
-    assert!(report.releases.iter().all(|r| r.is_clean()));
+    assert!(
+        report
+            .releases
+            .iter()
+            .all(executor::ReleaseReport::is_clean)
+    );
 }
 
 /// Two scopes get two workspaces, and each is released on its own.
@@ -240,7 +245,7 @@ async fn a_step_can_run_in_a_subdirectory() {
             PROCESS_KIND,
             script_with(
                 "pwd | rev | cut -d/ -f1-2 | rev",
-                json!({ "working_dir": "nested/deep" }),
+                &json!({ "working_dir": "nested/deep" }),
             ),
         ),
     );

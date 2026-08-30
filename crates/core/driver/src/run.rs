@@ -1,6 +1,8 @@
 //! The driver loop.
 
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,14 +15,16 @@ use executor::{
     AcquireContext, EnvError, EnvHandle, Executor, NoProgress, ProgressSink, ReleaseReport,
     Retention, ScopeOutcome, ScopeSpec, SecretProvider,
 };
+use ir::placeholder::SECRET_REF_KEY;
 use ir::{
     Attempt, Control, EvalEnv, ExprOrValue, FailureInfo, FiringId, Graph, NodeId, Outcome,
     RunContext, RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
 };
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time;
 
 use crate::jitter::jittered;
 use crate::observe::{EventObserver, ObserveError};
@@ -51,7 +55,7 @@ pub const NO_RUNNER: &str = "no_runner";
 
 /// After the first root cancel, how long admitted cleanup gets before the
 /// driver feeds back `KillRequested` (§10, resolved decision 3).
-pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(120);
+pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_mins(2);
 
 /// Capacity of a firing's control channel. A named implementation constant, not
 /// a compatibility rule: reliable delivery and ordering hold when the channel
@@ -87,21 +91,25 @@ impl RunConfig {
         }
     }
 
+    #[must_use]
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
         self
     }
 
+    #[must_use]
     pub fn with_cleanup_grace(mut self, cleanup_grace: Duration) -> Self {
         self.cleanup_grace = cleanup_grace;
         self
     }
 
+    #[must_use]
     pub fn with_retention(mut self, retention: Retention) -> Self {
         self.keep_workspaces = retention;
         self
     }
 
+    #[must_use]
     pub fn echoing(mut self, echo: bool) -> Self {
         self.echo_logs = echo;
         self
@@ -166,7 +174,7 @@ pub enum DeliverDisposition {
     NotLive,
 }
 
-type DeliverAck = tokio::sync::oneshot::Sender<DeliverDisposition>;
+type DeliverAck = oneshot::Sender<DeliverDisposition>;
 
 /// Cancel a running run, or deliver a value into one of its firings, from
 /// outside.
@@ -193,7 +201,7 @@ impl RunHandle {
     /// core emitted no command (the event is still logged — the audit
     /// trail) or the firing ended before the send completed.
     pub async fn deliver(&self, firing: FiringId, ctl: Control) -> DeliverDisposition {
-        let (ack, disposition) = tokio::sync::oneshot::channel();
+        let (ack, disposition) = oneshot::channel();
         if self
             .tx
             .send(Signal::Deliver { firing, ctl, ack })
@@ -278,7 +286,7 @@ pub struct Driver {
     observers:        Vec<Arc<dyn EventObserver>>,
     /// Per-run host services riding this run's lifetime: held untouched until
     /// the driver drops, which is their teardown.
-    run_guards:       Vec<Box<dyn std::any::Any + Send + Sync>>,
+    run_guards:       Vec<Box<dyn Any + Send + Sync>>,
     releases:         Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer:    Option<JoinHandle<()>>,
@@ -318,6 +326,11 @@ impl Driver {
     /// the re-dispatched firings *before* calling `run()`.
     ///
     /// An empty log resumes as a fresh start: nothing durable happened.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the host hands the dead run's graph and log over together; the log it keeps \
+                  afterwards is the rebuilt one in `ResumeInfo`, not the loaded prefix"
+    )]
     pub fn resume(
         graph: Graph,
         log: EventLog,
@@ -377,12 +390,14 @@ impl Driver {
 
     /// Register an observer: it sees every appended record, in seq order, with
     /// the post-apply state, and its `finish` is awaited before the report.
+    #[must_use]
     pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
         self
     }
 
     /// The host services every step's `StepCtx` carries (default: none).
+    #[must_use]
     pub fn with_capabilities(mut self, caps: Capabilities) -> Self {
         self.caps = caps;
         self
@@ -391,13 +406,15 @@ impl Driver {
     /// Hold a per-run host service for this run's lifetime. The driver never
     /// looks inside; dropping the driver drops the guard, which is the
     /// service's teardown.
-    pub fn with_run_guard(mut self, guard: Box<dyn std::any::Any + Send + Sync>) -> Self {
+    #[must_use]
+    pub fn with_run_guard(mut self, guard: Box<dyn Any + Send + Sync>) -> Self {
         self.run_guards.push(guard);
         self
     }
 
     /// Where live acquisition progress goes — image pulls, service health.
     /// Wall-clock effects only; nothing of it enters the replay log.
+    #[must_use]
     pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
         self.progress = progress;
         self
@@ -432,7 +449,7 @@ impl Driver {
         // Release is best effort and never fails the run, but the run should not
         // report back before the environments are actually gone.
         let mut releases = Vec::new();
-        for handle in std::mem::take(&mut self.releases) {
+        for handle in mem::take(&mut self.releases) {
             if let Ok(report) = handle.await {
                 releases.push(report);
             }
@@ -467,10 +484,10 @@ impl Driver {
             Signal::Inject(Event::CancelRequested { scope })
                 if scope == ir::CancelScopeId::ROOT =>
             {
-                self.on_root_cancel().await
+                self.on_root_cancel().await;
             }
             Signal::Inject(Event::KillRequested { scope }) if scope == ir::CancelScopeId::ROOT => {
-                self.kill_root().await
+                self.kill_root().await;
             }
             Signal::Inject(event) => self.feed(event).await,
             Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack),
@@ -483,7 +500,7 @@ impl Driver {
                 attempt,
                 outcome,
             } => self.finish(firing, attempt, outcome).await,
-            Signal::Timeout { firing, attempt } => self.on_timeout(firing, attempt).await,
+            Signal::Timeout { firing, attempt } => self.on_timeout(firing, attempt),
             Signal::RetryDue {
                 firing,
                 next_attempt,
@@ -495,7 +512,7 @@ impl Driver {
                 .await;
             }
             Signal::HardDeadline { firing, attempt } => {
-                self.on_hard_deadline(firing, attempt).await
+                self.on_hard_deadline(firing, attempt).await;
             }
         }
     }
@@ -519,7 +536,7 @@ impl Driver {
         let grace = self.config.cleanup_grace;
         let tx = self.tx.clone();
         self.cleanup_timer = Some(tokio::spawn(async move {
-            tokio::time::sleep(grace).await;
+            time::sleep(grace).await;
             let _ = tx
                 .send(Signal::Inject(Event::KillRequested {
                     scope: ir::CancelScopeId::ROOT,
@@ -555,7 +572,7 @@ impl Driver {
     /// appended record exactly once, in seq order, with the post-apply state.
     fn apply_event(&mut self, event: Event) -> Vec<Command> {
         let before = self.engine.log.len();
-        let state = std::mem::replace(&mut self.engine, EngineState::new(Graph::new()));
+        let state = mem::replace(&mut self.engine, EngineState::new(Graph::new()));
         let (state, commands) = apply(state, event);
         self.engine = state;
         self.notify_observers(before);
@@ -628,7 +645,7 @@ impl Driver {
                     let commands = self.apply_event(Event::StepStarted { firing, attempt });
                     debug_assert!(commands.is_empty(), "StepStarted derives no commands");
                 }
-                self.start(resolved).await;
+                self.start(&resolved);
             }
             Command::DeliverControl { firing, ctl } => match ctl {
                 // A delivered value only forwards: no deadline, no reason — it never
@@ -644,7 +661,7 @@ impl Driver {
                 let delay = jittered(base_delay, firing, next_attempt);
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
+                    time::sleep(delay).await;
                     let _ = tx
                         .send(Signal::RetryDue {
                             firing,
@@ -767,7 +784,7 @@ impl Driver {
 
     // ── Steps ──────────────────────────────────────────────────────────────
 
-    async fn start(&mut self, resolved: ResolvedFiring) {
+    fn start(&mut self, resolved: &ResolvedFiring) {
         let firing = resolved.id();
         let attempt = resolved.attempt();
         let scope = resolved.scope();
@@ -893,7 +910,7 @@ impl Driver {
             .map(|limit| {
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(limit).await;
+                    time::sleep(limit).await;
                     let _ = tx.send(Signal::Timeout { firing, attempt }).await;
                 })
             });
@@ -960,7 +977,7 @@ impl Driver {
             let attempt = task.attempt;
             let tx = self.tx.clone();
             task.deadline = Some(tokio::spawn(async move {
-                tokio::time::sleep(limit).await;
+                time::sleep(limit).await;
                 let _ = tx.send(Signal::HardDeadline { firing, attempt }).await;
             }));
         }
@@ -1007,7 +1024,7 @@ impl Driver {
         }
     }
 
-    async fn on_timeout(&mut self, firing: FiringId, attempt: Attempt) {
+    fn on_timeout(&mut self, firing: FiringId, attempt: Attempt) {
         let still_running = self
             .tasks
             .get(&firing)
@@ -1116,8 +1133,7 @@ impl Driver {
         let name = self
             .tasks
             .get(&firing)
-            .map(|t| t.name.to_string())
-            .unwrap_or_else(|| "step".to_string());
+            .map_or_else(|| "step".to_string(), |t| t.name.to_string());
         match event {
             StepEvent::Log { stream, line } => {
                 let line = self.sink.record(&name, firing.raw(), stream, &line).await;
@@ -1147,7 +1163,7 @@ fn resolve_secret_refs(value: Value, secrets: &dyn SecretProvider) -> Result<Val
     match value {
         Value::Object(map) => {
             if map.len() == 1
-                && let Some(name) = map.get(ir::placeholder::SECRET_REF_KEY)
+                && let Some(name) = map.get(SECRET_REF_KEY)
                 && let Some(name) = name.as_str()
             {
                 return match secrets.resolve(name) {

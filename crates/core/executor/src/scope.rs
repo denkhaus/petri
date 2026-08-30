@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,21 +80,25 @@ impl ScopeSpec {
         }
     }
 
+    #[must_use]
     pub fn with_env(mut self, env: BTreeMap<SmolStr, SmolStr>) -> Self {
         self.env = env;
         self
     }
 
+    #[must_use]
     pub fn with_runtime(mut self, runtime: RuntimeSpec) -> Self {
         self.runtime = runtime;
         self
     }
 
+    #[must_use]
     pub fn with_services(mut self, services: Vec<ServiceSpec>) -> Self {
         self.services = services;
         self
     }
 
+    #[must_use]
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
         self
@@ -152,9 +157,9 @@ pub enum Retention {
 impl Retention {
     pub fn keeps(self, outcome: ScopeOutcome) -> bool {
         match self {
-            Retention::Always => true,
-            Retention::Never => false,
-            Retention::OnFailure => outcome == ScopeOutcome::Failed,
+            Self::Always => true,
+            Self::Never => false,
+            Self::OnFailure => outcome == ScopeOutcome::Failed,
         }
     }
 }
@@ -167,9 +172,9 @@ impl Retention {
 /// looks inside, so a new kind of environment needs no change here. Any `Debug
 /// + Send + Sync + 'static` type qualifies: an executor derives `Debug` on a
 /// struct and passes it to [`EnvHandle::new`].
-pub trait Teardown: Any + std::fmt::Debug + Send + Sync {}
+pub trait Teardown: Any + fmt::Debug + Send + Sync {}
 
-impl<T: Any + std::fmt::Debug + Send + Sync> Teardown for T {}
+impl<T: Any + fmt::Debug + Send + Sync> Teardown for T {}
 
 /// A live environment, and what it takes to get rid of it.
 #[derive(Clone)]
@@ -200,6 +205,7 @@ impl EnvHandle {
     /// Bind a scope-bound one-shot container runner to this environment. An
     /// executor that can run containers in this scope's world attaches one;
     /// pure executors that cannot simply never call this.
+    #[must_use]
     pub fn with_runner(mut self, runner: Arc<dyn ContainerRunner>) -> Self {
         self.runner = Some(runner);
         self
@@ -236,8 +242,14 @@ impl EnvHandle {
     }
 }
 
-impl std::fmt::Debug for EnvHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "`env` and `runner` are trait objects with no `Debug` bound — an executor's \
+              environment and container runner have no printable form, and requiring one \
+              would constrain every implementation"
+)]
+impl fmt::Debug for EnvHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnvHandle")
             .field("scope", &self.scope)
             .field("instance", &self.instance)

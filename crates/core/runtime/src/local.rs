@@ -57,6 +57,7 @@ impl LocalExecutor {
         }
     }
 
+    #[must_use]
     pub fn with_retention(mut self, retention: Retention) -> Self {
         self.host = self.host.with_retention(retention);
         self.docker = self.docker.with_retention(retention);

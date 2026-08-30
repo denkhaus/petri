@@ -8,7 +8,8 @@
 
 mod support;
 
-use std::time::Duration;
+use std::fs;
+use std::time::{Duration, Instant};
 
 use driver::RunConfig;
 use executor::Retention;
@@ -18,6 +19,7 @@ use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
 use testkit::docker_ready;
+use tokio::time;
 
 const IMAGE: &str = "alpine:3.20";
 
@@ -29,7 +31,7 @@ fn docker_graph(name: &str, run: &str) -> ir::Graph {
     b.add_node(
         name,
         scope,
-        StepRef::new(PROCESS_KIND, script_with(run, json!({ "shell": "sh" }))),
+        StepRef::new(PROCESS_KIND, script_with(run, &json!({ "shell": "sh" }))),
     );
     let graph = b.build();
     validate(&graph).expect("valid");
@@ -84,11 +86,11 @@ async fn docker_cancel_kills_the_exec_process_group() {
     let dir = RunDir::new("docker-group-kill");
     let graph = docker_graph(
         "backgrounder",
-        r#"
+        r"
 ( while :; do echo tick >> heartbeat; sleep 0.05; done ) &
 echo ready > ready
 sleep 300
-"#,
+",
     );
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(2))
@@ -100,7 +102,7 @@ sleep 300
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
+        wait_for_file(&workspace.join("ready"), Duration::from_mins(1)).await,
         "the step never started inside the container"
     );
     let heartbeat = workspace.join("heartbeat");
@@ -129,9 +131,9 @@ sleep 300
 
     // If the signal had gone to PID 1 instead of the step's group, the grandchild
     // would still be ticking here.
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    time::sleep(Duration::from_millis(800)).await;
     let before = file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
         file_len(&heartbeat),
         before,
@@ -180,15 +182,15 @@ async fn docker_kill_leaves_no_container() {
     let dir = RunDir::new("docker-kill");
     let graph = docker_graph(
         "stubborn",
-        r#"
+        r"
 trap '' TERM
 echo ready > ready
 while :; do sleep 0.1; done
-"#,
+",
     );
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(10))
-        .with_cleanup_grace(Duration::from_secs(300))
+        .with_cleanup_grace(Duration::from_mins(5))
         .with_retention(Retention::Never);
     let workspace = dir.workspace();
 
@@ -197,13 +199,13 @@ while :; do sleep 0.1; done
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
+        wait_for_file(&workspace.join("ready"), Duration::from_mins(1)).await,
         "the step never started inside the container"
     );
     handle.cancel(ir::CancelScopeId::ROOT).await;
-    let killed_at = std::time::Instant::now();
+    let killed_at = Instant::now();
     handle.cancel(ir::CancelScopeId::ROOT).await;
-    let report = tokio::time::timeout(Duration::from_secs(30), run)
+    let report = time::timeout(Duration::from_secs(30), run)
         .await
         .expect("the kill ends the run")
         .expect("the run finished");
@@ -262,7 +264,7 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
     let (driver, prefix) = docker_driver_named(graph.clone(), &dir, config()).await;
     let run = tokio::spawn(driver.run());
     assert!(
-        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
+        wait_for_file(&heartbeat, Duration::from_mins(1)).await,
         "the step never started inside the container"
     );
     // The crash: the driver is gone, release never runs, the container beats on.
@@ -273,7 +275,7 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
         "the crashed run's container outlives its driver"
     );
 
-    std::fs::write(workspace.join("done"), b"").expect("done");
+    fs::write(workspace.join("done"), b"").expect("done");
     let report = docker_driver(graph, &dir, config()).await_run().await;
     assert_eq!(
         report.status,
@@ -283,7 +285,7 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
     );
 
     let before = file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         file_len(&heartbeat),
         before,
@@ -380,7 +382,7 @@ async fn docker_wait_follows_the_step_not_the_client() {
         .with_grace(Duration::from_secs(2))
         .with_retention(Retention::Never);
 
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let report = docker_driver(graph, &dir, config).await_run().await;
     let elapsed = started.elapsed();
 
@@ -426,7 +428,7 @@ async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
         scope,
         StepRef::new(
             PROCESS_KIND,
-            script_with("uname -m", json!({ "shell": "sh" })),
+            script_with("uname -m", &json!({ "shell": "sh" })),
         ),
     );
     let graph = b.build();
@@ -511,11 +513,11 @@ async fn docker_cancel_without_a_recorded_status_still_reports_cancelled() {
     // included, mid-step.
     let graph = docker_graph(
         "stubborn",
-        r#"
+        r"
 trap '' TERM
 echo ready > ready
 while :; do sleep 0.1; done
-"#,
+",
     );
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(1))
@@ -526,10 +528,10 @@ while :; do sleep 0.1; done
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
-    assert!(wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await);
+    assert!(wait_for_file(&workspace.join("ready"), Duration::from_mins(1)).await);
     handle.cancel(ir::CancelScopeId::ROOT).await;
 
-    let report = tokio::time::timeout(Duration::from_secs(30), run)
+    let report = time::timeout(Duration::from_secs(30), run)
         .await
         .expect("the run must not hang waiting for a status file that is not coming")
         .expect("the run finished");
@@ -543,7 +545,7 @@ while :; do sleep 0.1; done
     );
 
     // Nothing recorded a status, which is the state this test exists to cover.
-    let leftovers: Vec<_> = std::fs::read_dir(workspace.join(".ci").join("pg"))
+    let leftovers: Vec<_> = fs::read_dir(workspace.join(".ci").join("pg"))
         .map(|entries| {
             entries
                 .flatten()

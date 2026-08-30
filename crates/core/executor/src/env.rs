@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -34,11 +35,13 @@ impl ProcessSpec {
         }
     }
 
+    #[must_use]
     pub fn with_env(mut self, env: BTreeMap<SmolStr, SmolStr>) -> Self {
         self.env = env;
         self
     }
 
+    #[must_use]
     pub fn with_cwd(mut self, cwd: Option<PathBuf>) -> Self {
         self.cwd = cwd;
         self
@@ -73,15 +76,15 @@ pub enum Sig {
 impl Sig {
     pub fn number(self) -> i32 {
         match self {
-            Sig::Term => libc::SIGTERM,
-            Sig::Kill => libc::SIGKILL,
+            Self::Term => libc::SIGTERM,
+            Self::Kill => libc::SIGKILL,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            Sig::Term => "SIGTERM",
-            Sig::Kill => "SIGKILL",
+            Self::Term => "SIGTERM",
+            Self::Kill => "SIGKILL",
         }
     }
 }
@@ -117,13 +120,13 @@ impl ExitStatus {
 /// The mapping every executor needs when the process it waited on was a real
 /// child of this one: an exit code when there is one, otherwise the signal that
 /// killed it.
-impl From<std::process::ExitStatus> for ExitStatus {
-    fn from(status: std::process::ExitStatus) -> Self {
+impl From<process::ExitStatus> for ExitStatus {
+    fn from(status: process::ExitStatus) -> Self {
         use std::os::unix::process::ExitStatusExt;
         match (status.code(), status.signal()) {
-            (Some(code), _) => ExitStatus::code(code),
-            (None, Some(signal)) => ExitStatus::signalled(signal),
-            (None, None) => ExitStatus::code(-1),
+            (Some(code), _) => Self::code(code),
+            (None, Some(signal)) => Self::signalled(signal),
+            (None, None) => Self::code(-1),
         }
     }
 }
@@ -193,6 +196,12 @@ pub trait ExecEnv: Send + Sync {
     /// One fact, answered where it is known: a host process uses loopback; a
     /// containerized environment answers with the alias its executor
     /// guaranteed resolvable at create (`host.docker.internal`).
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "this is the trait's signature, not one implementation: an executor whose \
+                  host address is computed at acquire returns a borrow of itself, which \
+                  `&'static str` would forbid"
+    )]
     fn host_address(&self) -> &str {
         "127.0.0.1"
     }

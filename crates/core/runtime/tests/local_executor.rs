@@ -2,7 +2,8 @@
 //! scope-bound one-shot runner in every execution mode, and the crash and
 //! cancel sweeps that keep one-shot containers from leaking.
 
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use executor::{
     AcquireContext, Executor, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec, Sig,
@@ -12,6 +13,7 @@ use executor_host::HostExecutor;
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;
 use testkit::{RunDir, docker_ready, wait_for_file};
+use tokio::time;
 
 const IMAGE: &str = "alpine:3.20";
 
@@ -134,7 +136,7 @@ async fn a_pure_docker_scope_is_bound_to_a_runner() {
     // The job container and the one-shot share the workspace bind mount.
     let shared = handle
         .exec()
-        .read_file(std::path::Path::new("shared"))
+        .read_file(Path::new("shared"))
         .await
         .expect("read through the job environment")
         .expect("the file the one-shot wrote");
@@ -166,11 +168,11 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
     ]);
     let mut process = runner.run(spec).await.expect("docker run");
     assert!(
-        wait_for_file(&dir.workspace().join("ready"), Duration::from_secs(60)).await,
+        wait_for_file(&dir.workspace().join("ready"), Duration::from_mins(1)).await,
         "the one-shot never started"
     );
     process.signal(Sig::Term).await.expect("signal");
-    let status = tokio::time::timeout(Duration::from_secs(30), process.wait())
+    let status = time::timeout(Duration::from_secs(30), process.wait())
         .await
         .expect("the signalled container ends")
         .expect("wait");
@@ -219,14 +221,14 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
         ]);
         let process = runner.run(spec).await.expect("docker run");
         assert!(
-            wait_for_file(&dir.workspace().join("ready"), Duration::from_secs(60)).await,
+            wait_for_file(&dir.workspace().join("ready"), Duration::from_mins(1)).await,
             "the one-shot never started"
         );
         drop(process);
         drop(handle);
     }
     // Client death is not container death.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    time::sleep(Duration::from_millis(300)).await;
     assert!(
         !list_containers(&prefix).await.is_empty(),
         "the leftover container survives its client"
@@ -248,13 +250,13 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
     let runner = handle.container_runner().expect("a runner");
     let spec = OneShotContainer::registry(IMAGE).with_args(&["sleep", "300"]);
     let _process = runner.run(spec).await.expect("docker run");
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while list_containers(&prefix).await.is_empty() {
         assert!(
-            std::time::Instant::now() < deadline,
+            Instant::now() < deadline,
             "the abandoned one-shot never appeared"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
     let report = resumed.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");

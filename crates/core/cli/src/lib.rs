@@ -16,10 +16,12 @@
 //! has a special case for one format.
 
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
+use std::{env, fs};
 
 use clap::{Args, Parser, Subcommand};
-use runtime::frontend::Lowered;
+use runtime::engine::{self, EventLog};
+use runtime::frontend::{self, Lowered};
 use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime};
 
@@ -106,9 +108,8 @@ pub async fn main(make: impl Fn() -> Runtime) -> ExitCode {
             run_dir,
             quiet,
         } => {
-            let run_dir = run_dir.unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("petri-run-{}", std::process::id()))
-            });
+            let run_dir = run_dir
+                .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
             let mut options = RunOptions::new(&run_dir);
             options.echo = !quiet;
             run(&make().options(options), &target, &run_dir).await
@@ -118,6 +119,14 @@ pub async fn main(make: impl Fn() -> Runtime) -> ExitCode {
 }
 
 /// Lower and validate, or explain why not. `Err` carries the exit code.
+#[expect(
+    clippy::print_stdout,
+    reason = "`--json` makes the diagnostics the command's output; a caller reads them on stdout"
+)]
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI reports diagnostics to the user on stderr, clear of the command's own output"
+)]
 fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered, ExitCode> {
     match rt.check(
         &target.file,
@@ -141,6 +150,14 @@ fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered,
     }
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "the printed graph is this command's output; stdout is the CLI's channel for it"
+)]
+#[expect(
+    clippy::print_stderr,
+    reason = "the summary is for the user, on stderr so stdout carries only the graph"
+)]
 fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> ExitCode {
     let lowered = match lowered_graph(rt, target, json) {
         Ok(lowered) => lowered,
@@ -148,34 +165,35 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
     };
     let errors = lowered.diagnostics.errors().count();
     let warnings = lowered.diagnostics.warnings().count();
-    match &lowered.graph {
-        Some(graph) => {
-            if print_graph {
-                print!("{}", runtime::frontend::print_graph(graph));
-            }
-            if !json {
-                eprintln!(
-                    "ok: {} node(s), {} scope(s){}",
-                    graph.nodes.len(),
-                    graph.scopes.len(),
-                    if warnings > 0 {
-                        format!(", {warnings} warning(s)")
-                    } else {
-                        String::new()
-                    }
-                );
-            }
-            ExitCode::SUCCESS
+    if let Some(graph) = &lowered.graph {
+        if print_graph {
+            print!("{}", frontend::print_graph(graph));
         }
-        None => {
-            if !json {
-                eprintln!("rejected: {errors} error(s), {warnings} warning(s)");
-            }
-            ExitCode::FAILURE
+        if !json {
+            eprintln!(
+                "ok: {} node(s), {} scope(s){}",
+                graph.nodes.len(),
+                graph.scopes.len(),
+                if warnings > 0 {
+                    format!(", {warnings} warning(s)")
+                } else {
+                    String::new()
+                }
+            );
         }
+        ExitCode::SUCCESS
+    } else {
+        if !json {
+            eprintln!("rejected: {errors} error(s), {warnings} warning(s)");
+        }
+        ExitCode::FAILURE
     }
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI reports the run dir, each step and the final status to the user on stderr"
+)]
 async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
     let lowered = match lowered_graph(rt, target, false) {
         Ok(lowered) => lowered,
@@ -202,7 +220,7 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
     let log_path = run_dir.join("events.json");
     match serde_json::to_vec_pretty(&report.state.log) {
         Ok(bytes) => {
-            if let Err(e) = std::fs::write(&log_path, bytes) {
+            if let Err(e) = fs::write(&log_path, bytes) {
                 eprintln!("warning: could not write {}: {e}", log_path.display());
             } else {
                 eprintln!("event log: {}", log_path.display());
@@ -223,6 +241,10 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
     }
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI reports the replay verdict to the user on stderr; no logging sink exists here"
+)]
 fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
     let lowered = match lowered_graph(rt, target, false) {
         Ok(lowered) => lowered,
@@ -234,14 +256,14 @@ fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
     };
     default_params(rt, target, &mut graph);
 
-    let text = match std::fs::read_to_string(log_path) {
+    let text = match fs::read_to_string(log_path) {
         Ok(text) => text,
         Err(e) => {
             eprintln!("error: could not read {}: {e}", log_path.display());
             return ExitCode::from(2);
         }
     };
-    let log: runtime::engine::EventLog = match serde_json::from_str(&text) {
+    let log: EventLog = match serde_json::from_str(&text) {
         Ok(log) => log,
         Err(e) => {
             eprintln!("error: {} is not an event log: {e}", log_path.display());
@@ -249,7 +271,7 @@ fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
         }
     };
 
-    match runtime::engine::verify_replay(graph, &log) {
+    match engine::verify_replay(graph, &log) {
         Ok(state) => {
             eprintln!(
                 "replay is byte-identical: {} record(s), status {:?}",

@@ -2,17 +2,23 @@
 //! `JsonlEventLog` battery, the strict read-back rules, and the known-secret
 //! refusal.
 
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use petri::driver::EventObserver;
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
-use petri::executor::{MapSecrets, SecretProvider};
+use petri::executor::docker::{self, RUN_ID_FILE};
+use petri::executor::{MapSecrets, Retention, SecretProvider};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, GRAPH_FILE, HostError};
-use petri::ir::{Graph, GraphBuilder, RunStatus, ScopeId};
+use petri::ir::{
+    CancelScopeId, Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef,
+};
+use petri::steps::PROCESS_KIND;
 use petri::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, add_script, wait_for_file};
+use tokio::time;
 
 fn test_runtime(dir: &RunDir) -> Runtime {
     petri::runtime().options(RunOptions::new(dir.path()))
@@ -43,7 +49,7 @@ async fn the_run_dir_is_self_describing() {
         report.observer_errors
     );
 
-    let graph_bytes = std::fs::read(dir.path().join(GRAPH_FILE)).expect("graph.json exists");
+    let graph_bytes = fs::read(dir.path().join(GRAPH_FILE)).expect("graph.json exists");
     assert_eq!(
         graph_bytes,
         serde_json::to_vec(&graph).expect("encodes"),
@@ -159,8 +165,8 @@ async fn the_files_hold_no_secret_bytes() {
     b.add_node(
         "deploy",
         ScopeId::new(0),
-        petri::ir::StepRef::new(
-            petri::steps::PROCESS_KIND,
+        StepRef::new(
+            PROCESS_KIND,
             json!({
                 "run": r#"echo "token is $DEPLOY_TOKEN""#,
                 "env": { "DEPLOY_TOKEN": { "$secret": "DEPLOY_TOKEN" } }
@@ -171,10 +177,10 @@ async fn the_files_hold_no_secret_bytes() {
     assert_eq!(report.status, RunStatus::Success);
 
     for file in [EVENTS_FILE, GRAPH_FILE] {
-        let text = std::fs::read_to_string(dir.path().join(file)).expect("exists");
+        let text = fs::read_to_string(dir.path().join(file)).expect("exists");
         assert!(!text.contains(SECRET), "the secret leaked into {file}");
     }
-    let events = std::fs::read_to_string(dir.path().join(EVENTS_FILE)).expect("exists");
+    let events = fs::read_to_string(dir.path().join(EVENTS_FILE)).expect("exists");
     assert!(events.contains("***"), "the masked line was persisted");
 }
 
@@ -230,7 +236,7 @@ async fn a_cancelled_run_leaves_complete_files() {
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     started(&dir).await;
-    handle.cancel(petri::ir::CancelScopeId::ROOT).await;
+    handle.cancel(CancelScopeId::ROOT).await;
 
     let report = run.await.expect("the run task");
     assert_eq!(report.status, RunStatus::Cancelled);
@@ -263,8 +269,8 @@ async fn a_killed_run_leaves_complete_files() {
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     started(&dir).await;
-    handle.cancel(petri::ir::CancelScopeId::ROOT).await;
-    handle.cancel(petri::ir::CancelScopeId::ROOT).await;
+    handle.cancel(CancelScopeId::ROOT).await;
+    handle.cancel(CancelScopeId::ROOT).await;
 
     let report = run.await.expect("the run task");
     assert_eq!(report.status, RunStatus::Cancelled);
@@ -286,7 +292,7 @@ async fn a_killed_run_leaves_complete_files() {
 /// (header included), plus `extra` raw bytes — the crash simulator.
 fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
     let path = dir.path().join(EVENTS_FILE);
-    let bytes = std::fs::read(&path).expect("reads");
+    let bytes = fs::read(&path).expect("reads");
     let mut end = 0;
     let mut seen = 0;
     for (i, b) in bytes.iter().enumerate() {
@@ -300,7 +306,7 @@ fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
     }
     let mut out = bytes[..end].to_vec();
     out.extend_from_slice(extra);
-    std::fs::write(&path, out).expect("writes");
+    fs::write(&path, out).expect("writes");
 }
 
 /// A crashed run resumes from nothing but the run dir, and the file converges
@@ -404,6 +410,10 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
 /// run id recorded in the run dir and ends the container before re-dispatching
 /// the step.
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice tells whoever runs the tests why this Docker battery did nothing; a test binary has no other sink"
+)]
 async fn resume_fences_the_crashed_container() {
     if !testkit::docker_available().await {
         eprintln!("skipping: no Docker daemon reachable");
@@ -413,11 +423,11 @@ async fn resume_fences_the_crashed_container() {
     // The workspace is kept: release would otherwise remove the directory the
     // heartbeat is checked through, hiding a beater the fence missed.
     let mut options = RunOptions::new(dir.path());
-    options.retention = petri::executor::Retention::Always;
+    options.retention = Retention::Always;
     let rt = petri::runtime().options(options);
     let mut b = GraphBuilder::bare();
-    let mut scope = petri::ir::Scope::new(ScopeId::new(0));
-    scope.runtime = petri::ir::RuntimeSpec::container("alpine:3.20");
+    let mut scope = Scope::new(ScopeId::new(0));
+    scope.runtime = RuntimeSpec::container("alpine:3.20");
     let scope = b.add_scope(scope);
     // The beater runs in its own session: an aborted driver still lets the
     // orphaned step task stop its own process group as the channels close, so a
@@ -427,13 +437,13 @@ async fn resume_fences_the_crashed_container() {
     b.add_node(
         "beat",
         scope,
-        petri::ir::StepRef::new(
-            petri::steps::PROCESS_KIND,
+        StepRef::new(
+            PROCESS_KIND,
             testkit::script_with(
                 "[ -e done ] && exit 0\n\
                  setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &\n\
                  sleep 300",
-                json!({ "shell": "sh" }),
+                &json!({ "shell": "sh" }),
             ),
         ),
     );
@@ -444,18 +454,18 @@ async fn resume_fences_the_crashed_container() {
     let driver = host::driver(&rt, graph).expect("prepared");
     let run = tokio::spawn(driver.run());
     assert!(
-        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
+        wait_for_file(&heartbeat, Duration::from_mins(1)).await,
         "the step never started inside the container"
     );
     // The crash: the driver is gone, release never runs, the container beats on.
     run.abort();
     let _ = run.await;
     // The crashed run's id, as a resuming process must find it.
-    let run_id = std::fs::read_to_string(dir.path().join(petri::executor::docker::RUN_ID_FILE))
-        .expect("the run id is in the run dir");
+    let run_id =
+        fs::read_to_string(dir.path().join(RUN_ID_FILE)).expect("the run id is in the run dir");
     let prefix = format!("petri-{run_id}-");
 
-    std::fs::write(workspace.join("done"), b"").expect("done");
+    fs::write(workspace.join("done"), b"").expect("done");
     let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(
         resumed.status,
@@ -465,13 +475,13 @@ async fn resume_fences_the_crashed_container() {
     );
 
     let before = testkit::file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         testkit::file_len(&heartbeat),
         before,
         "the crashed container kept writing: the fence missed it"
     );
-    let leftovers = petri::executor::docker::list_containers(&prefix).await;
+    let leftovers = docker::list_containers(&prefix).await;
     assert!(
         leftovers.is_empty(),
         "containers were left behind: {leftovers:?}"

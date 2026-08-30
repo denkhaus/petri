@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use driver::RunConfig;
 use engine::{Event, EventSource};
@@ -13,6 +13,7 @@ use executor::Retention;
 use ir::{CancelScopeId, GraphBuilder, RunStatus, ScopeId};
 use serde_json::json;
 use support::*;
+use tokio::time;
 
 /// work → cleanup, with cleanup opted in to run after a cancel.
 fn cleanup_graph(cleanup_script: &str) -> ir::Graph {
@@ -108,9 +109,9 @@ async fn cleanup_grace_expiry_feeds_kill() {
     let run = tokio::spawn(driver.run());
 
     assert!(wait_for_file(&workspace.join("ready"), Duration::from_secs(10)).await);
-    let cancelled_at = std::time::Instant::now();
+    let cancelled_at = Instant::now();
     handle.cancel(CancelScopeId::ROOT).await;
-    let report = tokio::time::timeout(Duration::from_secs(30), run)
+    let report = time::timeout(Duration::from_secs(30), run)
         .await
         .expect("the kill ends the run")
         .expect("the run finished");
@@ -144,7 +145,7 @@ async fn a_second_cancel_feeds_kill() {
     let graph = cleanup_graph("trap '' TERM; echo x > cleanup-started; sleep 300");
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(10))
-        .with_cleanup_grace(Duration::from_secs(300))
+        .with_cleanup_grace(Duration::from_mins(5))
         .with_retention(Retention::Always);
     let workspace = dir.workspace();
 
@@ -158,11 +159,11 @@ async fn a_second_cancel_feeds_kill() {
         wait_for_file(&workspace.join("cleanup-started"), Duration::from_secs(10)).await,
         "the polite cancel admitted the cleanup"
     );
-    let killed_at = std::time::Instant::now();
+    let killed_at = Instant::now();
     handle.cancel(CancelScopeId::ROOT).await;
-    let report = tokio::time::timeout(Duration::from_secs(30), run)
+    let report = time::timeout(Duration::from_secs(30), run)
         .await
-        .expect("the second cancel ends the run without waiting the 300s cleanup grace")
+        .expect("the second cancel ends the run without waiting the 5 minute cleanup grace")
         .expect("the run finished");
     let elapsed = killed_at.elapsed();
 

@@ -6,6 +6,8 @@
 
 mod support;
 
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,6 +17,7 @@ use ir::{Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId, Va
 use serde_json::json;
 use steps::{PROCESS_KIND, Registry};
 use support::*;
+use tokio::time;
 
 // ── Test step kinds ───────────────────────────────────────────────────────
 
@@ -28,6 +31,10 @@ impl ir::StepKind for CollectStep {
     fn id(&self) -> ir::StepKindId {
         COLLECT_KIND
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "collect"
     }
@@ -36,10 +43,11 @@ impl ir::StepKind for CollectStep {
 #[async_trait::async_trait]
 impl steps::StepRunner for CollectStep {
     async fn run(&self, mut ctx: steps::StepCtx) -> Outcome {
-        let count = ctx.config["count"].as_u64().unwrap_or(0) as usize;
+        let count = usize::try_from(ctx.config["count"].as_u64().unwrap_or(0))
+            .expect("the test's delivery count fits in a usize");
         if let Some(path) = ctx.config["start_file"].as_str() {
             assert!(
-                wait_for_file(std::path::Path::new(path), Duration::from_secs(10)).await,
+                wait_for_file(Path::new(path), Duration::from_secs(10)).await,
                 "the start file never appeared"
             );
         }
@@ -65,6 +73,10 @@ impl ir::StepKind for BusyStep {
     fn id(&self) -> ir::StepKindId {
         BUSY_KIND
     }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the lifetime"
+    )]
     fn name(&self) -> &str {
         "busy"
     }
@@ -75,7 +87,7 @@ impl steps::StepRunner for BusyStep {
     async fn run(&self, ctx: steps::StepCtx) -> Outcome {
         let path = ctx.config["finish_file"].as_str().expect("finish_file");
         assert!(
-            wait_for_file(std::path::Path::new(path), Duration::from_secs(10)).await,
+            wait_for_file(Path::new(path), Duration::from_secs(10)).await,
             "the finish file never appeared"
         );
         Outcome::success(json!("done"))
@@ -198,7 +210,7 @@ async fn ordering_and_liveness_hold_when_the_control_channel_is_full() {
         let handle = handle.clone();
         tokio::spawn(async move { deliver(&handle, FIRST, json!(CONTROL_CHANNEL_CAPACITY)).await })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     assert!(!overflow.is_finished(), "the overflow delivery is waiting");
 
     // The driver loop is live meanwhile: an unrelated request gets its answer.
@@ -208,7 +220,7 @@ async fn ordering_and_liveness_hold_when_the_control_channel_is_full() {
     );
 
     // Let the step drain; every value arrives, in send order.
-    std::fs::write(&start_file, b"go").expect("start file");
+    fs::write(&start_file, b"go").expect("start file");
     assert_eq!(
         overflow.await.expect("the overflow task"),
         DeliverDisposition::Delivered
@@ -257,11 +269,11 @@ async fn a_firing_that_finishes_first_turns_a_parked_delivery_not_live() {
         let handle = handle.clone();
         tokio::spawn(async move { deliver(&handle, FIRST, json!("parked")).await })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     assert!(!parked.is_finished());
 
     // The firing finishes; the parked delivery's receiver is gone.
-    std::fs::write(&finish_file, b"done").expect("finish file");
+    fs::write(&finish_file, b"done").expect("finish file");
     assert_eq!(
         parked.await.expect("the parked task"),
         DeliverDisposition::NotLive
@@ -350,9 +362,9 @@ echo "saw=go" > "$CI_OUTPUT"
         DeliverDisposition::Delivered
     );
     // The script is still waiting on us: it was not signalled by the delivery.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     assert!(!run.is_finished(), "the step ended before it was released");
-    std::fs::write(workspace.join("go"), b"go").expect("go file");
+    fs::write(workspace.join("go"), b"go").expect("go file");
 
     let report = run.await.expect("the run task");
     assert_eq!(

@@ -4,7 +4,9 @@
 //! command line. What the commands do lives in `cli`; which frontends and step
 //! kinds they see is decided here, by [`petri::runtime`].
 
+use std::process::ExitCode;
+
 #[tokio::main]
-async fn main() -> std::process::ExitCode {
+async fn main() -> ExitCode {
     cli::main(petri::runtime).await
 }

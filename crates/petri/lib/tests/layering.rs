@@ -40,11 +40,13 @@ fn world(workspace_root: &Path, crate_dir: &Path) -> World {
     assert_eq!(
         parts.first().map(String::as_str),
         Some("crates"),
-        "member outside crates/: {rel:?}"
+        "member outside crates/: {}",
+        rel.display()
     );
     assert!(
         parts.len() >= 3,
-        "every crate lives at crates/<group>/<name>; {rel:?} is directly under crates/"
+        "every crate lives at crates/<group>/<name>; {} is directly under crates/",
+        rel.display()
     );
     match parts[1].as_str() {
         "core" => World::Core,
@@ -106,6 +108,11 @@ fn core_never_depends_on_a_component() {
                 continue; // not a workspace crate
             };
             let kind = dep["kind"].as_str().unwrap_or("normal");
+            #[expect(
+                clippy::match_same_arms,
+                reason = "one arm per rule from the module docs, in rule order; merging arms \
+                          by body would mix the three rules and hide which rule decides a pair"
+            )]
             let ok = match (from, to) {
                 // Rule 1: core reaches only core.
                 (World::Core, World::Core) => true,

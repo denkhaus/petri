@@ -1,8 +1,14 @@
 //! Driver-specific scaffolding over the shared [`testkit`]: building drivers
 //! with particular executors, registries and failure modes.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary compiles this module in full but uses only some of its helpers"
+)]
 
+use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,21 +19,22 @@ use executor_docker::DockerExecutor;
 use executor_host::HostExecutor;
 use ir::{Control, FiringId, Graph, Outcome, ScopeId, Value};
 use steps::{ProcessStep, Registry};
-pub use testkit::*;
+pub(crate) use testkit::*;
+use tokio::time;
 
 // ── Helpers over the log and report ───────────────────────────────────────
 
 /// The log position of the first record matching `pred`.
-pub fn seq_of(log: &EventLog, pred: impl Fn(&EventRecord) -> bool) -> usize {
+pub(crate) fn seq_of(log: &EventLog, pred: impl Fn(&EventRecord) -> bool) -> usize {
     log.records()
         .iter()
         .find(|r| pred(r))
-        .map(|r| r.seq as usize)
+        .map(|r| usize::try_from(r.seq).expect("a log position fits in a usize"))
         .expect("the record is in the log")
 }
 
 /// The log position of a firing's `StepFinished` record.
-pub fn finish_seq(log: &EventLog, firing: FiringId) -> usize {
+pub(crate) fn finish_seq(log: &EventLog, firing: FiringId) -> usize {
     seq_of(
         log,
         |r| matches!(&r.event, Event::StepFinished { firing: f, .. } if *f == firing),
@@ -35,7 +42,7 @@ pub fn finish_seq(log: &EventLog, firing: FiringId) -> usize {
 }
 
 /// The firing recorded for the named node.
-pub fn firing_of(report: &RunReport, name: &str) -> FiringId {
+pub(crate) fn firing_of(report: &RunReport, name: &str) -> FiringId {
     report
         .state
         .history()
@@ -45,18 +52,18 @@ pub fn firing_of(report: &RunReport, name: &str) -> FiringId {
         .firing
 }
 
-pub fn runners() -> Registry {
+pub(crate) fn runners() -> Registry {
     let mut registry = Registry::new();
     registry.register(ProcessStep);
     registry
 }
 
 /// Build a driver over the host executor.
-pub fn host_driver(graph: Graph, dir: &RunDir) -> Driver {
+pub(crate) fn host_driver(graph: Graph, dir: &RunDir) -> Driver {
     host_driver_with(graph, dir, MapSecrets::empty(), RunConfig::new(dir.path()))
 }
 
-pub fn host_driver_with(
+pub(crate) fn host_driver_with(
     graph: Graph,
     dir: &RunDir,
     secrets: MapSecrets,
@@ -65,7 +72,7 @@ pub fn host_driver_with(
     host_driver_full(graph, dir, secrets, config, runners())
 }
 
-pub fn host_driver_full(
+pub(crate) fn host_driver_full(
     graph: Graph,
     dir: &RunDir,
     secrets: MapSecrets,
@@ -77,7 +84,7 @@ pub fn host_driver_full(
 
 /// Like [`host_driver_full`], but the caller keeps a handle to the secrets — to
 /// register values mid-run.
-pub fn host_driver_shared(
+pub(crate) fn host_driver_shared(
     graph: Graph,
     dir: &RunDir,
     secrets: Arc<MapSecrets>,
@@ -91,9 +98,9 @@ pub fn host_driver_shared(
 
 /// A host executor that refuses to acquire particular scopes, standing in for
 /// one bad image among several jobs without needing a Docker daemon.
-pub struct SelectivelyBroken {
+pub(crate) struct SelectivelyBroken {
     inner:   HostExecutor,
-    broken:  std::collections::HashSet<ScopeId>,
+    broken:  HashSet<ScopeId>,
     message: String,
 }
 
@@ -125,7 +132,7 @@ impl Executor for SelectivelyBroken {
 
 /// A driver whose executor cannot acquire `broken`, but is otherwise a host
 /// executor.
-pub fn broken_scope_driver(
+pub(crate) fn broken_scope_driver(
     graph: Graph,
     dir: &RunDir,
     broken: &[ScopeId],
@@ -145,7 +152,7 @@ pub fn broken_scope_driver(
     )
 }
 
-pub fn runners_with_wedged() -> Registry {
+pub(crate) fn runners_with_wedged() -> Registry {
     let mut registry = runners();
     registry.register_runner(Arc::new(WedgedStep));
     registry
@@ -153,7 +160,7 @@ pub fn runners_with_wedged() -> Registry {
 
 /// Build a driver over the Docker executor, and the container-name prefix it
 /// will use, so a leak check can look only at this test's own containers.
-pub async fn docker_driver_named(
+pub(crate) async fn docker_driver_named(
     graph: Graph,
     dir: &RunDir,
     config: RunConfig,
@@ -173,7 +180,7 @@ pub async fn docker_driver_named(
     (driver, prefix)
 }
 
-pub fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Driver {
+pub(crate) fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Driver {
     let executor: Arc<dyn Executor> =
         Arc::new(DockerExecutor::new(dir.path()).with_retention(config.keep_workspaces));
     Driver::new(
@@ -186,17 +193,17 @@ pub fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Driver {
 }
 
 /// Run a graph on the host executor and return the report.
-pub async fn run_host(graph: Graph, dir: &RunDir) -> RunReport {
+pub(crate) async fn run_host(graph: Graph, dir: &RunDir) -> RunReport {
     host_driver(graph, dir).await_run().await
 }
 
 /// Convenience so tests read as `driver.await_run()`.
-pub trait DriverExt {
-    fn await_run(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunReport> + Send>>;
+pub(crate) trait DriverExt {
+    fn await_run(self) -> Pin<Box<dyn Future<Output = RunReport> + Send>>;
 }
 
 impl DriverExt for Driver {
-    fn await_run(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunReport> + Send>> {
+    fn await_run(self) -> Pin<Box<dyn Future<Output = RunReport> + Send>> {
         Box::pin(self.run())
     }
 }
@@ -205,15 +212,21 @@ impl DriverExt for Driver {
 /// `Control::Cancel` and never returns, so the driver's hard deadline aborts
 /// its future — and, with `kill_on_drop` gone, only scope release can end the
 /// tree.
-pub struct SpawnAndWedge;
+pub(crate) struct SpawnAndWedge;
 
-pub const SPAWN_AND_WEDGE_KIND: ir::StepKindId = ir::StepKindId::new_static("spawn-and-wedge");
+pub(crate) const SPAWN_AND_WEDGE_KIND: ir::StepKindId =
+    ir::StepKindId::new_static("spawn-and-wedge");
 
 impl ir::StepKind for SpawnAndWedge {
     fn id(&self) -> ir::StepKindId {
         SPAWN_AND_WEDGE_KIND
     }
 
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the returned \
+                  lifetime"
+    )]
     fn name(&self) -> &str {
         "spawn-and-wedge"
     }
@@ -230,12 +243,12 @@ impl steps::StepRunner for SpawnAndWedge {
         let _handle = ctx.env.spawn(spec).await.expect("spawn");
         let _ = ctx.control.recv().await;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            time::sleep(Duration::from_hours(1)).await;
         }
     }
 }
 
-pub fn runners_with_spawn_and_wedge() -> Registry {
+pub(crate) fn runners_with_spawn_and_wedge() -> Registry {
     let mut registry = runners();
     registry.register_runner(Arc::new(SpawnAndWedge));
     registry
@@ -244,17 +257,22 @@ pub fn runners_with_spawn_and_wedge() -> Registry {
 /// The minimal human-gate shape: wait for one `Deliver`, record what arrived,
 /// and return it as the step's output. An optional `linger_ms` config keeps it
 /// running that long after the answer before returning it.
-pub struct GateStep {
+pub(crate) struct GateStep {
     pub received: Arc<Mutex<Vec<Value>>>,
 }
 
-pub const GATE_KIND: ir::StepKindId = ir::StepKindId::new_static("gate");
+pub(crate) const GATE_KIND: ir::StepKindId = ir::StepKindId::new_static("gate");
 
 impl ir::StepKind for GateStep {
     fn id(&self) -> ir::StepKindId {
         GATE_KIND
     }
 
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the `StepKind` trait fixes this signature; an impl cannot widen the returned \
+                  lifetime"
+    )]
     fn name(&self) -> &str {
         "gate"
     }
@@ -271,7 +289,7 @@ impl steps::StepRunner for GateStep {
                     .push(value.clone());
                 let linger = ctx.config["linger_ms"].as_u64().unwrap_or(0);
                 if linger > 0 {
-                    tokio::time::sleep(Duration::from_millis(linger)).await;
+                    time::sleep(Duration::from_millis(linger)).await;
                 }
                 Outcome::success(value)
             }

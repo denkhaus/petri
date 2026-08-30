@@ -13,12 +13,14 @@ use std::time::Duration;
 
 use executor::{AcquireContext, EnvError, Progress, ScopeSpec};
 use smol_str::SmolStr;
+use tokio::task::JoinSet;
+use tokio::time::{self, Instant};
 
 use crate::{PullPolicy, prepare_image, run_docker, sweep_containers};
 
 /// The backstop for a health check that never leaves `starting`: Docker's own
 /// retry budget bounds the common case, this bounds a misconfigured one.
-pub const SERVICE_HEALTH_WAIT: Duration = Duration::from_secs(300);
+pub const SERVICE_HEALTH_WAIT: Duration = Duration::from_mins(5);
 
 const HEALTH_POLL: Duration = Duration::from_millis(250);
 
@@ -69,7 +71,7 @@ async fn realize_inner(
     // independent: fetch every image concurrently. Every pull runs to
     // completion before any verdict, so a failing service never leaves another
     // one racing the sweep that follows.
-    let mut pulls = tokio::task::JoinSet::new();
+    let mut pulls = JoinSet::new();
     for service in &scope.services {
         let image = service.image.clone();
         let credentials = service.credentials.clone();
@@ -109,7 +111,7 @@ async fn realize_inner(
             }
         }
         // The service's raw engine flags — health checks ride here.
-        create.extend(service.options.iter().map(|o| o.to_string()));
+        create.extend(service.options.iter().map(ToString::to_string));
         create.push(service.image.to_string());
         let refs: Vec<&str> = create.iter().map(String::as_str).collect();
         run_docker(&refs).await?;
@@ -134,7 +136,7 @@ async fn realize_inner(
 /// container fail with the container's last log lines, so a bad service names
 /// itself.
 async fn await_health(container: &str, service: &SmolStr) -> Result<(), EnvError> {
-    let deadline = tokio::time::Instant::now() + SERVICE_HEALTH_WAIT;
+    let deadline = Instant::now() + SERVICE_HEALTH_WAIT;
     loop {
         let state = run_docker(&[
             "inspect",
@@ -147,11 +149,10 @@ async fn await_health(container: &str, service: &SmolStr) -> Result<(), EnvError
         let status = parts.next().unwrap_or("");
         let health = parts.next().unwrap_or("");
         match (status, health) {
-            (_, "healthy") => return Ok(()),
+            (_, "healthy") | ("running", "") => return Ok(()),
             (_, "unhealthy") => {
                 return Err(service_failure(service, container, "reported unhealthy").await);
             }
-            ("running", "") => return Ok(()),
             ("exited" | "dead", _) => {
                 return Err(
                     service_failure(service, container, "exited before it was ready").await,
@@ -159,10 +160,10 @@ async fn await_health(container: &str, service: &SmolStr) -> Result<(), EnvError
             }
             _ => {}
         }
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             return Err(service_failure(service, container, "never reported healthy").await);
         }
-        tokio::time::sleep(HEALTH_POLL).await;
+        time::sleep(HEALTH_POLL).await;
     }
 }
 

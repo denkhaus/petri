@@ -120,7 +120,7 @@ async fn e2e_gha_shaped_workflow() {
         lint_scope,
         StepRef::new(
             PROCESS_KIND,
-            script_with("echo style problems; exit 1", json!({ "soft_fail": [1] })),
+            script_with("echo style problems; exit 1", &json!({ "soft_fail": [1] })),
         ),
     );
     let publish = add_script(&mut b, "publish", release_scope, "echo publishing");

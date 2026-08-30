@@ -4,12 +4,12 @@
 
 use std::sync::Arc;
 
-use petri::ir::{GraphBuilder, RunStatus, ScopeId};
+use petri::ir::{Graph, GraphBuilder, RunStatus, ScopeId};
 use petri::{RunOptions, steps};
 use serde_json::json;
 use testkit::{GREET_KIND, GreetStep, Greeting, RunDir};
 
-fn greet_graph() -> petri::ir::Graph {
+fn greet_graph() -> Graph {
     let mut b = GraphBuilder::new();
     b.add_step("greet", ScopeId::new(0), GREET_KIND);
     b.build()

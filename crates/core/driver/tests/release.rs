@@ -10,7 +10,9 @@
 
 mod support;
 
-use std::time::Duration;
+use std::fs;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use driver::RunConfig;
 use executor::{Executor, ProcessSpec, Retention, ScopeOutcome, ScopeSpec};
@@ -18,13 +20,14 @@ use executor_host::HostExecutor;
 use ir::{CancelScopeId, GraphBuilder, RunStatus, ScopeId, StepRef};
 use serde_json::json;
 use support::*;
+use tokio::time;
 
 /// Pids of live processes whose command line mentions `pattern` — which the
 /// sentinel's does: it carries its status-file path, unique per run directory.
 /// Zombies have no readable command line, so a reaped-or-zombie sentinel drops
 /// out.
 fn pids_matching(pattern: &str) -> Vec<i32> {
-    let output = std::process::Command::new("pgrep")
+    let output = Command::new("pgrep")
         .args(["-f", pattern])
         .output()
         .expect("pgrep runs");
@@ -36,7 +39,7 @@ fn pids_matching(pattern: &str) -> Vec<i32> {
 
 /// The `ps` state of one pid, empty when the process is fully gone.
 fn ps_state(pid: i32) -> String {
-    let output = std::process::Command::new("ps")
+    let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "stat="])
         .output()
         .expect("ps runs");
@@ -82,7 +85,7 @@ async fn an_aborted_steps_process_tree_dies_at_release() {
     assert!(wait_for_file(&heartbeat, Duration::from_secs(10)).await);
 
     handle.cancel(CancelScopeId::ROOT).await;
-    let report = tokio::time::timeout(Duration::from_secs(15), run)
+    let report = time::timeout(Duration::from_secs(15), run)
         .await
         .expect("the hard deadline ends the run")
         .expect("the run finished");
@@ -103,9 +106,9 @@ async fn an_aborted_steps_process_tree_dies_at_release() {
     );
     // The grandchild died with the group at release — the report has already been
     // handed back, so anything still ticking here survived it.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    time::sleep(Duration::from_millis(400)).await;
     let before = file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
         file_len(&heartbeat),
         before,
@@ -146,9 +149,9 @@ async fn a_natural_exits_survivor_dies_at_release() {
         report.releases
     );
     let heartbeat = dir.workspace().join("heartbeat");
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    time::sleep(Duration::from_millis(400)).await;
     let before = file_len(&heartbeat);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
         file_len(&heartbeat),
         before,
@@ -185,7 +188,7 @@ async fn the_sentinel_pins_the_group_until_release() {
     // The workload is gone; the sentinel is not. Its command line names the
     // status file under this run's unique directory.
     let pattern = dir.path().display().to_string();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    time::sleep(Duration::from_millis(100)).await;
     let sentinels = pids_matching(&pattern);
     assert_eq!(
         sentinels.len(),
@@ -194,7 +197,7 @@ async fn the_sentinel_pins_the_group_until_release() {
     );
     let sentinel = sentinels[0];
 
-    let released_at = std::time::Instant::now();
+    let released_at = Instant::now();
     let report = executor.release(env, ScopeOutcome::Succeeded).await;
     let elapsed = released_at.elapsed();
     assert!(
@@ -241,16 +244,16 @@ async fn a_workload_that_kills_its_sentinel_cannot_free_the_group_id() {
 
     // Catch the sentinel's pid while it is alive, then let the murder happen.
     let pattern = dir.path().display().to_string();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let sentinel = loop {
         if let Some(pid) = pids_matching(&pattern).first().copied() {
             break pid;
         }
-        assert!(std::time::Instant::now() < deadline, "no sentinel appeared");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(Instant::now() < deadline, "no sentinel appeared");
+        time::sleep(Duration::from_millis(20)).await;
     };
     let workspace = executor.workspace_for("scope-0");
-    std::fs::write(workspace.join("go"), b"").expect("go file");
+    fs::write(workspace.join("go"), b"").expect("go file");
 
     let status = handle.wait().await.expect("wait resolves via group death");
     assert_eq!(
@@ -289,7 +292,7 @@ async fn a_trivial_step_does_not_wait_out_the_log_drain() {
         ir::validate(&graph).expect("valid");
         graph
     };
-    let started_at = std::time::Instant::now();
+    let started_at = Instant::now();
     let report = run_host(graph, &dir).await;
     let elapsed = started_at.elapsed();
 

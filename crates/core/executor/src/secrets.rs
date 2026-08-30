@@ -7,6 +7,7 @@
 //! resolved is masked, by construction. A resolved value is a [`Secret`].
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 
 /// The key marking a secret reference in a step config.
@@ -54,8 +55,8 @@ impl Secret {
     }
 }
 
-impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Secret({MASK})")
     }
 }
