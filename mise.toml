@@ -1,0 +1,62 @@
+min_version = "2026.6.11"
+
+[settings]
+lockfile = true
+lockfile_platforms = ["macos-arm64", "linux-x64", "linux-arm64"]
+minimum_release_age = "24h"
+
+[tools]
+rust = [
+  { version = "1.97.1", profile = "minimal", components = ["clippy"] },
+  { version = "nightly-2026-04-14", profile = "minimal", components = ["rustfmt"] },
+]
+zizmor = "1.29.0"
+
+[tasks.setup]
+description = "Prepare the pinned Rust style guide"
+run = "bin/style-guides prepare"
+
+[tasks.dev]
+description = "Build and run the Petri CLI"
+run = "cargo run --locked -p petri-cli --"
+
+[tasks.fmt]
+description = "Format Rust with the pinned nightly formatter"
+run = "cargo +nightly-2026-04-14 fmt --all"
+
+[tasks."fmt:check"]
+description = "Check Rust formatting without changing files"
+run = "cargo +nightly-2026-04-14 fmt --check --all"
+
+[tasks.lint]
+description = "Lint all Rust targets with warnings denied"
+env = { CARGO_TARGET_DIR = "{{config_root}}/target/clippy" }
+run = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Run the routine Rust test suite"
+run = "cargo test --locked --workspace --all-features"
+
+[tasks."test:release"]
+description = "Run all Rust tests in release mode"
+run = "cargo test --locked --release --workspace --all-features"
+
+[tasks."build:release"]
+description = "Build the workspace in release mode"
+run = "cargo build --locked --workspace --release"
+
+[tasks."check:actions"]
+description = "Audit GitHub Actions workflows"
+run = "zizmor .github/workflows"
+
+[tasks."check:whitespace"]
+description = "Check tracked and untracked patches for whitespace errors"
+run = ["git diff --check", "git diff --cached --check"]
+
+[tasks.check]
+description = "Run the complete routine verification gate"
+depends = ["fmt:check", "lint", "test", "build:release", "check:whitespace"]
+
+[tasks."check:nightly"]
+description = "Run the extended nightly verification gate"
+depends = ["check", "test:release"]

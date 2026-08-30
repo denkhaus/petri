@@ -25,10 +25,11 @@ style-guide defaults.
 
 ## Repository tasks
 
-- Use `./scripts/preflight.sh` for the complete local verification gate.
-- Use `cargo fmt --all` to format Rust.
-- Use `cargo clippy --all-targets --all-features -- -D warnings` to lint Rust.
-- Use `cargo test --workspace --all-features` to run the routine test suite.
+- Use `mise run dev` to build and run the Petri CLI.
+- Use `mise run test` for the routine test suite.
+- Use `mise run check` for the complete routine verification gate.
+- Use `mise run check:nightly` for the extended verification gate.
+- Use `mise run fmt` to format Rust with the pinned nightly formatter.
 - Use `scripts/corpus-fetch.sh` and `scripts/corpus-fetch-actions.sh` to prepare
   the GitHub Actions compatibility corpus.
 

@@ -2,7 +2,15 @@
 
 ## Setup
 
-Install the stable Rust toolchain with the `rustfmt` and `clippy` components.
+Install [Mise](https://mise.jdx.dev/), then install the locked tools and prepare
+the pinned Rust Style Guide:
+
+```sh
+mise trust
+mise install --locked --jobs=1
+mise run setup
+```
+
 Install Docker to run the container-backed tests. Tests that need Docker skip
 when no daemon is reachable.
 
@@ -17,35 +25,30 @@ scripts/corpus-fetch-actions.sh
 The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 `--repin` during a routine fetch.
 
-Prepare the pinned Rust Style Guide before Rust work:
-
-```sh
-bin/style-guides prepare
-```
-
 ## Common tasks
 
 | Command | Purpose |
 | --- | --- |
-| `cargo fmt --all` | Format Rust code |
-| `cargo fmt --all --check` | Check formatting without changing files |
-| `cargo clippy --all-targets --all-features -- -D warnings` | Run Clippy |
-| `cargo test --workspace --all-features` | Run the routine test suite |
-| `cargo build --workspace --release` | Build the workspace in release mode |
-| `./scripts/preflight.sh` | Run the complete local verification gate |
+| `mise run dev` | Build and run the Petri CLI |
+| `mise run fmt` | Format Rust code |
+| `mise run fmt:check` | Check formatting without changing files |
+| `mise run lint` | Run Clippy with warnings denied |
+| `mise run test` | Run the routine test suite |
+| `mise run check` | Run the complete routine verification gate |
+| `mise run check:nightly` | Run the extended verification gate |
 
-Run `./scripts/preflight.sh` before opening a pull request.
+Run `mise run check` before opening a pull request.
 
 ## Rust policy
 
-Petri follows the pinned Brynary Rust Style Guide. Run
-`bin/style-guides prepare`, then read
+Petri follows the pinned Brynary Rust Style Guide. Run `mise run setup`, then read
 `.ai/style-guides/rust-style-guide/SKILL.md` before changing Rust code,
 configuration, project structure, or tests.
 
-Petri uses Rust 2024. Tokio owns asynchronous subprocesses, timers, networking,
-and orchestration. Keep parsing, validation, graph transformations, and the
-engine state machine synchronous unless a real I/O boundary requires async.
+Petri uses Rust 2024. Mise pins the development compiler and the nightly
+formatter. Tokio owns asynchronous subprocesses, timers, networking, and
+orchestration. Keep parsing, validation, graph transformations, and the engine
+state machine synchronous unless a real I/O boundary requires async.
 
 The workspace contains internal crates, a distribution library, a CLI, and test
 support. Treat shared in-repository crates as application code unless the
