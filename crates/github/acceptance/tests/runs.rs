@@ -345,6 +345,11 @@ async fn run_one(
 
     let mut options = RunOptions::new(&dir);
     options.grace = Duration::from_secs(2);
+    // Below the sweep's 90s post-cancel wait, or "wedged" is arithmetic: the
+    // first cancel admits run_on_cancel cleanup and the kill only fires when
+    // this grace expires — with the driver's 120s default, a run that WOULD
+    // come down at ~125s was abandoned at 90s and read as wedged.
+    options.cleanup_grace = Duration::from_secs(60);
     options.retention = Retention::Never;
     options.echo = false;
     // The sweep measures outcomes, not determinism; replay verification is the
