@@ -77,7 +77,13 @@ depends = [
 [tasks."check:nightly"]
 description = "Run the extended nightly verification gate"
 depends = ["check", "check:msrv"]
-run = "mise run test:release"
+run = [
+  "cargo clean --profile dev",
+  "cargo clean --profile test",
+  "cargo clean --target-dir target/clippy",
+  "cargo clean --target-dir target/msrv",
+  "mise run test:release",
+]
 
 [tasks.release]
 description = "Build and package a Petri release for the current platform"
