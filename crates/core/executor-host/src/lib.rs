@@ -313,11 +313,12 @@ impl Executor for HostExecutor {
             return report.problem("host executor was handed a foreign environment");
         };
         let (path, retention) = (teardown.path.clone(), teardown.retention);
-        let groups: Vec<PinnedGroup> = teardown
-            .groups
-            .lock()
-            .map(|mut held| held.drain(..).collect())
-            .unwrap_or_default();
+        // A poisoned lock still has to give up its groups: skipping them would
+        // leak every process group this scope pinned.
+        let groups: Vec<PinnedGroup> = match teardown.groups.lock() {
+            Ok(mut held) => held.drain(..).collect(),
+            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+        };
         drop(env);
 
         // Process groups first, workspace second — a straggler may still be
@@ -779,11 +780,16 @@ fn live_group_members(pgid: i32) -> usize {
                 .to_str()
                 .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))
         })
-        .filter(|entry| {
-            fs::read_to_string(entry.path().join("stat"))
-                .is_ok_and(|stat| stat_is_live_in_group(&stat, pgid))
-        })
+        .filter(|entry| entry_is_live_member(entry, pgid))
         .count()
+}
+
+/// One `/proc/<pid>/stat` read for a numbered `/proc` entry: whether that
+/// process is a live member of the group.
+#[cfg(target_os = "linux")]
+fn entry_is_live_member(entry: &fs::DirEntry, pgid: i32) -> bool {
+    fs::read_to_string(entry.path().join("stat"))
+        .is_ok_and(|stat| stat_is_live_in_group(&stat, pgid))
 }
 
 /// Parse one `/proc/<pid>/stat` line: `pid (comm) state ppid pgrp ...`. The

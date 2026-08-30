@@ -439,6 +439,34 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
         }
     }
 
+    // Chase every env sentinel a string `ref:` carries. Each name is visited
+    // once — the walk below adds more — and the first hit answers.
+    fn sentinel_ref_reads_empty_input(
+        graph: &Graph,
+        scope: ir::ScopeId,
+        text: &str,
+        seen: &mut BTreeSet<String>,
+        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
+        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
+    ) -> bool {
+        for name in env_sentinel_names(text) {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if scope_env_reads_empty_input(
+                graph,
+                scope,
+                &name,
+                seen,
+                event_inputs_default,
+                env_names,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
     let zero = |v: &Value| match v {
         Value::Number(n) => n.as_f64() == Some(0.0),
         Value::String(s) => s.is_empty(),
@@ -545,17 +573,14 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
                 &env_names,
             ),
             None => reference.as_str().is_some_and(|text| {
-                env_sentinel_names(text).iter().any(|name| {
-                    seen.insert(name.clone())
-                        && scope_env_reads_empty_input(
-                            graph,
-                            node.scope,
-                            name,
-                            &mut seen,
-                            &event_inputs_default,
-                            &env_names,
-                        )
-                })
+                sentinel_ref_reads_empty_input(
+                    graph,
+                    node.scope,
+                    text,
+                    &mut seen,
+                    &event_inputs_default,
+                    &env_names,
+                )
             }),
         };
         if coupled {

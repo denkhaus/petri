@@ -186,11 +186,23 @@ async fn compute(
         ))
     })?;
     let mut result: Option<Vec<String>> = None;
+    // Kept until the helper is reaped: a crash explains a bad marker line better
+    // than the parse error does, so the exit status is reported first.
+    let mut parse_error: Option<String> = None;
     let mut tail: Vec<String> = Vec::new();
     if let Some(mut lines) = handle.lines() {
         while let Some(line) = lines.recv().await {
             if let Some(hashes) = line.line.strip_prefix(MARKER) {
-                result = serde_json::from_str(hashes).ok();
+                match serde_json::from_str(hashes) {
+                    Ok(hashes) => {
+                        result = Some(hashes);
+                        parse_error = None;
+                    }
+                    Err(e) => {
+                        result = None;
+                        parse_error = Some(e.to_string());
+                    }
+                }
             } else {
                 if tail.len() >= 5 {
                     tail.remove(0);
@@ -207,6 +219,11 @@ async fn compute(
         return Err(fail(format!(
             "the `hashFiles({display})` helper failed: {}",
             tail.join(" / ")
+        )));
+    }
+    if let Some(e) = parse_error {
+        return Err(fail(format!(
+            "the `hashFiles({display})` helper printed an unreadable result: {e}"
         )));
     }
     let result = result.ok_or_else(|| {

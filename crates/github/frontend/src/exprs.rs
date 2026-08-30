@@ -974,13 +974,17 @@ pub fn lower_scalar(
             }
         },
         |source, table| {
-            let ast = parse(source).map_err(|e| {
-                diags.error(
-                    "expr.parse",
-                    span.clone(),
-                    format!("could not parse `${{{{ {} }}}}`: {e}", source.trim()),
-                );
-            })?;
+            let ast = match parse(source) {
+                Ok(ast) => ast,
+                Err(e) => {
+                    diags.error(
+                        "expr.parse",
+                        span.clone(),
+                        format!("could not parse `${{{{ {} }}}}`: {e}", source.trim()),
+                    );
+                    return Err(());
+                }
+            };
             // A bare `env.NAME` alone in its segment becomes the env sentinel:
             // the step substitutes it at spawn from the environment its
             // process receives, so `GITHUB_ENV` appends from earlier steps

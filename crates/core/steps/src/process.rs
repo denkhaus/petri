@@ -190,9 +190,10 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
 
     // Log capture runs on its own task and keeps going through cancellation, so a
     // cancelled step's final output is not lost.
-    let drain = handle
-        .lines()
-        .map(|lines| tokio::spawn(forward_lines(lines, ctx.logs.clone())));
+    let mut drain = None;
+    if let Some(lines) = handle.lines() {
+        drain = Some(tokio::spawn(forward_lines(lines, ctx.logs.clone())));
+    }
 
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;

@@ -406,14 +406,17 @@ pub fn lower_one(
         }
         Ok(lowered) => {
             let diagnostics = lowered.diagnostics.into_vec();
-            let errors: Vec<&Diagnostic> = diagnostics.iter().filter(|d| d.is_error()).collect();
             let class = if let Some(_graph) = &lowered.graph {
                 if diagnostics.is_empty() {
                     Class::Clean
                 } else {
                     Class::Warnings
                 }
-            } else if errors.iter().all(|d| d.unsupported_feature().is_some()) {
+            } else if diagnostics
+                .iter()
+                .filter(|d| d.is_error())
+                .all(|d| d.unsupported_feature().is_some())
+            {
                 Class::Unsupported
             } else {
                 Class::OtherError

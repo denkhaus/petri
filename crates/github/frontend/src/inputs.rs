@@ -88,12 +88,11 @@ pub fn bind_param_inputs(
     diags: &mut Diagnostics,
 ) -> BoundInputs {
     // `github.event.inputs`, once; each declaration reads one key off it.
-    let params = ["event", "inputs"]
-        .iter()
-        .fold(table.var("github"), |acc, key| {
-            let k = table.lit(*key);
-            builtin(table, "get_ci", vec![acc, k]).expect("get_ci exists")
-        });
+    let mut params = table.var("github");
+    for key in ["event", "inputs"] {
+        let k = table.lit(key);
+        params = builtin(table, "get_ci", vec![params, k]).expect("get_ci exists");
+    }
     let mut bound = BoundInputs::default();
     for decl in decls {
         let name_key = table.lit(decl.name.as_str());
@@ -111,7 +110,9 @@ pub fn bind_param_inputs(
         // Placement is a lowering decision, so a directly run workflow places
         // by its declared defaults — the value a bare run gets — and only by
         // those: a defaultless input stays dynamic.
-        if let (Some(known), true) = (known, decl.default.is_some()) {
+        if let Some(known) = known
+            && decl.default.is_some()
+        {
             bound.statics.insert(decl.name.clone(), known);
         }
     }

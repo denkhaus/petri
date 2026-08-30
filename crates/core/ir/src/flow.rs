@@ -142,7 +142,8 @@ impl Status {
         match self {
             Self::Failure(info) => Some(info),
             Self::PartialSuccess { underlying } => underlying.as_ref(),
-            _ => None,
+            // `TimedOut` is a failure by `is_failure`, but it carries no info.
+            Self::Success | Self::Skipped | Self::Cancelled | Self::TimedOut => None,
         }
     }
 

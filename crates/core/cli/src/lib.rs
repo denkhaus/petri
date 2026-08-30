@@ -136,7 +136,10 @@ fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered,
         Ok(lowered) => {
             for d in lowered.diagnostics.iter() {
                 if json {
-                    println!("{}", serde_json::to_string(d).unwrap_or_default());
+                    match serde_json::to_string(d) {
+                        Ok(line) => println!("{line}"),
+                        Err(e) => eprintln!("error: could not serialize a diagnostic: {e}"),
+                    }
                 } else {
                     eprintln!("{d}");
                 }

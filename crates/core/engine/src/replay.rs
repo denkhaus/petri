@@ -102,7 +102,11 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
                 }
                 // Everything else is reconciled from the final state (scopes)
                 // or deliberately not re-issued (deliveries).
-                _ => {}
+                Command::DeliverControl { .. }
+                | Command::ExpandNode { .. }
+                | Command::AcquireScope { .. }
+                | Command::ReleaseScope { .. }
+                | Command::FinishRun { .. } => {}
             }
         }
     });

@@ -281,26 +281,20 @@ fn read_call_interface<'a>(wc: Node<'a>, diags: &mut Diagnostics) -> CallInterfa
         diags,
         "`on.workflow_call`",
     );
-    let outputs = wm
-        .get("outputs")
-        .and_then(|o| o.as_mapping())
-        .map(|om| {
-            om.iter()
-                .filter_map(|(name, spec)| {
-                    if let Some(value) = spec.as_mapping().and_then(|sm| sm.get("value")) {
-                        Some((name.to_string(), value))
-                    } else {
-                        diags.error(
-                            "gha.bad_call_output",
-                            spec.span(),
-                            format!("workflow output `{name}` needs a `value`"),
-                        );
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut outputs: Vec<(String, Node<'a>)> = Vec::new();
+    if let Some(om) = wm.get("outputs").and_then(|o| o.as_mapping()) {
+        for (name, spec) in om.iter() {
+            let Some(value) = spec.as_mapping().and_then(|sm| sm.get("value")) else {
+                diags.error(
+                    "gha.bad_call_output",
+                    spec.span(),
+                    format!("workflow output `{name}` needs a `value`"),
+                );
+                continue;
+            };
+            outputs.push((name.to_string(), value));
+        }
+    }
     let secrets = wm
         .get("secrets")
         .and_then(|s| s.as_mapping())
@@ -332,47 +326,53 @@ fn read_input_decls<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Vec<
     let Some(m) = node.and_then(|n| n.as_mapping()) else {
         return Vec::new();
     };
-    m.iter()
-        .map(|(name, spec)| {
-            let sm = spec.as_mapping();
-            let ty = match sm
-                .as_ref()
-                .and_then(|sm| sm.get("type"))
-                .and_then(|t| t.as_str())
-            {
-                None | Some("string") => InputType::String,
-                Some("boolean") => InputType::Boolean,
-                Some("number") => InputType::Number,
-                Some("environment") => InputType::Environment,
-                Some("choice") => InputType::Choice(
-                    sm.as_ref()
-                        .and_then(|sm| sm.get("options"))
-                        .and_then(|o| o.as_sequence())
-                        .map(|seq| {
-                            seq.iter()
-                                .filter_map(|n| n.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                ),
-                Some(other) => {
-                    diags.error(
-                        "gha.bad_input",
-                        spec.span(),
-                        format!("input `{name}` has unknown type `{other}`"),
-                    );
-                    InputType::String
-                }
-            };
-            InputDecl {
-                name: name.to_string(),
-                ty,
-                required: required_flag(spec),
-                default: sm.as_ref().and_then(|sm| sm.get("default")),
-                span: spec.span(),
-            }
-        })
-        .collect()
+    let mut decls = Vec::new();
+    for (name, spec) in m.iter() {
+        decls.push(read_input_decl(name, spec, diags));
+    }
+    decls
+}
+
+/// One `inputs:` entry. An unknown `type:` is reported and read as a string, so
+/// the rest of the declaration still lowers.
+fn read_input_decl<'a>(name: &str, spec: Node<'a>, diags: &mut Diagnostics) -> InputDecl<'a> {
+    let sm = spec.as_mapping();
+    let ty = match sm
+        .as_ref()
+        .and_then(|sm| sm.get("type"))
+        .and_then(|t| t.as_str())
+    {
+        None | Some("string") => InputType::String,
+        Some("boolean") => InputType::Boolean,
+        Some("number") => InputType::Number,
+        Some("environment") => InputType::Environment,
+        Some("choice") => InputType::Choice(
+            sm.as_ref()
+                .and_then(|sm| sm.get("options"))
+                .and_then(|o| o.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|n| n.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        Some(other) => {
+            diags.error(
+                "gha.bad_input",
+                spec.span(),
+                format!("input `{name}` has unknown type `{other}`"),
+            );
+            InputType::String
+        }
+    };
+    InputDecl {
+        name: name.to_string(),
+        ty,
+        required: required_flag(spec),
+        default: sm.as_ref().and_then(|sm| sm.get("default")),
+        span: spec.span(),
+    }
 }
 
 fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job<'a>> {
@@ -632,9 +632,10 @@ pub fn read_step<'a>(
     let uses = m
         .get("uses")
         .and_then(|u| u.as_str().map(|s| (s.to_string(), u.span())));
-    match (run.is_some(), uses.is_some()) {
-        (false, false) if background => {}
-        (false, false) => diags.error(
+    match (&run, &uses) {
+        // A background step needs neither: `wait:` is what it does.
+        (None, None) if background => {}
+        (None, None) => diags.error(
             "gha.bad_step",
             node.span(),
             format!(
@@ -642,7 +643,7 @@ pub fn read_step<'a>(
                 index + 1
             ),
         ),
-        (true, true) => diags.error(
+        (Some(_), Some(_)) => diags.error(
             "gha.bad_step",
             node.span(),
             format!(
@@ -650,7 +651,8 @@ pub fn read_step<'a>(
                 index + 1
             ),
         ),
-        _ => {}
+        // Exactly one of the two: the shapes this function goes on to lower.
+        (Some(_), None) | (None, Some(_)) => {}
     }
 
     // `with:` belongs to `uses:` steps; GitHub rejects it elsewhere ("Unexpected

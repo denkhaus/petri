@@ -240,13 +240,15 @@ fn write_records(mut file: File, path: &Path, rx: &Receiver<Msg>) {
                 if failure.is_some() {
                     continue;
                 }
-                let result = serde_json::to_vec(&record)
-                    .map_err(|e| e.to_string())
-                    .and_then(|mut line| {
+                let result = match serde_json::to_vec(&record) {
+                    Err(e) => Err(e.to_string()),
+                    Ok(mut line) => {
                         line.push(b'\n');
-                        file.write_all(&line).map_err(|e| e.to_string())
-                    })
-                    .and_then(|()| file.flush().map_err(|e| e.to_string()));
+                        file.write_all(&line)
+                            .and_then(|()| file.flush())
+                            .map_err(|e| e.to_string())
+                    }
+                };
                 if let Err(message) = result {
                     failure = Some(format!("could not write `{}`: {message}", path.display()));
                 }

@@ -631,22 +631,21 @@ pub(crate) fn forward_lines(
     lines: Option<executor::LineStream>,
     sink: mpsc::Sender<StepEvent>,
 ) -> Option<JoinHandle<()>> {
-    lines.map(|mut lines| {
-        tokio::spawn(async move {
-            while let Some(line) = lines.recv().await {
-                if sink
-                    .send(StepEvent::Log {
-                        stream: line.stream,
-                        line:   line.line,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
+    let mut lines = lines?;
+    Some(tokio::spawn(async move {
+        while let Some(line) = lines.recv().await {
+            if sink
+                .send(StepEvent::Log {
+                    stream: line.stream,
+                    line:   line.line,
+                })
+                .await
+                .is_err()
+            {
+                return;
             }
-        })
-    })
+        }
+    }))
 }
 
 /// Join the command sink and take what it collected; a sink that will not stop
@@ -777,7 +776,10 @@ fn runner_files_failure(
     let info = ir::FailureInfo::new(failure.message).with_class(failure.class);
     outcome.status = match soft_fail {
         steps::SoftFail::All(true) => ir::Status::partial(info),
-        _ => ir::Status::Failure(info),
+        // This failure carries no exit code, so a code list can never soften it.
+        steps::SoftFail::All(false) | steps::SoftFail::ExitStatuses(_) | steps::SoftFail::Off => {
+            ir::Status::Failure(info)
+        }
     };
     outcome
 }

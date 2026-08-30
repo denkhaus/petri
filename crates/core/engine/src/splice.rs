@@ -103,7 +103,11 @@ impl PreparationRejection {
         match self {
             Self::Policy { .. } | Self::Delegation { .. } => "policy",
             Self::Fragment(_) => "validation",
-            _ => "composition",
+            Self::NameCollision { .. }
+            | Self::UnknownReference { .. }
+            | Self::AmbiguousReference { .. }
+            | Self::RetractedReference { .. }
+            | Self::DependentJoinNotAll { .. } => "composition",
         }
     }
 }

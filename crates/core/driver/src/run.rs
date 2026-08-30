@@ -789,12 +789,6 @@ impl Driver {
         let attempt = resolved.attempt();
         let scope = resolved.scope();
         let node = resolved.node();
-        let name = self
-            .engine
-            .graph
-            .node(node)
-            .map(|n| n.name.clone())
-            .unwrap_or_default();
 
         // An environment that could not be acquired fails its firings rather than
         // aborting the run: the failure routes like any other.
@@ -833,12 +827,12 @@ impl Driver {
             );
             return;
         };
-        let Some(runner) = self
-            .engine
-            .graph
-            .node(node)
-            .and_then(|n| self.runners.get(&n.step.kind))
-        else {
+        // One lookup for both: a firing whose node left the graph has no runner
+        // either, and fails here rather than carrying a nameless step forward.
+        let Some((name, runner)) = self.engine.graph.node(node).and_then(|n| {
+            let runner = self.runners.get(&n.step.kind)?;
+            Some((n.name.clone(), runner))
+        }) else {
             self.fail_now(firing, attempt, "no runner for this step kind", NO_RUNNER);
             return;
         };
@@ -901,19 +895,16 @@ impl Driver {
         });
 
         // The per-attempt timeout. `Budget.timeout` is per attempt, not per firing.
-        let timeout = self
-            .engine
-            .graph
-            .node(node)
-            .map(|n| n.budget.timeout)
-            .filter(|t| !t.is_zero())
-            .map(|limit| {
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    time::sleep(limit).await;
-                    let _ = tx.send(Signal::Timeout { firing, attempt }).await;
-                })
-            });
+        let mut timeout = None;
+        if let Some(limit) = self.engine.graph.node(node).map(|n| n.budget.timeout)
+            && !limit.is_zero()
+        {
+            let tx = self.tx.clone();
+            timeout = Some(tokio::spawn(async move {
+                time::sleep(limit).await;
+                let _ = tx.send(Signal::Timeout { firing, attempt }).await;
+            }));
+        }
 
         self.tasks.insert(firing, Task {
             name,

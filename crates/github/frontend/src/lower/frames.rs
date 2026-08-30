@@ -109,27 +109,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// caller's own site, `secrets:` folded through the caller's map so a
     /// nested `inherit` keeps renames intact.
     pub(super) fn bind_frame(&mut self, i: usize, entries: &[Entry<'w, 'a>]) {
-        let frame_wf = self.frames[i].wf;
         let Some(CallEdge { caller, entry }) = self.frames[i].call else {
-            // The root: `workflow_call` and `workflow_dispatch` declarations
-            // both bind from run parameters, through one typed path.
-            let mut decls: Vec<&InputDecl<'_>> = Vec::new();
-            if let Some(interface) = &frame_wf.call {
-                decls.extend(interface.inputs.iter());
-            }
-            decls.extend(frame_wf.dispatch_inputs.iter());
-            let bound = (!decls.is_empty())
-                .then(|| inputs::bind_param_inputs(&decls, self.b.exprs(), &mut self.diags));
-            self.frame_ctx[i] = match bound {
-                Some(bound) => FrameCtx {
-                    inputs: Some(bound.exprs),
-                    static_inputs: bound.statics,
-                    ..Default::default()
-                },
-                None => FrameCtx::default(),
-            };
+            self.bind_root_frame(i);
             return;
         };
+        let frame_wf = self.frames[i].wf;
         let frame_remote = matches!(self.frames[i].source, CalleeSource::Remote { .. });
         let call_job = &entries[entry].job;
         let call = call_job
@@ -159,6 +143,27 @@ impl<'w, 'a> Lowering<'w, 'a> {
             call_start: Some(format!("{}{SEP}start", call_job.id)),
             exit: None,
             remote: frame_remote || self.frame_ctx[caller].remote,
+        };
+    }
+
+    /// The root frame: `workflow_call` and `workflow_dispatch` declarations
+    /// both bind from run parameters, through one typed path.
+    fn bind_root_frame(&mut self, i: usize) {
+        let frame_wf = self.frames[i].wf;
+        let mut decls: Vec<&InputDecl<'_>> = Vec::new();
+        if let Some(interface) = &frame_wf.call {
+            decls.extend(interface.inputs.iter());
+        }
+        decls.extend(frame_wf.dispatch_inputs.iter());
+        let bound = (!decls.is_empty())
+            .then(|| inputs::bind_param_inputs(&decls, self.b.exprs(), &mut self.diags));
+        self.frame_ctx[i] = match bound {
+            Some(bound) => FrameCtx {
+                inputs: Some(bound.exprs),
+                static_inputs: bound.statics,
+                ..Default::default()
+            },
+            None => FrameCtx::default(),
         };
     }
 
