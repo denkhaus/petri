@@ -22,7 +22,6 @@ mod support;
 use std::sync::Arc;
 
 use github_actions::{ActionSourceCap, ActionTreeSource};
-use runtime::ir::RunStatus;
 use support::*;
 
 /// Run one `real_workloads/*.yaml` file against the pinned runner image and
@@ -34,19 +33,8 @@ async fn assert_workload(yaml: &str, label: &str, expected: &str) {
     let text = yaml.replace("__IMAGE__", acceptance::runs::RUNNER_IMAGE_2404);
     let graph = lower_ok(&text);
     let report = run_host(graph, label).await;
+    assert_success(&report);
     let lines = log_lines(&report);
-    let records: Vec<String> = report
-        .state
-        .history()
-        .iter()
-        .map(|r| format!("{} → {:?}", r.name, r.outcome.status))
-        .collect();
-    assert_eq!(
-        report.status,
-        RunStatus::Success,
-        "errors: {:?}\nrecords: {records:#?}\nlog: {lines:#?}",
-        report.state.errors()
-    );
     assert!(
         lines.iter().any(|l| l == expected),
         "no `{expected}` in {lines:#?}"
@@ -74,19 +62,8 @@ async fn assert_action_workload(yaml: &str, label: &str, expected: &str) {
             )
         })
         .await;
+    assert_success(&report);
     let lines = log_lines(&report);
-    let records: Vec<String> = report
-        .state
-        .history()
-        .iter()
-        .map(|r| format!("{} → {:?}", r.name, r.outcome.status))
-        .collect();
-    assert_eq!(
-        report.status,
-        RunStatus::Success,
-        "errors: {:?}\nrecords: {records:#?}\nlog: {lines:#?}",
-        report.state.errors()
-    );
     assert!(
         lines.iter().any(|l| l == expected),
         "no `{expected}` in {lines:#?}"

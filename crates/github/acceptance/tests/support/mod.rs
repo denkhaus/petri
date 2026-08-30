@@ -269,6 +269,30 @@ pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (Run
 }
 
 /// A report in the shape the tests read.
+/// Assert the run succeeded — and when it did not, say everything a step
+/// failure has to say. `state.errors()` is empty for an ordinary failed step
+/// (engine errors are a different thing), so a bare status assertion shows a
+/// failed run as `[]`: the records carry the failure's class and message, and
+/// the log carries what the step printed. One dump, every battery.
+#[allow(dead_code)]
+pub fn assert_success(report: &RunReportPlus) {
+    if report.status == ir::RunStatus::Success {
+        return;
+    }
+    let records: Vec<String> = report
+        .state
+        .history()
+        .iter()
+        .map(|r| format!("{} → {:?}", r.name, r.outcome.status))
+        .collect();
+    panic!(
+        "run ended {:?}\nengine errors: {:?}\nrecords: {records:#?}\nlog: {:#?}",
+        report.status,
+        report.state.errors(),
+        log_lines(report)
+    );
+}
+
 pub struct RunReportPlus {
     pub status:   ir::RunStatus,
     pub state:    engine::EngineState,
