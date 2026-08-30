@@ -1,0 +1,75 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            docker: required
+          - runner: macos-15
+            docker: absent
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          version: 2026.6.11
+          install_args: --locked --jobs=1
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          shared-key: nightly-${{ matrix.runner }}
+
+      - name: Fetch the corpus
+        run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Pre-pull the test image
+        if: matrix.docker == 'required'
+        run: docker pull alpine:3.20
+
+      - name: Verify extended checks
+        run: mise run check:nightly
+        env:
+          PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
+          PETRI_REQUIRE_CORPUS: '1'
+
+      - name: No containers left behind
+        if: matrix.docker == 'required'
+        run: |
+          leftovers=$(docker ps -a --format '{{.Names}}' | grep '^petri-' || true)
+          if [ -n "$leftovers" ]; then
+            echo "the run leaked containers:"
+            echo "$leftovers"
+            exit 1
+          fi
+          echo "clean"

@@ -99,3 +99,7 @@ Linux and macOS runners. The gate checks formatting, Clippy, GitHub Actions,
 whitespace, the full test suite, and a release build. Linux also runs the
 Docker-backed acceptance tests and checks that Petri leaves no containers
 behind.
+
+The scheduled Nightly workflow also checks the Rust 1.89 compiler floor and
+runs the full test suite in release mode. You can start it manually from GitHub
+Actions.
