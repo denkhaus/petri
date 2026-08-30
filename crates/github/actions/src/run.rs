@@ -23,6 +23,12 @@ impl Step for RunStep {
         steps::check_misplaced_secret(config, &["env"])
     }
 
+    #[tracing::instrument(
+        name = "github.run_step",
+        level = "debug",
+        skip_all,
+        fields(shell = ?config.shell, custom_shell = config.shell_command.is_some())
+    )]
     async fn run(&self, config: RunConfig, ctx: StepCtx) -> Outcome {
         // The gate first: nothing is created and nothing spawns for a step whose
         // condition is false.

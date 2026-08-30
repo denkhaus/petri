@@ -24,6 +24,7 @@ use smol_str::SmolStr;
 use tokio::fs;
 use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, mpsc};
+use tracing::field::Empty;
 
 use crate::{CONTAINER_WORKSPACE, PullPolicy, next_token, prepare_registry_image, run_docker};
 
@@ -163,10 +164,24 @@ impl ContainerRunner for OneShotRunner {
         crate::HOST_ALIAS
     }
 
+    #[tracing::instrument(
+        name = "container.oneshot_run",
+        level = "debug",
+        skip_all,
+        fields(
+            arg_count = spec.args.len(),
+            env_count = spec.env.len(),
+            image = Empty,
+            container = Empty,
+        )
+    )]
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         self.mark().await?;
         let image = self.prepare(&spec.image).await?;
         let name = format!("{}{}-{}", self.prefix, process::id(), next_token());
+        let span = tracing::Span::current();
+        span.record("image", image.as_str());
+        span.record("container", name.as_str());
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", self.workspace.display());
         let workdir = spec

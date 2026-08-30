@@ -47,6 +47,8 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener as AsyncTcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{fs as async_fs, io as async_io, task};
+use tracing::Span;
+use tracing::field::Empty;
 
 use crate::cache::{CacheStore, DEFAULT_BUDGET};
 use crate::store::ArtifactStore;
@@ -176,6 +178,22 @@ enum Service {
     Cache,
 }
 
+impl Service {
+    /// The façade's name, as a fixed label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Artifacts => "artifacts",
+            Self::Cache => "cache",
+        }
+    }
+}
+
+#[tracing::instrument(
+    name = "objects.twirp",
+    level = "debug",
+    skip_all,
+    fields(service = service.label(), rpc_method = %method)
+)]
 async fn twirp(
     backend: &Arc<Backend>,
     service: Service,
@@ -188,6 +206,11 @@ async fn twirp(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     if bearer != Some(backend.token()) {
+        tracing::warn!(
+            service = service.label(),
+            rpc_method = %method,
+            "unauthenticated object request rejected"
+        );
         return Ok(twirp_error(&Twirp {
             status: StatusCode::UNAUTHORIZED,
             code:   "unauthenticated",
@@ -218,24 +241,30 @@ async fn twirp(
     // event loop — keeps streaming concurrent blob uploads and downloads.
     let backend = backend.clone();
     let method = method.to_string();
-    let result = task::spawn_blocking(move || match (service, method.as_str()) {
-        (Service::Artifacts, "CreateArtifact") => create_artifact(&backend, &host, &request),
-        (Service::Artifacts, "FinalizeArtifact") => finalize_artifact(&backend, &request),
-        (Service::Artifacts, "ListArtifacts") => list_artifacts(&backend, &request),
-        (Service::Artifacts, "GetSignedArtifactURL") => {
-            signed_artifact_url(&backend, &host, &request)
+    let span = Span::current();
+    let result = task::spawn_blocking(move || {
+        let _entered = span.enter();
+        match (service, method.as_str()) {
+            (Service::Artifacts, "CreateArtifact") => create_artifact(&backend, &host, &request),
+            (Service::Artifacts, "FinalizeArtifact") => finalize_artifact(&backend, &request),
+            (Service::Artifacts, "ListArtifacts") => list_artifacts(&backend, &request),
+            (Service::Artifacts, "GetSignedArtifactURL") => {
+                signed_artifact_url(&backend, &host, &request)
+            }
+            (Service::Artifacts, "DeleteArtifact") => delete_artifact(&backend, &request),
+            (Service::Cache, "CreateCacheEntry") => create_cache_entry(&backend, &host, &request),
+            (Service::Cache, "FinalizeCacheEntryUpload") => {
+                finalize_cache_entry(&backend, &request)
+            }
+            (Service::Cache, "GetCacheEntryDownloadURL") => {
+                cache_download_url(&backend, &host, &request)
+            }
+            (_, other) => Err(Twirp {
+                status: StatusCode::NOT_FOUND,
+                code:   "bad_route",
+                msg:    format!("no such method: {other}"),
+            }),
         }
-        (Service::Artifacts, "DeleteArtifact") => delete_artifact(&backend, &request),
-        (Service::Cache, "CreateCacheEntry") => create_cache_entry(&backend, &host, &request),
-        (Service::Cache, "FinalizeCacheEntryUpload") => finalize_cache_entry(&backend, &request),
-        (Service::Cache, "GetCacheEntryDownloadURL") => {
-            cache_download_url(&backend, &host, &request)
-        }
-        (_, other) => Err(Twirp {
-            status: StatusCode::NOT_FOUND,
-            code:   "bad_route",
-            msg:    format!("no such method: {other}"),
-        }),
     })
     .await
     .map_err(io::Error::other)?;
@@ -271,6 +300,11 @@ fn finalize_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp>
         .finalize(name, digest)
         .map_err(store_error)?
         .ok_or_else(|| Twirp::not_found(format!("no upload to finalize for `{name}`")))?;
+    tracing::info!(
+        artifact_id = artifact.id,
+        size_bytes = artifact.size,
+        "artifact finalized"
+    );
     Ok(json!({ "ok": true, "artifact_id": artifact.id.to_string() }))
 }
 
@@ -335,6 +369,7 @@ fn delete_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
               force a closure at each one"
 )]
 fn store_error(e: io::Error) -> Twirp {
+    tracing::error!(error = ?e, "object store request failed");
     Twirp {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code:   "internal",
@@ -353,6 +388,10 @@ fn create_cache_entry(backend: &Backend, host: &str, request: &Value) -> Result<
     let key = field(request, "key")?;
     let version = field(request, "version")?;
     let reserved = backend.cache.reserve(key, version).map_err(store_error)?;
+    tracing::debug!(
+        reserved = reserved.is_some(),
+        "cache upload reservation decided"
+    );
     Ok(match reserved {
         Some(id) => json!({
             "ok": true,
@@ -390,6 +429,12 @@ fn cache_download_url(backend: &Backend, host: &str, request: &Value) -> Result<
         .cache
         .lookup(key, &restore_keys, version)
         .map_err(store_error)?;
+    tracing::debug!(
+        hit = hit.is_some(),
+        restore_key_count = restore_keys.len(),
+        entry_id = hit.as_ref().map(|entry| entry.id.as_str()),
+        "cache lookup finished"
+    );
     Ok(match hit {
         Some(entry) => json!({
             "ok": true,
@@ -402,6 +447,12 @@ fn cache_download_url(backend: &Backend, host: &str, request: &Value) -> Result<
 
 // ── The blob half ─────────────────────────────────────────────────────────
 
+#[tracing::instrument(
+    name = "objects.blob",
+    level = "debug",
+    skip_all,
+    fields(http_method = %req.method(), blob_kind = Empty, size_bytes = Empty)
+)]
 async fn blob(backend: &Backend, rest: &str, req: Request<Incoming>) -> io::Result<Response<Body>> {
     let Some((kind, id)) = rest.split_once('/') else {
         return Ok(plain(StatusCode::NOT_FOUND, "not found"));
@@ -412,6 +463,7 @@ async fn blob(backend: &Backend, rest: &str, req: Request<Incoming>) -> io::Resu
         .find(|(k, _)| k == "sig")
         .is_some_and(|(_, sig)| backend.verify(&format!("{kind}/{id}"), sig));
     if !signed {
+        tracing::warn!(http_method = %req.method(), "unsigned blob request rejected");
         return Ok(plain(StatusCode::FORBIDDEN, "bad signature"));
     }
     // Each kind names its store; the id's shape is validated per store even
@@ -435,6 +487,9 @@ async fn blob(backend: &Backend, rest: &str, req: Request<Incoming>) -> io::Resu
         }
         _ => return Ok(plain(StatusCode::NOT_FOUND, "not found")),
     };
+    // Past the match, `kind` is one of the four routed literals — never the raw
+    // segment the URL carried in.
+    Span::current().record("blob_kind", kind);
     match (req.method(), kind) {
         (&Method::PUT, "upload" | "cache-upload") => upload(&target, &query, req).await,
         (&Method::GET | &Method::HEAD, "download" | "cache-download") => {
@@ -527,6 +582,7 @@ async fn download(target: &BlobTarget, req: Request<Incoming>) -> io::Result<Res
         Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
         None => (StatusCode::OK, 0, total),
     };
+    Span::current().record("size_bytes", len);
     let mut response = Response::builder()
         .status(status)
         .header(CONTENT_LENGTH, len)

@@ -172,6 +172,10 @@ impl CommandSink {
             match cmd.name.as_str() {
                 "add-mask" => {
                     self.masker.register(&cmd.message);
+                    tracing::debug!(
+                        mask_count = self.masker.len(),
+                        "workflow command masked a value"
+                    );
                     vec![]
                 }
                 "save-state" => {
@@ -200,6 +204,7 @@ impl CommandSink {
                 // throw when the opt-in is absent, and `TryProcessCommand` logs
                 // the two errors below (the step then fails).
                 "set-env" | "add-path" => {
+                    tracing::warn!(command = %cmd.name, "unsecure workflow command refused");
                     effects.refused.push(cmd.name.clone());
                     vec![
                         format!("Error: Unable to process command '{line}' successfully."),

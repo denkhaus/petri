@@ -16,6 +16,8 @@ use std::{env, fs};
 
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 use smol_str::SmolStr;
+use tracing::Span;
+use tracing::field::Empty;
 
 use crate::ActionTreeSource;
 
@@ -103,6 +105,18 @@ impl GitActionSource {
     }
 
     /// Make sure the pinned commit is in the bare repository.
+    #[tracing::instrument(
+        name = "github.action_fetch",
+        level = "debug",
+        skip_all,
+        fields(
+            owner = %pinned.reference.owner,
+            repo = %pinned.reference.repo,
+            git_ref = %pinned.reference.git_ref,
+            sha = %pinned.sha,
+            cached = Empty,
+        )
+    )]
     fn fetch(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
         pinned
             .validate()
@@ -110,8 +124,10 @@ impl GitActionSource {
         let reference = &pinned.reference;
         let bare = self.ensure_bare(reference)?;
         if Self::has_commit(&bare, &pinned.sha) {
+            Span::current().record("cached", true);
             return Ok(bare);
         }
+        Span::current().record("cached", false);
         // By the reference as written: a tag or branch fetch works on every
         // transport, and GitHub also serves a commit id directly.
         let url = self.url(reference);
@@ -141,7 +157,15 @@ impl GitActionSource {
 }
 
 fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
-    if is_upstream_refusal(&message) {
+    let upstream_refusal = is_upstream_refusal(&message);
+    tracing::error!(
+        owner = %reference.owner,
+        repo = %reference.repo,
+        git_ref = %reference.git_ref,
+        upstream_refusal,
+        "action source could not serve the reference"
+    );
+    if upstream_refusal {
         return ActionSourceError::Unavailable {
             reference: reference.to_string(),
             reason:    Some(message),
@@ -196,6 +220,17 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
 }
 
 impl ActionSource for GitActionSource {
+    #[tracing::instrument(
+        name = "github.action_resolve",
+        level = "debug",
+        skip_all,
+        fields(
+            owner = %reference.owner,
+            repo = %reference.repo,
+            git_ref = %reference.git_ref,
+            sha = Empty,
+        )
+    )]
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
         reference
             .validate()
@@ -255,6 +290,7 @@ impl ActionSource for GitActionSource {
             reference: key.clone(),
             message:   format!("no tag or branch `{}` at {url}", reference.git_ref),
         })?;
+        Span::current().record("sha", sha.as_str());
         let pinned = PinnedAction {
             reference: reference.clone(),
             sha,
@@ -307,13 +343,26 @@ impl ActionTreeSource for GitActionSource {
     /// (`github/codeql-action/init` runs `../lib/init-entry.js`), so the tree
     /// an action executes from is the repository, exactly as on GitHub's
     /// runners. Extracted once per commit, whichever subpath asked first.
+    #[tracing::instrument(
+        name = "github.action_tree",
+        level = "debug",
+        skip_all,
+        fields(
+            owner = %pinned.reference.owner,
+            repo = %pinned.reference.repo,
+            sha = %pinned.sha,
+            extracted = Empty,
+        )
+    )]
     fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
         let lock = self.repo_lock(&pinned.reference);
         let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
         let dir = self.tree_entry_dir(pinned);
         let complete = dir.with_extension("complete");
-        if !complete.is_file() || !dir.is_dir() {
+        let needs_extract = !complete.is_file() || !dir.is_dir();
+        Span::current().record("extracted", needs_extract);
+        if needs_extract {
             let _ = fs::remove_file(&complete);
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;

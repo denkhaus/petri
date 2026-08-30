@@ -68,6 +68,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, mpsc};
 use tokio::time::{self, Instant};
+use tracing::field::Empty;
 
 use crate::oneshot::OneShotRunner;
 
@@ -318,7 +319,16 @@ pub(crate) async fn pull_image(config_args: &[&str], image: &str) -> Result<(), 
     let mut args: Vec<&str> = config_args.to_vec();
     args.extend(["pull", "--platform", FALLBACK_PLATFORM, image]);
     match run_docker(&args).await {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Every container from this image now runs under emulation, which
+            // is otherwise an order-of-magnitude slowdown with no trace at all.
+            tracing::warn!(
+                image = %image,
+                platform = FALLBACK_PLATFORM,
+                "image pulled for a fallback platform"
+            );
+            Ok(())
+        }
         Err(_) => Err(error),
     }
 }
@@ -419,9 +429,31 @@ struct DockerTeardown {
     services:  bool,
 }
 
-#[async_trait]
-impl Executor for DockerExecutor {
-    async fn acquire(
+/// The acquire-failure record. `EnvError::Backend`'s message is docker's own
+/// stderr — for a service it carries the container's log tail — so the event
+/// takes the variant and the structural fields the error already has, never the
+/// message.
+fn report_acquire_failure(error: &EnvError) {
+    // A `None` field records nothing, so the two structural fields appear on the
+    // `Backend` arm and are absent everywhere else.
+    let (backend, operation) = match error {
+        EnvError::Backend {
+            backend, operation, ..
+        } => (Some(backend.as_str()), Some(operation.as_str())),
+        _ => (None, None),
+    };
+    tracing::error!(
+        error_kind = error.kind(),
+        backend,
+        operation,
+        "scope environment acquire failed"
+    );
+}
+
+impl DockerExecutor {
+    /// The whole of [`Executor::acquire`], so its several `?` sites report
+    /// through one boundary.
+    async fn acquire_inner(
         &self,
         scope: &ScopeSpec,
         ctx: &AcquireContext,
@@ -447,9 +479,12 @@ impl Executor for DockerExecutor {
                 message: e.to_string(),
             })?;
 
+        let span = tracing::Span::current();
+        span.record("image", image.as_str());
         prepare_image(image, credentials.as_ref(), self.pull, scope.id, ctx).await?;
 
         let name = self.container_name(&scope.instance).await?;
+        span.record("container", name.as_str());
         // The fence half of the acquire contract (§9): a previous acquisition —
         // a crashed driver's included — left containers under these
         // deterministic names; removing them ends whatever still runs inside and
@@ -549,7 +584,48 @@ impl Executor for DockerExecutor {
         )
         .with_runner(Arc::new(runner)))
     }
+}
 
+#[async_trait]
+impl Executor for DockerExecutor {
+    #[tracing::instrument(
+        name = "scope.acquire",
+        skip_all,
+        fields(
+            scope = scope.id.raw(),
+            instance = %scope.instance,
+            image = Empty,
+            service_count = scope.services.len(),
+            container = Empty,
+        )
+    )]
+    async fn acquire(
+        &self,
+        scope: &ScopeSpec,
+        ctx: &AcquireContext,
+    ) -> Result<EnvHandle, EnvError> {
+        match self.acquire_inner(scope, ctx).await {
+            Ok(handle) => {
+                tracing::info!("scope environment acquired");
+                Ok(handle)
+            }
+            Err(error) => {
+                report_acquire_failure(&error);
+                Err(error)
+            }
+        }
+    }
+
+    #[tracing::instrument(
+        name = "scope.release",
+        skip_all,
+        fields(
+            scope = env.scope().raw(),
+            instance = %env.instance(),
+            outcome = ?outcome,
+            container = Empty,
+        )
+    )]
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
         let mut report = ReleaseReport::default();
         let Some(DockerTeardown {
@@ -562,6 +638,7 @@ impl Executor for DockerExecutor {
         else {
             return report.problem("docker executor was handed a foreign environment");
         };
+        tracing::Span::current().record("container", container.as_str());
 
         // One-shot containers first: they may hang off the job container's
         // network namespace, and everything of the scope is meant to stop.
@@ -573,7 +650,16 @@ impl Executor for DockerExecutor {
         let _ = run_docker(&["stop", "-t", &grace_secs, container]).await;
         match run_docker(&["rm", "-f", "-v", container]).await {
             Ok(_) => report = report.released(format!("container {container}")),
-            Err(e) => report = report.problem(format!("could not remove {container}: {e}")),
+            Err(e) => {
+                // A container left on the daemon. `e` is a `Backend` carrying
+                // docker's stderr, so only the structural half is reported.
+                tracing::warn!(
+                    container = %container,
+                    operation = "rm",
+                    "container removal failed"
+                );
+                report = report.problem(format!("could not remove {container}: {e}"));
+            }
         }
 
         // The service world goes with the scope — after the job container,
@@ -592,7 +678,10 @@ impl Executor for DockerExecutor {
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 report = report.released(workspace);
             }
-            Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = ?e, "workspace removal failed");
+                report = report.problem(format!("could not remove {}: {e}", path.display()));
+            }
         }
         report
     }
@@ -634,6 +723,17 @@ impl DockerEnv {
 
 #[async_trait]
 impl ExecEnv for DockerEnv {
+    #[tracing::instrument(
+        name = "process.spawn",
+        level = "debug",
+        skip_all,
+        fields(
+            container = %self.container,
+            program = %spec.program,
+            arg_count = spec.args.len(),
+            env_count = spec.env.len(),
+        )
+    )]
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
         // The pgid file lives on the bind mount, so the container writes it and the
         // host reads it.
@@ -891,7 +991,9 @@ impl ProcessHandle for DockerProcess {
         // So: wait until a status is recorded or the process group is gone. `SIGKILL`
         // guarantees the second, which is what bounds this loop.
         let mut status = self.recorded_status().await;
+        let mut status_source = "recorded";
         if status.is_none() {
+            status_source = "recorded_late";
             let _ = self.pgid().await;
             loop {
                 if let Some(recorded) = self.recorded_status().await {
@@ -905,11 +1007,26 @@ impl ProcessHandle for DockerProcess {
                 }
                 time::sleep(LIVENESS_POLL).await;
             }
+            if status.is_none() {
+                status_source = "client";
+            }
         }
 
         let _ = fs::remove_file(&self.pgid_file).await;
         let _ = fs::remove_file(&self.status_file).await;
-        Ok(status.unwrap_or_else(|| ExitStatus::from(client)))
+        let status = status.unwrap_or_else(|| ExitStatus::from(client));
+        // Which of the three answered is the subtlety the status itself never
+        // carries: the wrapper's file, that file read after the group went away,
+        // or the `docker exec` client's own code, which this module's header
+        // explains can lie.
+        tracing::debug!(
+            container = %self.container,
+            exit_code = status.code,
+            exit_signal = status.signal,
+            status_source,
+            "step process ended"
+        );
+        Ok(status)
     }
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
@@ -917,6 +1034,11 @@ impl ProcessHandle for DockerProcess {
             // The step never got far enough to record a group. Killing the `docker
             // exec` client is all that is left, and it is enough: there is nothing
             // inside to reach.
+            tracing::warn!(
+                container = %self.container,
+                signal = sig.name(),
+                "step process group was never recorded"
+            );
             let _ = self.child.start_kill();
             return Ok(());
         };
@@ -970,6 +1092,12 @@ pub(crate) fn next_token() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+#[tracing::instrument(
+    name = "docker.cli",
+    level = "debug",
+    skip_all,
+    fields(operation = args.first().copied().unwrap_or("docker"))
+)]
 pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
     let output = Command::new("docker")
         .args(args)
@@ -993,6 +1121,12 @@ pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
 
 /// [`run_docker`], with `input` written to the child's stdin — how a login's
 /// password travels without ever being an argument.
+#[tracing::instrument(
+    name = "docker.cli",
+    level = "debug",
+    skip_all,
+    fields(operation = operation)
+)]
 async fn run_docker_stdin(
     operation: &str,
     args: &[&str],

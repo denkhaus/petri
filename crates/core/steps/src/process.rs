@@ -277,7 +277,13 @@ pub async fn ladder(
             result = handle.wait() => {
                 return match result {
                     Ok(status) => Ending::Natural(status),
-                    Err(_) => Ending::Natural(ExitStatus::code(-1)),
+                    Err(err) => {
+                        // The synthesized -1 is indistinguishable in the log
+                        // from a step that really exited -1, so the reason the
+                        // wait failed has nowhere else to go.
+                        tracing::warn!(error = ?err, "waiting on the step process failed");
+                        Ending::Natural(ExitStatus::code(-1))
+                    }
                 };
             }
             ctl = control.recv() => match ctl {

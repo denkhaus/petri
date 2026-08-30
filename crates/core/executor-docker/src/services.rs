@@ -59,6 +59,15 @@ pub(crate) async fn realize(
     }
 }
 
+#[tracing::instrument(
+    name = "scope.services",
+    skip_all,
+    fields(
+        scope = scope.id.raw(),
+        service_count = scope.services.len(),
+        network = %base,
+    )
+)]
 async fn realize_inner(
     scope: &ScopeSpec,
     base: &str,
@@ -151,9 +160,11 @@ async fn await_health(container: &str, service: &SmolStr) -> Result<(), EnvError
         match (status, health) {
             (_, "healthy") | ("running", "") => return Ok(()),
             (_, "unhealthy") => {
+                report_unhealthy(service, container, "unhealthy");
                 return Err(service_failure(service, container, "reported unhealthy").await);
             }
             ("exited" | "dead", _) => {
+                report_unhealthy(service, container, "exited");
                 return Err(
                     service_failure(service, container, "exited before it was ready").await,
                 );
@@ -161,10 +172,23 @@ async fn await_health(container: &str, service: &SmolStr) -> Result<(), EnvError
             _ => {}
         }
         if Instant::now() >= deadline {
+            report_unhealthy(service, container, "timeout");
             return Err(service_failure(service, container, "never reported healthy").await);
         }
         time::sleep(HEALTH_POLL).await;
     }
+}
+
+/// Which sidecar broke and how, as structure. The error the caller builds next
+/// carries the same fact, but its message quotes the container's own output, so
+/// only `reason` — a fixed word per arm — travels here.
+fn report_unhealthy(service: &SmolStr, container: &str, reason: &'static str) {
+    tracing::warn!(
+        service = %service,
+        container = %container,
+        reason,
+        "service container never became healthy"
+    );
 }
 
 async fn service_failure(service: &SmolStr, container: &str, what: &str) -> EnvError {

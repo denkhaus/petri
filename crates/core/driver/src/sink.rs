@@ -3,6 +3,7 @@
 //! Masking runs **before** the append, so the persisted log is post-mask. There
 //! is no window in which a secret is on disk.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use executor::Masker;
@@ -46,26 +47,38 @@ impl LogSink {
     )]
     pub async fn record(&self, node: &str, firing: u64, stream: LogStream, line: &str) -> String {
         let masked = self.masker.mask(line);
-        let _ = fs::create_dir_all(&self.dir).await;
         let path = self.dir.join(format!("{}-{firing}.log", sanitize(node)));
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-        {
-            let tag = match stream {
-                LogStream::Stdout => "out",
-                LogStream::Stderr => "err",
-            };
-            let _ = file
-                .write_all(format!("[{tag}] {masked}\n").as_bytes())
-                .await;
+        if let Err(err) = self.append(&path, stream, &masked).await {
+            tracing::warn!(
+                path = %path.display(),
+                node,
+                firing,
+                error = ?err,
+                "step log write failed"
+            );
         }
         if self.echo {
             println!("{node} | {masked}");
         }
         masked
+    }
+
+    /// The write itself. Its result is the sink's only failure signal: without
+    /// it a full disk loses the whole step log while the run reports success.
+    /// The line never leaves this function.
+    async fn append(&self, path: &Path, stream: LogStream, masked: &str) -> io::Result<()> {
+        fs::create_dir_all(&self.dir).await?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        let tag = match stream {
+            LogStream::Stdout => "out",
+            LogStream::Stderr => "err",
+        };
+        file.write_all(format!("[{tag}] {masked}\n").as_bytes())
+            .await
     }
 
     /// Mask every string in an outcome's data before the finish record is

@@ -46,6 +46,7 @@ use steps::{ProcessConfig, ProcessStep, Shell, Step, StepCtx, StepFailure, Value
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time;
+use tracing::{Instrument as _, Span};
 
 use crate::commands::{CommandEffects, CommandSink};
 use crate::config::try_map_process_texts;
@@ -514,7 +515,7 @@ impl Session {
         let (tx, rx) = mpsc::channel(64);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
         let collected = sink.effects();
-        let sink_task = tokio::spawn(sink.run(rx));
+        let sink_task = tokio::spawn(sink.run(rx).instrument(Span::current()));
         let delegate = StepCtx {
             firing,
             attempt,
@@ -555,6 +556,10 @@ impl Session {
         let (outcome, effects) = match self.finish(commands).await {
             Ok(effects) => (outcome, effects),
             Err(failure) => {
+                tracing::warn!(
+                    failure_class = failure.class,
+                    "runner files could not be read back"
+                );
                 let _ = logs
                     .send(StepEvent::Log {
                         stream: LogStream::Stderr,

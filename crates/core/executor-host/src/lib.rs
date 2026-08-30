@@ -84,6 +84,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::{fs as async_fs, time as async_time};
+use tracing::field::Empty;
 
 /// How often `wait` re-checks for a recorded status or group death.
 pub const LIVENESS_POLL: Duration = Duration::from_millis(25);
@@ -237,13 +238,10 @@ struct HostTeardown {
     groups:    Arc<Mutex<Vec<PinnedGroup>>>,
 }
 
-#[async_trait]
-impl Executor for HostExecutor {
-    async fn acquire(
-        &self,
-        scope: &ScopeSpec,
-        _ctx: &AcquireContext,
-    ) -> Result<EnvHandle, EnvError> {
+impl HostExecutor {
+    /// The whole of [`Executor::acquire`], so its several `?` sites report
+    /// through one boundary.
+    async fn acquire_inner(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
         // This executor is deliberately Docker-free; a scope that declares
         // sidecar services needs a composition that can realize them.
         // `LocalExecutor` satisfies this guard by realizing the services
@@ -279,7 +277,9 @@ impl Executor for HostExecutor {
                 message: e.to_string(),
             })?;
         fence_prior_generations(&groups_root, self.fence_drain).await?;
-        let gen_dir = groups_root.join(fresh_generation_id());
+        let generation = fresh_generation_id();
+        tracing::Span::current().record("generation", generation.as_str());
+        let gen_dir = groups_root.join(&generation);
         async_fs::create_dir_all(&gen_dir)
             .await
             .map_err(|e| EnvError::Workspace {
@@ -306,9 +306,46 @@ impl Executor for HostExecutor {
             },
         ))
     }
+}
 
+#[async_trait]
+impl Executor for HostExecutor {
+    #[tracing::instrument(
+        name = "scope.acquire",
+        skip_all,
+        fields(
+            scope = scope.id.raw(),
+            instance = %scope.instance,
+            generation = Empty,
+        )
+    )]
+    async fn acquire(
+        &self,
+        scope: &ScopeSpec,
+        _ctx: &AcquireContext,
+    ) -> Result<EnvHandle, EnvError> {
+        match self.acquire_inner(scope).await {
+            Ok(handle) => {
+                tracing::info!("scope environment acquired");
+                Ok(handle)
+            }
+            Err(err) => {
+                // Debug capture is safe on this side: every variant reachable
+                // here carries a path, an io error, a pgid, or a literal.
+                tracing::error!(error = ?err, "scope environment acquire failed");
+                Err(err)
+            }
+        }
+    }
+
+    #[tracing::instrument(
+        name = "scope.release",
+        skip_all,
+        fields(scope = env.scope().raw(), instance = %env.instance(), outcome = ?outcome)
+    )]
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
         let mut report = ReleaseReport::default();
+        let scope = env.scope().raw();
         let Some(teardown) = env.teardown::<HostTeardown>() else {
             return report.problem("host executor was handed a foreign environment");
         };
@@ -355,6 +392,7 @@ impl Executor for HostExecutor {
         let leaked = await_drain(pgids.clone(), deadline).await;
         for pgid in pgids {
             report = if leaked.contains(&pgid) {
+                tracing::warn!(scope, pgid, "process group outlived release");
                 report.problem(format!("process group {pgid} outlived release"))
             } else {
                 report.released(format!("process group {pgid}"))
@@ -370,7 +408,10 @@ impl Executor for HostExecutor {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 report = report.released(workspace);
             }
-            Err(e) => report = report.problem(format!("could not remove {}: {e}", path.display())),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = ?e, "workspace removal failed");
+                report = report.problem(format!("could not remove {}: {e}", path.display()));
+            }
         }
         report
     }
@@ -390,6 +431,17 @@ struct HostEnv {
 
 #[async_trait]
 impl ExecEnv for HostEnv {
+    #[tracing::instrument(
+        name = "process.spawn",
+        level = "debug",
+        skip_all,
+        fields(
+            program = %spec.program,
+            arg_count = spec.args.len(),
+            env_count = spec.env.len(),
+            pgid = Empty,
+        )
+    )]
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
         let cwd = match &spec.cwd {
             Some(rel) => self.workspace.join(rel),
@@ -441,6 +493,7 @@ impl ExecEnv for HostEnv {
                 message: "the child exited before its pid could be read".into(),
             })?
             .cast_signed();
+        tracing::Span::current().record("pgid", pgid);
 
         let (tx, rx) = mpsc::channel(256);
         if let Some(stdout) = child.stdout.take() {
@@ -562,6 +615,21 @@ struct HostProcess {
     lines:       Option<LineStream>,
 }
 
+impl HostProcess {
+    /// How the status was determined, which the status itself never says: one
+    /// the sentinel recorded, one read after the group died, or the `SIGKILL`
+    /// synthesized for a sentinel that died without recording.
+    fn ended(&self, status: ExitStatus, status_source: &'static str) {
+        tracing::debug!(
+            pgid = self.pgid,
+            exit_code = status.code,
+            exit_signal = status.signal,
+            status_source,
+            "step process ended"
+        );
+    }
+}
+
 #[async_trait]
 impl ProcessHandle for HostProcess {
     fn lines(&mut self) -> Option<LineStream> {
@@ -579,17 +647,19 @@ impl ProcessHandle for HostProcess {
             if let Some(code) = recorded_status(&self.status_file).await {
                 let status = decode_status(code);
                 self.status = Some(status);
+                self.ended(status, "recorded");
                 return Ok(status);
             }
             if !group_is_live(self.pgid) {
                 // The sentinel died without recording — our KILL, or a hostile
                 // workload's. One more read covers a rename that landed between
                 // the two checks.
-                let status = match recorded_status(&self.status_file).await {
-                    Some(code) => decode_status(code),
-                    None => ExitStatus::signalled(libc::SIGKILL),
+                let (status, source) = match recorded_status(&self.status_file).await {
+                    Some(code) => (decode_status(code), "recorded_late"),
+                    None => (ExitStatus::signalled(libc::SIGKILL), "group_death"),
                 };
                 self.status = Some(status);
+                self.ended(status, source);
                 return Ok(status);
             }
             async_time::sleep(LIVENESS_POLL).await;
@@ -612,14 +682,23 @@ impl ProcessHandle for HostProcess {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ESRCH) => Ok(()),
-            _ => Err(EnvError::Signal(format!(
-                "killpg({}, {}) failed: {error}",
-                self.pgid,
-                sig.name()
-            ))),
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
         }
+        // The cancel ladder discards this `Result`, so an unsignallable group —
+        // a root-owned member from a `sudo` step — is otherwise silent, and it
+        // is the direct cause of a step that will not die.
+        tracing::warn!(
+            pgid = self.pgid,
+            signal = sig.name(),
+            error = ?error,
+            "process group signal failed"
+        );
+        Err(EnvError::Signal(format!(
+            "killpg({}, {}) failed: {error}",
+            self.pgid,
+            sig.name()
+        )))
     }
 }
 
@@ -649,6 +728,15 @@ fn fresh_generation_id() -> String {
 /// fails the acquire with [`EnvError::FenceLeaked`] instead. Fencing an
 /// already-fenced (or already-dead) generation is a no-op, which is what makes
 /// the fence idempotent.
+#[tracing::instrument(
+    name = "scope.fence",
+    level = "debug",
+    skip_all,
+    fields(
+        drain_ms = u64::try_from(drain.as_millis()).unwrap_or(u64::MAX),
+        group_count = Empty,
+    )
+)]
 async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<(), EnvError> {
     let Ok(entries) = fs::read_dir(groups_root) else {
         return Ok(());
@@ -686,6 +774,7 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
             discovered.push((generation.clone(), pgid));
         }
     }
+    tracing::Span::current().record("group_count", discovered.len());
 
     let deadline = async_time::Instant::now() + drain;
     let pgids = discovered.iter().map(|(_, pgid)| *pgid).collect();

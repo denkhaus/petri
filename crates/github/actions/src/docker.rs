@@ -26,6 +26,8 @@ use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder, parse_outputs};
 use tokio::sync::mpsc;
 use tokio::time;
+use tracing::field::Empty;
+use tracing::{Instrument as _, Span};
 
 use crate::action::{ActionSourceCap, input_variable, stage};
 use crate::commands::CommandSink;
@@ -65,6 +67,19 @@ impl Step for DockerActionStep {
     }
 }
 
+#[tracing::instrument(
+    name = "github.docker_action_step",
+    level = "debug",
+    skip_all,
+    fields(
+        image_kind = match &config.image {
+            DockerActionImage::Registry(_) => "registry",
+            DockerActionImage::Dockerfile(_) => "dockerfile",
+        },
+        image_tag = Empty,
+        image_reuse = Empty,
+    )
+)]
 async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // The gate first: a phase whose condition is false pulls nothing and
     // creates nothing.
@@ -77,6 +92,11 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     let mut session = Session::begin(&ctx, &config.event).await?;
 
     let (image, repository, git_ref) = prepare_image(&config.image, &ctx).await?;
+    if let ContainerImage::Build { tag, reuse, .. } = &image {
+        let span = Span::current();
+        span.record("image_tag", tag.as_str());
+        span.record("image_reuse", *reuse);
+    }
 
     // Env values first: a bare `${{ env.NAME }}` there resolves from the job's
     // accumulated `GITHUB_ENV` — the environment this container receives — so
@@ -220,7 +240,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     let (tx, rx) = mpsc::channel(64);
     let sink = CommandSink::new(ctx.logs.clone(), ctx.secrets.masker(), allow_unsecure);
     let collected = sink.effects();
-    let sink_task = tokio::spawn(sink.run(rx));
+    let sink_task = tokio::spawn(sink.run(rx).instrument(Span::current()));
     let drain = forward_lines(handle.lines(), tx);
 
     let grace = ctx.env.grace();

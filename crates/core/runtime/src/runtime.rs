@@ -19,6 +19,7 @@ use executor::{
 };
 use frontend::{DirFiles, Frontend, Lowered, Span};
 use ir::Graph;
+use tracing::field::Empty;
 
 use crate::local::LocalExecutor;
 
@@ -267,6 +268,20 @@ impl Runtime {
 
     /// Read and lower one file. `Err` is an IO-or-usage problem; a rejected
     /// workflow comes back as `Ok` with diagnostics and no graph.
+    ///
+    /// The span is the only place that knows which frontend claimed the file;
+    /// the frontends themselves stay free of tracing, with diagnostics as their
+    /// one output channel.
+    #[tracing::instrument(
+        name = "runtime.lower",
+        level = "debug",
+        skip_all,
+        fields(
+            workflow_file = %file.display(),
+            frontend = Empty,
+            node_count = Empty,
+        )
+    )]
     pub fn lower(
         &self,
         file: &Path,
@@ -274,6 +289,8 @@ impl Runtime {
         repo: Option<&Path>,
     ) -> Result<Lowered, String> {
         let frontend = self.frontend_for(file, format)?;
+        let span = tracing::Span::current();
+        span.record("frontend", frontend.name());
         let repo = repo.map_or_else(|| frontend.repo_root(file), Path::to_path_buf);
         let text = fs::read_to_string(file)
             .map_err(|e| format!("could not read {}: {e}", file.display()))?;
@@ -283,7 +300,11 @@ impl Runtime {
             .to_string_lossy()
             .into_owned();
         let files = DirFiles { root: repo };
-        Ok(frontend.load(&name, &text, &files))
+        let lowered = frontend.load(&name, &text, &files);
+        if let Some(graph) = &lowered.graph {
+            span.record("node_count", graph.nodes.len());
+        }
+        Ok(lowered)
     }
 
     /// [`Runtime::lower`], then validate the graph against the step registry,
@@ -408,6 +429,13 @@ impl Runtime {
         let original = self.options.verify_replay.then(|| graph.clone());
         let report = build(graph)?.run().await;
         if let Some(graph) = original {
+            // The engine itself emits nothing, precisely because replay would
+            // say it all a second time; the check gets a span here instead.
+            let span = tracing::debug_span!(
+                "runtime.verify_replay",
+                record_count = report.state.log.len()
+            );
+            let _entered = span.enter();
             engine::verify_replay(graph, &report.state.log)?;
         }
         Ok(report)

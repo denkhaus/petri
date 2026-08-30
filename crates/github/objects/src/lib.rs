@@ -106,6 +106,7 @@ impl ObjectService {
         let thread = Builder::new()
             .name("petri-objects".into())
             .spawn(move || rt.block_on(http::serve(listener, backend, rx)))?;
+        tracing::info!(port, "object service listening");
         Ok(Self {
             port,
             token,

@@ -250,6 +250,14 @@ fn write_records(mut file: File, path: &Path, rx: &Receiver<Msg>) {
                     }
                 };
                 if let Err(message) = result {
+                    // The first failure sticks, so this says it once: the log
+                    // on disk is now a prefix of the run, and `finish` reports
+                    // it to whoever asked for the observer.
+                    tracing::warn!(
+                        events_file = %path.display(),
+                        error = ?message,
+                        "event log write failed; later records are dropped"
+                    );
                     failure = Some(format!("could not write `{}`: {message}", path.display()));
                 }
             }
@@ -373,6 +381,14 @@ fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostE
     let events = run_dir.join(EVENTS_FILE);
     let decoded = read_events(&events)?;
     if decoded.torn {
+        // The run died mid-write. The truncated tail is the run's own history,
+        // so say so before the file changes.
+        tracing::warn!(
+            events_file = %events.display(),
+            clean_bytes = decoded.clean_len,
+            record_count = decoded.log.len(),
+            "truncating an EOF-torn tail before resume"
+        );
         let file = OpenOptions::new()
             .write(true)
             .open(&events)

@@ -24,6 +24,7 @@ use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, Lowered};
 use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime};
+use tracing::field::{Empty, display};
 
 #[derive(Parser)]
 #[command(name = "petri", version, about = "A token-flow workflow engine")]
@@ -161,6 +162,16 @@ fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered,
     clippy::print_stderr,
     reason = "the summary is for the user, on stderr so stdout carries only the graph"
 )]
+#[tracing::instrument(
+    name = "cli.check",
+    skip_all,
+    fields(
+        workflow_file = %target.file.display(),
+        format = target.format.as_deref(),
+        error_count = Empty,
+        warning_count = Empty,
+    )
+)]
 fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> ExitCode {
     let lowered = match lowered_graph(rt, target, json) {
         Ok(lowered) => lowered,
@@ -168,6 +179,9 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
     };
     let errors = lowered.diagnostics.errors().count();
     let warnings = lowered.diagnostics.warnings().count();
+    let span = tracing::Span::current();
+    span.record("error_count", errors);
+    span.record("warning_count", warnings);
     if let Some(graph) = &lowered.graph {
         if print_graph {
             print!("{}", frontend::print_graph(graph));
@@ -196,6 +210,13 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
 #[expect(
     clippy::print_stderr,
     reason = "the CLI reports the run dir, each step and the final status to the user on stderr"
+)]
+// The run dir is `driver.run`'s field, and the user's first line of output. It
+// is not repeated here.
+#[tracing::instrument(
+    name = "cli.run",
+    skip_all,
+    fields(workflow_file = %target.file.display(), status = Empty)
 )]
 async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
     let lowered = match lowered_graph(rt, target, false) {
@@ -236,6 +257,7 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
         eprintln!("  {} {}", record.outcome.status.tag(), record.name);
     }
     let status = report.status;
+    tracing::Span::current().record("status", display(status));
     eprintln!("run: {status}");
     if status == RunStatus::Success {
         ExitCode::SUCCESS
@@ -246,7 +268,12 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
 
 #[expect(
     clippy::print_stderr,
-    reason = "the CLI reports the replay verdict to the user on stderr; no logging sink exists here"
+    reason = "the replay verdict is this command's output, and the user reads it on stderr"
+)]
+#[tracing::instrument(
+    name = "cli.replay",
+    skip_all,
+    fields(workflow_file = %target.file.display(), event_log = %log_path.display())
 )]
 fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
     let lowered = match lowered_graph(rt, target, false) {

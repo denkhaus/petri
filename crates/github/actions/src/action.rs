@@ -11,6 +11,8 @@ use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{ProcessConfig, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
 use tokio::task;
+use tracing::Span;
+use tracing::field::{Empty, display};
 
 use crate::config::{ActionConfig, ActionLocation};
 use crate::gate;
@@ -54,6 +56,12 @@ impl Step for ActionStep {
     }
 }
 
+#[tracing::instrument(
+    name = "github.action_step",
+    level = "debug",
+    skip_all,
+    fields(action = Empty, action_sha = Empty)
+)]
 async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // The gate first: a phase whose condition is false stages nothing and spawns
     // nothing.
@@ -67,6 +75,9 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     // Where the action's files are, as the process sees them.
     let (action_dir, repository, git_ref) = match &config.action {
         ActionLocation::Pinned(pinned) => {
+            let span = Span::current();
+            span.record("action", display(&pinned.reference));
+            span.record("action_sha", pinned.sha.as_str());
             let source = ctx.require_capability::<ActionSourceCap>()?;
             let root = stage(&ctx, &source.0, pinned).await?;
             let staged = match &pinned.reference.path {
@@ -79,11 +90,14 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
                 pinned.reference.git_ref.to_string(),
             )
         }
-        ActionLocation::Local { local } => (
-            format!("{}/{}", session.github_workspace(), local.trim_matches('/')),
-            String::new(),
-            String::new(),
-        ),
+        ActionLocation::Local { local } => {
+            Span::current().record("action", "local");
+            (
+                format!("{}/{}", session.github_workspace(), local.trim_matches('/')),
+                String::new(),
+                String::new(),
+            )
+        }
     };
 
     let mut env = config.env;
@@ -151,6 +165,17 @@ pub(crate) fn input_variable(name: &str) -> String {
 
 /// Put the action's tree into the job environment, once per scope instance, and
 /// return the staged repository root (relative to the workspace root).
+#[tracing::instrument(
+    name = "github.action_stage",
+    level = "debug",
+    skip_all,
+    fields(
+        owner = %pinned.reference.owner,
+        repo = %pinned.reference.repo,
+        sha = %pinned.sha,
+        cached = Empty,
+    )
+)]
 pub(crate) async fn stage(
     ctx: &StepCtx,
     source: &Arc<dyn ActionTreeSource>,
@@ -172,32 +197,43 @@ pub(crate) async fn stage(
         message: format!("could not check the staged action: {e}"),
     })?;
     if already.is_some() {
+        Span::current().record("cached", true);
         return Ok(root);
     }
+    Span::current().record("cached", false);
 
     let source = source.clone();
     let pinned_owned = pinned.clone();
-    let host_dir = task::spawn_blocking(move || source.tree(&pinned_owned))
-        .await
-        .map_err(|e| StepFailure {
-            class:   FETCH_CLASS,
-            message: format!("fetching `{pinned}` did not complete: {e}"),
-        })?
-        .map_err(|e| StepFailure {
-            class:   FETCH_CLASS,
-            message: e.to_string(),
-        })?;
+    let fetch_span = Span::current();
+    let host_dir = task::spawn_blocking(move || {
+        let _entered = fetch_span.enter();
+        source.tree(&pinned_owned)
+    })
+    .await
+    .map_err(|e| StepFailure {
+        class:   FETCH_CLASS,
+        message: format!("fetching `{pinned}` did not complete: {e}"),
+    })?
+    .map_err(|e| StepFailure {
+        class:   FETCH_CLASS,
+        message: e.to_string(),
+    })?;
     // One tarball, packed host-side from the fetched tree and extracted by the
     // environment's own `tar` — the delivery the checkout step uses. Mode bits
     // and symlinks survive, which per-file writes through `write_file` did not:
     // a shipped `setup.sh` arrived unexecutable and the action died spawning
     // it. One write also beats hundreds.
     let destination = root.to_string_lossy().into_owned();
-    let tarball = task::spawn_blocking(move || pack_tree(&destination, &host_dir))
-        .await
-        .map_err(|e| stage_error(format!("packing `{pinned}` did not complete: {e}")))?
-        .map_err(|e| stage_error(format!("could not pack `{pinned}`: {e}")))?;
+    let pack_span = Span::current();
+    let tarball = task::spawn_blocking(move || {
+        let _entered = pack_span.enter();
+        pack_tree(&destination, &host_dir)
+    })
+    .await
+    .map_err(|e| stage_error(format!("packing `{pinned}` did not complete: {e}")))?
+    .map_err(|e| stage_error(format!("could not pack `{pinned}`: {e}")))?;
 
+    let archive_bytes = tarball.len();
     let tar_rel = root.with_extension("tar");
     ctx.env
         .write_file(&tar_rel, &tarball)
@@ -205,6 +241,13 @@ pub(crate) async fn stage(
         .map_err(|e| stage_error(format!("could not write `{pinned}`'s archive: {e}")))?;
     drop(tarball);
     unpack(ctx, &tar_rel, pinned).await?;
+    tracing::info!(
+        owner = %pinned.reference.owner,
+        repo = %pinned.reference.repo,
+        sha = %pinned.sha,
+        archive_bytes,
+        "action tree staged"
+    );
     ctx.env
         .write_file(&marker, b"")
         .await

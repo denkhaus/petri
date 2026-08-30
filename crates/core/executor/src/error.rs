@@ -40,6 +40,23 @@ impl EnvError {
     /// The failure class recorded when acquiring an environment fails, so a bad
     /// image or a down daemon routes like any other failure.
     pub const ACQUIRE_CLASS: &'static str = "env_acquire";
+
+    /// A fixed discriminant, for diagnostics that may not carry the error
+    /// itself. A `Backend` message is the backing system's own stderr — a
+    /// container engine's, a service container's log tail — which no masker has
+    /// ever seen, so a caller that cannot vouch for the variant reports this
+    /// instead, beside the structural `backend` and `operation`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Workspace { .. } => "workspace",
+            Self::Spawn { .. } => "spawn",
+            Self::Signal(_) => "signal",
+            Self::Wait(_) => "wait",
+            Self::Backend { .. } => "backend",
+            Self::FenceLeaked { .. } => "fence_leaked",
+            Self::Gone => "gone",
+        }
+    }
 }
 
 /// What tearing an environment down actually managed to do.

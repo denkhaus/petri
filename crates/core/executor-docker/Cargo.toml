@@ -20,3 +20,4 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

@@ -300,7 +300,7 @@ pub async fn is_docker_available() -> bool {
 /// a failure (CI cannot tell a skipped battery from a passing one).
 #[expect(
     clippy::print_stderr,
-    reason = "the skip notice has to reach the test runner's output; testkit has no logging sink"
+    reason = "the skip notice belongs to the test runner's output, which no subscriber reads"
 )]
 pub async fn is_docker_ready() -> bool {
     if is_docker_available().await {

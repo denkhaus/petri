@@ -95,7 +95,15 @@ pub fn runtime() -> Runtime {
     // existence probe finds it on the host.
     let store = github_objects::default_store_dir();
     let tool_cache = github_objects::tool_cache_dir(&store);
-    let _ = fs::create_dir_all(&tool_cache);
+    if let Err(error) = fs::create_dir_all(&tool_cache) {
+        // The prologue's probe then finds nothing, and every `setup-*` action
+        // reinstalls its tool on every run.
+        tracing::warn!(
+            path = %tool_cache.display(),
+            error = ?error,
+            "tool cache directory could not be created"
+        );
+    }
     Runtime::standard()
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests)
@@ -118,13 +126,8 @@ pub fn runtime() -> Runtime {
                     };
                     (caps.provide(cap), Some(Box::new(service) as _))
                 }
-                #[expect(
-                    clippy::print_stderr,
-                    reason = "the run goes on without the backend, and only the user can tell \
-                              whether that matters; this distribution has no logging sink"
-                )]
                 Err(error) => {
-                    eprintln!("warning: no results service for this run: {error}");
+                    tracing::warn!(error = ?error, "results service unavailable");
                     (caps, None)
                 }
             }
@@ -152,20 +155,15 @@ impl GithubSecrets {
     /// their API calls go anonymous (public reads work, rate-limited; writes
     /// fail with the API's own error). A missing-secret failure would instead
     /// stop every action that merely *names* the token, setup-* included.
-    #[expect(
-        clippy::print_stderr,
-        reason = "a token-less run changes how every action behaves, so the user is told once; \
-                  this distribution has no logging sink"
-    )]
     fn load_token() -> Option<String> {
         let token = env::var("GITHUB_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty())
             .or_else(gh_auth_token);
         if token.is_none() {
-            eprintln!(
-                "warning: no GITHUB_TOKEN (set it, or log in with `gh`); actions that use \
-                 `github.token` run anonymously"
+            tracing::warn!(
+                "no GITHUB_TOKEN (set it, or log in with `gh`); actions that use `github.token` \
+                 run anonymously"
             );
         }
         token

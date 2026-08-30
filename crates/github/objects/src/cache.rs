@@ -201,6 +201,13 @@ impl CacheStore {
                 dropped.push(entry.id);
             }
             index.entries.retain(|e| !dropped.contains(&e.id));
+            if !dropped.is_empty() {
+                tracing::info!(
+                    dropped_count = dropped.len(),
+                    budget_bytes = self.budget,
+                    "cache store pruned entries"
+                );
+            }
         }
         if let Ok(blobs) = fs::read_dir(self.dir.join("blobs")) {
             for blob in blobs.flatten() {

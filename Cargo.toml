@@ -119,3 +119,8 @@ tar = "0.4"
 serde_json = { version = "1", features = ["preserve_order"] }
 smol_str = { version = "0.3", features = ["serde"] }
 thiserror = "2"
+# Operator-facing diagnostics. Emitted by internal crates; the subscriber is
+# installed by the `petri` binary alone.
+tracing = "0.1"
+# `env-filter` is not a default feature. Only `petri-cli` may depend on this.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

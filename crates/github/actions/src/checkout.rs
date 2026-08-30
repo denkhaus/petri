@@ -58,6 +58,15 @@ impl Step for CheckoutStep {
     }
 }
 
+#[tracing::instrument(
+    name = "github.checkout_step",
+    level = "debug",
+    skip_all,
+    fields(
+        git_ref = config.reference.as_deref().unwrap_or(""),
+        dest_path = config.path.as_deref().unwrap_or(""),
+    )
+)]
 async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // The snapshot's name carries a process-global counter, not the firing
     // id: concurrent *runs* in one process (the corpus sweep) each count
@@ -209,6 +218,11 @@ async fn snapshot_repository(
     }
 
     let head = git(Some(clone), &["rev-parse", "HEAD"]).await?;
+    tracing::info!(
+        commit = head.trim(),
+        dirty_path_count = copied,
+        "local checkout snapshot ready"
+    );
     Ok(head.trim().to_string())
 }
 

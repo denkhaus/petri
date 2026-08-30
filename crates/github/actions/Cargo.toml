@@ -25,6 +25,7 @@ smol_str = { workspace = true }
 tar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 runtime = { workspace = true }

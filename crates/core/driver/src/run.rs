@@ -25,6 +25,7 @@ use steps::{Capabilities, Registry, StepCtx};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time;
+use tracing::Instrument as _;
 
 use crate::jitter::jittered;
 use crate::observe::{EventObserver, ObserveError};
@@ -259,6 +260,11 @@ struct Task {
     name:     SmolStr,
     scope:    ScopeId,
     attempt:  Attempt,
+    /// The firing's `driver.step` span, held so the driver-loop events about
+    /// this firing — the stop signal, the hard deadline, the finish — land
+    /// inside it: they run on the driver task, not in the runner future the
+    /// span is attached to.
+    span:     tracing::Span,
     /// The firing's serialized forwarder: control sends await channel capacity
     /// here, in order, so the driver loop never blocks on a full channel. When
     /// the firing ends the receiver drops, pending sends fail, and their
@@ -331,6 +337,11 @@ impl Driver {
         reason = "the host hands the dead run's graph and log over together; the log it keeps \
                   afterwards is the rebuilt one in `ResumeInfo`, not the loaded prefix"
     )]
+    #[tracing::instrument(
+        name = "driver.resume",
+        skip_all,
+        fields(run_dir = %config.run_dir.display(), record_count = log.len())
+    )]
     pub fn resume(
         graph: Graph,
         log: EventLog,
@@ -340,6 +351,11 @@ impl Driver {
         config: RunConfig,
     ) -> Result<(Self, ResumeInfo), ResumeError> {
         let point = engine::resume(graph, &log)?;
+        tracing::info!(
+            record_count = log.len(),
+            pending_count = point.pending.len(),
+            "run resumed"
+        );
         let info = ResumeInfo {
             redispatched: point.redispatched,
             log:          point.state.log.clone(),
@@ -421,6 +437,15 @@ impl Driver {
     }
 
     /// Run to completion.
+    #[tracing::instrument(
+        name = "driver.run",
+        skip_all,
+        fields(
+            run_dir = %self.config.run_dir.display(),
+            resumed = self.resume.is_some(),
+            node_count = self.engine.graph.nodes.len(),
+        )
+    )]
     pub async fn run(mut self) -> RunReport {
         match self.resume.take() {
             None => self.feed(Event::RunStarted).await,
@@ -451,6 +476,14 @@ impl Driver {
         let mut releases = Vec::new();
         for handle in mem::take(&mut self.releases) {
             if let Ok(report) = handle.await {
+                if !report.is_clean() {
+                    tracing::warn!(
+                        problem_count = report.problems.len(),
+                        released_count = report.released.len(),
+                        kept_count = report.kept.len(),
+                        "environment release reported problems"
+                    );
+                }
                 releases.push(report);
             }
         }
@@ -460,12 +493,29 @@ impl Driver {
         let mut observer_errors = Vec::new();
         for observer in &self.observers {
             if let Err(error) = observer.finish().await {
+                tracing::warn!(error = ?error, "observer finish failed");
                 observer_errors.push(error);
             }
         }
 
+        // The run's own failures, which no caller reads: reported once here,
+        // from the driver, so replay never emits them a second time.
+        for error in self.engine.errors() {
+            tracing::warn!(error = ?error, "engine run error");
+        }
+
+        let status = self.engine.folded_status();
+        tracing::info!(
+            status = %status,
+            firing_count = self.engine.history().len(),
+            engine_error_count = self.engine.errors().len(),
+            released_count = releases.len(),
+            observer_error_count = observer_errors.len(),
+            "run finished"
+        );
+
         RunReport {
-            status: self.engine.folded_status(),
+            status,
             state: self.engine,
             releases,
             observer_errors,
@@ -534,6 +584,11 @@ impl Driver {
         })
         .await;
         let grace = self.config.cleanup_grace;
+        tracing::info!(
+            live_firing_count = self.tasks.len(),
+            cleanup_grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+            "run cancel requested"
+        );
         let tx = self.tx.clone();
         self.cleanup_timer = Some(tokio::spawn(async move {
             time::sleep(grace).await;
@@ -549,6 +604,7 @@ impl Driver {
         if let Some(timer) = self.cleanup_timer.take() {
             timer.abort();
         }
+        tracing::warn!(live_firing_count = self.tasks.len(), "run kill requested");
         self.feed(Event::KillRequested {
             scope: ir::CancelScopeId::ROOT,
         })
@@ -602,7 +658,20 @@ impl Driver {
     /// trail) and the host hears `NotLive`.
     fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
         let commands = self.apply_event(Event::ControlRequested { firing, ctl });
-        match commands.into_iter().next() {
+        let command = commands.into_iter().next();
+        let accepted = matches!(
+            command,
+            Some(Command::DeliverControl {
+                ctl: Control::Deliver(_),
+                ..
+            })
+        );
+        tracing::debug!(
+            firing = firing.raw(),
+            accepted,
+            "control delivery attempted"
+        );
+        match command {
             Some(Command::DeliverControl {
                 firing,
                 ctl: Control::Deliver(payload),
@@ -659,6 +728,12 @@ impl Driver {
                 base_delay,
             } => {
                 let delay = jittered(base_delay, firing, next_attempt);
+                tracing::debug!(
+                    firing = firing.raw(),
+                    next_attempt = next_attempt.raw(),
+                    delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "retry scheduled"
+                );
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     time::sleep(delay).await;
@@ -829,13 +904,24 @@ impl Driver {
         };
         // One lookup for both: a firing whose node left the graph has no runner
         // either, and fails here rather than carrying a nameless step forward.
-        let Some((name, runner)) = self.engine.graph.node(node).and_then(|n| {
+        let Some((name, kind, runner)) = self.engine.graph.node(node).and_then(|n| {
             let runner = self.runners.get(&n.step.kind)?;
-            Some((n.name.clone(), runner))
+            Some((n.name.clone(), n.step.kind.clone(), runner))
         }) else {
             self.fail_now(firing, attempt, "no runner for this step kind", NO_RUNNER);
             return;
         };
+
+        let span = tracing::debug_span!(
+            "driver.step",
+            firing = firing.raw(),
+            node = %name,
+            node_id = node.raw(),
+            attempt = attempt.raw(),
+            generation = resolved.generation().raw(),
+            scope = scope.raw(),
+            step_kind = %kind,
+        );
 
         let (log_tx, mut log_rx) = mpsc::channel::<StepEvent>(256);
         let (control_tx, control_rx) = mpsc::channel::<Control>(CONTROL_CHANNEL_CAPACITY);
@@ -883,16 +969,19 @@ impl Driver {
             control: control_rx,
         };
         let done_tx = self.tx.clone();
-        let join = tokio::spawn(async move {
-            let outcome = runner.run(ctx).await;
-            let _ = done_tx
-                .send(Signal::Finished {
-                    firing,
-                    attempt,
-                    outcome,
-                })
-                .await;
-        });
+        let join = tokio::spawn(
+            async move {
+                let outcome = runner.run(ctx).await;
+                let _ = done_tx
+                    .send(Signal::Finished {
+                        firing,
+                        attempt,
+                        outcome,
+                    })
+                    .await;
+            }
+            .instrument(span.clone()),
+        );
 
         // The per-attempt timeout. `Budget.timeout` is per attempt, not per firing.
         let mut timeout = None;
@@ -910,6 +999,7 @@ impl Driver {
             name,
             scope,
             attempt,
+            span,
             forwards: forward_tx,
             join,
             timeout,
@@ -919,6 +1009,12 @@ impl Driver {
     }
 
     fn fail_now(&mut self, firing: FiringId, attempt: Attempt, message: &str, class: &str) {
+        tracing::warn!(
+            firing = firing.raw(),
+            attempt = attempt.raw(),
+            failure_class = class,
+            "step could not be dispatched"
+        );
         let outcome = Outcome::new(
             Status::Failure(FailureInfo::new(message).with_class(class)),
             Value::Null,
@@ -950,6 +1046,14 @@ impl Driver {
             task.reason = Some(reason);
         }
         let kill = matches!(ctl, Control::Kill);
+        tracing::debug!(
+            parent: &task.span,
+            firing = firing.raw(),
+            attempt = task.attempt.raw(),
+            control = if kill { "kill" } else { "cancel" },
+            reason = ?reason,
+            "step stop signalled"
+        );
         let _ = task.forwards.send(Forward { ctl, ack: None });
 
         // A kill's deadline has no grace in it: the step was told to SIGKILL and
@@ -1035,6 +1139,13 @@ impl Driver {
         }
         let reason = task.reason.unwrap_or(CancelReason::Requested);
         let name = task.name.clone();
+        tracing::warn!(
+            parent: &task.span,
+            firing = firing.raw(),
+            attempt = attempt.raw(),
+            reason = ?reason,
+            "step did not return after cancel"
+        );
         // The step ignored its cancel. Stop waiting for it.
         task.join.abort();
 
@@ -1056,7 +1167,9 @@ impl Driver {
     }
 
     async fn finish(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
-        let reason = match self.tasks.remove(&firing) {
+        // A firing finished from `fail_now` or from resume's direct finish has no
+        // task, and so no step span: those events belong to the run instead.
+        let (reason, span) = match self.tasks.remove(&firing) {
             Some(task) => {
                 if let Some(timer) = task.timeout {
                     timer.abort();
@@ -1068,9 +1181,9 @@ impl Driver {
                 if outcome.status.is_failure() {
                     self.scope_failed.insert(task.scope);
                 }
-                task.reason
+                (task.reason, task.span)
             }
-            None => None,
+            None => (None, tracing::Span::current()),
         };
 
         // A step reports `Cancelled` whichever way it was stopped; only the driver
@@ -1096,6 +1209,13 @@ impl Driver {
                         .expect("splice requests always encode"),
                 )
             {
+                tracing::warn!(
+                    parent: &span,
+                    firing = firing.raw(),
+                    attempt = attempt.raw(),
+                    splice_count = outcome.splices.len(),
+                    "splice request held a registered secret"
+                );
                 outcome = engine::reject_splices(
                     outcome,
                     "a splice request contained a registered secret value; \
@@ -1111,6 +1231,16 @@ impl Driver {
             .iter()
             .map(|(k, v)| (k.clone(), self.sink.mask_value(v)))
             .collect();
+
+        tracing::debug!(
+            parent: &span,
+            firing = firing.raw(),
+            attempt = attempt.raw(),
+            status = outcome.status.tag(),
+            failure_class = outcome.status.failure_info().map(|info| info.class.as_str()),
+            duration_ms = outcome.metrics.duration_ms,
+            "step finished"
+        );
 
         self.feed(Event::StepFinished {
             firing,

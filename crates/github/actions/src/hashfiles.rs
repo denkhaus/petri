@@ -151,6 +151,12 @@ pub(crate) fn splice(text: &str, calls: &BTreeMap<Vec<String>, String>) -> Strin
 }
 
 /// Every distinct `hashFiles(patterns…)` in one step, in one workspace walk.
+#[tracing::instrument(
+    name = "github.hashfiles",
+    level = "debug",
+    skip_all,
+    fields(call_count = patterns.len())
+)]
 async fn compute(
     env: &dyn ExecEnv,
     github_workspace: &str,
