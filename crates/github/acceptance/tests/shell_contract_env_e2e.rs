@@ -462,15 +462,6 @@ async fn a_deleted_or_replaced_env_file_is_not_a_failure_in_a_container() {
 /// successfully.` and sets the step's `CommandResult` to failed — so the
 /// steps after it see a failure, and `continue-on-error` softens it exactly
 /// as it softens an exit status. The same holds for `GITHUB_OUTPUT`.
-///
-/// Ignored until `Session::conclude` fails the step instead of warning: the
-/// `GITHUB_OUTPUT` half already holds (the process step's `bad_output_file`
-/// failure); the `GITHUB_ENV` half logs `Warning:` and lets the next step
-/// run. The fix is in `session.rs`: `conclude` takes the outcome and the
-/// step's `soft_fail`, and on a read-back error logs `Error:` and overturns
-/// a success-like outcome — `Status::partial` under `continue-on-error`,
-/// `Status::Failure` (class `runner_files`) otherwise — leaving a failed or
-/// cancelled outcome as it is; a missing file stays a non-event.
 const MALFORMED_ENV_WORKFLOW: &str = r#"
 on: push
 jobs:
@@ -554,7 +545,6 @@ fn assert_malformed_env_fails(report: &RunReportPlus) {
     );
 }
 
-#[ignore = "divergence: a malformed GITHUB_ENV read-back logs a warning and the step's outcome stands; GitHub's FileCommandManager.ProcessFiles sets CommandResult=Failed and fails the step"]
 #[tokio::test]
 async fn a_malformed_env_file_fails_the_step() {
     let graph = lower_ok(MALFORMED_ENV_WORKFLOW);
@@ -562,7 +552,6 @@ async fn a_malformed_env_file_fails_the_step() {
     assert_malformed_env_fails(&report);
 }
 
-#[ignore = "divergence: a malformed GITHUB_ENV read-back logs a warning and the step's outcome stands; GitHub's FileCommandManager.ProcessFiles sets CommandResult=Failed and fails the step"]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_malformed_env_file_fails_the_step_in_a_container() {
     if !testkit::docker_ready().await {
