@@ -137,10 +137,31 @@ impl GitActionSource {
 }
 
 fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
+    if upstream_refusal(&message) {
+        return ActionSourceError::Unavailable {
+            reference: reference.to_string(),
+            reason: Some(message),
+        };
+    }
     ActionSourceError::Fetch {
         action: reference.to_string(),
         message,
     }
+}
+
+/// Whether git's stderr is a terminal upstream refusal — the repository is
+/// private or removed, and no anonymous fetch will ever serve it — as opposed
+/// to a transient or local failure. GitHub answers `Repository not found` for
+/// both private and missing repositories; a credential prompt with prompts
+/// disabled is the same refusal seen from the auth side. Classified as
+/// [`ActionSourceError::Unavailable`] with the reason, so the lowering rejects
+/// it as `unsupported.action.upstream_gone` — the same code the snapshot
+/// source reports from its recorded refresh failures, keeping the two sources'
+/// verdicts on one reference identical.
+fn upstream_refusal(stderr: &str) -> bool {
+    ["Repository not found", "could not read Username", "Authentication failed"]
+        .iter()
+        .any(|needle| stderr.contains(needle))
 }
 
 /// Run git and return its stdout, or its stderr as the error.
@@ -192,9 +213,18 @@ impl ActionSource for GitActionSource {
             ],
             None,
         )
-        .map_err(|message| ActionSourceError::Unresolvable {
-            reference: key.clone(),
-            message,
+        .map_err(|message| {
+            if upstream_refusal(&message) {
+                ActionSourceError::Unavailable {
+                    reference: key.clone(),
+                    reason: Some(message),
+                }
+            } else {
+                ActionSourceError::Unresolvable {
+                    reference: key.clone(),
+                    message,
+                }
+            }
         })?;
         // Prefer the peeled tag (the commit an annotated tag points at), then the
         // tag itself, then a branch.
@@ -341,4 +371,37 @@ pub fn default_cache_dir() -> PathBuf {
         return PathBuf::from(home).join(".cache").join("petri");
     }
     std::env::temp_dir().join("petri-cache")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact stderr shapes seen in the wild: the sweep's anonymous fetch of
+    /// an org-private repository, and the snapshot refresh's recorded refusal.
+    /// Both must classify as `Unavailable` (→ `upstream_gone`), so the git
+    /// source and the snapshot source give one reference the same verdict. A
+    /// transient failure stays `Fetch`.
+    #[test]
+    fn terminal_upstream_refusals_are_unavailable() {
+        let reference =
+            ActionRef::parse("vercel/gh-sts-action@c30f0b7a16e0766c4ffbc0d210b54d0e75053fd2")
+                .expect("a valid reference");
+        for refusal in [
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "remote: Repository not found.\nfatal: repository 'https://github.com/x/y/' not found",
+            "fatal: Authentication failed for 'https://github.com/x/y/'",
+        ] {
+            match fetch_error(&reference, refusal.to_string()) {
+                ActionSourceError::Unavailable { reason, .. } => {
+                    assert_eq!(reason.as_deref(), Some(refusal));
+                }
+                other => panic!("{refusal:?} should be Unavailable, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            fetch_error(&reference, "error: RPC failed; curl 56".to_string()),
+            ActionSourceError::Fetch { .. }
+        ));
+    }
 }

@@ -64,9 +64,11 @@ pub const OUT_OF_SCOPE: &[&str] = &[
 /// denominator the way Windows/macOS workflows do.
 pub const CALLEE_ONLY: &[&str] = &["runs_on.callee_input"];
 
-/// The referenced repository is gone upstream (private or removed, recorded at
-/// snapshot refresh): the workflow is broken on GitHub itself, so it measures
-/// nothing about this runner. Leaves the denominator.
+/// The referenced repository is unavailable upstream — removed, or private to
+/// its org (where GitHub-side Actions access may still let the workflow run
+/// there). Either way no anonymous local fetch can ever serve it, so the
+/// workflow measures nothing about this runner. Detected at snapshot refresh,
+/// or live by the git source's refusal classification. Leaves the denominator.
 pub const BROKEN_UPSTREAM: &[&str] = &["action.upstream_gone"];
 
 impl Outcome {

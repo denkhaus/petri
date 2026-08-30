@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 305 references, 1
 | Result (of the in-scope 248) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 218 | 88% |
-| rejected with a specific `unsupported.*` code | 8 | 3% |
+| lowered with warnings | 219 | 88% |
+| rejected with a specific `unsupported.*` code | 7 | 3% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -69,7 +69,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `runs_on.expression` | 2 |
 | `runs_on.unknown` | 2 |
 | `action.nested_local` | 1 |
-| `continue_on_error.expression` | 1 |
 | `step.background` | 1 |
 
 ## Failures that are not specific rejections
@@ -340,7 +339,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | rails/rails | `rails_releaser_tests.yml` | warnings | 6 | — |
 | rails/rails | `release.yml` | warnings | 11 | — |
 | rails/rails | `stale.yml` | warnings | 3 | — |
-| rust-lang/cargo | `audit.yml` | unsupported | — | `continue_on_error.expression` |
+| rust-lang/cargo | `audit.yml` | warnings | 4 | — |
 | rust-lang/cargo | `contrib.yml` | warnings | 12 | — |
 | rust-lang/cargo | `main.yml` | out of scope | — | — |
 | rust-lang/cargo | `release.yml` | warnings | 4 | — |
