@@ -263,9 +263,12 @@ async fn shell_steps_write_and_read_the_env_files_in_a_container() {
 
 /// `defaults.run.working-directory` at the workflow, overridden at the job,
 /// overridden at the step; every relative path resolves against
-/// `GITHUB_WORKSPACE`. The directories are made by an earlier real step —
-/// which is itself the test that a script's filesystem effects reach the
-/// next step. `pwd -P` on both sides keeps symlinked temp dirs honest.
+/// `GITHUB_WORKSPACE`, in every spelling GitHub combines away (`.`, `./`,
+/// `./sub`, `sub/.`, `sub/./deeper`, `sub/`). The directories are made by an
+/// earlier real step — which is itself the test that a script's filesystem
+/// effects reach the next step — and that step is each job's first, so its
+/// working directory resolves before anything has created `repo/`. `pwd -P`
+/// on both sides keeps symlinked temp dirs honest.
 const WORKING_DIRECTORY_WORKFLOW: &str = r#"
 on: push
 defaults:
@@ -290,16 +293,30 @@ jobs:
       run:
         working-directory: job-dir
     steps:
-      - working-directory: .
-        run: mkdir -p job-dir step-dir tpl-dir sub/deeper
+      - working-directory: ./
+        run: |
+          mkdir -p job-dir step-dir tpl-dir sub/deeper
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE" && pwd -P)" ] && echo dot-slash-is-the-workspace
       - run: |
           [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/job-dir" && pwd -P)" ] && echo inherits-job-default
       - working-directory: step-dir
         run: |
           [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/step-dir" && pwd -P)" ] && echo step-overrides-job
+      - working-directory: ./step-dir
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/step-dir" && pwd -P)" ] && echo dot-slash-prefix-resolves
+      - working-directory: step-dir/.
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/step-dir" && pwd -P)" ] && echo trailing-dot-resolves
+      - working-directory: step-dir/
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/step-dir" && pwd -P)" ] && echo trailing-slash-resolves
       - working-directory: sub/deeper
         run: |
           [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/sub/deeper" && pwd -P)" ] && echo nested-relative-resolves
+      - working-directory: sub/./deeper
+        run: |
+          [ "$(pwd -P)" = "$(cd "$GITHUB_WORKSPACE/sub/deeper" && pwd -P)" ] && echo interior-dot-resolves
       - working-directory: tpl-dir
         shell: bash --noprofile --norc -euo pipefail {0}
         run: |
@@ -314,12 +331,20 @@ fn assert_working_directories(report: &RunReportPlus) {
     assert_lines(
         report,
         &[
+            // `.` and `./` on the first step of each job: the workspace itself,
+            // before anything has created `repo/`.
             "dot-is-the-workspace",
+            "dot-slash-is-the-workspace",
             "inherits-workflow-default",
             "marker-persisted",
             "inherits-job-default",
             "step-overrides-job",
+            // The spellings GitHub combines away all land in the same directory.
+            "dot-slash-prefix-resolves",
+            "trailing-dot-resolves",
+            "trailing-slash-resolves",
             "nested-relative-resolves",
+            "interior-dot-resolves",
             // A custom `{0}` template with a working directory: the script is
             // staged and run from that directory, with the template's own
             // flags (`-u` here, which the direct bash invocation lacks).
