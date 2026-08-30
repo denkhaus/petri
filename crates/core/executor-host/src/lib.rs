@@ -577,23 +577,33 @@ impl ProcessHandle for HostProcess {
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
         // killpg, never kill: the group is the unit. The sentinel ignores TERM, so
-        // the polite rung passes through it to the workload.
+        // the polite rung passes through it to the workload. KILL repeats until
+        // the group drains: a shell can fork after the kernel selects the first
+        // signal's recipients, and that new child must not keep the output pipes
+        // open until the driver's hard deadline.
         //
         // SAFETY: `killpg` takes a pgid and a signal number and has no memory
         // effects. ESRCH means the group is already gone, which is success for our
-        // purposes — the ladder is idempotent.
-        let result = unsafe { libc::killpg(self.pgid, sig.number()) };
-        if result == 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ESRCH) => Ok(()),
-            _ => Err(EnvError::Signal(format!(
-                "killpg({}, {}) failed: {error}",
-                self.pgid,
-                sig.name()
-            ))),
+        // purposes — the ladder is idempotent. The executor keeps the sentinel
+        // unreaped, so the pgid cannot be recycled during the loop.
+        loop {
+            let result = unsafe { libc::killpg(self.pgid, sig.number()) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                return match error.raw_os_error() {
+                    Some(libc::ESRCH) => Ok(()),
+                    _ => Err(EnvError::Signal(format!(
+                        "killpg({}, {}) failed: {error}",
+                        self.pgid,
+                        sig.name()
+                    ))),
+                };
+            }
+
+            if sig != Sig::Kill || !group_is_live(self.pgid) {
+                return Ok(());
+            }
+            tokio::time::sleep(LIVENESS_POLL).await;
         }
     }
 }
