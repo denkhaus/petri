@@ -80,7 +80,7 @@ use executor::{
     ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
 };
 use smol_str::SmolStr;
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::{fs as async_fs, time as async_time};

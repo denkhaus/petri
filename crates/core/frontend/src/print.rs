@@ -5,7 +5,7 @@
 //! reads back, so the output is close to a native-format document for the
 //! graph.
 
-use std::fmt::Write;
+use std::fmt::Write as _;
 
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{Expr, ExprId, ExprTable, Graph, Guard, JoinPolicy, RuntimeTarget};

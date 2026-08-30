@@ -15,7 +15,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use driver::RunConfig;
-use executor::{Executor, ProcessSpec, Retention, ScopeOutcome, ScopeSpec};
+use executor::{Executor as _, ProcessSpec, Retention, ScopeOutcome, ScopeSpec};
 use executor_host::HostExecutor;
 use ir::{CancelScopeId, GraphBuilder, RunStatus, ScopeId, StepRef};
 use serde_json::json;

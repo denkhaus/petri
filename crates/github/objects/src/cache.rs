@@ -27,6 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::{index, token};
 
@@ -71,7 +72,6 @@ impl CacheStore {
 
     /// The blob id for a `(key, version)` pair.
     pub(crate) fn blob_id(key: &str, version: &str) -> String {
-        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         hasher.update([0]);

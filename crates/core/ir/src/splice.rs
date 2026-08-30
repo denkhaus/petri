@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
-use serde::ser::SerializeStruct;
+use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smol_str::SmolStr;
 

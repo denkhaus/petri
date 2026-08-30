@@ -30,9 +30,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac as _};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Body as HttpBody, Bytes, Frame, Incoming};
 use hyper::header::{
     ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HOST, RANGE,
@@ -43,7 +43,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use sha2::Sha256;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener as AsyncTcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{fs as async_fs, io as async_io, task};

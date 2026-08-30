@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use executor::{
-    AcquireContext, Executor, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec, Sig,
+    AcquireContext, Executor as _, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec, Sig,
 };
 use executor_docker::{DockerExecutor, list_containers};
 use executor_host::HostExecutor;

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use executor::Masker;
 use ir::{LogStream, Value};
 use tokio::fs::{self, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::AsyncWriteExt as _;
 
 /// Writes step output to the run directory, and optionally echoes it.
 pub struct LogSink {

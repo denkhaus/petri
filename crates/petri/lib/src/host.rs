@@ -30,7 +30,7 @@
 //! needs a stronger bar owns its own sink.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};

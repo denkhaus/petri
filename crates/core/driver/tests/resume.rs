@@ -14,7 +14,7 @@ use driver::{
     RunHandle, RunReport,
 };
 use engine::{CANCEL_ESCALATION_KEY, Command, Event, EventLog, EventRecord, EventSource};
-use executor::SecretProvider;
+use executor::SecretProvider as _;
 use ir::{
     Arm, BinOp, Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId, StepRef, Value,
 };

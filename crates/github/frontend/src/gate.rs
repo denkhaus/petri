@@ -37,6 +37,7 @@
 use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::literal_value;
 use frontend::expr::{BinaryOp, Expr, UnaryOp};
+use ir::expr::builtins::loose;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{ExprTable, Value};
 use serde_json::json;
@@ -258,7 +259,6 @@ pub fn eval<E>(
     gate: &Gate,
     env: &mut dyn FnMut(&str) -> Result<Option<Value>, E>,
 ) -> Result<Value, E> {
-    use ir::expr::builtins::loose;
     Ok(match gate {
         Gate::Lit(v) => v.clone(),
         Gate::Env { name, or } => match env(name)? {
@@ -450,16 +450,15 @@ pub fn condition_tree(
 }
 
 fn gate_op(op: BinaryOp) -> GateOp {
-    use frontend::expr::BinaryOp as B;
     match op {
-        B::Eq => GateOp::Eq,
-        B::Ne => GateOp::Ne,
-        B::Lt => GateOp::Lt,
-        B::Le => GateOp::Le,
-        B::Gt => GateOp::Gt,
-        B::Ge => GateOp::Ge,
-        B::And => GateOp::And,
-        B::Or => GateOp::Or,
+        BinaryOp::Eq => GateOp::Eq,
+        BinaryOp::Ne => GateOp::Ne,
+        BinaryOp::Lt => GateOp::Lt,
+        BinaryOp::Le => GateOp::Le,
+        BinaryOp::Gt => GateOp::Gt,
+        BinaryOp::Ge => GateOp::Ge,
+        BinaryOp::And => GateOp::And,
+        BinaryOp::Or => GateOp::Or,
     }
 }
 
@@ -574,7 +573,6 @@ mod tests {
 
     #[test]
     fn operators_follow_github_semantics() {
-        use ir::expr::builtins::loose;
         // `&&`/`||` return operands; comparisons are loose and case-insensitive.
         let and = Gate::Op {
             op:   GateOp::And,

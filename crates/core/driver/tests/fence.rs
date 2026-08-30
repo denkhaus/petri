@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use executor::{EnvError, Executor, ExitStatus, ProcessSpec, ScopeOutcome, ScopeSpec};
+use executor::{EnvError, Executor as _, ExitStatus, ProcessSpec, ScopeOutcome, ScopeSpec};
 use executor_host::HostExecutor;
 use ir::ScopeId;
 use support::*;

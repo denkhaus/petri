@@ -5,7 +5,9 @@
 use std::net::TcpStream;
 use std::path::Path;
 
-use executor::{AcquireContext, Executor, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec};
+use executor::{
+    AcquireContext, Executor as _, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec,
+};
 use executor_docker::{DockerExecutor, list_containers};
 use ir::{RuntimeSpec, ScopeId};
 use runtime::LocalExecutor;

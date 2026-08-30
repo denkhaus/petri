@@ -7,7 +7,7 @@
 //! machinery is needed to test it.
 
 use std::fmt::Write as _;
-use std::io::{Read, Write};
+use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::{env, fs, process};

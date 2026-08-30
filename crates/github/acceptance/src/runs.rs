@@ -27,12 +27,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::env::consts::ARCH;
+use std::fmt::Write as _;
 
 use frontend_gha::action::{
     ACTION_KIND, ActionLocation, DOCKER_ACTION_KIND, PinnedAction, RUN_KIND,
 };
+use frontend_gha::exprs::{has_env_sentinel, replace_env_sentinels};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
-use ir::{Expansion, Graph, RuntimeTarget, Value};
+use ir::{BinOp, ExpandTarget, Expansion, Expr, ExprId, Graph, NodeId, RuntimeTarget, Value};
 use smol_str::SmolStr;
 
 /// The pinned battery images: flavor tags (`:slim`) move after maintained
@@ -140,8 +142,6 @@ pub fn stub_run_scripts(graph: &mut Graph) {
 /// another job's tainted output is tainted too), then reads of tainted
 /// outputs, then expansions whose items ride one.
 pub fn stubbed_output_consumers(graph: &Graph) -> BTreeSet<String> {
-    use ir::{BinOp, ExpandTarget, Expr, ExprId, NodeId};
-
     // The tainted job outputs, by `(<job>/done node, output name)`.
     type Tainted = BTreeSet<(String, String)>;
 
@@ -375,8 +375,6 @@ pub fn stubbed_output_consumers(graph: &Graph) -> BTreeSet<String> {
 /// to the env value's own expression. A ref reading only *defaulted* inputs
 /// resolves to a real ref and is not collected: its failures stay gaps.
 pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
-    use ir::{Expr, ExprId};
-
     // Does the ref expression read an empty-falling dispatch input, chasing
     // `env.<name>` into the scope's env expressions? `seen` breaks env cycles.
     fn reads_empty_input(
@@ -593,7 +591,6 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
 /// The names of every env sentinel in `text` — a bare `${{ env.NAME }}` in
 /// step config, left for the step to substitute at spawn.
 fn env_sentinel_names(text: &str) -> Vec<String> {
-    use frontend_gha::exprs::{has_env_sentinel, replace_env_sentinels};
     if !has_env_sentinel(text) {
         return Vec::new();
     }
@@ -607,7 +604,6 @@ fn env_sentinel_names(text: &str) -> Vec<String> {
 
 /// Every child expression of `expr`, onto `stack`.
 fn push_children(expr: &ir::Expr, stack: &mut Vec<ir::ExprId>) {
-    use ir::Expr;
     match expr {
         Expr::Lit(_) | Expr::Var(_) => {}
         Expr::Field(a, _) | Expr::Unary(_, a) => stack.push(*a),
@@ -1059,7 +1055,6 @@ impl RunResult {
 /// ranked — the run-time REPORT.md. `note` states this sweep's configuration
 /// (image pin, caps, identity), written by the sweep that measured.
 pub fn runs_report(records: &[RunRecord], note: &str) -> String {
-    use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "# Corpus run sweep\n");
     let _ = writeln!(

@@ -9,7 +9,7 @@ use std::time::Duration;
 use petri::driver::EventObserver;
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
 use petri::executor::docker::{self, RUN_ID_FILE};
-use petri::executor::{MapSecrets, Retention, SecretProvider};
+use petri::executor::{MapSecrets, Retention, SecretProvider as _};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, GRAPH_FILE, HostError};
 use petri::ir::{
     CancelScopeId, Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef,

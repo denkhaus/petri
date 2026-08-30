@@ -7,9 +7,9 @@
 //! checked, so minting costs nothing; the `nonce` claim carries the real
 //! randomness that makes the exact string a credential.
 
-use std::fmt::Write;
+use std::fmt::Write as _;
 
-use base64::Engine;
+use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 /// The backend ids this runner mints into every token. Fixed: the store is

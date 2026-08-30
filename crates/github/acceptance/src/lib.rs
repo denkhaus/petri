@@ -11,13 +11,14 @@
 //! rather than fail — see [`corpus_present`].
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, DirEntry};
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use frontend::{Diagnostic, DirFiles, Frontend, Severity};
+use frontend::{Diagnostic, DirFiles, Frontend as _, Severity};
 use frontend_gha::GitHubActions;
 use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
 use smol_str::SmolStr;
@@ -451,7 +452,6 @@ pub fn check_all(corpus_root: &Path, actions: Option<&Arc<dyn ActionSource>>) ->
 /// runs are the same and callers pass `outcomes` twice. `actions_note` says how
 /// remote actions were resolved for this report.
 pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> String {
-    use std::fmt::Write;
     let mut out = String::new();
     // Three exclusions leave the denominator entirely, so every share below
     // measures what this runner could ever run: Windows/macOS workflows (out

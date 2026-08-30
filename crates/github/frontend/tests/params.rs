@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::{env, fs, process};
 
-use frontend::Frontend;
+use frontend::Frontend as _;
 use frontend_gha::GitHubActions;
 
 const SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";

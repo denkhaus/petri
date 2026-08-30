@@ -4,6 +4,7 @@
 //! written once against it and never mentions Docker.
 
 use std::collections::BTreeMap;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{fmt, process};
@@ -137,7 +138,6 @@ impl ExitStatus {
 /// killed it.
 impl From<process::ExitStatus> for ExitStatus {
     fn from(status: process::ExitStatus) -> Self {
-        use std::os::unix::process::ExitStatusExt;
         match (status.code(), status.signal()) {
             (Some(code), _) => Self::code(code),
             (None, Some(signal)) => Self::signalled(signal),

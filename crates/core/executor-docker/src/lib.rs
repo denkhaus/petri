@@ -64,7 +64,7 @@ use ir::RuntimeTarget;
 pub use services::SERVICE_HEALTH_WAIT;
 use smol_str::SmolStr;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, mpsc};
 use tokio::time::{self, Instant};

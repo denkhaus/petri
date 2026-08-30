@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, process};
 
@@ -21,7 +22,6 @@ use tokio::time;
 
 /// A process-unique counter, for run ids and directory names.
 pub fn unique_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }

@@ -4,7 +4,7 @@
 //! line cap and the truncation marker are decided once, here, and a step's log
 //! looks the same whichever environment ran it.
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 
 use crate::env::LogLine;

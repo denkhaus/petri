@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use driver::{CONTROL_CHANNEL_CAPACITY, DeliverDisposition, RunConfig, RunHandle};
-use executor::{MapSecrets, SecretProvider};
+use executor::{MapSecrets, SecretProvider as _};
 use ir::{Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId, Value};
 use serde_json::json;
 use steps::{PROCESS_KIND, Registry};
