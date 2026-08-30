@@ -907,6 +907,21 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
     {
         return Some("amd64-only image; this host's emulation cannot run it".to_string());
     }
+    // A toolchain's own architecture refusal — CodeQL's "does not support the
+    // platform/architecture combination of linux/arm64", and any tool that
+    // says the same thing about itself. The same host-architecture limit as
+    // above, seen from the download side: a host of a supported architecture
+    // runs the row unchanged.
+    if log
+        .iter()
+        .any(|line| line.contains("does not support the platform/architecture combination"))
+    {
+        return Some(
+            "the toolchain ships no build for this architecture; a host of a supported \
+             architecture runs it"
+                .to_string(),
+        );
+    }
     // The scorecard action's publish path signs its results, and the signing
     // service takes only the Actions-issued ephemeral `GITHUB_TOKEN` — any
     // PAT, which is all the sweep can supply, is rejected on shape alone. The
@@ -1836,6 +1851,26 @@ mod log_tests {
             cross_run: false,
         };
         assert!(expected_from_log(&other, &not_found).is_none());
+    }
+
+    /// A toolchain refusing this architecture outright — CodeQL on linux/arm64
+    /// — is the host's limit, not a runtime gap; an unrelated failure in the
+    /// same action stays a gap.
+    #[test]
+    fn an_architecture_refusal_classifies_as_the_hosts_limit() {
+        let init = StepIdentity::Action {
+            bare: "github/codeql-action/init".to_string(),
+            cross_run: false,
+        };
+        let refusal = vec![
+            "Error: Unable to download and extract CodeQL CLI: The CodeQL CLI does not \
+             support the platform/architecture combination of linux/arm64 (see \
+             https://codeql.github.com/docs/)"
+                .to_string(),
+        ];
+        assert!(expected_from_log(&init, &refusal).is_some());
+        let unrelated = vec!["Error: The configuration file does not exist".to_string()];
+        assert!(expected_from_log(&init, &unrelated).is_none());
     }
 
     /// The setup-node shape that made a whole gap class undiagnosable: the
