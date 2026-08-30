@@ -10,12 +10,18 @@
 //! they read and edit as workflows; `__IMAGE__` is the one substitution.
 //!
 //! Deliberately container-only: the target is the runner image's toolchain
-//! surface, not the developer's host. And deliberately image-native tools
-//! (gcc, python, node) — Go/Ruby/Rust arrive via setup-* actions, whose
-//! staging the toolcache and action batteries already cover.
+//! surface, not the developer's host. Two kinds of probe: image-native tools
+//! (gcc, python, node) run directly, and the toolchains slim deliberately
+//! does not ship (Go, Ruby, Rust) arrive the way real workflows get them —
+//! through their sha-pinned setup actions into the tool cache, then a real
+//! build — so those probes cover the whole action → tool cache → PATH →
+//! compile chain.
 
 mod support;
 
+use std::sync::Arc;
+
+use github_actions::{ActionSourceCap, ActionTreeSource};
 use runtime::ir::RunStatus;
 use support::*;
 
@@ -28,13 +34,59 @@ async fn assert_workload(yaml: &str, label: &str, expected: &str) {
     let text = yaml.replace("__IMAGE__", acceptance::runs::RUNNER_IMAGE_2404);
     let graph = lower_ok(&text);
     let report = run_host(graph, label).await;
+    let lines = log_lines(&report);
+    let records: Vec<String> = report
+        .state
+        .history()
+        .iter()
+        .map(|r| format!("{} → {:?}", r.name, r.outcome.status))
+        .collect();
     assert_eq!(
         report.status,
         RunStatus::Success,
-        "{:?}",
+        "errors: {:?}\nrecords: {records:#?}\nlog: {lines:#?}",
         report.state.errors()
     );
+    assert!(
+        lines.iter().any(|l| l == expected),
+        "no `{expected}` in {lines:#?}"
+    );
+}
+
+/// [`assert_workload`] for a workflow whose toolchain arrives through a real
+/// `uses:` action — lowered and run against the corpus action cache (fetched
+/// on machines that don't have it).
+async fn assert_action_workload(yaml: &str, label: &str, expected: &str) {
+    if !testkit::docker_ready().await {
+        return;
+    }
+    let text = yaml.replace("__IMAGE__", acceptance::runs::RUNNER_IMAGE_2404);
+    let source = corpus_action_source();
+    let graph = lower_with_actions(&text, &source);
+    let trees: Arc<dyn ActionTreeSource> = source;
+    // An empty GITHUB_TOKEN, the distribution's token-less stance: setup-*
+    // actions default their `token` input to `${{ github.token }}`, and the
+    // toolkit treats empty as "no auth" — version manifests read anonymously.
+    let report =
+        run_host_with(graph, label, |rt| {
+            rt.capability(ActionSourceCap(trees)).secrets(
+                runtime::executor::MapSecrets::from_pairs(&[("GITHUB_TOKEN", "")]),
+            )
+        })
+        .await;
     let lines = log_lines(&report);
+    let records: Vec<String> = report
+        .state
+        .history()
+        .iter()
+        .map(|r| format!("{} → {:?}", r.name, r.outcome.status))
+        .collect();
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "errors: {:?}\nrecords: {records:#?}\nlog: {lines:#?}",
+        report.state.errors()
+    );
     assert!(
         lines.iter().any(|l| l == expected),
         "no `{expected}` in {lines:#?}"
@@ -67,6 +119,36 @@ async fn a_pinned_npm_package_installs_and_runs() {
         include_str!("real_workloads/node.yaml"),
         "real-node",
         "node-installed-and-ran 007",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_go_installs_a_toolchain_that_builds() {
+    assert_action_workload(
+        include_str!("real_workloads/go.yaml"),
+        "real-go",
+        "go-built-and-ran 1+1=2",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_ruby_installs_a_ruby_whose_gems_run() {
+    assert_action_workload(
+        include_str!("real_workloads/ruby.yaml"),
+        "real-ruby",
+        "ruby-installed-and-ran 3.3.6",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rust_toolchain_installs_a_rustc_that_compiles() {
+    assert_action_workload(
+        include_str!("real_workloads/rust.yaml"),
+        "real-rust",
+        "rust-built-and-ran 42",
     )
     .await;
 }
