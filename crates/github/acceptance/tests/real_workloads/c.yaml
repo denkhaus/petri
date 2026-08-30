@@ -1,0 +1,15 @@
+# A real C build in the runner image: gcc compiles and the binary runs.
+# `__IMAGE__` is replaced with the pinned runner image by the test.
+on: push
+jobs:
+  c:
+    runs-on: ubuntu-latest
+    container: __IMAGE__
+    steps:
+      - run: |
+          cat > hello.c <<'EOF'
+          #include <stdio.h>
+          int main(void) { printf("c-built-and-ran\n"); return 0; }
+          EOF
+          gcc -o hello hello.c
+          ./hello

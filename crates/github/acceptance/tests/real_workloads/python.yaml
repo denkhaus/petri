@@ -1,0 +1,13 @@
+# A real Python install in the runner image: a pinned wheel into a venv,
+# imported by the venv's own interpreter.
+# `__IMAGE__` is replaced with the pinned runner image by the test.
+on: push
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    container: __IMAGE__
+    steps:
+      - run: |
+          python3 -m venv v
+          ./v/bin/pip --quiet install six==1.17.0
+          ./v/bin/python -c "import six; print('python-installed-and-imported', six.__version__)"

@@ -1,0 +1,13 @@
+# A real npm install in the runner image: a pinned package, then its output
+# executes through the image's node.
+# `__IMAGE__` is replaced with the pinned runner image by the test.
+on: push
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    container: __IMAGE__
+    steps:
+      - run: |
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund left-pad@1.3.0 >/dev/null
+          node -e "console.log('node-installed-and-ran', require('left-pad')('7', 3, '0'))"
