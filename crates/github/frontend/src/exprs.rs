@@ -979,6 +979,18 @@ pub fn lower_scalar(
                     format!("could not parse `${{{{ {} }}}}`: {e}", source.trim()),
                 );
             })?;
+            // A bare `env.NAME` alone in its segment becomes the env sentinel:
+            // the step substitutes it at spawn from the environment its
+            // process receives, so `GITHUB_ENV` appends from earlier steps
+            // are visible — the gate's `$env` leaf, for config text. Under an
+            // operator or function the engine would evaluate over the marker,
+            // so those fall through and read the scope env, as conditions do.
+            if env_shaped
+                && at_step
+                && let Some(name) = bare_env_name(&ast)
+            {
+                return Ok(table.lit(env_sentinel(&name)));
+            }
             let lowered = lower_expr(&ast, site, at_step, &span, table, diags).ok_or(())?;
             if lowered.saw_secret && !env_shaped {
                 diags.unsupported(
@@ -1016,6 +1028,22 @@ pub fn lower_scalar(
 pub fn whole_value_secret(text: &str) -> Option<String> {
     match split_template(text).ok()?.as_slice() {
         [Segment::Expr { source, .. }] => secret_expr_name(source),
+        _ => None,
+    }
+}
+
+/// The variable `expr` reads when it is exactly `env.NAME` (or `env['NAME']`)
+/// and the name cannot impersonate a marker — the shape [`lower_scalar`] turns
+/// into an env sentinel in step config.
+fn bare_env_name(expr: &Expr) -> Option<String> {
+    let (root, path) = expr.dotted_path()?;
+    if !root.eq_ignore_ascii_case("env") {
+        return None;
+    }
+    match path.as_slice() {
+        [name] if !name.chars().any(|c| ('\u{E000}'..='\u{E002}').contains(&c)) => {
+            Some(name.to_string())
+        }
         _ => None,
     }
 }
@@ -1151,6 +1179,35 @@ pub fn has_runner_tool_cache_sentinel(text: &str) -> bool {
 
 pub fn replace_runner_tool_cache_sentinels(text: &str, tool_cache: &str) -> String {
     text.replace(RUNNER_TOOL_CACHE_SENTINEL, tool_cache)
+}
+
+/// The stand-in for a bare `env.NAME` reference in step config (`run:`, `env:`,
+/// `with:`), carrying the name as [`secret_sentinel`] carries its. The engine's
+/// `env` binding is the scope env, frozen at firing, so it can never see what an
+/// earlier step appended through `GITHUB_ENV`; the step substitutes this marker
+/// at spawn from the environment its process receives, so the expression and
+/// the variable cannot diverge — the gate's `$env` leaf, in flat-text form.
+/// Only a bare reference standing alone in its template segment lowers this way
+/// ([`lower_scalar`]): under an operator or function the engine would evaluate
+/// over the marker, so those keep the engine's scope-env meaning, exactly as
+/// they do in a condition.
+const ENV_OPEN: &str = "\u{E000}petri-env:";
+
+pub fn env_sentinel(name: &str) -> String {
+    format!("{ENV_OPEN}{name}{SENTINEL_CLOSE}")
+}
+
+/// Whether `text` carries an env sentinel.
+pub fn has_env_sentinel(text: &str) -> bool {
+    text.contains(ENV_OPEN)
+}
+
+/// Replace every env sentinel in `text` with what `resolve` returns for its name.
+pub fn replace_env_sentinels<E>(
+    text: &str,
+    mut resolve: impl FnMut(&str) -> Result<String, E>,
+) -> Result<String, E> {
+    replace_marked(text, ENV_OPEN, &mut resolve)
 }
 
 /// Replace every secret sentinel in `text` with what `resolve` returns for its name.

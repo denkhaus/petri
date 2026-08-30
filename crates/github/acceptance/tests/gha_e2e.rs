@@ -1096,6 +1096,83 @@ jobs:
     assert_eq!(status_of(&report, "j/stale").as_deref(), Some("skipped"));
 }
 
+/// The workflow behind [`step_config_reads_the_step_environment`]: an append
+/// through `GITHUB_ENV`, then a step whose config reads it every way step
+/// config can.
+const STEP_ENV_CONFIG_WORKFLOW: &str = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    env:
+      DECLARED: scope-value
+    steps:
+      - run: echo "PROBE=from_env_file" >> "$GITHUB_ENV"
+      - env:
+          COPIED: ${{ env.PROBE }}
+        run: |
+          echo "inline=[${{ env.PROBE }}]"
+          echo "shellvar=[$PROBE]"
+          echo "stepenv=[$COPIED]"
+          echo "declared=[${{ env.DECLARED }}]"
+"#;
+
+fn assert_step_env_config_lines(report: &RunReportPlus) {
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(report);
+    for expected in [
+        // The inline expression, the variable and the step-env copy agree:
+        // one substitution at spawn, from the environment the process
+        // receives, so the expression and the variable cannot diverge.
+        "inline=[from_env_file]",
+        "shellvar=[from_env_file]",
+        "stepenv=[from_env_file]",
+        // A name declared in the workflow still answers, through the scope
+        // env the process inherits.
+        "declared=[scope-value]",
+    ] {
+        assert!(
+            lines.contains(&expected.to_string()),
+            "{expected}: {lines:?}"
+        );
+    }
+}
+
+/// Inline `${{ env.NAME }}` in a later step's config sees what an earlier step
+/// appended through `GITHUB_ENV` — on GitHub the runner renders step config
+/// with that environment — and lands on exactly the value the process
+/// receives, in `run:` text and `env:` values alike.
+#[tokio::test]
+async fn step_config_reads_the_step_environment() {
+    let graph = lower_ok(STEP_ENV_CONFIG_WORKFLOW);
+    let report = run_host(graph, "env-config").await;
+    assert_step_env_config_lines(&report);
+}
+
+/// The same truth holds when the job runs in a container: the substitution
+/// happens where the environment is known, so the mount point changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_config_reads_the_step_environment_in_a_container() {
+    if !testkit::docker_ready().await {
+        return;
+    }
+    let text = STEP_ENV_CONFIG_WORKFLOW.replace(
+        "    runs-on: ubuntu-latest\n",
+        &format!(
+            "    runs-on: ubuntu-latest\n    container: {}\n",
+            acceptance::runs::RUNNER_IMAGE_2404
+        ),
+    );
+    let graph = lower_ok(&text);
+    let report = run_host(graph, "env-config-boxed").await;
+    assert_step_env_config_lines(&report);
+}
+
 /// The documented pattern for secrets and conditions: pass the secret through an
 /// environment variable and test it in the step. The gate resolves the secret at
 /// spawn, step-side, so nothing of it reaches the log.

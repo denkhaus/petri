@@ -23,16 +23,18 @@
 //! `GITHUB_OUTPUT` is the process step's own outputs file, under its alias.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
-    escape_sentinel_text, has_runner_temp_sentinel, has_runner_tool_cache_sentinel,
-    has_secret_sentinel, has_sentinel_escape, has_workspace_sentinel,
-    replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels, replace_secret_sentinels,
-    replace_workspace_sentinels, unescape_sentinel_text,
+    escape_sentinel_text, has_env_sentinel, has_runner_temp_sentinel,
+    has_runner_tool_cache_sentinel, has_secret_sentinel, has_sentinel_escape,
+    has_workspace_sentinel, replace_env_sentinels, replace_runner_temp_sentinels,
+    replace_runner_tool_cache_sentinels, replace_secret_sentinels, replace_workspace_sentinels,
+    secret_sentinel, unescape_sentinel_text,
 };
 use ir::{LogStream, Outcome, StepEvent, Value};
 use serde_json::{Map, json};
@@ -300,6 +302,66 @@ impl Session {
         out
     }
 
+    /// The job's accumulated `GITHUB_ENV`, for a step kind that assembles its
+    /// process environment itself (the docker action step).
+    pub(crate) fn job_env(&self) -> &BTreeMap<String, String> {
+        &self.job_env
+    }
+
+    /// Replace the `env.NAME` sentinels — bare `${{ env.NAME }}` references in
+    /// step config — with the value the name has in the environment this
+    /// process receives: the resolved env config first (the step's own `env:`,
+    /// with the job's accumulated `GITHUB_ENV` and the contract's variables
+    /// already merged beneath it), then the ambient environment. One truth for
+    /// the expression and the variable — the `runner.temp` invariant — so a
+    /// `GITHUB_ENV` append from an earlier step is visible here, as it is on
+    /// GitHub and in this runner's gates.
+    ///
+    /// Env values resolve first, from the job's accumulated file and the
+    /// ambient env alone — a step's `env:` block is not in its own scope, so
+    /// nothing can chase its own tail — and the run text after them, so a
+    /// value spliced from the config carries no marker of its own. A secret
+    /// reference splices its sentinel for the secret pass right after this one
+    /// to resolve (and register for masking); runtime text — the env file, the
+    /// ambient env — splices escaped, so nothing a step exported can
+    /// impersonate a marker.
+    fn resolve_env_sentinels(&self, mut process: ProcessConfig) -> ProcessConfig {
+        let runtime = |name: &str| {
+            ci_get(&self.job_env, name)
+                .cloned()
+                .or_else(|| self.env.ambient_env(name))
+                .map(|value| escape_sentinel_text(&value))
+                .unwrap_or_default()
+        };
+        for value in process.env.values_mut() {
+            if let ValueOrSecretRef::Literal(Value::String(text)) = value
+                && has_env_sentinel(text)
+            {
+                *text = replace_env_sentinels(text, |name| -> Result<String, Infallible> {
+                    Ok(runtime(name))
+                })
+                .expect("the runtime lookup is infallible");
+            }
+        }
+        if has_env_sentinel(&process.run) {
+            let env = &process.env;
+            process.run =
+                replace_env_sentinels(&process.run, |name| -> Result<String, Infallible> {
+                    Ok(match ci_get(env, name) {
+                        Some(ValueOrSecretRef::Literal(v)) => stringify(v),
+                        Some(ValueOrSecretRef::Secret { name }) => secret_sentinel(name),
+                        None => self
+                            .env
+                            .ambient_env(name)
+                            .map(|value| escape_sentinel_text(&value))
+                            .unwrap_or_default(),
+                    })
+                })
+                .expect("the config lookup is infallible");
+        }
+        process
+    }
+
     /// A shell prologue: the job's `GITHUB_PATH` entries in front of `PATH`,
     /// newest first as GitHub does, and the runner image's Docker daemon
     /// started once. Plain POSIX, like the rest of the runner scripts.
@@ -410,6 +472,9 @@ impl Session {
                 ValueOrSecretRef::Literal(Value::String(tool_cache)),
             );
         }
+        // The `env.NAME` sentinels next, from the environment now assembled —
+        // before the secret pass, which resolves whatever they spliced.
+        let process = self.resolve_env_sentinels(process);
         let StepCtx {
             firing,
             attempt,
@@ -635,6 +700,21 @@ fn resolve_workspace_sentinels(
         });
     let _ = infallible;
     process
+}
+
+/// One name from an env-shaped map, exact then case-insensitive on a miss, as
+/// the `env` context's lookups are.
+pub(crate) fn ci_get<'m, K, V>(map: &'m BTreeMap<K, V>, name: &str) -> Option<&'m V>
+where
+    K: std::borrow::Borrow<str> + Ord,
+{
+    if let Some(value) = map.get(name) {
+        return Some(value);
+    }
+    let lowered = name.to_lowercase();
+    map.iter()
+        .find(|(k, _)| k.borrow().to_lowercase() == lowered)
+        .map(|(_, v)| v)
 }
 
 /// Replace the secret sentinels the frontend lowered into the script and the env

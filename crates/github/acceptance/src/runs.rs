@@ -402,22 +402,26 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
         }
         false
     };
-    // The env-var name a `env.<name>` read resolves, in any lowered spelling.
-    let env_read = |expr: &Expr| -> Option<String> {
+    // The env-var names an expression reads, in every lowered spelling: an
+    // engine-side `env.<name>` read (under a function or operator), or the env
+    // sentinels a bare `${{ env.NAME }}` leaves in a string literal for the
+    // step to substitute at spawn.
+    let env_names = |expr: &Expr| -> Vec<String> {
         let is_env = |id: ExprId| matches!(graph.exprs.get(id), Some(Expr::Var(v)) if v == "env");
         match expr {
-            Expr::Field(base, name) if is_env(*base) => Some(name.to_string()),
+            Expr::Field(base, name) if is_env(*base) => vec![name.to_string()],
             Expr::Index(base, key) if is_env(*base) => match graph.exprs.get(*key) {
-                Some(Expr::Lit(Value::String(s))) => Some(s.to_string()),
-                _ => None,
+                Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
+                _ => Vec::new(),
             },
             Expr::Call(name, args) if name == "get_ci" && args.len() == 2 && is_env(args[0]) => {
                 match graph.exprs.get(args[1]) {
-                    Some(Expr::Lit(Value::String(s))) => Some(s.to_string()),
-                    _ => None,
+                    Some(Expr::Lit(Value::String(s))) => vec![s.to_string()],
+                    _ => Vec::new(),
                 }
             }
-            _ => None,
+            Expr::Lit(Value::String(s)) => env_sentinel_names(s),
+            _ => Vec::new(),
         }
     };
 
@@ -429,7 +433,7 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
         root: ir::ExprId,
         seen: &mut std::collections::BTreeSet<String>,
         event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
-        env_read: &dyn Fn(&ir::Expr) -> Option<String>,
+        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
     ) -> bool {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
@@ -439,24 +443,48 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
             if event_inputs_default(expr) {
                 return true;
             }
-            if let Some(name) = env_read(expr)
-                && seen.insert(name.clone())
-                && let Some(scope) = graph.scopes.iter().find(|s| s.id == scope)
-                && let Some(ir::ExprOrValue::Expr(env_expr)) = scope.env.get(name.as_str())
-                && reads_empty_input(
-                    graph,
-                    scope.id,
-                    *env_expr,
-                    seen,
-                    event_inputs_default,
-                    env_read,
-                )
-            {
-                return true;
+            for name in env_names(expr) {
+                if seen.insert(name.clone())
+                    && scope_env_reads_empty_input(
+                        graph,
+                        scope,
+                        &name,
+                        seen,
+                        event_inputs_default,
+                        env_names,
+                    )
+                {
+                    return true;
+                }
             }
             push_children(expr, &mut stack);
         }
         false
+    }
+
+    // Chase one env-var name into the scope's own `env:` expression for it.
+    fn scope_env_reads_empty_input(
+        graph: &Graph,
+        scope: ir::ScopeId,
+        name: &str,
+        seen: &mut std::collections::BTreeSet<String>,
+        event_inputs_default: &dyn Fn(&ir::Expr) -> bool,
+        env_names: &dyn Fn(&ir::Expr) -> Vec<String>,
+    ) -> bool {
+        let Some(scope) = graph.scopes.iter().find(|s| s.id == scope) else {
+            return false;
+        };
+        match scope.env.get(name) {
+            Some(ir::ExprOrValue::Expr(env_expr)) => reads_empty_input(
+                graph,
+                scope.id,
+                *env_expr,
+                seen,
+                event_inputs_default,
+                env_names,
+            ),
+            _ => false,
+        }
     }
 
     // `default(<reads github.event.inputs>, <zero literal>)`: an undeclared
@@ -483,30 +511,58 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> std::collections::BTreeSet<Strin
         if bare != "actions/checkout" {
             continue;
         }
-        let Some(raw) = node
-            .step
-            .config
-            .get("inputs")
-            .and_then(|i| i.get("ref"))
-            .and_then(|r| r.get(ir::placeholder::EXPR_PLACEHOLDER_KEY))
-            .and_then(Value::as_u64)
-        else {
+        let Some(reference) = node.step.config.get("inputs").and_then(|i| i.get("ref")) else {
             continue;
         };
-        let ref_expr = ir::ExprId::new(raw as u32);
         let mut seen = std::collections::BTreeSet::new();
-        if reads_empty_input(
-            graph,
-            node.scope,
-            ref_expr,
-            &mut seen,
-            &event_inputs_default,
-            &env_read,
-        ) {
+        // The ref is a placeholder where the engine evaluates it, or a string
+        // whose only expressions were bare `env.NAME` reads, left as sentinels.
+        let coupled = match reference
+            .get(ir::placeholder::EXPR_PLACEHOLDER_KEY)
+            .and_then(Value::as_u64)
+        {
+            Some(raw) => reads_empty_input(
+                graph,
+                node.scope,
+                ir::ExprId::new(raw as u32),
+                &mut seen,
+                &event_inputs_default,
+                &env_names,
+            ),
+            None => reference.as_str().is_some_and(|text| {
+                env_sentinel_names(text).iter().any(|name| {
+                    seen.insert(name.clone())
+                        && scope_env_reads_empty_input(
+                            graph,
+                            node.scope,
+                            name,
+                            &mut seen,
+                            &event_inputs_default,
+                            &env_names,
+                        )
+                })
+            }),
+        };
+        if coupled {
             out.insert(node.name.to_string());
         }
     }
     out
+}
+
+/// The names of every env sentinel in `text` — a bare `${{ env.NAME }}` in
+/// step config, left for the step to substitute at spawn.
+fn env_sentinel_names(text: &str) -> Vec<String> {
+    use frontend_gha::exprs::{has_env_sentinel, replace_env_sentinels};
+    if !has_env_sentinel(text) {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    let _ = replace_env_sentinels(text, |name| -> Result<String, std::convert::Infallible> {
+        names.push(name.to_string());
+        Ok(String::new())
+    });
+    names
 }
 
 /// Every child expression of `expr`, onto `stack`.

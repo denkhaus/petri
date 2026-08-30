@@ -144,7 +144,16 @@ spliced in at spawn and never enters the graph or the log. `github.workspace`,
 `runner.temp` and `runner.tool_cache` are runner-side paths only the step's
 environment knows: in step positions they resolve at spawn to exactly
 `GITHUB_WORKSPACE`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE`; in scope positions
-(a job-level `env:`) they render empty. The tool cache is one resolution per
+(a job-level `env:`) they render empty. A bare `${{ env.NAME }}` in step
+config resolves the same way — at spawn, from the environment the step's
+process receives: the step's own `env:`, then what earlier steps appended
+through `GITHUB_ENV`, then the ambient scope env — so the expression and the
+variable it names always agree, and an append is visible to the next step's
+config text as it is on GitHub. (GitHub's `env` context holds only declared
+values and appends; here a name only the runner's environment binds answers
+too — the price of that equality.) Under an operator or function, `env.*`
+stays engine-evaluated over the scope env, frozen at firing — appends
+invisible — in step config exactly as in a condition's gate. The tool cache is one resolution per
 environment, weakest default last: the step's own `env:` or an earlier step's
 `GITHUB_ENV` export (on GitHub the context is a constant; here such an export
 moves it, so the exported variable and the expression stay equal), else the

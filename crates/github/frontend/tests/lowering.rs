@@ -1201,3 +1201,53 @@ jobs:
         "a job-level env stays a parameter read: {encoded}"
     );
 }
+
+/// A bare `${{ env.NAME }}` in step config lowers to the env sentinel — the
+/// step substitutes it at spawn from the environment its process receives, so
+/// `GITHUB_ENV` appends from earlier steps are visible, as they are in a
+/// gate's `$env` leaf. Under an operator or function the engine would evaluate
+/// over the marker, so those keep the engine's scope-env meaning — and a scope
+/// position (a job-level `env:`) resolves at acquire, where nothing could
+/// substitute, so no sentinel appears there either.
+#[test]
+fn a_bare_env_reference_lowers_to_a_sentinel_in_step_positions_only() {
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          COPIED: ${{ env.PROBE }}
+        run: echo "inline=[${{ env.PROBE }}]"
+"#;
+    let graph = lower_ok(text);
+    let encoded = serde_json::to_string(&graph).unwrap();
+    assert!(
+        encoded.contains(&frontend_gha::exprs::env_sentinel("PROBE")),
+        "step config carries the sentinel: {encoded}"
+    );
+    let diags = diagnostics(text);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:?}");
+
+    // Under a function the engine evaluates, so no sentinel: the reference
+    // keeps its engine meaning (the scope env), as it does in a condition.
+    let complex = lower_ok(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ contains(env.PROBE, 'x') }}\"\n",
+    );
+    let encoded = serde_json::to_string(&complex).unwrap();
+    assert!(
+        !encoded.contains(&frontend_gha::exprs::env_sentinel("PROBE")),
+        "an env reference under a function stays engine-side: {encoded}"
+    );
+
+    // And a scope position: a job-level env value resolves at acquire.
+    let scope_only = lower_ok(
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    env:\n      COPIED: ${{ env.PROBE }}\n    steps:\n      - run: echo\n",
+    );
+    let encoded = serde_json::to_string(&scope_only).unwrap();
+    assert!(
+        !encoded.contains(&frontend_gha::exprs::env_sentinel("PROBE")),
+        "a job-level env stays an engine read: {encoded}"
+    );
+}

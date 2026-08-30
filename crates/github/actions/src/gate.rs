@@ -21,8 +21,9 @@
 use std::collections::BTreeMap;
 
 use frontend_gha::exprs::{
-    has_hashfiles_sentinel, has_runner_temp_sentinel, has_runner_tool_cache_sentinel,
-    has_workspace_sentinel, replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
+    has_env_sentinel, has_hashfiles_sentinel, has_runner_temp_sentinel,
+    has_runner_tool_cache_sentinel, has_workspace_sentinel, replace_env_sentinels,
+    replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
     replace_workspace_sentinels,
 };
 use frontend_gha::gate::{Gate, GateOp, eval};
@@ -31,7 +32,7 @@ use ir::{Outcome, Value};
 use smol_str::SmolStr;
 use steps::{StepCtx, StepFailure, ValueOrSecretRef};
 
-use crate::session::{env_tool_cache, github_workspace_path, read_job_env};
+use crate::session::{ci_get, env_tool_cache, github_workspace_path, read_job_env};
 
 /// The step's gate could not be read or evaluated.
 pub const GATE_CLASS: &str = "gate";
@@ -82,9 +83,10 @@ async fn admitted(
 
     // The job env file is control input the gate may not even need — but a
     // `runner.tool_cache` leaf does, resolution's second rung being a mid-job
-    // `GITHUB_ENV` export.
+    // `GITHUB_ENV` export, and so does an env sentinel in a string literal.
     let wants_tool_cache = gate.texts().into_iter().any(has_runner_tool_cache_sentinel);
-    let job_env = if gate.reads_env() || wants_tool_cache {
+    let wants_env = gate.texts().into_iter().any(has_env_sentinel);
+    let job_env = if gate.reads_env() || wants_tool_cache || wants_env {
         read_job_env(&*ctx.env).await?
     } else {
         BTreeMap::new()
@@ -101,6 +103,34 @@ async fn admitted(
             has_runner_tool_cache_sentinel(text)
                 .then(|| replace_runner_tool_cache_sentinels(text, &tool_cache))
         });
+    }
+
+    // An env sentinel in a gate literal — a caller's `with:` value woven into
+    // a composite condition — resolves through the same rungs an env leaf
+    // uses, the ambient env answering last, as the spawn substitution does.
+    if wants_env {
+        let mut failed = None;
+        gate.map_texts(&mut |text| {
+            if !has_env_sentinel(text) || failed.is_some() {
+                return None;
+            }
+            match replace_env_sentinels(text, |name| {
+                env_value(name, env_config, &job_env, ctx).map(|value| match value {
+                    Some(Value::String(s)) => s,
+                    Some(other) => crate::session::stringify(&other),
+                    None => ctx.env.ambient_env(name).unwrap_or_default(),
+                })
+            }) {
+                Ok(resolved) => Some(resolved),
+                Err(failure) => {
+                    failed = Some(failure);
+                    None
+                }
+            }
+        });
+        if let Some(failure) = failed {
+            return Err(failure);
+        }
     }
 
     let value = eval(&gate, &mut |name| {
@@ -140,10 +170,7 @@ fn env_value(
     job_env: &BTreeMap<String, String>,
     ctx: &StepCtx,
 ) -> Result<Option<Value>, StepFailure> {
-    let configured = env_config
-        .get(name)
-        .or_else(|| ci_find(env_config.iter().map(|(k, v)| (k.as_str(), v)), name));
-    if let Some(value) = configured {
+    if let Some(value) = ci_get(env_config, name) {
         return Ok(Some(match value {
             ValueOrSecretRef::Secret { name } => {
                 let secret = ctx.secrets.resolve(name).map_err(|e| StepFailure {
@@ -155,17 +182,7 @@ fn env_value(
             ValueOrSecretRef::Literal(v) => Value::String(crate::session::stringify(v)),
         }));
     }
-    let accumulated = job_env
-        .get(name)
-        .or_else(|| ci_find(job_env.iter().map(|(k, v)| (k.as_str(), v)), name));
-    Ok(accumulated.map(|v| Value::String(v.clone())))
-}
-
-fn ci_find<'a, T>(mut entries: impl Iterator<Item = (&'a str, T)>, name: &str) -> Option<T> {
-    let lowered = name.to_lowercase();
-    entries
-        .find(|(k, _)| k.to_lowercase() == lowered)
-        .map(|(_, v)| v)
+    Ok(ci_get(job_env, name).map(|v| Value::String(v.clone())))
 }
 
 /// Resolve every `hashFiles` sentinel in the gate's string literals, in one
