@@ -11,7 +11,7 @@ mod support;
 use std::time::Duration;
 
 use driver::RunConfig;
-use executor::Retention;
+use executor::{Executor, Retention};
 use executor_docker::list_containers;
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
@@ -313,6 +313,83 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
         leftovers.is_empty(),
         "containers were left behind: {leftovers:?}"
     );
+}
+
+/// An acquire nobody waited out leaves no container, wherever the drop lands.
+/// The live case is the sweep aborting a run 90s after a cancel it ignored:
+/// the acquire future is dropped mid-flight, the killed `docker create` client
+/// does not cancel the daemon's create, and the container appears *after*
+/// every remove-by-name sweep already ran — Created, never started, cleaned by
+/// nothing. The drop points are sampled across the whole acquire; each
+/// abandoned round must converge to zero containers on its own, with no fence
+/// re-acquire to hide behind (every round gets a fresh run dir and prefix).
+#[tokio::test]
+async fn an_abandoned_acquire_leaves_no_container() {
+    if !docker_ready().await {
+        return;
+    }
+    // The image must be present, or early rounds kill the pull mid-flight and
+    // acquire never gets to the create window this test aims at.
+    assert!(
+        tokio::process::Command::new("docker")
+            .args(["pull", IMAGE])
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success()),
+        "could not pre-pull {IMAGE}"
+    );
+
+    let mut timeout_ms: u64 = 50;
+    loop {
+        let dir = RunDir::new(&format!("docker-abandon-{timeout_ms}"));
+        let executor =
+            executor_docker::DockerExecutor::new(dir.path()).with_retention(Retention::Never);
+        let prefix = executor
+            .container_prefix()
+            .await
+            .expect("the run id is recorded in the run dir");
+        let spec = executor::ScopeSpec::new(ScopeId::new(0), "scope-0")
+            .with_runtime(RuntimeSpec::container(IMAGE));
+        let ctx = executor::AcquireContext::bare();
+
+        match tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            executor.acquire(&spec, &ctx),
+        )
+        .await
+        {
+            Ok(result) => {
+                // The whole acquire fit inside this round's timeout: the drop
+                // points have been sampled past the create window. Clean up
+                // and stop.
+                if let Ok(handle) = result {
+                    executor
+                        .release(handle, executor::ScopeOutcome::Succeeded)
+                        .await;
+                }
+                break;
+            }
+            Err(_elapsed) => {
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    let leftovers = list_containers(&prefix).await;
+                    if leftovers.is_empty() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "an acquire abandoned at {timeout_ms}ms leaked: {leftovers:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+        timeout_ms += 100;
+        assert!(
+            timeout_ms < 30_000,
+            "acquire of a local image never completed within {timeout_ms}ms"
+        );
+    }
 }
 
 /// A non-zero exit inside the container maps the same way it does on the host.
