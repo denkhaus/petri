@@ -39,6 +39,19 @@ The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 
 Run `mise run check` before opening a pull request.
 
+## Diagnostics
+
+Set `PETRI_LOG` to see tracing output on stderr. The default is `warn`. Use
+`PETRI_LOG=debug` for per-step and per-external-call detail:
+
+```sh
+PETRI_LOG=debug mise run dev -- run workflow.yml
+```
+
+`PETRI_LOG` takes any `tracing_subscriber` filter directive. Diagnostics never
+mix with command output on stdout. Tracing fields carry only structural data;
+secrets, step output, and environment values are never captured.
+
 ## Rust policy
 
 Petri follows the pinned Brynary Rust Style Guide. Run `mise run setup`, then read
