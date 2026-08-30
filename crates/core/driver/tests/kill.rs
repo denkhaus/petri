@@ -145,7 +145,7 @@ async fn a_second_cancel_feeds_kill() {
     let graph = cleanup_graph("trap '' TERM; echo x > cleanup-started; sleep 300");
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(10))
-        .with_cleanup_grace(Duration::from_mins(5))
+        .with_cleanup_grace(Duration::from_secs(300))
         .with_retention(Retention::Always);
     let workspace = dir.workspace();
 

@@ -16,6 +16,9 @@ use testkit::{RunDir, is_docker_ready};
 use tokio::process::Command;
 
 const REDIS: &str = "redis:7-alpine";
+// The trailing dot prevents a host-provided DNS search suffix from hiding
+// Docker's network alias.
+const RESOLVE_REDIS: &str = "nslookup redis.";
 
 fn redis_service(published: Option<&str>) -> ServiceSpec {
     let mut service = ServiceSpec::new("redis", REDIS);
@@ -61,7 +64,7 @@ async fn a_host_scope_realizes_and_tears_down_services() {
     // One-shots run on the scope's network and resolve the service by name.
     let runner = handle.container_runner().expect("a runner");
     let one_shot =
-        OneShotContainer::registry("alpine:3.20").with_args(&["sh", "-c", "nslookup redis"]);
+        OneShotContainer::registry("alpine:3.20").with_args(&["sh", "-c", RESOLVE_REDIS]);
     let mut process = runner.run(one_shot).await.expect("docker run");
     let status = process.wait().await.expect("wait");
     assert!(status.is_success(), "the service name resolves: {status:?}");
@@ -99,7 +102,7 @@ async fn a_container_scope_reaches_its_service_by_name() {
 
     let mut process = handle
         .exec()
-        .spawn(executor::ProcessSpec::new("sh", &["-c", "nslookup redis"]))
+        .spawn(executor::ProcessSpec::new("sh", &["-c", RESOLVE_REDIS]))
         .await
         .expect("spawn in the job container");
     let status = process.wait().await.expect("wait");

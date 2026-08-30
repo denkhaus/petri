@@ -1,0 +1,8 @@
+# These tests share external resources: the corpus action cache and the Docker
+# daemon, including its container networks. Run them one at a time.
+[test-groups.external]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "package(petri-github-acceptance) | (package(petri-driver) & binary(docker)) | (package(petri-runtime) & (binary(local_executor) | binary(services)))"
+test-group = "external"

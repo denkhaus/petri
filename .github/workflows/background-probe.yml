@@ -1,0 +1,106 @@
+# Semantics probe for background steps (see .ai/plans/background-steps.md).
+# Dispatch-only; each job answers one open question. Safe syntax only —
+# undocumented shapes live in background-probe2.yml so a parse rejection
+# there cannot invalidate these results.
+name: background-probe
+on: workflow_dispatch
+jobs:
+  # Q1: a background step still running when the last foreground step ends.
+  # Job duration tells the policy: >=25s means implicit wait; ~5s means it
+  # was cancelled/abandoned (then: does its marker line ever appear?).
+  unwaited_running:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bg
+        background: true
+        run: |
+          echo "bg started $(date -u +%H:%M:%S)"
+          sleep 25
+          echo "bg finished late $(date -u +%H:%M:%S)"
+      - run: echo "foreground done $(date -u +%H:%M:%S)"
+
+  # Q2a: an unwaited background step FAILS. Does the job fail?
+  unwaited_fail:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bgfail
+        background: true
+        run: sleep 5 && exit 1
+      - run: echo "foreground fine"
+
+  # Q2b: a waited failure — does the wait step fail? do later plain steps
+  # run? what do outcome/conclusion say?
+  waited_fail:
+    runs-on: ubuntu-latest
+    steps:
+      - id: bf
+        background: true
+        run: sleep 3 && exit 1
+      - if: success()
+        run: echo "before wait, success() is true"
+      - id: w
+        wait: bf
+      - run: echo "plain step after failed wait"
+      - if: success()
+        run: echo "after wait, success() still true"
+      - if: failure()
+        run: echo "after wait, failure() is true"
+      - if: always()
+        run: |
+          echo "bf outcome=${{ steps.bf.outcome }} conclusion=${{ steps.bf.conclusion }}"
+          echo "wait outcome=${{ steps.w.outcome }} conclusion=${{ steps.w.conclusion }}"
+
+  # Q3: outcome/outputs/env visibility before and after the wait. The
+  # background step writes its output and GITHUB_ENV export immediately,
+  # then sleeps, so the pre-wait reader races nothing.
+  mid_status:
+    runs-on: ubuntu-latest
+    steps:
+      - id: slow
+        background: true
+        run: |
+          echo "v=from-bg" >> "$GITHUB_OUTPUT"
+          echo "MID=exported-by-bg" >> "$GITHUB_ENV"
+          sleep 12
+      - run: |
+          sleep 2
+          echo "pre-wait outcome=[${{ steps.slow.outcome }}] conclusion=[${{ steps.slow.conclusion }}]"
+          echo "pre-wait output=[${{ steps.slow.outputs.v }}] envctx=[${{ env.MID }}] envvar=[$MID]"
+      - wait: slow
+      - run: |
+          echo "post-wait outcome=[${{ steps.slow.outcome }}] conclusion=[${{ steps.slow.conclusion }}]"
+          echo "post-wait output=[${{ steps.slow.outputs.v }}] envctx=[${{ env.MID }}] envvar=[$MID]"
+
+  # Q4: continue-on-error and timeout-minutes on background steps.
+  interactions:
+    runs-on: ubuntu-latest
+    steps:
+      - id: soft
+        background: true
+        continue-on-error: true
+        run: sleep 2 && exit 1
+      - id: slowpoke
+        background: true
+        timeout-minutes: 1
+        run: sleep 90
+      - wait: soft
+      - run: echo "after soft wait, soft outcome=${{ steps.soft.outcome }} conclusion=${{ steps.soft.conclusion }}"
+      - id: w2
+        wait: slowpoke
+      - if: always()
+        run: echo "slowpoke outcome=${{ steps.slowpoke.outcome }} w2=${{ steps.w2.outcome }}"
+
+  # Q4b: a backgrounded action WITH a post phase (cache's save) — where does
+  # the post run?
+  action_post:
+    runs-on: ubuntu-latest
+    steps:
+      - id: cache
+        background: true
+        uses: actions/cache@v4
+        with:
+          path: /tmp/probe-cache
+          key: background-probe-${{ github.run_id }}
+      - run: echo "foreground while cache restores"
+      - wait: cache
+      - run: mkdir -p /tmp/probe-cache && echo data > /tmp/probe-cache/f

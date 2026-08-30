@@ -216,6 +216,13 @@ fn runtime(dir: &Path) -> Runtime {
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
         .step(github_actions::CheckoutStep)
+        // The distribution's token-less stance, so batteries test the shipped
+        // semantics: `github.token` resolves to the empty string — the toolkit
+        // treats it as "no auth" and reads anonymously — never a missing
+        // secret. A bare runtime has no secrets at all, and a setup-* action's
+        // `token: ${{ github.token }}` default then fails `secret_unavailable`
+        // where the shipped product proceeds.
+        .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", "")]))
 }
 
 /// Run on the standard runtime, which verifies replay itself.
@@ -248,8 +255,14 @@ pub(crate) async fn run_host_with_secrets(
 ) -> RunReportPlus {
     let graph = with_params(graph);
     let dir = run_dir(label);
+    // `.secrets()` replaces the provider, so the default empty GITHUB_TOKEN
+    // rides along unless the test names its own.
+    let mut pairs: Vec<(&str, &str)> = secrets.to_vec();
+    if !pairs.iter().any(|(k, _)| *k == "GITHUB_TOKEN") {
+        pairs.push(("GITHUB_TOKEN", ""));
+    }
     let report = runtime(&dir)
-        .secrets(MapSecrets::from_pairs(secrets))
+        .secrets(MapSecrets::from_pairs(&pairs))
         .run(graph)
         .await
         .expect("replay is byte-identical");
@@ -293,6 +306,33 @@ pub(crate) async fn run_host_then_cancel(
     let _ = fs::remove_dir_all(&dir);
     testkit::assert_replay_identical(&original, &report);
     (RunReportPlus::from(report), ())
+}
+
+/// Assert the run succeeded — and when it did not, say everything a step
+/// failure has to say. `state.errors()` is empty for an ordinary failed step
+/// (engine errors are a different thing), so a bare status assertion shows a
+/// failed run as `[]`: the records carry the failure's class and message, and
+/// the log carries what the step printed. One dump, every battery.
+#[allow(
+    dead_code,
+    reason = "every test binary compiles this module but uses only some helpers"
+)]
+pub(crate) fn assert_success(report: &RunReportPlus) {
+    if report.status == ir::RunStatus::Success {
+        return;
+    }
+    let records: Vec<String> = report
+        .state
+        .history()
+        .iter()
+        .map(|r| format!("{} → {:?}", r.name, r.outcome.status))
+        .collect();
+    panic!(
+        "run ended {:?}\nengine errors: {:?}\nrecords: {records:#?}\nlog: {:#?}",
+        report.status,
+        report.state.errors(),
+        log_lines(report)
+    );
 }
 
 /// A report in the shape the tests read.

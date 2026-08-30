@@ -380,9 +380,11 @@ jobs:
         run: |
           false | cat
           echo loose-after-pipe
-      - if: always()
+      - id: make-subdir
+        if: always()
         run: mkdir -p sub
-      - if: always()
+      - id: custom-pwd
+        if: always()
         shell: bash --noprofile --norc -eo pipefail {0}
         working-directory: sub
         run: echo "custom-pwd=$(pwd)"
@@ -432,6 +434,8 @@ fn assert_shell_semantics(report: &RunReportPlus) {
     lacks(&lines, "strict-after-pipe");
     assert_eq!(status("custom/loose"), "success");
     has(&lines, "loose-after-pipe");
+    assert_eq!(status("custom/make-subdir"), "success");
+    assert_eq!(status("custom/custom-pwd"), "success");
     assert!(
         lines
             .iter()
@@ -580,6 +584,9 @@ jobs:
           printf 'runtime-line-one\nruntime-line-two\n'
           echo "::warning::warned runtime-masked-value"
           echo "::notice::joined runtime-line-one%0Aruntime-line-two"
+          # Separate pipes do not preserve cross-stream ordering. Register on
+          # stderr before checking that stderr commands affect stderr output.
+          echo "::add-mask::runtime-masked-value" >&2
           echo "stderr runtime-masked-value" >&2
 "#;
 

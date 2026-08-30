@@ -228,12 +228,12 @@ impl Budget {
 
     /// A node that fires once, with a one-hour ceiling.
     pub fn once() -> Self {
-        Self::new(1, Duration::from_hours(1))
+        Self::new(1, Duration::from_secs(3600))
     }
 
     /// A node inside a loop: capped at `max_firings` iterations.
     pub fn looped(max_firings: u32) -> Self {
-        Self::new(max_firings, Duration::from_hours(1))
+        Self::new(max_firings, Duration::from_secs(3600))
     }
 
     /// Whether the firing cap is finite (invariant 4 for looped nodes).
@@ -373,7 +373,7 @@ impl Default for Backoff {
         Self {
             initial: Duration::from_secs(1),
             factor:  2.0,
-            max:     Duration::from_mins(1),
+            max:     Duration::from_secs(60),
             jitter:  true,
         }
     }

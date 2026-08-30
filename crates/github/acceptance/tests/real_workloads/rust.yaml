@@ -1,0 +1,19 @@
+# A real Rust build: the pinned rust-toolchain action installs a pinned
+# rustc, which compiles and runs a program. rustc directly, no cargo — the
+# probe is the toolchain executing, not the registry.
+# `__IMAGE__` is replaced with the pinned runner image by the test.
+on: push
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    container: __IMAGE__
+    steps:
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.83.0
+      - run: |
+          cat > hello.rs <<'EOF'
+          fn main() { println!("rust-built-and-ran {}", 40 + 2); }
+          EOF
+          rustc -o hello hello.rs
+          ./hello

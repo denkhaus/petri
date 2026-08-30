@@ -1,9 +1,8 @@
-name: CI
+name: Nightly
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  schedule:
+    - cron: "30 7 * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -19,19 +18,17 @@ jobs:
   check:
     name: check (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux runners have a native Docker daemon, so the Docker half of the
-          # acceptance battery runs for real here.
           - runner: ubuntu-24.04
             docker: required
-          # macOS runners have no daemon. The Docker tests skip themselves, and
-          # the rest of the suite still exercises the host executor.
+          - runner: ubuntu-24.04-arm
+            docker: required
           - runner: macos-15
             docker: absent
 
@@ -59,29 +56,21 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
-          shared-key: routine-${{ matrix.runner }}
+          shared-key: nightly-${{ matrix.runner }}
 
-      # The compatibility corpus is other projects' workflows, fetched rather
-      # than committed. `gh api` needs a token on a runner.
       - name: Fetch the corpus
         run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # Pull it here rather than inside a test, so a registry hiccup fails as an
-      # infrastructure problem instead of a flaky cancellation test.
       - name: Pre-pull the test image
         if: matrix.docker == 'required'
         run: docker pull alpine:3.20
 
-      - name: Verify routine changes
-        run: mise run check
+      - name: Verify extended checks
+        run: mise run check:nightly
         env:
-          # On a runner that has Docker, a skipped Docker test is a failure: the
-          # whole point of this job is that the acceptance battery actually ran.
           PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
-          # The corpus was just fetched, so a skipped corpus battery means the
-          # fetch failed.
           PETRI_REQUIRE_CORPUS: '1'
 
       - name: No containers left behind

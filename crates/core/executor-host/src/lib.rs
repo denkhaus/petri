@@ -668,7 +668,10 @@ impl ProcessHandle for HostProcess {
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
         // killpg, never kill: the group is the unit. The sentinel ignores TERM, so
-        // the polite rung passes through it to the workload.
+        // the polite rung passes through it to the workload. KILL repeats until
+        // the group drains: a shell can fork after the kernel selects the first
+        // signal's recipients, and that new child must not keep the output pipes
+        // open until the driver's hard deadline.
         //
         // SAFETY: `killpg` takes the process-group id and the signal number by
         // value. It dereferences no pointer, so it reads and writes no Rust
@@ -676,29 +679,37 @@ impl ProcessHandle for HostProcess {
         // integers the kernel can reject on its own. Its result is handled
         // below: `ESRCH` means the group is already gone, which is success for
         // our purposes — the ladder is idempotent — and every other errno
-        // becomes an `EnvError`.
-        let result = unsafe { libc::killpg(self.pgid, sig.number()) };
-        if result == 0 {
-            return Ok(());
+        // becomes an `EnvError`. The executor keeps the sentinel unreaped, so
+        // the pgid cannot be recycled during the loop.
+        loop {
+            let result = unsafe { libc::killpg(self.pgid, sig.number()) };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    return Ok(());
+                }
+                // The cancel ladder discards this `Result`, so an
+                // unsignallable group — a root-owned member from a `sudo`
+                // step — is otherwise silent, and it is the direct cause of a
+                // step that will not die.
+                tracing::warn!(
+                    pgid = self.pgid,
+                    signal = sig.name(),
+                    error = ?error,
+                    "process group signal failed"
+                );
+                return Err(EnvError::Signal(format!(
+                    "killpg({}, {}) failed: {error}",
+                    self.pgid,
+                    sig.name()
+                )));
+            }
+
+            if sig != Sig::Kill || !group_is_live(self.pgid) {
+                return Ok(());
+            }
+            async_time::sleep(LIVENESS_POLL).await;
         }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
-        }
-        // The cancel ladder discards this `Result`, so an unsignallable group —
-        // a root-owned member from a `sudo` step — is otherwise silent, and it
-        // is the direct cause of a step that will not die.
-        tracing::warn!(
-            pgid = self.pgid,
-            signal = sig.name(),
-            error = ?error,
-            "process group signal failed"
-        );
-        Err(EnvError::Signal(format!(
-            "killpg({}, {}) failed: {error}",
-            self.pgid,
-            sig.name()
-        )))
     }
 }
 

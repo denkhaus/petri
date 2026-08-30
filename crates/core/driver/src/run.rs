@@ -56,7 +56,7 @@ pub const NO_RUNNER: &str = "no_runner";
 
 /// After the first root cancel, how long admitted cleanup gets before the
 /// driver feeds back `KillRequested` (§10, resolved decision 3).
-pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_mins(2);
+pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(120);
 
 /// Capacity of a firing's control channel. A named implementation constant, not
 /// a compatibility rule: reliable delivery and ordering hold when the channel

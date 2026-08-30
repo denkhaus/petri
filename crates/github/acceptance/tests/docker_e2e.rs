@@ -203,12 +203,20 @@ jobs:
       redis:
         image: redis:7-alpine
     steps:
-      - run: nslookup redis > /dev/null && echo service-resolved
+      # The trailing dot prevents a host-provided DNS search suffix from hiding
+      # Docker's network alias.
+      - run: nslookup redis. && echo service-resolved
         shell: sh
 "#;
     let graph = lower_ok(text);
     let report = run_host(graph, "services-e2e").await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}\n{:?}",
+        errors(&report),
+        log_lines(&report)
+    );
     let lines = log_lines(&report);
     assert!(lines.iter().any(|l| l == "service-reachable"), "{lines:?}");
     assert!(lines.iter().any(|l| l == "service-resolved"), "{lines:?}");

@@ -19,9 +19,29 @@ use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
 use testkit::is_docker_ready;
+use tokio::process::Command;
 use tokio::time;
 
 const IMAGE: &str = "alpine:3.20";
+const AMD64_EMULATION_PROBE_IMAGE: &str = "amd64/busybox:1.36.1";
+
+async fn amd64_emulation_ready() -> bool {
+    if cfg!(target_arch = "x86_64") {
+        return true;
+    }
+    Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--platform",
+            "linux/amd64",
+            AMD64_EMULATION_PROBE_IMAGE,
+            "true",
+        ])
+        .output()
+        .await
+        .is_ok_and(|output| output.status.success())
+}
 
 fn docker_graph(name: &str, run: &str) -> ir::Graph {
     let mut b = GraphBuilder::bare();
@@ -102,7 +122,7 @@ sleep 300
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_mins(1)).await,
+        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
     let heartbeat = workspace.join("heartbeat");
@@ -190,7 +210,7 @@ while :; do sleep 0.1; done
     );
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(10))
-        .with_cleanup_grace(Duration::from_mins(5))
+        .with_cleanup_grace(Duration::from_secs(300))
         .with_retention(Retention::Never);
     let workspace = dir.workspace();
 
@@ -199,7 +219,7 @@ while :; do sleep 0.1; done
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_mins(1)).await,
+        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
     handle.cancel(ir::CancelScopeId::ROOT).await;
@@ -264,7 +284,7 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
     let (driver, prefix) = docker_driver_named(graph.clone(), &dir, config()).await;
     let run = tokio::spawn(driver.run());
     assert!(
-        wait_for_file(&heartbeat, Duration::from_mins(1)).await,
+        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
     // The crash: the driver is gone, release never runs, the container beats on.
@@ -414,8 +434,16 @@ async fn docker_wait_follows_the_step_not_the_client() {
 /// exercises the fallback on arm64 daemons and the native path on amd64 ones;
 /// either way the container reports an x86_64 machine.
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice belongs to the test runner's output, which no subscriber reads"
+)]
 async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
     if !is_docker_ready().await {
+        return;
+    }
+    if !amd64_emulation_ready().await {
+        eprintln!("skipping: the Docker daemon cannot execute linux/amd64 binaries");
         return;
     }
     let dir = RunDir::new("docker-platform-fallback");
@@ -528,7 +556,7 @@ while :; do sleep 0.1; done
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
-    assert!(wait_for_file(&workspace.join("ready"), Duration::from_mins(1)).await);
+    assert!(wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await);
     handle.cancel(ir::CancelScopeId::ROOT).await;
 
     let report = time::timeout(Duration::from_secs(30), run)

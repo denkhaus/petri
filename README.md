@@ -107,10 +107,11 @@ crates/github/acceptance/tests/harness.rs    frontend §7 8: every corpus workfl
 crates/github/acceptance/tests/e2e.rs        frontend §7 9: two real corpus workflows run on the executor
 ```
 
-Docker tests skip with a message when no daemon is reachable, so `cargo test` is
-green on a machine without one.
+Docker tests skip with a message when no daemon is reachable, so `mise run test`
+is green on a machine without one.
 
-`cargo test` runs all of them.
+`mise run test` runs all of them with Nextest, then runs the maintained doctests
+with Cargo.
 
 ## Decisions the design document left open
 

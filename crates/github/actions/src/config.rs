@@ -15,6 +15,16 @@ use serde::{Deserialize, Deserializer, de};
 use smol_str::SmolStr;
 use steps::{ProcessConfig, Shell, SoftFail, ValueOrSecretRef};
 
+/// Preparation required before a shell template runs its script file.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellScript {
+    #[default]
+    Plain,
+    /// GitHub's built-in `pwsh` script contract.
+    PowerShell,
+}
+
 /// `github/run`: a `run:` step.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +47,10 @@ pub struct RunConfig {
     /// does. When set, `shell` is not used.
     #[serde(default)]
     pub shell_command: Option<String>,
+    /// Preparation for a built-in shell whose script contract is more than its
+    /// command template. Custom shell templates leave this as `plain`.
+    #[serde(default)]
+    pub shell_script:  ShellScript,
     #[serde(default)]
     pub env:           BTreeMap<SmolStr, ValueOrSecretRef>,
     /// `working-directory`, relative to `GITHUB_WORKSPACE`.

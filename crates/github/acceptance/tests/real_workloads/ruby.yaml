@@ -1,0 +1,17 @@
+# A real Ruby install: the pinned setup-ruby action places a pinned prebuilt
+# ruby in the tool cache, gem installs a pinned pure-ruby gem for real, and
+# the gem's own executable runs.
+# `__IMAGE__` is replaced with the pinned runner image by the test.
+on: push
+jobs:
+  ruby:
+    runs-on: ubuntu-latest
+    container: __IMAGE__
+    steps:
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: 3.3.6
+      - run: |
+          gem install --no-document rake -v 13.2.1 >/dev/null
+          rake --version
+          ruby -e 'puts "ruby-installed-and-ran #{RUBY_VERSION}"'

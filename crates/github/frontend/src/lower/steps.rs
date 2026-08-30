@@ -17,7 +17,7 @@ use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, Step};
 
 /// GitHub's default job timeout.
-const DEFAULT_TIMEOUT: Duration = Duration::from_hours(6);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(360 * 60);
 
 impl<'a> Lowering<'_, 'a> {
     /// The node(s) for one step: one `github/run` node, one `github/action`
@@ -103,6 +103,7 @@ impl<'a> Lowering<'_, 'a> {
             }
             "pwsh" => {
                 config.insert("shell_command".into(), json!("pwsh -command \". '{0}'\""));
+                config.insert("shell_script".into(), json!("power_shell"));
             }
             other if other.contains("{0}") && !other.contains("${{") => {
                 config.insert("shell_command".into(), json!(other));

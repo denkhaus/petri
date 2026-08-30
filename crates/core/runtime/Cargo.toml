@@ -2,6 +2,7 @@
 name = "petri-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Core assembled: the standard runtime, and the facade over core's layers."
 publish = false

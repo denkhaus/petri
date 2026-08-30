@@ -49,7 +49,7 @@ use tokio::time;
 use tracing::{Instrument as _, Span};
 
 use crate::commands::{CommandEffects, CommandSink};
-use crate::config::try_map_process_texts;
+use crate::config::{ShellScript, try_map_process_texts};
 use crate::hashfiles;
 
 /// The runner's own directory, relative to the workspace root.
@@ -64,6 +64,7 @@ const JOB_PATH_FILE: &str = ".ci/github/job-path.json";
 const EVENT_FILE: &str = ".ci/github/event.json";
 const TEMP_DIR: &str = ".ci/temp";
 const TOOL_CACHE_DIR: &str = ".ci/toolcache";
+const SCRIPT_PATH_ENV: &str = "PETRI_GITHUB_SCRIPT";
 /// GitHub command files are control input, not general artifact storage.
 const COMMAND_FILE_LIMIT: usize = 1024 * 1024;
 
@@ -105,6 +106,30 @@ pub struct Effects {
     /// Commands the sink refused (`set-env`/`add-path` without the opt-in):
     /// each fails the step, as the runner's `CommandResult` does.
     pub refused: Vec<String>,
+    /// The runner's error annotations for `GITHUB_ENV` names on its block
+    /// list ([`set_env_blocked`]): the pair is dropped and the message logged,
+    /// but — unlike a refusal — the step's result stands.
+    pub blocked: Vec<String>,
+}
+
+/// The names the runner refuses to set from a step's own writes —
+/// `_setEnvBlockList` in `FileCommandManager.cs` (the `GITHUB_ENV` file) and
+/// `ActionCommandManager.cs` (the legacy `::set-env::` command), compared
+/// `OrdinalIgnoreCase`: `NODE_OPTIONS` would splice code into every later
+/// Node process, action executions included. A workflow's declared `env:` is
+/// author-controlled and stays unrestricted, as on GitHub.
+const SET_ENV_BLOCK_LIST: &[&str] = &["NODE_OPTIONS"];
+
+/// The block list's own spelling when `name` is on it — the runner's error
+/// names the list entry, not the step's casing. A blocked pair is dropped
+/// with an error annotation and nothing more: `SetEnvFileCommand` `continue`s
+/// rather than throwing, so `ProcessFiles`' catch never fires and the step's
+/// result is untouched.
+pub(crate) fn set_env_blocked(name: &str) -> Option<&'static str> {
+    SET_ENV_BLOCK_LIST
+        .iter()
+        .copied()
+        .find(|blocked| blocked.eq_ignore_ascii_case(name))
 }
 
 /// The job's accumulated `GITHUB_ENV`, read without creating any session files:
@@ -175,27 +200,22 @@ pub(crate) fn resolved_tool_cache(
 }
 
 /// [`resolved_tool_cache`] for a process running in `env` itself — a shell or
-/// node step: the ambient env is the executor's fact, and the host store
-/// counts only where this environment's filesystem has it (petri mounts
-/// nothing but the workspace into containers, so a containerized job never
-/// sees host paths).
+/// node step. An isolated environment owns its ambient cache path. A host job
+/// instead uses Petri's registered store and must not inherit the cache path of
+/// the process that launched Petri. Petri mounts nothing but the workspace into
+/// containers, so a containerized job never sees host paths.
 pub(crate) fn env_tool_cache(
     env: &dyn ExecEnv,
     store: Option<&Path>,
     env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
     job_env: &BTreeMap<String, String>,
 ) -> String {
-    resolved_tool_cache(
-        env.workspace_path(),
-        env.ambient_env("RUNNER_TOOL_CACHE"),
-        if env.shares_host_filesystem() {
-            store
-        } else {
-            None
-        },
-        env_config,
-        job_env,
-    )
+    let (ambient, store) = if env.shares_host_filesystem() {
+        (None, store)
+    } else {
+        (env.ambient_env("RUNNER_TOOL_CACHE"), None)
+    };
+    resolved_tool_cache(env.workspace_path(), ambient, store, env_config, job_env)
 }
 
 /// `RUNNER_TEMP` under `root`: the one computation behind both the exported
@@ -404,30 +424,43 @@ impl Session {
         out
     }
 
-    /// Write the resolved script to the step's `script` file and turn the
-    /// process into `sh` running the shell template over it.
+    /// Write the resolved script to the step's runner-owned directory and turn
+    /// the process into `sh` running the shell template over it. The script
+    /// cannot live below `working-directory`: a preceding container step can
+    /// create that directory as a uid that the host process cannot write as.
     async fn stage_script(
         &self,
         mut process: ProcessConfig,
         template: &str,
+        shell_script: ShellScript,
     ) -> Result<ProcessConfig, StepFailure> {
-        let step_id = self
+        let (script_name, contents) = match shell_script {
+            ShellScript::Plain => ("script", process.run),
+            ShellScript::PowerShell => (
+                "script.ps1",
+                format!(
+                    "$ErrorActionPreference = 'stop'\n{}\n\
+                     if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}\n",
+                    process.run
+                ),
+            ),
+        };
+        let script = self
             .files
             .env
             .parent()
-            .and_then(Path::file_name)
-            .expect("step files have a firing directory");
-        let script_arg = PathBuf::from(".petri").join(step_id).join("script");
-        let script = process
-            .working_dir
-            .as_deref()
-            .unwrap_or_else(|| Path::new(""))
-            .join(&script_arg);
-        write(&*self.env, &script, process.run.as_bytes()).await?;
+            .expect("step files have a firing directory")
+            .join(script_name);
+        write(&*self.env, &script, contents.as_bytes()).await?;
+        let script_path = format!("{}/{}", self.workspace, script.display());
+        process.env.insert(
+            SmolStr::new(SCRIPT_PATH_ENV),
+            ValueOrSecretRef::Literal(Value::String(script_path)),
+        );
         process.run = format!(
             "{}exec {}\n",
             self.prologue(),
-            template.replace("{0}", &script_arg.to_string_lossy())
+            template.replace("{0}", &format!("\"${SCRIPT_PATH_ENV}\""))
         );
         process.shell = Shell::Sh;
         Ok(process)
@@ -444,6 +477,7 @@ impl Session {
         mut self,
         process: ProcessConfig,
         shell_command: Option<String>,
+        shell_script: ShellScript,
         ctx: StepCtx,
         allow_unsecure: bool,
     ) -> (Outcome, Effects) {
@@ -506,7 +540,7 @@ impl Session {
             Err(failure) => return (failure.into(), Effects::default()),
         };
         let process = match shell_command {
-            Some(template) => match self.stage_script(process, &template).await {
+            Some(template) => match self.stage_script(process, &template, shell_script).await {
                 Ok(process) => process,
                 Err(failure) => return (failure.into(), Effects::default()),
             },
@@ -554,7 +588,19 @@ impl Session {
         // words when the outcome is still success-like.
         let refused = commands.refused.clone();
         let (outcome, effects) = match self.finish(commands).await {
-            Ok(effects) => (outcome, effects),
+            Ok(effects) => {
+                // Block-list drops annotate without failing: the runner
+                // `AddIssue`s and moves on, so the outcome stands as it is.
+                for message in &effects.blocked {
+                    let _ = logs
+                        .send(StepEvent::Log {
+                            stream: LogStream::Stderr,
+                            line:   format!("Error: {message}"),
+                        })
+                        .await;
+                }
+                (outcome, effects)
+            }
             Err(failure) => {
                 tracing::warn!(
                     failure_class = failure.class,
@@ -596,8 +642,17 @@ impl Session {
         )?;
 
         let mut env = parse_env_file(&env_text, "GITHUB_ENV")?;
+        // The sink already blocked `::set-env::` names in-stream, with that
+        // path's own message; whatever is blocked here came from the file.
         env.extend(commands.env);
+        let mut blocked = Vec::new();
         for (key, value) in env {
+            if let Some(name) = set_env_blocked(&key) {
+                blocked.push(format!(
+                    "Can't store {name} output parameter using '$GITHUB_ENV' command."
+                ));
+                continue;
+            }
             self.job_env.insert(key, stringify(&value));
         }
         // Each entry goes in front of the ones before it.
@@ -625,6 +680,7 @@ impl Session {
             state,
             summary,
             refused: commands.refused,
+            blocked,
         })
     }
 }
@@ -941,6 +997,16 @@ mod tests {
         assert!(is_env_truthy(&env, "A"));
         assert!(!is_env_truthy(&env, "B"));
         assert!(!is_env_truthy(&env, "C"));
+    }
+
+    #[test]
+    fn the_block_list_matches_any_casing_and_answers_with_its_own() {
+        assert_eq!(set_env_blocked("NODE_OPTIONS"), Some("NODE_OPTIONS"));
+        assert_eq!(set_env_blocked("node_options"), Some("NODE_OPTIONS"));
+        assert_eq!(set_env_blocked("Node_Options"), Some("NODE_OPTIONS"));
+        assert_eq!(set_env_blocked("NODE_OPTIONS2"), None);
+        assert_eq!(set_env_blocked("NODEOPTIONS"), None);
+        assert_eq!(set_env_blocked(""), None);
     }
 
     #[test]

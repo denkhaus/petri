@@ -2,6 +2,7 @@
 name = "petri-driver"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "The IO loop between the pure core and real processes."
 publish = false

@@ -179,8 +179,12 @@ environment variable and test `env.NAME` in the condition.
 and `RUNNER_*` variables, `GITHUB_EVENT_PATH`, and the `::` workflow commands:
 `set-output`, `save-state`, `add-mask`, `error`/`warning`/`notice`, `group`,
 `debug`, `echo`, `stop-commands`, with `set-env`/`add-path` gated behind
-`ACTIONS_ALLOW_UNSECURE_COMMANDS` as on GitHub. `GITHUB_TOKEN` comes from the
-environment or a logged-in `gh`.
+`ACTIONS_ALLOW_UNSECURE_COMMANDS` as on GitHub. The runner's env block list
+holds here too: `NODE_OPTIONS` (in any casing) written through `GITHUB_ENV`
+or `::set-env::` is dropped with the runner's error annotation and — as on
+GitHub, which annotates without throwing — the step still succeeds; a
+declared `env:` stays unrestricted. `GITHUB_TOKEN` comes from the environment
+or a logged-in `gh`.
 
 **The GitHub API.** Petri neither proxies nor blocks it (v1 stance, decided
 2026-08-28): `github-script`, `gh` steps and API-calling actions hit the real

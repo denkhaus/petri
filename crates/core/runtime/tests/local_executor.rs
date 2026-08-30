@@ -168,7 +168,7 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
     ]);
     let mut process = runner.run(spec).await.expect("docker run");
     assert!(
-        wait_for_file(&dir.workspace().join("ready"), Duration::from_mins(1)).await,
+        wait_for_file(&dir.workspace().join("ready"), Duration::from_secs(60)).await,
         "the one-shot never started"
     );
     process.signal(Sig::Term).await.expect("signal");
@@ -221,7 +221,7 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
         ]);
         let process = runner.run(spec).await.expect("docker run");
         assert!(
-            wait_for_file(&dir.workspace().join("ready"), Duration::from_mins(1)).await,
+            wait_for_file(&dir.workspace().join("ready"), Duration::from_secs(60)).await,
             "the one-shot never started"
         );
         drop(process);

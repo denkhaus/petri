@@ -43,15 +43,15 @@ use smol_str::SmolStr;
 /// (linux/amd64 and linux/arm64), so the daemon runs its own architecture
 /// natively and `runner.arch` reports it — an arm64 host is GitHub's
 /// `ubuntu-*-arm` runner, an amd64 host its `ubuntu-*` one.
-pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-e38f48b4bcd5";
-pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-e38f48b4bcd5";
-pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-e38f48b4bcd5";
+pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-b253b0b6004f";
+pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-b253b0b6004f";
+pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-b253b0b6004f";
 
 /// The dind flavor of the 24.04 runner: slim plus a Docker engine and its
 /// `start-docker` helper. The daemon is not running when the container starts
 /// — the session prologue brings it up lazily on the first step — and it needs
 /// `--privileged` ([`privilege`]). Only the 24.04 flavor is built.
-pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-e38f48b4bcd5";
+pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-b253b0b6004f";
 
 /// The full 24.04 runner capture — GitHub's own runner filesystem, ~20 GB to
 /// pull once. Each architecture is a capture of GitHub's runner for that
@@ -934,6 +934,21 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
         .any(|line| line.contains("Function not implemented"))
     {
         return Some("amd64-only image; this host's emulation cannot run it".to_string());
+    }
+    // A toolchain's own architecture refusal — CodeQL's "does not support the
+    // platform/architecture combination of linux/arm64", and any tool that
+    // says the same thing about itself. The same host-architecture limit as
+    // above, seen from the download side: a host of a supported architecture
+    // runs the row unchanged.
+    if log
+        .iter()
+        .any(|line| line.contains("does not support the platform/architecture combination"))
+    {
+        return Some(
+            "the toolchain ships no build for this architecture; a host of a supported \
+             architecture runs it"
+                .to_string(),
+        );
     }
     // The scorecard action's publish path signs its results, and the signing
     // service takes only the Actions-issued ephemeral `GITHUB_TOKEN` — any
@@ -1866,6 +1881,26 @@ mod log_tests {
             cross_run: false,
         };
         assert!(expected_from_log(&other, &not_found).is_none());
+    }
+
+    /// A toolchain refusing this architecture outright — CodeQL on linux/arm64
+    /// — is the host's limit, not a runtime gap; an unrelated failure in the
+    /// same action stays a gap.
+    #[test]
+    fn an_architecture_refusal_classifies_as_the_hosts_limit() {
+        let init = StepIdentity::Action {
+            bare:      "github/codeql-action/init".to_string(),
+            cross_run: false,
+        };
+        let refusal = vec![
+            "Error: Unable to download and extract CodeQL CLI: The CodeQL CLI does not \
+             support the platform/architecture combination of linux/arm64 (see \
+             https://codeql.github.com/docs/)"
+                .to_string(),
+        ];
+        assert!(expected_from_log(&init, &refusal).is_some());
+        let unrelated = vec!["Error: The configuration file does not exist".to_string()];
+        assert!(expected_from_log(&init, &unrelated).is_none());
     }
 
     /// The setup-node shape that made a whole gap class undiagnosable: the

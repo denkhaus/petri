@@ -258,7 +258,18 @@ fn prepare(
     platform: Option<&str>,
     runner_arch: &str,
 ) {
-    runs::stub_run_scripts(graph);
+    // `PETRI_SWEEP_REAL`: comma-separated `repo/file` substrings whose `run:`
+    // scripts stay REAL — the exploratory smoke for actual builds, always used
+    // with a filter, never in the baseline sweep (real failures are the
+    // project's business and would read as gaps).
+    let real = env::var("PETRI_SWEEP_REAL").ok().is_some_and(|list| {
+        let name = format!("{repo_slug}/{file}");
+        list.split(',')
+            .any(|pat| !pat.trim().is_empty() && name.contains(pat.trim()))
+    });
+    if !real {
+        runs::stub_run_scripts(graph);
+    }
     // A graph that drives a Docker engine gets the dind runner (and the
     // `--privileged` its daemon needs) where the 24.04 image would have been
     // picked — the only flavor the dind variant is built for. A workflow on

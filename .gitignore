@@ -6,6 +6,7 @@
 !/.ai/plans/DRAFTING.md
 node_modules/
 /target
+/dist-release/
 __pycache__/
 tmp
 /dist/

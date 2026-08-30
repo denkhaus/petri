@@ -119,7 +119,7 @@ impl steps::StepRunner for WedgedStep {
         // Receive the cancel and deliberately do nothing about it.
         let _ = ctx.control.recv().await;
         loop {
-            time::sleep(Duration::from_hours(1)).await;
+            time::sleep(Duration::from_secs(3600)).await;
         }
     }
 }

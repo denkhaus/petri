@@ -68,6 +68,12 @@ jobs:
         shell_command("j/step-3"),
         json!("pwsh -command \". '{0}'\"")
     );
+    let pwsh = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "j/step-3")
+        .expect("pwsh step");
+    assert_eq!(pwsh.step.config["shell_script"], json!("power_shell"));
     assert_eq!(shell_command("j/step-4"), json!("/usr/bin/env bash {0}"));
 
     let diags = diagnostics(

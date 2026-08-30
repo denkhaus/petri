@@ -14,7 +14,7 @@ use tokio::task;
 use tracing::Span;
 use tracing::field::{Empty, display};
 
-use crate::config::{ActionConfig, ActionLocation};
+use crate::config::{ActionConfig, ActionLocation, ShellScript};
 use crate::gate;
 use crate::session::{
     REPO_DIR, RUNNER_DIR, Session, can_use_unsecure_commands, fold_into_outcome, shell_quote,
@@ -145,7 +145,9 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
         soft_fail: config.soft_fail,
         output_env_aliases: vec![SmolStr::new("GITHUB_OUTPUT")],
     };
-    let (outcome, effects) = session.run(process, None, ctx, allow_unsecure).await;
+    let (outcome, effects) = session
+        .run(process, None, ShellScript::Plain, ctx, allow_unsecure)
+        .await;
 
     // State accumulates across phases: what this phase inherited plus what it
     // saved.

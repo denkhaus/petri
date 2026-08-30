@@ -454,7 +454,7 @@ async fn resume_fences_the_crashed_container() {
     let driver = host::driver(&rt, graph).expect("prepared");
     let run = tokio::spawn(driver.run());
     assert!(
-        wait_for_file(&heartbeat, Duration::from_mins(1)).await,
+        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
     // The crash: the driver is gone, release never runs, the container beats on.

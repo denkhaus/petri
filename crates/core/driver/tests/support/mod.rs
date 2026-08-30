@@ -243,7 +243,7 @@ impl steps::StepRunner for SpawnAndWedge {
         let _handle = ctx.env.spawn(spec).await.expect("spawn");
         let _ = ctx.control.recv().await;
         loop {
-            time::sleep(Duration::from_hours(1)).await;
+            time::sleep(Duration::from_secs(3600)).await;
         }
     }
 }

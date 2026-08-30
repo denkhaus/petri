@@ -548,3 +548,88 @@ async fn a_malformed_env_file_fails_the_step_in_a_container() {
     let report = run_host(graph, "shell-env-malformed-boxed").await;
     assert_malformed_env_fails(&report);
 }
+
+// ── 5. The NODE_OPTIONS block list ──────────────────────────────────────────
+
+/// The runner's `_setEnvBlockList` (`SetEnvFileCommand` in
+/// `FileCommandManager.cs`): `NODE_OPTIONS` written to `GITHUB_ENV` is
+/// dropped with an error annotation — the runner `AddIssue`s and `continue`s
+/// rather than throwing, so the step still *succeeds* — while sibling
+/// variables from the same file apply. The comparison is `OrdinalIgnoreCase`
+/// and the message carries the list's spelling, whatever the step wrote. The
+/// legacy `::set-env::` command (`SetEnvCommandExtension`) checks the same
+/// list even with the unsecure opt-in, with its own message. A declared
+/// `env:` is author-controlled and stays unrestricted, on both runners.
+const NODE_OPTIONS_WORKFLOW: &str = r#"
+on: push
+jobs:
+  env_file:
+    runs-on: ubuntu-latest
+    steps:
+      - id: writer
+        run: |
+          echo "NODE_OPTIONS=--require=/tmp/evil.js" >> "$GITHUB_ENV"
+          echo "node_options=--require=/tmp/evil.js" >> "$GITHUB_ENV"
+          echo "BENIGN=still-applied" >> "$GITHUB_ENV"
+          echo writer-done
+      - id: reader
+        run: |
+          [ "${NODE_OPTIONS:-}" != "--require=/tmp/evil.js" ] && echo node-options-not-applied
+          [ -z "${node_options:-}" ] && echo lowercase-blocked-too
+          echo "benign=[$BENIGN]"
+  legacy:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+    steps:
+      - id: writer
+        run: |
+          echo "::set-env name=NODE_OPTIONS::--require=/tmp/evil.js"
+          echo "::set-env name=LEGACY_OK::applied"
+      - id: reader
+        run: |
+          [ "${NODE_OPTIONS:-}" != "--require=/tmp/evil.js" ] && echo legacy-node-options-not-applied
+          echo "legacy-ok=[$LEGACY_OK]"
+"#;
+
+fn assert_node_options_blocked(report: &RunReportPlus) {
+    // The annotation does not fail anything: every step, both jobs, green.
+    assert_success(report);
+    assert_lines(report, &[
+        "writer-done",
+        "Error: Can't store NODE_OPTIONS output parameter using '$GITHUB_ENV' command.",
+        "node-options-not-applied",
+        "lowercase-blocked-too",
+        "benign=[still-applied]",
+        "Error: Can't update NODE_OPTIONS environment variable using ::set-env:: command.",
+        "legacy-node-options-not-applied",
+        "legacy-ok=[applied]",
+    ]);
+    let lines = log_lines(report);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.as_str()
+                == "Error: Can't store NODE_OPTIONS output parameter using '$GITHUB_ENV' command.")
+            .count(),
+        2,
+        "one annotation per blocked pair, each naming the list's spelling: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn node_options_from_a_step_is_dropped_without_failing_it() {
+    let graph = lower_ok(NODE_OPTIONS_WORKFLOW);
+    let report = run_host(graph, "shell-env-node-options").await;
+    assert_node_options_blocked(&report);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_options_from_a_step_is_dropped_without_failing_it_in_a_container() {
+    if !testkit::is_docker_ready().await {
+        return;
+    }
+    let graph = lower_ok(&containerized(NODE_OPTIONS_WORKFLOW));
+    let report = run_host(graph, "shell-env-node-options-boxed").await;
+    assert_node_options_blocked(&report);
+}
