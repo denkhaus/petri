@@ -347,6 +347,8 @@ async fn run_one(
     let identities = step_identities(&graph);
     let stub_consumers = runs::stubbed_output_consumers(&graph);
     let dispatch_refs = runs::dispatch_ref_checkouts(&graph);
+    let empty_inputs = runs::empty_input_steps(&graph);
+    let scripts = runs::stashed_scripts(&graph);
     let label: String = format!("{repo}-{file}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -358,6 +360,11 @@ async fn run_one(
 
     let mut options = RunOptions::new(&dir);
     options.grace = Duration::from_secs(2);
+    // Below the sweep's 90s post-cancel wait, or "wedged" is arithmetic: the
+    // first cancel admits run_on_cancel cleanup and the kill only fires when
+    // this grace expires — with the driver's 120s default, a run that WOULD
+    // come down at ~125s was abandoned at 90s and read as wedged.
+    options.cleanup_grace = Duration::from_secs(60);
     options.retention = Retention::Never;
     options.echo = false;
     // The sweep measures outcomes, not determinism; replay verification is the
@@ -414,6 +421,8 @@ async fn run_one(
                 caller_coupled,
                 &stub_consumers,
                 &dispatch_refs,
+                &empty_inputs,
+                &scripts,
             ),
         },
     };
@@ -434,6 +443,8 @@ fn first_failure(
     caller_coupled: bool,
     stub_consumers: &BTreeSet<String>,
     dispatch_refs: &BTreeSet<String>,
+    empty_inputs: &BTreeSet<String>,
+    scripts: &[(String, Option<String>)],
 ) -> RunResult {
     for record in report.state.history() {
         if !record.outcome.status.is_failure() {
@@ -470,6 +481,19 @@ fn first_failure(
                             "checks out a ref built from an empty dispatch input".to_string()
                         })
                     })
+                    .or_else(|| {
+                        // A step reading a defaultless declared input got the
+                        // type's zero; when the file is a reusable one run
+                        // standalone, the missing caller — not the runtime —
+                        // is what left it empty.
+                        (caller_coupled && empty_inputs.contains(&base)).then(|| {
+                            "reads a caller input left empty (a reusable workflow run standalone)"
+                                .to_string()
+                        })
+                    })
+                    // A missing executable an earlier stubbed script in the
+                    // same job would have installed is the stub's doing.
+                    .or_else(|| runs::expected_from_stubbed_script(scripts, &base, &lines))
             });
         return RunResult::Fail(FirstFailure {
             node: record.name.to_string(),

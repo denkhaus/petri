@@ -46,13 +46,13 @@ mod oneshot;
 mod services;
 
 use std::collections::BTreeMap;
-use std::env;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{env, mem};
 
 use async_trait::async_trait;
 use executor::lines::pump;
@@ -66,6 +66,7 @@ use smol_str::SmolStr;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
+use tokio::runtime::Handle;
 use tokio::sync::{OnceCell, mpsc};
 use tokio::time::{self, Instant};
 use tracing::field::Empty;
@@ -417,6 +418,63 @@ pub async fn sweep_containers(prefix: &str) {
     }
 }
 
+/// Cleanup for an acquire nobody waited out. Release tears down what acquire
+/// returned; this covers what acquire had already realized when its future was
+/// dropped instead — the sweep abandoning a run that ignored its cancel is the
+/// live case. Dropping while armed removes the scope's world by name, best
+/// effort, on a detached task; the `abandoned` flag additionally reaches the
+/// create task, which owns the window where the container's create is still in
+/// flight at the daemon and remove-by-name has nothing to see yet.
+struct AbandonGuard {
+    container: String,
+    services:  bool,
+    abandoned: Arc<AtomicBool>,
+    armed:     bool,
+}
+
+impl AbandonGuard {
+    fn arm(container: &str, services: bool) -> Self {
+        Self {
+            container: container.to_string(),
+            services,
+            abandoned: Arc::new(AtomicBool::new(false)),
+            armed: true,
+        }
+    }
+
+    fn abandoned(&self) -> Arc<AtomicBool> {
+        self.abandoned.clone()
+    }
+
+    /// Acquire returned: cleanup is inline on the error paths and the handle's
+    /// on success.
+    fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbandonGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.abandoned.store(true, Ordering::SeqCst);
+        let container = mem::take(&mut self.container);
+        let services = self.services;
+        // Detached on purpose: there is no future left to await from. On a
+        // runtime that is itself shutting down the spawn is dropped unrun —
+        // best effort, like the rest of the fence.
+        if let Ok(handle) = Handle::try_current() {
+            handle.spawn(async move {
+                let _ = run_docker(&["rm", "-f", "-v", &container]).await;
+                if services {
+                    services::sweep(&container).await;
+                }
+            });
+        }
+    }
+}
+
 /// What release needs: the container to stop, the workspace, and whether to
 /// keep it.
 #[derive(Clone, Debug)]
@@ -498,9 +556,23 @@ impl DockerExecutor {
             services::sweep(&name).await;
         }
 
+        // Armed for the rest of acquire: a caller that stops waiting drops
+        // this future — an aborted driver task, a host's timeout — and
+        // whatever the daemon has already realized for this scope must not
+        // outlive the drop. Defused on every return, where cleanup is either
+        // done inline or owned by the handle.
+        let guard = AbandonGuard::arm(&name, !scope.services.is_empty());
+
         // The scope's services first: the job container joins their network at
         // creation, and every service is healthy before any step can fire.
-        let network = services::realize(scope, &name, false, self.pull, ctx).await?;
+        let network = match services::realize(scope, &name, false, self.pull, ctx).await {
+            Ok(network) => network,
+            Err(error) => {
+                // realize failed and cleaned up after itself.
+                guard.defuse();
+                return Err(error);
+            }
+        };
 
         let mount = format!("{}:{CONTAINER_WORKSPACE}", workspace.display());
         let mut create: Vec<String> = vec![
@@ -528,16 +600,41 @@ impl DockerExecutor {
         // A long-lived init command, so the container outlives any one step.
         create.extend(["sleep".to_string(), "infinity".to_string()]);
 
-        let refs: Vec<&str> = create.iter().map(String::as_str).collect();
-        let created = async {
-            run_docker(&refs).await?;
-            run_docker(&["start", &name]).await?;
-            // The environment a `docker exec` will start from, snapshotted
-            // once: the image's `Config.Env` with the `-e` flags above folded
-            // in — the fact behind [`ExecEnv::ambient_env`].
-            run_docker(&["inspect", "--format", "{{json .Config.Env}}", &name]).await
-        }
-        .await;
+        // The create sequence runs in its own task, which a dropped acquire
+        // does not abort. Killing the `docker create` client mid-request does
+        // not cancel the daemon's create: the container appears moments
+        // *after* the client is dead, past any remove-by-name sweep that
+        // already ran — the leak this closes. The task always sees its own
+        // requests through, then checks whether anyone is still waiting.
+        let abandoned = guard.abandoned();
+        let sequence = tokio::spawn({
+            let name = name.clone();
+            async move {
+                let refs: Vec<&str> = create.iter().map(String::as_str).collect();
+                let result = async {
+                    run_docker(&refs).await?;
+                    run_docker(&["start", &name]).await?;
+                    // The environment a `docker exec` will start from,
+                    // snapshotted once: the image's `Config.Env` with the `-e`
+                    // flags above folded in — the fact behind
+                    // [`ExecEnv::ambient_env`].
+                    run_docker(&["inspect", "--format", "{{json .Config.Env}}", &name]).await
+                }
+                .await;
+                if abandoned.load(Ordering::SeqCst) {
+                    let _ = run_docker(&["rm", "-f", "-v", &name]).await;
+                }
+                result
+            }
+        });
+        let created = match sequence.await {
+            Ok(result) => result,
+            Err(join) => Err(EnvError::Backend {
+                backend:   SmolStr::new("docker"),
+                operation: SmolStr::new("create"),
+                message:   join.to_string(),
+            }),
+        };
         let ambient = match created {
             Ok(env_json) => parse_env_list(&env_json),
             Err(error) => {
@@ -547,6 +644,7 @@ impl DockerExecutor {
                 if network.is_some() {
                     services::sweep(&name).await;
                 }
+                guard.defuse();
                 return Err(error);
             }
         };
@@ -564,6 +662,7 @@ impl DockerExecutor {
             ctx,
         );
 
+        guard.defuse();
         Ok(EnvHandle::new(
             scope.id,
             scope.instance.clone(),
