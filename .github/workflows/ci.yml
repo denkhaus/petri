@@ -4,52 +4,61 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # Deliberately no global `RUSTFLAGS: -D warnings`: it applies to dependency
-  # compilation too, so a warning in someone else's crate fails our build. The
-  # denial belongs on our own lint step, after `--`.
 
 jobs:
-  test:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  check:
+    name: check (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu runners have a native Docker daemon, so the Docker half of the
+          # Linux runners have a native Docker daemon, so the Docker half of the
           # acceptance battery runs for real here.
-          - os: ubuntu-latest
+          - runner: ubuntu-24.04
             docker: required
-          # macOS runners have no daemon. The Docker tests skip themselves, and the
-          # rest of the suite still exercises the host executor.
-          - os: macos-latest
+          # macOS runners have no daemon. The Docker tests skip themselves, and
+          # the rest of the suite still exercises the host executor.
+          - runner: macos-15
             docker: absent
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install locked tools
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          version: 2026.6.11
+          install_args: --locked --jobs=1
 
-      # The compatibility corpus is other projects' workflows, fetched rather than
-      # committed. `gh api` needs a token on a runner.
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          shared-key: routine-${{ matrix.runner }}
+
+      # The compatibility corpus is other projects' workflows, fetched rather
+      # than committed. `gh api` needs a token on a runner.
       - name: Fetch the corpus
-        run: ./scripts/corpus-fetch.sh && ./scripts/corpus-fetch-actions.sh
+        run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: Formatting
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       # Pull it here rather than inside a test, so a registry hiccup fails as an
       # infrastructure problem instead of a flaky cancellation test.
@@ -57,15 +66,14 @@ jobs:
         if: matrix.docker == 'required'
         run: docker pull alpine:3.20
 
-      - name: Tests
-        run: cargo test --locked --workspace --all-features
+      - name: Verify routine changes
+        run: mise run check
         env:
           # On a runner that has Docker, a skipped Docker test is a failure: the
           # whole point of this job is that the acceptance battery actually ran.
           PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
-          # Same reasoning for the corpus: it was just fetched, so a skipped corpus
-          # battery means the fetch failed, and a silently skipped battery is
-          # indistinguishable from a passing one.
+          # The corpus was just fetched, so a skipped corpus battery means the
+          # fetch failed.
           PETRI_REQUIRE_CORPUS: '1'
 
       - name: No containers left behind
@@ -78,13 +86,3 @@ jobs:
             exit 1
           fi
           echo "clean"
-
-  # Release mode catches what debug assertions hide, and is cheap enough to run once.
-  release-build:
-    name: release build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --workspace --release

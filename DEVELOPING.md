@@ -75,7 +75,8 @@ mutate repositories through the GitHub API.
 
 ## Continuous integration
 
-Pull requests and pushes to `main` run formatting, Clippy, and the full test
-suite on Linux and macOS. A separate Linux job builds the workspace in release
-mode. Linux also runs the Docker-backed acceptance tests and checks that Petri
-leaves no containers behind.
+Pull requests and pushes to `main` run the routine verification gate on fixed
+Linux and macOS runners. The gate checks formatting, Clippy, GitHub Actions,
+whitespace, the full test suite, and a release build. Linux also runs the
+Docker-backed acceptance tests and checks that Petri leaves no containers
+behind.
