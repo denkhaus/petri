@@ -102,4 +102,5 @@ behind.
 
 The scheduled Nightly workflow also checks the Rust 1.89 compiler floor and
 runs the full test suite in release mode. You can start it manually from GitHub
-Actions.
+Actions. Nightly includes Linux arm64 coverage. Keep arm64 in Nightly until its
+Docker and corpus runs are reliable enough for the routine gate.

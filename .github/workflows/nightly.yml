@@ -27,6 +27,8 @@ jobs:
         include:
           - runner: ubuntu-24.04
             docker: required
+          - runner: ubuntu-24.04-arm
+            docker: required
           - runner: macos-15
             docker: absent
 
