@@ -1,6 +1,6 @@
 //! `github/run`: a `run:` step with GitHub's runner contract.
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use ir::{Outcome, Value};
 use serde_json::Map;
@@ -41,10 +41,14 @@ impl Step for RunStep {
                 .or_insert_with(|| ValueOrSecretRef::Literal(Value::String(value.to_string())));
         }
         let allow_unsecure = env_truthy(&env, "ACTIONS_ALLOW_UNSECURE_COMMANDS");
-        let working_dir = match config.working_dir {
-            Some(dir) => PathBuf::from(REPO_DIR).join(dir),
-            None => PathBuf::from(REPO_DIR),
-        };
+        // `.` components drop out: `create_dir_all("repo/.")` cannot make
+        // `repo` (its parent is the workspace, not `repo`), and
+        // `working-directory: .` is how workflows spell the workspace itself.
+        let working_dir: PathBuf = PathBuf::from(REPO_DIR)
+            .join(config.working_dir.unwrap_or_default())
+            .components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect();
         // With a custom shell the script rides in a file and the prologue joins
         // the wrapper line instead; the session assembles both.
         let run = match &config.shell_command {
