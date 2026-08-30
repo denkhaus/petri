@@ -76,8 +76,9 @@ depends = [
 
 [tasks."check:nightly"]
 description = "Run the extended nightly verification gate"
-depends = ["check", "check:msrv"]
+depends = ["check"]
 run = [
+  "mise run check:msrv",
   "cargo clean --profile dev",
   "cargo clean --profile test",
   "cargo clean --target-dir target/clippy",
