@@ -1,0 +1,8 @@
+# Acceptance tests share the corpus action cache. Git cannot safely fetch the
+# same bare repository from multiple test processes at once.
+[test-groups.acceptance]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "package(petri-github-acceptance)"
+test-group = "acceptance"
