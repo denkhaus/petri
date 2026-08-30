@@ -17,7 +17,6 @@ name = "executor"
 ir = { workspace = true }
 async-trait = { workspace = true }
 libc = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }

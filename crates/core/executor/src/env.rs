@@ -5,18 +5,22 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::time::Duration;
+use std::{fmt, process};
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 
 use crate::error::EnvError;
 
 /// What to run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` is hand-written: this is where resolved secrets land — `env` holds
+/// the plaintext a step's `{"$secret": ...}` references resolved to, and the
+/// last argument is the script itself — so the shape prints and the values do
+/// not.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProcessSpec {
     pub program: SmolStr,
     pub args:    Vec<SmolStr>,
@@ -45,6 +49,17 @@ impl ProcessSpec {
     pub fn with_cwd(mut self, cwd: Option<PathBuf>) -> Self {
         self.cwd = cwd;
         self
+    }
+}
+
+impl fmt::Debug for ProcessSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcessSpec")
+            .field("program", &self.program)
+            .field("args", &self.args.len())
+            .field("env", &self.env.keys())
+            .field("cwd", &self.cwd)
+            .finish()
     }
 }
 
@@ -90,7 +105,7 @@ impl Sig {
 }
 
 /// How a process ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExitStatus {
     pub code:   Option<i32>,
     /// The signal that killed it, when it was killed.

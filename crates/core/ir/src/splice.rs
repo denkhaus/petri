@@ -209,6 +209,11 @@ impl GraphBuilder<Local> {
     /// Finish a fragment graph with explicit exits. This uses the same node,
     /// edge, entry, routing, and scope allocation path as a live graph
     /// builder.
+    ///
+    /// # Panics
+    ///
+    /// When the builder carries run params or a completion policy. A fragment
+    /// is a body, not a graph, and neither can cross the splice boundary.
     pub fn build_fragment(self, exits: impl IntoIterator<Item = NodeId<Local>>) -> GraphFragment {
         let Graph {
             body,

@@ -221,8 +221,11 @@ impl Registry {
         self.insert(Arc::new(Erased(step)))
     }
 
-    /// Register a hand-erased runner. Same duplicate rule as
-    /// [`Registry::register`].
+    /// Register a hand-erased runner.
+    ///
+    /// # Panics
+    ///
+    /// On a duplicate name. Same rule as [`Registry::register`].
     pub fn register_runner(&mut self, runner: Arc<dyn StepRunner>) -> StepKindId {
         self.insert(runner)
     }

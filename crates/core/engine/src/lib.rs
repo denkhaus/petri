@@ -6,7 +6,7 @@
 //! in [`EngineState`]; side effects happen in the host, behind the [`Command`]
 //! / [`Event`] boundary.
 //!
-//! ```no_run
+//! ```
 //! # use engine::{EngineState, Event, apply};
 //! # let graph = ir::Graph::new();
 //! let state = EngineState::new(graph);

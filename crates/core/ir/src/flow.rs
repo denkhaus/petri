@@ -2,6 +2,7 @@
 //! signals.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -71,7 +72,12 @@ pub enum Status {
 }
 
 /// A [`Status`] with its payload stripped, for matching on the variant alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// Deliberately unordered: no total order over these six means anything, and
+/// declaration order is not one. Contrast
+/// [`SplicePolicy`](crate::SplicePolicy), whose derived order *is* its
+/// authority order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StatusKind {
     Success,
     PartialSuccess,
@@ -435,4 +441,16 @@ pub enum RunStatus {
     Success,
     Failed,
     Cancelled,
+}
+
+/// The text a reader sees, in the same lowercase shape as [`Status::tag`], so
+/// a run and its steps read the same way. `Debug` stays for diagnostics.
+impl fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        })
+    }
 }

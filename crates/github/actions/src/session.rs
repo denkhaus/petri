@@ -258,7 +258,8 @@ impl Session {
         &self.workspace
     }
 
-    /// `GITHUB_WORKSPACE`.
+    /// The checkout root — `GITHUB_WORKSPACE`, which is [`Self::workspace`]
+    /// plus the repository directory, not the workspace root itself.
     pub fn github_workspace(&self) -> String {
         github_workspace_path(&*self.env)
     }

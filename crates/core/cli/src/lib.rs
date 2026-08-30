@@ -233,7 +233,7 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
         eprintln!("  {} {}", record.outcome.status.tag(), record.name);
     }
     let status = report.status;
-    eprintln!("run: {status:?}");
+    eprintln!("run: {status}");
     if status == RunStatus::Success {
         ExitCode::SUCCESS
     } else {

@@ -616,7 +616,6 @@ dependencies = [
  "async-trait",
  "libc",
  "petri-ir",
- "serde",
  "serde_json",
  "smol_str",
  "thiserror",

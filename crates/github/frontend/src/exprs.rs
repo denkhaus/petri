@@ -890,7 +890,9 @@ pub fn fold_template<E>(
     Ok(acc)
 }
 
-/// How a scalar lowered.
+/// What [`lower_scalar`] made of one workflow scalar. `Secret` appears only at
+/// `env_shaped` sites — a step's `run:`, `env:` or `with:`; anywhere else a
+/// whole-value secret is a diagnostic instead.
 pub enum LoweredScalar {
     /// A plain value, no expression in it.
     Literal(Value),

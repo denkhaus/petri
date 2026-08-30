@@ -88,7 +88,7 @@ pub trait SecretProvider: Send + Sync {
 ///
 /// Shared by handle: the provider adds to it as secrets are resolved, and the
 /// log sink reads it on every line.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Masker {
     values: Arc<RwLock<Vec<String>>>,
 }
@@ -162,6 +162,16 @@ impl Masker {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Hand-written for the same reason [`Secret`]'s is: the mask set holds the
+/// plaintext of every resolved secret, so only its size may print.
+impl fmt::Debug for Masker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Masker")
+            .field("values", &self.len())
+            .finish()
     }
 }
 

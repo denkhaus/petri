@@ -17,12 +17,12 @@
 //! run wrappers that keep a run resumable when no product store sits behind it.
 //!
 //! ```no_run
-//! # async fn demo() -> Result<(), String> {
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let rt = petri::runtime().options(petri::RunOptions::new("/tmp/petri-demo"));
 //! let lowered = rt.check(std::path::Path::new("pipeline.yml"), None, None)?;
 //! if let Some(graph) = lowered.graph {
-//!     let report = rt.run(graph).await.expect("replay is byte-identical");
-//!     println!("{:?}", report.status);
+//!     let report = rt.run(graph).await?;
+//!     println!("{}", report.status);
 //! }
 //! # Ok(())
 //! # }

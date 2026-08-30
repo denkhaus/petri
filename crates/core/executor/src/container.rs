@@ -11,6 +11,7 @@
 //! [`EnvHandle`]: crate::EnvHandle
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -48,7 +49,12 @@ pub enum ContainerImage {
 
 /// What one one-shot container runs. The runner supplies the scope's world —
 /// workspace mount, network, naming — so nothing here names a host path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` is hand-written for the same reason [`crate::ProcessSpec`]'s is:
+/// `env` holds the plaintext a step's `{"$secret": ...}` references resolved
+/// to, and `args` can carry a secret a caller substituted into them, so the
+/// shape prints and the values do not.
+#[derive(Clone, PartialEq, Eq)]
 pub struct OneShotContainer {
     pub image:      ContainerImage,
     /// Override the image's entrypoint (one executable; arguments go in
@@ -112,6 +118,18 @@ impl OneShotContainer {
     pub fn with_workdir(mut self, workdir: &str) -> Self {
         self.workdir = Some(SmolStr::new(workdir));
         self
+    }
+}
+
+impl fmt::Debug for OneShotContainer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OneShotContainer")
+            .field("image", &self.image)
+            .field("entrypoint", &self.entrypoint)
+            .field("args", &self.args.len())
+            .field("env", &self.env.keys())
+            .field("workdir", &self.workdir)
+            .finish()
     }
 }
 
