@@ -204,12 +204,25 @@ jobs:
       redis:
         image: redis:7-alpine
     steps:
-      - run: nslookup redis > /dev/null && echo service-resolved
+      - run: |
+          tries=0
+          until nslookup redis; do
+            tries=$((tries + 1))
+            [ "$tries" -ge 10 ] && exit 1
+            sleep 1
+          done
+          echo service-resolved
         shell: sh
 "#;
     let graph = lower_ok(text);
     let report = run_host(graph, "services-e2e").await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}\n{:?}",
+        errors(&report),
+        log_lines(&report)
+    );
     let lines = log_lines(&report);
     assert!(lines.iter().any(|l| l == "service-reachable"), "{lines:?}");
     assert!(lines.iter().any(|l| l == "service-resolved"), "{lines:?}");
