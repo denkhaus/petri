@@ -397,9 +397,9 @@ async fn a_pending_retry_is_rearmed_not_restarted() {
     let flaky = b.add_step("flaky", ScopeId::new(0), FLAKY);
     b.node_mut(flaky).retry = ir::RetryPolicy::attempts(2).with_backoff(ir::Backoff {
         initial: Duration::from_millis(50),
-        factor: 1.0,
-        max: Duration::from_millis(200),
-        jitter: false,
+        factor:  1.0,
+        max:     Duration::from_millis(200),
+        jitter:  false,
     });
     let graph = b.build();
 
@@ -685,7 +685,7 @@ async fn the_synthesized_cancel_routes_and_cleanup_redispatches() {
 
 /// An executor stub that counts acquisitions and delegates to the host.
 struct CountingExecutor {
-    inner: executor_host::HostExecutor,
+    inner:    executor_host::HostExecutor,
     acquires: Arc<AtomicUsize>,
 }
 
@@ -724,7 +724,7 @@ async fn resume_reacquires_held_scopes() {
 
     let acquires = Arc::new(AtomicUsize::new(0));
     let executor: Arc<dyn executor::Executor> = Arc::new(CountingExecutor {
-        inner: executor_host::HostExecutor::new(dir.path()),
+        inner:    executor_host::HostExecutor::new(dir.path()),
         acquires: Arc::clone(&acquires),
     });
     let (driver, _info) = Driver::resume(

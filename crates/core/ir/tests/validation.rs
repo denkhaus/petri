@@ -1,10 +1,9 @@
-//! §7: the invariants checked at load. Every check runs, so one call reports every
-//! problem rather than stopping at the first.
+//! §7: the invariants checked at load. Every check runs, so one call reports
+//! every problem rather than stopping at the first.
 
 use std::time::Duration;
 
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
-
 use ir::validate::{ValidationError, ValidationLocation, ValidationWarning};
 use ir::{
     Arm, Budget, Edge, ExpandTarget, Expansion, ExprId, Graph, GraphBuilder, Guard, JoinPolicy,
@@ -114,8 +113,8 @@ fn groups_must_have_arms_but_a_node_need_not_have_groups() {
     validate(&b.build()).expect("a terminal node is fine");
 }
 
-/// Invariant 4: `max_firings >= 1`, and anything downstream of a back edge needs a
-/// finite cap.
+/// Invariant 4: `max_firings >= 1`, and anything downstream of a back edge
+/// needs a finite cap.
 #[test]
 fn budgets_must_be_at_least_one_and_finite_inside_loops() {
     let mut b = GraphBuilder::new();
@@ -198,15 +197,12 @@ fn a_plan_may_not_carry_hir_fields() {
     let scope = ScopeId::new(0);
     let a = b.add_step("a", scope, NOOP);
     let items = b.exprs().lit(json!([1, 2]));
-    b.set_expansion(
-        a,
-        Expansion::ForEach {
-            items,
-            target: ExpandTarget::Node,
-            max_parallel: None,
-            fail_fast: false,
-        },
-    );
+    b.set_expansion(a, Expansion::ForEach {
+        items,
+        target: ExpandTarget::Node,
+        max_parallel: None,
+        fail_fast: false,
+    });
     let graph = b.build();
 
     validate(&graph).expect("valid as HIR");
@@ -248,15 +244,12 @@ fn expansion_regions_may_only_be_entered_at_the_entry() {
     // `outside` jumps straight into the middle of the region.
     b.link(outside, middle);
     let items = b.exprs().lit(json!([1]));
-    b.set_expansion(
-        entry,
-        Expansion::ForEach {
-            items,
-            target: ExpandTarget::Subgraph { entry, exit },
-            max_parallel: None,
-            fail_fast: false,
-        },
-    );
+    b.set_expansion(entry, Expansion::ForEach {
+        items,
+        target: ExpandTarget::Subgraph { entry, exit },
+        max_parallel: None,
+        fail_fast: false,
+    });
     b.mark_entry(outside);
     b.mark_entry(entry);
 
@@ -267,8 +260,8 @@ fn expansion_regions_may_only_be_entered_at_the_entry() {
     );
 }
 
-/// Invariant 7: the exit must postdominate the entry, so a region member that can
-/// finish without reaching the exit is rejected.
+/// Invariant 7: the exit must postdominate the entry, so a region member that
+/// can finish without reaching the exit is rejected.
 #[test]
 fn the_expansion_exit_must_postdominate_the_entry() {
     let mut b = GraphBuilder::new();
@@ -278,15 +271,12 @@ fn the_expansion_exit_must_postdominate_the_entry() {
     let exit = b.add_step("exit", scope, NOOP);
     b.fan_out(entry, &[stops, exit]);
     let items = b.exprs().lit(json!([1]));
-    b.set_expansion(
-        entry,
-        Expansion::ForEach {
-            items,
-            target: ExpandTarget::Subgraph { entry, exit },
-            max_parallel: None,
-            fail_fast: false,
-        },
-    );
+    b.set_expansion(entry, Expansion::ForEach {
+        items,
+        target: ExpandTarget::Subgraph { entry, exit },
+        max_parallel: None,
+        fail_fast: false,
+    });
     assert!(
         errors(&b.build())
             .iter()
@@ -307,15 +297,12 @@ fn a_well_formed_expansion_region_passes() {
     b.link(middle, exit);
     b.link(exit, after);
     let items = b.exprs().lit(json!([1, 2]));
-    b.set_expansion(
-        entry,
-        Expansion::ForEach {
-            items,
-            target: ExpandTarget::Subgraph { entry, exit },
-            max_parallel: Some(2),
-            fail_fast: true,
-        },
-    );
+    b.set_expansion(entry, Expansion::ForEach {
+        items,
+        target: ExpandTarget::Subgraph { entry, exit },
+        max_parallel: Some(2),
+        fail_fast: true,
+    });
     validate(&b.build()).expect("valid");
 }
 
@@ -323,18 +310,18 @@ fn a_well_formed_expansion_region_passes() {
 #[test]
 fn structural_problems_are_reported() {
     let graph = Graph {
-        body: ir::GraphBody {
-            nodes: vec![Node::new(
+        body:       ir::GraphBody {
+            nodes:  vec![Node::new(
                 NodeId::new(7),
                 "misnumbered",
                 ScopeId::new(0),
                 StepRef::new(NOOP, Value::Null),
             )],
             scopes: vec![Scope::new(ScopeId::new(0))],
-            exprs: Default::default(),
-            entry: vec![],
+            exprs:  Default::default(),
+            entry:  vec![],
         },
-        params: Default::default(),
+        params:     Default::default(),
         completion: Default::default(),
     };
     let found = errors(&graph);
@@ -444,12 +431,12 @@ fn a_loop_head_must_join_with_any() {
     validate(&build(JoinPolicy::Any)).expect("Any is the only legal loop-head join");
 }
 
-/// The corollary: a node cannot be both a multi-branch `All` join and a loop head.
-/// The fix is a dedicated join node in front of the head.
+/// The corollary: a node cannot be both a multi-branch `All` join and a loop
+/// head. The fix is a dedicated join node in front of the head.
 #[test]
 fn a_multi_branch_join_needs_its_own_node_in_front_of_a_loop_head() {
-    // Broken: `head` tries to be both the `All` join for two branches and the target
-    // of the back edge.
+    // Broken: `head` tries to be both the `All` join for two branches and the
+    // target of the back edge.
     let mut b = GraphBuilder::new();
     let scope = ScopeId::new(0);
     let start = b.add_step("start", scope, NOOP);
@@ -486,8 +473,8 @@ fn a_multi_branch_join_needs_its_own_node_in_front_of_a_loop_head() {
     validate(&b.build()).expect("valid");
 }
 
-/// A scope a path can leave and return to gets a warning, not an error: release is
-/// irreversible, so re-entry acquires a fresh runtime and workspace.
+/// A scope a path can leave and return to gets a warning, not an error: release
+/// is irreversible, so re-entry acquires a fresh runtime and workspace.
 #[test]
 fn re_entering_a_scope_is_a_warning() {
     let mut b = GraphBuilder::bare();
@@ -502,14 +489,11 @@ fn re_entering_a_scope_is_a_warning() {
 
     let report = ir::check(&graph);
     assert!(report.is_ok(), "re-entry is legal, just risky");
-    assert_eq!(
-        report.warnings,
-        vec![ValidationWarning::ScopeReentry {
-            scope: job,
-            at: back,
-            via: away
-        }]
-    );
+    assert_eq!(report.warnings, vec![ValidationWarning::ScopeReentry {
+        scope: job,
+        at:    back,
+        via:   away,
+    }]);
 
     // A scope nothing leaves and returns to draws no warning.
     let mut b = GraphBuilder::bare();
@@ -523,13 +507,13 @@ fn re_entering_a_scope_is_a_warning() {
     assert!(ir::check(&b.build()).warnings.is_empty());
 }
 
-/// The diamond is suppressed: an `All` re-entry node with an incoming forward edge
-/// from inside the scope cannot fire before the scope would be released.
+/// The diamond is suppressed: an `All` re-entry node with an incoming forward
+/// edge from inside the scope cannot fire before the scope would be released.
 ///
-/// Either the inside token is emitted while the scope is still held — and then it is
-/// a pending token pinning the scope until the join resolves — or the inside arm
-/// never emits, in which case the `All` join is unsatisfiable and the node never
-/// fires at all.
+/// Either the inside token is emitted while the scope is still held — and then
+/// it is a pending token pinning the scope until the join resolves — or the
+/// inside arm never emits, in which case the `All` join is unsatisfiable and
+/// the node never fires at all.
 #[test]
 fn a_diamond_back_into_its_own_scope_is_not_a_re_entry() {
     let mut b = GraphBuilder::bare();
@@ -554,8 +538,8 @@ fn a_diamond_back_into_its_own_scope_is_not_a_re_entry() {
     );
 }
 
-/// `Any` and `Quorum` re-entry nodes keep the warning: they can fire on the outside
-/// token alone, after the scope has been released.
+/// `Any` and `Quorum` re-entry nodes keep the warning: they can fire on the
+/// outside token alone, after the scope has been released.
 #[test]
 fn a_permissive_join_does_not_suppress_the_re_entry_warning() {
     for join in [JoinPolicy::Any, JoinPolicy::Quorum { n: 1 }] {
@@ -580,10 +564,10 @@ fn a_permissive_join_does_not_suppress_the_re_entry_warning() {
 }
 
 /// A loop head that is also a re-entry point always warns. Suppression needs an
-/// `All` join, and invariant 8 forces `Any` on anything with an incoming back edge,
-/// so the two can never both hold. The `!back` filter in the suppression test is
-/// therefore defensive: a back edge carries only later generations and could not pin
-/// the scope for the generation arriving from outside anyway.
+/// `All` join, and invariant 8 forces `Any` on anything with an incoming back
+/// edge, so the two can never both hold. The `!back` filter in the suppression
+/// test is therefore defensive: a back edge carries only later generations and
+/// could not pin the scope for the generation arriving from outside anyway.
 #[test]
 fn a_loop_head_can_never_suppress_the_re_entry_warning() {
     let mut b = GraphBuilder::bare();
@@ -605,17 +589,15 @@ fn a_loop_head_can_never_suppress_the_re_entry_warning() {
 
     let report = ir::check(&graph);
     assert!(report.is_ok(), "{:?}", report.errors);
-    assert_eq!(
-        report.warnings,
-        vec![ValidationWarning::ScopeReentry {
-            scope: main,
-            at: head,
-            via: away
-        }]
-    );
+    assert_eq!(report.warnings, vec![ValidationWarning::ScopeReentry {
+        scope: main,
+        at:    head,
+        via:   away,
+    }]);
 }
 
-/// `check` reports errors and warnings together; `validate` is the errors-only view.
+/// `check` reports errors and warnings together; `validate` is the errors-only
+/// view.
 #[test]
 fn check_reports_both_errors_and_warnings() {
     let mut b = GraphBuilder::bare();
@@ -635,7 +617,8 @@ fn check_reports_both_errors_and_warnings() {
     assert!(report.into_result().is_err());
 }
 
-/// An unresolved placeholder is reported with its path, so a deep config says where.
+/// An unresolved placeholder is reported with its path, so a deep config says
+/// where.
 #[test]
 fn placeholder_paths_point_at_the_offending_field() {
     use ir::placeholder::{contains_placeholder, placeholder_path};
@@ -649,8 +632,8 @@ fn placeholder_paths_point_at_the_offending_field() {
     assert_eq!(placeholder_path(&json!({ "plain": 1 })), None);
 }
 
-/// A frontend that produces `Quorum { n: 1 }` on a loop head normalizes it to `Any`
-/// rather than the invariant being relaxed.
+/// A frontend that produces `Quorum { n: 1 }` on a loop head normalizes it to
+/// `Any` rather than the invariant being relaxed.
 #[test]
 fn loop_head_normalization_rewrites_quorum_one_to_any() {
     let mut b = GraphBuilder::new();
@@ -681,8 +664,8 @@ fn loop_head_normalization_rewrites_quorum_one_to_any() {
 }
 
 /// `Completion::TerminalNode` must name a node that exists — and nothing more:
-/// terminal-shaped routing is not required (resolved decision 2; the semantics only
-/// need a final record), so a node with outgoing edges is accepted.
+/// terminal-shaped routing is not required (resolved decision 2; the semantics
+/// only need a final record), so a node with outgoing edges is accepted.
 #[test]
 fn completion_terminal_node_must_exist() {
     let mut b = GraphBuilder::new();

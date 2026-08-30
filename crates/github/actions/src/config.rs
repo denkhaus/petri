@@ -1,52 +1,51 @@
 //! The step configs the GitHub Actions frontend emits.
 //!
-//! The frontend writes these as JSON with `$expr` placeholders; by the time a step
-//! deserializes one they are resolved, and the only non-literal left is a
+//! The frontend writes these as JSON with `$expr` placeholders; by the time a
+//! step deserializes one they are resolved, and the only non-literal left is a
 //! `{"$secret": NAME}` reference in an env-shaped position.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub use frontend_gha::action::ActionLocation;
+use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
 use ir::Value;
 use serde::{Deserialize, Deserializer, de};
 use smol_str::SmolStr;
 use steps::{ProcessConfig, Shell, SoftFail, ValueOrSecretRef};
 
-pub use frontend_gha::action::ActionLocation;
-use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
-
 /// `github/run`: a `run:` step.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
-    pub run: String,
+    pub run:           String,
     /// The step's condition, as the frontend's gate tree. The step evaluates it
     /// before session files are created and before any process spawns; false
     /// means `Outcome::skipped()` — or a cancelled outcome when `cancelled` is
     /// set. Absent means run.
     #[serde(default)]
-    pub gate: Option<Value>,
+    pub gate:          Option<Value>,
     /// The engine's `scope_cancelled` static at firing time: a false gate then
     /// records `Cancelled`, as GitHub reports post-cancel non-cleanup steps.
     #[serde(default)]
-    pub cancelled: bool,
+    pub cancelled:     bool,
     #[serde(default)]
-    pub shell: Shell,
-    /// A custom shell template (`bash -el {0}`, `python {0}`): the step writes the
-    /// script to a file and substitutes its path for `{0}`, as GitHub does. When
-    /// set, `shell` is not used.
+    pub shell:         Shell,
+    /// A custom shell template (`bash -el {0}`, `python {0}`): the step writes
+    /// the script to a file and substitutes its path for `{0}`, as GitHub
+    /// does. When set, `shell` is not used.
     #[serde(default)]
     pub shell_command: Option<String>,
     #[serde(default)]
-    pub env: BTreeMap<SmolStr, ValueOrSecretRef>,
+    pub env:           BTreeMap<SmolStr, ValueOrSecretRef>,
     /// `working-directory`, relative to `GITHUB_WORKSPACE`.
     #[serde(default)]
-    pub working_dir: Option<PathBuf>,
+    pub working_dir:   Option<PathBuf>,
     #[serde(default)]
-    pub soft_fail: SoftFail,
+    pub soft_fail:     SoftFail,
     /// `github.event`, written to the file `GITHUB_EVENT_PATH` names.
     #[serde(default)]
-    pub event: Value,
+    pub event:         Value,
 }
 
 /// `github/checkout`: the local-checkout substitute — the workspace
@@ -57,15 +56,15 @@ pub struct CheckoutConfig {
     /// The repository's host path, from the `petri.repo` run parameter. A run
     /// whose host filled nothing resolves to null — the step fails routably.
     #[serde(default)]
-    pub source: Option<String>,
+    pub source:     Option<String>,
     /// The `path:` input: destination relative to `GITHUB_WORKSPACE`.
     #[serde(default)]
-    pub path: Option<String>,
+    pub path:       Option<String>,
     /// The run's fully-qualified ref (`github.ref`): a `refs/heads/*` value
     /// names the branch the snapshot leaves checked out, as GitHub's checkout
     /// does; anything else stays as the clone landed (detached).
     #[serde(default, rename = "ref")]
-    pub reference: Option<String>,
+    pub reference:  Option<String>,
     /// `github.repository` — with `server_url`, the URL the snapshot's
     /// `origin` remote is set to, as GitHub's checkout configures it.
     #[serde(default)]
@@ -75,53 +74,56 @@ pub struct CheckoutConfig {
     pub server_url: Option<String>,
     /// The step's condition, as the frontend's gate tree; see [`RunConfig`].
     #[serde(default)]
-    pub gate: Option<Value>,
+    pub gate:       Option<Value>,
     #[serde(default)]
-    pub cancelled: bool,
+    pub cancelled:  bool,
     #[serde(default)]
-    pub soft_fail: SoftFail,
+    pub soft_fail:  SoftFail,
 }
 
 /// `github/action`: one phase of a JavaScript action.
 #[derive(Debug)]
 pub struct ActionConfig {
-    pub action: ActionLocation,
-    /// `runs.main`, `runs.pre` or `runs.post`, relative to the action directory.
-    pub entry: String,
-    /// The phase's condition (`if:`, `pre-if`, `post-if`) as the frontend's gate
-    /// tree, evaluated before anything is staged or spawned. Absent means run.
-    pub gate: Option<Value>,
+    pub action:    ActionLocation,
+    /// `runs.main`, `runs.pre` or `runs.post`, relative to the action
+    /// directory.
+    pub entry:     String,
+    /// The phase's condition (`if:`, `pre-if`, `post-if`) as the frontend's
+    /// gate tree, evaluated before anything is staged or spawned. Absent
+    /// means run.
+    pub gate:      Option<Value>,
     /// The engine's `scope_cancelled` static at firing time; see `RunConfig`.
     pub cancelled: bool,
-    /// Declared inputs with the caller's values or their defaults, plus undeclared
-    /// `with:` keys. Each becomes `INPUT_<NAME>`.
-    pub inputs: BTreeMap<String, ValueOrSecretRef>,
-    pub env: BTreeMap<SmolStr, ValueOrSecretRef>,
-    /// State an earlier phase of this action saved; each entry becomes `STATE_<name>`.
-    pub state: BTreeMap<String, Value>,
+    /// Declared inputs with the caller's values or their defaults, plus
+    /// undeclared `with:` keys. Each becomes `INPUT_<NAME>`.
+    pub inputs:    BTreeMap<String, ValueOrSecretRef>,
+    pub env:       BTreeMap<SmolStr, ValueOrSecretRef>,
+    /// State an earlier phase of this action saved; each entry becomes
+    /// `STATE_<name>`.
+    pub state:     BTreeMap<String, Value>,
     pub soft_fail: SoftFail,
-    pub event: Value,
+    pub event:     Value,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawActionConfig {
-    action: ActionLocation,
-    entry: String,
+    action:    ActionLocation,
+    entry:     String,
     #[serde(default)]
-    gate: Option<Value>,
+    gate:      Option<Value>,
     #[serde(default)]
     cancelled: bool,
     #[serde(default)]
-    inputs: BTreeMap<String, ValueOrSecretRef>,
+    inputs:    BTreeMap<String, ValueOrSecretRef>,
     #[serde(default)]
-    env: BTreeMap<SmolStr, ValueOrSecretRef>,
+    env:       BTreeMap<SmolStr, ValueOrSecretRef>,
     #[serde(default)]
-    state: BTreeMap<String, Value>,
+    state:     BTreeMap<String, Value>,
     #[serde(default)]
     soft_fail: SoftFail,
     #[serde(default)]
-    event: Value,
+    event:     Value,
 }
 
 /// The manifest's entry (`runs.main`/`pre`/`post`), validated the way the
@@ -151,15 +153,15 @@ impl<'de> Deserialize<'de> for ActionConfig {
         }
         validate_entry(&raw.action, &raw.entry).map_err(de::Error::custom)?;
         Ok(Self {
-            action: raw.action,
-            entry: raw.entry,
-            gate: raw.gate,
+            action:    raw.action,
+            entry:     raw.entry,
+            gate:      raw.gate,
             cancelled: raw.cancelled,
-            inputs: raw.inputs,
-            env: raw.env,
-            state: raw.state,
+            inputs:    raw.inputs,
+            env:       raw.env,
+            state:     raw.state,
             soft_fail: raw.soft_fail,
-            event: raw.event,
+            event:     raw.event,
         })
     }
 }
@@ -169,37 +171,39 @@ impl<'de> Deserialize<'de> for ActionConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DockerActionConfig {
-    pub image: DockerActionImage,
+    pub image:      DockerActionImage,
     /// The phase's entrypoint (`runs.entrypoint`, a `with.entrypoint`, or the
-    /// phase's `pre-entrypoint`/`post-entrypoint`); the image's own when absent.
+    /// phase's `pre-entrypoint`/`post-entrypoint`); the image's own when
+    /// absent.
     #[serde(default)]
     pub entrypoint: Option<Value>,
     /// `runs.args`, one argument per entry (main phase only).
     #[serde(default)]
-    pub args: Vec<Value>,
+    pub args:       Vec<Value>,
     /// A `uses: docker://` step's `with.args`: one string, shell-split after
     /// expressions and secrets resolve, as GitHub does.
     #[serde(default)]
-    pub args_text: Option<Value>,
+    pub args_text:  Option<Value>,
     /// The phase's condition as the frontend's gate tree; see [`RunConfig`].
     #[serde(default)]
-    pub gate: Option<Value>,
+    pub gate:       Option<Value>,
     /// The engine's `scope_cancelled` static at firing time; see [`RunConfig`].
     #[serde(default)]
-    pub cancelled: bool,
+    pub cancelled:  bool,
     /// Declared inputs with the caller's values or their defaults, plus
     /// undeclared `with:` keys. Each becomes `INPUT_<NAME>`.
     #[serde(default)]
-    pub inputs: BTreeMap<String, Value>,
+    pub inputs:     BTreeMap<String, Value>,
     #[serde(default)]
-    pub env: BTreeMap<SmolStr, ValueOrSecretRef>,
-    /// State an earlier phase of this action saved; each entry becomes `STATE_<name>`.
+    pub env:        BTreeMap<SmolStr, ValueOrSecretRef>,
+    /// State an earlier phase of this action saved; each entry becomes
+    /// `STATE_<name>`.
     #[serde(default)]
-    pub state: BTreeMap<String, Value>,
+    pub state:      BTreeMap<String, Value>,
     #[serde(default)]
-    pub soft_fail: SoftFail,
+    pub soft_fail:  SoftFail,
     #[serde(default)]
-    pub event: Value,
+    pub event:      Value,
 }
 
 /// Where a Docker action's image comes from.
@@ -218,10 +222,11 @@ pub struct DockerfileImage {
     /// Where the action's tree is — the build context.
     pub action: ActionLocation,
     /// The Dockerfile, relative to the action (`runs.image` as written).
-    pub file: String,
+    pub file:   String,
 }
 
-/// Every string in a process config that can carry a lowered GitHub placeholder.
+/// Every string in a process config that can carry a lowered GitHub
+/// placeholder.
 pub(crate) fn process_texts(process: &ProcessConfig) -> impl Iterator<Item = &str> {
     std::iter::once(process.run.as_str()).chain(process.env.values().filter_map(
         |value| match value {
@@ -252,8 +257,9 @@ pub(crate) fn try_map_process_texts<E>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn an_action_config_deserializes_both_locations() {
@@ -284,14 +290,15 @@ mod tests {
 
 #[cfg(test)]
 mod entry_tests {
-    use super::*;
     use frontend_gha::action::ActionRef;
     use smol_str::SmolStr;
+
+    use super::*;
 
     fn pinned(reference: &str) -> ActionLocation {
         ActionLocation::Pinned(frontend_gha::action::PinnedAction {
             reference: ActionRef::parse(reference).expect("valid"),
-            sha: SmolStr::new("0123456789012345678901234567890123456789"),
+            sha:       SmolStr::new("0123456789012345678901234567890123456789"),
         })
     }
 

@@ -1,13 +1,13 @@
 //! `runs-on` with expressions, resolved at lowering — per matrix leg.
 //!
 //! GitHub evaluates a job's `runs-on` when the job is queued, with that leg's
-//! `matrix` in scope. A lowering has the same information whenever the matrix is
-//! static, so the labels resolve here, once per leg, with the engine's own
+//! `matrix` in scope. A lowering has the same information whenever the matrix
+//! is static, so the labels resolve here, once per leg, with the engine's own
 //! machinery: the matrix expands through the same combinators
-//! ([`crate::expr_lower::matrix_legs`]) and the expression evaluates through the
-//! engine's evaluator, in a private table the graph never sees. The `inputs`
-//! context resolves the same way from the values known at lowering — a literal
-//! call site's `with:`, a declared default — so a called workflow's
+//! ([`crate::expr_lower::matrix_legs`]) and the expression evaluates through
+//! the engine's evaluator, in a private table the graph never sees. The
+//! `inputs` context resolves the same way from the values known at lowering — a
+//! literal call site's `with:`, a declared default — so a called workflow's
 //! `runs-on: ${{ inputs.runner }}` places per call site. What cannot be
 //! resolved — a run-time context, an input the call site computes, a matrix
 //! whose legs are themselves expressions — is a specific diagnostic, not a
@@ -92,10 +92,11 @@ fn carries_mark(value: &Value) -> bool {
 
 /// One label position of a `runs-on`, as the reader collected it: the text as
 /// written, where it sits, and whether it was the whole scalar value — a whole
-/// value may evaluate to a list of labels, an element of a written list may not.
+/// value may evaluate to a list of labels, an element of a written list may
+/// not.
 pub struct RawLabel {
-    pub text: String,
-    pub span: Span,
+    pub text:  String,
+    pub span:  Span,
     pub whole: bool,
 }
 
@@ -167,13 +168,13 @@ fn eval_static(
 /// A compiled `runs-on`: each label position lowered once, evaluated once per
 /// leg. The table is private — nothing of this resolution enters the graph.
 pub struct Compiled {
-    table: ExprTable,
+    table:   ExprTable,
     entries: Vec<Entry>,
 }
 
 struct Entry {
-    id: ExprId,
-    span: Span,
+    id:    ExprId,
+    span:  Span,
     whole: bool,
 }
 
@@ -305,10 +306,10 @@ impl Compiled {
         for entry in &self.entries {
             let value = eval(&self.table, entry.id, &env).map_err(|e| Failure::Bad {
                 message: e.to_string(),
-                span: entry.span.clone(),
+                span:    entry.span.clone(),
             })?;
             let not_labels = |got: &Value| Failure::NotLabels {
-                got: got.to_string(),
+                got:  got.to_string(),
                 span: entry.span.clone(),
             };
             let mut push = |s: String| -> Result<(), Failure> {

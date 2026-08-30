@@ -26,7 +26,8 @@ fn diamond() -> ir::Graph {
     graph
 }
 
-/// Every event is logged before it is applied, including the tokens routing emits.
+/// Every event is logged before it is applied, including the tokens routing
+/// emits.
 #[test]
 fn routing_tokens_appear_in_the_log() {
     let mut h = Harness::new(diamond());
@@ -123,26 +124,20 @@ fn the_run_finishes_once() {
 #[test]
 fn out_of_order_events_are_errors_not_panics() {
     let state = EngineState::new(diamond());
-    let (state, commands) = apply(
-        state,
-        Event::StepFinished {
-            firing: ir::FiringId::new(99),
-            attempt: ir::Attempt::FIRST,
-            outcome: Outcome::success(Value::Null),
-        },
-    );
+    let (state, commands) = apply(state, Event::StepFinished {
+        firing:  ir::FiringId::new(99),
+        attempt: ir::Attempt::FIRST,
+        outcome: Outcome::success(Value::Null),
+    });
     assert!(commands.is_empty());
     assert_eq!(state.errors(), &[engine::RunError::NotStarted]);
 
     let (state, _) = apply(state, Event::RunStarted);
-    let (state, _) = apply(
-        state,
-        Event::StepFinished {
-            firing: ir::FiringId::new(99),
-            attempt: ir::Attempt::FIRST,
-            outcome: Outcome::success(Value::Null),
-        },
-    );
+    let (state, _) = apply(state, Event::StepFinished {
+        firing:  ir::FiringId::new(99),
+        attempt: ir::Attempt::FIRST,
+        outcome: Outcome::success(Value::Null),
+    });
     assert!(
         state
             .errors()
@@ -150,8 +145,8 @@ fn out_of_order_events_are_errors_not_panics() {
     );
 }
 
-/// §8: `Control` is non-exhaustive from day one, so `Pause` / `Steer` / `Approve`
-/// can land without a breaking change.
+/// §8: `Control` is non-exhaustive from day one, so `Pause` / `Steer` /
+/// `Approve` can land without a breaking change.
 #[test]
 fn control_is_non_exhaustive() {
     let ctl = Control::Cancel;
@@ -204,9 +199,9 @@ fn step_progress_changes_nothing() {
     h.commands.clear();
     h.feed(Event::StepProgress {
         firing: starts[0].0,
-        ev: ir::StepEvent::Log {
+        ev:     ir::StepEvent::Log {
             stream: ir::LogStream::Stdout,
-            line: "building".into(),
+            line:   "building".into(),
         },
     });
     assert_eq!(h.state.pending_count(), before);

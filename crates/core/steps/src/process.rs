@@ -1,7 +1,8 @@
-//! The process step kind: run a script, capture its output, honour cancellation.
+//! The process step kind: run a script, capture its output, honour
+//! cancellation.
 //!
-//! Written once against [`ExecEnv`](executor::ExecEnv). It never names an executor,
-//! and never assumes the workspace is on this machine.
+//! Written once against [`ExecEnv`](executor::ExecEnv). It never names an
+//! executor, and never assumes the workspace is on this machine.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -95,19 +96,20 @@ pub enum ValueOrSecretRef {
 #[serde(deny_unknown_fields)]
 pub struct ProcessConfig {
     /// The script text.
-    pub run: String,
+    pub run:                String,
     #[serde(default)]
-    pub shell: Shell,
+    pub shell:              Shell,
     #[serde(default)]
-    pub env: BTreeMap<SmolStr, ValueOrSecretRef>,
+    pub env:                BTreeMap<SmolStr, ValueOrSecretRef>,
     /// Relative to the workspace root.
     #[serde(default)]
-    pub working_dir: Option<PathBuf>,
+    pub working_dir:        Option<PathBuf>,
     #[serde(default)]
-    pub soft_fail: SoftFail,
-    /// Extra environment variables that name the same outputs file as `CI_OUTPUT`,
-    /// so a frontend whose scripts already write to a differently named file needs no
-    /// shim. (The GitHub Actions frontend sets `["GITHUB_OUTPUT"]`.)
+    pub soft_fail:          SoftFail,
+    /// Extra environment variables that name the same outputs file as
+    /// `CI_OUTPUT`, so a frontend whose scripts already write to a
+    /// differently named file needs no shim. (The GitHub Actions frontend
+    /// sets `["GITHUB_OUTPUT"]`.)
     #[serde(default)]
     pub output_env_aliases: Vec<SmolStr>,
 }
@@ -120,9 +122,9 @@ impl Step for ProcessStep {
     const NAME: &'static str = "process";
     type Config = ProcessConfig;
 
-    /// A `$secret` outside an env-shaped position outranks deserialization: it is a
-    /// misplaced secret, not a malformed config, and would otherwise reach the
-    /// process as literal JSON.
+    /// A `$secret` outside an env-shaped position outranks deserialization: it
+    /// is a misplaced secret, not a malformed config, and would otherwise
+    /// reach the process as literal JSON.
     fn check_raw(&self, config: &Value) -> Result<(), StepFailure> {
         check_misplaced_secret(config, &["env"])
     }
@@ -245,27 +247,29 @@ pub enum Ending {
     Natural(ExitStatus),
     Signalled {
         escalation: &'static str,
-        status: Option<ExitStatus>,
+        status:     Option<ExitStatus>,
     },
 }
 
-/// SIGTERM to the group, grace, then SIGKILL to the group. `Control::Kill` skips
-/// the ladder: straight to SIGKILL, no grace — whether it arrives first or while
-/// the polite ladder is already waiting.
+/// SIGTERM to the group, grace, then SIGKILL to the group. `Control::Kill`
+/// skips the ladder: straight to SIGKILL, no grace — whether it arrives first
+/// or while the polite ladder is already waiting.
 ///
-/// Idempotent by construction: once the ladder has started, further `Cancel`s are
-/// drained and ignored rather than restarting it. A `Deliver` is not a stop: a
-/// process has nothing to hand a value to, so it is dropped and the wait goes on.
+/// Idempotent by construction: once the ladder has started, further `Cancel`s
+/// are drained and ignored rather than restarting it. A `Deliver` is not a
+/// stop: a process has nothing to hand a value to, so it is dropped and the
+/// wait goes on.
 ///
-/// Public: every step kind that waits on a [`ProcessHandle`](executor::ProcessHandle)
-/// honours cancellation through this one ladder.
+/// Public: every step kind that waits on a
+/// [`ProcessHandle`](executor::ProcessHandle) honours cancellation through this
+/// one ladder.
 pub async fn ladder(
     handle: &mut dyn executor::ProcessHandle,
     control: &mut mpsc::Receiver<Control>,
     grace: Duration,
 ) -> Ending {
-    // First terminal wins. If the process exits before any signal lands, the outcome
-    // is the natural one and the cancel is a no-op.
+    // First terminal wins. If the process exits before any signal lands, the
+    // outcome is the natural one and the cancel is a no-op.
     let stop = loop {
         tokio::select! {
             result = handle.wait() => {
@@ -388,10 +392,10 @@ fn fail(class: &'static str, message: impl Into<String>) -> StepFailure {
     }
 }
 
-/// `check_raw` for a config whose secrets belong only in the given top-level maps:
-/// find a `{"$secret": …}` reference anywhere else and fail with where it is. For
-/// any step kind whose config is secret-shaped — the process step allows `env`;
-/// the GitHub step kinds add their own maps.
+/// `check_raw` for a config whose secrets belong only in the given top-level
+/// maps: find a `{"$secret": …}` reference anywhere else and fail with where it
+/// is. For any step kind whose config is secret-shaped — the process step
+/// allows `env`; the GitHub step kinds add their own maps.
 pub fn check_misplaced_secret(config: &Value, allowed_maps: &[&str]) -> Result<(), StepFailure> {
     let Some(path) = misplaced_secret(config, allowed_maps) else {
         return Ok(());
@@ -453,8 +457,9 @@ fn misplaced_secret(config: &Value, allowed_maps: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn secrets_are_fine_in_allowed_maps_and_nowhere_else() {
@@ -475,8 +480,9 @@ mod tests {
 
 #[cfg(test)]
 mod stringify_tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn null_renders_empty_and_scalars_render_plain() {

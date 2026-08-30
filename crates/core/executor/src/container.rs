@@ -32,17 +32,17 @@ pub enum ContainerImage {
     Registry { image: SmolStr },
     /// Built from a Dockerfile under `context` (workspace-relative).
     Build {
-        context: PathBuf,
+        context:    PathBuf,
         /// The Dockerfile within the context; `None` is the context's own
         /// `Dockerfile`.
         dockerfile: Option<SmolStr>,
         /// The image tag the build produces — the cache key.
-        tag: SmolStr,
+        tag:        SmolStr,
         /// Whether an image already carrying `tag` may be reused without
         /// building. True for content-addressed tags (a pinned commit); false
         /// when the context can change under the same tag (a local action's
         /// first build of the run).
-        reuse: bool,
+        reuse:      bool,
     },
 }
 
@@ -50,42 +50,43 @@ pub enum ContainerImage {
 /// workspace mount, network, naming — so nothing here names a host path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OneShotContainer {
-    pub image: ContainerImage,
-    /// Override the image's entrypoint (one executable; arguments go in `args`).
+    pub image:      ContainerImage,
+    /// Override the image's entrypoint (one executable; arguments go in
+    /// `args`).
     pub entrypoint: Option<SmolStr>,
     /// Arguments to the entrypoint.
-    pub args: Vec<SmolStr>,
-    pub env: BTreeMap<SmolStr, SmolStr>,
+    pub args:       Vec<SmolStr>,
+    pub env:        BTreeMap<SmolStr, SmolStr>,
     /// Working directory inside the container, absolute. `None` means the
     /// workspace mount ([`ContainerRunner::workspace_path`]).
-    pub workdir: Option<SmolStr>,
+    pub workdir:    Option<SmolStr>,
 }
 
 impl OneShotContainer {
     pub fn registry(image: &str) -> Self {
         Self {
-            image: ContainerImage::Registry {
+            image:      ContainerImage::Registry {
                 image: SmolStr::new(image),
             },
             entrypoint: None,
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            workdir: None,
+            args:       Vec::new(),
+            env:        BTreeMap::new(),
+            workdir:    None,
         }
     }
 
     pub fn build(context: impl Into<PathBuf>, tag: &str) -> Self {
         Self {
-            image: ContainerImage::Build {
-                context: context.into(),
+            image:      ContainerImage::Build {
+                context:    context.into(),
                 dockerfile: None,
-                tag: SmolStr::new(tag),
-                reuse: true,
+                tag:        SmolStr::new(tag),
+                reuse:      true,
             },
             entrypoint: None,
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            workdir: None,
+            args:       Vec::new(),
+            env:        BTreeMap::new(),
+            workdir:    None,
         }
     }
 

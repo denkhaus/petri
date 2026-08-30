@@ -1,47 +1,49 @@
-//! The Docker executor: a long-lived container with the workspace bind-mounted, and
-//! steps run through `docker exec`.
+//! The Docker executor: a long-lived container with the workspace bind-mounted,
+//! and steps run through `docker exec`.
 //!
-//! Implements the [`executor`] interface. The bind mount is what keeps the two sides
-//! symmetric: [`ExecEnv::workspace`] is the host path, so artifacts and logs are
-//! handled the same way whether or not a container is involved.
+//! Implements the [`executor`] interface. The bind mount is what keeps the two
+//! sides symmetric: [`ExecEnv::workspace`] is the host path, so artifacts and
+//! logs are handled the same way whether or not a container is involved.
 //!
 //! # Why `docker exec … kill`, and not `docker kill`
 //!
 //! `docker kill` signals PID 1 of the container. Steps are not PID 1 — they are
-//! `docker exec` processes, siblings of init — so `docker kill` never reaches them.
-//! Cancelling a step is therefore `docker exec <c> kill -<SIG> -- -<PGID>`, run
-//! inside the container against the step's own process group. Container-level kill is
-//! reserved for scope release, where killing everything is the point.
+//! `docker exec` processes, siblings of init — so `docker kill` never reaches
+//! them. Cancelling a step is therefore `docker exec <c> kill -<SIG> --
+//! -<PGID>`, run inside the container against the step's own process group.
+//! Container-level kill is reserved for scope release, where killing everything
+//! is the point.
 //!
 //! To have a process group to signal, each step is launched under `setsid` and
-//! records its own pid into a file on the bind-mounted workspace, where the host can
-//! read it. `setsid` makes the shell a session leader, so its pid *is* its pgid.
-//! **The image must provide `setsid`** (busybox and util-linux both do).
+//! records its own pid into a file on the bind-mounted workspace, where the
+//! host can read it. `setsid` makes the shell a session leader, so its pid *is*
+//! its pgid. **The image must provide `setsid`** (busybox and util-linux both
+//! do).
 //!
 //! # Why `setsid` runs under a keeper shell, and the exit status comes from a file
 //!
-//! `setsid` forks when its caller is already a process group leader, and `docker
-//! exec` does hand its process one (runc gives it a group of its own). Run
-//! directly, `setsid` therefore exits as soon as the child is running and the
-//! client returns 0 immediately — the step is still going, its real exit status
-//! is lost, and, worse, the client has *detached*: every line the step prints
-//! from then on is lost too. Fast steps never show it; a step that pauses for a
-//! download loses everything after the pause.
+//! `setsid` forks when its caller is already a process group leader, and
+//! `docker exec` does hand its process one (runc gives it a group of its own).
+//! Run directly, `setsid` therefore exits as soon as the child is running and
+//! the client returns 0 immediately — the step is still going, its real exit
+//! status is lost, and, worse, the client has *detached*: every line the step
+//! prints from then on is lost too. Fast steps never show it; a step that
+//! pauses for a download loses everything after the pause.
 //!
 //! So the step runs under a keeper: the process `docker exec` attaches to is a
-//! plain shell that runs `setsid` as its child. A child is not a group leader, so
-//! `setsid` never forks — it makes the session and execs the wrapper — and the
-//! keeper stays attached until the wrapper exits, forwarding output and status.
+//! plain shell that runs `setsid` as its child. A child is not a group leader,
+//! so `setsid` never forks — it makes the session and execs the wrapper — and
+//! the keeper stays attached until the wrapper exits, forwarding output and
+//! status.
 //!
 //! The wrapper still records the status in a file, and [`DockerProcess::wait`]
 //! prefers that file over the client's exit code, polling the process group's
-//! liveness rather than trusting the client: correct even if something kills the
-//! keeper out from under a step, instead of correct only when everything behaves.
+//! liveness rather than trusting the client: correct even if something kills
+//! the keeper out from under a step, instead of correct only when everything
+//! behaves.
 
 mod oneshot;
 mod services;
-
-pub use services::SERVICE_HEALTH_WAIT;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -57,6 +59,7 @@ use executor::{
     LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
 };
 use ir::RuntimeTarget;
+pub use services::SERVICE_HEALTH_WAIT;
 use smol_str::SmolStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OnceCell, mpsc};
@@ -85,17 +88,19 @@ pub(crate) const ADD_HOST_GATEWAY: &str = "--add-host=host.docker.internal:host-
 pub const RUN_ID_FILE: &str = "docker-run-id";
 
 /// How often [`DockerProcess::wait`] checks whether the step's process group is
-/// still alive, once the `docker exec` client has returned without a recorded status.
+/// still alive, once the `docker exec` client has returned without a recorded
+/// status.
 ///
-/// This sets two things at once: how long after a step really ends before the driver
-/// notices, and how much idle `docker exec` traffic a long step costs. At 50ms a
-/// ten-minute step costs about 12,000 liveness checks in the worst case — the case
-/// where `setsid` forked. When it did not fork, which is the common case, the status
-/// file is already there on the first look and the loop never runs.
+/// This sets two things at once: how long after a step really ends before the
+/// driver notices, and how much idle `docker exec` traffic a long step costs.
+/// At 50ms a ten-minute step costs about 12,000 liveness checks in the worst
+/// case — the case where `setsid` forked. When it did not fork, which is the
+/// common case, the status file is already there on the first look and the loop
+/// never runs.
 pub const LIVENESS_POLL: Duration = Duration::from_millis(50);
 
-/// How long to wait for the step to record its pgid before giving up on signalling
-/// the group. A cancel can arrive before the step has written it.
+/// How long to wait for the step to record its pgid before giving up on
+/// signalling the group. A cancel can arrive before the step has written it.
 pub const PGID_WAIT: Duration = Duration::from_secs(2);
 
 /// When to pull an image.
@@ -109,21 +114,21 @@ pub enum PullPolicy {
 
 /// Runs steps inside containers.
 pub struct DockerExecutor {
-    run_dir: PathBuf,
-    /// Resolved on first use from [`RUN_ID_FILE`]: the run dir's recorded id, or
-    /// a fresh one recorded there.
-    run_id: OnceCell<SmolStr>,
+    run_dir:   PathBuf,
+    /// Resolved on first use from [`RUN_ID_FILE`]: the run dir's recorded id,
+    /// or a fresh one recorded there.
+    run_id:    OnceCell<SmolStr>,
     retention: Retention,
-    pull: PullPolicy,
+    pull:      PullPolicy,
 }
 
 impl DockerExecutor {
     pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         Self {
-            run_dir: run_dir.into(),
-            run_id: OnceCell::new(),
+            run_dir:   run_dir.into(),
+            run_id:    OnceCell::new(),
             retention: Retention::default(),
-            pull: PullPolicy::default(),
+            pull:      PullPolicy::default(),
         }
     }
 
@@ -137,7 +142,8 @@ impl DockerExecutor {
         self
     }
 
-    /// Whether a Docker daemon is reachable. Tests skip rather than fail without one.
+    /// Whether a Docker daemon is reachable. Tests skip rather than fail
+    /// without one.
     pub async fn is_available() -> bool {
         run_docker(&["info", "--format", "{{.ServerVersion}}"])
             .await
@@ -256,12 +262,9 @@ async fn should_pull(image: &str, pull: PullPolicy) -> bool {
 }
 
 fn announce_pull(progress: &Arc<dyn executor::ProgressSink>, scope: ir::ScopeId, image: &str) {
-    progress.progress(
-        scope,
-        executor::Progress::PullingImage {
-            image: SmolStr::new(image),
-        },
-    );
+    progress.progress(scope, executor::Progress::PullingImage {
+        image: SmolStr::new(image),
+    });
 }
 
 /// Make `image` available under the pull policy, announcing the pull when one
@@ -345,9 +348,9 @@ async fn pull_with_credentials(
         .secrets()
         .resolve(&credentials.password_secret)
         .map_err(|e| EnvError::Backend {
-            backend: SmolStr::new("docker"),
+            backend:   SmolStr::new("docker"),
             operation: SmolStr::new("login"),
-            message: e.to_string(),
+            message:   e.to_string(),
         })?;
     let config_dir = std::env::temp_dir().join(format!(
         "petri-docker-login-{}-{}",
@@ -357,7 +360,7 @@ async fn pull_with_credentials(
     tokio::fs::create_dir_all(&config_dir)
         .await
         .map_err(|e| EnvError::Workspace {
-            path: config_dir.display().to_string(),
+            path:    config_dir.display().to_string(),
             message: e.to_string(),
         })?;
     let config = config_dir.display().to_string();
@@ -397,15 +400,16 @@ pub async fn sweep_containers(prefix: &str) {
     }
 }
 
-/// What release needs: the container to stop, the workspace, and whether to keep it.
+/// What release needs: the container to stop, the workspace, and whether to
+/// keep it.
 #[derive(Clone, Debug)]
 struct DockerTeardown {
     container: String,
-    path: PathBuf,
+    path:      PathBuf,
     retention: Retention,
-    grace: Duration,
+    grace:     Duration,
     /// The scope has a service world (containers and a network) to tear down.
-    services: bool,
+    services:  bool,
 }
 
 #[async_trait]
@@ -422,9 +426,9 @@ impl Executor for DockerExecutor {
         } = &scope.runtime.target
         else {
             return Err(EnvError::Backend {
-                backend: SmolStr::new("docker"),
+                backend:   SmolStr::new("docker"),
                 operation: SmolStr::new("acquire"),
-                message: "this scope does not ask for a container".into(),
+                message:   "this scope does not ask for a container".into(),
             });
         };
 
@@ -432,7 +436,7 @@ impl Executor for DockerExecutor {
         tokio::fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: workspace.display().to_string(),
+                path:    workspace.display().to_string(),
                 message: e.to_string(),
             })?;
 
@@ -530,10 +534,10 @@ impl Executor for DockerExecutor {
             }),
             DockerTeardown {
                 container: name,
-                path: workspace,
+                path:      workspace,
                 retention: self.retention,
-                grace: scope.grace,
-                services: network.is_some(),
+                grace:     scope.grace,
+                services:  network.is_some(),
             },
         )
         .with_runner(Arc::new(runner)))
@@ -588,11 +592,11 @@ impl Executor for DockerExecutor {
 }
 
 struct DockerEnv {
-    container: String,
-    workspace: PathBuf,
+    container:     String,
+    workspace:     PathBuf,
     /// The container's effective env, snapshotted at create.
-    ambient: BTreeMap<String, String>,
-    grace: Duration,
+    ambient:       BTreeMap<String, String>,
+    grace:         Duration,
     /// The shell the pgid wrapper runs under, probed once per container:
     /// `bash` when the image has it, `sh` otherwise. Not a style choice — a
     /// POSIX `sh` that is dash or busybox *filters out* environment names that
@@ -631,7 +635,7 @@ impl ExecEnv for DockerEnv {
         tokio::fs::create_dir_all(&pgid_dir)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: pgid_dir.display().to_string(),
+                path:    pgid_dir.display().to_string(),
                 message: e.to_string(),
             })?;
         let pgid_host = pgid_dir.join(&token);
@@ -646,7 +650,7 @@ impl ExecEnv for DockerEnv {
                 tokio::fs::create_dir_all(&host)
                     .await
                     .map_err(|e| EnvError::Workspace {
-                        path: host.display().to_string(),
+                        path:    host.display().to_string(),
                         message: e.to_string(),
                     })?;
                 format!("{CONTAINER_WORKSPACE}/{}", rel.display())
@@ -744,7 +748,7 @@ impl ExecEnv for DockerEnv {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: e.to_string(),
             }),
         }
@@ -761,7 +765,7 @@ impl ExecEnv for DockerEnv {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(EnvError::Workspace {
-                    path: relative.display().to_string(),
+                    path:    relative.display().to_string(),
                     message: e.to_string(),
                 });
             }
@@ -771,12 +775,12 @@ impl ExecEnv for DockerEnv {
             .read_to_end(&mut bytes)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: e.to_string(),
             })?;
         if bytes.len() > limit {
             return Err(EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: format!("file exceeds the {limit}-byte read limit"),
             });
         }
@@ -789,14 +793,14 @@ impl ExecEnv for DockerEnv {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| EnvError::Workspace {
-                    path: parent.display().to_string(),
+                    path:    parent.display().to_string(),
                     message: e.to_string(),
                 })?;
         }
         tokio::fs::write(&path, contents)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: e.to_string(),
             })
     }
@@ -807,12 +811,12 @@ impl ExecEnv for DockerEnv {
 }
 
 struct DockerProcess {
-    container: String,
-    child: tokio::process::Child,
-    pgid_file: PathBuf,
+    container:   String,
+    child:       tokio::process::Child,
+    pgid_file:   PathBuf,
     status_file: PathBuf,
-    pgid: Option<i32>,
-    lines: Option<LineStream>,
+    pgid:        Option<i32>,
+    lines:       Option<LineStream>,
 }
 
 impl DockerProcess {
@@ -832,8 +836,8 @@ impl DockerProcess {
 }
 
 impl DockerProcess {
-    /// Read the pgid the step recorded, waiting briefly for it to appear. A cancel
-    /// can arrive before the step has written it.
+    /// Read the pgid the step recorded, waiting briefly for it to appear. A
+    /// cancel can arrive before the step has written it.
     async fn pgid(&mut self) -> Option<i32> {
         if let Some(pgid) = self.pgid {
             return Some(pgid);
@@ -926,14 +930,14 @@ impl ProcessHandle for DockerProcess {
 ///
 /// Written `kill -SIG -PGID`, with **no `--` separator**. The handoff spells it
 /// `kill -<SIG> -- -<PGID>`, which is the POSIX form, but busybox rejects it —
-/// `sh: invalid number '--'` — and a rejected signal is a silent one: the step keeps
-/// running and the ladder waits out its whole grace period for nothing. Since alpine
-/// is the obvious base image, the separator cannot be used. `kill -TERM -123` is
-/// understood by busybox ash, dash and bash alike.
+/// `sh: invalid number '--'` — and a rejected signal is a silent one: the step
+/// keeps running and the ladder waits out its whole grace period for nothing.
+/// Since alpine is the obvious base image, the separator cannot be used. `kill
+/// -TERM -123` is understood by busybox ash, dash and bash alike.
 ///
-/// It also goes through `sh -c` rather than as a bare `docker exec … kill`, so this
-/// is the shell builtin rather than whichever `kill` binary the image happens to
-/// carry.
+/// It also goes through `sh -c` rather than as a bare `docker exec … kill`, so
+/// this is the shell builtin rather than whichever `kill` binary the image
+/// happens to carry.
 async fn signal_group(container: &str, pgid: i32, signal: &str) -> Result<(), EnvError> {
     let script = format!("kill -{signal} -{pgid}");
     run_docker(&["exec", container, "sh", "-c", &script])
@@ -968,17 +972,17 @@ pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
         .output()
         .await
         .map_err(|e| EnvError::Backend {
-            backend: SmolStr::new("docker"),
+            backend:   SmolStr::new("docker"),
             operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
-            message: e.to_string(),
+            message:   e.to_string(),
         })?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
     Err(EnvError::Backend {
-        backend: SmolStr::new("docker"),
+        backend:   SmolStr::new("docker"),
         operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
-        message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        message:   String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
 }
 
@@ -1028,7 +1032,7 @@ async fn run_docker_stdin(
 async fn load_or_record_run_id(run_dir: &Path) -> Result<SmolStr, EnvError> {
     let path = run_dir.join(RUN_ID_FILE);
     let io_error = |path: &Path, e: std::io::Error| EnvError::Workspace {
-        path: path.display().to_string(),
+        path:    path.display().to_string(),
         message: e.to_string(),
     };
     match tokio::fs::read_to_string(&path).await {
@@ -1119,16 +1123,16 @@ mod platform_fallback_tests {
     #[test]
     fn only_an_architecture_miss_triggers_the_fallback() {
         let miss = EnvError::Backend {
-            backend: SmolStr::new("docker"),
+            backend:   SmolStr::new("docker"),
             operation: SmolStr::new("pull"),
-            message: "no matching manifest for linux/arm64/v8 in the manifest list entries"
+            message:   "no matching manifest for linux/arm64/v8 in the manifest list entries"
                 .to_string(),
         };
         assert!(missing_platform(&miss));
         let denied = EnvError::Backend {
-            backend: SmolStr::new("docker"),
+            backend:   SmolStr::new("docker"),
             operation: SmolStr::new("pull"),
-            message: "pull access denied for ghcr.io/x/y".to_string(),
+            message:   "pull access denied for ghcr.io/x/y".to_string(),
         };
         assert!(!missing_platform(&denied));
     }

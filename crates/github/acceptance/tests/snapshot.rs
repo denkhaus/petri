@@ -2,13 +2,14 @@
 //!
 //! Lowers every corpus workflow with a recording source over git, so every
 //! `uses: owner/repo@ref` the corpus makes — references nested in remote
-//! composites included — is resolved to a commit and its manifest, and the lot is
-//! written to `crates/github/corpus/actions-snapshot.json`. The offline corpus run
-//! (`--test harness`) then resolves through the snapshot; see
+//! composites included — is resolved to a commit and its manifest, and the lot
+//! is written to `crates/github/corpus/actions-snapshot.json`. The offline
+//! corpus run (`--test harness`) then resolves through the snapshot; see
 //! `acceptance::SnapshotSource`.
 //!
-//! Like the corpus itself, the snapshot is fetched, not vendored: gitignored, and
-//! reproducible from the corpus plus the state of the referenced repositories.
+//! Like the corpus itself, the snapshot is fetched, not vendored: gitignored,
+//! and reproducible from the corpus plus the state of the referenced
+//! repositories.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -22,12 +23,12 @@ fn corpus_root() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
-/// Passes every call to git and records what came back, keyed by the reference as
-/// the lowering names it. A resolve that succeeds is recorded when its manifest
-/// arrives; a failure at either step is recorded as failed.
+/// Passes every call to git and records what came back, keyed by the reference
+/// as the lowering names it. A resolve that succeeds is recorded when its
+/// manifest arrives; a failure at either step is recorded as failed.
 struct Recording {
     inner: GitActionSource,
-    seen: Mutex<BTreeMap<String, SnapshotEntry>>,
+    seen:  Mutex<BTreeMap<String, SnapshotEntry>>,
 }
 
 impl Recording {
@@ -40,12 +41,9 @@ impl ActionSource for Recording {
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
         let result = self.inner.resolve(reference);
         if let Err(e) = &result {
-            self.record(
-                reference.to_string(),
-                SnapshotEntry::Failed {
-                    error: e.to_string(),
-                },
-            );
+            self.record(reference.to_string(), SnapshotEntry::Failed {
+                error: e.to_string(),
+            });
         }
         result
     }
@@ -67,7 +65,7 @@ impl ActionSource for Recording {
 fn entry_for(pinned: &PinnedAction, result: &Result<String, ActionSourceError>) -> SnapshotEntry {
     match result {
         Ok(text) => SnapshotEntry::Resolved {
-            sha: pinned.sha.to_string(),
+            sha:      pinned.sha.to_string(),
             manifest: text.clone(),
         },
         Err(e) => SnapshotEntry::Failed {
@@ -86,7 +84,7 @@ fn refresh_action_snapshot() {
     );
     let recording = Arc::new(Recording {
         inner: GitActionSource::new(root.join(".actions-cache")),
-        seen: Mutex::new(BTreeMap::new()),
+        seen:  Mutex::new(BTreeMap::new()),
     });
     let source: Arc<dyn ActionSource> = Arc::clone(&recording) as Arc<dyn ActionSource>;
     for (repo, repo_root, file) in workflows(&root) {

@@ -1,10 +1,10 @@
 //! The standard configuration, as a builder.
 //!
-//! Every place that runs a graph used to wire the same pieces by hand: a registry
-//! with `noop` and `process`, an executor, a secret provider, a `RunConfig`, a
-//! driver, and the replay canary. [`Runtime`] is that wiring, written once. The CLI,
-//! the acceptance harness, and an external repository all configure the same
-//! builder; extension is registration, not new plumbing.
+//! Every place that runs a graph used to wire the same pieces by hand: a
+//! registry with `noop` and `process`, an executor, a secret provider, a
+//! `RunConfig`, a driver, and the replay canary. [`Runtime`] is that wiring,
+//! written once. The CLI, the acceptance harness, and an external repository
+//! all configure the same builder; extension is registration, not new plumbing.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,32 +24,33 @@ use crate::local::LocalExecutor;
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     /// Where workspaces and logs live.
-    pub run_dir: PathBuf,
+    pub run_dir:             PathBuf,
     /// Between `SIGTERM` and `SIGKILL`, per scope.
-    pub grace: Duration,
-    /// How much longer than `grace` a step gets before the driver stops waiting.
+    pub grace:               Duration,
+    /// How much longer than `grace` a step gets before the driver stops
+    /// waiting.
     pub hard_deadline_slack: Duration,
     /// Between the first root cancel and the `KillRequested` that ends whatever
     /// cleanup is still running.
-    pub cleanup_grace: Duration,
-    pub retention: Retention,
+    pub cleanup_grace:       Duration,
+    pub retention:           Retention,
     /// Echo step output to this process's stdout.
-    pub echo: bool,
+    pub echo:                bool,
     /// Replay the log after the run and fail on any divergence. The determinism
     /// canary; on by default.
-    pub verify_replay: bool,
+    pub verify_replay:       bool,
 }
 
 impl RunOptions {
     pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         Self {
-            run_dir: run_dir.into(),
-            grace: DEFAULT_GRACE,
+            run_dir:             run_dir.into(),
+            grace:               DEFAULT_GRACE,
             hard_deadline_slack: Duration::from_secs(5),
-            cleanup_grace: driver::DEFAULT_CLEANUP_GRACE,
-            retention: Retention::default(),
-            echo: false,
-            verify_replay: true,
+            cleanup_grace:       driver::DEFAULT_CLEANUP_GRACE,
+            retention:           Retention::default(),
+            echo:                false,
+            verify_replay:       true,
         }
     }
 }
@@ -71,64 +72,66 @@ type RunProvisioner = Arc<
 
 /// The assembled system: frontends, step kinds, executors, secrets, options.
 pub struct Runtime {
-    frontends: Vec<Arc<dyn Frontend>>,
-    steps: ::steps::Registry,
-    executor: Option<Arc<dyn Executor>>,
-    secrets: Arc<dyn SecretProvider>,
-    observers: Vec<Arc<dyn EventObserver>>,
-    progress: Option<Arc<dyn ProgressSink>>,
-    caps: ::steps::CapabilitiesBuilder,
+    frontends:    Vec<Arc<dyn Frontend>>,
+    steps:        ::steps::Registry,
+    executor:     Option<Arc<dyn Executor>>,
+    secrets:      Arc<dyn SecretProvider>,
+    observers:    Vec<Arc<dyn EventObserver>>,
+    progress:     Option<Arc<dyn ProgressSink>>,
+    caps:         ::steps::CapabilitiesBuilder,
     provisioners: Vec<RunProvisioner>,
-    options: RunOptions,
+    options:      RunOptions,
 }
 
 impl Runtime {
-    /// The standard configuration: the formats and step kinds core itself owns —
-    /// the `native` frontend, the `noop` and `process` steps — no secrets, and,
-    /// unless [`Runtime::executor`] overrides it, the composed [`LocalExecutor`]
-    /// dispatching by each scope's [`ir::RuntimeTarget`].
+    /// The standard configuration: the formats and step kinds core itself owns
+    /// — the `native` frontend, the `noop` and `process` steps — no
+    /// secrets, and, unless [`Runtime::executor`] overrides it, the
+    /// composed [`LocalExecutor`] dispatching by each scope's
+    /// [`ir::RuntimeTarget`].
     ///
     /// A distribution or a consumer registers its own frontends on top with
-    /// [`Runtime::frontend`]; each one goes to the front of the list, ahead of the
-    /// native catch-all.
+    /// [`Runtime::frontend`]; each one goes to the front of the list, ahead of
+    /// the native catch-all.
     ///
-    /// The default run directory is under the system temp dir; set a real one with
-    /// [`Runtime::options`].
+    /// The default run directory is under the system temp dir; set a real one
+    /// with [`Runtime::options`].
     pub fn standard() -> Self {
         Self {
-            frontends: vec![Arc::new(frontend_native::Native)],
-            steps: crate::steps::standard(),
-            executor: None,
-            secrets: Arc::new(MapSecrets::empty()),
-            observers: Vec::new(),
-            progress: None,
-            caps: ::steps::Capabilities::builder(),
+            frontends:    vec![Arc::new(frontend_native::Native)],
+            steps:        crate::steps::standard(),
+            executor:     None,
+            secrets:      Arc::new(MapSecrets::empty()),
+            observers:    Vec::new(),
+            progress:     None,
+            caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
-            options: RunOptions::new(
+            options:      RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
         }
     }
 
-    /// No frontends, no step kinds: for a consumer that assembles everything itself.
+    /// No frontends, no step kinds: for a consumer that assembles everything
+    /// itself.
     pub fn bare() -> Self {
         Self {
-            frontends: Vec::new(),
-            steps: ::steps::Registry::new(),
-            executor: None,
-            secrets: Arc::new(MapSecrets::empty()),
-            observers: Vec::new(),
-            progress: None,
-            caps: ::steps::Capabilities::builder(),
+            frontends:    Vec::new(),
+            steps:        ::steps::Registry::new(),
+            executor:     None,
+            secrets:      Arc::new(MapSecrets::empty()),
+            observers:    Vec::new(),
+            progress:     None,
+            caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
-            options: RunOptions::new(
+            options:      RunOptions::new(
                 std::env::temp_dir().join(format!("petri-run-{}", std::process::id())),
             ),
         }
     }
 
-    /// Register a frontend. It goes to the front of the list, so a specific format
-    /// is asked before the native catch-all.
+    /// Register a frontend. It goes to the front of the list, so a specific
+    /// format is asked before the native catch-all.
     pub fn frontend(mut self, frontend: impl Frontend + 'static) -> Self {
         self.frontends.insert(0, Arc::new(frontend));
         self
@@ -227,8 +230,8 @@ impl Runtime {
 
     // ── Frontends ──────────────────────────────────────────────────────────
 
-    /// The frontend for a file: by `name` when given, else the first that claims
-    /// the path.
+    /// The frontend for a file: by `name` when given, else the first that
+    /// claims the path.
     pub fn frontend_for(&self, path: &Path, name: Option<&str>) -> Result<&dyn Frontend, String> {
         let all: Vec<&dyn Frontend> = self.frontends.iter().map(|f| f.as_ref()).collect();
         match name {
@@ -267,9 +270,9 @@ impl Runtime {
         Ok(frontend.load(&name, &text, &files))
     }
 
-    /// [`Runtime::lower`], then validate the graph against the step registry, so an
-    /// unregistered kind or a bad literal config is a diagnostic here rather than a
-    /// step failure at firing time.
+    /// [`Runtime::lower`], then validate the graph against the step registry,
+    /// so an unregistered kind or a bad literal config is a diagnostic here
+    /// rather than a step failure at firing time.
     pub fn check(
         &self,
         file: &Path,
@@ -369,18 +372,18 @@ impl Runtime {
         driver
     }
 
-    /// Run a graph to completion. With `verify_replay` on (the default), the log is
-    /// replayed afterwards and any divergence is the error.
+    /// Run a graph to completion. With `verify_replay` on (the default), the
+    /// log is replayed afterwards and any divergence is the error.
     pub async fn run(&self, graph: Graph) -> Result<RunReport, ReplayMismatch> {
         self.run_verified(graph, |graph| Ok(self.driver(graph)))
             .await
     }
 
     /// Run the driver `build` makes over `graph` to completion, with the same
-    /// verification as [`Runtime::run`]: `verify_replay` on (the default) replays
-    /// the log against the graph as it was before the run, and any divergence is
-    /// the error. For hosts that build their own driver — one with observers
-    /// attached, or a resumed one.
+    /// verification as [`Runtime::run`]: `verify_replay` on (the default)
+    /// replays the log against the graph as it was before the run, and any
+    /// divergence is the error. For hosts that build their own driver — one
+    /// with observers attached, or a resumed one.
     pub async fn run_verified<E: From<ReplayMismatch>>(
         &self,
         graph: Graph,
@@ -394,8 +397,8 @@ impl Runtime {
         Ok(report)
     }
 
-    /// The mask set of the configured `SecretProvider`, for a host that persists
-    /// anything beside the run.
+    /// The mask set of the configured `SecretProvider`, for a host that
+    /// persists anything beside the run.
     pub fn masker(&self) -> Masker {
         self.secrets.masker()
     }

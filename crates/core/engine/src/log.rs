@@ -6,57 +6,58 @@ use crate::event::Event;
 
 /// Bumped whenever the shape of a record changes.
 ///
-/// v1 → v2: the firing key gained [`ir::Attempt`], `StepStarted` / `StepFinished`
-/// carry it, `ScheduleRetry` / `RetryElapsed` joined the vocabulary, finish records
-/// carry `context_updates`, and every record records whether it came from outside or
-/// from the core.
+/// v1 → v2: the firing key gained [`ir::Attempt`], `StepStarted` /
+/// `StepFinished` carry it, `ScheduleRetry` / `RetryElapsed` joined the
+/// vocabulary, finish records carry `context_updates`, and every record records
+/// whether it came from outside or from the core.
 ///
 /// v2 → v3: cancelled outcomes route (the semantics change under replay),
 /// `KillRequested` joined the vocabulary, and `Node` — serialized inside
-/// `NodeExpanded` splices — gained `run_on_cancel`. Per the standing policy there is
-/// no migrator: a v2 log is rejected cleanly.
+/// `NodeExpanded` splices — gained `run_on_cancel`. Per the standing policy
+/// there is no migrator: a v2 log is rejected cleanly.
 ///
 /// v3 → v4: `Node` — serialized inside `NodeExpanded` splices — gained `meta`.
 /// Standing policy again: no migrator, a v3 log is rejected cleanly.
 ///
-/// v4 → v5: `ControlRequested` and `Control::Deliver` joined the vocabulary, so a
-/// pending host-delivered interaction is in the log and replay reproduces it.
+/// v4 → v5: `ControlRequested` and `Control::Deliver` joined the vocabulary, so
+/// a pending host-delivered interaction is in the log and replay reproduces it.
 /// Standing policy, no migrator.
 ///
-/// v5 → v6: `Outcome` — serialized inside `StepFinished` — gained `splices`, and
-/// `Node` — serialized inside `NodeExpanded` splices — gained `splice_policy`, for
-/// the outcome-driven splice. Standing policy, no migrator: a v5 log is rejected
-/// cleanly.
+/// v5 → v6: `Outcome` — serialized inside `StepFinished` — gained `splices`,
+/// and `Node` — serialized inside `NodeExpanded` splices — gained
+/// `splice_policy`, for the outcome-driven splice. Standing policy, no
+/// migrator: a v5 log is rejected cleanly.
 pub const LOG_VERSION: u32 = 6;
 
 /// Where an event came from.
 ///
-/// **This enum is closed.** `External` and `Core` are the complete and permanent
-/// vocabulary: an event either entered from outside the core or the core produced it,
-/// and there is no third case. Nothing may extend it.
+/// **This enum is closed.** `External` and `Core` are the complete and
+/// permanent vocabulary: an event either entered from outside the core or the
+/// core produced it, and there is no third case. Nothing may extend it.
 ///
 /// # The verification contract
 ///
-/// This is load-bearing for every determinism claim the system makes, so it is worth
-/// stating plainly:
+/// This is load-bearing for every determinism claim the system makes, so it is
+/// worth stating plainly:
 ///
 /// - Replay feeds back **only** `External` records.
-/// - Every `Core` record is **regenerated** by the core during replay, never replayed
-///   from the log.
-/// - A replayed log that is byte-identical to the original therefore asserts that the
-///   core reached every one of those `Core` events again, in the same order, from the
-///   same inputs.
+/// - Every `Core` record is **regenerated** by the core during replay, never
+///   replayed from the log.
+/// - A replayed log that is byte-identical to the original therefore asserts
+///   that the core reached every one of those `Core` events again, in the same
+///   order, from the same inputs.
 ///
 /// The regenerated-versus-recorded distinction *is* the assertion. It is not
-/// redundancy, and it is not an optimisation. If a future change feeds `Core` records
-/// back instead of regenerating them, `verify_replay` keeps passing while asserting
-/// nothing at all: it would be comparing the log against a copy of itself. Anything
-/// that makes the core consult a clock, an RNG, an environment variable, or a
-/// non-deterministic iteration order breaks byte-identity — which is the point.
+/// redundancy, and it is not an optimisation. If a future change feeds `Core`
+/// records back instead of regenerating them, `verify_replay` keeps passing
+/// while asserting nothing at all: it would be comparing the log against a copy
+/// of itself. Anything that makes the core consult a clock, an RNG, an
+/// environment variable, or a non-deterministic iteration order breaks
+/// byte-identity — which is the point.
 ///
-/// A host feeding an event in is `External` even when that event describes something
-/// the core asked for, such as `RetryElapsed` answering a `ScheduleRetry`: the
-/// decision to send it, and when, came from outside.
+/// A host feeding an event in is `External` even when that event describes
+/// something the core asked for, such as `RetryElapsed` answering a
+/// `ScheduleRetry`: the decision to send it, and when, came from outside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventSource {
     /// Fed in by the host: run start, step results, retry timers, cancellation.
@@ -65,12 +66,14 @@ pub enum EventSource {
     Core,
 }
 
-/// Where a cancellation's escalation is recorded, and why it is not a failure class.
+/// Where a cancellation's escalation is recorded, and why it is not a failure
+/// class.
 ///
-/// A consumer reading the log for "how did this step get stopped" looks here, not at
-/// [`ir::Status`]. `Status::Cancelled` and `Status::TimedOut` carry no `FailureInfo`,
-/// and giving them one would widen an enum the core declares closed and permanent.
-/// So the escalation is a field on the finish record's `outcome.output`:
+/// A consumer reading the log for "how did this step get stopped" looks here,
+/// not at [`ir::Status`]. `Status::Cancelled` and `Status::TimedOut` carry no
+/// `FailureInfo`, and giving them one would widen an enum the core declares
+/// closed and permanent. So the escalation is a field on the finish record's
+/// `outcome.output`:
 ///
 /// | Value | Meaning |
 /// |---|---|
@@ -86,16 +89,16 @@ pub const CANCEL_ESCALATION_KEY: &str = "cancel_escalation";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
     /// Position in the log, starting at 0.
-    pub seq: u64,
+    pub seq:    u64,
     pub source: EventSource,
-    pub event: Event,
+    pub event:  Event,
 }
 
 /// A log whose version is not the one this build speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[error("event log is version {found}; this build reads version {expected}")]
 pub struct UnsupportedLogVersion {
-    pub found: u32,
+    pub found:    u32,
     pub expected: u32,
 }
 
@@ -110,9 +113,9 @@ pub enum InvalidRecords {
 
 /// An append-only list of every event the run has applied, in order.
 ///
-/// The core appends here before applying, including for the events it emits itself
-/// while routing. Replaying the external records through `apply` from a fresh state
-/// reproduces the run exactly, because `apply` has no other inputs.
+/// The core appends here before applying, including for the events it emits
+/// itself while routing. Replaying the external records through `apply` from a
+/// fresh state reproduces the run exactly, because `apply` has no other inputs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(into = "EventLogRepr", try_from = "EventLogRepr")]
 pub struct EventLog {
@@ -134,19 +137,20 @@ impl EventLog {
         Self::default()
     }
 
-    /// The format version. Always [`LOG_VERSION`] for a log this build produced.
+    /// The format version. Always [`LOG_VERSION`] for a log this build
+    /// produced.
     pub fn version(&self) -> u32 {
         self.version
     }
 
     /// Rebuild a log from records a host persisted in its own store.
     ///
-    /// This constructor, plus the serde round-trip of [`EventLog`] itself, is the
-    /// whole of the core's persistence surface: a host frames and stores records
-    /// however it likes — a jsonl file, a database, an object store — and hands
-    /// them back here. The version is checked exactly as deserialization checks it
-    /// (standing no-migrator policy), and the records must be contiguous from
-    /// seq 0.
+    /// This constructor, plus the serde round-trip of [`EventLog`] itself, is
+    /// the whole of the core's persistence surface: a host frames and
+    /// stores records however it likes — a jsonl file, a database, an
+    /// object store — and hands them back here. The version is checked
+    /// exactly as deserialization checks it (standing no-migrator policy),
+    /// and the records must be contiguous from seq 0.
     pub fn try_from_records(
         version: u32,
         records: Vec<EventRecord>,
@@ -195,9 +199,9 @@ impl EventLog {
 
     /// The first `len` records, as a log of their own.
     ///
-    /// The rewind/fork helper: resuming a truncated log is rewind, doing it in a
-    /// fresh run dir is fork — replay regenerates everything past the prefix.
-    /// One method, no policy.
+    /// The rewind/fork helper: resuming a truncated log is rewind, doing it in
+    /// a fresh run dir is fork — replay regenerates everything past the
+    /// prefix. One method, no policy.
     pub fn prefix(&self, len: usize) -> EventLog {
         Self {
             version: self.version,

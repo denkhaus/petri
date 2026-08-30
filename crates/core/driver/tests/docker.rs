@@ -1,9 +1,10 @@
-//! Handoff §7 tests 3 and 10, Docker halves. These skip when no daemon is reachable.
+//! Handoff §7 tests 3 and 10, Docker halves. These skip when no daemon is
+//! reachable.
 //!
 //! The one that matters most is `docker_cancel_kills_the_exec_process_group`:
-//! `docker kill` signals PID 1 and never reaches an exec'd step, so cancellation has
-//! to be `docker exec … kill -- -PGID`. Getting that wrong is the classic bug, and
-//! this is the test aimed at it.
+//! `docker kill` signals PID 1 and never reaches an exec'd step, so
+//! cancellation has to be `docker exec … kill -- -PGID`. Getting that wrong is
+//! the classic bug, and this is the test aimed at it.
 
 mod support;
 
@@ -72,8 +73,9 @@ async fn a_step_runs_inside_the_container() {
 /// §7 test 3, Docker variant, and the §4.1 test.
 ///
 /// The step backgrounds a grandchild inside the container. `docker kill` would
-/// signal PID 1 and leave both alive; only `docker exec … kill -- -PGID` reaches
-/// them. The heartbeat file is on the bind mount, so the host can watch it stop.
+/// signal PID 1 and leave both alive; only `docker exec … kill -- -PGID`
+/// reaches them. The heartbeat file is on the bind mount, so the host can watch
+/// it stop.
 #[tokio::test]
 async fn docker_cancel_kills_the_exec_process_group() {
     if !docker_ready().await {
@@ -364,9 +366,9 @@ async fn a_bad_image_fails_the_scope() {
     assert!(report.state.is_finished(), "the run completed");
 }
 
-/// The step's real duration and exit status both survive, whether or not `setsid`
-/// forked. If `docker exec` returned early we would see a fast success here instead
-/// of a slow failure.
+/// The step's real duration and exit status both survive, whether or not
+/// `setsid` forked. If `docker exec` returned early we would see a fast success
+/// here instead of a slow failure.
 #[tokio::test]
 async fn docker_wait_follows_the_step_not_the_client() {
     if !docker_ready().await {
@@ -447,11 +449,12 @@ async fn an_amd64_only_image_acquires_via_the_platform_fallback() {
     );
 }
 
-/// Output printed *after* a pause survives, on both streams. The exit status was
-/// always safe (the wrapper records it), but the log path was not: run directly
-/// under `docker exec`, `setsid` forks and the client detaches from a step still
-/// running — every later line is lost. Fast steps never showed it; the keeper
-/// shell the executor now runs `setsid` under is what keeps the client attached.
+/// Output printed *after* a pause survives, on both streams. The exit status
+/// was always safe (the wrapper records it), but the log path was not: run
+/// directly under `docker exec`, `setsid` forks and the client detaches from a
+/// step still running — every later line is lost. Fast steps never showed it;
+/// the keeper shell the executor now runs `setsid` under is what keeps the
+/// client attached.
 #[tokio::test]
 async fn docker_output_after_a_pause_is_captured() {
     if !docker_ready().await {
@@ -495,9 +498,9 @@ async fn docker_output_after_a_pause_is_captured() {
     );
 }
 
-/// The wrapper is inside the group the ladder kills, so it never gets to record a
-/// status. That path must land on the cancellation outcome rather than hanging on a
-/// status file that is not coming, or falling back to a default.
+/// The wrapper is inside the group the ladder kills, so it never gets to record
+/// a status. That path must land on the cancellation outcome rather than
+/// hanging on a status file that is not coming, or falling back to a default.
 #[tokio::test]
 async fn docker_cancel_without_a_recorded_status_still_reports_cancelled() {
     if !docker_ready().await {

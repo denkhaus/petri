@@ -13,7 +13,8 @@ use smol_str::SmolStr;
 pub enum Progress {
     /// An image is being pulled from a registry.
     PullingImage { image: SmolStr },
-    /// An image is being built from a workspace Dockerfile; `tag` is the cache key.
+    /// An image is being built from a workspace Dockerfile; `tag` is the cache
+    /// key.
     BuildingImage { tag: SmolStr },
     /// A service container was created and started.
     ServiceStarted { name: SmolStr },

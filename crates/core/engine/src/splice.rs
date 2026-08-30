@@ -6,10 +6,10 @@
 //! [`SplicePlan`] against a scratch view of `EngineState` — remapping every
 //! identifier from live-graph high-water marks, resolving attachments, and
 //! computing retraction — without touching canonical state, so a rejected
-//! transaction leaks nothing, not even allocator movement. [`PreparedSplice`] is
-//! engine-private, non-serializable, and constructible only here (or by the
-//! `ForEach` producer); `apply_prepared_splice` is infallible for domain errors,
-//! because validation is a type boundary, not a convention.
+//! transaction leaks nothing, not even allocator movement. [`PreparedSplice`]
+//! is engine-private, non-serializable, and constructible only here (or by the
+//! `ForEach` producer); `apply_prepared_splice` is infallible for domain
+//! errors, because validation is a type boundary, not a convention.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -32,10 +32,10 @@ use crate::state::{
 pub const INVALID_SPLICE_CLASS: &str = "invalid_splice";
 
 /// The canonical invalid-splice conversion: the outcome becomes a
-/// `Failure{class: invalid_splice}` with `message`, output and metrics are kept,
-/// and `context_updates` drop with the requests. Both converters — the engine's
-/// preparation rejection and the driver's secret backstop — go through here, so
-/// the rule cannot drift.
+/// `Failure{class: invalid_splice}` with `message`, output and metrics are
+/// kept, and `context_updates` drop with the requests. Both converters — the
+/// engine's preparation rejection and the driver's secret backstop — go through
+/// here, so the rule cannot drift.
 pub fn reject_splices(outcome: Outcome, message: impl Into<String>) -> Outcome {
     Outcome {
         status: Status::Failure(FailureInfo::new(message).with_class(INVALID_SPLICE_CLASS)),
@@ -55,7 +55,7 @@ pub fn reject_splices(outcome: Outcome, message: impl Into<String>) -> Outcome {
 #[error("splice request {request_index} rejected during {}: {source}", .source.phase())]
 pub(crate) struct SplicePreparationError {
     pub request_index: usize,
-    pub source: PreparationRejection,
+    pub source:        PreparationRejection,
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -65,16 +65,16 @@ pub(crate) enum PreparationRejection {
     #[error("the uploader's policy {policy:?} does not authorize {mode:?}")]
     Policy {
         policy: SplicePolicy,
-        mode: SpliceMode,
+        mode:   SpliceMode,
     },
     #[error(
         "fragment node `{node}` declares policy {declared:?}, above its uploader's {cap:?}; \
          a fragment can never mint more authority than its uploader"
     )]
     Delegation {
-        node: SmolStr,
+        node:     SmolStr,
         declared: SplicePolicy,
-        cap: SplicePolicy,
+        cap:      SplicePolicy,
     },
     #[error("instance name `{name}` collides with a node already in the graph")]
     NameCollision { name: SmolStr },
@@ -95,8 +95,9 @@ pub(crate) enum PreparationRejection {
 }
 
 impl PreparationRejection {
-    /// Which preparation phase this rejection comes from — policy authorization,
-    /// fragment-local validation, or composition with the live graph.
+    /// Which preparation phase this rejection comes from — policy
+    /// authorization, fragment-local validation, or composition with the
+    /// live graph.
     fn phase(&self) -> &'static str {
         match self {
             Self::Policy { .. } | Self::Delegation { .. } => "policy",
@@ -116,13 +117,13 @@ fn format_fragment_errors(errors: &[ir::FragmentValidationError]) -> String {
 
 // ── The prepared shape ────────────────────────────────────────────────────
 
-/// One seed for a spliced entry: the synthetic incoming edge, the node it feeds,
-/// and the token placed on it.
+/// One seed for a spliced entry: the synthetic incoming edge, the node it
+/// feeds, and the token placed on it.
 pub(crate) struct PreparedSeed {
-    pub edge: EdgeId,
-    pub entry: NodeId,
+    pub edge:       EdgeId,
+    pub entry:      NodeId,
     pub generation: Generation,
-    pub payload: Value,
+    pub payload:    Value,
 }
 
 /// A splice with every identifier remapped and every check complete: the only
@@ -130,37 +131,38 @@ pub(crate) struct PreparedSeed {
 pub(crate) struct PreparedSplice {
     /// The node whose firing produced this batch: the expansion source, or the
     /// uploader. Stamped on the record — ownership is core-derived.
-    pub owner: NodeId,
-    pub cancel_scope: CancelScopeId,
+    pub owner:              NodeId,
+    pub cancel_scope:       CancelScopeId,
     /// The scope the fresh batch scope nests under: the producing firing's
     /// current cancel scope.
-    pub parent_scope: CancelScopeId,
+    pub parent_scope:       CancelScopeId,
     /// Fully formed live-space nodes, ids contiguous with the live graph.
-    pub nodes: Vec<Node>,
+    pub nodes:              Vec<Node>,
     /// Expressions appended to the live table, ids contiguous with it: the
     /// fragment's own, then the synthesized attachment guards.
-    pub exprs: Vec<Expr>,
+    pub exprs:              Vec<Expr>,
     /// Resource scopes appended to the live list, ids contiguous with it.
-    pub scopes: Vec<Scope>,
+    pub scopes:             Vec<Scope>,
     /// `item` / `index` bindings for expansion clones; empty for uploads.
-    pub bindings: BTreeMap<NodeId, BTreeMap<SmolStr, Value>>,
+    pub bindings:           BTreeMap<NodeId, BTreeMap<SmolStr, Value>>,
     /// Seed tokens for entries fed by no real edge (`ForEach` clones). Uploaded
     /// fragments attach through real select groups instead and seed nothing.
-    pub seeds: Vec<PreparedSeed>,
+    pub seeds:              Vec<PreparedSeed>,
     /// Select groups appended to nodes once they are live: the uploader's entry
-    /// groups, and `depends_on` edges on not-final or earlier-planned references.
+    /// groups, and `depends_on` edges on not-final or earlier-planned
+    /// references.
     pub routing_extensions: Vec<(NodeId, SelectGroup)>,
-    pub origin: SpliceOrigin,
-    pub policy: BatchPolicy,
+    pub origin:             SpliceOrigin,
+    pub policy:             BatchPolicy,
     /// State changes applied with the graph additions and recorded on the
     /// [`AppliedSplice`].
-    pub effects: Vec<SpliceEffect>,
+    pub effects:            Vec<SpliceEffect>,
 }
 
 /// Every request in one final outcome, prepared: the transaction plan. Commit
 /// consumes it in order; nothing partial ever commits.
 pub(crate) struct SplicePlan {
-    pub batches: Vec<PreparedSplice>,
+    pub batches:    Vec<PreparedSplice>,
     pub allocators: Allocators,
 }
 
@@ -179,36 +181,36 @@ pub(crate) fn prepare_outcome_splices(
 }
 
 /// Scratch state for one outcome's atomic splice transaction. Every field is a
-/// prepared view; canonical [`EngineState`] remains borrowed and unchanged until
-/// the resulting [`SplicePlan`] commits.
+/// prepared view; canonical [`EngineState`] remains borrowed and unchanged
+/// until the resulting [`SplicePlan`] commits.
 struct SpliceTransaction<'a> {
-    state: &'a EngineState,
-    uploader: &'a Node,
-    generation: Generation,
-    parent_scope: CancelScopeId,
-    allocators: Allocators,
-    expr_cursor: u32,
-    scope_cursor: u32,
-    batches: Vec<PreparedSplice>,
-    names: BTreeMap<SmolStr, NodeId>,
-    retracted: BTreeSet<AdmissionKey>,
-    loop_nodes: OnceCell<BTreeSet<NodeId>>,
-    pending_keys: OnceCell<Vec<AdmissionKey>>,
-    owned_nodes: OnceCell<BTreeSet<NodeId>>,
+    state:                &'a EngineState,
+    uploader:             &'a Node,
+    generation:           Generation,
+    parent_scope:         CancelScopeId,
+    allocators:           Allocators,
+    expr_cursor:          u32,
+    scope_cursor:         u32,
+    batches:              Vec<PreparedSplice>,
+    names:                BTreeMap<SmolStr, NodeId>,
+    retracted:            BTreeSet<AdmissionKey>,
+    loop_nodes:           OnceCell<BTreeSet<NodeId>>,
+    pending_keys:         OnceCell<Vec<AdmissionKey>>,
+    owned_nodes:          OnceCell<BTreeSet<NodeId>>,
     ambiguous_references: BTreeMap<NodeId, bool>,
 }
 
 /// The remapped graph data and attachment effects for one request before it is
 /// sealed as a [`PreparedSplice`].
 struct BatchDraft {
-    node_base: u32,
-    expr_base: u32,
-    scope_base: u32,
-    nodes: Vec<Node>,
-    exprs: Vec<Expr>,
-    scopes: Vec<Scope>,
+    node_base:          u32,
+    expr_base:          u32,
+    scope_base:         u32,
+    nodes:              Vec<Node>,
+    exprs:              Vec<Expr>,
+    scopes:             Vec<Scope>,
     routing_extensions: Vec<(NodeId, SelectGroup)>,
-    retracted: Vec<AdmissionKey>,
+    retracted:          Vec<AdmissionKey>,
 }
 
 impl<'a> SpliceTransaction<'a> {
@@ -246,7 +248,7 @@ impl<'a> SpliceTransaction<'a> {
             self.prepare_request(request_index, request)?;
         }
         Ok(SplicePlan {
-            batches: self.batches,
+            batches:    self.batches,
             allocators: self.allocators,
         })
     }
@@ -278,23 +280,24 @@ impl<'a> SpliceTransaction<'a> {
         if !self.uploader.splice_policy.authorizes(&request.mode) {
             return Err(reject(PreparationRejection::Policy {
                 policy: self.uploader.splice_policy,
-                mode: request.mode,
+                mode:   request.mode,
             }));
         }
         for node in &request.fragment.nodes {
             if !self.uploader.splice_policy.may_delegate(node.splice_policy) {
                 return Err(reject(PreparationRejection::Delegation {
-                    node: node.name.clone(),
+                    node:     node.name.clone(),
                     declared: node.splice_policy,
-                    cap: self.uploader.splice_policy,
+                    cap:      self.uploader.splice_policy,
                 }));
             }
         }
         validate_request(request).map_err(|errors| reject(PreparationRejection::Fragment(errors)))
     }
 
-    /// Compute this request's retractions against the same canonical snapshot as
-    /// every other request, excluding keys an earlier request already took.
+    /// Compute this request's retractions against the same canonical snapshot
+    /// as every other request, excluding keys an earlier request already
+    /// took.
     fn prepare_retractions(&mut self, request: &SpliceRequest) -> Vec<AdmissionKey> {
         let mut batch = Vec::new();
         let SpliceMode::Replace { scope } = request.mode else {
@@ -331,8 +334,8 @@ impl<'a> SpliceTransaction<'a> {
         batch
     }
 
-    /// Remap one fragment into fresh live ids. All allocator movement remains on
-    /// the transaction copy.
+    /// Remap one fragment into fresh live ids. All allocator movement remains
+    /// on the transaction copy.
     fn remap_fragment(
         &mut self,
         request: &SpliceRequest,
@@ -387,8 +390,8 @@ impl<'a> SpliceTransaction<'a> {
         Ok(())
     }
 
-    /// Attach fragment entries to the uploader, gated by success-like status and
-    /// the exact uploading generation.
+    /// Attach fragment entries to the uploader, gated by success-like status
+    /// and the exact uploading generation.
     fn attach_entries(&mut self, fragment: &ir::GraphFragment, draft: &mut BatchDraft) {
         if fragment.entry.is_empty() {
             return;
@@ -459,7 +462,7 @@ impl<'a> SpliceTransaction<'a> {
             .collect();
         for dependent in dependents {
             if self.retracted.contains(&AdmissionKey {
-                node: dependent,
+                node:       dependent,
                 generation: self.generation,
             }) {
                 continue;
@@ -487,8 +490,8 @@ impl<'a> SpliceTransaction<'a> {
         Ok(())
     }
 
-    /// Resolve explicit `depends_on` attachments against live and earlier-planned
-    /// names in the transaction.
+    /// Resolve explicit `depends_on` attachments against live and
+    /// earlier-planned names in the transaction.
     fn attach_dependencies(
         &mut self,
         request_index: usize,
@@ -678,7 +681,8 @@ pub(crate) fn apply_prepared_splice(
 
 // ── Remapping helpers ─────────────────────────────────────────────────────
 
-/// Append a synthesized expression to the batch's segment and return its live id.
+/// Append a synthesized expression to the batch's segment and return its live
+/// id.
 fn push_expr(exprs: &mut Vec<Expr>, expr_base: u32, expr: Expr) -> ExprId {
     let id = ExprId::new(expr_base + exprs.len() as u32);
     exprs.push(expr);
@@ -723,8 +727,8 @@ fn shift_expr(expr: &Expr<Local>, offset: u32) -> Expr {
             then,
             otherwise,
         } => Expr::Cond {
-            cond: id(*cond),
-            then: id(*then),
+            cond:      id(*cond),
+            then:      id(*then),
             otherwise: id(*otherwise),
         },
         Expr::Array(items) => Expr::Array(items.iter().map(|i| id(*i)).collect()),
@@ -831,14 +835,14 @@ fn remap_node(
             .arms
             .iter()
             .map(|arm| Edge {
-                id: alloc.take_edge(),
-                to: NodeId::new(node_base + arm.to.raw()),
+                id:    alloc.take_edge(),
+                to:    NodeId::new(node_base + arm.to.raw()),
                 guard: match arm.guard {
                     Guard::Always => Guard::Always,
                     Guard::Expr(id) => Guard::Expr(shift(id)),
                 },
-                map: arm.map.map(shift),
-                back: arm.back,
+                map:   arm.map.map(shift),
+                back:  arm.back,
             })
             .collect();
         node.routing.groups.push(SelectGroup {

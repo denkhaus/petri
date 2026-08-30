@@ -101,8 +101,8 @@ fn the_loop_exit_carries_every_result_in_order() {
     assert_eq!(*seen.borrow(), json!([20, 30, 40]));
 }
 
-/// `Budget.max_firings` is what caps a loop. A guard that never exits hits it and
-/// fails the run instead of spinning.
+/// `Budget.max_firings` is what caps a loop. A guard that never exits hits it
+/// and fails the run instead of spinning.
 #[test]
 fn a_runaway_loop_stops_at_its_budget() {
     let mut b = GraphBuilder::new();
@@ -114,10 +114,10 @@ fn a_runaway_loop_stops_at_its_budget() {
     b.set_join(spin, JoinPolicy::Any);
     b.set_budget(spin, Budget::looped(4));
     let always_loop = b.exprs().lit(true);
-    b.select(
-        spin,
-        vec![Arm::when(spin, always_loop).as_back(), Arm::always(never)],
-    );
+    b.select(spin, vec![
+        Arm::when(spin, always_loop).as_back(),
+        Arm::always(never),
+    ]);
     let graph = b.build();
     validate(&graph).expect("valid");
 

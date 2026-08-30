@@ -1,11 +1,12 @@
 //! Where a frontend reads a repository file from.
 //!
-//! Frontends are pure, but some formats have local includes — a GitHub composite
-//! action under `./.github/actions/x`, say — and the frontend has to read them. It
-//! does so through [`FileSource`], so the caller decides what "the repository" is: a
-//! directory on disk, or a map in a test.
+//! Frontends are pure, but some formats have local includes — a GitHub
+//! composite action under `./.github/actions/x`, say — and the frontend has to
+//! read them. It does so through [`FileSource`], so the caller decides what
+//! "the repository" is: a directory on disk, or a map in a test.
 
-/// Where the frontend reads a repository file from, by repository-relative path.
+/// Where the frontend reads a repository file from, by repository-relative
+/// path.
 pub trait FileSource {
     fn read(&self, path: &str) -> Option<String>;
 }

@@ -11,9 +11,10 @@ use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
 
-/// §7 test 7. An environment that cannot be acquired fails every firing in its scope
-/// with `env_acquire` — routable like any other failure, never a run abort. A cleanup
-/// path in a working scope still runs on `if: failure()`, and the run completes.
+/// §7 test 7. An environment that cannot be acquired fails every firing in its
+/// scope with `env_acquire` — routable like any other failure, never a run
+/// abort. A cleanup path in a working scope still runs on `if: failure()`, and
+/// the run completes.
 #[tokio::test]
 async fn an_acquire_failure_fails_its_firings_and_still_routes() {
     let dir = RunDir::new("acquire-failure");
@@ -95,8 +96,8 @@ async fn an_acquire_failure_fails_its_firings_and_still_routes() {
     assert!(report.state.is_finished(), "the run completed");
 }
 
-/// §7 test 10, host half. A failed scope keeps its workspace — that is what you need
-/// to debug it — and a successful one does not.
+/// §7 test 10, host half. A failed scope keeps its workspace — that is what you
+/// need to debug it — and a successful one does not.
 #[tokio::test]
 async fn workspace_retention_follows_the_outcome() {
     // Failure keeps it.

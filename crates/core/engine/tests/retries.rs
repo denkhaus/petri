@@ -1,7 +1,9 @@
-//! Handoff §1: retries add an attempt dimension. A retry is not a loop iteration —
-//! it advances `Attempt` and never touches `Generation`.
+//! Handoff §1: retries add an attempt dimension. A retry is not a loop
+//! iteration — it advances `Attempt` and never touches `Generation`.
 
 mod support;
+
+use std::time::Duration;
 
 use engine::{Command, Event};
 use ir::{
@@ -9,12 +11,11 @@ use ir::{
     StatusKind, Value, sequential_for_each, validate,
 };
 use serde_json::json;
-use std::time::Duration;
 use support::{Harness, NOOP};
 
 /// Handoff §7 test 1. A node fails twice then succeeds under `max_attempts: 3`:
-/// routing fires once, on the final outcome; the log shows three attempts; replay is
-/// byte-identical.
+/// routing fires once, on the final outcome; the log shows three attempts;
+/// replay is byte-identical.
 #[test]
 fn a_node_that_fails_twice_then_succeeds_routes_once() {
     let mut b = GraphBuilder::new();
@@ -99,8 +100,8 @@ fn a_retry_is_not_a_loop_iteration() {
     );
 }
 
-/// Handoff §7 test 2. A retried node on a back edge: the attempt counter resets each
-/// generation, and the budget counts one firing per generation.
+/// Handoff §7 test 2. A retried node on a back edge: the attempt counter resets
+/// each generation, and the budget counts one firing per generation.
 #[test]
 fn attempts_reset_on_each_generation() {
     let mut b = GraphBuilder::new();
@@ -152,9 +153,9 @@ fn the_core_schedules_a_deterministic_backoff() {
     let flaky = b.add_step("flaky", scope, NOOP);
     b.node_mut(flaky).retry = RetryPolicy::attempts(4).with_backoff(ir::Backoff {
         initial: Duration::from_millis(100),
-        factor: 3.0,
-        max: Duration::from_secs(1),
-        jitter: true,
+        factor:  3.0,
+        max:     Duration::from_secs(1),
+        jitter:  true,
     });
     let graph = b.build();
 
@@ -180,9 +181,9 @@ fn the_core_schedules_a_deterministic_backoff() {
 fn the_backoff_is_capped() {
     let policy = RetryPolicy::attempts(10).with_backoff(ir::Backoff {
         initial: Duration::from_secs(1),
-        factor: 10.0,
-        max: Duration::from_secs(30),
-        jitter: false,
+        factor:  10.0,
+        max:     Duration::from_secs(30),
+        jitter:  false,
     });
     assert_eq!(policy.base_delay(Attempt::new(1)), Duration::from_secs(1));
     assert_eq!(policy.base_delay(Attempt::new(2)), Duration::from_secs(10));
@@ -190,8 +191,8 @@ fn the_backoff_is_capped() {
     assert_eq!(policy.base_delay(Attempt::new(9)), Duration::from_secs(30));
 }
 
-/// `retry_on` matches failure classes, which is how BuildKite's `exit_status` and
-/// Attractor's `RETRY` outcome both lower.
+/// `retry_on` matches failure classes, which is how BuildKite's `exit_status`
+/// and Attractor's `RETRY` outcome both lower.
 #[test]
 fn retry_on_matches_failure_classes() {
     let mut b = GraphBuilder::new();
@@ -226,8 +227,8 @@ fn retry_on_matches_failure_classes() {
     assert_eq!(h.start_count("step"), 3);
 }
 
-/// Attractor's first-class `RETRY` outcome lowers onto a failure class, not a new
-/// `Status` variant. The status vocabulary stays closed.
+/// Attractor's first-class `RETRY` outcome lowers onto a failure class, not a
+/// new `Status` variant. The status vocabulary stays closed.
 #[test]
 fn a_retry_request_is_a_failure_class_not_a_status() {
     let mut b = GraphBuilder::new();
@@ -255,8 +256,8 @@ fn a_retry_request_is_a_failure_class_not_a_status() {
     assert_eq!(h.output("handler"), json!("second pass"));
 }
 
-/// `on_exhaustion: AcceptPartial` turns an exhausted failure into `PartialSuccess`,
-/// carrying the real failure so the log stays truthful.
+/// `on_exhaustion: AcceptPartial` turns an exhausted failure into
+/// `PartialSuccess`, carrying the real failure so the log stays truthful.
 #[test]
 fn exhausted_retries_can_accept_a_partial_success() {
     let mut b = GraphBuilder::new();
@@ -333,11 +334,11 @@ fn a_backoff_holds_the_run_open() {
     h.feed(Event::RunStarted);
     let starts = h.take_starts();
     h.feed(Event::StepStarted {
-        firing: starts[0].0,
+        firing:  starts[0].0,
         attempt: Attempt::FIRST,
     });
     h.feed(Event::StepFinished {
-        firing: starts[0].0,
+        firing:  starts[0].0,
         attempt: Attempt::FIRST,
         outcome: Outcome::failure("first try"),
     });
@@ -383,10 +384,10 @@ fn budget_still_bounds_a_retrying_loop() {
     b.set_budget(spin, Budget::looped(3));
     b.node_mut(spin).retry = RetryPolicy::attempts(2);
     let always_loop = b.exprs().lit(true);
-    b.select(
-        spin,
-        vec![Arm::when(spin, always_loop).as_back(), Arm::always(never)],
-    );
+    b.select(spin, vec![
+        Arm::when(spin, always_loop).as_back(),
+        Arm::always(never),
+    ]);
     let graph = b.build();
     validate(&graph).expect("valid");
 
@@ -396,9 +397,9 @@ fn budget_still_bounds_a_retrying_loop() {
     h.verify_replay();
 }
 
-/// `AcceptPartial` with `max_attempts: 1`: exhaustion means "no attempts remain",
-/// which with one attempt is immediate. Reading it otherwise would make
-/// `allow_partial` conditional on unrelated retry configuration.
+/// `AcceptPartial` with `max_attempts: 1`: exhaustion means "no attempts
+/// remain", which with one attempt is immediate. Reading it otherwise would
+/// make `allow_partial` conditional on unrelated retry configuration.
 ///
 /// The conversion carries the real failure, and the exhausted attempt's
 /// `context_updates` are merged — that outcome is the final one.
@@ -447,9 +448,9 @@ fn accept_partial_applies_with_no_retries_configured() {
     h.verify_replay();
 }
 
-/// A retried attempt's `context_updates` never reach `kv`: retries are invisible
-/// everywhere except the event log. The discarded attempt's writes are still in its
-/// finish record, for tooling to read.
+/// A retried attempt's `context_updates` never reach `kv`: retries are
+/// invisible everywhere except the event log. The discarded attempt's writes
+/// are still in its finish record, for tooling to read.
 #[test]
 fn a_discarded_attempts_updates_never_reach_the_run_context() {
     let mut b = GraphBuilder::new();

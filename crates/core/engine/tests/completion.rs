@@ -1,7 +1,7 @@
 //! §1: how the run's status folds from node outcomes — `Completion::AnyFailure`
-//! (the CI rule, the default) versus `Completion::TerminalNode` (the fabro rule:
-//! a failure that routes onward is control flow; only the exit node's record
-//! decides).
+//! (the CI rule, the default) versus `Completion::TerminalNode` (the fabro
+//! rule: a failure that routes onward is control flow; only the exit node's
+//! record decides).
 
 mod support;
 
@@ -43,8 +43,8 @@ fn bad_token() -> Event {
     ))
 }
 
-/// The same graph, both policies: a failed node that routes onward is control flow
-/// under `TerminalNode`, and a run failure under `AnyFailure`.
+/// The same graph, both policies: a failed node that routes onward is control
+/// flow under `TerminalNode`, and a run failure under `AnyFailure`.
 #[test]
 fn a_routed_failure_is_control_flow_under_terminal_node() {
     let results = BTreeMap::from([("work", Outcome::failure("boom"))]);
@@ -81,11 +81,11 @@ fn a_tolerated_failure_does_not_fail_the_run() {
     h.verify_replay();
 }
 
-/// Quiescence without the exit record is `Failed` — including the successful dead
-/// end, where every node that ran succeeded. This is a deliberate departure from
-/// fabro_core, whose executor reports success when traversal stops on a succeeded
-/// node with no outgoing edge; the fabro frontend rejects that shape at load time
-/// instead (resolved decision 3).
+/// Quiescence without the exit record is `Failed` — including the successful
+/// dead end, where every node that ran succeeded. This is a deliberate
+/// departure from fabro_core, whose executor reports success when traversal
+/// stops on a succeeded node with no outgoing edge; the fabro frontend rejects
+/// that shape at load time instead (resolved decision 3).
 #[test]
 fn a_successful_dead_end_without_the_terminal_record_fails() {
     let mut b = GraphBuilder::new();
@@ -111,8 +111,8 @@ fn a_failed_terminal_node_fails_the_run() {
     assert_eq!(h.run(), RunStatus::Failed);
 }
 
-/// A `RunError` fails the run under both policies: engine errors are never control
-/// flow, however healthy the exit record looks.
+/// A `RunError` fails the run under both policies: engine errors are never
+/// control flow, however healthy the exit record looks.
 #[test]
 fn a_run_error_fails_the_run_under_both_policies() {
     for terminal in [false, true] {
@@ -195,9 +195,10 @@ fn a_run_error_sets_run_failed_for_later_guards() {
     assert!(h.state.is_finished());
 }
 
-/// Under `TerminalNode`, a healthy run's `run.failed` guard reads false mid-run.
-/// The regression this pins: folding the status for the guard would read `Failed`
-/// until the exit record exists, poisoning every `run.failed` guard on the way.
+/// Under `TerminalNode`, a healthy run's `run.failed` guard reads false
+/// mid-run. The regression this pins: folding the status for the guard would
+/// read `Failed` until the exit record exists, poisoning every `run.failed`
+/// guard on the way.
 #[test]
 fn run_failed_stays_false_mid_run_under_terminal_node() {
     let mut b = GraphBuilder::new();
@@ -218,9 +219,9 @@ fn run_failed_stays_false_mid_run_under_terminal_node() {
     h.verify_replay();
 }
 
-/// And after a real failure, `run.failed` still reflects any-failure mid-run under
-/// `TerminalNode` — while the run itself still folds to `Success` once the exit
-/// completes, because that failure is control flow.
+/// And after a real failure, `run.failed` still reflects any-failure mid-run
+/// under `TerminalNode` — while the run itself still folds to `Success` once
+/// the exit completes, because that failure is control flow.
 #[test]
 fn run_failed_still_reflects_any_failure_under_terminal_node() {
     let mut b = GraphBuilder::new();

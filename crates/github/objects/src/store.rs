@@ -24,31 +24,31 @@ use serde::{Deserialize, Serialize};
 /// One finalized artifact, as the index records it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Artifact {
-    pub id: i64,
-    pub name: String,
-    pub size: u64,
+    pub id:         i64,
+    pub name:       String,
+    pub size:       u64,
     /// RFC 3339 — the JSON form of a protobuf `Timestamp`.
     pub created_at: String,
     /// The client's content hash (`sha256:<hex>`), echoed back on list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub digest: Option<String>,
+    pub digest:     Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct Index {
-    next_id: i64,
+    next_id:   i64,
     artifacts: Vec<Artifact>,
 }
 
 struct State {
-    index: Index,
+    index:   Index,
     /// Uploads begun and not yet finalized, by name. In memory only: a crash
     /// mid-upload leaves staging files, and the client retries from create.
     pending: BTreeMap<String, i64>,
 }
 
 pub struct ArtifactStore {
-    dir: PathBuf,
+    dir:   PathBuf,
     state: Mutex<State>,
 }
 

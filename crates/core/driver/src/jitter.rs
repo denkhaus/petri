@@ -1,13 +1,13 @@
 //! Retry jitter.
 //!
-//! Jitter is the driver's job, never the core's: the core has no randomness and must
-//! not acquire any. What the core hands over is `base_delay`; the spread around it is
-//! added here.
+//! Jitter is the driver's job, never the core's: the core has no randomness and
+//! must not acquire any. What the core hands over is `base_delay`; the spread
+//! around it is added here.
 //!
-//! The spread is derived from the firing and attempt rather than drawn from an RNG.
-//! The goal of jitter is to decorrelate *different* retries so they do not stampede,
-//! and a per-firing hash does that. It also avoids a dependency, and leaves the
-//! driver reproducible, which makes retry timing testable.
+//! The spread is derived from the firing and attempt rather than drawn from an
+//! RNG. The goal of jitter is to decorrelate *different* retries so they do not
+//! stampede, and a per-firing hash does that. It also avoids a dependency, and
+//! leaves the driver reproducible, which makes retry timing testable.
 
 use std::time::Duration;
 

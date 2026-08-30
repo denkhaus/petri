@@ -1,5 +1,5 @@
-//! The GHA end-to-end harness: lower with the real frontend, run on the standard
-//! runtime.
+//! The GHA end-to-end harness: lower with the real frontend, run on the
+//! standard runtime.
 
 #![allow(dead_code)]
 
@@ -79,9 +79,10 @@ pub fn tool_ready(program: &str) -> bool {
     found
 }
 
-/// A `gh` on `PATH` that records what it was asked and answers `cache list`, so a
-/// corpus workflow runs for real without reaching GitHub's API. Returns the bin dir
-/// to prepend to `PATH`; invocations append to the file named by `GH_STUB_LOG`.
+/// A `gh` on `PATH` that records what it was asked and answers `cache list`, so
+/// a corpus workflow runs for real without reaching GitHub's API. Returns the
+/// bin dir to prepend to `PATH`; invocations append to the file named by
+/// `GH_STUB_LOG`.
 pub fn install_gh_stub(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -137,7 +138,7 @@ pub fn with_object_service(rt: Runtime, cache_store: Option<PathBuf>) -> Runtime
         match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
             Ok(service) => {
                 let cap = github_actions::ResultsServiceCap {
-                    port: service.port(),
+                    port:  service.port(),
                     token: service.token().into(),
                 };
                 (caps.provide(cap), Some(Box::new(service) as _))
@@ -177,9 +178,9 @@ pub fn commit_fixture(dir: &Path) {
     git_in(dir, &["commit", "--quiet", "-m", "fixture"]);
 }
 
-/// The standard runtime plus the GitHub step kinds the frontend lowers to — what
-/// the distribution registers, assembled here because a component's tests may not
-/// depend on the distribution.
+/// The standard runtime plus the GitHub step kinds the frontend lowers to —
+/// what the distribution registers, assembled here because a component's tests
+/// may not depend on the distribution.
 fn runtime(dir: &std::path::Path) -> Runtime {
     let mut options = RunOptions::new(dir);
     options.grace = Duration::from_secs(1);
@@ -233,9 +234,9 @@ pub async fn run_host_with_secrets(
 
 /// Start a run, cancel it once `node` has started, and return the report.
 ///
-/// The step must print something once it is under way (`echo ready && sleep 30`):
-/// the cancel is triggered by its log file appearing. Replay byte-identity is
-/// verified on the way out, cancellation included.
+/// The step must print something once it is under way (`echo ready && sleep
+/// 30`): the cancel is triggered by its log file appearing. Replay
+/// byte-identity is verified on the way out, cancellation included.
 pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (RunReportPlus, ()) {
     let graph = with_params(graph);
     let original = graph.clone();
@@ -269,16 +270,16 @@ pub async fn run_host_then_cancel(graph: Graph, label: &str, node: &str) -> (Run
 
 /// A report in the shape the tests read.
 pub struct RunReportPlus {
-    pub status: ir::RunStatus,
-    pub state: engine::EngineState,
+    pub status:   ir::RunStatus,
+    pub state:    engine::EngineState,
     pub commands: Vec<engine::Command>,
 }
 
 impl From<RunReport> for RunReportPlus {
     fn from(r: RunReport) -> Self {
         Self {
-            status: r.status,
-            state: r.state,
+            status:   r.status,
+            state:    r.state,
             commands: Vec::new(),
         }
     }

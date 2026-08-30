@@ -1,17 +1,18 @@
-//! Building the [`EvalEnv`] a firing's expressions see, and resolving HIR config
-//! placeholders against it.
+//! Building the [`EvalEnv`] a firing's expressions see, and resolving HIR
+//! config placeholders against it.
 //!
-//! There is exactly one way for an expression to reach upstream state: `nodes.*` and
-//! `kv.*` on the [`RunContext`], which only `apply` writes. Nothing is threaded
-//! through token payloads for that purpose, and no second bag of upstream bindings
-//! exists.
+//! There is exactly one way for an expression to reach upstream state:
+//! `nodes.*` and `kv.*` on the [`RunContext`], which only `apply` writes.
+//! Nothing is threaded through token payloads for that purpose, and no second
+//! bag of upstream bindings exists.
 //!
 //! An expression sees three things:
 //!
 //! - the **token**: the payload that arrived on the first input edge,
 //! - the **run context**: every completed node instance, and run-scoped `kv`,
-//! - the **statics**: scope `env`, the node's identity, generation and attempt, the
-//!   firing's own outcome where there is one, and `item` / `index` in a clone.
+//! - the **statics**: scope `env`, the node's identity, generation and attempt,
+//!   the firing's own outcome where there is one, and `item` / `index` in a
+//!   clone.
 
 use std::collections::BTreeMap;
 
@@ -77,8 +78,8 @@ pub(crate) fn firing_statics(
     );
 
     // The folded status of this node's upstream, read from the run context: failure
-    // if any upstream failed, skipped if none ran, else success. Statuses are read by
-    // node name through `nodes.*`; nothing rides on the token payload.
+    // if any upstream failed, skipped if none ran, else success. Statuses are read
+    // by node name through `nodes.*`; nothing rides on the token payload.
     ctx.set(
         "status",
         Value::String(folded_upstream_status(state, inputs).to_string()),
@@ -142,9 +143,9 @@ pub(crate) fn primary_token(inputs: &[Token]) -> Value {
 
 /// Fold the statuses of the nodes whose edges fed this firing.
 ///
-/// Read from [`RunContext`], by looking up the source node of each input edge. With
-/// no upstream at all — an entry node, or a clone seeded by a splice — the fold is a
-/// success.
+/// Read from [`RunContext`], by looking up the source node of each input edge.
+/// With no upstream at all — an entry node, or a clone seeded by a splice — the
+/// fold is a success.
 fn folded_upstream_status(state: &EngineState, inputs: &[Token]) -> &'static str {
     let mut saw_any = false;
     let mut any_failed = false;

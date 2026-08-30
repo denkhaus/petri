@@ -131,23 +131,18 @@ async fn e2e_gha_shaped_workflow() {
     b.link(setup, run_tests);
     // A job with two dependents: two groups of one arm, explicit fan-out.
     b.fan_out(compile, &[setup, lint]);
-    b.select(
-        run_tests,
-        vec![Arm::always(publish).with_map(collector.indexed)],
-    );
-    // continue-on-error: the soft failure still satisfies the default success guard,
-    // and a partial_success guard routes it separately.
+    b.select(run_tests, vec![
+        Arm::always(publish).with_map(collector.indexed),
+    ]);
+    // continue-on-error: the soft failure still satisfies the default success
+    // guard, and a partial_success guard routes it separately.
     let (succeeded, was_partial) = {
         let e = b.exprs();
         (e.call("success", vec![]), e.call("partial_success", vec![]))
     };
-    b.fan_out_groups(
-        lint,
-        vec![
-            vec![Arm::when(publish, succeeded)],
-            vec![Arm::when(warn, was_partial)],
-        ],
-    );
+    b.fan_out_groups(lint, vec![vec![Arm::when(publish, succeeded)], vec![
+        Arm::when(warn, was_partial),
+    ]]);
     // needs: [test, lint]
     b.set_join(publish, JoinPolicy::All);
 
@@ -158,7 +153,7 @@ async fn e2e_gha_shaped_workflow() {
         suites,
         ExpandTarget::Subgraph {
             entry: setup,
-            exit: run_tests,
+            exit:  run_tests,
         },
         None,
         true,

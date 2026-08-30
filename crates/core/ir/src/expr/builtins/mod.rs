@@ -1,9 +1,10 @@
 //! The built-in function table, and the one place each entry is implemented.
 //!
-//! [`BUILTINS`] gates dispatch: [`eval_call`] looks a name up here before any match
-//! arm is reached, so a function missing from the table is unknown however many arms
-//! exist, and an entry with no arm fails its own conformance test. The two cannot
-//! drift. [`loose`] and [`combine`] hold the pure value functions the entries call.
+//! [`BUILTINS`] gates dispatch: [`eval_call`] looks a name up here before any
+//! match arm is reached, so a function missing from the table is unknown
+//! however many arms exist, and an entry with no arm fails its own conformance
+//! test. The two cannot drift. [`loose`] and [`combine`] hold the pure value
+//! functions the entries call.
 
 pub mod combine;
 pub mod loose;
@@ -20,17 +21,18 @@ use crate::ids::ExprId;
 /// One entry in the built-in function table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Builtin {
-    pub name: &'static str,
-    pub arity: usize,
+    pub name:    &'static str,
+    pub arity:   usize,
     pub summary: &'static str,
 }
 
 /// Every function an expression may call.
 ///
-/// This table is not documentation that sits beside the implementation — it **gates**
-/// it. [`eval`](super::eval) looks a call up here before dispatching, so a function that is not in
-/// the table is unknown however many match arms exist, and an entry with no arm fails
-/// its own conformance test. The two cannot drift.
+/// This table is not documentation that sits beside the implementation — it
+/// **gates** it. [`eval`](super::eval) looks a call up here before dispatching,
+/// so a function that is not in the table is unknown however many match arms
+/// exist, and an entry with no arm fails its own conformance test. The two
+/// cannot drift.
 ///
 /// # The bar for adding one
 ///
@@ -38,240 +40,241 @@ pub struct Builtin {
 /// scripting language by accretion. Every entry must be:
 ///
 /// - **pure** — no IO, no clock, no randomness, no ambient state;
-/// - **total** — every input either yields a value or a typed [`EvalError`], never a
-///   panic;
-/// - **tested** — in `crates/core/ir/tests/expressions.rs`, including its error cases;
-/// - **necessary** — justified by a test or a frontend mapping that genuinely cannot
-///   be written without it. `split` met this bar: the outputs-file protocol yields
-///   strings, and `for_each` needs an array.
+/// - **total** — every input either yields a value or a typed [`EvalError`],
+///   never a panic;
+/// - **tested** — in `crates/core/ir/tests/expressions.rs`, including its error
+///   cases;
+/// - **necessary** — justified by a test or a frontend mapping that genuinely
+///   cannot be written without it. `split` met this bar: the outputs-file
+///   protocol yields strings, and `for_each` needs an array.
 ///
-/// This is also the surface a frontend expression grammar maps onto, so additions
-/// widen a contract rather than adding a convenience.
+/// This is also the surface a frontend expression grammar maps onto, so
+/// additions widen a contract rather than adding a convenience.
 pub const BUILTINS: &[Builtin] = &[
     // Status predicates. `status` is bound wherever an outcome is in scope.
     Builtin {
-        name: "always",
-        arity: 0,
+        name:    "always",
+        arity:   0,
         summary: "true, whatever the status",
     },
     Builtin {
-        name: "never",
-        arity: 0,
+        name:    "never",
+        arity:   0,
         summary: "false, whatever the status",
     },
     Builtin {
-        name: "success",
-        arity: 0,
+        name:    "success",
+        arity:   0,
         summary: "success-like: Success or PartialSuccess (see Status::is_success_like)",
     },
     Builtin {
-        name: "partial_success",
-        arity: 0,
+        name:    "partial_success",
+        arity:   0,
         summary: "exactly PartialSuccess",
     },
     Builtin {
-        name: "full_success",
-        arity: 0,
+        name:    "full_success",
+        arity:   0,
         summary: "exactly Success, excluding PartialSuccess",
     },
     Builtin {
-        name: "failure",
-        arity: 0,
+        name:    "failure",
+        arity:   0,
         summary: "exactly Failure",
     },
     Builtin {
-        name: "skipped",
-        arity: 0,
+        name:    "skipped",
+        arity:   0,
         summary: "exactly Skipped",
     },
     Builtin {
-        name: "cancelled",
-        arity: 0,
+        name:    "cancelled",
+        arity:   0,
         summary: "exactly Cancelled",
     },
     Builtin {
-        name: "timed_out",
-        arity: 0,
+        name:    "timed_out",
+        arity:   0,
         summary: "exactly TimedOut",
     },
     // Values.
     Builtin {
-        name: "not",
-        arity: 1,
+        name:    "not",
+        arity:   1,
         summary: "logical negation, by truthiness",
     },
     Builtin {
-        name: "len",
-        arity: 1,
+        name:    "len",
+        arity:   1,
         summary: "length of an array, object or string",
     },
     Builtin {
-        name: "to_string",
-        arity: 1,
+        name:    "to_string",
+        arity:   1,
         summary: "render a value as a string",
     },
     Builtin {
-        name: "default",
-        arity: 2,
+        name:    "default",
+        arity:   2,
         summary: "the first value unless it is null, else the second",
     },
     Builtin {
-        name: "get",
-        arity: 2,
+        name:    "get",
+        arity:   2,
         summary: "index an array by number or an object by key",
     },
     Builtin {
-        name: "contains",
-        arity: 2,
+        name:    "contains",
+        arity:   2,
         summary: "membership in an array, object keys, or a substring",
     },
     // Full `regex` semantics, unanchored search, compiled per evaluation: a frontend
     // that validates patterns at parse time must never have the core reject one at
     // runtime, which is why this is `regex` and not `regex-lite`.
     Builtin {
-        name: "matches",
-        arity: 2,
+        name:    "matches",
+        arity:   2,
         summary: "regex search in a string",
     },
     Builtin {
-        name: "concat",
-        arity: 2,
+        name:    "concat",
+        arity:   2,
         summary: "join two arrays, strings or objects",
     },
     // Lists. These exist so a collector can reassemble expansion results, and so a
     // step's string output can feed `for_each`, without the language needing lambdas.
     Builtin {
-        name: "split",
-        arity: 2,
+        name:    "split",
+        arity:   2,
         summary: "split a string on a separator, dropping empty pieces",
     },
     Builtin {
-        name: "sort_by_key",
-        arity: 2,
+        name:    "sort_by_key",
+        arity:   2,
         summary: "order an array of objects by one field",
     },
     Builtin {
-        name: "pluck",
-        arity: 2,
+        name:    "pluck",
+        arity:   2,
         summary: "take one field from every object in an array",
     },
     // Loose semantics: the JavaScript-family coercion rules most CI expression
     // languages share. A frontend whose format compares loosely lowers its operators
     // onto these instead of `Eq` / `Lt`. Rules are in [`loose`].
     Builtin {
-        name: "loose_eq",
-        arity: 2,
+        name:    "loose_eq",
+        arity:   2,
         summary: "loose `==`: differing kinds coerce to numbers; strings compare case-insensitively",
     },
     Builtin {
-        name: "loose_lt",
-        arity: 2,
+        name:    "loose_lt",
+        arity:   2,
         summary: "loose `<`; false whenever a side coerces to NaN",
     },
     Builtin {
-        name: "loose_le",
-        arity: 2,
+        name:    "loose_le",
+        arity:   2,
         summary: "loose `<=`",
     },
     Builtin {
-        name: "loose_gt",
-        arity: 2,
+        name:    "loose_gt",
+        arity:   2,
         summary: "loose `>`",
     },
     Builtin {
-        name: "loose_ge",
-        arity: 2,
+        name:    "loose_ge",
+        arity:   2,
         summary: "loose `>=`",
     },
     Builtin {
-        name: "loose_truthy",
-        arity: 1,
+        name:    "loose_truthy",
+        arity:   1,
         summary: "loose truthiness: empty arrays and objects are truthy",
     },
     Builtin {
-        name: "loose_number",
-        arity: 1,
+        name:    "loose_number",
+        arity:   1,
         summary: "loose number coercion; NaN becomes null",
     },
     Builtin {
-        name: "loose_string",
-        arity: 1,
+        name:    "loose_string",
+        arity:   1,
         summary: "loose string coercion: null is empty, containers render as their type name",
     },
     Builtin {
-        name: "contains_ci",
-        arity: 2,
+        name:    "contains_ci",
+        arity:   2,
         summary: "array membership by loose equality, or case-insensitive substring",
     },
     Builtin {
-        name: "starts_with",
-        arity: 2,
+        name:    "starts_with",
+        arity:   2,
         summary: "case-insensitive prefix test over string coercions",
     },
     Builtin {
-        name: "ends_with",
-        arity: 2,
+        name:    "ends_with",
+        arity:   2,
         summary: "case-insensitive suffix test over string coercions",
     },
     Builtin {
-        name: "format",
-        arity: 2,
+        name:    "format",
+        arity:   2,
         summary: "positional `{N}` substitution from an array of arguments; `{{` and `}}` are literal braces",
     },
     Builtin {
-        name: "join",
-        arity: 2,
+        name:    "join",
+        arity:   2,
         summary: "join an array with a separator, coercing each element to a string",
     },
     Builtin {
-        name: "to_json",
-        arity: 1,
+        name:    "to_json",
+        arity:   1,
         summary: "pretty-printed JSON",
     },
     Builtin {
-        name: "from_json",
-        arity: 1,
+        name:    "from_json",
+        arity:   1,
         summary: "parse a JSON string; a non-string passes through",
     },
     // Records and lists of records.
     Builtin {
-        name: "get_ci",
-        arity: 2,
+        name:    "get_ci",
+        arity:   2,
         summary: "case-insensitive property lookup",
     },
     Builtin {
-        name: "values",
-        arity: 1,
+        name:    "values",
+        arity:   1,
         summary: "an object's values, or an array itself",
     },
     Builtin {
-        name: "pluck_present",
-        arity: 2,
+        name:    "pluck_present",
+        arity:   2,
         summary: "one field from every record that has it; records without it are dropped",
     },
     Builtin {
-        name: "keys",
-        arity: 1,
+        name:    "keys",
+        arity:   1,
         summary: "an object's keys, in order",
     },
     Builtin {
-        name: "omit",
-        arity: 2,
+        name:    "omit",
+        arity:   2,
         summary: "an object without the named keys",
     },
     Builtin {
-        name: "cartesian",
-        arity: 1,
+        name:    "cartesian",
+        arity:   1,
         summary: "every combination of one value per key of an object of arrays",
     },
     Builtin {
-        name: "reject_where",
-        arity: 2,
+        name:    "reject_where",
+        arity:   2,
         summary: "drop every record matching any of the partial records",
     },
     Builtin {
-        name: "extend_where",
-        arity: 3,
+        name:    "extend_where",
+        arity:   3,
         summary: "merge partial records into compatible records, protecting the named keys; append the rest",
     },
 ];
@@ -288,14 +291,14 @@ pub(super) fn eval_call(
     env: &EvalEnv<'_>,
     depth: u32,
 ) -> Result<Value, EvalError> {
-    // The table gates dispatch: an unknown name never reaches a match arm, and arity
-    // is checked once, here, rather than in nineteen places.
+    // The table gates dispatch: an unknown name never reaches a match arm, and
+    // arity is checked once, here, rather than in nineteen places.
     let spec = builtin(name).ok_or_else(|| EvalError::UnknownFunction(name.clone()))?;
     if args.len() != spec.arity {
         return Err(EvalError::Arity {
-            name: name.clone(),
+            name:     name.clone(),
             expected: spec.arity,
-            got: args.len(),
+            got:      args.len(),
         });
     }
     let arg = |i: usize| eval_at(table, args[i], env, depth);
@@ -358,9 +361,9 @@ pub(super) fn eval_call(
             // deterministic and pure; a cache would need interior mutability the
             // table deliberately does not have.
             let re = regex::Regex::new(pattern).map_err(|e| EvalError::Type {
-                op: SmolStr::new("matches"),
+                op:       SmolStr::new("matches"),
                 expected: SmolStr::new("a valid regex pattern"),
-                got: SmolStr::new(format!("an invalid pattern ({e})")),
+                got:      SmolStr::new(format!("an invalid pattern ({e})")),
             })?;
             Ok(Value::Bool(re.is_match(text)))
         }
@@ -505,9 +508,9 @@ pub(super) fn eval_call(
             let v = arg(0)?;
             match &v {
                 Value::String(s) => serde_json::from_str::<Value>(s).map_err(|e| EvalError::Type {
-                    op: SmolStr::new("from_json"),
+                    op:       SmolStr::new("from_json"),
                     expected: SmolStr::new("valid JSON"),
-                    got: SmolStr::new(format!("invalid JSON ({e})")),
+                    got:      SmolStr::new(format!("invalid JSON ({e})")),
                 }),
                 _ => Ok(v),
             }
@@ -553,8 +556,9 @@ pub(super) fn eval_call(
     }
 }
 
-/// Positional formatting: `{N}` substitutes argument N, `{{` and `}}` are literal
-/// braces. An index with no argument is an error rather than an empty string.
+/// Positional formatting: `{N}` substitutes argument N, `{{` and `}}` are
+/// literal braces. An index with no argument is an error rather than an empty
+/// string.
 fn positional_format(template: &str, args: &[Value]) -> Result<Value, EvalError> {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
@@ -577,9 +581,9 @@ fn positional_format(template: &str, args: &[Value]) -> Result<Value, EvalError>
                 }
                 if digits.is_empty() || chars.next() != Some('}') {
                     return Err(EvalError::Type {
-                        op: SmolStr::new("format"),
+                        op:       SmolStr::new("format"),
                         expected: SmolStr::new("`{N}` placeholders"),
-                        got: SmolStr::new("a malformed placeholder"),
+                        got:      SmolStr::new("a malformed placeholder"),
                     });
                 }
                 let index: usize = digits.parse().unwrap_or(usize::MAX);
@@ -587,9 +591,9 @@ fn positional_format(template: &str, args: &[Value]) -> Result<Value, EvalError>
                     Some(v) => out.push_str(&loose::to_string(v)),
                     None => {
                         return Err(EvalError::Type {
-                            op: SmolStr::new("format"),
+                            op:       SmolStr::new("format"),
                             expected: SmolStr::new(format!("at least {} argument(s)", index + 1)),
-                            got: SmolStr::new(format!("{}", args.len())),
+                            got:      SmolStr::new(format!("{}", args.len())),
                         });
                     }
                 }

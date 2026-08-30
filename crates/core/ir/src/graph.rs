@@ -32,14 +32,15 @@ pub enum Guard<S = Live> {
 /// One arm of a select group: where a token goes, and when.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge<S = Live> {
-    pub id: EdgeId<S>,
-    pub to: NodeId<S>,
+    pub id:    EdgeId<S>,
+    pub to:    NodeId<S>,
     pub guard: Guard<S>,
-    /// Payload for the emitted token; `None` means the source outcome's `output`.
-    pub map: Option<ExprId<S>>,
+    /// Payload for the emitted token; `None` means the source outcome's
+    /// `output`.
+    pub map:   Option<ExprId<S>>,
     /// Back edge: traversal increments the token's `Generation`.
     /// Every cycle must contain at least one (invariant 1).
-    pub back: bool,
+    pub back:  bool,
 }
 
 impl<S> Edge<S> {
@@ -79,11 +80,12 @@ impl<S> Edge<S> {
 
 // ── Routing: AND of XORs ──────────────────────────────────────────────────
 
-/// One XOR-select: arms are tried in order and **at most one** token is emitted.
+/// One XOR-select: arms are tried in order and **at most one** token is
+/// emitted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SelectGroup<S = Live> {
     /// Ordered; the first arm whose guard passes wins.
-    pub arms: Vec<Edge<S>>,
+    pub arms:        Vec<Edge<S>>,
     pub fallthrough: Fallthrough,
 }
 
@@ -166,14 +168,15 @@ impl<S> Routing<S> {
 // ── Joins ─────────────────────────────────────────────────────────────────
 
 /// How incoming tokens are matched into a firing. Tokens are matched per
-/// `(node, generation)`; incoming edges are counted **as of firing time**, so edges
-/// spliced in by an expansion are included.
+/// `(node, generation)`; incoming edges are counted **as of firing time**, so
+/// edges spliced in by an expansion are included.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JoinPolicy {
     /// A token present on every incoming edge of the same generation.
     #[default]
     All,
-    /// The first token fires the node; later same-generation tokens are dropped.
+    /// The first token fires the node; later same-generation tokens are
+    /// dropped.
     Any,
     /// Tokens on `n` distinct incoming edges of the same generation.
     Quorum { n: u32 },
@@ -184,7 +187,7 @@ pub enum JoinPolicy {
 /// What a node runs, and with what configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StepRef {
-    pub kind: StepKindId,
+    pub kind:   StepKindId,
     /// May embed unresolved expression placeholders in HIR (see [`Expansion`]).
     pub config: Value,
 }
@@ -201,12 +204,13 @@ impl StepRef {
 /// Hard limits on a node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
-    /// Hard cap on **firings** of this node across all generations. Must be >= 1.
-    /// Retries do not count: a firing that takes four attempts is still one firing.
+    /// Hard cap on **firings** of this node across all generations. Must be at
+    /// least 1. Retries do not count: a firing that takes four attempts is
+    /// still one firing.
     pub max_firings: u32,
-    /// Applies **per attempt**, not per firing. Node-total wall clock is not a thing
-    /// the core tracks.
-    pub timeout: Duration,
+    /// Applies **per attempt**, not per firing. Node-total wall clock is not a
+    /// thing the core tracks.
+    pub timeout:     Duration,
 }
 
 impl Budget {
@@ -244,14 +248,14 @@ impl Default for Budget {
 /// How many times a node may be attempted, and when.
 ///
 /// A retry is not a loop iteration: it advances [`Attempt`], never
-/// [`Generation`](crate::Generation). Attempt counters never carry across firings,
-/// so a later generation retries from scratch.
+/// [`Generation`](crate::Generation). Attempt counters never carry across
+/// firings, so a later generation retries from scratch.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     /// 1 means no retries.
-    pub max_attempts: NonZeroU32,
-    pub backoff: Backoff,
-    pub retry_on: RetryOn,
+    pub max_attempts:  NonZeroU32,
+    pub backoff:       Backoff,
+    pub retry_on:      RetryOn,
     pub on_exhaustion: Exhaustion,
 }
 
@@ -265,9 +269,9 @@ impl RetryPolicy {
     /// One attempt, no retries.
     pub fn none() -> Self {
         Self {
-            max_attempts: NonZeroU32::new(1).expect("1 is non-zero"),
-            backoff: Backoff::default(),
-            retry_on: RetryOn::default(),
+            max_attempts:  NonZeroU32::new(1).expect("1 is non-zero"),
+            backoff:       Backoff::default(),
+            retry_on:      RetryOn::default(),
             on_exhaustion: Exhaustion::Fail,
         }
     }
@@ -321,8 +325,8 @@ impl RetryPolicy {
     /// `initial * factor^(n - 1)`, capped at `max`.
     ///
     /// Computed by repeated multiplication rather than `powi`, so the result is
-    /// bit-identical on every replay. The driver adds jitter and does the waiting;
-    /// the core never sees a clock or an RNG.
+    /// bit-identical on every replay. The driver adds jitter and does the
+    /// waiting; the core never sees a clock or an RNG.
     pub fn base_delay(&self, failed_attempt: Attempt) -> Duration {
         let mut nanos = self.backoff.initial.as_nanos() as f64;
         let cap = self.backoff.max.as_nanos() as f64;
@@ -344,20 +348,20 @@ impl RetryPolicy {
 pub struct Backoff {
     pub initial: Duration,
     /// Exponential factor; `1.0` is a fixed delay.
-    pub factor: f64,
-    pub max: Duration,
-    /// Applied by the driver, never by the core — jitter is randomness, and the core
-    /// has none.
-    pub jitter: bool,
+    pub factor:  f64,
+    pub max:     Duration,
+    /// Applied by the driver, never by the core — jitter is randomness, and the
+    /// core has none.
+    pub jitter:  bool,
 }
 
 impl Default for Backoff {
     fn default() -> Self {
         Self {
             initial: Duration::from_secs(1),
-            factor: 2.0,
-            max: Duration::from_secs(60),
-            jitter: true,
+            factor:  2.0,
+            max:     Duration::from_secs(60),
+            jitter:  true,
         }
     }
 }
@@ -365,7 +369,7 @@ impl Default for Backoff {
 /// Which failed outcomes are worth another attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RetryOn {
-    pub statuses: Vec<StatusKind>,
+    pub statuses:        Vec<StatusKind>,
     /// Matched against [`FailureInfo::class`](crate::FailureInfo::class).
     pub failure_classes: Vec<SmolStr>,
 }
@@ -373,7 +377,7 @@ pub struct RetryOn {
 impl Default for RetryOn {
     fn default() -> Self {
         Self {
-            statuses: vec![StatusKind::Failure, StatusKind::TimedOut],
+            statuses:        vec![StatusKind::Failure, StatusKind::TimedOut],
             failure_classes: Vec::new(),
         }
     }
@@ -389,7 +393,7 @@ impl RetryOn {
 
     pub fn classes(classes: &[&str]) -> Self {
         Self {
-            statuses: Vec::new(),
+            statuses:        Vec::new(),
             failure_classes: classes.iter().map(|c| SmolStr::new(*c)).collect(),
         }
     }
@@ -413,19 +417,20 @@ pub enum Exhaustion {
 
 /// Parallel `for_each` / matrix.
 ///
-/// Sequential `for_each` is **not** an expansion: it desugars to a cycle over back
-/// edges and generations. The engine has no loop primitive.
+/// Sequential `for_each` is **not** an expansion: it desugars to a cycle over
+/// back edges and generations. The engine has no loop primitive.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Expansion<S = Live> {
     ForEach {
-        /// Evaluates to an array at runtime; one clone per element, with `item` and
-        /// `index` bound into the clone's expression context.
-        items: ExprId<S>,
-        target: ExpandTarget<S>,
+        /// Evaluates to an array at runtime; one clone per element, with `item`
+        /// and `index` bound into the clone's expression context.
+        items:        ExprId<S>,
+        target:       ExpandTarget<S>,
         /// Scheduler admission control across the spliced clones.
         max_parallel: Option<u32>,
-        /// The first clone failure cancels sibling clones, via the splice's cancel scope.
-        fail_fast: bool,
+        /// The first clone failure cancels sibling clones, via the splice's
+        /// cancel scope.
+        fail_fast:    bool,
     },
 }
 
@@ -433,33 +438,34 @@ pub enum Expansion<S = Live> {
 pub enum ExpandTarget<S = Live> {
     /// Clone this node only.
     Node,
-    /// Clone the subgraph between `entry` and `exit` (loop bodies, matrix jobs).
+    /// Clone the subgraph between `entry` and `exit` (loop bodies, matrix
+    /// jobs).
     Subgraph { entry: NodeId<S>, exit: NodeId<S> },
 }
 
 /// A unit of work in the graph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node<S = Live> {
-    pub id: NodeId<S>,
-    pub name: SmolStr,
-    pub scope: ScopeId<S>,
-    pub step: StepRef,
-    pub join: JoinPolicy,
+    pub id:                NodeId<S>,
+    pub name:              SmolStr,
+    pub scope:             ScopeId<S>,
+    pub step:              StepRef,
+    pub join:              JoinPolicy,
     /// Precondition evaluated in the node's own context. False means the node
-    /// completes `Skipped` without executing; routing still runs, so `always()` and
-    /// `failure()` guards downstream still see it.
-    pub precondition: Option<ExprId<S>>,
-    pub routing: Routing<S>,
-    pub budget: Budget,
+    /// completes `Skipped` without executing; routing still runs, so `always()`
+    /// and `failure()` guards downstream still see it.
+    pub precondition:      Option<ExprId<S>>,
+    pub routing:           Routing<S>,
+    pub budget:            Budget,
     /// How many attempts this node gets. The default is one.
-    pub retry: RetryPolicy,
+    pub retry:             RetryPolicy,
     /// The node may fire inside a cancelled scope (§5): its precondition is
-    /// evaluated, and absent-or-true means it runs for real. Unset — the default —
-    /// means the node completes `Cancelled` without evaluating anything, so
-    /// un-marked work can never restart after a cancel, whatever its gates say.
-    /// Kill admits nothing, flag or no flag.
+    /// evaluated, and absent-or-true means it runs for real. Unset — the
+    /// default — means the node completes `Cancelled` without evaluating
+    /// anything, so un-marked work can never restart after a cancel,
+    /// whatever its gates say. Kill admits nothing, flag or no flag.
     #[serde(default)]
-    pub run_on_cancel: bool,
+    pub run_on_cancel:     bool,
     /// This node's failure is control flow, not a run failure: under
     /// [`Completion::AnyFailure`] the status fold passes over a failed record
     /// here, and a failed clone does not trigger its splice's fail-fast cancel.
@@ -468,18 +474,19 @@ pub struct Node<S = Live> {
     /// GHA's job-level `continue-on-error`.
     #[serde(default)]
     pub tolerates_failure: bool,
-    /// What outcome-driven splices this node's firings may request (§14 made real).
-    /// `Deny` — the default — rejects every request as `invalid_splice`; anything
-    /// higher authorizes operations up to it, per the total order on
-    /// [`SplicePolicy`].
+    /// What outcome-driven splices this node's firings may request (§14 made
+    /// real). `Deny` — the default — rejects every request as
+    /// `invalid_splice`; anything higher authorizes operations up to it,
+    /// per the total order on [`SplicePolicy`].
     #[serde(default)]
-    pub splice_policy: SplicePolicy,
-    /// Frontend-supplied metadata: display label, source span, classes. Opaque to the
-    /// engine; `apply` never reads it. Hosts and observers render with it.
+    pub splice_policy:     SplicePolicy,
+    /// Frontend-supplied metadata: display label, source span, classes. Opaque
+    /// to the engine; `apply` never reads it. Hosts and observers render
+    /// with it.
     #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub meta: Value,
+    pub meta:              Value,
     /// HIR only; lowered away before execution.
-    pub expand: Option<Expansion<S>>,
+    pub expand:            Option<Expansion<S>>,
 }
 
 impl<S> Node<S> {
@@ -563,36 +570,37 @@ pub enum ExprOrValue<S = Live> {
 /// Where a scope's steps run, plus the placement hints that go with it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSpec {
-    pub target: RuntimeTarget,
-    /// Uninterpreted placement labels, populated by frontends from whatever their
-    /// format calls them (`runs-on`, agent tags, an instance class).
+    pub target:       RuntimeTarget,
+    /// Uninterpreted placement labels, populated by frontends from whatever
+    /// their format calls them (`runs-on`, agent tags, an instance class).
     ///
-    /// The core never reads these. Whichever executor runs the scope maps the labels
-    /// it knows and rejects unknown ones per label. No matching rules, queues or
-    /// capability types until there is a distributed agent system to consume them.
+    /// The core never reads these. Whichever executor runs the scope maps the
+    /// labels it knows and rejects unknown ones per label. No matching
+    /// rules, queues or capability types until there is a distributed agent
+    /// system to consume them.
     #[serde(default)]
     pub requirements: Vec<SmolStr>,
 }
 
-/// The *kind* of environment a scope needs. Not an executor: several executors can
-/// provide the same kind. A process on some machine and a container from some image
-/// are the two kinds any CI format can ask for; where and how they are provided — this
-/// machine, a Docker daemon, a cloud API — is the executor's business and never named
-/// here.
+/// The *kind* of environment a scope needs. Not an executor: several executors
+/// can provide the same kind. A process on some machine and a container from
+/// some image are the two kinds any CI format can ask for; where and how they
+/// are provided — this machine, a Docker daemon, a cloud API — is the
+/// executor's business and never named here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RuntimeTarget {
     /// A process with the machine's own filesystem and tools.
     HostProcess,
     /// A process inside a container started from `image`.
     Container {
-        image: SmolStr,
+        image:       SmolStr,
         /// Raw engine flags, passed through to whatever runs the container. The
         /// core never reads them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        options: Vec<SmolStr>,
-        /// Registry auth for pulling the image. Carries a secret *name*, never a
-        /// value: the graph stays serializable and plaintext exists only inside
-        /// the executor's acquire.
+        options:     Vec<SmolStr>,
+        /// Registry auth for pulling the image. Carries a secret *name*, never
+        /// a value: the graph stays serializable and plaintext exists
+        /// only inside the executor's acquire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credentials: Option<RegistryCredentials>,
     },
@@ -602,7 +610,7 @@ pub enum RuntimeTarget {
 /// by the executor at the point of use.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryCredentials {
-    pub username: SmolStr,
+    pub username:        SmolStr,
     /// The name of the secret holding the password.
     pub password_secret: SmolStr,
 }
@@ -614,16 +622,16 @@ pub struct RegistryCredentials {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ServiceSpec<S = Live> {
     /// The alias other processes in the scope reach it by.
-    pub name: SmolStr,
-    pub image: SmolStr,
+    pub name:        SmolStr,
+    pub image:       SmolStr,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<SmolStr, ExprOrValue<S>>,
+    pub env:         BTreeMap<SmolStr, ExprOrValue<S>>,
     /// Port publications, as written (`host:container` or `container`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<SmolStr>,
+    pub ports:       Vec<SmolStr>,
     /// Raw engine flags, opaque to the core (health checks ride here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<SmolStr>,
+    pub options:     Vec<SmolStr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<RegistryCredentials>,
 }
@@ -631,11 +639,11 @@ pub struct ServiceSpec<S = Live> {
 impl<S> ServiceSpec<S> {
     pub fn new(name: &str, image: &str) -> Self {
         Self {
-            name: SmolStr::new(name),
-            image: SmolStr::new(image),
-            env: BTreeMap::new(),
-            ports: Vec::new(),
-            options: Vec::new(),
+            name:        SmolStr::new(name),
+            image:       SmolStr::new(image),
+            env:         BTreeMap::new(),
+            ports:       Vec::new(),
+            options:     Vec::new(),
             credentials: None,
         }
     }
@@ -644,7 +652,7 @@ impl<S> ServiceSpec<S> {
 impl Default for RuntimeSpec {
     fn default() -> Self {
         Self {
-            target: RuntimeTarget::HostProcess,
+            target:       RuntimeTarget::HostProcess,
             requirements: Vec::new(),
         }
     }
@@ -657,9 +665,9 @@ impl RuntimeSpec {
 
     pub fn container(image: &str) -> Self {
         Self {
-            target: RuntimeTarget::Container {
-                image: SmolStr::new(image),
-                options: Vec::new(),
+            target:       RuntimeTarget::Container {
+                image:       SmolStr::new(image),
+                options:     Vec::new(),
                 credentials: None,
             },
             requirements: Vec::new(),
@@ -685,13 +693,13 @@ pub enum WorkspacePolicy {
 /// "Job" generalized: a resource scope, not a sequence.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scope<S = Live> {
-    pub id: ScopeId<S>,
-    pub env: BTreeMap<SmolStr, ExprOrValue<S>>,
-    pub runtime: RuntimeSpec,
+    pub id:        ScopeId<S>,
+    pub env:       BTreeMap<SmolStr, ExprOrValue<S>>,
+    pub runtime:   RuntimeSpec,
     pub workspace: WorkspacePolicy,
     /// Sidecar containers with this scope's lifetime, realized at acquisition.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<ServiceSpec<S>>,
+    pub services:  Vec<ServiceSpec<S>>,
 }
 
 impl<S> Scope<S> {
@@ -725,9 +733,9 @@ impl<S> Scope<S> {
 
 /// How the run's status folds from node outcomes.
 ///
-/// Root cancellation and engine `RunError`s outrank both policies: a cancelled run
-/// is `Cancelled`, and an engine error fails the run — errors are never control
-/// flow.
+/// Root cancellation and engine `RunError`s outrank both policies: a cancelled
+/// run is `Cancelled`, and an engine error fails the run — errors are never
+/// control flow.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Completion<S = Live> {
     /// Any failed node record fails the run. The CI rule; today's behavior.
@@ -751,20 +759,20 @@ fn is_default_completion<S>(completion: &Completion<S>) -> bool {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(bound(deserialize = "S: Deserialize<'de> + Default"))]
 pub struct GraphBody<S = Live> {
-    pub nodes: Vec<Node<S>>,
+    pub nodes:  Vec<Node<S>>,
     pub scopes: Vec<Scope<S>>,
-    pub exprs: ExprTable<S>,
+    pub exprs:  ExprTable<S>,
     /// Seeded with one `Generation(0)` token each.
-    pub entry: Vec<NodeId<S>>,
+    pub entry:  Vec<NodeId<S>>,
 }
 
 impl<S> Default for GraphBody<S> {
     fn default() -> Self {
         Self {
-            nodes: Vec::new(),
+            nodes:  Vec::new(),
             scopes: Vec::new(),
-            exprs: ExprTable::default(),
-            entry: Vec::new(),
+            exprs:  ExprTable::default(),
+            entry:  Vec::new(),
         }
     }
 }
@@ -826,17 +834,17 @@ impl<S> GraphBody<S> {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Graph<S = Live> {
     #[serde(flatten)]
-    pub body: GraphBody<S>,
-    /// Per-run parameters, visible to every expression as a static binding of the
-    /// same name — the GHA `github`, `vars` and `runner` contexts, a native format's
-    /// `params`. Frontends leave this empty; the host fills it in before the run
-    /// starts, so the graph a run used is self-describing and replay needs nothing
-    /// beyond it.
+    pub body:       GraphBody<S>,
+    /// Per-run parameters, visible to every expression as a static binding of
+    /// the same name — the GHA `github`, `vars` and `runner` contexts, a
+    /// native format's `params`. Frontends leave this empty; the host fills
+    /// it in before the run starts, so the graph a run used is
+    /// self-describing and replay needs nothing beyond it.
     ///
-    /// Lowest precedence: a firing's own bindings (`env`, `item`, `status`, …) shadow
-    /// a parameter of the same name. Read-only for the whole run.
+    /// Lowest precedence: a firing's own bindings (`env`, `item`, `status`, …)
+    /// shadow a parameter of the same name. Read-only for the whole run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub params: BTreeMap<SmolStr, Value>,
+    pub params:     BTreeMap<SmolStr, Value>,
     /// How the run's status folds from node outcomes (§1).
     #[serde(default, skip_serializing_if = "is_default_completion")]
     pub completion: Completion<S>,
@@ -864,7 +872,8 @@ impl<S> Graph<S> {
         Self::default()
     }
 
-    /// Set a run parameter. Chainable, for hosts filling the graph in before a run.
+    /// Set a run parameter. Chainable, for hosts filling the graph in before a
+    /// run.
     pub fn with_param(mut self, name: &str, value: Value) -> Self {
         self.params.insert(SmolStr::new(name), value);
         self

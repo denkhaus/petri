@@ -1,8 +1,9 @@
 //! A stable text rendering of a lowered graph.
 //!
 //! For `petri check --print-graph`: reviewable by eye, diffable by the corpus
-//! harness. Expressions print in the native syntax, which the strict lowering reads
-//! back, so the output is close to a native-format document for the graph.
+//! harness. Expressions print in the native syntax, which the strict lowering
+//! reads back, so the output is close to a native-format document for the
+//! graph.
 
 use std::fmt::Write;
 
@@ -144,7 +145,8 @@ pub fn print_graph(graph: &Graph) -> String {
     out
 }
 
-/// Render a config value, showing `{"$expr": id}` placeholders as the expression.
+/// Render a config value, showing `{"$expr": id}` placeholders as the
+/// expression.
 fn print_config(table: &ExprTable, value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
@@ -217,26 +219,22 @@ fn write_expr(table: &ExprTable, id: ExprId, out: &mut String, depth: usize) {
         Expr::Binary(op, l, r) => {
             out.push('(');
             write_expr(table, *l, out, d);
-            let _ = write!(
-                out,
-                " {} ",
-                match op {
-                    ir::BinOp::Eq => "==",
-                    ir::BinOp::Ne => "!=",
-                    ir::BinOp::Lt => "<",
-                    ir::BinOp::Le => "<=",
-                    ir::BinOp::Gt => ">",
-                    ir::BinOp::Ge => ">=",
-                    ir::BinOp::And => "&&",
-                    ir::BinOp::Or => "||",
-                    ir::BinOp::Add => "+",
-                    ir::BinOp::Sub => "-",
-                    ir::BinOp::Mul => "*",
-                    ir::BinOp::Div => "/",
-                    ir::BinOp::Rem => "%",
-                    ir::BinOp::Concat => "++",
-                }
-            );
+            let _ = write!(out, " {} ", match op {
+                ir::BinOp::Eq => "==",
+                ir::BinOp::Ne => "!=",
+                ir::BinOp::Lt => "<",
+                ir::BinOp::Le => "<=",
+                ir::BinOp::Gt => ">",
+                ir::BinOp::Ge => ">=",
+                ir::BinOp::And => "&&",
+                ir::BinOp::Or => "||",
+                ir::BinOp::Add => "+",
+                ir::BinOp::Sub => "-",
+                ir::BinOp::Mul => "*",
+                ir::BinOp::Div => "/",
+                ir::BinOp::Rem => "%",
+                ir::BinOp::Concat => "++",
+            });
             write_expr(table, *r, out, d);
             out.push(')');
         }

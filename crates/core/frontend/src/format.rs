@@ -1,8 +1,8 @@
 //! What every workflow format implements.
 //!
 //! The CLI and the corpus harness hold a list of [`Frontend`]s and ask each one
-//! whether it claims a path, instead of matching on an enum. Adding a format is a
-//! new crate that implements this trait, and one entry in that list.
+//! whether it claims a path, instead of matching on an enum. Adding a format is
+//! a new crate that implements this trait, and one entry in that list.
 
 use std::path::{Path, PathBuf};
 
@@ -14,13 +14,14 @@ use crate::files::FileSource;
 
 /// A workflow format: text in, graph and diagnostics out.
 pub trait Frontend: Send + Sync {
-    /// Short, stable, lower-case and unique: `gha`, `native`. What `--format` takes.
+    /// Short, stable, lower-case and unique: `gha`, `native`. What `--format`
+    /// takes.
     fn name(&self) -> &str;
 
     /// Whether files at `path` are, by convention, in this format.
     ///
-    /// Frontends are asked in registration order, so a format that claims every path
-    /// goes last.
+    /// Frontends are asked in registration order, so a format that claims every
+    /// path goes last.
     fn claims(&self, path: &Path) -> bool;
 
     /// Parse and lower one file. `file` is the name spans carry — usually the
@@ -29,7 +30,8 @@ pub trait Frontend: Send + Sync {
 
     /// Run parameters a host owes this format when it has nothing better: fixed
     /// values, so lowering the same file twice yields the identical graph and a
-    /// saved log replays against it. `repo` is the repository root. Default: none.
+    /// saved log replays against it. `repo` is the repository root. Default:
+    /// none.
     fn default_params(&self, _repo: &Path) -> Vec<(SmolStr, Value)> {
         Vec::new()
     }
@@ -38,8 +40,8 @@ pub trait Frontend: Send + Sync {
     /// format whose files sit at a fixed place in a repository walks up to it;
     /// the default is the file's own directory.
     ///
-    /// It is the root local includes resolve against, and the prefix stripped from
-    /// the name spans carry.
+    /// It is the root local includes resolve against, and the prefix stripped
+    /// from the name spans carry.
     fn repo_root(&self, file: &Path) -> PathBuf {
         file.parent()
             .map(Path::to_path_buf)

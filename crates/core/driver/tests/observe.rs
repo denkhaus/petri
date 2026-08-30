@@ -19,13 +19,13 @@ type ResolvedFinish = (u64, Option<(String, Value)>);
 /// Records everything it sees, and what the state could resolve at that moment.
 #[derive(Default)]
 struct Recording {
-    records: Mutex<Vec<EventRecord>>,
+    records:  Mutex<Vec<EventRecord>>,
     /// For each `StepFinished` record: seq, and the `(name, meta)` the state
     /// resolved the firing to — at the moment of the record, when the firing is
     /// already retired.
     finishes: Mutex<Vec<ResolvedFinish>>,
     /// Sleep this long in `on_record`, to stand in for a slow consumer.
-    delay: Option<Duration>,
+    delay:    Option<Duration>,
 }
 
 #[async_trait::async_trait]

@@ -49,10 +49,12 @@ jobs:
         unreachable!()
     };
     assert_eq!(image, "ghcr.io/acme/builder:1");
-    assert_eq!(
-        options,
-        &["--cpus", "2", "--health-cmd", "curl -f localhost"]
-    );
+    assert_eq!(options, &[
+        "--cpus",
+        "2",
+        "--health-cmd",
+        "curl -f localhost"
+    ]);
     let credentials = credentials.as_ref().expect("credentials");
     assert_eq!(credentials.username, "robot");
     // The graph carries the secret's *name*, never a value.

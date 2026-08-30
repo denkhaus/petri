@@ -1,9 +1,10 @@
 //! GitHub's semantics, on the shared syntax tree.
 //!
-//! Operators become `loose_*` builtins; `&&` and `||` return operand values; `*` and
-//! the filtered-array rule follow the runner. Function names are GitHub's, mapped onto
-//! builtins by [`gha_function`]. Contexts are resolved by the caller's [`Roots`], which
-//! is where `steps.x` gets its meaning. Nothing here evaluates.
+//! Operators become `loose_*` builtins; `&&` and `||` return operand values;
+//! `*` and the filtered-array rule follow the runner. Function names are
+//! GitHub's, mapped onto builtins by [`gha_function`]. Contexts are resolved by
+//! the caller's [`Roots`], which is where `steps.x` gets its meaning. Nothing
+//! here evaluates.
 
 use frontend::expr::lower::{LowerError, Roots, builtin, literal};
 use frontend::expr::{BinaryOp, Expr, Literal, UnaryOp};
@@ -21,7 +22,7 @@ pub fn gha(
 /// result of `*`, on which a later property access maps over elements. Tracked
 /// statically: the parser's shape decides it, so no runtime flag exists.
 struct Lowered {
-    id: ExprId,
+    id:       ExprId,
     filtered: bool,
 }
 
@@ -140,7 +141,7 @@ fn index(
             return Ok(Lowered { id, filtered: true });
         }
         return Ok(Lowered {
-            id: table.index(base.id, key_id),
+            id:       table.index(base.id, key_id),
             filtered: false,
         });
     }
@@ -157,9 +158,9 @@ fn index(
 
 /// GitHub's function names, mapped onto the builtin table.
 ///
-/// A GitHub function with no faithful builtin is a finding, not a special case here.
-/// `hashFiles` is intercepted by the frontend before this point because it reads the
-/// workspace, which no total builtin can.
+/// A GitHub function with no faithful builtin is a finding, not a special case
+/// here. `hashFiles` is intercepted by the frontend before this point because
+/// it reads the workspace, which no total builtin can.
 pub fn gha_function(
     name: &str,
     args: Vec<ExprId>,
@@ -193,9 +194,9 @@ pub fn gha_function(
         "format" => {
             if args.is_empty() {
                 return Err(LowerError::Arity {
-                    name: name.to_string(),
+                    name:     name.to_string(),
                     expected: 1,
-                    got: 0,
+                    got:      0,
                 });
             }
             let mut args = args;
@@ -206,9 +207,9 @@ pub fn gha_function(
         "join" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(LowerError::Arity {
-                    name: name.to_string(),
+                    name:     name.to_string(),
                     expected: 2,
-                    got: args.len(),
+                    got:      args.len(),
                 });
             }
             let mut args = args;
@@ -259,20 +260,21 @@ pub const GHA_FUNCTIONS_UNSUPPORTED: &[(&str, &str)] = &[(
      calls in step config and lowers them to a sentinel the step resolves at spawn",
 )];
 
-/// GitHub's `strategy.matrix`, as a composition of the engine's record combinators.
+/// GitHub's `strategy.matrix`, as a composition of the engine's record
+/// combinators.
 ///
-/// The matrix object may be a literal or the result of `fromJSON(...)`; either way
-/// the same expression expands it at firing time:
+/// The matrix object may be a literal or the result of `fromJSON(...)`; either
+/// way the same expression expands it at firing time:
 ///
 /// ```text
 /// axes  = omit(matrix, ['include', 'exclude'])
 /// legs  = extend_where(reject_where(cartesian(axes), matrix.exclude), matrix.include, keys(axes))
 /// ```
 ///
-/// GitHub's rule that an `include` may not overwrite an original axis value is the
-/// `keys(axes)` argument: those are the protected keys. Excludes run first, so an
-/// include can add a leg back. None of this is in the engine; the engine has
-/// combinators, and this is GitHub's use of them.
+/// GitHub's rule that an `include` may not overwrite an original axis value is
+/// the `keys(axes)` argument: those are the protected keys. Excludes run first,
+/// so an include can add a leg back. None of this is in the engine; the engine
+/// has combinators, and this is GitHub's use of them.
 pub fn matrix_legs(table: &mut ExprTable, matrix: ExprId) -> Result<ExprId, LowerError> {
     let reserved = {
         let inc = table.lit("include");
@@ -287,9 +289,9 @@ pub fn matrix_legs(table: &mut ExprTable, matrix: ExprId) -> Result<ExprId, Lowe
     let include_key = table.lit("include");
     let includes = builtin(table, "get_ci", vec![matrix, include_key])?;
     let protected = builtin(table, "keys", vec![axes])?;
-    builtin(
-        table,
-        "extend_where",
-        vec![after_exclude, includes, protected],
-    )
+    builtin(table, "extend_where", vec![
+        after_exclude,
+        includes,
+        protected,
+    ])
 }

@@ -623,14 +623,10 @@ fn assert_nothing_leaked(report: &RunReportPlus) {
 #[tokio::test]
 async fn secrets_and_runtime_masks_never_reach_the_log() {
     let graph = lower_ok(MASKING_WORKFLOW);
-    let report = run_host_with_secrets(
-        graph,
-        "cmd-masking",
-        &[
-            ("SINGLE_SECRET", SINGLE_SECRET),
-            ("MULTI_SECRET", MULTI_SECRET),
-        ],
-    )
+    let report = run_host_with_secrets(graph, "cmd-masking", &[
+        ("SINGLE_SECRET", SINGLE_SECRET),
+        ("MULTI_SECRET", MULTI_SECRET),
+    ])
     .await;
     assert_nothing_leaked(&report);
 }
@@ -641,14 +637,10 @@ async fn secrets_and_runtime_masks_never_reach_the_log_in_a_container() {
         return;
     }
     let graph = lower_ok(&in_container(MASKING_WORKFLOW));
-    let report = run_host_with_secrets(
-        graph,
-        "cmd-masking-boxed",
-        &[
-            ("SINGLE_SECRET", SINGLE_SECRET),
-            ("MULTI_SECRET", MULTI_SECRET),
-        ],
-    )
+    let report = run_host_with_secrets(graph, "cmd-masking-boxed", &[
+        ("SINGLE_SECRET", SINGLE_SECRET),
+        ("MULTI_SECRET", MULTI_SECRET),
+    ])
     .await;
     assert_nothing_leaked(&report);
 }

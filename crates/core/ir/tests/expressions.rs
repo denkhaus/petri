@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 /// A static-only environment: no token, no run context.
 struct Env {
     statics: StaticCtx,
-    run: RunContext,
-    token: Value,
+    run:     RunContext,
+    token:   Value,
 }
 
 impl Env {
@@ -282,8 +282,8 @@ fn eval_bool_uses_truthiness() {
     assert!(eval_bool(&t, items, &c.env()).unwrap());
 }
 
-/// `token` and `input` come from the environment, not from the statics, and they
-/// shadow a static of the same name.
+/// `token` and `input` come from the environment, not from the statics, and
+/// they shadow a static of the same name.
 #[test]
 fn the_token_shadows_the_statics() {
     let mut t = ExprTable::new();
@@ -294,7 +294,8 @@ fn the_token_shadows_the_statics() {
     assert_eq!(eval(&t, input, &c.env()).unwrap(), json!("from token"));
 }
 
-/// `nodes.*` reads the run context: one way for an expression to see upstream state.
+/// `nodes.*` reads the run context: one way for an expression to see upstream
+/// state.
 #[test]
 fn nodes_reads_the_run_context() {
     let mut t = ExprTable::new();
@@ -323,9 +324,9 @@ fn kv_reads_the_run_context() {
 }
 
 /// `nodes.x`, `nodes["x"]`, `kv.x` and `kv["x"]` read a single entry without
-/// materializing the whole map. The result must be exactly what indexing the whole
-/// map would give: for an entry that is there, one that is not, and an index that is
-/// not a string.
+/// materializing the whole map. The result must be exactly what indexing the
+/// whole map would give: for an entry that is there, one that is not, and an
+/// index that is not a string.
 #[test]
 fn single_entry_reads_match_the_whole_map() {
     let mut t = ExprTable::new();
@@ -364,8 +365,8 @@ fn single_entry_reads_match_the_whole_map() {
     assert_eq!(eval(&t, no_kv, &c.env()).unwrap(), kv["nope"]);
 }
 
-/// `success()` is success-like, so it covers `PartialSuccess`. A guard that needs to
-/// tell them apart calls `partial_success()` or `full_success()`.
+/// `success()` is success-like, so it covers `PartialSuccess`. A guard that
+/// needs to tell them apart calls `partial_success()` or `full_success()`.
 #[test]
 fn success_is_success_like() {
     let mut t = ExprTable::new();
@@ -390,7 +391,8 @@ fn success_is_success_like() {
     assert_eq!(eval(&t, failure, &soft.env()).unwrap(), json!(false));
 }
 
-/// `split` turns a step's string output into a list, which is what feeds `for_each`.
+/// `split` turns a step's string output into a list, which is what feeds
+/// `for_each`.
 #[test]
 fn split_turns_output_into_a_list() {
     let mut t = ExprTable::new();
@@ -491,11 +493,11 @@ fn matches_rejects_bad_inputs_with_typed_errors() {
     ));
 }
 
-/// The fabro condition lowering is `matches(to_string(default(v, "")), pattern)`:
-/// `default` supplies fabro's null-and-missing -> `""` rule, and `to_string`
-/// renders the rest exactly as fabro's `json_value_to_string` does — booleans and
-/// numbers as text, arrays and objects as JSON. Pinned per value kind with fully
-/// anchored patterns, so a drift in any rendering fails here.
+/// The fabro condition lowering is `matches(to_string(default(v, "")),
+/// pattern)`: `default` supplies fabro's null-and-missing -> `""` rule, and
+/// `to_string` renders the rest exactly as fabro's `json_value_to_string` does
+/// — booleans and numbers as text, arrays and objects as JSON. Pinned per value
+/// kind with fully anchored patterns, so a drift in any rendering fails here.
 #[test]
 fn matches_lowering_coerces_like_fabro() {
     let mut t = ExprTable::new();
@@ -537,8 +539,9 @@ fn matches_lowering_coerces_like_fabro() {
     assert_eq!(eval(&t, call, &c.env()).unwrap(), json!(true));
 }
 
-/// The function table gates dispatch, so it cannot drift from the implementation:
-/// every entry must evaluate, and a name that is not an entry must be unknown.
+/// The function table gates dispatch, so it cannot drift from the
+/// implementation: every entry must evaluate, and a name that is not an entry
+/// must be unknown.
 #[test]
 fn the_builtin_table_matches_the_implementation() {
     use ir::expr::{BUILTINS, builtin};
@@ -649,8 +652,8 @@ fn loose_number_coercion_table() {
     }
 }
 
-/// Truthiness: `false`, `0`, `-0`, `""`, `null`, NaN are falsy. Empty containers
-/// are **truthy**, the opposite of this crate's own rule.
+/// Truthiness: `false`, `0`, `-0`, `""`, `null`, NaN are falsy. Empty
+/// containers are **truthy**, the opposite of this crate's own rule.
 #[test]
 fn loose_truthy_matrix() {
     for falsy in [json!(false), json!(0), json!(-0.0), json!(""), json!(null)] {
@@ -687,8 +690,9 @@ fn loose_truthy_matrix() {
     );
 }
 
-/// Equality: same kinds compare directly (strings case-insensitively); different
-/// kinds coerce to numbers; NaN equals nothing; containers never equal.
+/// Equality: same kinds compare directly (strings case-insensitively);
+/// different kinds coerce to numbers; NaN equals nothing; containers never
+/// equal.
 #[test]
 fn loose_equality_matrix() {
     let equal: &[(Value, Value)] = &[
@@ -740,8 +744,8 @@ fn loose_equality_matrix() {
     }
 }
 
-/// Relational: two strings compare as strings, case-insensitively; anything else as
-/// numbers; NaN makes every comparison false.
+/// Relational: two strings compare as strings, case-insensitively; anything
+/// else as numbers; NaN makes every comparison false.
 #[test]
 fn loose_relational_matrix() {
     assert_eq!(run("loose_lt", &[json!(1), json!(2)]), json!(true));
@@ -939,13 +943,14 @@ fn record_combinators() {
         json!("scalar")
     );
 
-    // reject_where: any partial that matches removes the record; null removes nothing.
+    // reject_where: any partial that matches removes the record; null removes
+    // nothing.
     let records = json!([{"os": "a", "v": 1}, {"os": "a", "v": 2}, {"os": "b", "v": 1}]);
     assert_eq!(
-        run(
-            "reject_where",
-            &[records.clone(), json!([{"os": "a", "v": 2}])]
-        ),
+        run("reject_where", &[
+            records.clone(),
+            json!([{"os": "a", "v": 2}])
+        ]),
         json!([{"os": "a", "v": 1}, {"os": "b", "v": 1}])
     );
     assert_eq!(
@@ -968,10 +973,11 @@ fn record_combinators() {
         {"fruit": "banana", "animal": "cat"},
     ]);
     assert_eq!(
-        run(
-            "extend_where",
-            &[base, partials, json!(["fruit", "animal"])]
-        ),
+        run("extend_where", &[
+            base,
+            partials,
+            json!(["fruit", "animal"])
+        ]),
         json!([
             {"fruit": "apple", "animal": "cat", "color": "pink"},
             {"fruit": "pear", "animal": "dog", "color": "green"},
@@ -980,10 +986,11 @@ fn record_combinators() {
         ])
     );
     assert_eq!(
-        run(
-            "extend_where",
-            &[json!([{"a": 1}]), json!(null), json!(["a"])]
-        ),
+        run("extend_where", &[
+            json!([{"a": 1}]),
+            json!(null),
+            json!(["a"])
+        ]),
         json!([{"a": 1}])
     );
 }

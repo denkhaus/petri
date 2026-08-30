@@ -1,9 +1,10 @@
 //! Action manifests: `action.yml`, read for a `uses:` step.
 //!
-//! A composite action is inlined into the job, so its steps are read here in full. A
-//! Node action becomes a `github/action` node, so only its entry points and inputs
-//! matter. A Docker action becomes a `github/docker_action` node: its image,
-//! entrypoints and args are read here, raw, and lowered where the step is.
+//! A composite action is inlined into the job, so its steps are read here in
+//! full. A Node action becomes a `github/action` node, so only its entry points
+//! and inputs matter. A Docker action becomes a `github/docker_action` node:
+//! its image, entrypoints and args are read here, raw, and lowered where the
+//! step is.
 
 use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
@@ -11,14 +12,15 @@ use frontend::yaml::{Document, Node};
 
 use crate::model::Step;
 
-/// How deep composites may nest before the lowering reports rather than recurses.
+/// How deep composites may nest before the lowering reports rather than
+/// recurses.
 pub const MAX_DEPTH: usize = 10;
 
 /// What `action.yml` declares.
 pub struct Manifest<'a> {
     pub inputs: Vec<Input<'a>>,
-    pub runs: Runs<'a>,
-    pub span: Span,
+    pub runs:   Runs<'a>,
+    pub span:   Span,
 }
 
 pub enum Runs<'a> {
@@ -33,40 +35,40 @@ pub enum Runs<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockerAction {
     /// `docker://image`, or a Dockerfile path relative to the action.
-    pub image: String,
-    pub entrypoint: Option<String>,
-    pub pre_entrypoint: Option<String>,
-    pub pre_if: Option<String>,
+    pub image:           String,
+    pub entrypoint:      Option<String>,
+    pub pre_entrypoint:  Option<String>,
+    pub pre_if:          Option<String>,
     pub post_entrypoint: Option<String>,
-    pub post_if: Option<String>,
+    pub post_if:         Option<String>,
     /// `runs.args`: one argument per entry.
-    pub args: Vec<String>,
+    pub args:            Vec<String>,
     /// `runs.env`.
-    pub env: Vec<(String, String)>,
+    pub env:             Vec<(String, String)>,
 }
 
 /// A composite action's steps and outputs.
 pub struct Action<'a> {
-    pub inputs: Vec<Input<'a>>,
+    pub inputs:  Vec<Input<'a>>,
     pub outputs: Vec<(String, Node<'a>)>,
-    pub steps: Vec<Step<'a>>,
-    pub span: Span,
+    pub steps:   Vec<Step<'a>>,
+    pub span:    Span,
 }
 
-/// A JavaScript action's entry points. Owned, so it outlives the document it came
-/// from: the pre and post nodes are placed away from the main one.
+/// A JavaScript action's entry points. Owned, so it outlives the document it
+/// came from: the pre and post nodes are placed away from the main one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeAction {
-    pub main: String,
-    pub pre: Option<String>,
-    pub pre_if: Option<String>,
-    pub post: Option<String>,
+    pub main:    String,
+    pub pre:     Option<String>,
+    pub pre_if:  Option<String>,
+    pub post:    Option<String>,
     pub post_if: Option<String>,
 }
 
 pub struct Input<'a> {
-    pub name: String,
-    pub default: Option<Node<'a>>,
+    pub name:     String,
+    pub default:  Option<Node<'a>>,
     pub required: bool,
 }
 
@@ -95,8 +97,8 @@ pub fn classify(reference: &str) -> Uses {
     }
 }
 
-/// Read `action.yml` (or `.yaml`) under `path`. Returns the parsed document so the
-/// caller can hold it while lowering.
+/// Read `action.yml` (or `.yaml`) under `path`. Returns the parsed document so
+/// the caller can hold it while lowering.
 pub fn read_document(
     files: &dyn FileSource,
     path: &str,
@@ -248,7 +250,8 @@ fn read_inputs<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Vec<Input
     inputs
 }
 
-/// Read a composite action's steps and outputs. `runs.using: composite` is known.
+/// Read a composite action's steps and outputs. `runs.using: composite` is
+/// known.
 fn read_composite<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Action<'a>> {
     let root = doc.root();
     let m = root.expect_mapping(diags, "an action")?;
@@ -338,16 +341,13 @@ runs:
         let Runs::Node(node) = manifest.runs else {
             panic!("expected a node action");
         };
-        assert_eq!(
-            node,
-            NodeAction {
-                main: "dist/index.js".into(),
-                pre: None,
-                pre_if: None,
-                post: Some("dist/post.js".into()),
-                post_if: Some("success()".into()),
-            }
-        );
+        assert_eq!(node, NodeAction {
+            main:    "dist/index.js".into(),
+            pre:     None,
+            pre_if:  None,
+            post:    Some("dist/post.js".into()),
+            post_if: Some("success()".into()),
+        });
     }
 
     #[test]

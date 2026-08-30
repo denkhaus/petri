@@ -1,6 +1,6 @@
-//! Handoff §7 tests 3–6, the pure half: what lowering produces, without running it.
-//! The behavioural half — the same constructs through the engine on real processes —
-//! lives in `crates/github/acceptance/tests/gha_e2e.rs`.
+//! Handoff §7 tests 3–6, the pure half: what lowering produces, without running
+//! it. The behavioural half — the same constructs through the engine on real
+//! processes — lives in `crates/github/acceptance/tests/gha_e2e.rs`.
 
 mod support;
 
@@ -159,8 +159,8 @@ jobs:
 }
 
 /// `concurrency:` lowers — the group is cross-run mutual exclusion, meaningless
-/// in a single local run — but never silently: a warning names what was ignored,
-/// at the workflow level and the job level alike.
+/// in a single local run — but never silently: a warning names what was
+/// ignored, at the workflow level and the job level alike.
 #[test]
 fn concurrency_lowers_with_a_warning() {
     let text = "concurrency: group-a\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    concurrency: { group: g, cancel-in-progress: true }\n    steps:\n      - run: echo\n";
@@ -179,9 +179,9 @@ fn concurrency_lowers_with_a_warning() {
 
 /// `environment:` lowers — approvals, protection rules and environment-scoped
 /// secrets are GitHub server features a local run cannot enforce — but never
-/// silently, and the target survives on the job's `start` node so the graph says
-/// what the job would have deployed to. Expression-valued names stay as written:
-/// an ignored field is never evaluated.
+/// silently, and the target survives on the job's `start` node so the graph
+/// says what the job would have deployed to. Expression-valued names stay as
+/// written: an ignored field is never evaluated.
 #[test]
 fn environment_lowers_with_a_warning_and_the_target_is_preserved() {
     let text = r#"
@@ -296,10 +296,10 @@ jobs:
         "each leg keeps its own result, through exclude and include"
     );
     let scope = graph.scope(start.scope).unwrap();
-    assert_eq!(
-        scope.runtime.requirements,
-        ["ubuntu-latest", "ubuntu-22.04"]
-    );
+    assert_eq!(scope.runtime.requirements, [
+        "ubuntu-latest",
+        "ubuntu-22.04"
+    ]);
 }
 
 /// The shapes the handoff names: a label list from `fromJSON`, a template
@@ -504,10 +504,9 @@ fn github_guards_resolve_against_the_checkout_identity() {
     // No checkout: the guard takes its fallback and lowers.
     let graph = lower_ok(text);
     let start = graph.nodes.iter().find(|n| n.name == "j/start").unwrap();
-    assert_eq!(
-        graph.scope(start.scope).unwrap().runtime.requirements,
-        ["ubuntu-latest"]
-    );
+    assert_eq!(graph.scope(start.scope).unwrap().runtime.requirements, [
+        "ubuntu-latest"
+    ]);
 
     // The named checkout: the guard selects the opaque pool, and the runner
     // map's rejection names it.
@@ -810,20 +809,17 @@ jobs:
 "#;
     let graph = lower_ok(text);
     let names: Vec<&str> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec![
-            "build/start",
-            "build/done",
-            "test/start",
-            "test/done",
-            "lint/start",
-            "lint/done",
-            "build/compile",
-            "test/step-1",
-            "lint/step-1"
-        ]
-    );
+    assert_eq!(names, vec![
+        "build/start",
+        "build/done",
+        "test/start",
+        "test/done",
+        "lint/start",
+        "lint/done",
+        "build/compile",
+        "test/step-1",
+        "lint/step-1"
+    ]);
     // k dependents → k single-arm groups on `done`.
     let build_done = graph.nodes.iter().find(|n| n.name == "build/done").unwrap();
     assert_eq!(build_done.routing.groups.len(), 2);
@@ -852,10 +848,9 @@ jobs:
     assert!(
         matches!(&lint_scope.runtime.target, ir::RuntimeTarget::Container { image, .. } if image == "alpine:3.20")
     );
-    assert_eq!(
-        lint_scope.runtime.requirements,
-        vec![smol_str::SmolStr::new("ubuntu-latest")]
-    );
+    assert_eq!(lint_scope.runtime.requirements, vec![
+        smol_str::SmolStr::new("ubuntu-latest")
+    ]);
     // Env layering.
     let build_scope = graph.scope(compile.scope).unwrap();
     assert!(build_scope.env.contains_key("GLOBAL"));
@@ -871,11 +866,11 @@ jobs:
 
 /// After a polite cancel, conditions decide: every node the lowering emits
 /// carries `run_on_cancel` (spec §5), fires, and its gate or precondition lands
-/// on GitHub's truth table — no condition text is sniffed for admission. The one
-/// exception is a matrix `start`, which carries the expansion: a cancelled scope
-/// never splices, so a leg not yet started stays cancelled, as GitHub cancels a
-/// queued `fail-fast` leg. Step nodes carry no engine precondition at all; their
-/// condition is the `gate` in their config.
+/// on GitHub's truth table — no condition text is sniffed for admission. The
+/// one exception is a matrix `start`, which carries the expansion: a cancelled
+/// scope never splices, so a leg not yet started stays cancelled, as GitHub
+/// cancels a queued `fail-fast` leg. Step nodes carry no engine precondition at
+/// all; their condition is the `gate` in their config.
 #[test]
 fn run_on_cancel_lands_exactly_where_github_keeps_going() {
     let action = r#"

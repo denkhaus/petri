@@ -1,10 +1,11 @@
-//! §5a: cancel scopes. A scope is a dynamic set of firings cancellable as a unit.
-//! Cancellation is a state transition in the pure core; only signal delivery is
-//! the host's job.
+//! §5a: cancel scopes. A scope is a dynamic set of firings cancellable as a
+//! unit. Cancellation is a state transition in the pure core; only signal
+//! delivery is the host's job.
 //!
-//! Two tiers. Cancel is polite: outcomes route, and a node marked `run_on_cancel`
-//! may still fire, so `always()`- and `cancelled()`-style cleanup can run. Kill is
-//! forced: tokens drop, nothing routes, nothing is admitted.
+//! Two tiers. Cancel is polite: outcomes route, and a node marked
+//! `run_on_cancel` may still fire, so `always()`- and `cancelled()`-style
+//! cleanup can run. Kill is forced: tokens drop, nothing routes, nothing is
+//! admitted.
 
 mod support;
 
@@ -62,10 +63,10 @@ fn cancelling_the_root_scope_stops_the_run() {
     assert_eq!(h.state.pending_count(), 0);
 }
 
-/// A cancelled firing's outcome routes like any other (§5), but the token cannot
-/// restart un-marked work: the downstream node completes `Cancelled` without
-/// executing. Its record — which only routing could have produced — is the proof
-/// the token flowed.
+/// A cancelled firing's outcome routes like any other (§5), but the token
+/// cannot restart un-marked work: the downstream node completes `Cancelled`
+/// without executing. Its record — which only routing could have produced — is
+/// the proof the token flowed.
 #[test]
 fn a_cancelled_outcome_routes_but_does_not_restart_unmarked_work() {
     let mut b = GraphBuilder::new();
@@ -88,7 +89,8 @@ fn a_cancelled_outcome_routes_but_does_not_restart_unmarked_work() {
     h.verify_replay();
 }
 
-/// Splice scopes nest under the root, so cancelling the root reaches inside them.
+/// Splice scopes nest under the root, so cancelling the root reaches inside
+/// them.
 #[test]
 fn cancelling_the_root_reaches_into_splice_scopes() {
     let mut b = GraphBuilder::new();
@@ -99,10 +101,9 @@ fn cancelling_the_root_reaches_into_splice_scopes() {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.link(plan, work);
-    b.select(
-        work,
-        vec![ir::Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(work, vec![
+        ir::Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     parallel_for_each(&mut b, work, items, ExpandTarget::Node, None, false);
     let graph = b.build();
@@ -142,10 +143,9 @@ fn cancelling_a_splice_scope_spares_the_rest_of_the_run() {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.fan_out(plan, &[matrix, sibling]);
-    b.select(
-        matrix,
-        vec![ir::Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(matrix, vec![
+        ir::Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     parallel_for_each(&mut b, matrix, items, ExpandTarget::Node, None, false);
     let graph = b.build();
@@ -184,8 +184,8 @@ fn cancelling_a_splice_scope_spares_the_rest_of_the_run() {
 
 /// §5 test 1: after a cancel, a `run_on_cancel` node with an absent (or true)
 /// precondition fires for real, while an un-flagged node between completes
-/// `Cancelled` without anything being evaluated — even a precondition that would
-/// error is never touched.
+/// `Cancelled` without anything being evaluated — even a precondition that
+/// would error is never touched.
 #[test]
 fn run_on_cancel_admits_cleanup_and_unmarked_work_is_never_evaluated() {
     let mut b = GraphBuilder::new();
@@ -267,9 +267,10 @@ fn a_marked_nodes_broken_precondition_is_still_an_error() {
 }
 
 /// §5: a `run_on_cancel` node whose gate is false records `Cancelled`, not
-/// `Skipped` — matching GitHub's UI for unreached steps, and saying why it did not
-/// run. Pins the upstream fold too: a cancelled upstream folds to "cancelled", so
-/// the core `success()` guard is false and `cancelled()` true over it.
+/// `Skipped` — matching GitHub's UI for unreached steps, and saying why it did
+/// not run. Pins the upstream fold too: a cancelled upstream folds to
+/// "cancelled", so the core `success()` guard is false and `cancelled()` true
+/// over it.
 #[test]
 fn upstream_cancelled_folds_to_cancelled_and_a_false_gate_records_cancelled() {
     let mut b = GraphBuilder::new();
@@ -309,8 +310,8 @@ fn upstream_cancelled_folds_to_cancelled_and_a_false_gate_records_cancelled() {
     h.verify_replay();
 }
 
-/// §5 test 3: an expansion node in a cancelled scope never expands. It completes
-/// `Cancelled`, and nothing is spliced.
+/// §5 test 3: an expansion node in a cancelled scope never expands. It
+/// completes `Cancelled`, and nothing is spliced.
 #[test]
 fn a_cancelled_expansion_never_splices() {
     let mut b = GraphBuilder::new();
@@ -321,10 +322,9 @@ fn a_cancelled_expansion_never_splices() {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.link(plan, work);
-    b.select(
-        work,
-        vec![ir::Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(work, vec![
+        ir::Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     parallel_for_each(&mut b, work, items, ExpandTarget::Node, None, false);
     let graph = b.build();
@@ -350,9 +350,9 @@ fn a_cancelled_expansion_never_splices() {
     h.verify_replay();
 }
 
-/// §5 test 4: an `Always`-guarded back edge through a cancelled region terminates
-/// by budget, exactly as the `Skipped` cascade does — same envelope, no new
-/// machinery. The test finishing is the termination proof.
+/// §5 test 4: an `Always`-guarded back edge through a cancelled region
+/// terminates by budget, exactly as the `Skipped` cascade does — same envelope,
+/// no new machinery. The test finishing is the termination proof.
 #[test]
 fn a_back_edge_through_a_cancelled_region_stops_at_its_budget() {
     let mut b = GraphBuilder::new();
@@ -364,13 +364,10 @@ fn a_back_edge_through_a_cancelled_region_stops_at_its_budget() {
     b.set_join(spin, JoinPolicy::Any);
     b.set_budget(spin, ir::Budget::looped(4));
     let always_loop = b.exprs().lit(true);
-    b.select(
-        spin,
-        vec![
-            ir::Arm::when(spin, always_loop).as_back(),
-            ir::Arm::always(never),
-        ],
-    );
+    b.select(spin, vec![
+        ir::Arm::when(spin, always_loop).as_back(),
+        ir::Arm::always(never),
+    ]);
     let graph = b.build();
     validate(&graph).expect("valid");
 
@@ -399,9 +396,10 @@ fn a_back_edge_through_a_cancelled_region_stops_at_its_budget() {
     h.verify_replay();
 }
 
-/// §5 test 7: a cancelled route that leaves an `All` join unsatisfiable parks its
-/// token forever — and the environment must not be parked with it. When the run
-/// finishes, every held scope is released and the finished state claims nothing.
+/// §5 test 7: a cancelled route that leaves an `All` join unsatisfiable parks
+/// its token forever — and the environment must not be parked with it. When the
+/// run finishes, every held scope is released and the finished state claims
+/// nothing.
 #[test]
 fn a_parked_token_does_not_hold_its_scope_past_the_finish() {
     let mut b = GraphBuilder::new();
@@ -480,10 +478,11 @@ fn retry_then_cleanup_graph() -> ir::Graph {
     graph
 }
 
-/// A cancel settles a firing that is waiting out a retry backoff at once: there is
-/// no task to deliver a control to, so the core records `Cancelled` and routes it.
-/// The driver's sleeper cannot be recalled; its late `RetryElapsed` consumes a
-/// tombstone silently, while every other invalid `RetryElapsed` still errors.
+/// A cancel settles a firing that is waiting out a retry backoff at once: there
+/// is no task to deliver a control to, so the core records `Cancelled` and
+/// routes it. The driver's sleeper cannot be recalled; its late `RetryElapsed`
+/// consumes a tombstone silently, while every other invalid `RetryElapsed`
+/// still errors.
 #[test]
 fn cancel_settles_an_awaiting_retry_firing_at_once() {
     let mut h = Harness::new(retry_then_cleanup_graph());
@@ -507,7 +506,7 @@ fn cancel_settles_an_awaiting_retry_firing_at_once() {
     // The sleeper fires late; the tombstone absorbs exactly that one event.
     let errors_before = h.state.errors().len();
     h.feed(Event::RetryElapsed {
-        firing: a,
+        firing:       a,
         next_attempt: Attempt::FIRST.next(),
     });
     assert_eq!(
@@ -519,11 +518,11 @@ fn cancel_settles_an_awaiting_retry_firing_at_once() {
     // A duplicate — the tombstone is consumed — and a never-existing firing both
     // still error: the no-op is cancellation-specific.
     h.feed(Event::RetryElapsed {
-        firing: a,
+        firing:       a,
         next_attempt: Attempt::FIRST.next(),
     });
     h.feed(Event::RetryElapsed {
-        firing: FiringId::new(999),
+        firing:       FiringId::new(999),
         next_attempt: Attempt::FIRST.next(),
     });
     assert_eq!(
@@ -560,9 +559,9 @@ fn kill_settles_an_awaiting_retry_firing_without_routing() {
 
 // ── Kill (§5 tests 10–13) ─────────────────────────────────────────────────
 
-/// Kill is the pre-v3 cancel, kept under its own event: tokens drop, outcomes are
-/// recorded without routing, `run_on_cancel` admits nothing, and every held scope
-/// is still released when the run finishes.
+/// Kill is the pre-v3 cancel, kept under its own event: tokens drop, outcomes
+/// are recorded without routing, `run_on_cancel` admits nothing, and every held
+/// scope is still released when the run finishes.
 #[test]
 fn kill_stops_everything_and_still_releases_the_scopes() {
     let mut b = GraphBuilder::new();
@@ -625,8 +624,8 @@ fn kill_stops_everything_and_still_releases_the_scopes() {
 }
 
 /// §5 test 11: a firing the polite tier already signalled still receives
-/// `Control::Kill` — the `cancelling` skip that makes repeated cancels idempotent
-/// must not swallow the escalation.
+/// `Control::Kill` — the `cancelling` skip that makes repeated cancels
+/// idempotent must not swallow the escalation.
 #[test]
 fn kill_reaches_a_firing_already_politely_cancelling() {
     let mut b = GraphBuilder::new();
@@ -661,9 +660,9 @@ fn kill_reaches_a_firing_already_politely_cancelling() {
     h.verify_replay();
 }
 
-/// §5 test 12: a kill lands while admitted cleanup is running. The cleanup firing
-/// gets `Control::Kill`, its outcome is recorded without routing, and nothing
-/// further starts.
+/// §5 test 12: a kill lands while admitted cleanup is running. The cleanup
+/// firing gets `Control::Kill`, its outcome is recorded without routing, and
+/// nothing further starts.
 #[test]
 fn kill_during_cleanup_stops_the_cleanup() {
     let mut b = GraphBuilder::new();
@@ -691,13 +690,12 @@ fn kill_during_cleanup_stops_the_cleanup() {
         scope: CancelScopeId::ROOT,
     });
     assert!(
-        h.commands.iter().any(|c| matches!(
-            c,
-            Command::DeliverControl {
+        h.commands
+            .iter()
+            .any(|c| matches!(c, Command::DeliverControl {
                 ctl: Control::Kill,
                 ..
-            }
-        )),
+            })),
         "the running cleanup gets Control::Kill"
     );
     h.finish(cleanup_starts[0].0, Outcome::cancelled());
@@ -722,10 +720,9 @@ fn killing_a_splice_scope_spares_the_rest_of_the_run() {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.fan_out(plan, &[matrix, sibling]);
-    b.select(
-        matrix,
-        vec![ir::Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(matrix, vec![
+        ir::Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     parallel_for_each(&mut b, matrix, items, ExpandTarget::Node, None, false);
     let graph = b.build();
@@ -746,13 +743,10 @@ fn killing_a_splice_scope_spares_the_rest_of_the_run() {
         .commands
         .iter()
         .filter(|c| {
-            matches!(
-                c,
-                Command::DeliverControl {
-                    ctl: Control::Kill,
-                    ..
-                }
-            )
+            matches!(c, Command::DeliverControl {
+                ctl: Control::Kill,
+                ..
+            })
         })
         .count();
     assert_eq!(kills, 2, "only the clones are killed");
@@ -775,9 +769,9 @@ fn killing_a_splice_scope_spares_the_rest_of_the_run() {
     h.verify_replay();
 }
 
-/// `run.cancelled` is root-only; `scope_cancelled` is true wherever the firing's
-/// node lies in a cancelled cancel-scope. A root cancel sets both; a `fail_fast`
-/// splice cancel is visible only to `scope_cancelled`.
+/// `run.cancelled` is root-only; `scope_cancelled` is true wherever the
+/// firing's node lies in a cancelled cancel-scope. A root cancel sets both; a
+/// `fail_fast` splice cancel is visible only to `scope_cancelled`.
 #[test]
 fn scope_cancelled_and_run_cancelled_read_correctly() {
     use ir::placeholder::EXPR_PLACEHOLDER_KEY;
@@ -828,10 +822,9 @@ fn scope_cancelled_and_run_cancelled_read_correctly() {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.link(plan, work);
-    b.select(
-        work,
-        vec![ir::Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(work, vec![
+        ir::Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     let sc = b.exprs().var("scope_cancelled");
     let run = b.exprs().var("run");
@@ -885,9 +878,9 @@ fn scope_cancelled_and_run_cancelled_read_correctly() {
     h.verify_replay();
 }
 
-/// A cancelled run's log — cancel, routed cancelled outcomes, admitted cleanup —
-/// replays byte-identically. `Status::Cancelled` in an outcome must survive the
-/// round trip like every other status.
+/// A cancelled run's log — cancel, routed cancelled outcomes, admitted cleanup
+/// — replays byte-identically. `Status::Cancelled` in an outcome must survive
+/// the round trip like every other status.
 #[test]
 fn a_cancelled_runs_log_replays_byte_identically() {
     let mut b = GraphBuilder::new();

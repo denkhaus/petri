@@ -1,13 +1,13 @@
 //! Newtype identifiers used across the IR and the engine.
 //!
-//! Graph-structure ids (`NodeId`, `EdgeId`, `ScopeId`, `ExprId`) carry an id-space
-//! marker: [`Live`] for the run's live graph — the default everywhere, so ordinary
-//! call sites never name it — and [`Local`] for ids inside a
-//! [`GraphFragment`](crate::GraphFragment), which are meaningless against the live
-//! graph until the splice remapper converts them. The marker is how the type system
-//! refuses a mixed-space id without a parallel family of mirror types. Runtime ids
-//! (`FiringId`, `Generation`, `Attempt`, `CancelScopeId`) exist only at run time, so
-//! they have no space.
+//! Graph-structure ids (`NodeId`, `EdgeId`, `ScopeId`, `ExprId`) carry an
+//! id-space marker: [`Live`] for the run's live graph — the default everywhere,
+//! so ordinary call sites never name it — and [`Local`] for ids inside a
+//! [`GraphFragment`](crate::GraphFragment), which are meaningless against the
+//! live graph until the splice remapper converts them. The marker is how the
+//! type system refuses a mixed-space id without a parallel family of mirror
+//! types. Runtime ids (`FiringId`, `Generation`, `Attempt`, `CancelScopeId`)
+//! exist only at run time, so they have no space.
 
 use std::marker::PhantomData;
 
@@ -21,9 +21,10 @@ use smol_str::SmolStr;
 )]
 pub struct Live;
 
-/// A fragment's local id space: ids in a [`GraphFragment`](crate::GraphFragment)
-/// index the fragment's own tables and mean nothing against the live graph. Only
-/// the splice remapper converts them, by allocating fresh [`Live`] ids.
+/// A fragment's local id space: ids in a
+/// [`GraphFragment`](crate::GraphFragment) index the fragment's own tables and
+/// mean nothing against the live graph. Only the splice remapper converts them,
+/// by allocating fresh [`Live`] ids.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -147,13 +148,13 @@ id_newtype!(
     /// Loop-iteration counter carried by tokens; bumped by `back` edges.
     Generation, u32
 );
-/// The name of a step kind: `process`, `noop`, or a namespaced `vendor/kind` from
-/// another repository.
+/// The name of a step kind: `process`, `noop`, or a namespaced `vendor/kind`
+/// from another repository.
 ///
 /// A name, not a number, so a serialized graph says what each node runs and two
-/// repositories never have to agree on a `u32`. Built-in kinds use bare names; kinds
-/// defined elsewhere use `<vendor>/<kind>`, and a registry rejects a duplicate. Names
-/// are what a step registry is keyed by.
+/// repositories never have to agree on a `u32`. Built-in kinds use bare names;
+/// kinds defined elsewhere use `<vendor>/<kind>`, and a registry rejects a
+/// duplicate. Names are what a step registry is keyed by.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StepKindId(SmolStr);
@@ -163,7 +164,8 @@ impl StepKindId {
         Self(SmolStr::new(name))
     }
 
-    /// For constants: `const PROCESS: StepKindId = StepKindId::new_static("process")`.
+    /// For constants: `const PROCESS: StepKindId =
+    /// StepKindId::new_static("process")`.
     pub const fn new_static(name: &'static str) -> Self {
         Self(SmolStr::new_static(name))
     }
@@ -223,8 +225,8 @@ impl Generation {
 }
 
 impl Attempt {
-    /// Every firing starts here. Counters never carry across firings, so a later
-    /// generation retries from scratch.
+    /// Every firing starts here. Counters never carry across firings, so a
+    /// later generation retries from scratch.
     pub const FIRST: Attempt = Attempt(1);
 
     pub const fn next(self) -> Attempt {
@@ -233,9 +235,10 @@ impl Attempt {
 }
 
 impl<S> EdgeId<S> {
-    /// Reserved: no edge declared in a graph may use this id. The engine allocates
-    /// seed edges for entry nodes and expansion clones from the free id space, and
-    /// keeps this one out of play as an unambiguous "not an edge" sentinel.
+    /// Reserved: no edge declared in a graph may use this id. The engine
+    /// allocates seed edges for entry nodes and expansion clones from the
+    /// free id space, and keeps this one out of play as an unambiguous "not
+    /// an edge" sentinel.
     pub const SEED: EdgeId<S> = EdgeId::new(u32::MAX);
 }
 

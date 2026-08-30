@@ -1,8 +1,8 @@
-//! `RunHandle::deliver`: the host delivers a value into a live firing, through the
-//! engine, so question and answer are both in the log. Delivery is reliable — the
-//! per-firing forwarder awaits channel capacity — and the disposition reports how
-//! it landed: `Delivered` once the value is in the firing's control channel,
-//! `NotLive` when the firing was gone or ended first.
+//! `RunHandle::deliver`: the host delivers a value into a live firing, through
+//! the engine, so question and answer are both in the log. Delivery is reliable
+//! — the per-firing forwarder awaits channel capacity — and the disposition
+//! reports how it landed: `Delivered` once the value is in the firing's control
+//! channel, `NotLive` when the firing was gone or ended first.
 
 mod support;
 
@@ -55,8 +55,8 @@ impl steps::StepRunner for CollectStep {
     }
 }
 
-/// Never reads its control channel; returns once `finish_file` exists. What a step
-/// busy with real work looks like to the delivery path.
+/// Never reads its control channel; returns once `finish_file` exists. What a
+/// step busy with real work looks like to the delivery path.
 struct BusyStep;
 
 const BUSY_KIND: ir::StepKindId = ir::StepKindId::new_static("busy");
@@ -108,8 +108,9 @@ async fn deliver(handle: &RunHandle, firing: FiringId, value: Value) -> DeliverD
 // ── The battery ───────────────────────────────────────────────────────────
 
 /// The minimal human-gate shape, end to end: a step waits on `ctx.control` for
-/// `Deliver(answer)` and returns it as its output. Question and answer are both in
-/// the log, replay is byte-identical, and a delivery after the run is `NotLive`.
+/// `Deliver(answer)` and returns it as its output. Question and answer are both
+/// in the log, replay is byte-identical, and a delivery after the run is
+/// `NotLive`.
 #[tokio::test]
 async fn a_gate_step_receives_an_answer_end_to_end() {
     let dir = RunDir::new("deliver-gate");
@@ -159,10 +160,10 @@ async fn a_gate_step_receives_an_answer_end_to_end() {
     );
 }
 
-/// Reliable delivery under backpressure: capacity-plus-one deliveries all arrive,
-/// in send order, while the driver loop stays live — a delivery to an unknown
-/// firing still gets its `NotLive` answer while the overflow send is parked on the
-/// forwarder.
+/// Reliable delivery under backpressure: capacity-plus-one deliveries all
+/// arrive, in send order, while the driver loop stays live — a delivery to an
+/// unknown firing still gets its `NotLive` answer while the overflow send is
+/// parked on the forwarder.
 #[tokio::test]
 async fn ordering_and_liveness_hold_when_the_control_channel_is_full() {
     let dir = RunDir::new("deliver-order");
@@ -275,9 +276,9 @@ async fn a_firing_that_finishes_first_turns_a_parked_delivery_not_live() {
     assert_eq!(output_of(&report, "gate"), json!("done"));
 }
 
-/// `Deliver` never starts the cancellation ladder: no hard deadline is armed, so a
-/// step that keeps working past `grace + slack` after its answer still finishes on
-/// its own terms.
+/// `Deliver` never starts the cancellation ladder: no hard deadline is armed,
+/// so a step that keeps working past `grace + slack` after its answer still
+/// finishes on its own terms.
 #[tokio::test]
 async fn a_delivery_arms_no_hard_deadline() {
     let dir = RunDir::new("deliver-no-deadline");
@@ -314,8 +315,8 @@ async fn a_delivery_arms_no_hard_deadline() {
     );
 }
 
-/// A delivery into a running process step is not a stop. The step has nothing to
-/// hand the value to, so it drops it and the script runs to its natural end:
+/// A delivery into a running process step is not a stop. The step has nothing
+/// to hand the value to, so it drops it and the script runs to its natural end:
 /// `Success`, with no `cancel_escalation` — not `Cancelled` after a SIGTERM.
 #[tokio::test]
 async fn a_delivery_does_not_terminate_a_process_step() {
@@ -372,10 +373,10 @@ echo "saw=go" > "$CI_OUTPUT"
 
 const SECRET: &str = "hunter2-but-long-enough-to-mask";
 
-/// The decisive secret test, asserting both sides: a secret registered after run
-/// start crosses as a reference, resolves at dispatch into the step — which
-/// receives the original value — while the serialized log and state hold no secret
-/// bytes.
+/// The decisive secret test, asserting both sides: a secret registered after
+/// run start crosses as a reference, resolves at dispatch into the step — which
+/// receives the original value — while the serialized log and state hold no
+/// secret bytes.
 #[tokio::test]
 async fn a_sensitive_answer_crosses_as_a_reference_and_never_enters_the_log() {
     let dir = RunDir::new("deliver-secret");

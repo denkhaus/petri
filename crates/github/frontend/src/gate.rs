@@ -3,34 +3,36 @@
 //!
 //! A step-level `if:` (and an action's `pre-if` / `post-if`) does not become an
 //! engine precondition. It lowers into the step's config as a small expression
-//! tree — the **gate** — and the step kind evaluates it at spawn, before session
-//! files are created and before any process starts. One mechanism evaluates every
-//! step-level condition; nothing inspects condition text to decide admission.
+//! tree — the **gate** — and the step kind evaluates it at spawn, before
+//! session files are created and before any process starts. One mechanism
+//! evaluates every step-level condition; nothing inspects condition text to
+//! decide admission.
 //!
 //! Leaves of the gate:
 //!
 //! - A maximal subtree that needs nothing from the step — no `hashFiles`, no
-//!   `env.*` — lowers to one engine expression and rides as `{"lit": {"$expr": id}}`.
-//!   The engine resolves it to a literal when the step fires, as it does for any
-//!   config value, so the step sees `{"lit": value}`.
+//!   `env.*` — lowers to one engine expression and rides as `{"lit": {"$expr":
+//!   id}}`. The engine resolves it to a literal when the step fires, as it does
+//!   for any config value, so the step sees `{"lit": value}`.
 //! - `env.NAME` becomes `{"$env": "NAME", "or": <gate>}`: the step resolves the
-//!   name from its own environment — its `env:` config and the job's accumulated
-//!   `GITHUB_ENV` — so it sees what earlier steps appended. The `or` fallback is
-//!   the engine's view of the same reference (the scope env), for names declared
-//!   in the workflow rather than written at run time.
+//!   name from its own environment — its `env:` config and the job's
+//!   accumulated `GITHUB_ENV` — so it sees what earlier steps appended. The
+//!   `or` fallback is the engine's view of the same reference (the scope env),
+//!   for names declared in the workflow rather than written at run time.
 //! - `hashFiles(...)` with literal patterns is a `{"lit": "<sentinel>"}` string
-//!   leaf; the step resolves the sentinel against the workspace before comparing.
+//!   leaf; the step resolves the sentinel against the workspace before
+//!   comparing.
 //! - `secrets.*` stays rejected in conditions: gates carry no secret leaves.
 //!
 //! Interior nodes are the GitHub operators — `==`, `!=`, `<`, `<=`, `>`, `>=`,
-//! `&&`, `||`, `!` — with GitHub's semantics: `&&`/`||` return operand values, and
-//! the caller applies GitHub truthiness to the root. Comparison and coercion come
-//! from the engine's own loose primitives ([`ir::expr::builtins::loose`]), so the
-//! two evaluators cannot drift.
+//! `&&`, `||`, `!` — with GitHub's semantics: `&&`/`||` return operand values,
+//! and the caller applies GitHub truthiness to the root. Comparison and
+//! coercion come from the engine's own loose primitives
+//! ([`ir::expr::builtins::loose`]), so the two evaluators cannot drift.
 //!
 //! Every literal is wrapped as `{"lit": …}` — unlike the bare values a first
-//! sketch might use — because a resolved engine leaf can be *any* JSON value, and
-//! an unwrapped object could not be told apart from an operator node.
+//! sketch might use — because a resolved engine leaf can be *any* JSON value,
+//! and an unwrapped object could not be told apart from an operator node.
 
 use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::literal_value;
@@ -45,8 +47,8 @@ use crate::exprs::{Site, hashfiles_sentinel, literal_hashfiles_patterns, lower_e
 pub const OP_KEY: &str = "op";
 /// Config key for an interior node's operands.
 pub const ARGS_KEY: &str = "args";
-/// Config key wrapping a literal leaf (or an `{"$expr": id}` the engine resolves
-/// into one).
+/// Config key wrapping a literal leaf (or an `{"$expr": id}` the engine
+/// resolves into one).
 pub const LIT_KEY: &str = "lit";
 /// Config key for an env leaf: the variable name the step resolves.
 pub const ENV_KEY: &str = "$env";
@@ -102,13 +104,16 @@ impl GateOp {
 /// One node of a gate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gate {
-    /// A literal value. In the graph this may be `{"$expr": id}`, which the engine
-    /// resolves before the step sees it; a string may carry a `hashFiles` sentinel
-    /// the step resolves before comparing.
+    /// A literal value. In the graph this may be `{"$expr": id}`, which the
+    /// engine resolves before the step sees it; a string may carry a
+    /// `hashFiles` sentinel the step resolves before comparing.
     Lit(Value),
     /// An environment variable, resolved by the step; `or` when the step's
     /// environment does not bind it.
-    Env { name: String, or: Option<Box<Gate>> },
+    Env {
+        name: String,
+        or:   Option<Box<Gate>>,
+    },
     /// A GitHub operator over sub-gates.
     Op { op: GateOp, args: Vec<Gate> },
 }
@@ -134,9 +139,9 @@ impl Gate {
         }
     }
 
-    /// Read a gate back from config JSON. The format is strict: every node is an
-    /// `op`, an `$env`, or a `lit` object, so a resolved engine value can never be
-    /// mistaken for structure.
+    /// Read a gate back from config JSON. The format is strict: every node is
+    /// an `op`, an `$env`, or a `lit` object, so a resolved engine value
+    /// can never be mistaken for structure.
     pub fn from_value(value: &Value) -> Result<Gate, String> {
         let Some(map) = value.as_object() else {
             return Err(format!("a gate node must be an object, got {value}"));
@@ -241,7 +246,8 @@ impl Gate {
 
 /// Evaluate a gate to its value, GitHub-style: `&&` and `||` return operand
 /// values, comparisons use the loose rules, `!` negates loose truthiness. The
-/// caller applies [`loose::truthy`] to the result — GitHub truthiness at the root.
+/// caller applies [`loose::truthy`] to the result — GitHub truthiness at the
+/// root.
 ///
 /// `env` resolves an env leaf: `Ok(None)` means the name is unbound and the
 /// leaf's `or` (or null) stands in.
@@ -367,11 +373,11 @@ fn env_leaf(expr: &Expr) -> Option<String> {
 
 /// Lower one parsed condition onto a gate tree.
 ///
-/// Operators split; a subtree with nothing lazy in it lowers whole to one engine
-/// expression leaf; `env.NAME` and literal-pattern `hashFiles` become their step
-/// leaves. Something lazy under a non-operator falls to the engine-leaf path,
-/// which keeps `env` at its engine meaning (the scope env) and rejects
-/// `hashFiles` there. `None` means a diagnostic was reported.
+/// Operators split; a subtree with nothing lazy in it lowers whole to one
+/// engine expression leaf; `env.NAME` and literal-pattern `hashFiles` become
+/// their step leaves. Something lazy under a non-operator falls to the
+/// engine-leaf path, which keeps `env` at its engine meaning (the scope env)
+/// and rejects `hashFiles` there. `None` means a diagnostic was reported.
 pub fn condition_tree(
     ast: &Expr,
     site: &Site,
@@ -421,7 +427,7 @@ pub fn condition_tree(
         Expr::Unary(UnaryOp::Not, arg) => {
             let arg = condition_tree(arg, site, span, table, diags)?;
             Some(Gate::Op {
-                op: GateOp::Not,
+                op:   GateOp::Not,
                 args: vec![arg],
             })
         }
@@ -429,7 +435,7 @@ pub fn condition_tree(
             let l = condition_tree(l, site, span, table, diags)?;
             let r = condition_tree(r, site, span, table, diags)?;
             Some(Gate::Op {
-                op: gate_op(*op),
+                op:   gate_op(*op),
                 args: vec![l, r],
             })
         }
@@ -538,20 +544,17 @@ mod tests {
     #[test]
     fn the_wire_format_round_trips() {
         let gate = Gate::Op {
-            op: GateOp::And,
-            args: vec![
-                Gate::Lit(json!(true)),
-                Gate::Op {
-                    op: GateOp::Ne,
-                    args: vec![
-                        Gate::Env {
-                            name: "HAS_TOKEN".into(),
-                            or: Some(Box::new(Gate::Lit(Value::Null))),
-                        },
-                        Gate::Lit(json!("")),
-                    ],
-                },
-            ],
+            op:   GateOp::And,
+            args: vec![Gate::Lit(json!(true)), Gate::Op {
+                op:   GateOp::Ne,
+                args: vec![
+                    Gate::Env {
+                        name: "HAS_TOKEN".into(),
+                        or:   Some(Box::new(Gate::Lit(Value::Null))),
+                    },
+                    Gate::Lit(json!("")),
+                ],
+            }],
         };
         let value = gate.to_value();
         assert_eq!(Gate::from_value(&value).unwrap(), gate);
@@ -570,39 +573,39 @@ mod tests {
         use ir::expr::builtins::loose;
         // `&&`/`||` return operands; comparisons are loose and case-insensitive.
         let and = Gate::Op {
-            op: GateOp::And,
+            op:   GateOp::And,
             args: vec![Gate::Lit(json!("x")), Gate::Lit(json!("y"))],
         };
         assert_eq!(eval(&and, &mut no_env).unwrap(), json!("y"));
         let or = Gate::Op {
-            op: GateOp::Or,
+            op:   GateOp::Or,
             args: vec![Gate::Lit(json!("")), Gate::Lit(json!("fallback"))],
         };
         assert_eq!(eval(&or, &mut no_env).unwrap(), json!("fallback"));
         let eq = Gate::Op {
-            op: GateOp::Eq,
+            op:   GateOp::Eq,
             args: vec![Gate::Lit(json!("Linux")), Gate::Lit(json!("linux"))],
         };
         assert_eq!(eval(&eq, &mut no_env).unwrap(), json!(true));
         let lt = Gate::Op {
-            op: GateOp::Lt,
+            op:   GateOp::Lt,
             args: vec![Gate::Lit(json!("3")), Gate::Lit(json!(10))],
         };
         assert_eq!(eval(&lt, &mut no_env).unwrap(), json!(true));
         let not = Gate::Op {
-            op: GateOp::Not,
+            op:   GateOp::Not,
             args: vec![Gate::Lit(json!(""))],
         };
         assert_eq!(eval(&not, &mut no_env).unwrap(), json!(true));
         // An unbound env leaf takes its fallback, else null.
         let env = Gate::Env {
             name: "MISSING".into(),
-            or: Some(Box::new(Gate::Lit(json!("default")))),
+            or:   Some(Box::new(Gate::Lit(json!("default")))),
         };
         assert_eq!(eval(&env, &mut no_env).unwrap(), json!("default"));
         let bare = Gate::Env {
             name: "MISSING".into(),
-            or: None,
+            or:   None,
         };
         assert!(!loose::truthy(&eval(&bare, &mut no_env).unwrap()));
         // A bound one wins over the fallback.

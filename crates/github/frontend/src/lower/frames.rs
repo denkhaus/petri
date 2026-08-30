@@ -6,12 +6,11 @@ use std::collections::BTreeMap;
 
 use frontend::diag::{Diagnostics, Span};
 
+use super::{CallEdge, Entry, EntryKind, Frame, FrameCtx, Lowering};
 use crate::call::{self, CallGraph, CalleeSource};
 use crate::exprs::{SEP, SecretMap, undeclared_secret, whole_value_secret};
 use crate::inputs;
 use crate::model::{CallInterface, Job, SecretsArg, Workflow, WorkflowCall};
-
-use super::{CallEdge, Entry, EntryKind, Frame, FrameCtx, Lowering};
 
 /// A job under its frame's prefix: the id and every `needs` entry prefixed, so
 /// names, `JobNodes` keys and wiring stay collision-free across inlined
@@ -65,15 +64,15 @@ pub(super) fn plan<'w, 'a>(
             let kind = match callee {
                 Some((callee_source, callee_wf)) => {
                     frames.push(Frame {
-                        wf: callee_wf,
-                        source: callee_source.clone(),
-                        prefix: materialized.id.clone(),
-                        call: Some(CallEdge {
+                        wf:           callee_wf,
+                        source:       callee_source.clone(),
+                        prefix:       materialized.id.clone(),
+                        call:         Some(CallEdge {
                             caller: i,
-                            entry: entries.len(),
+                            entry:  entries.len(),
                         }),
                         in_expansion: in_expansion || has_matrix,
-                        depth: depth + 1,
+                        depth:        depth + 1,
                     });
                     EntryKind::Call {
                         callee: frames.len() - 1,

@@ -1,5 +1,5 @@
-//! Handoff §4: `PartialSuccess` is first-class, and `Status::is_success_like` is the
-//! single place success-likeness is defined.
+//! Handoff §4: `PartialSuccess` is first-class, and `Status::is_success_like`
+//! is the single place success-likeness is defined.
 
 mod support;
 
@@ -10,10 +10,10 @@ use ir::{
 use serde_json::json;
 use support::{Harness, NOOP, process_outcome};
 
-/// Handoff §7 test 5. A soft-failed process step: exit 1 under `soft_fail: [1]`.
-/// Joins and default success guards treat it as a success, a `partial_success` guard
-/// can still route it distinctly, the log keeps the underlying exit status, and retry
-/// never triggers.
+/// Handoff §7 test 5. A soft-failed process step: exit 1 under `soft_fail:
+/// [1]`. Joins and default success guards treat it as a success, a
+/// `partial_success` guard can still route it distinctly, the log keeps the
+/// underlying exit status, and retry never triggers.
 #[test]
 fn a_soft_failed_step_is_success_like_but_still_distinguishable() {
     let mut b = GraphBuilder::new();
@@ -33,13 +33,9 @@ fn a_soft_failed_step_is_success_like_but_still_distinguishable() {
     };
     // Two groups: the default success path and a distinct soft-failure path. Both
     // fire, which is what "success-like, but still visible" means.
-    b.fan_out_groups(
-        build,
-        vec![
-            vec![Arm::when(deploy, succeeded)],
-            vec![Arm::when(warn, was_partial)],
-        ],
-    );
+    b.fan_out_groups(build, vec![vec![Arm::when(deploy, succeeded)], vec![
+        Arm::when(warn, was_partial),
+    ]]);
     b.link(deploy, finish);
     b.link(warn, finish);
     b.set_join(finish, JoinPolicy::All);
@@ -135,8 +131,8 @@ fn is_success_like_is_the_only_classification() {
     assert!(Status::TimedOut.is_failure());
 }
 
-/// A `PartialSuccess` converted from a failure always carries it; a clean partial
-/// completion carries nothing, because nothing failed.
+/// A `PartialSuccess` converted from a failure always carries it; a clean
+/// partial completion carries nothing, because nothing failed.
 #[test]
 fn a_converted_partial_success_keeps_the_failure() {
     let converted = Status::partial(ir::FailureInfo::exit_status(3));

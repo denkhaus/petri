@@ -1,7 +1,8 @@
 //! Handoff §7 test 1: the expression grammar, property-tested.
 //!
-//! Parse → print → reparse round-trips; malformed text yields an error and never a
-//! panic; precedence is GitHub's; the two lowerings emit only table functions.
+//! Parse → print → reparse round-trips; malformed text yields an error and
+//! never a panic; precedence is GitHub's; the two lowerings emit only table
+//! functions.
 
 use frontend::expr::lower::{EngineBindings, strict};
 use frontend::expr::{BinaryOp, Expr, Segment, parse, print, split_template};
@@ -114,18 +115,19 @@ fn precedence_matches_github() {
 fn calls() {
     assert_eq!(
         parses_to("contains(github.ref, 'main')"),
-        Expr::call(
-            "contains",
-            vec![Expr::ident("github").property("ref"), Expr::string("main")]
-        )
+        Expr::call("contains", vec![
+            Expr::ident("github").property("ref"),
+            Expr::string("main")
+        ])
     );
     assert_eq!(parses_to("always()"), Expr::call("always", vec![]));
     assert_eq!(
         parses_to("format('{0}-{1}', a, b)"),
-        Expr::call(
-            "format",
-            vec![Expr::string("{0}-{1}"), Expr::ident("a"), Expr::ident("b")]
-        )
+        Expr::call("format", vec![
+            Expr::string("{0}-{1}"),
+            Expr::ident("a"),
+            Expr::ident("b")
+        ])
     );
 }
 
@@ -162,8 +164,8 @@ fn malformed_input_is_an_error_not_a_panic() {
     }
 }
 
-/// The parser has a depth cap, so pathological nesting is an error rather than a
-/// stack overflow.
+/// The parser has a depth cap, so pathological nesting is an error rather than
+/// a stack overflow.
 #[test]
 fn deep_nesting_is_rejected_not_overflowed() {
     let deep = format!("{}a{}", "(".repeat(10_000), ")".repeat(10_000));
@@ -174,35 +176,28 @@ fn deep_nesting_is_rejected_not_overflowed() {
 
 #[test]
 fn templates_split_into_segments() {
-    assert_eq!(
-        split_template("pre-${{ a.b }}-post").unwrap(),
-        vec![
-            Segment::Text("pre-".into()),
-            Segment::Expr {
-                source: " a.b ".into(),
-                offset: 7
-            },
-            Segment::Text("-post".into()),
-        ]
-    );
-    assert_eq!(
-        split_template("plain").unwrap(),
-        vec![Segment::Text("plain".into())]
-    );
+    assert_eq!(split_template("pre-${{ a.b }}-post").unwrap(), vec![
+        Segment::Text("pre-".into()),
+        Segment::Expr {
+            source: " a.b ".into(),
+            offset: 7,
+        },
+        Segment::Text("-post".into()),
+    ]);
+    assert_eq!(split_template("plain").unwrap(), vec![Segment::Text(
+        "plain".into()
+    )]);
     assert_eq!(split_template("").unwrap(), Vec::<Segment>::new());
-    assert_eq!(
-        split_template("${{ a }}${{ b }}").unwrap(),
-        vec![
-            Segment::Expr {
-                source: " a ".into(),
-                offset: 3
-            },
-            Segment::Expr {
-                source: " b ".into(),
-                offset: 11
-            },
-        ]
-    );
+    assert_eq!(split_template("${{ a }}${{ b }}").unwrap(), vec![
+        Segment::Expr {
+            source: " a ".into(),
+            offset: 3,
+        },
+        Segment::Expr {
+            source: " b ".into(),
+            offset: 11,
+        },
+    ]);
     assert_eq!(split_template("x ${{ never closed"), Err(2));
 }
 
@@ -257,9 +252,10 @@ fn arb_literal() -> impl Strategy<Value = Expr> {
     ]
 }
 
-/// Postfix operators bind tighter than `!` and every binary operator, so the parser
-/// can only ever produce a postfix node whose base is itself postfix-able. A
-/// generator that put `!a` under `.b` would be asking for a tree no source can mean.
+/// Postfix operators bind tighter than `!` and every binary operator, so the
+/// parser can only ever produce a postfix node whose base is itself
+/// postfix-able. A generator that put `!a` under `.b` would be asking for a
+/// tree no source can mean.
 fn postfixable(e: Expr) -> Expr {
     match e {
         Expr::Unary(..) | Expr::Binary(..) => Expr::Group(Box::new(e)),

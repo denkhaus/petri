@@ -33,7 +33,7 @@ impl Drop for Scratch {
 
 struct Reply {
     status: u16,
-    body: Vec<u8>,
+    body:   Vec<u8>,
 }
 
 impl Reply {

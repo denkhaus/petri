@@ -3,14 +3,14 @@
 //! The frontend lowers a literal-pattern `hashFiles` call in step config to a
 //! sentinel (like a secret's); this module replaces it with the hash before the
 //! step's process spawns. The hash is computed **in the job environment** — a
-//! short `node` program walks `GITHUB_WORKSPACE` — so it sees the same files the
-//! step would, wherever the job runs. `node` is already this runner's requirement
-//! for JavaScript actions.
+//! short `node` program walks `GITHUB_WORKSPACE` — so it sees the same files
+//! the step would, wherever the job runs. `node` is already this runner's
+//! requirement for JavaScript actions.
 //!
-//! The algorithm is GitHub's: each matched file's SHA-256 digest, folded through
-//! one more SHA-256, as lowercase hex; the empty string when nothing matches.
-//! Patterns are relative to `GITHUB_WORKSPACE` and support `*`, `?`, `**` and
-//! leading-`!` negation; symbolic links are not followed.
+//! The algorithm is GitHub's: each matched file's SHA-256 digest, folded
+//! through one more SHA-256, as lowercase hex; the empty string when nothing
+//! matches. Patterns are relative to `GITHUB_WORKSPACE` and support `*`, `?`,
+//! `**` and leading-`!` negation; symbolic links are not followed.
 
 use std::collections::BTreeMap;
 
@@ -92,9 +92,9 @@ console.log('petri-hashfiles='+JSON.stringify(
   specs.map(s=>s.any?s.outer.digest('hex'):'')));
 "#;
 
-/// Replace every hashFiles sentinel in the config's `run` and env values with the
-/// hash of the matched workspace files, computed in the job environment. A config
-/// with no sentinel passes through untouched.
+/// Replace every hashFiles sentinel in the config's `run` and env values with
+/// the hash of the matched workspace files, computed in the job environment. A
+/// config with no sentinel passes through untouched.
 pub(crate) async fn resolve_hashfiles(
     mut process: ProcessConfig,
     env: &dyn ExecEnv,
@@ -178,9 +178,9 @@ async fn compute(
     );
     let spec = ProcessSpec {
         program: SmolStr::new("node"),
-        args: vec![SmolStr::new("-e"), SmolStr::new(HELPER_JS)],
-        env: helper_env,
-        cwd: None,
+        args:    vec![SmolStr::new("-e"), SmolStr::new(HELPER_JS)],
+        env:     helper_env,
+        cwd:     None,
     };
     let mut handle = env.spawn(spec).await.map_err(|e| {
         fail(format!(

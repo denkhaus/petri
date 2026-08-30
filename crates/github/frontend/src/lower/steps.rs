@@ -10,19 +10,18 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, Budget, ExprId, ExprOrValue, NodeId, ScopeId, StepRef, Value};
 use serde_json::{Map, json};
 
+use super::{ActionPlan, EnvValue, Lowering, if_expr_source, names_status_function};
 use crate::action::RUN_KIND;
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar};
 use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, Step};
 
-use super::{ActionPlan, EnvValue, Lowering, if_expr_source, names_status_function};
-
 /// GitHub's default job timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(360 * 60);
 
 impl<'w, 'a> Lowering<'w, 'a> {
-    /// The node(s) for one step: one `github/run` node, one `github/action` node,
-    /// or a composite's inlined chain.
+    /// The node(s) for one step: one `github/run` node, one `github/action`
+    /// node, or a composite's inlined chain.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn step_nodes(
         &mut self,
@@ -225,8 +224,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// The step's `env:` as config, secrets from the job pushed down first. Step env
-    /// is also made visible to the step's own expressions through `site`.
+    /// The step's `env:` as config, secrets from the job pushed down first.
+    /// Step env is also made visible to the step's own expressions through
+    /// `site`.
     pub(super) fn step_env_config(
         &mut self,
         step: &Step<'_>,
@@ -244,13 +244,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
             match self.env_value(node, step_site, true) {
                 Some(EnvValue::Plain(v)) => {
                     step_site.step_env.insert(key.clone(), v.clone());
-                    env_config.insert(
-                        key.clone(),
-                        match v {
-                            ExprOrValue::Value(v) => v,
-                            ExprOrValue::Expr(id) => json!({ EXPR_PLACEHOLDER_KEY: id.raw() }),
-                        },
-                    );
+                    env_config.insert(key.clone(), match v {
+                        ExprOrValue::Value(v) => v,
+                        ExprOrValue::Expr(id) => json!({ EXPR_PLACEHOLDER_KEY: id.raw() }),
+                    });
                 }
                 Some(EnvValue::Secret(name)) => {
                     env_config.insert(
@@ -273,17 +270,18 @@ impl<'w, 'a> Lowering<'w, 'a> {
         self.b.set_budget(id, Budget::new(1, timeout));
     }
 
-    /// A main step's gate: the job started, and the step's own condition (default
-    /// `success()` over earlier steps), attached to the node's config for the
-    /// step kind to evaluate at spawn. The node carries no engine precondition.
+    /// A main step's gate: the job started, and the step's own condition
+    /// (default `success()` over earlier steps), attached to the node's
+    /// config for the step kind to evaluate at spawn. The node carries no
+    /// engine precondition.
     pub(super) fn gate_main_node(&mut self, id: NodeId, step: &Step<'_>, step_site: &Site) {
         let started = step_site.job_started(self.b.exprs());
         let gate = self.step_gate(step.condition, step_site, step.span.clone(), &[started]);
         self.attach_gate(id, gate);
     }
 
-    /// The step-level condition as a gate. `prereqs` are engine-side terms ANDed
-    /// in front — the job-started term, a post node's main-ran term.
+    /// The step-level condition as a gate. `prereqs` are engine-side terms
+    /// ANDed in front — the job-started term, a post node's main-ran term.
     ///
     /// A condition with nothing only the step can resolve — no `env.*`, no
     /// `hashFiles` — collapses with the prerequisites into a single engine
@@ -323,7 +321,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         self.collapse_gate(prereqs, cond)
     }
 
-    /// The all-engine case: one `$expr` leaf holding `prereq && … && condition`.
+    /// The all-engine case: one `$expr` leaf holding `prereq && … &&
+    /// condition`.
     fn collapse_gate(&mut self, prereqs: &[ExprId], cond: Option<ExprId>) -> Value {
         let mut acc: Option<ExprId> = None;
         for term in prereqs.iter().copied().chain(cond) {
@@ -336,10 +335,11 @@ impl<'w, 'a> Lowering<'w, 'a> {
         Gate::expr(id).to_value()
     }
 
-    /// The gate tree for a condition with step-resolved leaves: prerequisites and
-    /// the implicit `success()` (unless the condition names a status function) as
-    /// engine leaves, then the condition split on its operators. GitHub
-    /// truthiness lands at the root, in the step's evaluator.
+    /// The gate tree for a condition with step-resolved leaves: prerequisites
+    /// and the implicit `success()` (unless the condition names a status
+    /// function) as engine leaves, then the condition split on its
+    /// operators. GitHub truthiness lands at the root, in the step's
+    /// evaluator.
     fn lazy_gate(
         &mut self,
         ast: &frontend::expr::Expr,
@@ -359,16 +359,17 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let gate = match terms.len() {
             1 => terms.pop().expect("one term"),
             _ => Gate::Op {
-                op: GateOp::And,
+                op:   GateOp::And,
                 args: terms,
             },
         };
         gate.to_value()
     }
 
-    /// The engine's `scope_cancelled` static as a config placeholder: the bit that
-    /// turns a false gate into a `Cancelled` record rather than a `Skipped` one,
-    /// mirroring how the engine records a false precondition in a cancelled scope.
+    /// The engine's `scope_cancelled` static as a config placeholder: the bit
+    /// that turns a false gate into a `Cancelled` record rather than a
+    /// `Skipped` one, mirroring how the engine records a false precondition
+    /// in a cancelled scope.
     pub(super) fn scope_cancelled_config(&mut self) -> Value {
         let id = self.b.exprs().var("scope_cancelled");
         json!({ EXPR_PLACEHOLDER_KEY: id.raw() })

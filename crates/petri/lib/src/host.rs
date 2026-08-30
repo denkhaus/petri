@@ -14,14 +14,14 @@
 //!   read exactly as the log's own deserialization checks it (standing
 //!   no-migrator policy); each further line is one record.
 //!
-//! This file convention is the standalone host's own, not the core's: the core's
-//! whole persistence surface is `EventLog`'s serde plus
+//! This file convention is the standalone host's own, not the core's: the
+//! core's whole persistence surface is `EventLog`'s serde plus
 //! [`EventLog::try_from_records`]. A system with its own store persists records
 //! through its own observer and never sees these files.
 //!
 //! These two files are the run; everything else under the run dir — workspaces,
-//! logs, the executors' own records (`groups/`, `docker-run-id`) — identifies the
-//! processes and containers of *this* run and fences them on resume. A fork
+//! logs, the executors' own records (`groups/`, `docker-run-id`) — identifies
+//! the processes and containers of *this* run and fences them on resume. A fork
 //! therefore copies exactly these two files into a fresh run dir, nothing else.
 //!
 //! The battery's durability bar is flush per record, no fsync: on process death
@@ -32,9 +32,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
-
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 
 use runtime::Runtime;
 use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
@@ -55,13 +54,13 @@ pub enum HostError {
     #[error("could not {action} `{path}`: {source}")]
     Io {
         action: &'static str,
-        path: PathBuf,
+        path:   PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("`{path}`: {source}")]
     Events {
-        path: PathBuf,
+        path:   PathBuf,
         #[source]
         source: EventsDecodeError,
     },
@@ -75,7 +74,7 @@ pub enum HostError {
     EncodeGraph(#[source] serde_json::Error),
     #[error("`{path}` is not a graph: {source}")]
     BadGraph {
-        path: PathBuf,
+        path:   PathBuf,
         #[source]
         source: serde_json::Error,
     },
@@ -113,12 +112,12 @@ struct Header {
 /// One successful `events.jsonl` decode.
 #[derive(Debug)]
 pub struct DecodedEvents {
-    pub log: EventLog,
+    pub log:       EventLog,
     /// Byte length of the clean prefix: everything up to and including the last
     /// terminating newline. Resume truncates the file here before appending.
     pub clean_len: usize,
     /// An EOF-torn final line was dropped. Worth a warning; never an error.
-    pub torn: bool,
+    pub torn:      bool,
 }
 
 /// Decode `events.jsonl` bytes: header, records, strict torn-line rule.
@@ -140,7 +139,7 @@ pub fn decode_events(bytes: &[u8]) -> Result<DecodedEvents, EventsDecodeError> {
     let mut records: Vec<EventRecord> = Vec::new();
     for (index, line) in lines.enumerate() {
         let record = serde_json::from_slice(line).map_err(|e| EventsDecodeError::BadRecord {
-            line: index + 2,
+            line:    index + 2,
             message: e.to_string(),
         })?;
         records.push(record);
@@ -172,11 +171,11 @@ pub fn encode_events(log: &EventLog) -> Vec<u8> {
 pub fn read_events(path: &Path) -> Result<DecodedEvents, HostError> {
     let bytes = std::fs::read(path).map_err(|e| HostError::Io {
         action: "read",
-        path: path.to_path_buf(),
+        path:   path.to_path_buf(),
         source: e,
     })?;
     decode_events(&bytes).map_err(|e| HostError::Events {
-        path: path.to_path_buf(),
+        path:   path.to_path_buf(),
         source: e,
     })
 }
@@ -197,7 +196,7 @@ enum Msg {
 /// record is flushed as it lands, without fsync. `finish` drains the queue,
 /// flushes, and reports any write error.
 pub struct JsonlEventLog {
-    tx: Sender<Msg>,
+    tx:         Sender<Msg>,
     /// Records below this seq are already in the file — the resume case, where
     /// the driver redelivers at-least-once and the file is the high-water mark.
     high_water: u64,
@@ -299,7 +298,7 @@ fn encode_graph_checked(graph: &Graph, masker: &Masker) -> Result<Vec<u8>, HostE
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
     std::fs::write(path, bytes).map_err(|e| HostError::Io {
         action: "write",
-        path: path.to_path_buf(),
+        path:   path.to_path_buf(),
         source: e,
     })
 }
@@ -313,7 +312,7 @@ pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
     std::fs::create_dir_all(&run_dir).map_err(|e| HostError::Io {
         action: "create",
-        path: run_dir.clone(),
+        path:   run_dir.clone(),
         source: e,
     })?;
     let encoded = encode_graph_checked(&graph, &rt.masker())?;
@@ -321,7 +320,7 @@ pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
     let events = run_dir.join(EVENTS_FILE);
     let battery = JsonlEventLog::create(&events).map_err(|e| HostError::Io {
         action: "create",
-        path: events,
+        path:   events,
         source: e,
     })?;
     Ok(rt.driver(graph).observe(Arc::new(battery)))
@@ -340,7 +339,7 @@ fn read_graph(rt: &Runtime) -> Result<Graph, HostError> {
     let path = rt.run_options().run_dir.join(GRAPH_FILE);
     let bytes = std::fs::read(&path).map_err(|e| HostError::Io {
         action: "read",
-        path: path.clone(),
+        path:   path.clone(),
         source: e,
     })?;
     serde_json::from_slice(&bytes).map_err(|e| HostError::BadGraph { path, source: e })
@@ -375,13 +374,13 @@ fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostE
             .open(&events)
             .map_err(|e| HostError::Io {
                 action: "open",
-                path: events.clone(),
+                path:   events.clone(),
                 source: e,
             })?;
         file.set_len(decoded.clean_len as u64)
             .map_err(|e| HostError::Io {
                 action: "truncate",
-                path: events.clone(),
+                path:   events.clone(),
                 source: e,
             })?;
     }
@@ -389,7 +388,7 @@ fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostE
     let (driver, info) = rt.resume_driver(graph, decoded.log)?;
     let battery = JsonlEventLog::append_to(&events, loaded).map_err(|e| HostError::Io {
         action: "open",
-        path: events,
+        path:   events,
         source: e,
     })?;
     Ok((driver.observe(Arc::new(battery)), info))

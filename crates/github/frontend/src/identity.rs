@@ -70,7 +70,7 @@ fn slug_from_url(url: &str) -> Option<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadIdentity {
     /// The commit HEAD resolves to, 40 hex characters.
-    pub sha: String,
+    pub sha:       String,
     /// The branch HEAD is on (`refs/heads/<name>`); a detached HEAD has none.
     pub reference: Option<String>,
 }
@@ -95,7 +95,7 @@ pub fn head_identity(repo: &Path) -> Option<HeadIdentity> {
         });
     }
     is_full_sha(head).then(|| HeadIdentity {
-        sha: head.to_string(),
+        sha:       head.to_string(),
         reference: None,
     })
 }
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(
             head_identity(&repo.0),
             Some(HeadIdentity {
-                sha: SHA.to_string(),
+                sha:       SHA.to_string(),
                 reference: Some("refs/heads/work".to_string()),
             })
         );
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(
             head_identity(&repo.0),
             Some(HeadIdentity {
-                sha: SHA.to_string(),
+                sha:       SHA.to_string(),
                 reference: None,
             })
         );
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(
             head_identity(&root.0.join("wt")),
             Some(HeadIdentity {
-                sha: SHA.to_string(),
+                sha:       SHA.to_string(),
                 reference: Some("refs/heads/topic".to_string()),
             })
         );

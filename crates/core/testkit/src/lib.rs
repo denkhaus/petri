@@ -1,7 +1,7 @@
 //! Shared test scaffolding.
 //!
-//! What every end-to-end harness needs and none should copy: a run directory that
-//! cleans itself up, readers over a [`RunReport`], the replay canary as an
+//! What every end-to-end harness needs and none should copy: a run directory
+//! that cleans itself up, readers over a [`RunReport`], the replay canary as an
 //! assertion, a step that ignores cancellation, and a step that needs a
 //! capability. Dev-dependency only; never published.
 
@@ -84,8 +84,8 @@ pub fn add_script(b: &mut GraphBuilder, name: &str, scope: ScopeId, run: &str) -
     b.add_node(name, scope, StepRef::new(PROCESS_KIND, script(run)))
 }
 
-/// A step kind that ignores `Control::Cancel` and never returns, so the driver's
-/// hard deadline is the only thing that can end it.
+/// A step kind that ignores `Control::Cancel` and never returns, so the
+/// driver's hard deadline is the only thing that can end it.
 pub struct WedgedStep;
 
 pub const WEDGED_KIND: ir::StepKindId = ir::StepKindId::new_static("wedged");
@@ -136,7 +136,7 @@ pub struct SpliceConfig {
     #[serde(default)]
     requests: Vec<ir::SpliceRequest>,
     #[serde(default)]
-    output: Value,
+    output:   Value,
 }
 
 #[async_trait::async_trait]
@@ -150,8 +150,8 @@ impl steps::Step for SpliceStep {
     }
 }
 
-/// The handle a host registers as a capability: a concrete type over whatever it
-/// wraps. [`GreetStep`] requires it.
+/// The handle a host registers as a capability: a concrete type over whatever
+/// it wraps. [`GreetStep`] requires it.
 pub struct Greeting(pub &'static str);
 
 /// A step kind that requires the [`Greeting`] capability and outputs its text —

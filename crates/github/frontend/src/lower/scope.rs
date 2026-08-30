@@ -7,10 +7,9 @@ use ir::{ExprOrValue, RuntimeSpec, Scope, ScopeId, Value};
 use serde_json::json;
 use smol_str::SmolStr;
 
+use super::{EnvValue, Lowering};
 use crate::model::{Job, Workflow};
 use crate::runs_on;
-
-use super::{EnvValue, Lowering};
 
 /// The job container's `env:` entries, when the job has a container mapping.
 /// Read here for the scope and again by `job_body`'s secret scan, so a secret
@@ -111,7 +110,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     scope.env.insert(SmolStr::new(&key), v);
                 }
                 Some(EnvValue::Secret(_)) => {
-                    // Recorded in job_body via the same lookup; nothing to do here.
+                    // Recorded in job_body via the same lookup; nothing to do
+                    // here.
                 }
                 None => {}
             }
@@ -332,7 +332,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             return None;
         };
         Some(ir::RegistryCredentials {
-            username: SmolStr::new(username),
+            username:        SmolStr::new(username),
             password_secret: SmolStr::new(password_secret),
         })
     }

@@ -5,8 +5,8 @@ mod support;
 use ir::{Arm, BinOp, Budget, GraphBuilder, JoinPolicy, Outcome, RunStatus, Value, validate};
 use support::{Harness, NOOP};
 
-/// Three branches, one `All` join: the node fires once, when every incoming edge
-/// has a token.
+/// Three branches, one `All` join: the node fires once, when every incoming
+/// edge has a token.
 #[test]
 fn all_waits_for_every_incoming_edge() {
     let mut b = GraphBuilder::new();
@@ -147,7 +147,8 @@ fn generations_partition_the_join() {
     assert_eq!(generations, vec![0, 1, 2]);
 }
 
-/// An entry node has no incoming edges: it is seeded, and its join never blocks.
+/// An entry node has no incoming edges: it is seeded, and its join never
+/// blocks.
 #[test]
 fn entry_nodes_are_seeded() {
     let mut b = GraphBuilder::new();

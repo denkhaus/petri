@@ -1,8 +1,8 @@
 //! Print an expression back to source.
 //!
-//! `parse(print(e)) == e` for every `e` the parser produces: the property tests hold
-//! the printer to it. Groups are printed as written, so precedence never has to be
-//! re-derived.
+//! `parse(print(e)) == e` for every `e` the parser produces: the property tests
+//! hold the printer to it. Groups are printed as written, so precedence never
+//! has to be re-derived.
 
 use super::ast::{Expr, Literal};
 

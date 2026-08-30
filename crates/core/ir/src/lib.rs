@@ -3,13 +3,14 @@
 //!
 //! A node fires when its [`JoinPolicy`] is satisfied by incoming tokens. On
 //! completion its [`Routing`] emits tokens on outgoing edges. Routing is an
-//! **AND of XORs**: each [`SelectGroup`] emits at most one token, and groups emit
-//! concurrently. The default is selection — one completing node routes to exactly one
-//! successor — so fan-out is never implicit. It takes writing more than one group,
-//! which keeps single-path workflows analyzable and makes parallelism visible.
+//! **AND of XORs**: each [`SelectGroup`] emits at most one token, and groups
+//! emit concurrently. The default is selection — one completing node routes to
+//! exactly one successor — so fan-out is never implicit. It takes writing more
+//! than one group, which keeps single-path workflows analyzable and makes
+//! parallelism visible.
 //!
-//! This crate is data and pure functions only. Coordination lives in the `engine`
-//! crate; side effects live behind traits in the host.
+//! This crate is data and pure functions only. Coordination lives in the
+//! `engine` crate; side effects live behind traits in the host.
 
 pub mod builder;
 pub mod desugar;

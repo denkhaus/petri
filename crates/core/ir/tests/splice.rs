@@ -66,7 +66,7 @@ fn delegation_permits_equal_or_lower_authority_only() {
     assert!(cap.may_delegate(SplicePolicy::Append));
     assert!(cap.may_delegate(cap), "equal-authority chaining is allowed");
     assert!(!cap.may_delegate(SplicePolicy::Replace {
-        scope: ReplaceScope::AllPending
+        scope: ReplaceScope::AllPending,
     }));
 }
 
@@ -134,10 +134,10 @@ fn exits_must_resolve_and_not_repeat() {
 fn a_fragment_is_executable_ir_never_hir() {
     let mut fragment = one_node_fragment();
     fragment.nodes[0].expand = Some(ir::Expansion::ForEach {
-        items: ir::ExprId::new(0),
-        target: ir::ExpandTarget::Node,
+        items:        ir::ExprId::new(0),
+        target:       ir::ExpandTarget::Node,
         max_parallel: None,
-        fail_fast: false,
+        fail_fast:    false,
     });
     let errors = validate_fragment(&fragment).unwrap_err();
     assert!(
@@ -171,7 +171,7 @@ fn an_attachment_must_name_a_fragment_node() {
     let request =
         SpliceRequest::append(one_node_fragment()).with_attachment(Attachment::DependsOn {
             node: NodeId::new(7),
-            on: ExistingNodeRef::new("build"),
+            on:   ExistingNodeRef::new("build"),
         });
     let errors = validate_request(&request).unwrap_err();
     assert!(
@@ -238,7 +238,7 @@ fn a_request_round_trips_through_serde() {
     let request =
         SpliceRequest::append(one_node_fragment()).with_attachment(Attachment::DependsOn {
             node: NodeId::new(0),
-            on: ExistingNodeRef::new("build#2"),
+            on:   ExistingNodeRef::new("build#2"),
         });
     let json = serde_json::to_value(&request).unwrap();
     let back: SpliceRequest = serde_json::from_value(json).unwrap();

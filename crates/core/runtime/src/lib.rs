@@ -1,19 +1,19 @@
 //! Core, assembled.
 //!
-//! Every other core crate is one layer and names no other implementation: the IR
-//! knows no executor, the executor interface knows no backend, the frontend trait
-//! knows no format. This crate is the one place those pieces are wired together —
-//! [`Runtime`] holds a frontend list, a step registry, an executor per
-//! [`ir::RuntimeTarget`], secrets and options, and drives a graph with the replay
-//! canary on. It is also the facade: [`ir`], [`engine`], [`driver`], [`frontend`],
-//! [`steps`] and [`executor`] are reachable through it, so one dependency reaches
-//! all of core.
+//! Every other core crate is one layer and names no other implementation: the
+//! IR knows no executor, the executor interface knows no backend, the frontend
+//! trait knows no format. This crate is the one place those pieces are wired
+//! together — [`Runtime`] holds a frontend list, a step registry, an executor
+//! per [`ir::RuntimeTarget`], secrets and options, and drives a graph with the
+//! replay canary on. It is also the facade: [`ir`], [`engine`], [`driver`],
+//! [`frontend`], [`steps`] and [`executor`] are reachable through it, so one
+//! dependency reaches all of core.
 //!
 //! The wiring goes one way. A component — another workflow format, another step
 //! kind — *registers onto* this builder with [`Runtime::frontend`] and
-//! [`Runtime::step`]; nothing registers *into* it, and no crate under `core` names
-//! a component. The distribution that ships is assembled a layer up, in `petri`,
-//! which is the crate that names them all.
+//! [`Runtime::step`]; nothing registers *into* it, and no crate under `core`
+//! names a component. The distribution that ships is assembled a layer up, in
+//! `petri`, which is the crate that names them all.
 
 pub use driver;
 pub use engine;

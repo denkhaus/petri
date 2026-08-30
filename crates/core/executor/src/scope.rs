@@ -24,24 +24,24 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct ServiceSpec {
     /// The alias other processes in the scope reach it by.
-    pub name: SmolStr,
-    pub image: SmolStr,
-    pub env: BTreeMap<SmolStr, SmolStr>,
+    pub name:        SmolStr,
+    pub image:       SmolStr,
+    pub env:         BTreeMap<SmolStr, SmolStr>,
     /// Port publications, as written (`host:container` or `container`).
-    pub ports: Vec<SmolStr>,
+    pub ports:       Vec<SmolStr>,
     /// Raw engine flags, passed through (health checks ride here).
-    pub options: Vec<SmolStr>,
+    pub options:     Vec<SmolStr>,
     pub credentials: Option<RegistryCredentials>,
 }
 
 impl ServiceSpec {
     pub fn new(name: &str, image: &str) -> Self {
         Self {
-            name: SmolStr::new(name),
-            image: SmolStr::new(image),
-            env: BTreeMap::new(),
-            ports: Vec::new(),
-            options: Vec::new(),
+            name:        SmolStr::new(name),
+            image:       SmolStr::new(image),
+            env:         BTreeMap::new(),
+            ports:       Vec::new(),
+            options:     Vec::new(),
             credentials: None,
         }
     }
@@ -52,18 +52,18 @@ impl ServiceSpec {
 /// realizes all of it; [`Executor::release`] tears all of it down.
 #[derive(Clone, Debug)]
 pub struct ScopeSpec {
-    pub id: ScopeId,
+    pub id:        ScopeId,
     /// Instance name, which is also the workspace directory name.
-    pub instance: SmolStr,
-    /// The scope's env, already resolved. Secrets are not here — they are fetched at
-    /// spawn time and never written down.
-    pub env: BTreeMap<SmolStr, SmolStr>,
-    pub runtime: RuntimeSpec,
+    pub instance:  SmolStr,
+    /// The scope's env, already resolved. Secrets are not here — they are
+    /// fetched at spawn time and never written down.
+    pub env:       BTreeMap<SmolStr, SmolStr>,
+    pub runtime:   RuntimeSpec,
     pub workspace: WorkspacePolicy,
     /// Sidecar containers with this scope's lifetime, healthy before acquire
     /// returns.
-    pub services: Vec<ServiceSpec>,
-    pub grace: Duration,
+    pub services:  Vec<ServiceSpec>,
+    pub grace:     Duration,
 }
 
 impl ScopeSpec {
@@ -106,7 +106,7 @@ impl ScopeSpec {
 /// log.
 #[derive(Clone)]
 pub struct AcquireContext {
-    secrets: Arc<dyn SecretProvider>,
+    secrets:  Arc<dyn SecretProvider>,
     progress: Arc<dyn ProgressSink>,
 }
 
@@ -118,7 +118,7 @@ impl AcquireContext {
     /// No secrets, no progress: tests and hosts with nothing to wire.
     pub fn bare() -> Self {
         Self {
-            secrets: Arc::new(MapSecrets::empty()),
+            secrets:  Arc::new(MapSecrets::empty()),
             progress: Arc::new(NoProgress),
         }
     }
@@ -161,12 +161,12 @@ impl Retention {
 
 /// What it takes to tear one environment down.
 ///
-/// Each executor defines its own — a workspace path and a retention policy on the
-/// host, a container name besides under Docker — and gets it back, untouched, in
-/// [`Executor::release`]. The interface only carries it and never looks inside, so a
-/// new kind of environment needs no change here. Any `Debug + Send + Sync + 'static`
-/// type qualifies: an executor derives `Debug` on a struct and passes it to
-/// [`EnvHandle::new`].
+/// Each executor defines its own — a workspace path and a retention policy on
+/// the host, a container name besides under Docker — and gets it back,
+/// untouched, in [`Executor::release`]. The interface only carries it and never
+/// looks inside, so a new kind of environment needs no change here. Any `Debug
+/// + Send + Sync + 'static` type qualifies: an executor derives `Debug` on a
+/// struct and passes it to [`EnvHandle::new`].
 pub trait Teardown: Any + std::fmt::Debug + Send + Sync {}
 
 impl<T: Any + std::fmt::Debug + Send + Sync> Teardown for T {}
@@ -174,11 +174,11 @@ impl<T: Any + std::fmt::Debug + Send + Sync> Teardown for T {}
 /// A live environment, and what it takes to get rid of it.
 #[derive(Clone)]
 pub struct EnvHandle {
-    scope: ScopeId,
+    scope:    ScopeId,
     instance: SmolStr,
-    env: Arc<dyn ExecEnv>,
+    env:      Arc<dyn ExecEnv>,
     teardown: Arc<dyn Teardown>,
-    runner: Option<Arc<dyn ContainerRunner>>,
+    runner:   Option<Arc<dyn ContainerRunner>>,
 }
 
 impl EnvHandle {
@@ -218,13 +218,15 @@ impl EnvHandle {
         Arc::clone(&self.env)
     }
 
-    /// The scope-bound one-shot container runner, when the executor provided one.
+    /// The scope-bound one-shot container runner, when the executor provided
+    /// one.
     pub fn container_runner(&self) -> Option<Arc<dyn ContainerRunner>> {
         self.runner.clone()
     }
 
-    /// The executor's own teardown record, when this handle was made by an executor
-    /// that uses `T`. `None` means the handle came from some other executor.
+    /// The executor's own teardown record, when this handle was made by an
+    /// executor that uses `T`. `None` means the handle came from some other
+    /// executor.
     pub fn teardown<T: Teardown>(&self) -> Option<&T> {
         // Deref to the trait object before upcasting. `Arc<dyn Teardown>` is itself a
         // `Teardown`, and a method call on the `Arc` would resolve there and downcast
@@ -270,7 +272,8 @@ pub trait Executor: Send + Sync {
 
     /// Tear down. Idempotent, and never fails the run: problems are reported.
     ///
-    /// `outcome` decides workspace retention, which the handoff's signature has no
-    /// room for — a scope cannot know on its own whether its work failed.
+    /// `outcome` decides workspace retention, which the handoff's signature has
+    /// no room for — a scope cannot know on its own whether its work
+    /// failed.
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport;
 }

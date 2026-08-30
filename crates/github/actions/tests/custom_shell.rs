@@ -1,6 +1,6 @@
-//! Custom `shell:` templates end to end: the step writes the resolved script to a
-//! file and runs the template with `{0}` substituted by its path, as GitHub does.
-//! Expressions and outputs work the same as with the built-in shells.
+//! Custom `shell:` templates end to end: the step writes the resolved script to
+//! a file and runs the template with `{0}` substituted by its path, as GitHub
+//! does. Expressions and outputs work the same as with the built-in shells.
 
 use std::process::Command;
 use std::time::Duration;

@@ -1,4 +1,5 @@
-//! `Node.meta`: opaque, host-facing metadata the engine carries and never reads.
+//! `Node.meta`: opaque, host-facing metadata the engine carries and never
+//! reads.
 
 use ir::{Graph, GraphBuilder, ScopeId, StepKindId, Value};
 use serde_json::json;
@@ -14,9 +15,9 @@ fn linear() -> Graph {
     b.build()
 }
 
-/// A graph serialized before `meta` existed still deserializes: the field defaults
-/// to `Null` and is skipped when null, so an unannotated graph round-trips to the
-/// same bytes it always had.
+/// A graph serialized before `meta` existed still deserializes: the field
+/// defaults to `Null` and is skipped when null, so an unannotated graph
+/// round-trips to the same bytes it always had.
 #[test]
 fn a_graph_without_meta_deserializes_to_null() {
     let graph = linear();
@@ -30,7 +31,8 @@ fn a_graph_without_meta_deserializes_to_null() {
     assert!(decoded.nodes.iter().all(|n| n.meta.is_null()));
 }
 
-/// Meta survives a round trip untouched: the engine carries it, nothing reads it.
+/// Meta survives a round trip untouched: the engine carries it, nothing reads
+/// it.
 #[test]
 fn meta_round_trips() {
     let mut b = GraphBuilder::new();

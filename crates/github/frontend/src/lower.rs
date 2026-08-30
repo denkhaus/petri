@@ -24,6 +24,8 @@ use frontend::expr::parse;
 use frontend::yaml::Node;
 use ir::{BinOp, ExprId, ExprOrValue, GraphBuilder, NodeId, ScopeId, Value};
 
+use self::frames::plan;
+use self::uses::ResolveFailure;
 use crate::action::{ActionLocation, ActionSource, Phase, PinnedAction};
 use crate::call::{self, CalleeSource};
 use crate::composite::{DockerAction, NodeAction};
@@ -31,76 +33,74 @@ use crate::exprs::{LoweredScalar, SEP, SecretMap, Site, lower_scalar};
 use crate::model::{Job, Step, Workflow};
 use crate::runners::RunnerMap;
 
-use self::frames::plan;
-use self::uses::ResolveFailure;
-
 struct JobNodes {
-    scope: ScopeId,
-    start: NodeId,
-    done: NodeId,
+    scope:  ScopeId,
+    start:  NodeId,
+    done:   NodeId,
     /// The last node of the step chain, which the expansion region ends at.
-    last: NodeId,
+    last:   NodeId,
     matrix: bool,
 }
 
 pub struct Lowering<'w, 'a> {
-    b: GraphBuilder,
-    diags: Diagnostics,
-    wf: &'w Workflow<'a>,
+    b:                   GraphBuilder,
+    diags:               Diagnostics,
+    wf:                  &'w Workflow<'a>,
     /// The planned frames — the root workflow and each inlined callee.
-    frames: Vec<Frame<'w, 'a>>,
-    files: &'w dyn FileSource,
+    frames:              Vec<Frame<'w, 'a>>,
+    files:               &'w dyn FileSource,
     /// Where `uses: owner/repo@ref` actions come from. `None` rejects them.
-    actions: Option<&'w dyn ActionSource>,
+    actions:             Option<&'w dyn ActionSource>,
     /// Which `runs-on` labels place on this machine.
-    runners: &'w RunnerMap,
+    runners:             &'w RunnerMap,
     /// Whether a supportable `actions/checkout` call becomes `github/checkout`
     /// (the local-checkout substitution) instead of running the real action.
     substitute_checkout: bool,
     /// Remote actions resolved so far, by reference as written: the pin and the
-    /// manifest text, or why not. A reference used by several steps resolves once.
-    resolved: HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
-    jobs: HashMap<String, JobNodes>,
-    spans: HashMap<NodeId, Span>,
+    /// manifest text, or why not. A reference used by several steps resolves
+    /// once.
+    resolved:            HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
+    jobs:                HashMap<String, JobNodes>,
+    spans:               HashMap<NodeId, Span>,
     /// The job in flight's per-leg `runs-on` resolutions: what each matrix leg
     /// resolved to, written by [`Lowering::expression_runs_on`] and taken back
     /// within the same [`Lowering::job_shell`] call for the job's `start` node
     /// meta. Never live across jobs.
-    leg_runs_on: Option<Value>,
+    leg_runs_on:         Option<Value>,
     /// The checkout's declared `github` identity — the repository slug from the
     /// origin remote where one exists — which placement guards evaluate
     /// against ([`crate::identity`]).
-    github_identity: Value,
+    github_identity:     Value,
     /// One context per frame — the root workflow and each inlined callee —
     /// bound top-down before any node exists ([`Lowering::bind_frame`]).
-    frame_ctx: Vec<FrameCtx>,
+    frame_ctx:           Vec<FrameCtx>,
     /// The frame whose workflow `self.wf` currently is ([`Lowering::enter`]).
-    current: usize,
+    current:             usize,
 }
 
 /// One workflow being lowered: the root, or a callee inlined under a call job.
 struct Frame<'w, 'a> {
-    wf: &'w Workflow<'a>,
+    wf:           &'w Workflow<'a>,
     /// Where this workflow's text came from — its own `./` references resolve
     /// against this.
-    source: CalleeSource,
+    source:       CalleeSource,
     /// `""` at the root; the call job's materialized id for a callee frame, so
     /// every node of the frame lives under `prefix/…`.
-    prefix: String,
+    prefix:       String,
     /// The call that brought the frame in: (caller frame, its entry index).
-    call: Option<CallEdge>,
+    call:         Option<CallEdge>,
     /// The frame sits inside a matrix call's expansion region: node names take
     /// `#index` suffixes, and further expansion heads cannot nest.
     in_expansion: bool,
     /// Callees below the root. Planning stops at [`call::MAX_DEPTH`] — the
     /// resolver already reported the cycle or the too-deep nest.
-    depth: usize,
+    depth:        usize,
 }
 
 #[derive(Clone, Copy)]
 struct CallEdge {
     caller: usize,
-    entry: usize,
+    entry:  usize,
 }
 
 /// One materialized job of the flat plan: which frame it belongs to, the job
@@ -108,13 +108,14 @@ struct CallEdge {
 /// no prefix), and whether it is a workflow call.
 struct Entry<'w, 'a> {
     frame: usize,
-    job: Cow<'w, Job<'a>>,
-    kind: EntryKind,
+    job:   Cow<'w, Job<'a>>,
+    kind:  EntryKind,
 }
 
 enum EntryKind {
     Job,
-    /// A `uses:` job whose callee resolved: the frame its jobs were planned into.
+    /// A `uses:` job whose callee resolved: the frame its jobs were planned
+    /// into.
     Call {
         callee: usize,
     },
@@ -126,20 +127,20 @@ enum EntryKind {
 struct FrameCtx {
     /// The `inputs` context: a call's bound `with:`, or the root's typed
     /// run-parameter reads.
-    inputs: Option<BTreeMap<String, ExprId>>,
+    inputs:        Option<BTreeMap<String, ExprId>>,
     /// The subset of `inputs` whose values are known at lowering — what the
     /// per-leg `runs-on` resolver may read.
     static_inputs: BTreeMap<String, Value>,
     /// How `secrets.*` names map to the provider's.
-    secrets: SecretMap,
+    secrets:       SecretMap,
     /// Inside a callee: the call's `start` node, ANDed into every job gate of
     /// the frame — when the call was skipped, nothing of the callee runs.
-    call_start: Option<String>,
+    call_start:    Option<String>,
     /// Inside a callee: the call's exit join, which every job's `done` feeds.
-    exit: Option<NodeId>,
+    exit:          Option<NodeId>,
     /// The frame's workflow was fetched from another repository, so its `./`
     /// step actions cannot resolve against this one.
-    remote: bool,
+    remote:        bool,
 }
 
 /// A `uses:` step that contributes standalone nodes — a JavaScript action or a
@@ -149,8 +150,8 @@ struct ActionPlan {
     /// Where the action's files are. `None` for `uses: docker://…`, which has
     /// no files at all.
     location: Option<ActionLocation>,
-    kind: PlanKind,
-    inputs: Vec<PlanInput>,
+    kind:     PlanKind,
+    inputs:   Vec<PlanInput>,
 }
 
 enum PlanKind {
@@ -189,18 +190,18 @@ impl ActionPlan {
 }
 
 struct PlanInput {
-    name: String,
+    name:     String,
     /// The default's text, expressions and all; lowered where the step is.
-    default: Option<String>,
+    default:  Option<String>,
     required: bool,
 }
 
 #[derive(Clone, Copy)]
 struct ActionContext<'s, 'job, 'step> {
-    job: &'s Job<'job>,
-    step: &'s Step<'step>,
-    scope: ScopeId,
-    site: &'s Site,
+    job:            &'s Job<'job>,
+    step:           &'s Step<'step>,
+    scope:          ScopeId,
+    site:           &'s Site,
     job_secret_env: &'s [(String, String)],
 }
 
@@ -309,7 +310,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs`
     /// known, matrix-ness known, the frame's inputs and secret map in scope, no
     /// steps yet. The `needs.*` context keys are the names as written — the
-    /// frame prefix is stripped — while the values keep the prefixed node names.
+    /// frame prefix is stripped — while the values keep the prefixed node
+    /// names.
     fn base_site(&self, job: &Job<'a>) -> Site {
         let ctx = &self.frame_ctx[self.current];
         let frame = &self.frames[self.current];
@@ -354,7 +356,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     /// An `if:`: absent means `success()`; present is evaluated with GitHub's
-    /// truthiness, and gets `success() &&` in front unless it names a status function.
+    /// truthiness, and gets `success() &&` in front unless it names a status
+    /// function.
     fn condition(
         &mut self,
         node: Option<Node<'_>>,
@@ -398,8 +401,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     /// One condition's expression text (the body of an `if:`, a `pre-if`, a
-    /// `post-if`) as a precondition: GitHub's truthiness, with `success() &&` in
-    /// front unless it names a status function.
+    /// `post-if`) as a precondition: GitHub's truthiness, with `success() &&`
+    /// in front unless it names a status function.
     fn condition_text(
         &mut self,
         source: &str,
@@ -468,15 +471,15 @@ enum EnvValue {
     Secret(String),
 }
 
-/// A YAML scalar as the string GitHub would pass: text as written, other scalars
-/// stringified, null empty.
+/// A YAML scalar as the string GitHub would pass: text as written, other
+/// scalars stringified, null empty.
 fn scalar_text(node: Node<'_>) -> String {
     scalar_text_opt(node).unwrap_or_default()
 }
 
-/// [`scalar_text`], with a YAML null as `None`: an input whose `default:` is null
-/// (or missing a value) has no default, and GitHub leaves it unset rather than
-/// passing `"null"` — while an explicit `default: ''` is the empty string.
+/// [`scalar_text`], with a YAML null as `None`: an input whose `default:` is
+/// null (or missing a value) has no default, and GitHub leaves it unset rather
+/// than passing `"null"` — while an explicit `default: ''` is the empty string.
 fn scalar_text_opt(node: Node<'_>) -> Option<String> {
     if node.as_scalar().is_some_and(|s| s.is_null()) {
         return None;
@@ -500,9 +503,9 @@ enum IfTemplateError {
     Unterminated,
 }
 
-/// The one expression an `if:` string holds: the text itself, or the body of its
-/// single `${{ }}`. Both readers of an `if:` go through here, so they cannot
-/// disagree on what counts as one expression.
+/// The one expression an `if:` string holds: the text itself, or the body of
+/// its single `${{ }}`. Both readers of an `if:` go through here, so they
+/// cannot disagree on what counts as one expression.
 fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
     if !text.contains("${{") {
         return Ok(text.to_string());

@@ -1,7 +1,7 @@
-//! Handoff §7 tests 3–6, the behavioural half: the status truth table, matrices,
-//! composites and job outputs, lowered by the real GHA frontend and run on the
-//! standard runtime. The pure lowering half stays with the frontend, in
-//! `crates/github/frontend/tests/lowering.rs`.
+//! Handoff §7 tests 3–6, the behavioural half: the status truth table,
+//! matrices, composites and job outputs, lowered by the real GHA frontend and
+//! run on the standard runtime. The pure lowering half stays with the frontend,
+//! in `crates/github/frontend/tests/lowering.rs`.
 
 mod support;
 
@@ -54,11 +54,9 @@ async fn status_functions_truth_table() {
             "        run: exit 1\n        continue-on-error: true",
             &["b", "d", "f"],
         ),
-        (
-            "skipped",
-            "        if: false\n        run: exit 0",
-            &["b", "d", "f"],
-        ),
+        ("skipped", "        if: false\n        run: exit 0", &[
+            "b", "d", "f",
+        ]),
     ];
     for (label, a_step, expected) in cases {
         let text = status_table_workflow(a_step);
@@ -159,11 +157,11 @@ jobs:
 }
 
 /// A cancel that lands with no step of the job cancelled: the cleanup job's
-/// first step is gated on `cancelled()`, and no earlier step of that job carries
-/// a `Cancelled` record — only the `scope_cancelled` static can make the gate
-/// true. The job itself opts in with `if: always()`; a dependent with no such
-/// gate never starts at all (GitHub cancels a queued job), and its steps record
-/// `Cancelled` rather than running.
+/// first step is gated on `cancelled()`, and no earlier step of that job
+/// carries a `Cancelled` record — only the `scope_cancelled` static can make
+/// the gate true. The job itself opts in with `if: always()`; a dependent with
+/// no such gate never starts at all (GitHub cancels a queued job), and its
+/// steps record `Cancelled` rather than running.
 #[tokio::test]
 async fn a_cancelled_step_fires_via_scope_cancelled() {
     let text = r#"
@@ -793,7 +791,8 @@ jobs:
     assert!(lines.contains(&"on-ubuntu-24.04".to_string()), "{lines:?}");
 }
 
-/// An expression-valued matrix stays unevaluated in HIR and expands at run time.
+/// An expression-valued matrix stays unevaluated in HIR and expands at run
+/// time.
 #[tokio::test]
 async fn expression_matrix_expands_at_runtime() {
     let text = r#"
@@ -1173,9 +1172,9 @@ async fn step_config_reads_the_step_environment_in_a_container() {
     assert_step_env_config_lines(&report);
 }
 
-/// The documented pattern for secrets and conditions: pass the secret through an
-/// environment variable and test it in the step. The gate resolves the secret at
-/// spawn, step-side, so nothing of it reaches the log.
+/// The documented pattern for secrets and conditions: pass the secret through
+/// an environment variable and test it in the step. The gate resolves the
+/// secret at spawn, step-side, so nothing of it reaches the log.
 #[tokio::test]
 async fn a_secret_passed_through_env_gates_a_step() {
     let text = r#"

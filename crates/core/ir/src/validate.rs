@@ -1,5 +1,5 @@
-//! Load-time validation: the invariants of §7, plus the structural checks the rest
-//! of the system assumes (ids in range, node index == `NodeId`, ...).
+//! Load-time validation: the invariants of §7, plus the structural checks the
+//! rest of the system assumes (ids in range, node index == `NodeId`, ...).
 //!
 //! Every check runs, so one call reports every problem rather than the first.
 
@@ -19,16 +19,22 @@ use crate::step::StepKinds;
 pub enum ValidationError<S = Live> {
     // ── Structure ──────────────────────────────────────────────────────────
     #[error("node at index {index} declares id {declared:?}; node ids must equal their index")]
-    NodeIdMismatch { index: usize, declared: NodeId<S> },
+    NodeIdMismatch {
+        index:    usize,
+        declared: NodeId<S>,
+    },
     #[error("scope at index {index} declares id {declared:?}; scope ids must equal their index")]
-    ScopeIdMismatch { index: usize, declared: ScopeId<S> },
+    ScopeIdMismatch {
+        index:    usize,
+        declared: ScopeId<S>,
+    },
     #[error("node {node:?} refers to unknown scope {scope:?}")]
     UnknownScope { node: NodeId<S>, scope: ScopeId<S> },
     #[error("edge {edge:?} on node {from:?} points at unknown node {to:?}")]
     UnknownTarget {
         from: NodeId<S>,
         edge: EdgeId<S>,
-        to: NodeId<S>,
+        to:   NodeId<S>,
     },
     #[error("node {node:?} uses step kind `{kind}` which is not registered")]
     UnknownStepKind { node: NodeId<S>, kind: StepKindId },
@@ -92,18 +98,18 @@ pub enum ValidationError<S = Live> {
     // ── Invariant 7 ────────────────────────────────────────────────────────
     #[error("node {node:?}: expansion subgraph entry {entry:?} does not reach exit {exit:?}")]
     ExitUnreachable {
-        node: NodeId<S>,
+        node:  NodeId<S>,
         entry: NodeId<S>,
-        exit: NodeId<S>,
+        exit:  NodeId<S>,
     },
     #[error(
         "node {node:?}: expansion subgraph exit {exit:?} does not postdominate entry {entry:?}; \
          {offender:?} can complete the region without reaching the exit"
     )]
     ExitNotPostdominator {
-        node: NodeId<S>,
-        entry: NodeId<S>,
-        exit: NodeId<S>,
+        node:     NodeId<S>,
+        entry:    NodeId<S>,
+        exit:     NodeId<S>,
         offender: NodeId<S>,
     },
     #[error(
@@ -185,7 +191,8 @@ impl<S> ValidationError<S> {
     }
 
     /// The node a source frontend should use as the primary diagnostic span.
-    /// Errors without a meaningful node return `None` and use the document span.
+    /// Errors without a meaningful node return `None` and use the document
+    /// span.
     pub fn primary_node(&self) -> Option<NodeId<S>> {
         use ValidationError as E;
         match self {
@@ -254,9 +261,9 @@ pub enum ValidationWarning<S = Live> {
     ScopeReentry {
         scope: ScopeId<S>,
         /// The node inside the scope the path comes back to.
-        at: NodeId<S>,
+        at:    NodeId<S>,
         /// The node outside the scope the path travels through.
-        via: NodeId<S>,
+        via:   NodeId<S>,
     },
     #[error(
         "node {node:?} sets `run_on_cancel` on an expansion node; a cancelled scope \
@@ -298,14 +305,14 @@ impl<S> ValidationWarning<S> {
 /// Everything one validation pass found. Errors block a load; warnings do not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationReport<S = Live> {
-    pub errors: Vec<ValidationError<S>>,
+    pub errors:   Vec<ValidationError<S>>,
     pub warnings: Vec<ValidationWarning<S>>,
 }
 
 impl<S> Default for ValidationReport<S> {
     fn default() -> Self {
         Self {
-            errors: Vec::new(),
+            errors:   Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -339,7 +346,8 @@ pub fn check<S>(graph: &Graph<S>) -> ValidationReport<S> {
     check_with(graph, None)
 }
 
-/// Validate a graph against a step registry and return both errors and warnings.
+/// Validate a graph against a step registry and return both errors and
+/// warnings.
 pub fn check_with<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> ValidationReport<S> {
     let mut warnings = Vec::new();
     check_scope_reentry(&graph.body, &mut warnings);
@@ -350,8 +358,8 @@ pub fn check_with<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> Vali
     }
 }
 
-/// Validate an executable plan: everything [`validate`] checks, plus invariant 6's
-/// requirement that no HIR-only field survives.
+/// Validate an executable plan: everything [`validate`] checks, plus invariant
+/// 6's requirement that no HIR-only field survives.
 pub fn validate_plan<S>(graph: &Graph<S>) -> Result<(), Vec<ValidationError<S>>> {
     let mut errors = collect(graph, None);
     check_fully_lowered(&graph.body, &mut errors);
@@ -432,7 +440,7 @@ fn check_structure<S>(
         }
         if graph.scope(node.scope).is_none() {
             errors.push(ValidationError::UnknownScope {
-                node: node.id,
+                node:  node.id,
                 scope: node.scope,
             });
         }
@@ -457,7 +465,7 @@ fn check_structure<S>(
                 errors.push(ValidationError::UnknownTarget {
                     from: node.id,
                     edge: edge.id,
-                    to: edge.to,
+                    to:   edge.to,
                 });
             }
         }
@@ -484,9 +492,10 @@ fn check_structure<S>(
     }
 }
 
-/// `Completion::TerminalNode` must name a node that exists. Nothing more: the node
-/// is *expected* to be terminal, but the semantics only need a final record, so
-/// "terminal" and outside-expansion topology rules belong to frontends.
+/// `Completion::TerminalNode` must name a node that exists. Nothing more: the
+/// node is *expected* to be terminal, but the semantics only need a final
+/// record, so "terminal" and outside-expansion topology rules belong to
+/// frontends.
 fn check_completion<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     if let Completion::TerminalNode(node) = graph.completion
         && graph.node(node).is_none()
@@ -516,7 +525,7 @@ fn check_routing_shape<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError
         for (group_index, group) in node.routing.groups.iter().enumerate() {
             if group.arms.is_empty() {
                 errors.push(ValidationError::EmptyGroup {
-                    node: node.id,
+                    node:  node.id,
                     group: group_index,
                 });
                 continue;
@@ -526,7 +535,7 @@ fn check_routing_shape<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError
                 if matches!(arm.guard, Guard::Always) && arm_index != last {
                     errors.push(ValidationError::AlwaysNotLast {
                         node: node.id,
-                        arm: arm_index,
+                        arm:  arm_index,
                     });
                 }
             }
@@ -614,9 +623,9 @@ fn check_fully_lowered<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError
 
 // ── Invariant 1 ───────────────────────────────────────────────────────────
 
-/// Every cycle contains at least one back edge — equivalently, the graph with back
-/// edges removed is acyclic. Reports one representative cycle per offending
-/// strongly connected component.
+/// Every cycle contains at least one back edge — equivalently, the graph with
+/// back edges removed is acyclic. Reports one representative cycle per
+/// offending strongly connected component.
 fn check_back_edges<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     // Iterative DFS over forward edges only, tracking the current path so a
     // rediscovered grey node yields the cycle itself, not just "a cycle exists".
@@ -810,17 +819,17 @@ fn check_expansions<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>
 
 // ── Invariant 8 ───────────────────────────────────────────────────────────
 
-/// A node with an incoming back edge is a loop head, and a loop head must join with
-/// `Any`.
+/// A node with an incoming back edge is a loop head, and a loop head must join
+/// with `Any`.
 ///
 /// The reason is structural. A forward edge into the head only ever carries
-/// generation 0, and a back edge only ever carries generation 1 and up. Tokens are
-/// matched per `(node, generation)`, so no generation ever holds a token on both, and
-/// `All` is unsatisfiable forever.
+/// generation 0, and a back edge only ever carries generation 1 and up. Tokens
+/// are matched per `(node, generation)`, so no generation ever holds a token on
+/// both, and `All` is unsatisfiable forever.
 ///
-/// The corollary users meet first: a node cannot be both a multi-branch `All` join
-/// and a loop head. Put a dedicated join node in front of the loop head and let the
-/// back edge target the head.
+/// The corollary users meet first: a node cannot be both a multi-branch `All`
+/// join and a loop head. Put a dedicated join node in front of the loop head
+/// and let the back edge target the head.
 fn check_loop_head_joins<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     let mut heads: BTreeSet<NodeId<S>> = BTreeSet::new();
     for edge in graph.edges() {
@@ -841,23 +850,24 @@ fn check_loop_head_joins<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationErr
 
 /// Warn where a path can leave a scope and come back.
 ///
-/// A scope is released once no live firing, pending token or deferred join needs it,
-/// and release is irreversible, so re-entry gets a fresh runtime and workspace. The
-/// static condition is that some node outside the scope is both reachable from it and
-/// able to reach it.
+/// A scope is released once no live firing, pending token or deferred join
+/// needs it, and release is irreversible, so re-entry gets a fresh runtime and
+/// workspace. The static condition is that some node outside the scope is both
+/// reachable from it and able to reach it.
 ///
-/// **Suppression.** A re-entry node is safe when it joins with `All` and has at least
-/// one incoming forward edge from inside the scope. For such a node to fire it needs
-/// the inside edge's token, and there are only two cases. Either that token is
-/// emitted while the scope is still held, in which case it is a pending token pinning
-/// the scope until the join resolves and release cannot happen before re-entry. Or
-/// the inside arm never emits — its guard fails, or its group falls through — in
-/// which case the `All` join is permanently unsatisfiable, the node never fires, and
-/// there is no re-entry at all. Both branches are safe, so suppressing is sound, and
-/// the test is purely structural.
+/// **Suppression.** A re-entry node is safe when it joins with `All` and has at
+/// least one incoming forward edge from inside the scope. For such a node to
+/// fire it needs the inside edge's token, and there are only two cases. Either
+/// that token is emitted while the scope is still held, in which case it is a
+/// pending token pinning the scope until the join resolves and release cannot
+/// happen before re-entry. Or the inside arm never emits — its guard fails, or
+/// its group falls through — in which case the `All` join is permanently
+/// unsatisfiable, the node never fires, and there is no re-entry at all. Both
+/// branches are safe, so suppressing is sound, and the test is purely
+/// structural.
 ///
-/// `Any` and `Quorum` re-entry nodes keep the warning: those can genuinely fire on
-/// the outside token alone, after the scope has been released.
+/// `Any` and `Quorum` re-entry nodes keep the warning: those can genuinely fire
+/// on the outside token alone, after the scope has been released.
 fn check_scope_reentry<S>(graph: &GraphBody<S>, warnings: &mut Vec<ValidationWarning<S>>) {
     let mut by_scope: BTreeMap<ScopeId<S>, BTreeSet<NodeId<S>>> = BTreeMap::new();
     for node in &graph.nodes {
@@ -911,16 +921,17 @@ fn check_scope_reentry<S>(graph: &GraphBody<S>, warnings: &mut Vec<ValidationWar
             }
             warnings.push(ValidationWarning::ScopeReentry {
                 scope: *scope,
-                at: *member,
-                via: *via,
+                at:    *member,
+                via:   *via,
             });
         }
     }
 }
 
-/// Warn where `run_on_cancel` sits on an expansion node: a cancelled scope never
-/// splices, so the flag can never admit anything there. v1 ignores it; the fix is to
-/// flag the template nodes inside the region, which clones inherit.
+/// Warn where `run_on_cancel` sits on an expansion node: a cancelled scope
+/// never splices, so the flag can never admit anything there. v1 ignores it;
+/// the fix is to flag the template nodes inside the region, which clones
+/// inherit.
 fn check_run_on_cancel<S>(graph: &GraphBody<S>, warnings: &mut Vec<ValidationWarning<S>>) {
     for node in &graph.nodes {
         if node.run_on_cancel && node.expand.is_some() {
@@ -948,7 +959,8 @@ fn reachable<S>(
     seen
 }
 
-/// Map of edge id to the node it leaves, built once for callers that need it often.
+/// Map of edge id to the node it leaves, built once for callers that need it
+/// often.
 pub fn edge_sources<S>(graph: &GraphBody<S>) -> HashMap<EdgeId<S>, NodeId<S>> {
     let mut map = HashMap::new();
     for node in &graph.nodes {

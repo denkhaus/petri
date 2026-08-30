@@ -42,7 +42,7 @@ pub enum CalleeSource {
 /// One resolved callee: where it came from and its parsed document.
 pub struct Callee {
     pub source: CalleeSource,
-    pub doc: Document,
+    pub doc:    Document,
 }
 
 /// Every called workflow the root reaches, by identity.
@@ -234,13 +234,10 @@ fn walk(
             );
             stack.pop();
         }
-        graph.resolved.insert(
-            identity,
-            Callee {
-                source: callee_source,
-                doc,
-            },
-        );
+        graph.resolved.insert(identity, Callee {
+            source: callee_source,
+            doc,
+        });
     }
 }
 

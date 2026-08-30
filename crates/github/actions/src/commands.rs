@@ -1,12 +1,12 @@
 //! Workflow commands: `::name key=value,key2=value2::message` on stdout.
 //!
-//! [`CommandSink`] sits between the process step and the driver. Every log event
-//! the process step emits passes through it; a line that is a command is applied
-//! and swallowed, everything else is forwarded unchanged. Both streams are read:
-//! the runner attaches its command-aware output manager to stdout and stderr
-//! alike (`ScriptHandler.cs`), so a `::error::` echoed to stderr is a command
-//! there too. `::add-mask::` registers with the run's masker before the next
-//! line is forwarded, so the value is masked from then on.
+//! [`CommandSink`] sits between the process step and the driver. Every log
+//! event the process step emits passes through it; a line that is a command is
+//! applied and swallowed, everything else is forwarded unchanged. Both streams
+//! are read: the runner attaches its command-aware output manager to stdout and
+//! stderr alike (`ScriptHandler.cs`), so a `::error::` echoed to stderr is a
+//! command there too. `::add-mask::` registers with the run's masker before the
+//! next line is forwarded, so the value is masked from then on.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -18,9 +18,9 @@ use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowCommand {
-    pub name: String,
+    pub name:       String,
     pub properties: BTreeMap<String, String>,
-    pub message: String,
+    pub message:    String,
 }
 
 /// Parse one output line. `None` when it is not a command. Leading whitespace
@@ -54,7 +54,8 @@ pub fn parse(line: &str) -> Option<WorkflowCommand> {
     })
 }
 
-/// The toolkit escapes `%`, `\r`, `\n` in a message, in that order; undo in reverse.
+/// The toolkit escapes `%`, `\r`, `\n` in a message, in that order; undo in
+/// reverse.
 fn unescape_data(s: &str) -> String {
     s.replace("%0A", "\n")
         .replace("%0D", "\r")
@@ -73,14 +74,15 @@ fn unescape_property(s: &str) -> String {
 /// What the commands asked for, collected while the process ran.
 #[derive(Debug, Default)]
 pub struct CommandEffects {
-    /// `::set-output name=X::value` (deprecated; still emitted by older actions).
+    /// `::set-output name=X::value` (deprecated; still emitted by older
+    /// actions).
     pub outputs: Map<String, Value>,
     /// `::save-state name=X::value` (deprecated in favour of `GITHUB_STATE`).
-    pub state: Map<String, Value>,
+    pub state:   Map<String, Value>,
     /// `::set-env name=X::value`, only when unsecure commands are allowed.
-    pub env: Map<String, Value>,
+    pub env:     Map<String, Value>,
     /// `::add-path::dir`, only when unsecure commands are allowed.
-    pub path: Vec<String>,
+    pub path:    Vec<String>,
     /// The names of commands the sink refused — `set-env`/`add-path` without
     /// the opt-in. The runner's extension throws, `TryProcessCommand` records
     /// `CommandResult = Failed`, and the step fails once its process ends,
@@ -90,15 +92,16 @@ pub struct CommandEffects {
 
 /// The sink one step's log events pass through.
 pub struct CommandSink {
-    out: mpsc::Sender<StepEvent>,
-    masker: Masker,
-    /// `ACTIONS_ALLOW_UNSECURE_COMMANDS`: whether `set-env` and `add-path` apply.
+    out:            mpsc::Sender<StepEvent>,
+    masker:         Masker,
+    /// `ACTIONS_ALLOW_UNSECURE_COMMANDS`: whether `set-env` and `add-path`
+    /// apply.
     allow_unsecure: bool,
     /// `::stop-commands::token` is in effect until `::token::`.
-    stopped: Option<String>,
+    stopped:        Option<String>,
     /// `::echo::on`: commands are also forwarded as lines.
-    echo: bool,
-    effects: Arc<Mutex<CommandEffects>>,
+    echo:           bool,
+    effects:        Arc<Mutex<CommandEffects>>,
 }
 
 impl CommandSink {
@@ -113,8 +116,9 @@ impl CommandSink {
         }
     }
 
-    /// The effects so far, shared: readable even if the process left a straggler
-    /// holding stdout open and the sink never sees the end of the stream.
+    /// The effects so far, shared: readable even if the process left a
+    /// straggler holding stdout open and the sink never sees the end of the
+    /// stream.
     pub fn effects(&self) -> Arc<Mutex<CommandEffects>> {
         Arc::clone(&self.effects)
     }
@@ -286,7 +290,7 @@ mod tests {
         for (stream, line) in lines {
             tx.send(StepEvent::Log {
                 stream: *stream,
-                line: (*line).into(),
+                line:   (*line).into(),
             })
             .await
             .unwrap();
@@ -306,42 +310,36 @@ mod tests {
     /// the echo set omits what the runner omits; the resume token is output.
     #[tokio::test]
     async fn both_streams_carry_commands_and_echo_omits_the_runners_set() {
-        let (out, _, _) = drive(
-            false,
-            &[
-                (LogStream::Stderr, "::error::from stderr"),
-                (LogStream::Stderr, "plain stderr"),
-                (LogStream::Stdout, "::echo::on"),
-                (LogStream::Stdout, "::set-output name=o::v"),
-                (LogStream::Stdout, "::add-mask::hidden-value"),
-                (LogStream::Stdout, "::debug::quiet"),
-                (LogStream::Stdout, "::warning::loud"),
-                (LogStream::Stdout, "::group::g"),
-                (LogStream::Stdout, "::echo::off"),
-                (LogStream::Stdout, "::set-output name=p::w"),
-                (LogStream::Stdout, "::stop-commands::tok"),
-                (LogStream::Stdout, "::error::inert"),
-                (LogStream::Stdout, "::tok::"),
-                (LogStream::Stdout, "::error::live"),
-            ],
-        )
+        let (out, _, _) = drive(false, &[
+            (LogStream::Stderr, "::error::from stderr"),
+            (LogStream::Stderr, "plain stderr"),
+            (LogStream::Stdout, "::echo::on"),
+            (LogStream::Stdout, "::set-output name=o::v"),
+            (LogStream::Stdout, "::add-mask::hidden-value"),
+            (LogStream::Stdout, "::debug::quiet"),
+            (LogStream::Stdout, "::warning::loud"),
+            (LogStream::Stdout, "::group::g"),
+            (LogStream::Stdout, "::echo::off"),
+            (LogStream::Stdout, "::set-output name=p::w"),
+            (LogStream::Stdout, "::stop-commands::tok"),
+            (LogStream::Stdout, "::error::inert"),
+            (LogStream::Stdout, "::tok::"),
+            (LogStream::Stdout, "::error::live"),
+        ])
         .await;
-        assert_eq!(
-            out,
-            vec![
-                (LogStream::Stderr, "Error: from stderr".to_string()),
-                (LogStream::Stderr, "plain stderr".to_string()),
-                (LogStream::Stdout, "::set-output name=o::v".to_string()),
-                (LogStream::Stdout, "Warning: loud".to_string()),
-                (LogStream::Stdout, "::group::g".to_string()),
-                (LogStream::Stdout, "▶ g".to_string()),
-                // `::echo::off` is still echoed: echo is on when it is checked.
-                (LogStream::Stdout, "::echo::off".to_string()),
-                (LogStream::Stdout, "::error::inert".to_string()),
-                (LogStream::Stdout, "::tok::".to_string()),
-                (LogStream::Stdout, "Error: live".to_string()),
-            ]
-        );
+        assert_eq!(out, vec![
+            (LogStream::Stderr, "Error: from stderr".to_string()),
+            (LogStream::Stderr, "plain stderr".to_string()),
+            (LogStream::Stdout, "::set-output name=o::v".to_string()),
+            (LogStream::Stdout, "Warning: loud".to_string()),
+            (LogStream::Stdout, "::group::g".to_string()),
+            (LogStream::Stdout, "▶ g".to_string()),
+            // `::echo::off` is still echoed: echo is on when it is checked.
+            (LogStream::Stdout, "::echo::off".to_string()),
+            (LogStream::Stdout, "::error::inert".to_string()),
+            (LogStream::Stdout, "::tok::".to_string()),
+            (LogStream::Stdout, "Error: live".to_string()),
+        ]);
     }
 
     #[tokio::test]
@@ -368,7 +366,7 @@ mod tests {
         ] {
             tx.send(StepEvent::Log {
                 stream: LogStream::Stdout,
-                line: line.into(),
+                line:   line.into(),
             })
             .await
             .unwrap();
@@ -382,23 +380,20 @@ mod tests {
                 lines.push(line);
             }
         }
-        assert_eq!(
-            lines,
-            vec![
-                "plain",
-                "Error: Unable to process command '::set-env name=E::1' successfully.",
-                "Error: The `set-env` command is disabled. Please upgrade to using \
+        assert_eq!(lines, vec![
+            "plain",
+            "Error: Unable to process command '::set-env name=E::1' successfully.",
+            "Error: The `set-env` command is disabled. Please upgrade to using \
                  Environment Files or opt into unsecure command execution by setting \
                  the `ACTIONS_ALLOW_UNSECURE_COMMANDS` environment variable to `true`. \
                  For more information see: \
                  https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/",
-                "▶ title",
-                "Error: bad",
-                "::save-state name=ignored::x",
-                "::tok::",
-                "after",
-            ]
-        );
+            "▶ title",
+            "Error: bad",
+            "::save-state name=ignored::x",
+            "::tok::",
+            "after",
+        ]);
         let effects = effects.lock().unwrap();
         assert_eq!(effects.state["k"], "v");
         assert_eq!(effects.outputs["o"], "out");

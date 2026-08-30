@@ -19,7 +19,7 @@ use smol_str::SmolStr;
 /// accepts. Registered per run by the host; absent means no service was stood
 /// up, and toolkit calls fail exactly as they do with no backend configured.
 pub struct ResultsServiceCap {
-    pub port: u16,
+    pub port:  u16,
     pub token: SmolStr,
 }
 
@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn the_url_keeps_its_trailing_slash() {
         let cap = ResultsServiceCap {
-            port: 4242,
+            port:  4242,
             token: SmolStr::new("t"),
         };
         let env = cap.env("host.docker.internal");

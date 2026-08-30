@@ -1,10 +1,10 @@
-//! Actions from other repositories: how a `uses: owner/repo@ref` is named, pinned
-//! and fetched.
+//! Actions from other repositories: how a `uses: owner/repo@ref` is named,
+//! pinned and fetched.
 //!
 //! The frontend resolves a reference to a commit while lowering, so the graph
-//! carries what will run ([`PinnedAction`]) and the same file lowers to the same
-//! graph. It reads the action's manifest the same way. Fetching the tree is the
-//! step's business at run time, through the same [`ActionSource`].
+//! carries what will run ([`PinnedAction`]) and the same file lowers to the
+//! same graph. It reads the action's manifest the same way. Fetching the tree
+//! is the step's business at run time, through the same [`ActionSource`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -42,8 +42,8 @@ pub const REPO_PARAM_KEY: &str = "repo";
 /// `main` saved (`GITHUB_STATE`, `::save-state::`), for the phases after it.
 pub const STATE_OUTPUT_KEY: &str = "github.state";
 
-/// Which of an action's entry points a `github/action` node runs. Defined here so
-/// the lowering and the step agree on one wire value.
+/// Which of an action's entry points a `github/action` node runs. Defined here
+/// so the lowering and the step agree on one wire value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Pre,
@@ -57,8 +57,8 @@ pub enum Phase {
 pub enum ActionLocation {
     /// Fetched from its repository at a commit, through the action source.
     Pinned(PinnedAction),
-    /// `uses: ./path`: a directory of the checked-out repository, resolved against
-    /// `GITHUB_WORKSPACE` at run time as GitHub does.
+    /// `uses: ./path`: a directory of the checked-out repository, resolved
+    /// against `GITHUB_WORKSPACE` at run time as GitHub does.
     Local { local: String },
 }
 
@@ -76,11 +76,11 @@ impl ActionLocation {
 /// `owner/repo[/path]@ref`, as written in `uses:`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActionRef {
-    pub owner: SmolStr,
-    pub repo: SmolStr,
+    pub owner:   SmolStr,
+    pub repo:    SmolStr,
     /// A subdirectory of the repository holding the action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<SmolStr>,
+    pub path:    Option<SmolStr>,
     /// The tag, branch or commit as written.
     #[serde(rename = "ref")]
     pub git_ref: SmolStr,
@@ -99,7 +99,7 @@ pub enum RefError {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("unsafe action path `{path}`: {reason}")]
 pub struct ActionPathError {
-    path: String,
+    path:   String,
     reason: &'static str,
 }
 
@@ -175,12 +175,13 @@ pub fn validate_relative_action_path(path: &str, allow_empty: bool) -> Result<()
 /// and `..` may climb only as far as the fetched repository root (the checkout
 /// root for a local action). A subpath action's file may live beside or above
 /// its directory (`github/codeql-action/init` runs `../lib/init-entry.js`;
-/// oss-fuzz's `infra/cifuzz` actions build `../../../build_fuzzers.Dockerfile`),
-/// and the whole repository is what stages. The invariant: a fetched manifest
-/// can name any file of its own pinned repository and nothing outside it —
-/// stricter than GitHub, which only checks that the joined file exists. The
-/// result is the file's path from that root with every `.` and `..` resolved
-/// away, so the executor receives a fully normalized path, never `..`.
+/// oss-fuzz's `infra/cifuzz` actions build
+/// `../../../build_fuzzers.Dockerfile`), and the whole repository is what
+/// stages. The invariant: a fetched manifest can name any file of its own
+/// pinned repository and nothing outside it — stricter than GitHub, which only
+/// checks that the joined file exists. The result is the file's path from that
+/// root with every `.` and `..` resolved away, so the executor receives a fully
+/// normalized path, never `..`.
 ///
 /// `directory` must already be strictly validated
 /// ([`validate_relative_action_path`]) — the climb budget it grants is only
@@ -278,12 +279,12 @@ impl fmt::Display for ActionRef {
     }
 }
 
-/// A reference resolved to a commit: what the graph carries. The reference stays
-/// alongside for messages and for `GITHUB_ACTION_REF`.
+/// A reference resolved to a commit: what the graph carries. The reference
+/// stays alongside for messages and for `GITHUB_ACTION_REF`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PinnedAction {
     pub reference: ActionRef,
-    pub sha: SmolStr,
+    pub sha:       SmolStr,
 }
 
 impl fmt::Display for PinnedAction {
@@ -309,20 +310,24 @@ impl PinnedAction {
 pub enum ActionSourceError {
     /// The reference names nothing the source can find.
     #[error("cannot resolve `{reference}`: {message}")]
-    Unresolvable { reference: String, message: String },
+    Unresolvable {
+        reference: String,
+        message:   String,
+    },
     /// The source does not serve this reference — and says why, when it knows.
-    /// With no reason, an offline or partial source (a snapshot, say) simply does
-    /// not cover the reference, and refreshing it may. With one, the source met a
-    /// terminal answer upstream — the repository is private or removed, recorded
-    /// at refresh time — and refreshing will not help. Either way the lowering
-    /// rejects the step as `unsupported.action.remote`, exactly as it would with
-    /// no source at all, rather than as an error; a *resolved* action whose
-    /// manifest is missing or malformed stays a load error instead.
+    /// With no reason, an offline or partial source (a snapshot, say) simply
+    /// does not cover the reference, and refreshing it may. With one, the
+    /// source met a terminal answer upstream — the repository is private or
+    /// removed, recorded at refresh time — and refreshing will not help.
+    /// Either way the lowering rejects the step as
+    /// `unsupported.action.remote`, exactly as it would with no source at
+    /// all, rather than as an error; a *resolved* action whose manifest is
+    /// missing or malformed stays a load error instead.
     #[error("`{reference}` is not available from this action source{}",
             .reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default())]
     Unavailable {
         reference: String,
-        reason: Option<String>,
+        reason:    Option<String>,
     },
     #[error("`{0}` has no `action.yml` or `action.yaml`")]
     NoManifest(String),
@@ -364,7 +369,7 @@ pub trait ActionSource: Send + Sync {
     fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
         Err(ActionSourceError::Unavailable {
             reference: pinned.reference.to_string(),
-            reason: None,
+            reason:    None,
         })
     }
 }
@@ -380,8 +385,8 @@ impl MapActionSource {
         Self::default()
     }
 
-    /// Register `uses` (as written, `owner/repo@ref`) as resolving to `sha` with
-    /// this manifest text.
+    /// Register `uses` (as written, `owner/repo@ref`) as resolving to `sha`
+    /// with this manifest text.
     pub fn with(self, uses: &str, sha: &str, manifest: &str) -> Self {
         self.manifests
             .lock()
@@ -398,11 +403,11 @@ impl ActionSource for MapActionSource {
         match manifests.get(&key) {
             Some((sha, _)) => Ok(PinnedAction {
                 reference: reference.clone(),
-                sha: SmolStr::new(sha),
+                sha:       SmolStr::new(sha),
             }),
             None => Err(ActionSourceError::Unresolvable {
                 reference: key,
-                message: "not in the map".into(),
+                message:   "not in the map".into(),
             }),
         }
     }

@@ -1,5 +1,6 @@
-//! §3/§5: a scope is a resource scope, not a sequence. The host acquires it before
-//! the first step in it runs and releases it once nothing in it can run again.
+//! §3/§5: a scope is a resource scope, not a sequence. The host acquires it
+//! before the first step in it runs and releases it once nothing in it can run
+//! again.
 
 mod support;
 

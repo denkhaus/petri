@@ -94,10 +94,10 @@ fn coercion_positions_and_duplicates_are_unchanged() {
     assert_eq!((b.line, b.column), (2, 4));
 }
 
-/// The corpus shape that motivated the flow repair: a multi-line `[…]` of quoted
-/// strings whose closing `]` sits at the key's indentation. GitHub accepts it;
-/// the scanner alone does not. The repair pads only the closer line, so every
-/// other position holds.
+/// The corpus shape that motivated the flow repair: a multi-line `[…]` of
+/// quoted strings whose closing `]` sits at the key's indentation. GitHub
+/// accepts it; the scanner alone does not. The repair pads only the closer
+/// line, so every other position holds.
 #[test]
 fn a_flow_close_at_the_keys_indent_parses() {
     let doc = parse(

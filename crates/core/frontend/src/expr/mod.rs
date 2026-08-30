@@ -1,11 +1,12 @@
-//! The `${{ }}` expression grammar: one parser, semantics decided by the lowering.
+//! The `${{ }}` expression grammar: one parser, semantics decided by the
+//! lowering.
 //!
-//! The syntax is the one users of YAML CI systems already know. What an operator
-//! *means* is the lowering's decision, and lowerings live with the format that owns
-//! them: [`lower::strict`] here, for the native format, maps `==` onto the engine's
-//! own `Eq`; the GitHub Actions frontend carries a lowering onto the loose builtins in
-//! its own crate. No lowering evaluates anything. Evaluation happens once, in the
-//! engine.
+//! The syntax is the one users of YAML CI systems already know. What an
+//! operator *means* is the lowering's decision, and lowerings live with the
+//! format that owns them: [`lower::strict`] here, for the native format, maps
+//! `==` onto the engine's own `Eq`; the GitHub Actions frontend carries a
+//! lowering onto the loose builtins in its own crate. No lowering evaluates
+//! anything. Evaluation happens once, in the engine.
 
 pub mod ast;
 pub mod lexer;
@@ -18,13 +19,14 @@ pub use lexer::{Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use print::print;
 
-/// Where an expression came from within a larger string, for spans and templates.
+/// Where an expression came from within a larger string, for spans and
+/// templates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
     /// Literal text outside any `${{ }}`.
     Text(String),
-    /// The source inside one `${{ }}`, braces stripped, with its byte offset in the
-    /// original string.
+    /// The source inside one `${{ }}`, braces stripped, with its byte offset in
+    /// the original string.
     Expr { source: String, offset: usize },
 }
 

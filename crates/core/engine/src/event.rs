@@ -1,7 +1,9 @@
-//! The engine's interface: what goes in ([`Event`]) and what comes out ([`Command`]).
+//! The engine's interface: what goes in ([`Event`]) and what comes out
+//! ([`Command`]).
 //!
-//! The core is sans-IO. It never runs a step, never reads a clock and never blocks.
-//! A host turns commands into effects and feeds the results back as events.
+//! The core is sans-IO. It never runs a step, never reads a clock and never
+//! blocks. A host turns commands into effects and feeds the results back as
+//! events.
 
 use std::time::Duration;
 
@@ -15,87 +17,91 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     RunStarted,
-    /// A token was placed on an edge. The core emits these for its own routing and
-    /// seeding; a host may also inject one.
+    /// A token was placed on an edge. The core emits these for its own routing
+    /// and seeding; a host may also inject one.
     TokenEmitted(Token),
     StepStarted {
-        firing: FiringId,
+        firing:  FiringId,
         attempt: Attempt,
     },
-    /// Logs, artifacts and step-defined progress. Carries no coordination meaning.
+    /// Logs, artifacts and step-defined progress. Carries no coordination
+    /// meaning.
     StepProgress {
         firing: FiringId,
-        ev: StepEvent,
+        ev:     StepEvent,
     },
     StepFinished {
-        firing: FiringId,
+        firing:  FiringId,
         attempt: Attempt,
         outcome: Outcome,
     },
     /// The driver waited out a retry's backoff. It applies jitter and does the
     /// sleeping; the core never sees a clock or an RNG.
     RetryElapsed {
-        firing: FiringId,
+        firing:       FiringId,
         next_attempt: Attempt,
     },
-    /// The result of a `for_each` expansion: clones spliced into the live graph.
+    /// The result of a `for_each` expansion: clones spliced into the live
+    /// graph.
     NodeExpanded {
-        node: NodeId,
+        node:   NodeId,
         splice: SubgraphSplice,
     },
     /// External cancellation, the polite tier. The run's root scope cancels
-    /// everything. Live firings get `Control::Cancel`, cancelled outcomes route,
-    /// and `run_on_cancel` cleanup is admitted (§5).
+    /// everything. Live firings get `Control::Cancel`, cancelled outcomes
+    /// route, and `run_on_cancel` cleanup is admitted (§5).
     CancelRequested {
         scope: CancelScopeId,
     },
     /// External kill, the forced tier. Tokens drop, nothing routes, nothing is
-    /// admitted — `run_on_cancel` included — and every live firing in the closure
-    /// gets `Control::Kill`, already-cancelling ones included. In the log so the
-    /// mode of stopping is recorded, never inferred (§5).
+    /// admitted — `run_on_cancel` included — and every live firing in the
+    /// closure gets `Control::Kill`, already-cancelling ones included. In
+    /// the log so the mode of stopping is recorded, never inferred (§5).
     KillRequested {
         scope: CancelScopeId,
     },
     /// The host asks the core to deliver a control to one live firing — a human
-    /// gate's answer, a supervisor's steering. Question and answer are both in the
-    /// log, so replay and resume reproduce a pending interaction.
+    /// gate's answer, a supervisor's steering. Question and answer are both in
+    /// the log, so replay and resume reproduce a pending interaction.
     ///
-    /// Only `Control::Deliver` produces a command, and only for a firing that is
-    /// live, not cancelling and not awaiting a retry. Everything else — a dead or
-    /// unknown firing, a `Cancel` or `Kill` (which have their own scope-routed
-    /// events whose closure bookkeeping a raw per-firing path would bypass) — is a
-    /// logged no-op, never a `RunError`: a late answer must not fail the run (§6).
+    /// Only `Control::Deliver` produces a command, and only for a firing that
+    /// is live, not cancelling and not awaiting a retry. Everything else —
+    /// a dead or unknown firing, a `Cancel` or `Kill` (which have their own
+    /// scope-routed events whose closure bookkeeping a raw per-firing path
+    /// would bypass) — is a logged no-op, never a `RunError`: a late answer
+    /// must not fail the run (§6).
     ControlRequested {
         firing: FiringId,
-        ctl: Control,
+        ctl:    Control,
     },
 }
 
 /// Everything an executor needs to run one step, with every expression already
 /// resolved.
 ///
-/// The type is the enforcement point for the boundary invariant: **no unresolved
-/// expression placeholder crosses it, and a secret reference is the only non-literal
-/// form that may.** Its fields are private and the only way to build one is
-/// [`ResolvedFiring::new`]. Deserialization goes through the same check, so a value
-/// read back off the wire carries the invariant too.
+/// The type is the enforcement point for the boundary invariant: **no
+/// unresolved expression placeholder crosses it, and a secret reference is the
+/// only non-literal form that may.** Its fields are private and the only way to
+/// build one is [`ResolvedFiring::new`]. Deserialization goes through the same
+/// check, so a value read back off the wire carries the invariant too.
 ///
-/// Secret references survive on purpose. A `ResolvedFiring` is serialized into the
-/// event log, so resolving a secret here would write it to disk. `{"$secret": "NAME"}`
-/// crosses instead, and the value is fetched at spawn time straight into the child's
-/// environment. The reference must name a string; anything else is rejected here
-/// rather than reaching a step. Whether a secret reference is in a position that
-/// allows one is the step kind's business, not the boundary's.
+/// Secret references survive on purpose. A `ResolvedFiring` is serialized into
+/// the event log, so resolving a secret here would write it to disk.
+/// `{"$secret": "NAME"}` crosses instead, and the value is fetched at spawn
+/// time straight into the child's environment. The reference must name a
+/// string; anything else is rejected here rather than reaching a step. Whether
+/// a secret reference is in a position that allows one is the step kind's
+/// business, not the boundary's.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(into = "ResolvedFiringRepr", try_from = "ResolvedFiringRepr")]
 pub struct ResolvedFiring {
-    id: FiringId,
-    node: NodeId,
+    id:         FiringId,
+    node:       NodeId,
     generation: Generation,
-    attempt: Attempt,
-    scope: ScopeId,
-    inputs: Vec<Token>,
-    config: Value,
+    attempt:    Attempt,
+    scope:      ScopeId,
+    inputs:     Vec<Token>,
+    config:     Value,
 }
 
 impl ResolvedFiring {
@@ -196,8 +202,8 @@ impl std::fmt::Display for BoundaryViolation {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[error("step config for node {node:?} holds {reason} at `{path}`")]
 pub struct UnresolvedConfig {
-    pub node: NodeId,
-    pub path: String,
+    pub node:   NodeId,
+    pub path:   String,
     pub reason: BoundaryViolation,
 }
 
@@ -205,25 +211,25 @@ pub struct UnresolvedConfig {
 /// constructor.
 #[derive(Serialize, Deserialize)]
 struct ResolvedFiringRepr {
-    id: FiringId,
-    node: NodeId,
+    id:         FiringId,
+    node:       NodeId,
     generation: Generation,
-    attempt: Attempt,
-    scope: ScopeId,
-    inputs: Vec<Token>,
-    config: Value,
+    attempt:    Attempt,
+    scope:      ScopeId,
+    inputs:     Vec<Token>,
+    config:     Value,
 }
 
 impl From<ResolvedFiring> for ResolvedFiringRepr {
     fn from(f: ResolvedFiring) -> Self {
         Self {
-            id: f.id,
-            node: f.node,
+            id:         f.id,
+            node:       f.node,
             generation: f.generation,
-            attempt: f.attempt,
-            scope: f.scope,
-            inputs: f.inputs,
-            config: f.config,
+            attempt:    f.attempt,
+            scope:      f.scope,
+            inputs:     f.inputs,
+            config:     f.config,
         }
     }
 }
@@ -252,25 +258,26 @@ pub enum Command {
     StartStep(ResolvedFiring),
     DeliverControl {
         firing: FiringId,
-        ctl: Control,
+        ctl:    Control,
     },
     /// Wait out `base_delay`, then feed back [`Event::RetryElapsed`].
     ///
-    /// The delay is computed deterministically from the node's [`ir::Backoff`]. The
-    /// driver adds jitter, which is why jitter lives there and not here.
+    /// The delay is computed deterministically from the node's [`ir::Backoff`].
+    /// The driver adds jitter, which is why jitter lives there and not
+    /// here.
     ScheduleRetry {
-        firing: FiringId,
+        firing:       FiringId,
         next_attempt: Attempt,
-        base_delay: Duration,
+        base_delay:   Duration,
     },
     // reserved: external expansion. The core resolves `items` itself and splices in
     // the same `apply` call, so it never emits this. The variant is the seam for a
     // host that resolves items externally and feeds back `Event::NodeExpanded` — do
     // not delete it as dead code.
     ExpandNode {
-        node: NodeId,
+        node:       NodeId,
         generation: Generation,
-        expr: ir::ExprId,
+        expr:       ir::ExprId,
     },
     AcquireScope {
         scope: ScopeId,
@@ -287,13 +294,14 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpliceClone {
     /// Position in the `items` array; bound as `index` inside the clone.
-    pub index: u32,
+    pub index:     u32,
     /// The element itself; bound as `item` inside the clone.
-    pub item: Value,
-    /// Fully formed clone nodes. Their ids are already allocated in graph order.
-    pub nodes: Vec<Node>,
+    pub item:      Value,
+    /// Fully formed clone nodes. Their ids are already allocated in graph
+    /// order.
+    pub nodes:     Vec<Node>,
     /// Where the clone starts. Seeded with `seed_edge`.
-    pub entry: NodeId,
+    pub entry:     NodeId,
     /// Synthetic incoming edge for `entry`, so its join counts like any other.
     pub seed_edge: EdgeId,
 }
@@ -304,20 +312,21 @@ pub struct SubgraphSplice {
     /// A fresh cancel scope over the clones. `fail_fast` cancels this one.
     pub cancel_scope: CancelScopeId,
     /// The expanding node, which is the region's entry.
-    pub source: NodeId,
-    /// The original region the clones replace. Every node in it is superseded: it
-    /// never executes, and its outgoing edges stop counting toward downstream
-    /// joins, so a collector waits for the clones instead of the originals.
-    pub region: Vec<NodeId>,
+    pub source:       NodeId,
+    /// The original region the clones replace. Every node in it is superseded:
+    /// it never executes, and its outgoing edges stop counting toward
+    /// downstream joins, so a collector waits for the clones instead of the
+    /// originals.
+    pub region:       Vec<NodeId>,
     /// Generation the expansion happened in; clones start there.
-    pub generation: Generation,
+    pub generation:   Generation,
     /// Payload the expanding node's join produced, seeded into every clone.
-    pub payload: Value,
-    pub clones: Vec<SpliceClone>,
+    pub payload:      Value,
+    pub clones:       Vec<SpliceClone>,
     /// Admission control: at most this many clone firings run at once.
     pub max_parallel: Option<u32>,
     /// The first clone failure cancels the siblings.
-    pub fail_fast: bool,
+    pub fail_fast:    bool,
 }
 
 impl SubgraphSplice {

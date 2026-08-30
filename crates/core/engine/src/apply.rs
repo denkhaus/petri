@@ -1,9 +1,9 @@
 //! The state machine itself.
 //!
 //! `apply` is deterministic: no IO, no clocks, no randomness. Timeouts and step
-//! results arrive as events. Routing emits tokens by feeding events back to itself
-//! through an internal queue, and every one of those is logged before it is applied,
-//! so the log is a complete, replayable account of the run.
+//! results arrive as events. Routing emits tokens by feeding events back to
+//! itself through an internal queue, and every one of those is logged before it
+//! is applied, so the log is a complete, replayable account of the run.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -29,13 +29,14 @@ use crate::state::{
 
 /// Apply one event and return the commands it produced.
 ///
-/// The event may cause the core to emit further events of its own (tokens, splices,
-/// cascading cancellations). Those are drained inside this call, so the caller only
-/// ever feeds in events that came from outside.
+/// The event may cause the core to emit further events of its own (tokens,
+/// splices, cascading cancellations). Those are drained inside this call, so
+/// the caller only ever feeds in events that came from outside.
 pub fn apply(mut state: EngineState, ev: Event) -> (EngineState, Vec<Command>) {
     let mut commands = Vec::new();
     let mut queue: VecDeque<Event> = VecDeque::from([ev]);
-    // The first event came from outside; everything the drain adds is the core's own.
+    // The first event came from outside; everything the drain adds is the core's
+    // own.
     let mut source = EventSource::External;
 
     loop {
@@ -150,7 +151,8 @@ fn on_token(
     }
     // A killed scope swallows tokens aimed inside it. A merely cancelled scope does
     // not: its nodes receive their tokens and complete without executing — or fire,
-    // when marked `run_on_cancel` — so `always()` and `cancelled()` cleanup can run.
+    // when marked `run_on_cancel` — so `always()` and `cancelled()` cleanup can
+    // run.
     if state.is_node_killed(target) {
         return;
     }
@@ -219,7 +221,7 @@ fn try_fire(
     // cascade does.
     if state.firing_count(node_id) >= node.budget.max_firings {
         state.push_error(RunError::BudgetExceeded {
-            node: node_id,
+            node:        node_id,
             max_firings: node.budget.max_firings,
         });
         state.take_tokens(key);
@@ -386,9 +388,9 @@ fn try_fire(
     state.insert_firing(firing);
 }
 
-/// Whether any token waiting at this join was emitted by a firing whose recorded
-/// outcome is `Cancelled`. Work fed by cancelled work is admitted the same way as
-/// work inside a cancelled scope: only via `run_on_cancel`.
+/// Whether any token waiting at this join was emitted by a firing whose
+/// recorded outcome is `Cancelled`. Work fed by cancelled work is admitted the
+/// same way as work inside a cancelled scope: only via `run_on_cancel`.
 fn has_cancelled_input(state: &EngineState, key: (NodeId, Generation)) -> bool {
     let Some(tokens) = state.tokens_for(key) else {
         return false;
@@ -458,9 +460,9 @@ fn on_step_finished(
     };
     if firing.attempt != attempt {
         state.push_error(RunError::AttemptMismatch {
-            firing: firing_id,
+            firing:   firing_id,
             reported: attempt,
-            running: firing.attempt,
+            running:  firing.attempt,
         });
         return;
     }
@@ -489,22 +491,20 @@ fn on_step_finished(
     // This attempt is candidate-final. Finalization is prepare-then-commit for
     // its splice requests, in this order:
     //
-    // 1. Cancelled-scope check first: a cancelled (or killed) firing's splice
-    //    list is dropped wholesale — no policy check, no validation, no
-    //    `invalid_splice` — and the rest of the outcome records, merges and
-    //    routes under the normal cancel semantics. Cancellation must not admit
-    //    new work.
-    // 2. Prepare every request in order against a scratch view. Preparation
-    //    never touches canonical state, so a rejection leaks nothing.
-    // 3. On rejection, convert to the canonical `Failure{class: invalid_splice}`
-    //    — output and metrics kept, `context_updates` dropped, the message
-    //    naming the request index and location, raw requests remaining only in
-    //    the External event — and only then run `retry_on` and exhaustion:
-    //    `invalid_splice` is an ordinary retry class, and a later attempt can
-    //    succeed.
+    // 1. Cancelled-scope check first: a cancelled (or killed) firing's splice list
+    //    is dropped wholesale — no policy check, no validation, no `invalid_splice`
+    //    — and the rest of the outcome records, merges and routes under the normal
+    //    cancel semantics. Cancellation must not admit new work.
+    // 2. Prepare every request in order against a scratch view. Preparation never
+    //    touches canonical state, so a rejection leaks nothing.
+    // 3. On rejection, convert to the canonical `Failure{class: invalid_splice}` —
+    //    output and metrics kept, `context_updates` dropped, the message naming the
+    //    request index and location, raw requests remaining only in the External
+    //    event — and only then run `retry_on` and exhaustion: `invalid_splice` is
+    //    an ordinary retry class, and a later attempt can succeed.
     // 4. If all requests prepare, commit consumes the plan below: record the
-    //    outcome, apply in order, route the uploader, and quiescence runs at
-    //    the end of `apply` as always. Nothing partial ever commits.
+    //    outcome, apply in order, route the uploader, and quiescence runs at the
+    //    end of `apply` as always. Nothing partial ever commits.
     let mut outcome = outcome;
     let mut plan = None;
     if !outcome.splices.is_empty() {
@@ -603,15 +603,15 @@ fn schedule_retry(
         f.started = false;
     }
     cmds.push(Command::ScheduleRetry {
-        firing: firing_id,
+        firing:       firing_id,
         next_attempt: attempt.next(),
-        base_delay: node.retry.base_delay(attempt),
+        base_delay:   node.retry.base_delay(attempt),
     });
 }
 
 /// Turn an exhausted retry's failure into a `PartialSuccess`, keeping the real
-/// failure in `underlying` so the log never records a clean success for something
-/// that failed.
+/// failure in `underlying` so the log never records a clean success for
+/// something that failed.
 fn accept_partial_on_exhaustion(node: &Node, attempt: Attempt, outcome: Outcome) -> Outcome {
     let exhausted =
         node.retry.should_retry(&outcome.status) && !node.retry.has_attempt_after(attempt);
@@ -627,8 +627,8 @@ fn accept_partial_on_exhaustion(node: &Node, attempt: Attempt, outcome: Outcome)
 
 /// The backoff elapsed: start the next attempt.
 ///
-/// The config is resolved again, so a retry sees the run context as it stands now
-/// rather than as it stood before the first attempt.
+/// The config is resolved again, so a retry sees the run context as it stands
+/// now rather than as it stood before the first attempt.
 fn on_retry_elapsed(
     state: &mut EngineState,
     firing_id: FiringId,
@@ -715,8 +715,8 @@ fn on_retry_elapsed(
     cmds.push(Command::StartStep(resolved));
 }
 
-/// End a live firing that could not be restarted, recording the failure and routing
-/// it like any other final outcome.
+/// End a live firing that could not be restarted, recording the failure and
+/// routing it like any other final outcome.
 fn fail_live_firing(
     state: &mut EngineState,
     firing_id: FiringId,
@@ -749,8 +749,8 @@ fn fail_live_firing(
 
 // ── Routing ───────────────────────────────────────────────────────────────
 
-/// Evaluate a node's routing: each group emits at most one token, and groups emit
-/// concurrently.
+/// Evaluate a node's routing: each group emits at most one token, and groups
+/// emit concurrently.
 #[allow(clippy::too_many_arguments)]
 fn route(
     state: &mut EngineState,
@@ -834,7 +834,7 @@ fn route(
         }
         if !matched && matches!(group.fallthrough, ir::Fallthrough::Error) {
             state.push_error(RunError::NoArmMatched {
-                node: node.id,
+                node:  node.id,
                 group: group_index,
             });
         }
@@ -888,7 +888,7 @@ fn expand(
     let Value::Array(items) = items else {
         state.push_error(RunError::ItemsNotArray {
             node: node.id,
-            got: SmolStr::new(type_name(&items)),
+            got:  SmolStr::new(type_name(&items)),
         });
         return;
     };
@@ -995,9 +995,9 @@ fn region_nodes(state: &EngineState, entry: NodeId, exit: NodeId) -> Vec<NodeId>
     order
 }
 
-/// The `ForEach` producer's second half: turn the logged [`SubgraphSplice`] into
-/// a [`PreparedSplice`] and hand it to the one applicator. The event stays the
-/// wire shape; the applicator is the only code that mutates the live graph.
+/// The `ForEach` producer's second half: turn the logged [`SubgraphSplice`]
+/// into a [`PreparedSplice`] and hand it to the one applicator. The event stays
+/// the wire shape; the applicator is the only code that mutates the live graph.
 fn on_node_expanded(
     state: &mut EngineState,
     source: NodeId,
@@ -1016,10 +1016,10 @@ fn on_node_expanded(
             nodes.push(node);
         }
         seeds.push(PreparedSeed {
-            edge: clone.seed_edge,
-            entry: clone.entry,
+            edge:       clone.seed_edge,
+            entry:      clone.entry,
             generation: splice.generation,
-            payload: splice.payload.clone(),
+            payload:    splice.payload.clone(),
         });
     }
 
@@ -1036,7 +1036,7 @@ fn on_node_expanded(
         origin: SpliceOrigin::Expansion,
         policy: BatchPolicy {
             max_parallel: splice.max_parallel,
-            fail_fast: splice.fail_fast,
+            fail_fast:    splice.fail_fast,
         },
         effects: splice
             .region
@@ -1081,9 +1081,9 @@ fn on_control_requested(
 
 // ── Cancellation ──────────────────────────────────────────────────────────
 
-/// The polite tier. Live firings get `Control::Cancel`; pending tokens survive, so
-/// nodes in the scope complete `Cancelled` — or fire, when marked `run_on_cancel` —
-/// as their joins satisfy (§5).
+/// The polite tier. Live firings get `Control::Cancel`; pending tokens survive,
+/// so nodes in the scope complete `Cancelled` — or fire, when marked
+/// `run_on_cancel` — as their joins satisfy (§5).
 fn on_cancel(
     state: &mut EngineState,
     scope: CancelScopeId,
@@ -1093,9 +1093,10 @@ fn on_cancel(
     stop_scope(state, scope, false, cmds, queue);
 }
 
-/// The forced tier: the pre-v3 cancel behavior, kept under its own event. Tokens
-/// drop, nothing routes, nothing is admitted — `run_on_cancel` included — and
-/// `Control::Kill` reaches every live firing, already-cancelling ones too.
+/// The forced tier: the pre-v3 cancel behavior, kept under its own event.
+/// Tokens drop, nothing routes, nothing is admitted — `run_on_cancel` included
+/// — and `Control::Kill` reaches every live firing, already-cancelling ones
+/// too.
 fn on_kill(
     state: &mut EngineState,
     scope: CancelScopeId,
@@ -1106,8 +1107,8 @@ fn on_kill(
 }
 
 /// Both tiers share one shape — mark the closure, doom its live firings — and
-/// differ only where the spec says they do: a kill drops tokens, routes nothing,
-/// and reaches firings the polite tier already signalled.
+/// differ only where the spec says they do: a kill drops tokens, routes
+/// nothing, and reaches firings the polite tier already signalled.
 fn stop_scope(
     state: &mut EngineState,
     scope: CancelScopeId,
@@ -1159,15 +1160,15 @@ fn stop_scope(
         }
         cmds.push(Command::DeliverControl {
             firing: firing.id,
-            ctl: if kill { Control::Kill } else { Control::Cancel },
+            ctl:    if kill { Control::Kill } else { Control::Cancel },
         });
     }
 }
 
 /// Settle a firing that a cancel or kill caught mid-backoff: record `Cancelled`
-/// now — there is no task to deliver a control to — and leave a tombstone for the
-/// driver's unrecallable `RetryElapsed`. Under a cancel the outcome routes; under a
-/// kill it does not.
+/// now — there is no task to deliver a control to — and leave a tombstone for
+/// the driver's unrecallable `RetryElapsed`. Under a cancel the outcome routes;
+/// under a kill it does not.
 fn settle_awaiting_retry(
     state: &mut EngineState,
     firing: &Firing,
@@ -1182,12 +1183,12 @@ fn settle_awaiting_retry(
     };
     let outcome = synthetic(Status::Cancelled);
     state.record_outcome(FiringRecord {
-        firing: firing.id,
-        node: firing.node,
-        name: node.name.clone(),
+        firing:     firing.id,
+        node:       firing.node,
+        name:       node.name.clone(),
         generation: firing.generation,
-        attempt: firing.attempt,
-        outcome: outcome.clone(),
+        attempt:    firing.attempt,
+        outcome:    outcome.clone(),
     });
     if routes {
         route(

@@ -25,7 +25,7 @@ use crate::model::{InputDecl, InputType};
 /// read.
 #[derive(Default)]
 pub struct BoundInputs {
-    pub exprs: BTreeMap<String, ExprId>,
+    pub exprs:   BTreeMap<String, ExprId>,
     pub statics: BTreeMap<String, Value>,
 }
 

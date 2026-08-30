@@ -22,10 +22,11 @@ use crate::model::*;
 /// Resolves identifiers for the native format: engine bindings by name, with
 /// `item` / `index` rewritten to the loop-state shape inside a sequential body.
 struct NativeRoots {
-    /// Inside a sequential `for_each` body, the current element lives on the token.
+    /// Inside a sequential `for_each` body, the current element lives on the
+    /// token.
     sequential_body: bool,
     /// Only `params` may appear here (scope env).
-    params_only: bool,
+    params_only:     bool,
 }
 
 impl Roots for NativeRoots {
@@ -52,15 +53,15 @@ impl Roots for NativeRoots {
 }
 
 struct Ctx<'a> {
-    diags: Diagnostics,
-    b: GraphBuilder,
-    ids: HashMap<String, NodeId>,
-    spans: HashMap<NodeId, Span>,
-    scope_ids: HashMap<String, ScopeId>,
-    /// Nodes that are the body of a sequential `for_each`, so their expressions get
-    /// the loop-state rewrite.
+    diags:             Diagnostics,
+    b:                 GraphBuilder,
+    ids:               HashMap<String, NodeId>,
+    spans:             HashMap<NodeId, Span>,
+    scope_ids:         HashMap<String, ScopeId>,
+    /// Nodes that are the body of a sequential `for_each`, so their expressions
+    /// get the loop-state rewrite.
     sequential_bodies: std::collections::HashSet<NodeId>,
-    _doc: &'a Document,
+    _doc:              &'a Document,
 }
 
 pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
@@ -564,7 +565,7 @@ impl<'a> Ctx<'a> {
             {
                 rm.reject_unknown_keys(RETRY_ON_KEYS, &mut self.diags, "`retry_on`");
                 let mut on = RetryOn {
-                    statuses: Vec::new(),
+                    statuses:        Vec::new(),
                     failure_classes: Vec::new(),
                 };
                 if let Some(list) = rm.get("statuses").and_then(|n| n.as_sequence()) {
@@ -809,7 +810,7 @@ impl<'a> Ctx<'a> {
             } else {
                 ExpandTarget::Subgraph {
                     entry: head,
-                    exit: tail,
+                    exit:  tail,
                 }
             };
             ir::parallel_for_each(&mut self.b, head, items, target, max_parallel, fail_fast);
@@ -993,7 +994,7 @@ impl<'a> Ctx<'a> {
         };
         let mut roots = NativeRoots {
             sequential_body: in_loop,
-            params_only: false,
+            params_only:     false,
         };
         match strict(&ast, self.b.exprs(), &mut roots) {
             Ok(id) => Some(id),
@@ -1015,7 +1016,8 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// A scope env value: a literal, or an expression that may only read `params`.
+    /// A scope env value: a literal, or an expression that may only read
+    /// `params`.
     fn scalar_or_expr(&mut self, node: Node<'_>, params_only: bool) -> ExprOrValue {
         let Some(text) = node.as_str() else {
             return ExprOrValue::Value(node.to_json());
@@ -1053,8 +1055,8 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Lower a `${{ }}`-bearing string. A lone `${{ e }}` is `e` with its type; mixed
-    /// text is a string concatenation.
+    /// Lower a `${{ }}`-bearing string. A lone `${{ e }}` is `e` with its type;
+    /// mixed text is a string concatenation.
     fn template(
         &mut self,
         text: &str,

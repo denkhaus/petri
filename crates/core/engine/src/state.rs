@@ -1,4 +1,5 @@
-//! Coordination state. Everything the engine knows lives here; nothing else does.
+//! Coordination state. Everything the engine knows lives here; nothing else
+//! does.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -14,52 +15,55 @@ use crate::log::EventLog;
 /// A node execution attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Firing {
-    pub id: FiringId,
-    pub node: NodeId,
-    pub generation: Generation,
+    pub id:             FiringId,
+    pub node:           NodeId,
+    pub generation:     Generation,
     /// Which try is running, 1-based. A retry advances this and never touches
     /// `generation`.
-    pub attempt: Attempt,
+    pub attempt:        Attempt,
     /// Resource scope: where the step runs.
-    pub scope: ScopeId,
+    pub scope:          ScopeId,
     /// Innermost cancel scope the firing belongs to.
-    pub cancel_scope: CancelScopeId,
-    pub inputs: Vec<Token>,
+    pub cancel_scope:   CancelScopeId,
+    pub inputs:         Vec<Token>,
     /// The host reported `StepStarted`.
-    pub started: bool,
-    /// A `ScheduleRetry` is out; the firing stays live until `RetryElapsed` arrives,
-    /// which is what keeps its scope held and the run non-quiescent.
+    pub started:        bool,
+    /// A `ScheduleRetry` is out; the firing stays live until `RetryElapsed`
+    /// arrives, which is what keeps its scope held and the run
+    /// non-quiescent.
     pub awaiting_retry: bool,
     /// A `Control::Cancel` has been delivered; the outcome will not be routed.
-    pub cancelling: bool,
+    pub cancelling:     bool,
 }
 
-/// What a firing produced, kept for status folding and for the `outputs` context.
+/// What a firing produced, kept for status folding and for the `outputs`
+/// context.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FiringRecord {
-    pub firing: FiringId,
-    pub node: NodeId,
-    pub name: SmolStr,
+    pub firing:     FiringId,
+    pub node:       NodeId,
+    pub name:       SmolStr,
     pub generation: Generation,
-    /// The attempt this outcome came from. Only final attempts are recorded here.
-    pub attempt: Attempt,
-    pub outcome: Outcome,
+    /// The attempt this outcome came from. Only final attempts are recorded
+    /// here.
+    pub attempt:    Attempt,
+    pub outcome:    Outcome,
 }
 
 /// A dynamic set of firings cancellable as a unit. Scopes nest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CancelScope {
-    pub id: CancelScopeId,
-    pub parent: Option<CancelScopeId>,
-    pub children: Vec<CancelScopeId>,
+    pub id:        CancelScopeId,
+    pub parent:    Option<CancelScopeId>,
+    pub children:  Vec<CancelScopeId>,
     /// Nodes covered by this scope. The root scope covers everything and leaves
     /// this empty.
-    pub nodes: BTreeSet<NodeId>,
+    pub nodes:     BTreeSet<NodeId>,
     pub cancelled: bool,
     /// The forced tier: nothing in the scope fires or routes any more, and
     /// `run_on_cancel` admits nothing. Killed implies cancelled.
     #[serde(default)]
-    pub killed: bool,
+    pub killed:    bool,
 }
 
 /// Identity of one applied splice batch, whoever produced it.
@@ -77,7 +81,7 @@ impl std::fmt::Display for SpliceBatchId {
 /// [`AppliedSplice`] records and read back out of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AdmissionKey {
-    pub node: NodeId,
+    pub node:       NodeId,
     pub generation: Generation,
 }
 
@@ -85,18 +89,18 @@ pub struct AdmissionKey {
 /// outcome upload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppliedSplice {
-    pub batch: SpliceBatchId,
+    pub batch:             SpliceBatchId,
     /// The node whose firing produced the batch: the expansion source, or the
     /// uploader. Core-derived — stamped at apply time, never taken from a
     /// request — and stable across generations, so a loop-head uploader can
     /// replace its own earlier batches.
-    pub owner: NodeId,
+    pub owner:             NodeId,
     /// Every node the batch added, for admission control and cancellation.
-    pub nodes: BTreeSet<NodeId>,
-    pub cancel_scope: CancelScopeId,
-    pub origin: SpliceOrigin,
-    pub policy: BatchPolicy,
-    pub effects: Vec<SpliceEffect>,
+    pub nodes:             BTreeSet<NodeId>,
+    pub cancel_scope:      CancelScopeId,
+    pub origin:            SpliceOrigin,
+    pub policy:            BatchPolicy,
+    pub effects:           Vec<SpliceEffect>,
     /// Firings currently occupying this batch's admission slots.
     pub(crate) live_count: u32,
 }
@@ -109,33 +113,34 @@ impl AppliedSplice {
 }
 
 /// Runtime facts for one graph node. The vector holding these records stays
-/// aligned with `Graph::nodes`, so node metadata needs no parallel maps or scans.
+/// aligned with `Graph::nodes`, so node metadata needs no parallel maps or
+/// scans.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct NodeRuntime {
-    cancel_scope: CancelScopeId,
-    batch: Option<SpliceBatchId>,
+    cancel_scope:   CancelScopeId,
+    batch:          Option<SpliceBatchId>,
     clone_bindings: Option<BTreeMap<SmolStr, Value>>,
-    superseded: bool,
+    superseded:     bool,
 }
 
 impl NodeRuntime {
     fn declared() -> Self {
         Self {
-            cancel_scope: CancelScopeId::ROOT,
-            batch: None,
+            cancel_scope:   CancelScopeId::ROOT,
+            batch:          None,
             clone_bindings: None,
-            superseded: false,
+            superseded:     false,
         }
     }
 }
 
-/// The engine's id allocators. Splice preparation copies this value and advances
-/// the copy, so a rejected transaction cannot move canonical state.
+/// The engine's id allocators. Splice preparation copies this value and
+/// advances the copy, so a rejected transaction cannot move canonical state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Allocators {
     /// High-water mark for splice-allocated node ids.
-    pub next_node: u32,
-    pub next_edge: u32,
+    pub next_node:         u32,
+    pub next_edge:         u32,
     pub next_cancel_scope: u32,
 }
 
@@ -170,7 +175,7 @@ pub enum SpliceOrigin {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchPolicy {
     pub max_parallel: Option<u32>,
-    pub fail_fast: bool,
+    pub fail_fast:    bool,
 }
 
 /// A state change applied with a splice batch.
@@ -185,12 +190,15 @@ pub enum SpliceEffect {
 pub enum RunError {
     #[error("node {node:?}: evaluating {site} failed: {error}")]
     Eval {
-        node: NodeId,
-        site: SmolStr,
+        node:  NodeId,
+        site:  SmolStr,
         error: EvalError,
     },
     #[error("node {node:?} exceeded its firing budget of {max_firings}")]
-    BudgetExceeded { node: NodeId, max_firings: u32 },
+    BudgetExceeded {
+        node:        NodeId,
+        max_firings: u32,
+    },
     #[error("node {node:?}: select group {group} matched no arm and requires one")]
     NoArmMatched { node: NodeId, group: usize },
     #[error("node {node:?}: `for_each` items evaluated to {got}, not an array")]
@@ -201,9 +209,9 @@ pub enum RunError {
     UnexpectedRetry { firing: FiringId },
     #[error("firing {firing:?} reported attempt {reported:?} while running {running:?}")]
     AttemptMismatch {
-        firing: FiringId,
+        firing:   FiringId,
         reported: Attempt,
-        running: Attempt,
+        running:  Attempt,
     },
     #[error("node {node:?}: expansion subgraph entry must be the expanding node")]
     ExpansionEntryMismatch { node: NodeId },
@@ -222,66 +230,69 @@ pub enum RunError {
 /// The whole state machine's state. Pure data: no handles, no clocks, no IO.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EngineState {
-    /// The live graph. Expansions splice clones into it, so it grows during a run.
+    /// The live graph. Expansions splice clones into it, so it grows during a
+    /// run.
     pub graph: Graph,
     /// Every event applied so far, in order.
-    pub log: EventLog,
+    pub log:   EventLog,
 
-    /// Tokens waiting on a join: node, then generation, then edge. Nested rather
-    /// than keyed by a `(node, generation)` tuple so the whole state serializes to
-    /// JSON, where a map key has to be a primitive.
-    pending: BTreeMap<NodeId, BTreeMap<Generation, BTreeMap<EdgeId, Token>>>,
+    /// Tokens waiting on a join: node, then generation, then edge. Nested
+    /// rather than keyed by a `(node, generation)` tuple so the whole state
+    /// serializes to JSON, where a map key has to be a primitive.
+    pending:  BTreeMap<NodeId, BTreeMap<Generation, BTreeMap<EdgeId, Token>>>,
     /// `(node, generation)` pairs that already fired. Later tokens for them are
     /// dropped, which is what makes `JoinPolicy::Any` fire exactly once.
-    fired: BTreeSet<(NodeId, Generation)>,
+    fired:    BTreeSet<(NodeId, Generation)>,
     /// Joins that are satisfied but held back by `max_parallel`.
     deferred: VecDeque<(NodeId, Generation)>,
 
-    live: BTreeMap<FiringId, Firing>,
-    firing_counts: BTreeMap<NodeId, u32>,
-    history: Vec<FiringRecord>,
-    /// Firings whose latest recorded outcome is `Cancelled` — the admission check
-    /// runs per token, so this is kept alongside `history` rather than scanned out
-    /// of it.
+    live:               BTreeMap<FiringId, Firing>,
+    firing_counts:      BTreeMap<NodeId, u32>,
+    history:            Vec<FiringRecord>,
+    /// Firings whose latest recorded outcome is `Cancelled` — the admission
+    /// check runs per token, so this is kept alongside `history` rather
+    /// than scanned out of it.
     #[serde(default)]
     cancelled_outcomes: BTreeSet<FiringId>,
     /// Run-scoped state expressions read as `nodes.*` and `kv.*`.
     ///
-    /// Derived: every write happens in `apply`, in event order, so replaying the log
-    /// rebuilds it exactly. It is never checkpointed as a separate artifact.
-    run: RunContext,
+    /// Derived: every write happens in `apply`, in event order, so replaying
+    /// the log rebuilds it exactly. It is never checkpointed as a separate
+    /// artifact.
+    run:                RunContext,
 
-    cancel_scopes: BTreeMap<CancelScopeId, CancelScope>,
+    cancel_scopes:        BTreeMap<CancelScopeId, CancelScope>,
     /// Per-node runtime facts, indexed directly by `NodeId`.
-    node_runtime: Vec<NodeRuntime>,
-    splices: Vec<AppliedSplice>,
-    /// Admissions retracted by a `Replace`: their parked tokens were dropped, and
-    /// later tokens for these exact keys are swallowed. Kept flat beside the
-    /// per-batch records because the swallow check runs per token.
+    node_runtime:         Vec<NodeRuntime>,
+    splices:              Vec<AppliedSplice>,
+    /// Admissions retracted by a `Replace`: their parked tokens were dropped,
+    /// and later tokens for these exact keys are swallowed. Kept flat
+    /// beside the per-batch records because the swallow check runs per
+    /// token.
     #[serde(default)]
     retracted_admissions: BTreeSet<AdmissionKey>,
     /// Firings settled by a cancel or kill while awaiting a retry backoff. The
-    /// driver's sleeper cannot be recalled, so the one matching late `RetryElapsed`
-    /// consumes its tombstone silently; any other invalid `RetryElapsed` still
-    /// errors.
+    /// driver's sleeper cannot be recalled, so the one matching late
+    /// `RetryElapsed` consumes its tombstone silently; any other invalid
+    /// `RetryElapsed` still errors.
     #[serde(default)]
-    retry_tombstones: BTreeSet<FiringId>,
+    retry_tombstones:     BTreeSet<FiringId>,
 
     /// Synthetic incoming edges for entry nodes and clone entries.
-    seed_edges: BTreeMap<EdgeId, NodeId>,
-    /// Resource scopes currently held. A scope is held from the moment one of its
-    /// nodes starts until nothing in it can run again, so a chain of steps in one
-    /// job does not tear the job down between steps.
+    seed_edges:  BTreeMap<EdgeId, NodeId>,
+    /// Resource scopes currently held. A scope is held from the moment one of
+    /// its nodes starts until nothing in it can run again, so a chain of
+    /// steps in one job does not tear the job down between steps.
     held_scopes: BTreeSet<ScopeId>,
 
     next_firing: u64,
     #[serde(flatten)]
-    allocators: Allocators,
+    allocators:  Allocators,
 
-    started: bool,
-    finished: bool,
+    started:   bool,
+    finished:  bool,
     cancelled: bool,
-    errors: Vec<RunError>,
+    errors:    Vec<RunError>,
 }
 
 impl EngineState {
@@ -294,17 +305,14 @@ impl EngineState {
             .max()
             .map_or(0, |m| m + 1);
         let mut cancel_scopes = BTreeMap::new();
-        cancel_scopes.insert(
-            CancelScopeId::ROOT,
-            CancelScope {
-                id: CancelScopeId::ROOT,
-                parent: None,
-                children: Vec::new(),
-                nodes: BTreeSet::new(),
-                cancelled: false,
-                killed: false,
-            },
-        );
+        cancel_scopes.insert(CancelScopeId::ROOT, CancelScope {
+            id:        CancelScopeId::ROOT,
+            parent:    None,
+            children:  Vec::new(),
+            nodes:     BTreeSet::new(),
+            cancelled: false,
+            killed:    false,
+        });
         let node_runtime = vec![NodeRuntime::declared(); graph.nodes.len()];
         Self {
             graph,
@@ -370,10 +378,10 @@ impl EngineState {
 
     /// The node a firing belongs to, live or finished.
     ///
-    /// [`EngineState::firing`] sees only live firings, and by the time an observer
-    /// runs for a finish record the firing is already retired — so this searches
-    /// history too. The stable way for a host to resolve a firing to its node, and
-    /// from there its name and `meta`.
+    /// [`EngineState::firing`] sees only live firings, and by the time an
+    /// observer runs for a finish record the firing is already retired — so
+    /// this searches history too. The stable way for a host to resolve a
+    /// firing to its node, and from there its name and `meta`.
     pub fn firing_node(&self, id: FiringId) -> Option<NodeId> {
         self.live.get(&id).map(|f| f.node).or_else(|| {
             self.history
@@ -399,7 +407,8 @@ impl EngineState {
         self.firing_counts.get(&node).copied().unwrap_or(0)
     }
 
-    /// Tokens still waiting on a join, with the `(node, generation)` they wait at.
+    /// Tokens still waiting on a join, with the `(node, generation)` they wait
+    /// at.
     pub fn pending_tokens(&self) -> impl Iterator<Item = ((NodeId, Generation), &Token)> {
         self.pending.iter().flat_map(|(node, generations)| {
             generations.iter().flat_map(move |(generation, tokens)| {
@@ -416,14 +425,14 @@ impl EngineState {
             .sum()
     }
 
-    /// The synthetic incoming edges allocated for entry nodes and expansion clone
-    /// entries, with the node each one feeds.
+    /// The synthetic incoming edges allocated for entry nodes and expansion
+    /// clone entries, with the node each one feeds.
     ///
     /// These are allocated from the free edge-id space above every id the graph
     /// declares, so they never collide with a declared edge, and they are never
-    /// written into a [`ir::Routing`] group — they exist only here. Joins count them
-    /// alongside real incoming edges, which is what lets an entry node use any join
-    /// policy without a special case.
+    /// written into a [`ir::Routing`] group — they exist only here. Joins count
+    /// them alongside real incoming edges, which is what lets an entry node
+    /// use any join policy without a special case.
     pub fn seed_edges(&self) -> impl Iterator<Item = (EdgeId, NodeId)> + '_ {
         self.seed_edges.iter().map(|(edge, node)| (*edge, *node))
     }
@@ -458,8 +467,8 @@ impl EngineState {
         self.live.values().filter(|f| f.awaiting_retry)
     }
 
-    /// The run status folded from node outcomes, as it stands right now, under the
-    /// graph's [`Completion`] policy.
+    /// The run status folded from node outcomes, as it stands right now, under
+    /// the graph's [`Completion`] policy.
     pub fn folded_status(&self) -> RunStatus {
         if self.cancelled {
             return RunStatus::Cancelled;
@@ -500,14 +509,14 @@ impl EngineState {
         }
     }
 
-    /// Whether anything has failed so far: an engine error, or any failed record in
-    /// history.
+    /// Whether anything has failed so far: an engine error, or any failed
+    /// record in history.
     ///
     /// This is what the `run.failed` static means — "any failure so far", under
     /// every completion policy. It is deliberately not [`Self::folded_status`]:
-    /// under [`Completion::TerminalNode`] the fold reads `Failed` until the exit
-    /// record exists, which would poison `run.failed` guards mid-run. Two names,
-    /// two meanings.
+    /// under [`Completion::TerminalNode`] the fold reads `Failed` until the
+    /// exit record exists, which would poison `run.failed` guards mid-run.
+    /// Two names, two meanings.
     pub fn any_failure(&self) -> bool {
         !self.errors.is_empty() || self.history.iter().any(|r| r.outcome.status.is_failure())
     }
@@ -558,7 +567,8 @@ impl EngineState {
         self.seed_edges.insert(edge, node);
     }
 
-    /// Where a token on this edge is headed. Covers seed edges as well as real ones.
+    /// Where a token on this edge is headed. Covers seed edges as well as real
+    /// ones.
     pub(crate) fn edge_target(&self, edge: EdgeId) -> Option<NodeId> {
         self.graph
             .edge(edge)
@@ -566,8 +576,9 @@ impl EngineState {
             .or_else(|| self.seed_edges.get(&edge).copied())
     }
 
-    /// Edges that count toward a node's join right now: its real incoming edges,
-    /// minus those from superseded sources, plus any seed edge aimed at it.
+    /// Edges that count toward a node's join right now: its real incoming
+    /// edges, minus those from superseded sources, plus any seed edge aimed
+    /// at it.
     pub(crate) fn incoming_edges(&self, node: NodeId) -> Vec<EdgeId> {
         let mut ids: Vec<EdgeId> = self
             .graph
@@ -658,21 +669,18 @@ impl EngineState {
         Some(firing)
     }
 
-    /// Record a firing's final outcome: history, the node's run-context record, and
-    /// the `kv` merge, in that order.
+    /// Record a firing's final outcome: history, the node's run-context record,
+    /// and the `kv` merge, in that order.
     ///
-    /// This is the only write path into [`RunContext`], and it runs inside `apply`,
-    /// in event order. Intermediate retry attempts never reach it.
+    /// This is the only write path into [`RunContext`], and it runs inside
+    /// `apply`, in event order. Intermediate retry attempts never reach it.
     pub(crate) fn record_outcome(&mut self, record: FiringRecord) {
-        self.run.record(
-            record.name.clone(),
-            NodeRecord {
-                status: record.outcome.status.clone(),
-                output: record.outcome.output.clone(),
-                generation: record.generation,
-                attempts: record.attempt.raw(),
-            },
-        );
+        self.run.record(record.name.clone(), NodeRecord {
+            status:     record.outcome.status.clone(),
+            output:     record.outcome.output.clone(),
+            generation: record.generation,
+            attempts:   record.attempt.raw(),
+        });
         self.run.merge(&record.outcome.context_updates);
         if matches!(record.outcome.status, Status::Cancelled) {
             self.cancelled_outcomes.insert(record.firing);
@@ -700,17 +708,14 @@ impl EngineState {
         parent: CancelScopeId,
         nodes: BTreeSet<NodeId>,
     ) {
-        self.cancel_scopes.insert(
+        self.cancel_scopes.insert(id, CancelScope {
             id,
-            CancelScope {
-                id,
-                parent: Some(parent),
-                children: Vec::new(),
-                nodes,
-                cancelled: false,
-                killed: false,
-            },
-        );
+            parent: Some(parent),
+            children: Vec::new(),
+            nodes,
+            cancelled: false,
+            killed: false,
+        });
         if let Some(p) = self.cancel_scopes.get_mut(&parent) {
             p.children.push(id);
         }
@@ -750,7 +755,8 @@ impl EngineState {
             .is_some_and(|scope| scope.cancelled)
     }
 
-    /// Whether any scope on the node's chain, innermost to root, satisfies `pred`.
+    /// Whether any scope on the node's chain, innermost to root, satisfies
+    /// `pred`.
     fn any_enclosing_scope(&self, node: NodeId, pred: impl Fn(&CancelScope) -> bool) -> bool {
         let mut current = Some(self.cancel_scope_of(node));
         while let Some(id) = current {
@@ -778,8 +784,9 @@ impl EngineState {
         }
     }
 
-    /// Whether the node sits in a killed scope. A root kill marks the root scope,
-    /// and every node's scope chain ends there, so no separate run flag is needed.
+    /// Whether the node sits in a killed scope. A root kill marks the root
+    /// scope, and every node's scope chain ends there, so no separate run
+    /// flag is needed.
     ///
     /// Public because a resumed driver needs the stop tier: a cancelling firing
     /// is finished rather than re-spawned, and which tier stopped it comes from
@@ -798,7 +805,8 @@ impl EngineState {
         self.retry_tombstones.insert(firing);
     }
 
-    /// Consume the tombstone for a settled awaiting-retry firing, if one exists.
+    /// Consume the tombstone for a settled awaiting-retry firing, if one
+    /// exists.
     pub(crate) fn take_retry_tombstone(&mut self, firing: FiringId) -> bool {
         self.retry_tombstones.remove(&firing)
     }
@@ -894,21 +902,21 @@ impl EngineState {
                     .iter()
                     .filter(|(_, tokens)| !tokens.is_empty())
                     .map(move |(generation, _)| AdmissionKey {
-                        node: *node,
+                        node:       *node,
                         generation: *generation,
                     })
             })
             .collect();
         keys.extend(self.deferred.iter().map(|(node, generation)| AdmissionKey {
-            node: *node,
+            node:       *node,
             generation: *generation,
         }));
         keys.into_iter().collect()
     }
 
     /// Whether this node was admitted in more than one generation. The
-    /// `depends_on` ambiguity rule only needs this Boolean, so stop at the first
-    /// generation that differs from the first one seen.
+    /// `depends_on` ambiguity rule only needs this Boolean, so stop at the
+    /// first generation that differs from the first one seen.
     pub(crate) fn has_multiple_admission_generations(&self, node: NodeId) -> bool {
         let mut generations = self
             .fired
@@ -951,7 +959,7 @@ impl EngineState {
         }
         self.deferred.retain(|(node, generation)| {
             !keys.contains(&AdmissionKey {
-                node: *node,
+                node:       *node,
                 generation: *generation,
             })
         });
@@ -975,12 +983,14 @@ impl EngineState {
         self.deferred.drain(..).collect()
     }
 
-    /// Mark a scope held. Returns true the first time, when the host must acquire it.
+    /// Mark a scope held. Returns true the first time, when the host must
+    /// acquire it.
     pub(crate) fn acquire_scope(&mut self, scope: ScopeId) -> bool {
         self.held_scopes.insert(scope)
     }
 
-    /// Scopes with a live firing, a pending token or a deferred join still in them.
+    /// Scopes with a live firing, a pending token or a deferred join still in
+    /// them.
     fn needed_scopes(&self) -> BTreeSet<ScopeId> {
         let mut needed: BTreeSet<ScopeId> = self.live.values().map(|f| f.scope).collect();
         let waiting = self
@@ -1007,10 +1017,11 @@ impl EngineState {
         released
     }
 
-    /// Terminal release: drop every held scope, and say which they were. Nothing can
-    /// need an environment after `FinishRun`, and a finished serialized state must
-    /// claim no resources — a token parked at an unsatisfiable join no longer holds
-    /// its environment past the end of the run.
+    /// Terminal release: drop every held scope, and say which they were.
+    /// Nothing can need an environment after `FinishRun`, and a finished
+    /// serialized state must claim no resources — a token parked at an
+    /// unsatisfiable join no longer holds its environment past the end of
+    /// the run.
     pub(crate) fn release_all_scopes(&mut self) -> Vec<ScopeId> {
         let released: Vec<ScopeId> = self.held_scopes.iter().copied().collect();
         self.held_scopes.clear();

@@ -1,4 +1,5 @@
-//! §2: routing is an AND of XORs. Selection is the default; fan-out is explicit.
+//! §2: routing is an AND of XORs. Selection is the default; fan-out is
+//! explicit.
 
 mod support;
 
@@ -21,8 +22,8 @@ fn unconditional_next_runs_the_successor() {
     assert_eq!(h.started, vec!["a", "c"]);
 }
 
-/// One group with guarded arms: the first passing guard wins, and only one token
-/// leaves the node.
+/// One group with guarded arms: the first passing guard wins, and only one
+/// token leaves the node.
 #[test]
 fn select_takes_the_first_matching_arm() {
     for (value, expected) in [(1, "low"), (5, "mid"), (99, "high")] {
@@ -43,10 +44,11 @@ fn select_takes_the_first_matching_arm() {
             let lt10 = e.binary(BinOp::Lt, output, ten);
             (lt3, lt10)
         };
-        b.select(
-            pick,
-            vec![Arm::when(low, lt3), Arm::when(mid, lt10), Arm::always(high)],
-        );
+        b.select(pick, vec![
+            Arm::when(low, lt3),
+            Arm::when(mid, lt10),
+            Arm::always(high),
+        ]);
         let graph = b.build();
         validate(&graph).expect("valid");
 
@@ -117,13 +119,9 @@ fn conditional_fan_out_drops_groups_that_match_nothing() {
     let always_runs = b.add_step("always_runs", scope, NOOP);
     let never_runs = b.add_step("never_runs", scope, NOOP);
     let no = b.exprs().lit(false);
-    b.fan_out_groups(
-        start,
-        vec![
-            vec![Arm::always(always_runs)],
-            vec![Arm::when(never_runs, no)],
-        ],
-    );
+    b.fan_out_groups(start, vec![vec![Arm::always(always_runs)], vec![
+        Arm::when(never_runs, no),
+    ]]);
     let graph = b.build();
     validate(&graph).expect("valid");
 
@@ -215,10 +213,9 @@ fn status_functions_drive_recovery_paths() {
         let e = b.exprs();
         (e.call("failure", vec![]), e.call("success", vec![]))
     };
-    b.fan_out_groups(
-        build,
-        vec![vec![Arm::when(notify, failed)], vec![Arm::when(deploy, ok)]],
-    );
+    b.fan_out_groups(build, vec![vec![Arm::when(notify, failed)], vec![
+        Arm::when(deploy, ok),
+    ]]);
     let graph = b.build();
     validate(&graph).expect("valid");
 

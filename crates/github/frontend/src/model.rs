@@ -1,28 +1,28 @@
 //! The shape of a GitHub Actions workflow file, read with positions.
 //!
-//! This is a *reading*, not a lowering: values that carry expressions stay as spanned
-//! YAML nodes, so the lowering can report a bad `${{ }}` at the line it sits on.
-//! Everything the engine cannot express is rejected here, loudly, with the package
-//! that will add it named in the hint.
+//! This is a *reading*, not a lowering: values that carry expressions stay as
+//! spanned YAML nodes, so the lowering can report a bad `${{ }}` at the line it
+//! sits on. Everything the engine cannot express is rejected here, loudly, with
+//! the package that will add it named in the hint.
 
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::{Document, Mapping, Node};
 
 pub struct Workflow<'a> {
-    pub name: Option<String>,
-    pub env: Vec<(String, Node<'a>)>,
-    pub defaults: Defaults<'a>,
-    pub jobs: Vec<Job<'a>>,
+    pub name:            Option<String>,
+    pub env:             Vec<(String, Node<'a>)>,
+    pub defaults:        Defaults<'a>,
+    pub jobs:            Vec<Job<'a>>,
     /// `on.workflow_call`: the file is reusable, with this call interface.
-    pub call: Option<CallInterface<'a>>,
+    pub call:            Option<CallInterface<'a>>,
     /// `on.workflow_dispatch.inputs`, typed like call inputs.
     pub dispatch_inputs: Vec<InputDecl<'a>>,
-    pub span: Span,
+    pub span:            Span,
 }
 
 /// What `on.workflow_call` declares: the contract a caller binds against.
 pub struct CallInterface<'a> {
-    pub inputs: Vec<InputDecl<'a>>,
+    pub inputs:  Vec<InputDecl<'a>>,
     /// Output name → its `value` expression, over the `jobs.*` context.
     pub outputs: Vec<(String, Node<'a>)>,
     /// Declared secret names, as written, with whether each is required.
@@ -32,11 +32,11 @@ pub struct CallInterface<'a> {
 /// One typed input — the same declaration for `workflow_call` and
 /// `workflow_dispatch`, so both feed one validation path.
 pub struct InputDecl<'a> {
-    pub name: String,
-    pub ty: InputType,
+    pub name:     String,
+    pub ty:       InputType,
     pub required: bool,
-    pub default: Option<Node<'a>>,
-    pub span: Span,
+    pub default:  Option<Node<'a>>,
+    pub span:     Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,8 +54,8 @@ pub enum InputType {
 /// `with:` plus `secrets:`.
 #[derive(Clone)]
 pub struct WorkflowCall<'a> {
-    pub uses: (String, Span),
-    pub with: Vec<(String, Node<'a>)>,
+    pub uses:    (String, Span),
+    pub with:    Vec<(String, Node<'a>)>,
     pub secrets: SecretsArg<'a>,
 }
 
@@ -72,69 +72,70 @@ pub enum SecretsArg<'a> {
 
 #[derive(Default, Clone, Copy)]
 pub struct Defaults<'a> {
-    pub shell: Option<Node<'a>>,
+    pub shell:             Option<Node<'a>>,
     pub working_directory: Option<Node<'a>>,
 }
 
 #[derive(Clone)]
 pub struct Job<'a> {
-    pub id: String,
-    pub span: Span,
-    pub name: Option<Node<'a>>,
-    pub needs: Vec<(String, Span)>,
-    pub condition: Option<Node<'a>>,
-    pub runs_on: Option<Node<'a>>,
-    pub container: Option<Node<'a>>,
-    pub services: Option<Node<'a>>,
-    pub env: Vec<(String, Node<'a>)>,
-    pub defaults: Defaults<'a>,
-    pub strategy: Option<Strategy<'a>>,
+    pub id:                String,
+    pub span:              Span,
+    pub name:              Option<Node<'a>>,
+    pub needs:             Vec<(String, Span)>,
+    pub condition:         Option<Node<'a>>,
+    pub runs_on:           Option<Node<'a>>,
+    pub container:         Option<Node<'a>>,
+    pub services:          Option<Node<'a>>,
+    pub env:               Vec<(String, Node<'a>)>,
+    pub defaults:          Defaults<'a>,
+    pub strategy:          Option<Strategy<'a>>,
     pub continue_on_error: Option<Node<'a>>,
-    pub timeout_minutes: Option<Node<'a>>,
-    pub outputs: Vec<(String, Node<'a>)>,
-    pub environment: Option<Environment<'a>>,
-    pub steps: Vec<Step<'a>>,
+    pub timeout_minutes:   Option<Node<'a>>,
+    pub outputs:           Vec<(String, Node<'a>)>,
+    pub environment:       Option<Environment<'a>>,
+    pub steps:             Vec<Step<'a>>,
     /// The job calls a reusable workflow instead of running steps.
-    pub call: Option<WorkflowCall<'a>>,
+    pub call:              Option<WorkflowCall<'a>>,
 }
 
 /// The deployment environment a job targets. Its enforcement — approvals,
-/// protection rules, wait timers, environment-scoped secrets — lives on GitHub's
-/// servers, so a local run ignores it with a warning; the name, URL and
-/// `deployment` flag are kept so the graph can say what the job would have
+/// protection rules, wait timers, environment-scoped secrets — lives on
+/// GitHub's servers, so a local run ignores it with a warning; the name, URL
+/// and `deployment` flag are kept so the graph can say what the job would have
 /// deployed to. Any value may be an expression, which stays as written: an
 /// ignored field is never evaluated.
 #[derive(Clone, Copy)]
 pub struct Environment<'a> {
-    pub name: Node<'a>,
-    pub url: Option<Node<'a>>,
+    pub name:       Node<'a>,
+    pub url:        Option<Node<'a>>,
     pub deployment: Option<Node<'a>>,
 }
 
 #[derive(Clone, Copy)]
 pub struct Strategy<'a> {
-    /// Absent when `strategy:` only sets `fail-fast` or `max-parallel`, which is legal.
-    pub matrix: Option<Node<'a>>,
-    pub fail_fast: Option<Node<'a>>,
+    /// Absent when `strategy:` only sets `fail-fast` or `max-parallel`, which
+    /// is legal.
+    pub matrix:       Option<Node<'a>>,
+    pub fail_fast:    Option<Node<'a>>,
     pub max_parallel: Option<Node<'a>>,
 }
 
 #[derive(Clone)]
 pub struct Step<'a> {
     /// Position in the job, 0-based. Steps without an `id` are named from it.
-    pub index: usize,
-    pub id: Option<String>,
-    pub span: Span,
-    pub name: Option<Node<'a>>,
-    pub condition: Option<Node<'a>>,
-    pub run: Option<Node<'a>>,
-    pub uses: Option<(String, Span)>,
-    pub with: Vec<(String, Node<'a>)>,
-    pub env: Vec<(String, Node<'a>)>,
-    pub shell: Option<Node<'a>>,
+    pub index:             usize,
+    pub id:                Option<String>,
+    pub span:              Span,
+    pub name:              Option<Node<'a>>,
+    pub condition:         Option<Node<'a>>,
+    pub run:               Option<Node<'a>>,
+    pub uses:              Option<(String, Span)>,
+    pub with:              Vec<(String, Node<'a>)>,
+    pub env:               Vec<(String, Node<'a>)>,
+    pub shell:             Option<Node<'a>>,
     pub working_directory: Option<Node<'a>>,
     pub continue_on_error: Option<Node<'a>>,
-    pub timeout_minutes: Option<Node<'a>>,
+    pub timeout_minutes:   Option<Node<'a>>,
 }
 
 impl Step<'_> {
@@ -195,9 +196,9 @@ const STEP_KEYS: &[&str] = &[
     "wait-all",
 ];
 
-/// Read a workflow. Returns `None` only when the document is not a workflow at all;
-/// individual rejections are diagnostics and reading continues past them so one pass
-/// reports everything.
+/// Read a workflow. Returns `None` only when the document is not a workflow at
+/// all; individual rejections are diagnostics and reading continues past them
+/// so one pass reports everything.
 pub fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'a>> {
     let root = doc.root();
     let top = root.expect_mapping(diags, "a workflow")?;
@@ -271,7 +272,7 @@ fn read_triggers<'a>(
 fn read_call_interface<'a>(wc: Node<'a>, diags: &mut Diagnostics) -> CallInterface<'a> {
     let Some(wm) = wc.as_mapping() else {
         return CallInterface {
-            inputs: Vec::new(),
+            inputs:  Vec::new(),
             outputs: Vec::new(),
             secrets: Vec::new(),
         };
@@ -443,8 +444,8 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
             "`strategy`",
         );
         Some(Strategy {
-            matrix: sm.get("matrix"),
-            fail_fast: sm.get("fail-fast"),
+            matrix:       sm.get("matrix"),
+            fail_fast:    sm.get("fail-fast"),
             max_parallel: sm.get("max-parallel"),
         })
     });
@@ -534,10 +535,10 @@ fn read_call<'a>(
 }
 
 /// `environment:` — a name, or a `{name, url}` mapping. The shape is validated
-/// (a malformed value is still an error), the target is kept, and the job lowers
-/// with a warning naming the semantics a local run does not have. Secrets scoped
-/// to the environment stay unavailable: the secret provider has no environment
-/// scope to serve them from.
+/// (a malformed value is still an error), the target is kept, and the job
+/// lowers with a warning naming the semantics a local run does not have.
+/// Secrets scoped to the environment stay unavailable: the secret provider has
+/// no environment scope to serve them from.
 fn read_environment<'a>(
     job: &str,
     node: Node<'a>,
@@ -545,8 +546,8 @@ fn read_environment<'a>(
 ) -> Option<Environment<'a>> {
     let environment = if node.is_scalar() {
         Some(Environment {
-            name: node,
-            url: None,
+            name:       node,
+            url:        None,
             deployment: None,
         })
     } else if let Some(m) = node.as_mapping() {
@@ -610,9 +611,10 @@ pub fn read_step<'a>(
         &format!("step {} of job `{job}`", index + 1),
     );
 
-    // Background steps and the `wait:` steps that join them. The IR can express this
-    // — a background step is a fan-out, a `wait` is an `All` join — but that is a
-    // lowering decision for the spec, so it is rejected specifically for now.
+    // Background steps and the `wait:` steps that join them. The IR can express
+    // this — a background step is a fan-out, a `wait` is an `All` join — but
+    // that is a lowering decision for the spec, so it is rejected specifically
+    // for now.
     let mut background = false;
     for key in ["background", "wait", "wait-all"] {
         if let Some(node) = m.get(key) {
@@ -698,7 +700,7 @@ fn read_defaults<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Default
     };
     run.reject_unknown_keys(&["shell", "working-directory"], diags, "`defaults.run`");
     Defaults {
-        shell: run.get("shell"),
+        shell:             run.get("shell"),
         working_directory: run.get("working-directory"),
     }
 }
@@ -709,8 +711,8 @@ fn env_entries<'a>(
     what: &str,
 ) -> Vec<(String, Node<'a>)> {
     let Some(node) = node else { return Vec::new() };
-    // GitHub allows `env: ${{ ... }}` as a whole; that is an expression-valued map we
-    // cannot statically type, and rare enough to reject.
+    // GitHub allows `env: ${{ ... }}` as a whole; that is an expression-valued map
+    // we cannot statically type, and rare enough to reject.
     if node.is_scalar() {
         diags.unsupported(
             "env.expression",
@@ -727,9 +729,9 @@ fn env_entries<'a>(
 }
 
 /// `concurrency:` is cross-run mutual exclusion — one run against another. A
-/// single local run has nothing to race, so the group is ignored, loudly: the rule
-/// is real on GitHub, and the log should say it did not apply here. Cross-run
-/// concurrency stays with the multi-run driver layer (decision D2).
+/// single local run has nothing to race, so the group is ignored, loudly: the
+/// rule is real on GitHub, and the log should say it did not apply here.
+/// Cross-run concurrency stays with the multi-run driver layer (decision D2).
 fn warn_concurrency(node: Node<'_>, diags: &mut Diagnostics) {
     diags.warning(
         "ignored.concurrency",

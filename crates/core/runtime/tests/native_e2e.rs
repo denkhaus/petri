@@ -1,6 +1,7 @@
-//! Handoff §7 test 7, the behavioural half: the cycle + XOR + `any` example runs
-//! end to end on the standard runtime. The lowering half stays with the frontend,
-//! in `crates/core/frontend-native/tests/native.rs` (which lowers this same document).
+//! Handoff §7 test 7, the behavioural half: the cycle + XOR + `any` example
+//! runs end to end on the standard runtime. The lowering half stays with the
+//! frontend, in `crates/core/frontend-native/tests/native.rs` (which lowers
+//! this same document).
 
 use runtime::frontend::native::load;
 use runtime::ir::RunStatus;

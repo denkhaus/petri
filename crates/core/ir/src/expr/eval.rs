@@ -1,5 +1,5 @@
-//! Evaluation: the environment an expression reads, and the walker that reduces it
-//! to a [`Value`]. Function calls dispatch through [`super::builtins`].
+//! Evaluation: the environment an expression reads, and the walker that reduces
+//! it to a [`Value`]. Function calls dispatch through [`super::builtins`].
 
 use std::collections::BTreeMap;
 
@@ -14,8 +14,8 @@ use crate::ids::ExprId;
 
 /// Per-firing bindings that are neither the token payload nor run-scoped state.
 ///
-/// Scope `env`, the node's identity and generation, the firing's own outcome where
-/// there is one, and `item` / `index` inside an expansion clone.
+/// Scope `env`, the node's identity and generation, the firing's own outcome
+/// where there is one, and `item` / `index` inside an expansion clone.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StaticCtx {
     vars: BTreeMap<SmolStr, Value>,
@@ -23,8 +23,8 @@ pub struct StaticCtx {
 
 /// Everything an expression may read.
 ///
-/// One environment for guards, `map`, preconditions and `Expansion.items` alike, so
-/// there is a single way for an expression to see upstream state.
+/// One environment for guards, `map`, preconditions and `Expansion.items`
+/// alike, so there is a single way for an expression to see upstream state.
 ///
 /// Name resolution runs in this order, and the first three shadow `statics`:
 ///
@@ -35,8 +35,8 @@ pub struct StaticCtx {
 /// | `token`, `input` | the token payload |
 /// | anything else | [`StaticCtx`] |
 pub struct EvalEnv<'a> {
-    pub token: &'a Value,
-    pub run: &'a RunContext,
+    pub token:   &'a Value,
+    pub run:     &'a RunContext,
     pub statics: &'a StaticCtx,
 }
 
@@ -67,9 +67,10 @@ impl<'a> EvalEnv<'a> {
         }
     }
 
-    /// One entry of a run-context map, read without materializing the map: going
-    /// through [`Self::run_map`] would clone every node's output to reach one. Equal
-    /// to indexing the whole map, `Null` for a missing entry included.
+    /// One entry of a run-context map, read without materializing the map:
+    /// going through [`Self::run_map`] would clone every node's output to
+    /// reach one. Equal to indexing the whole map, `Null` for a missing
+    /// entry included.
     fn run_entry(&self, map: RunMap, key: &str) -> Value {
         match map {
             RunMap::Nodes => self
@@ -82,8 +83,9 @@ impl<'a> EvalEnv<'a> {
     }
 }
 
-/// The maps of [`RunContext`] that expressions read by name. [`EvalEnv::lookup`]
-/// resolves these before the statics, so neither name can be shadowed.
+/// The maps of [`RunContext`] that expressions read by name.
+/// [`EvalEnv::lookup`] resolves these before the statics, so neither name can
+/// be shadowed.
 #[derive(Clone, Copy)]
 enum RunMap {
     Nodes,
@@ -133,15 +135,15 @@ pub enum EvalError {
     UnknownFunction(SmolStr),
     #[error("`{name}` takes {expected} argument(s), got {got}")]
     Arity {
-        name: SmolStr,
+        name:     SmolStr,
         expected: usize,
-        got: usize,
+        got:      usize,
     },
     #[error("{op} needs {expected}, got {got}")]
     Type {
-        op: SmolStr,
+        op:       SmolStr,
         expected: SmolStr,
-        got: SmolStr,
+        got:      SmolStr,
     },
     #[error("division by zero")]
     DivByZero,
@@ -392,9 +394,9 @@ pub(super) fn to_display(v: &Value) -> String {
 
 pub(super) fn type_err(op: &str, expected: &str, got: &Value) -> EvalError {
     EvalError::Type {
-        op: SmolStr::new(op),
+        op:       SmolStr::new(op),
         expected: SmolStr::new(expected),
-        got: SmolStr::new(type_name(got)),
+        got:      SmolStr::new(type_name(got)),
     }
 }
 

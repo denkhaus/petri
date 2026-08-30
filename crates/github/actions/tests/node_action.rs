@@ -1,8 +1,9 @@
 //! A JavaScript action in a local git repository, run for real: the frontend
 //! resolves `uses: acme/hello@v1` through a `GitActionSource` pointed at a `file://`
 //! base, the step stages the tree and runs `node`, and the runner contract —
-//! inputs, outputs, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, `::add-mask::`,
-//! `post` — is exercised end to end on the standard runtime, replay verified.
+//! inputs, outputs, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`,
+//! `::add-mask::`, `post` — is exercised end to end on the standard runtime,
+//! replay verified.
 //!
 //! Needs `git` and `node` on this machine; skips otherwise.
 
@@ -131,19 +132,16 @@ fn fixture_action(base: &Path) {
     }
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
-    git(
-        &dir,
-        &[
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.com",
-            "commit",
-            "-q",
-            "-m",
-            "the action",
-        ],
-    );
+    git(&dir, &[
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "the action",
+    ]);
     git(&dir, &["tag", "v1"]);
 }
 
@@ -340,26 +338,24 @@ fn a_moving_reference_is_resolved_again_for_a_later_load() {
 
     std::fs::write(repo.join("dist/index.js"), "console.log('changed');\n").unwrap();
     git(&repo, &["add", "."]);
-    git(
-        &repo,
-        &[
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.com",
-            "commit",
-            "-q",
-            "-m",
-            "move main",
-        ],
-    );
+    git(&repo, &[
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "move main",
+    ]);
 
     let second = github_actions::ActionSource::resolve(&source, &reference).unwrap();
     assert_ne!(first.sha, second.sha);
 }
 
-/// `actions/checkout@v4` then `actions/setup-node@v4`, from GitHub, for real. Needs
-/// the network and a `GITHUB_TOKEN` (or `gh auth token`); run with `--ignored`.
+/// `actions/checkout@v4` then `actions/setup-node@v4`, from GitHub, for real.
+/// Needs the network and a `GITHUB_TOKEN` (or `gh auth token`); run with
+/// `--ignored`.
 #[tokio::test]
 #[ignore = "fetches real actions from github.com"]
 async fn checkout_and_setup_node_run_for_real() {

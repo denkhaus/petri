@@ -37,11 +37,11 @@ enum Which {
 /// Routes each scope to the executor for its [`RuntimeTarget`] and binds the
 /// shared Docker facilities to the result.
 pub struct LocalExecutor {
-    host: HostExecutor,
+    host:   HostExecutor,
     docker: DockerExecutor,
-    /// Which executor acquired each live environment, so release goes back to it.
-    /// Keyed by scope and instance name; one `LocalExecutor` serves one run
-    /// directory, where instance names are unique.
+    /// Which executor acquired each live environment, so release goes back to
+    /// it. Keyed by scope and instance name; one `LocalExecutor` serves one
+    /// run directory, where instance names are unique.
     routes: Mutex<HashMap<(ScopeId, SmolStr), Which>>,
 }
 
@@ -51,7 +51,7 @@ impl LocalExecutor {
     pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         let run_dir = run_dir.into();
         Self {
-            host: HostExecutor::new(&run_dir),
+            host:   HostExecutor::new(&run_dir),
             docker: DockerExecutor::new(&run_dir),
             routes: Mutex::new(HashMap::new()),
         }

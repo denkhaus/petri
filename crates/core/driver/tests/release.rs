@@ -1,12 +1,12 @@
 //! §6 driver test 3, host half: after a kill — or an aborted step future, or a
 //! workload that murders its own supervisor — no process group survives scope
-//! release, no zombie outlives it, and a normal release completes well inside the
-//! observation deadline.
+//! release, no zombie outlives it, and a normal release completes well inside
+//! the observation deadline.
 //!
-//! The sentinel is the mechanism under test: the group leader that pins the pgid
-//! from spawn to release, so release's one `SIGKILL` can never reach a recycled
-//! id. Ownership is what these tests assert — deterministically, not by timing a
-//! watcher.
+//! The sentinel is the mechanism under test: the group leader that pins the
+//! pgid from spawn to release, so release's one `SIGKILL` can never reach a
+//! recycled id. Ownership is what these tests assert — deterministically, not
+//! by timing a watcher.
 
 mod support;
 
@@ -21,7 +21,8 @@ use support::*;
 
 /// Pids of live processes whose command line mentions `pattern` — which the
 /// sentinel's does: it carries its status-file path, unique per run directory.
-/// Zombies have no readable command line, so a reaped-or-zombie sentinel drops out.
+/// Zombies have no readable command line, so a reaped-or-zombie sentinel drops
+/// out.
 fn pids_matching(pattern: &str) -> Vec<i32> {
     let output = std::process::Command::new("pgrep")
         .args(["-f", pattern])
@@ -42,8 +43,9 @@ fn ps_state(pid: i32) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// A wedged step kind's future is aborted by the hard deadline; nothing kills its
-/// process tree at that moment — with `kill_on_drop` gone, that is release's job.
+/// A wedged step kind's future is aborted by the hard deadline; nothing kills
+/// its process tree at that moment — with `kill_on_drop` gone, that is
+/// release's job.
 #[tokio::test]
 async fn an_aborted_steps_process_tree_dies_at_release() {
     let dir = RunDir::new("aborted-tree");
@@ -158,8 +160,8 @@ async fn a_natural_exits_survivor_dies_at_release() {
 /// the workload and every straggler have exited on their own, the sentinel is
 /// still alive — pinning the pgid — until release, and release leaves nothing,
 /// zombie included. The normal release also completes well inside the
-/// observation deadline: an `ESRCH`-before-reap ordering would hit that deadline
-/// on every run, because the zombie leader keeps the group visible.
+/// observation deadline: an `ESRCH`-before-reap ordering would hit that
+/// deadline on every run, because the zombie leader keeps the group visible.
 #[tokio::test]
 async fn the_sentinel_pins_the_group_until_release() {
     let dir = RunDir::new("sentinel-pins");
@@ -212,9 +214,10 @@ async fn the_sentinel_pins_the_group_until_release() {
 }
 
 /// The hostile case: the workload kills its own supervisor. The unreaped zombie
-/// still pins the identifier, so release cannot signal a recycled group; reaping
-/// at release leaves no zombie behind; and the workload's own end is observed as
-/// group death rather than trusted to a supervisor that no longer exists.
+/// still pins the identifier, so release cannot signal a recycled group;
+/// reaping at release leaves no zombie behind; and the workload's own end is
+/// observed as group death rather than trusted to a supervisor that no longer
+/// exists.
 #[tokio::test]
 async fn a_workload_that_kills_its_sentinel_cannot_free_the_group_id() {
     let dir = RunDir::new("hostile-workload");
@@ -229,13 +232,10 @@ async fn a_workload_that_kills_its_sentinel_cannot_free_the_group_id() {
 
     let mut handle = env
         .exec()
-        .spawn(ProcessSpec::new(
-            "bash",
-            &[
-                "-c",
-                "while [ ! -f go ]; do sleep 0.05; done; kill -9 $PPID; echo after > after.txt",
-            ],
-        ))
+        .spawn(ProcessSpec::new("bash", &[
+            "-c",
+            "while [ ! -f go ]; do sleep 0.05; done; kill -9 $PPID; echo after > after.txt",
+        ]))
         .await
         .expect("spawn");
 

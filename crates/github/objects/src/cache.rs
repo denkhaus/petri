@@ -32,27 +32,27 @@ pub const DEFAULT_BUDGET: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
-    pub key: String,
+    pub key:     String,
     pub version: String,
     /// The blob's file name: hex of a digest over `(key, version)`.
-    pub id: String,
-    pub size: u64,
+    pub id:      String,
+    pub size:    u64,
     /// Unix seconds; `created` orders "newest wins", `used` orders the LRU.
     pub created: u64,
-    pub used: u64,
+    pub used:    u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct Index {
     next_entry: i64,
-    entries: Vec<CacheEntry>,
+    entries:    Vec<CacheEntry>,
 }
 
 pub struct CacheStore {
-    dir: PathBuf,
+    dir:    PathBuf,
     budget: u64,
     /// Serializes this process's read-modify-write of the index.
-    lock: Mutex<()>,
+    lock:   Mutex<()>,
 }
 
 impl CacheStore {

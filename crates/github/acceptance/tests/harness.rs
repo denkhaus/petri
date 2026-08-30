@@ -1,11 +1,12 @@
 //! Handoff §7 test 8: the corpus bar.
 //!
 //! Every corpus workflow either lowers or is rejected with a specific
-//! `unsupported.*` code. Zero panics, zero generic errors. The report is written to
-//! `crates/github/corpus/REPORT.md` on every run so it stays current with the code.
+//! `unsupported.*` code. Zero panics, zero generic errors. The report is
+//! written to `crates/github/corpus/REPORT.md` on every run so it stays current
+//! with the code.
 //!
-//! The corpus itself is fetched, not committed, so this skips when it is absent. See
-//! `acceptance::corpus_present`.
+//! The corpus itself is fetched, not committed, so this skips when it is
+//! absent. See `acceptance::corpus_present`.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

@@ -1,5 +1,6 @@
-//! A tiny host for the pure core: it turns commands into scripted step results and
-//! feeds them back, so tests read as "run this graph and see what happened".
+//! A tiny host for the pure core: it turns commands into scripted step results
+//! and feeds them back, so tests read as "run this graph and see what
+//! happened".
 
 #![allow(dead_code)]
 
@@ -14,19 +15,19 @@ use ir::{
 /// What the host is being asked to run.
 #[derive(Clone, Debug)]
 pub struct StartInfo {
-    pub firing: FiringId,
-    pub node: NodeId,
+    pub firing:     FiringId,
+    pub node:       NodeId,
     /// Node name, including the `#index` suffix on expansion clones.
-    pub name: String,
+    pub name:       String,
     /// Node name with any `#index` suffix removed.
-    pub base: String,
+    pub base:       String,
     /// Clone index, when this node came out of an expansion.
-    pub index: Option<u32>,
+    pub index:      Option<u32>,
     pub generation: Generation,
     /// Which try this is, 1-based.
-    pub attempt: Attempt,
-    pub config: Value,
-    pub inputs: Vec<Token>,
+    pub attempt:    Attempt,
+    pub config:     Value,
+    pub inputs:     Vec<Token>,
 }
 
 impl StartInfo {
@@ -69,32 +70,33 @@ pub const NOOP: StepKindId = StepKindId::new_static("noop");
 type Responder = Box<dyn FnMut(&StartInfo) -> Outcome>;
 
 pub struct Harness {
-    pub state: EngineState,
-    /// The graph the run started from, before any splice. Replay needs this one.
-    pub original_graph: Graph,
-    responder: Responder,
+    pub state:             EngineState,
+    /// The graph the run started from, before any splice. Replay needs this
+    /// one.
+    pub original_graph:    Graph,
+    responder:             Responder,
     /// Every command the core produced, in order.
-    pub commands: Vec<Command>,
+    pub commands:          Vec<Command>,
     /// Names of the nodes the host was told to start, in order.
-    pub started: Vec<String>,
+    pub started:           Vec<String>,
     /// The most steps that were running at the same time.
-    pub max_concurrent: usize,
+    pub max_concurrent:    usize,
     /// Every `ScheduleRetry` the core issued, in order.
     pub scheduled_retries: Vec<(FiringId, Attempt, std::time::Duration)>,
-    pub status: Option<RunStatus>,
+    pub status:            Option<RunStatus>,
 }
 
 impl Harness {
     pub fn new(graph: Graph) -> Self {
         Self {
-            original_graph: graph.clone(),
-            state: EngineState::new(graph),
-            responder: Box::new(|_| Outcome::success(Value::Null)),
-            commands: Vec::new(),
-            started: Vec::new(),
-            max_concurrent: 0,
+            original_graph:    graph.clone(),
+            state:             EngineState::new(graph),
+            responder:         Box::new(|_| Outcome::success(Value::Null)),
+            commands:          Vec::new(),
+            started:           Vec::new(),
+            max_concurrent:    0,
             scheduled_retries: Vec::new(),
-            status: None,
+            status:            None,
         }
     }
 
@@ -104,7 +106,8 @@ impl Harness {
         self
     }
 
-    /// Fixed results per node base name; anything unlisted succeeds with `null`.
+    /// Fixed results per node base name; anything unlisted succeeds with
+    /// `null`.
     pub fn results(self, results: BTreeMap<&'static str, Outcome>) -> Self {
         let table: BTreeMap<String, Outcome> = results
             .into_iter()
@@ -179,8 +182,8 @@ impl Harness {
         self.status.unwrap_or_else(|| self.state.folded_status())
     }
 
-    /// Answer every outstanding `ScheduleRetry` at once. The driver would sleep and
-    /// add jitter; a test just feeds the event straight back.
+    /// Answer every outstanding `ScheduleRetry` at once. The driver would sleep
+    /// and add jitter; a test just feeds the event straight back.
     pub fn drain_retries(&mut self) {
         loop {
             let pending: Vec<(FiringId, Attempt, std::time::Duration)> = self
@@ -269,7 +272,8 @@ impl Harness {
         });
     }
 
-    /// Replay the log from a fresh state and check it comes back byte-identical.
+    /// Replay the log from a fresh state and check it comes back
+    /// byte-identical.
     ///
     /// The determinism canary: if any core decision depended on a clock, on
     /// iteration order, or on anything outside the state, the logs diverge.
@@ -314,8 +318,8 @@ impl Harness {
 
 /// Stand-in for the process step kind's `soft_fail` handling.
 ///
-/// Producing `PartialSuccess` is a step-kind decision, not a core one: there is no
-/// node-level policy. This is the shape BuildKite's `soft_fail` and GHA's
+/// Producing `PartialSuccess` is a step-kind decision, not a core one: there is
+/// no node-level policy. This is the shape BuildKite's `soft_fail` and GHA's
 /// `continue-on-error` both lower onto.
 pub fn process_outcome(config: &Value, exit_code: i32) -> Outcome {
     if exit_code == 0 {

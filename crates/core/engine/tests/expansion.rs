@@ -22,10 +22,9 @@ fn matrix_graph(max_parallel: Option<u32>, fail_fast: bool) -> ir::Graph {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.link(plan, deploy);
-    b.select(
-        deploy,
-        vec![Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(deploy, vec![
+        Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.select(collect, vec![]);
     b.node_mut(collect).routing = ir::Routing::terminal();
     b.set_join(collect, JoinPolicy::All);
@@ -48,8 +47,8 @@ fn matrix_graph(max_parallel: Option<u32>, fail_fast: bool) -> ir::Graph {
     b.build()
 }
 
-/// Every element gets a clone, and the collector's `All` join counts the edges the
-/// splice added.
+/// Every element gets a clone, and the collector's `All` join counts the edges
+/// the splice added.
 #[test]
 fn for_each_clones_the_node_and_the_collector_waits_for_all_of_them() {
     let graph = matrix_graph(None, false);
@@ -66,10 +65,9 @@ fn for_each_clones_the_node_and_the_collector_waits_for_all_of_them() {
     assert_eq!(h.start_count("deploy"), 3);
     assert_eq!(h.max_concurrent, 3, "clones run concurrently by default");
     assert_eq!(h.start_count("collect"), 1);
-    assert_eq!(
-        h.started,
-        vec!["plan", "deploy#0", "deploy#1", "deploy#2", "collect"]
-    );
+    assert_eq!(h.started, vec![
+        "plan", "deploy#0", "deploy#1", "deploy#2", "collect"
+    ]);
 
     // A splice clones the node wholesale, so a clone carries the template's `meta`.
     let clone = h
@@ -97,14 +95,12 @@ fn clones_carry_item_and_index_and_the_collector_orders_results() {
     let items = b.exprs().var("input");
     let item = b.exprs().var("item");
     b.link(plan, build);
-    b.select(
-        build,
-        vec![Arm::always(collect).with_map(collector.indexed)],
-    );
-    b.select(
-        collect,
-        vec![Arm::always(report).with_map(collector.ordered)],
-    );
+    b.select(build, vec![
+        Arm::always(collect).with_map(collector.indexed),
+    ]);
+    b.select(collect, vec![
+        Arm::always(report).with_map(collector.ordered),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     b.node_mut(build).step = StepRef::new(
         NOOP,
@@ -154,7 +150,8 @@ fn max_parallel_limits_how_many_clones_run_at_once() {
     assert_eq!(h.max_concurrent, 2, "never more than two at a time");
 }
 
-/// `fail_fast` cancels the sibling clones through the splice's own cancel scope.
+/// `fail_fast` cancels the sibling clones through the splice's own cancel
+/// scope.
 #[test]
 fn fail_fast_cancels_the_sibling_clones() {
     let graph = matrix_graph(None, true);
@@ -257,8 +254,9 @@ fn fail_fast_still_fires_a_marked_collector() {
 }
 
 /// §5: a root cancel does not start `max_parallel`-deferred clones. They are
-/// un-marked, so once the running clone settles they complete `Cancelled` without
-/// a `StartStep` — deferral is not a back door around the admission rule.
+/// un-marked, so once the running clone settles they complete `Cancelled`
+/// without a `StartStep` — deferral is not a back door around the admission
+/// rule.
 #[test]
 fn a_cancel_does_not_start_deferred_unmarked_clones() {
     let graph = matrix_graph(Some(1), false);
@@ -283,13 +281,13 @@ fn a_cancel_does_not_start_deferred_unmarked_clones() {
     h.verify_replay();
 }
 
-/// Splice semantics: a splice supersedes the whole template region, so a template
-/// edge no token can cross stops counting toward a downstream join.
+/// Splice semantics: a splice supersedes the whole template region, so a
+/// template edge no token can cross stops counting toward a downstream join.
 ///
-/// This is the regression test for a deadlock generator. `All` is defined over the
-/// incoming edges a node has *at firing time*, so if the template's `test -> collect`
-/// edge kept counting after the clones were spliced in, the collector would wait
-/// forever on an edge nothing can ever cross.
+/// This is the regression test for a deadlock generator. `All` is defined over
+/// the incoming edges a node has *at firing time*, so if the template's `test
+/// -> collect` edge kept counting after the clones were spliced in, the
+/// collector would wait forever on an edge nothing can ever cross.
 #[test]
 fn superseded_template_edges_do_not_deadlock_the_collector() {
     let mut b = GraphBuilder::new();
@@ -312,7 +310,7 @@ fn superseded_template_edges_do_not_deadlock_the_collector() {
         items,
         ExpandTarget::Subgraph {
             entry: setup,
-            exit: test,
+            exit:  test,
         },
         None,
         false,
@@ -350,8 +348,8 @@ fn superseded_template_edges_do_not_deadlock_the_collector() {
     assert_eq!(h.state.pending_count(), 0, "no token is left stranded");
 }
 
-/// Expanding over an empty array leaves the collector with nothing to wait for and
-/// no clone to run.
+/// Expanding over an empty array leaves the collector with nothing to wait for
+/// and no clone to run.
 #[test]
 fn an_empty_items_array_expands_to_nothing() {
     let graph = matrix_graph(None, false);

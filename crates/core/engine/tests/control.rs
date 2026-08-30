@@ -1,7 +1,7 @@
 //! §6: `ControlRequested` — the host delivers a value into a live firing. Only
-//! `Control::Deliver` to a live, not-cancelling, not-awaiting-retry firing produces
-//! a command; everything else is a logged no-op, never a `RunError`, because a late
-//! answer must not fail the run.
+//! `Control::Deliver` to a live, not-cancelling, not-awaiting-retry firing
+//! produces a command; everything else is a logged no-op, never a `RunError`,
+//! because a late answer must not fail the run.
 
 mod support;
 
@@ -43,10 +43,10 @@ fn a_deliver_to_a_live_firing_produces_one_command() {
         firing,
         ctl: Control::Deliver(json!({"answer": "approved"})),
     });
-    assert_eq!(
-        deliveries(&h),
-        vec![(firing, Control::Deliver(json!({"answer": "approved"})))]
-    );
+    assert_eq!(deliveries(&h), vec![(
+        firing,
+        Control::Deliver(json!({"answer": "approved"}))
+    )]);
     assert_eq!(h.state.pending_count(), before, "no routing effect");
     assert!(h.state.errors().is_empty());
 
@@ -97,7 +97,7 @@ fn a_deliver_to_a_dead_or_unknown_firing_is_a_logged_noop() {
     // Unknown.
     h.feed(Event::ControlRequested {
         firing: FiringId::new(999),
-        ctl: Control::Deliver(json!("to nobody")),
+        ctl:    Control::Deliver(json!("to nobody")),
     });
 
     assert!(deliveries(&h).is_empty());
@@ -117,8 +117,8 @@ fn a_deliver_to_a_dead_or_unknown_firing_is_a_logged_noop() {
     assert_eq!(h.status, Some(RunStatus::Success));
 }
 
-/// A firing waiting out a retry backoff has no task to deliver to: no command, no
-/// error.
+/// A firing waiting out a retry backoff has no task to deliver to: no command,
+/// no error.
 #[test]
 fn a_deliver_to_an_awaiting_retry_firing_is_a_noop() {
     let mut b = GraphBuilder::new();

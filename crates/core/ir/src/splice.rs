@@ -1,13 +1,14 @@
-//! The outcome-splice vocabulary: what a step's final outcome may ask the engine
-//! to graft into the live graph, and the capability that gates it.
+//! The outcome-splice vocabulary: what a step's final outcome may ask the
+//! engine to graft into the live graph, and the capability that gates it.
 //!
 //! A [`SpliceRequest`] is fragment-local, serialized inside `StepFinished`, and
-//! untrusted: every id in its [`GraphFragment`] lives in the [`Local`] space and
-//! means nothing against the live graph until the engine's preparation remaps it.
-//! Policy is a closed capability, not a Boolean: [`SplicePolicy`] is totally
-//! ordered, `authorize` rejects an operation above the node's policy, and the
-//! delegation check rejects a fragment node whose declared policy exceeds its
-//! uploader's. Both reject loudly as `invalid_splice` — never a silent clamp.
+//! untrusted: every id in its [`GraphFragment`] lives in the [`Local`] space
+//! and means nothing against the live graph until the engine's preparation
+//! remaps it. Policy is a closed capability, not a Boolean: [`SplicePolicy`] is
+//! totally ordered, `authorize` rejects an operation above the node's policy,
+//! and the delegation check rejects a fragment node whose declared policy
+//! exceeds its uploader's. Both reject loudly as `invalid_splice` — never a
+//! silent clamp.
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -98,10 +99,10 @@ impl SpliceMode {
 /// V1 fragments declare their own resource scopes only.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphFragment {
-    pub body: GraphBody<Local>,
+    pub body:  GraphBody<Local>,
     /// Where the fragment ends: exits gain edges to each existing dependent of
-    /// the uploader, so a dependency on the uploader becomes a dependency on the
-    /// batch too.
+    /// the uploader, so a dependency on the uploader becomes a dependency on
+    /// the batch too.
     pub exits: Vec<NodeId<Local>>,
 }
 
@@ -143,11 +144,11 @@ impl<'de> Deserialize<'de> for GraphFragment {
     {
         #[derive(Deserialize)]
         struct Wire {
-            nodes: Vec<Node<Local>>,
-            scopes: Vec<Scope<Local>>,
-            exprs: ExprTable<Local>,
+            nodes:   Vec<Node<Local>>,
+            scopes:  Vec<Scope<Local>>,
+            exprs:   ExprTable<Local>,
             entries: Vec<NodeId<Local>>,
-            exits: Vec<NodeId<Local>>,
+            exits:   Vec<NodeId<Local>>,
         }
 
         let Wire {
@@ -201,8 +202,9 @@ impl GraphBuilder<Local> {
         builder
     }
 
-    /// Finish a fragment graph with explicit exits. This uses the same node, edge,
-    /// entry, routing, and scope allocation path as a live graph builder.
+    /// Finish a fragment graph with explicit exits. This uses the same node,
+    /// edge, entry, routing, and scope allocation path as a live graph
+    /// builder.
     pub fn build_fragment(self, exits: impl IntoIterator<Item = NodeId<Local>>) -> GraphFragment {
         let Graph {
             body,
@@ -261,7 +263,7 @@ pub enum Attachment {
     /// admission — any loop node rejects in v1.
     DependsOn {
         node: NodeId<Local>,
-        on: ExistingNodeRef,
+        on:   ExistingNodeRef,
     },
 }
 
@@ -269,8 +271,8 @@ pub enum Attachment {
 /// prepare successfully or none apply.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpliceRequest {
-    pub mode: SpliceMode,
-    pub fragment: GraphFragment,
+    pub mode:        SpliceMode,
+    pub fragment:    GraphFragment,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
 }
@@ -309,7 +311,7 @@ pub struct FragmentValidationError {
     /// Where in the fragment: `node N`, `edge N`, `entry N`, `attachment N`, or
     /// `fragment` for whole-fragment problems.
     pub location: SmolStr,
-    pub kind: FragmentErrorKind,
+    pub kind:     FragmentErrorKind,
 }
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -353,7 +355,7 @@ pub fn validate_fragment_with(
         for error in validate::collect_body(&fragment.body, registry) {
             errors.push(FragmentValidationError {
                 location: structure_location(&error),
-                kind: FragmentErrorKind::Structure(error),
+                kind:     FragmentErrorKind::Structure(error),
             });
         }
     }
@@ -363,14 +365,14 @@ pub fn validate_fragment_with(
         if exit.index() >= fragment.nodes.len() {
             errors.push(FragmentValidationError {
                 location: SmolStr::new(format!("exit {exit}")),
-                kind: FragmentErrorKind::UnknownExit(*exit),
+                kind:     FragmentErrorKind::UnknownExit(*exit),
             });
             continue;
         }
         if !seen_exits.insert(*exit) {
             errors.push(FragmentValidationError {
                 location: SmolStr::new(format!("exit {exit}")),
-                kind: FragmentErrorKind::DuplicateExit(*exit),
+                kind:     FragmentErrorKind::DuplicateExit(*exit),
             });
         }
     }
@@ -379,7 +381,7 @@ pub fn validate_fragment_with(
         if let Some(Expansion::ForEach { .. }) = node.expand {
             errors.push(FragmentValidationError {
                 location: SmolStr::new(format!("node {}", node.id)),
-                kind: FragmentErrorKind::ExpansionInFragment(node.id),
+                kind:     FragmentErrorKind::ExpansionInFragment(node.id),
             });
         }
     }
@@ -399,7 +401,8 @@ pub fn validate_request(request: &SpliceRequest) -> Result<(), Vec<FragmentValid
     validate_request_with(request, None)
 }
 
-/// [`validate_request`] with a step registry, mirroring [`validate_fragment_with`].
+/// [`validate_request`] with a step registry, mirroring
+/// [`validate_fragment_with`].
 pub fn validate_request_with(
     request: &SpliceRequest,
     registry: Option<&dyn StepKinds>,
@@ -412,7 +415,7 @@ pub fn validate_request_with(
     if request.fragment.nodes.is_empty() && request.mode == SpliceMode::Append {
         errors.push(FragmentValidationError {
             location: SmolStr::new("fragment"),
-            kind: FragmentErrorKind::EmptyAppend,
+            kind:     FragmentErrorKind::EmptyAppend,
         });
     }
 
@@ -421,7 +424,7 @@ pub fn validate_request_with(
         if node.index() >= request.fragment.nodes.len() {
             errors.push(FragmentValidationError {
                 location: SmolStr::new(format!("attachment {index}")),
-                kind: FragmentErrorKind::AttachmentUnknownNode(*node),
+                kind:     FragmentErrorKind::AttachmentUnknownNode(*node),
             });
         }
     }

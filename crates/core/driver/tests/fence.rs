@@ -67,10 +67,10 @@ async fn reacquire_fences_the_survivor_and_isolates_status() {
 
     // And something still running: the survivor.
     let _survivor = exec
-        .spawn(ProcessSpec::new(
-            "sh",
-            &["-c", "while :; do echo tick >> heartbeat; sleep 0.05; done"],
-        ))
+        .spawn(ProcessSpec::new("sh", &[
+            "-c",
+            "while :; do echo tick >> heartbeat; sleep 0.05; done",
+        ]))
         .await
         .expect("spawn");
     let heartbeat = dir.workspace().join("heartbeat");
@@ -122,10 +122,10 @@ async fn a_prefenced_generation_never_starts_the_workload() {
 
     let mut process = env
         .exec()
-        .spawn(ProcessSpec::new(
-            "sh",
-            &["-c", "echo started > started; sleep 300"],
-        ))
+        .spawn(ProcessSpec::new("sh", &[
+            "-c",
+            "echo started > started; sleep 300",
+        ]))
         .await
         .expect("spawn");
     // The group ends on its own — the sentinel exited at its check — and the

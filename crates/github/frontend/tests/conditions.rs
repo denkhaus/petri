@@ -1,7 +1,7 @@
-//! Job-level `if:` semantics, pinned end to end: a user-written comparison lowers
-//! onto the loose builtins (GitHub's coercion), while the comparisons petri builds
-//! itself — the `success()` admission against engine-written status tags — stay
-//! strict. The shape is uv's `rebase-and-push` gate,
+//! Job-level `if:` semantics, pinned end to end: a user-written comparison
+//! lowers onto the loose builtins (GitHub's coercion), while the comparisons
+//! petri builds itself — the `success()` admission against engine-written
+//! status tags — stay strict. The shape is uv's `rebase-and-push` gate,
 //! `needs.identify.outputs.rebasable != '0'`, whose skip depends on GitHub's
 //! null-coerces-to-number rule.
 
@@ -75,15 +75,12 @@ fn a_needs_output_gate_follows_github_coercion() {
     ];
     for (rebasable, admitted) in cases {
         let mut run = RunContext::new();
-        run.record(
-            SmolStr::new("identify/done"),
-            NodeRecord {
-                status: Status::Success,
-                output: json!({ "result": "success", "outputs": { "rebasable": rebasable } }),
-                generation: ir::Generation::ZERO,
-                attempts: 1,
-            },
-        );
+        run.record(SmolStr::new("identify/done"), NodeRecord {
+            status:     Status::Success,
+            output:     json!({ "result": "success", "outputs": { "rebasable": rebasable } }),
+            generation: ir::Generation::ZERO,
+            attempts:   1,
+        });
         let statics = StaticCtx::new().bind("scope_cancelled", json!(false));
         let token = Value::Null;
         let env = EvalEnv::new(&token, &run, &statics);

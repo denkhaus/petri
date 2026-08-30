@@ -56,19 +56,21 @@ impl BinaryOp {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Literal(Literal),
-    /// A bare identifier: a context name (`github`) or, in the native format, an
-    /// engine binding (`nodes`, `item`).
+    /// A bare identifier: a context name (`github`) or, in the native format,
+    /// an engine binding (`nodes`, `item`).
     Ident(String),
     /// `a.b` — property access by name.
     Property(Box<Expr>, String),
     /// `a[expr]` — index by a computed key.
     Index(Box<Expr>, Box<Expr>),
-    /// `a.*` or `a[*]` — the object filter: an object's values, or an array's elements.
+    /// `a.*` or `a[*]` — the object filter: an object's values, or an array's
+    /// elements.
     Wildcard(Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
-    /// `(expr)`, kept so the printer round-trips exactly and precedence is explicit.
+    /// `(expr)`, kept so the printer round-trips exactly and precedence is
+    /// explicit.
     Group(Box<Expr>),
 }
 
@@ -101,8 +103,8 @@ impl Expr {
         Expr::Call(name.to_string(), args)
     }
 
-    /// The chain of property names from a root identifier: `a.b.c` → `("a", [b, c])`.
-    /// `None` when the expression is not a plain dotted path.
+    /// The chain of property names from a root identifier: `a.b.c` → `("a", [b,
+    /// c])`. `None` when the expression is not a plain dotted path.
     pub fn dotted_path(&self) -> Option<(&str, Vec<&str>)> {
         match self {
             Expr::Ident(name) => Some((name, Vec::new())),

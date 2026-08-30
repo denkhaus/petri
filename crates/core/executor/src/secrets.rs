@@ -1,21 +1,20 @@
 //! Secret resolution and the mask set.
 //!
 //! Secrets never enter the event log. A `ResolvedFiring` carries
-//! `{"$secret": "NAME"}` references, and the value is fetched at spawn time and put
-//! straight into the child's environment. Resolving a secret also registers its value
-//! for masking, so the two cannot get out of step: anything that was resolved is
-//! masked, by construction. A resolved value is a [`Secret`].
+//! `{"$secret": "NAME"}` references, and the value is fetched at spawn time and
+//! put straight into the child's environment. Resolving a secret also registers
+//! its value for masking, so the two cannot get out of step: anything that was
+//! resolved is masked, by construction. A resolved value is a [`Secret`].
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use smol_str::SmolStr;
-
 /// The key marking a secret reference in a step config.
 ///
-/// Re-exported from `ir` so there is one definition: the constructor that permits the
-/// form and the step kind that resolves it must agree.
+/// Re-exported from `ir` so there is one definition: the constructor that
+/// permits the form and the step kind that resolves it must agree.
 pub use ir::placeholder::SECRET_REF_KEY;
+use smol_str::SmolStr;
 
 /// Values shorter than this are not masked: masking `1` or `true` would
 /// turn every log into asterisks.
@@ -35,10 +34,11 @@ pub enum SecretError {
 
 /// A resolved secret value.
 ///
-/// The plaintext leaves only through [`Secret::expose`], so every consumer is an
-/// explicit call at the boundary that needs the value — the child's environment, a
-/// `Deliver` payload. `Debug` redacts and there is no `Display`, so a resolved value
-/// cannot ride into an error message or a log line by accident.
+/// The plaintext leaves only through [`Secret::expose`], so every consumer is
+/// an explicit call at the boundary that needs the value — the child's
+/// environment, a `Deliver` payload. `Debug` redacts and there is no `Display`,
+/// so a resolved value cannot ride into an error message or a log line by
+/// accident.
 #[derive(Clone)]
 pub struct Secret(SmolStr);
 
@@ -47,8 +47,8 @@ impl Secret {
         Self(value)
     }
 
-    /// The plaintext, moved out of the wrapper. Call it where the value is consumed,
-    /// never to build a message.
+    /// The plaintext, moved out of the wrapper. Call it where the value is
+    /// consumed, never to build a message.
     pub fn expose(self) -> SmolStr {
         self.0
     }
@@ -65,14 +65,15 @@ pub trait SecretProvider: Send + Sync {
     /// Fetch a secret and register it for masking.
     fn resolve(&self, name: &str) -> Result<Secret, SecretError>;
 
-    /// Register a secret at runtime, so a dynamic value — a human gate's sensitive
-    /// answer — can cross as a `{"$secret": ...}` reference and stay out of the
-    /// log. Registration feeds the masker, so anything resolvable is maskable by
-    /// construction; the lifetime is the provider instance, i.e. the run.
+    /// Register a secret at runtime, so a dynamic value — a human gate's
+    /// sensitive answer — can cross as a `{"$secret": ...}` reference and
+    /// stay out of the log. Registration feeds the masker, so anything
+    /// resolvable is maskable by construction; the lifetime is the provider
+    /// instance, i.e. the run.
     ///
-    /// Duplicate names are rejected, so a runtime registration can never shadow a
-    /// configured secret. The default is a typed unsupported error; providers opt
-    /// in.
+    /// Duplicate names are rejected, so a runtime registration can never shadow
+    /// a configured secret. The default is a typed unsupported error;
+    /// providers opt in.
     fn register(&self, name: &str, value: &str) -> Result<(), SecretError> {
         let _ = (name, value);
         Err(SecretError::RegistrationUnsupported)
@@ -84,8 +85,8 @@ pub trait SecretProvider: Send + Sync {
 
 /// The set of resolved secret values, and the masking itself.
 ///
-/// Shared by handle: the provider adds to it as secrets are resolved, and the log
-/// sink reads it on every line.
+/// Shared by handle: the provider adds to it as secrets are resolved, and the
+/// log sink reads it on every line.
 #[derive(Clone, Debug, Default)]
 pub struct Masker {
     values: Arc<RwLock<Vec<String>>>,
@@ -97,8 +98,8 @@ impl Masker {
     }
 
     /// Register a value. Short values are ignored, and multi-line secrets are
-    /// registered line by line as well as whole, so a secret that spans lines is
-    /// still masked in line-buffered output.
+    /// registered line by line as well as whole, so a secret that spans lines
+    /// is still masked in line-buffered output.
     pub fn register(&self, value: &str) {
         let mut values = self.values.write().expect("mask set is not poisoned");
         let mut add = |candidate: &str| {
@@ -167,14 +168,14 @@ impl Masker {
 /// and [`SecretProvider::register`] can add run-scoped values on top.
 pub struct MapSecrets {
     secrets: RwLock<BTreeMap<SmolStr, SmolStr>>,
-    masker: Masker,
+    masker:  Masker,
 }
 
 impl MapSecrets {
     pub fn new(secrets: BTreeMap<SmolStr, SmolStr>) -> Self {
         Self {
             secrets: RwLock::new(secrets),
-            masker: Masker::new(),
+            masker:  Masker::new(),
         }
     }
 

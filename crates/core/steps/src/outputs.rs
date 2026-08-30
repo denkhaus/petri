@@ -1,12 +1,13 @@
 //! The outputs-file protocol.
 //!
-//! A step writes `key=value` lines to the file named by `CI_OUTPUT`; a multi-line
-//! value uses the heredoc form `key<<DELIM … DELIM`. After the step exits the file is
-//! parsed into `Outcome.output`.
+//! A step writes `key=value` lines to the file named by `CI_OUTPUT`; a
+//! multi-line value uses the heredoc form `key<<DELIM … DELIM`. After the step
+//! exits the file is parsed into `Outcome.output`.
 //!
-//! The format is deliberately a superset of GitHub's `$GITHUB_OUTPUT` file so that
-//! variable can be a plain alias of ours (see `ProcessConfig.output_env_aliases`).
-//! That is a compatibility choice in this step kind, not something the engine knows.
+//! The format is deliberately a superset of GitHub's `$GITHUB_OUTPUT` file so
+//! that variable can be a plain alias of ours (see
+//! `ProcessConfig.output_env_aliases`). That is a compatibility choice in this
+//! step kind, not something the engine knows.
 
 use std::collections::BTreeMap;
 
@@ -18,8 +19,8 @@ pub enum OutputError {
     Malformed { line: usize, text: String },
     #[error("line {line}: heredoc for `{key}` was never closed with `{delimiter}`")]
     UnclosedHeredoc {
-        line: usize,
-        key: String,
+        line:      usize,
+        key:       String,
         delimiter: String,
     },
     #[error("line {line}: empty key")]
@@ -65,7 +66,7 @@ pub fn parse(text: &str) -> Result<Map<String, Value>, OutputError> {
             if delimiter.is_empty() {
                 return Err(OutputError::EmptyDelimiter {
                     line: line_number,
-                    key: key.to_string(),
+                    key:  key.to_string(),
                 });
             }
             let mut body: Vec<&str> = Vec::new();
@@ -81,8 +82,8 @@ pub fn parse(text: &str) -> Result<Map<String, Value>, OutputError> {
             }
             if !closed {
                 return Err(OutputError::UnclosedHeredoc {
-                    line: line_number,
-                    key: key.to_string(),
+                    line:      line_number,
+                    key:       key.to_string(),
                     delimiter: delimiter.to_string(),
                 });
             }
@@ -185,8 +186,8 @@ mod tests {
         assert_eq!(
             parse("A=1\nK<<EOF\nbody\nmore\n"),
             Err(OutputError::UnclosedHeredoc {
-                line: 2,
-                key: "K".into(),
+                line:      2,
+                key:       "K".into(),
                 delimiter: "EOF".into(),
             })
         );
@@ -201,14 +202,14 @@ mod tests {
             parse("K<<\n\nvalue\n\n"),
             Err(OutputError::EmptyDelimiter {
                 line: 1,
-                key: "K".into(),
+                key:  "K".into(),
             })
         );
         assert_eq!(
             parse("K<<   \nEOF\n"),
             Err(OutputError::EmptyDelimiter {
                 line: 1,
-                key: "K".into(),
+                key:  "K".into(),
             })
         );
     }

@@ -36,10 +36,10 @@ fn checkout_kinds(text: &str, files: &dyn frontend::FileSource) -> Vec<String> {
 #[test]
 fn a_default_checkout_substitutes() {
     let kinds = checkout_kinds(&checkout_workflow(""), &frontend::NoFiles);
-    assert_eq!(
-        kinds,
-        vec![CHECKOUT_KIND.to_string(), "github/run".to_string()]
-    );
+    assert_eq!(kinds, vec![
+        CHECKOUT_KIND.to_string(),
+        "github/run".to_string()
+    ]);
 }
 
 #[test]

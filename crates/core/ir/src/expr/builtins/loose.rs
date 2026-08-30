@@ -1,8 +1,10 @@
-//! Loose coercion: the JavaScript-family rules, as pure functions over JSON values.
+//! Loose coercion: the JavaScript-family rules, as pure functions over JSON
+//! values.
 //!
-//! These back the `loose_*` builtins. A frontend whose expression language compares
-//! loosely — GitHub Actions does, and most YAML CI dialects follow it — lowers its
-//! operators onto them; the frontend evaluates nothing. One evaluator.
+//! These back the `loose_*` builtins. A frontend whose expression language
+//! compares loosely — GitHub Actions does, and most YAML CI dialects follow it
+//! — lowers its operators onto them; the frontend evaluates nothing. One
+//! evaluator.
 //!
 //! The rules:
 //!
@@ -14,27 +16,28 @@
 //! | array   | NaN                                                  |
 //! | object  | NaN                                                  |
 //!
-//! Equality: same kinds compare directly (strings case-insensitively; arrays and
-//! objects only equal by identity, so never here). Different kinds both coerce to a
-//! number. NaN is never equal to anything, and any relational comparison involving
-//! NaN is false.
+//! Equality: same kinds compare directly (strings case-insensitively; arrays
+//! and objects only equal by identity, so never here). Different kinds both
+//! coerce to a number. NaN is never equal to anything, and any relational
+//! comparison involving NaN is false.
 //!
 //! Falsy: `false`, `0`, `-0`, `""`, `null`, `NaN`. Empty arrays and objects are
-//! **truthy** — the opposite of this crate's own `truthy`, which is why the two are
-//! separate functions rather than one with a flag.
+//! **truthy** — the opposite of this crate's own `truthy`, which is why the two
+//! are separate functions rather than one with a flag.
 //!
-//! On string-to-number: the reference implementations parse with a leading sign,
-//! leading zeros and a trailing point allowed (`+1`, `01`, `1.`), which is looser than
-//! JSON's grammar. That is what this follows, since it is what real expressions were
-//! written against.
+//! On string-to-number: the reference implementations parse with a leading
+//! sign, leading zeros and a trailing point allowed (`+1`, `01`, `1.`), which
+//! is looser than JSON's grammar. That is what this follows, since it is what
+//! real expressions were written against.
 //!
-//! On string-from-container: a container has no loose string form. It renders as its
-//! type name (`Array`, `Object`) so that a value that should have been a scalar shows
-//! up as a visible mistake rather than as a JSON blob silently reaching a command
-//! line.
+//! On string-from-container: a container has no loose string form. It renders
+//! as its type name (`Array`, `Object`) so that a value that should have been a
+//! scalar shows up as a visible mistake rather than as a JSON blob silently
+//! reaching a command line.
+
+use std::cmp::Ordering;
 
 use serde_json::Value;
-use std::cmp::Ordering;
 
 /// Coerce a value to a number by the loose rules.
 pub fn to_number(value: &Value) -> f64 {
@@ -77,8 +80,8 @@ fn parse_number(text: &str) -> f64 {
 }
 
 /// .NET's `AllowDecimalPoint | AllowExponent` shape: digits with an optional
-/// fraction (either side may be empty, but not both) and an optional exponent. No
-/// whitespace inside, no thousands separators, no second sign.
+/// fraction (either side may be empty, but not both) and an optional exponent.
+/// No whitespace inside, no thousands separators, no second sign.
 fn looks_like_decimal(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -188,7 +191,8 @@ pub fn equal(a: &Value, b: &Value) -> bool {
 }
 
 /// Loose relational comparison. Two strings compare case-insensitively as
-/// strings; anything else coerces to numbers, and NaN makes every comparison false.
+/// strings; anything else coerces to numbers, and NaN makes every comparison
+/// false.
 pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     if let (Value::String(x), Value::String(y)) = (a, b) {
         return Some(x.to_lowercase().cmp(&y.to_lowercase()));

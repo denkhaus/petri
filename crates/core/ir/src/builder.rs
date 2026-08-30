@@ -1,9 +1,10 @@
-//! A small builder for graphs. Frontends and tests use it so node ids stay equal to
-//! their index and edge ids stay unique, which validation requires.
+//! A small builder for graphs. Frontends and tests use it so node ids stay
+//! equal to their index and edge ids stay unique, which validation requires.
 //!
 //! The builder has no `connect` that grows a group: routing is set with one of
-//! [`GraphBuilder::link`], [`GraphBuilder::select`] or [`GraphBuilder::fan_out`], so
-//! fan-out is as explicit here as it is in the IR.
+//! [`GraphBuilder::link`], [`GraphBuilder::select`] or
+//! [`GraphBuilder::fan_out`], so fan-out is as explicit here as it is in the
+//! IR.
 
 use serde_json::Value;
 
@@ -16,10 +17,10 @@ use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 
 /// One arm of a select group, before edge ids are allocated.
 pub struct Arm<S = Live> {
-    pub to: NodeId<S>,
+    pub to:    NodeId<S>,
     pub guard: Option<ExprId<S>>,
-    pub map: Option<ExprId<S>>,
-    pub back: bool,
+    pub map:   Option<ExprId<S>>,
+    pub back:  bool,
 }
 
 impl<S> Arm<S> {
@@ -55,16 +56,16 @@ impl<S> Arm<S> {
 
 #[derive(Debug)]
 pub struct GraphBuilder<S = Live> {
-    graph: Graph<S>,
+    graph:     Graph<S>,
     next_edge: u32,
 }
 
 impl<S> Default for GraphBuilder<S> {
     fn default() -> Self {
         Self {
-            graph: Graph {
-                body: GraphBody::default(),
-                params: Default::default(),
+            graph:     Graph {
+                body:       GraphBody::default(),
+                params:     Default::default(),
                 completion: Completion::AnyFailure,
             },
             next_edge: 0,
@@ -199,8 +200,8 @@ impl<S> GraphBuilder<S> {
         ids
     }
 
-    /// Fan-out where each group carries its own guard: a group with no matching arm
-    /// emits nothing, which is the OR-split.
+    /// Fan-out where each group carries its own guard: a group with no matching
+    /// arm emits nothing, which is the OR-split.
     pub fn fan_out_groups(
         &mut self,
         from: NodeId<S>,
@@ -234,8 +235,8 @@ impl<S> GraphBuilder<S> {
         (edges, ids)
     }
 
-    /// Finish. Entry defaults to every node with no incoming edges when none was
-    /// marked, which is what a linear frontend wants.
+    /// Finish. Entry defaults to every node with no incoming edges when none
+    /// was marked, which is what a linear frontend wants.
     pub fn build(mut self) -> Graph<S> {
         self.finish_entries();
         self.graph

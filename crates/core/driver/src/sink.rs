@@ -1,7 +1,7 @@
 //! Where log lines go, and where masking happens.
 //!
-//! Masking runs **before** the append, so the persisted log is post-mask. There is no
-//! window in which a secret is on disk.
+//! Masking runs **before** the append, so the persisted log is post-mask. There
+//! is no window in which a secret is on disk.
 
 use std::path::{Path, PathBuf};
 
@@ -11,9 +11,9 @@ use tokio::io::AsyncWriteExt;
 
 /// Writes step output to the run directory, and optionally echoes it.
 pub struct LogSink {
-    dir: PathBuf,
+    dir:    PathBuf,
     masker: Masker,
-    echo: bool,
+    echo:   bool,
 }
 
 impl LogSink {
@@ -35,8 +35,8 @@ impl LogSink {
         &self.masker
     }
 
-    /// Mask a line and persist it. The masked line is what the caller should then
-    /// hand to the core.
+    /// Mask a line and persist it. The masked line is what the caller should
+    /// then hand to the core.
     pub async fn record(&self, node: &str, firing: u64, stream: LogStream, line: &str) -> String {
         let masked = self.masker.mask(line);
         let _ = tokio::fs::create_dir_all(&self.dir).await;
@@ -61,7 +61,8 @@ impl LogSink {
         masked
     }
 
-    /// Mask every string in an outcome's data before the finish record is appended.
+    /// Mask every string in an outcome's data before the finish record is
+    /// appended.
     pub fn mask_value(&self, value: &Value) -> Value {
         self.masker.mask_value(value)
     }

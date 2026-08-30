@@ -1,11 +1,11 @@
 //! What a step kind is handed, what it returns, and the one registry.
 //!
 //! A step kind is written once, as a [`Step`]: a name, a typed config, and one
-//! attempt. Registration erases it into the two faces the rest of the system uses —
-//! [`StepRunner`] for the driver to dispatch to, and [`ir::StepKind`] for
-//! `validate_with` to check configs against at load. One definition, one registry,
-//! so a kind with no runner or a config that cannot deserialize is caught by
-//! `petri check` rather than at firing time.
+//! attempt. Registration erases it into the two faces the rest of the system
+//! uses — [`StepRunner`] for the driver to dispatch to, and [`ir::StepKind`]
+//! for `validate_with` to check configs against at load. One definition, one
+//! registry, so a kind with no runner or a config that cannot deserialize is
+//! caught by `petri check` rather than at firing time.
 
 use std::sync::Arc;
 
@@ -21,24 +21,25 @@ pub const BAD_CONFIG_CLASS: &str = "bad_config";
 
 /// Everything a step needs to run one attempt.
 pub struct StepCtx {
-    pub firing: FiringId,
+    pub firing:  FiringId,
     pub attempt: Attempt,
     /// The node's instance name, for log file naming and messages.
-    pub node: SmolStr,
+    pub node:    SmolStr,
     /// The resolved config. Free of expression placeholders; may hold `$secret`
-    /// references, which are resolved here at spawn time and never written down.
-    pub config: Value,
-    pub env: Arc<dyn ExecEnv>,
+    /// references, which are resolved here at spawn time and never written
+    /// down.
+    pub config:  Value,
+    pub env:     Arc<dyn ExecEnv>,
     /// The scope-bound one-shot container runner, when the scope's executor
     /// provided one. Steps reach it through
     /// [`StepCtx::require_container_runner`], never a daemon of their own.
-    pub runner: Option<Arc<dyn ContainerRunner>>,
+    pub runner:  Option<Arc<dyn ContainerRunner>>,
     pub secrets: Arc<dyn SecretProvider>,
     /// Host services, looked up by type ([`StepCtx::capability`]). The core
     /// never names one.
-    pub caps: crate::caps::Capabilities,
+    pub caps:    crate::caps::Capabilities,
     /// Progress out: logs and artifacts, in arrival order.
-    pub logs: mpsc::Sender<StepEvent>,
+    pub logs:    mpsc::Sender<StepEvent>,
     /// Control in. A `Cancel` starts the ladder.
     pub control: mpsc::Receiver<Control>,
 }
@@ -72,7 +73,7 @@ impl StepCtx {
     /// never a daemon found by other means.
     pub fn require_container_runner(&self) -> Result<Arc<dyn ContainerRunner>, StepFailure> {
         self.runner.clone().ok_or_else(|| StepFailure {
-            class: CONTAINER_RUNTIME_CLASS,
+            class:   CONTAINER_RUNTIME_CLASS,
             message: "this step runs a container, and the scope's executor provides no \
                       container runtime"
                 .into(),
@@ -82,12 +83,12 @@ impl StepCtx {
 
 /// A step that failed before it could run, in the few bytes needed to say so.
 ///
-/// The short-circuit arm used to be a whole `Outcome`, which made every caller pay
-/// for the larger of two identical types for no benefit. This carries the class and
-/// the message, and becomes an `Outcome` once, at the boundary.
+/// The short-circuit arm used to be a whole `Outcome`, which made every caller
+/// pay for the larger of two identical types for no benefit. This carries the
+/// class and the message, and becomes an `Outcome` once, at the boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepFailure {
-    pub class: &'static str,
+    pub class:   &'static str,
     pub message: String,
 }
 
@@ -103,18 +104,19 @@ impl From<StepFailure> for Outcome {
 /// A step kind, as an author writes one.
 ///
 /// One attempt per call. Retries are the core's business: a step never loops.
-/// Registering a `Step` yields both faces — the runner the driver dispatches to and
-/// the load-time validator — so a kind is defined exactly once.
+/// Registering a `Step` yields both faces — the runner the driver dispatches to
+/// and the load-time validator — so a kind is defined exactly once.
 ///
 /// `NAME` is the kind's identity: bare for the built-ins (`process`, `noop`),
-/// `vendor/kind` for kinds defined in another repository (`attractor/llm`), so two
-/// repositories never collide.
+/// `vendor/kind` for kinds defined in another repository (`attractor/llm`), so
+/// two repositories never collide.
 #[async_trait::async_trait]
 pub trait Step: Send + Sync + 'static {
     const NAME: &'static str;
 
-    /// The config's shape. Deserialization failure is class `bad_config` — at load
-    /// when the config is literal, at firing time when it held placeholders.
+    /// The config's shape. Deserialization failure is class `bad_config` — at
+    /// load when the config is literal, at firing time when it held
+    /// placeholders.
     type Config: DeserializeOwned + Send;
 
     /// Checks on the raw config that outrank deserialization, with their own
@@ -134,8 +136,8 @@ pub trait Step: Send + Sync + 'static {
 /// A step kind, erased: what the driver dispatches to.
 ///
 /// Authors implement [`Step`] and let registration erase it. Implementing this
-/// directly is for the rare kind whose config handling fits no `Config` type; it
-/// then carries its `StepKind` half by hand.
+/// directly is for the rare kind whose config handling fits no `Config` type;
+/// it then carries its `StepKind` half by hand.
 #[async_trait::async_trait]
 pub trait StepRunner: StepKind {
     async fn run(&self, ctx: StepCtx) -> Outcome;
@@ -182,7 +184,7 @@ impl<S: Step> StepRunner for Erased<S> {
             Ok(config) => config,
             Err(e) => {
                 return StepFailure {
-                    class: BAD_CONFIG_CLASS,
+                    class:   BAD_CONFIG_CLASS,
                     message: format!("step config is invalid: {e}"),
                 }
                 .into();
@@ -193,8 +195,8 @@ impl<S: Step> StepRunner for Erased<S> {
 }
 
 /// The step kinds a run can use: the driver dispatches through it, and
-/// `validate_with` checks graphs against it, so a kind with no runner cannot get
-/// past load.
+/// `validate_with` checks graphs against it, so a kind with no runner cannot
+/// get past load.
 #[derive(Clone, Default)]
 pub struct Registry {
     runners: std::collections::HashMap<StepKindId, Arc<dyn StepRunner>>,
@@ -209,13 +211,14 @@ impl Registry {
     ///
     /// # Panics
     ///
-    /// On a duplicate name. Registration is configuration, and two kinds under one
-    /// name is a programming error the run must not paper over.
+    /// On a duplicate name. Registration is configuration, and two kinds under
+    /// one name is a programming error the run must not paper over.
     pub fn register<S: Step>(&mut self, step: S) -> StepKindId {
         self.insert(Arc::new(Erased(step)))
     }
 
-    /// Register a hand-erased runner. Same duplicate rule as [`Registry::register`].
+    /// Register a hand-erased runner. Same duplicate rule as
+    /// [`Registry::register`].
     pub fn register_runner(&mut self, runner: Arc<dyn StepRunner>) -> StepKindId {
         self.insert(runner)
     }

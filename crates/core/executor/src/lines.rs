@@ -1,8 +1,8 @@
 //! Line-buffered capture of a process's output.
 //!
-//! Every executor pipes a child's stdout and stderr through [`pump`], so the line
-//! cap and the truncation marker are decided once, here, and a step's log looks the
-//! same whichever environment ran it.
+//! Every executor pipes a child's stdout and stderr through [`pump`], so the
+//! line cap and the truncation marker are decided once, here, and a step's log
+//! looks the same whichever environment ran it.
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
@@ -14,7 +14,8 @@ pub const LINE_CAP: usize = 64 * 1024;
 
 const TRUNCATION_MARKER: &str = " …[line truncated]";
 
-/// Read one stream line by line, capping each line, and forward in arrival order.
+/// Read one stream line by line, capping each line, and forward in arrival
+/// order.
 pub async fn pump<R: AsyncRead + Unpin + Send + 'static>(
     reader: R,
     stream: ir::LogStream,

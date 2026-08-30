@@ -1,6 +1,6 @@
 //! `uses: owner/repo@ref` lowering: a JavaScript action becomes `github/action`
-//! nodes — main where the step is, `pre` before every step, `post` after the last
-//! in reverse — pinned to the commit the source resolved, with inputs and
+//! nodes — main where the step is, `pre` before every step, `post` after the
+//! last in reverse — pinned to the commit the source resolved, with inputs and
 //! `github.token` lowered where the step is.
 
 use frontend::NoFiles;
@@ -44,8 +44,8 @@ fn lower(text: &str, source: &MapActionSource) -> frontend::Lowered {
     lowered
 }
 
-/// The step chain in creation order — every node but a job's `start` and `done`,
-/// which the shell pass creates before any step.
+/// The step chain in creation order — every node but a job's `start` and
+/// `done`, which the shell pass creates before any step.
 fn chain(graph: &ir::Graph) -> Vec<&str> {
     graph
         .nodes
@@ -70,10 +70,11 @@ jobs:
       - run: echo hi
 "#;
     let graph = lower(text, &source).graph.expect("lowers");
-    assert_eq!(
-        chain(&graph),
-        vec!["build/step-1", "build/step-2", "build/step-1/post"]
-    );
+    assert_eq!(chain(&graph), vec![
+        "build/step-1",
+        "build/step-2",
+        "build/step-1/post"
+    ]);
 
     let main = graph
         .nodes
@@ -139,10 +140,9 @@ jobs:
         uses: octo/tool@v4
 "#;
     let graph = lower(text, &source).graph.expect("lowers");
-    assert_eq!(
-        chain(&graph),
-        vec!["j/a/pre", "j/step-1", "j/a", "j/b", "j/b/post", "j/a/post"]
-    );
+    assert_eq!(chain(&graph), vec![
+        "j/a/pre", "j/step-1", "j/a", "j/b", "j/b/post", "j/a/post"
+    ]);
     let a = graph.nodes.iter().find(|n| n.name == "j/a").unwrap();
     assert!(
         a.step.config["state"].get("$expr").is_some(),
@@ -269,8 +269,8 @@ jobs:
 fn an_unavailable_reference_is_unsupported_and_the_hint_says_why() {
     use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 
-    /// A partial source — a snapshot, say — that serves nothing, with or without
-    /// a recorded reason.
+    /// A partial source — a snapshot, say — that serves nothing, with or
+    /// without a recorded reason.
     struct Offline(Option<&'static str>);
     impl Offline {
         fn decline(&self, reference: String) -> ActionSourceError {

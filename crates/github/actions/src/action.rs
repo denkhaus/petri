@@ -129,7 +129,8 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     };
     let (outcome, effects) = session.run(process, None, ctx, allow_unsecure).await;
 
-    // State accumulates across phases: what this phase inherited plus what it saved.
+    // State accumulates across phases: what this phase inherited plus what it
+    // saved.
     let mut state: Map<String, Value> = config
         .state
         .into_iter()
@@ -163,7 +164,7 @@ pub(crate) async fn stage(
         .join(pinned.sha.as_str());
     let marker = root.join(".petri-staged");
     let already = ctx.env.read_file(&marker).await.map_err(|e| StepFailure {
-        class: STAGE_CLASS,
+        class:   STAGE_CLASS,
         message: format!("could not check the staged action: {e}"),
     })?;
     if already.is_some() {
@@ -175,11 +176,11 @@ pub(crate) async fn stage(
     let host_dir = tokio::task::spawn_blocking(move || source.tree(&pinned_owned))
         .await
         .map_err(|e| StepFailure {
-            class: FETCH_CLASS,
+            class:   FETCH_CLASS,
             message: format!("fetching `{pinned}` did not complete: {e}"),
         })?
         .map_err(|e| StepFailure {
-            class: FETCH_CLASS,
+            class:   FETCH_CLASS,
             message: e.to_string(),
         })?;
     // One tarball, packed host-side from the fetched tree and extracted by the
@@ -204,7 +205,7 @@ pub(crate) async fn stage(
         .write_file(&marker, b"")
         .await
         .map_err(|e| StepFailure {
-            class: STAGE_CLASS,
+            class:   STAGE_CLASS,
             message: format!("could not mark `{pinned}` as staged: {e}"),
         })?;
     Ok(root)
@@ -238,14 +239,14 @@ async fn unpack(ctx: &StepCtx, tar_rel: &Path, pinned: &PinnedAction) -> Result<
         .env
         .spawn(executor::ProcessSpec {
             program: SmolStr::new("tar"),
-            args: vec![
+            args:    vec![
                 SmolStr::new("-xf"),
                 SmolStr::new(format!("{workspace}/{}", tar_rel.display())),
                 SmolStr::new("-C"),
                 SmolStr::new(&workspace),
             ],
-            env: Default::default(),
-            cwd: None,
+            env:     Default::default(),
+            cwd:     None,
         })
         .await
         .map_err(|e| stage_error(format!("could not run `tar` for `{pinned}`: {e}")))?;

@@ -9,6 +9,9 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, ExprId, NodeId, ScopeId, StepRef, UnOp, Value};
 use serde_json::{Map, json};
 
+use super::{
+    ActionContext, ActionPlan, Lowering, PlanInput, PlanKind, scalar_text, scalar_text_opt,
+};
 use crate::action::{
     ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DOCKER_ACTION_KIND,
     Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, STATE_OUTPUT_KEY, unavailable_hint,
@@ -18,19 +21,15 @@ use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_
 use crate::gate::{self, GateOp};
 use crate::model::{Defaults, Job, Step};
 
-use super::{
-    ActionContext, ActionPlan, Lowering, PlanInput, PlanKind, scalar_text, scalar_text_opt,
-};
-
 /// Why a remote action did not resolve.
 #[derive(Clone)]
 pub(super) enum ResolveFailure {
     /// No [`ActionSource`] was given: the format is running without one.
     NoSource,
-    /// The source said [`ActionSourceError::Unavailable`]: it does not serve this
-    /// reference. Rejected like `NoSource`, scoped to the one reference; the
-    /// reason, when the source knows one, tells the hint whether refreshing the
-    /// source could ever help.
+    /// The source said [`ActionSourceError::Unavailable`]: it does not serve
+    /// this reference. Rejected like `NoSource`, scoped to the one
+    /// reference; the reason, when the source knows one, tells the hint
+    /// whether refreshing the source could ever help.
     Unavailable(Option<String>),
     Failed(String),
 }
@@ -64,8 +63,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         result
     }
 
-    /// The `action.yml` document for a `uses:` reference, or the diagnostic saying
-    /// why there is none.
+    /// The `action.yml` document for a `uses:` reference, or the diagnostic
+    /// saying why there is none.
     fn action_document(&mut self, reference: &str, span: &Span) -> Option<Document> {
         match composite::classify(reference) {
             Uses::Local(path) => {
@@ -226,8 +225,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         );
     }
 
-    /// One `github/action` node: the action pinned, its phase and entry point, its
-    /// inputs and env lowered where the step is.
+    /// One `github/action` node: the action pinned, its phase and entry point,
+    /// its inputs and env lowered where the step is.
     fn action_node(
         &mut self,
         context: ActionContext<'_, 'a, '_>,
@@ -732,7 +731,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         vec![id]
     }
 
-    /// A `with:` value: a string, possibly templated; anything else stringified.
+    /// A `with:` value: a string, possibly templated; anything else
+    /// stringified.
     fn with_value(&mut self, node: Node<'_>, site: &Site) -> Option<Value> {
         match node.as_str() {
             Some(text) => self.text_value(text, node.span(), site),
@@ -954,7 +954,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut ids = Vec::new();
         for inner in &action.steps {
             let inherited = Defaults {
-                shell: inner.shell,
+                shell:             inner.shell,
                 working_directory: inner.working_directory,
             };
             let nodes = self.step_nodes(
@@ -1036,7 +1036,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// The state an earlier phase of the same action saved, read from its record.
+    /// The state an earlier phase of the same action saved, read from its
+    /// record.
     fn state_config(&mut self, site: &Site, from: &str) -> Value {
         let t = self.b.exprs();
         let record = site.node_record(t, from);
@@ -1048,8 +1049,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         json!({ EXPR_PLACEHOLDER_KEY: state.raw() })
     }
 
-    /// `true` when the action's main node has a record other than `skipped`: the
-    /// condition for its `post` to run at all.
+    /// `true` when the action's main node has a record other than `skipped`:
+    /// the condition for its `post` to run at all.
     fn main_ran(&mut self, site: &Site, main: &str) -> ExprId {
         let t = self.b.exprs();
         let status = site.node_status(t, main);
@@ -1073,17 +1074,17 @@ fn lowercased_with<'n>(step: &Step<'n>) -> BTreeMap<String, Node<'n>> {
 fn docker_image_plan(image: &str) -> ActionPlan {
     ActionPlan {
         location: None,
-        kind: PlanKind::Docker(DockerAction {
-            image: format!("docker://{image}"),
-            entrypoint: None,
-            pre_entrypoint: None,
-            pre_if: None,
+        kind:     PlanKind::Docker(DockerAction {
+            image:           format!("docker://{image}"),
+            entrypoint:      None,
+            pre_entrypoint:  None,
+            pre_if:          None,
             post_entrypoint: None,
-            post_if: None,
-            args: Vec::new(),
-            env: Vec::new(),
+            post_if:         None,
+            args:            Vec::new(),
+            env:             Vec::new(),
         }),
-        inputs: Vec::new(),
+        inputs:   Vec::new(),
     }
 }
 
@@ -1092,8 +1093,8 @@ fn plan_inputs(inputs: &[composite::Input<'_>]) -> Vec<PlanInput> {
     inputs
         .iter()
         .map(|input| PlanInput {
-            name: input.name.clone(),
-            default: input.default.and_then(scalar_text_opt),
+            name:     input.name.clone(),
+            default:  input.default.and_then(scalar_text_opt),
             required: input.required,
         })
         .collect()

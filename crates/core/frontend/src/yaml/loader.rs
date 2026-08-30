@@ -2,10 +2,10 @@
 //!
 //! `marked_yaml`'s own loader rejects anchors and aliases, which real workflow
 //! files use (`paths: &paths` … `paths: *paths`). This loader drives the same
-//! event parser (`yaml_rust2`) and builds the same `marked_yaml` node types, but
-//! keeps every anchored node and splices a copy in at each alias. The copy keeps
-//! the anchor site's span: a diagnostic inside aliased content points at the one
-//! place the content is written.
+//! event parser (`yaml_rust2`) and builds the same `marked_yaml` node types,
+//! but keeps every anchored node and splices a copy in at each alias. The copy
+//! keeps the anchor site's span: a diagnostic inside aliased content points at
+//! the one place the content is written.
 //!
 //! The shape rules mirror `marked_yaml`'s loader (MIT) as `Document::parse` has
 //! always applied them: the top level is a mapping, mapping keys are scalars,
@@ -24,8 +24,8 @@ use yaml_rust2::scanner::{Marker as YamlMarker, ScanError, TScalarStyle};
 pub enum ParseFailure {
     Scan(ScanError),
     Shape {
-        line: u32,
-        column: u32,
+        line:    u32,
+        column:  u32,
         message: String,
     },
 }
@@ -83,22 +83,22 @@ enum Frame {
     Mapping {
         node: MarkedMappingNode,
         /// A key waiting for its value.
-        key: Option<MarkedScalarNode>,
-        aid: usize,
+        key:  Option<MarkedScalarNode>,
+        aid:  usize,
     },
     Sequence {
         node: MarkedSequenceNode,
-        aid: usize,
+        aid:  usize,
     },
 }
 
 #[derive(Default)]
 struct Loader {
-    frames: Vec<Frame>,
+    frames:  Vec<Frame>,
     /// Every anchored node, by the parser's anchor id, once complete.
     anchors: HashMap<usize, MarkedNode>,
-    root: Option<MarkedNode>,
-    error: Option<(Span, String)>,
+    root:    Option<MarkedNode>,
+    error:   Option<(Span, String)>,
 }
 
 impl Loader {

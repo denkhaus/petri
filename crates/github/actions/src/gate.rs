@@ -7,10 +7,11 @@
 //!
 //! - `hashFiles` sentinels in string literals resolve against the workspace, in
 //!   the job environment, exactly as they do in a `run:` script;
-//! - `{"$env": NAME}` leaves resolve from the environment the process would get —
-//!   the step's own `env:` config first (secrets included, fetched from the run's
-//!   provider and never written down), then the job's accumulated `GITHUB_ENV` —
-//!   falling back to the leaf's engine-resolved `or` (the scope env);
+//! - `{"$env": NAME}` leaves resolve from the environment the process would get
+//!   — the step's own `env:` config first (secrets included, fetched from the
+//!   run's provider and never written down), then the job's accumulated
+//!   `GITHUB_ENV` — falling back to the leaf's engine-resolved `or` (the scope
+//!   env);
 //! - the operators evaluate with GitHub's loose semantics, shared with the
 //!   engine through `ir`'s loose primitives, and GitHub truthiness lands at the
 //!   root.
@@ -66,7 +67,7 @@ async fn admitted(
     ctx: &StepCtx,
 ) -> Result<bool, StepFailure> {
     let mut gate = Gate::from_value(gate).map_err(|message| StepFailure {
-        class: GATE_CLASS,
+        class:   GATE_CLASS,
         message: format!("the step's gate is not one this runner wrote: {message}"),
     })?;
 
@@ -174,7 +175,7 @@ fn env_value(
         return Ok(Some(match value {
             ValueOrSecretRef::Secret { name } => {
                 let secret = ctx.secrets.resolve(name).map_err(|e| StepFailure {
-                    class: steps::SECRET_UNAVAILABLE_CLASS,
+                    class:   steps::SECRET_UNAVAILABLE_CLASS,
                     message: e.to_string(),
                 })?;
                 Value::String(secret.expose().to_string())

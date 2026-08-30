@@ -114,7 +114,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
                 .secrets
                 .resolve(name)
                 .map_err(|e| StepFailure {
-                    class: steps::SECRET_UNAVAILABLE_CLASS,
+                    class:   steps::SECRET_UNAVAILABLE_CLASS,
                     message: e.to_string(),
                 })?
                 .expose()
@@ -172,7 +172,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
         .write_file(&output_rel_path, b"")
         .await
         .map_err(|e| StepFailure {
-            class: steps::WORKSPACE_CLASS,
+            class:   steps::WORKSPACE_CLASS,
             message: format!("could not create the outputs file: {e}"),
         })?;
     env.insert(
@@ -233,7 +233,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     let output = match ctx.env.read_file(&output_rel_path).await {
         Ok(Some(bytes)) => {
             parse_outputs(&String::from_utf8_lossy(&bytes)).map_err(|e| StepFailure {
-                class: steps::BAD_OUTPUT_CLASS,
+                class:   steps::BAD_OUTPUT_CLASS,
                 message: e.to_string(),
             })?
         }
@@ -259,7 +259,7 @@ async fn spec_run(
     spec: OneShotContainer,
 ) -> Result<Box<dyn executor::ProcessHandle>, StepFailure> {
     runner.run(spec).await.map_err(|e| StepFailure {
-        class: executor::CONTAINER_RUNTIME_CLASS,
+        class:   executor::CONTAINER_RUNTIME_CLASS,
         message: format!("could not run the action container: {e}"),
     })
 }
@@ -286,13 +286,13 @@ async fn prepare_image(
             match action {
                 crate::config::ActionLocation::Pinned(pinned) => {
                     pinned.validate().map_err(|e| StepFailure {
-                        class: IMAGE_CLASS,
+                        class:   IMAGE_CLASS,
                         message: e.to_string(),
                     })?
                 }
                 crate::config::ActionLocation::Local { local } => {
                     validate_relative_action_path(local, true).map_err(|e| StepFailure {
-                        class: IMAGE_CLASS,
+                        class:   IMAGE_CLASS,
                         message: e.to_string(),
                     })?
                 }
@@ -307,7 +307,7 @@ async fn prepare_image(
             // basename, never `..`.
             let normalized =
                 resolve_manifest_path(action.directory(), file).map_err(|e| StepFailure {
-                    class: IMAGE_CLASS,
+                    class:   IMAGE_CLASS,
                     message: e.to_string(),
                 })?;
             let (parent, file) = normalized.rsplit_once('/').unwrap_or(("", &normalized));
@@ -417,17 +417,17 @@ fn image_tag(key: &str) -> String {
 /// `GITHUB_WORKSPACE`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` — under the
 /// mount point, not the job environment's paths.
 struct TextResolver {
-    hashes: std::collections::BTreeMap<Vec<String>, String>,
-    container_workspace: String,
+    hashes:                std::collections::BTreeMap<Vec<String>, String>,
+    container_workspace:   String,
     container_runner_temp: String,
-    container_tool_cache: String,
+    container_tool_cache:  String,
     /// The phase's `env:` (its env sentinels already resolved) and the job's
     /// accumulated `GITHUB_ENV`: the rungs an `env.NAME` sentinel in an input,
     /// an argument or the entrypoint resolves through — the environment this
     /// container receives. The image's own env is out of reach, so an unbound
     /// name renders empty.
-    env_config: BTreeMap<SmolStr, ValueOrSecretRef>,
-    job_env: BTreeMap<String, String>,
+    env_config:            BTreeMap<SmolStr, ValueOrSecretRef>,
+    job_env:               BTreeMap<String, String>,
 }
 
 impl TextResolver {

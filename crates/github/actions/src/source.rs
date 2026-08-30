@@ -1,9 +1,10 @@
-//! Actions from git: a bare repository per `owner/repo` under a cache directory.
+//! Actions from git: a bare repository per `owner/repo` under a cache
+//! directory.
 //!
 //! Resolution asks the remote (`git ls-remote`), so a moving tag such as `v4`
-//! resolves to whatever it points at now — as GitHub does at the start of a run —
-//! and the graph pins that commit. Fetching is by the reference as written, one
-//! commit deep. Trees are extracted once per commit with `git archive`.
+//! resolves to whatever it points at now — as GitHub does at the start of a run
+//! — and the graph pins that commit. Fetching is by the reference as written,
+//! one commit deep. Trees are extracted once per commit with `git archive`.
 //!
 //! Everything shells out to `git`, which every machine that runs workflows has.
 
@@ -18,20 +19,21 @@ use smol_str::SmolStr;
 use crate::ActionTreeSource;
 
 pub struct GitActionSource {
-    cache: PathBuf,
+    cache:       PathBuf,
     /// `https://github.com` — or a `file://` directory of repositories in tests.
     remote_base: String,
     /// Fetches and extractions serialize per repository. Independent actions do
-    /// not block each other, while two steps cannot write one cache entry at once.
-    locks: Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
+    /// not block each other, while two steps cannot write one cache entry at
+    /// once.
+    locks:       Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
 }
 
 impl GitActionSource {
     pub fn new(cache: impl Into<PathBuf>) -> Self {
         Self {
-            cache: cache.into(),
+            cache:       cache.into(),
             remote_base: "https://github.com".into(),
-            locks: Mutex::new(HashMap::new()),
+            locks:       Mutex::new(HashMap::new()),
         }
     }
 
@@ -140,7 +142,7 @@ fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
     if upstream_refusal(&message) {
         return ActionSourceError::Unavailable {
             reference: reference.to_string(),
-            reason: Some(message),
+            reason:    Some(message),
         };
     }
     ActionSourceError::Fetch {
@@ -197,12 +199,12 @@ impl ActionSource for GitActionSource {
             .validate()
             .map_err(|e| ActionSourceError::Unresolvable {
                 reference: reference.to_string(),
-                message: e.to_string(),
+                message:   e.to_string(),
             })?;
         if reference.is_commit() {
             return Ok(PinnedAction {
                 reference: reference.clone(),
-                sha: reference.git_ref.clone(),
+                sha:       reference.git_ref.clone(),
             });
         }
         let key = reference.to_string();
@@ -221,7 +223,7 @@ impl ActionSource for GitActionSource {
             if upstream_refusal(&message) {
                 ActionSourceError::Unavailable {
                     reference: key.clone(),
-                    reason: Some(message),
+                    reason:    Some(message),
                 }
             } else {
                 ActionSourceError::Unresolvable {
@@ -249,7 +251,7 @@ impl ActionSource for GitActionSource {
         }
         let sha = found.ok_or_else(|| ActionSourceError::Unresolvable {
             reference: key.clone(),
-            message: format!("no tag or branch `{}` at {url}", reference.git_ref),
+            message:   format!("no tag or branch `{}` at {url}", reference.git_ref),
         })?;
         let pinned = PinnedAction {
             reference: reference.clone(),
@@ -282,7 +284,7 @@ impl ActionSource for GitActionSource {
     fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
         let Some(path) = pinned.reference.path.as_deref() else {
             return Err(ActionSourceError::Fetch {
-                action: pinned.reference.to_string(),
+                action:  pinned.reference.to_string(),
                 message: "the reference names no file path".into(),
             });
         };

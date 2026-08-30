@@ -7,9 +7,9 @@ use ir::{Arm, BinOp, Budget, GraphBuilder, JoinPolicy, Outcome, RunStatus, Value
 use serde_json::json;
 use support::{Harness, NOOP};
 
-/// Handoff §7 test 3. An Attractor-style goal gate: the exit is blocked, the run
-/// jumps to a repair target, the gate is satisfied on the second pass, and the exit
-/// is taken. Entirely via guards on `nodes.*` — no engine feature.
+/// Handoff §7 test 3. An Attractor-style goal gate: the exit is blocked, the
+/// run jumps to a repair target, the gate is satisfied on the second pass, and
+/// the exit is taken. Entirely via guards on `nodes.*` — no engine feature.
 #[test]
 fn a_goal_gate_routes_on_the_run_context() {
     let mut b = GraphBuilder::new();
@@ -59,8 +59,8 @@ fn a_goal_gate_routes_on_the_run_context() {
     h.verify_replay();
 }
 
-/// Handoff §7 test 4. Two parallel nodes writing the same key: the last event wins,
-/// and replay is identical.
+/// Handoff §7 test 4. Two parallel nodes writing the same key: the last event
+/// wins, and replay is identical.
 #[test]
 fn context_updates_merge_in_event_order() {
     let mut b = GraphBuilder::new();
@@ -108,7 +108,8 @@ fn context_updates_merge_in_event_order() {
     h.verify_replay();
 }
 
-/// Node records land under the instance name, so a matrix clone records separately.
+/// Node records land under the instance name, so a matrix clone records
+/// separately.
 #[test]
 fn clones_record_under_their_instance_name() {
     use ir::{ExpandTarget, collector_exprs, parallel_for_each};
@@ -121,10 +122,9 @@ fn clones_record_under_their_instance_name() {
     let collector = collector_exprs(b.exprs());
     let items = b.exprs().var("input");
     b.link(plan, build);
-    b.select(
-        build,
-        vec![Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(build, vec![
+        Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     parallel_for_each(&mut b, build, items, ExpandTarget::Node, None, false);
     let graph = b.build();
@@ -202,8 +202,8 @@ fn the_run_context_is_rebuilt_by_replay() {
     assert_eq!(replayed.run_context().get("last"), Some(&json!("c")));
 }
 
-/// `success()` on an entry node: there are no real input edges, only the seed, so
-/// the upstream fold has nothing to look up and evaluates true.
+/// `success()` on an entry node: there are no real input edges, only the seed,
+/// so the upstream fold has nothing to look up and evaluates true.
 #[test]
 fn success_on_an_entry_node_evaluates_true_off_the_seed() {
     let mut b = GraphBuilder::new();
@@ -225,9 +225,9 @@ fn success_on_an_entry_node_evaluates_true_off_the_seed() {
     );
 }
 
-/// `success()` on a matrix clone: a clone is seeded like an entry node, so its own
-/// precondition evaluates true, and downstream nodes look the clone up by its
-/// instance name.
+/// `success()` on a matrix clone: a clone is seeded like an entry node, so its
+/// own precondition evaluates true, and downstream nodes look the clone up by
+/// its instance name.
 #[test]
 fn success_works_on_a_matrix_clone_and_downstream_of_one() {
     use ir::{BinOp, ExpandTarget, collector_exprs, parallel_for_each};
@@ -252,13 +252,13 @@ fn success_works_on_a_matrix_clone_and_downstream_of_one() {
     };
 
     b.link(plan, build);
-    b.select(
-        build,
-        vec![Arm::always(collect).with_map(collector.indexed)],
-    );
+    b.select(build, vec![
+        Arm::always(collect).with_map(collector.indexed),
+    ]);
     b.set_join(collect, JoinPolicy::All);
     b.select(collect, vec![Arm::when(report, clone_ok)]);
-    // Every clone carries this precondition; each is seeded, so each evaluates true.
+    // Every clone carries this precondition; each is seeded, so each evaluates
+    // true.
     b.set_precondition(build, succeeded);
     parallel_for_each(&mut b, build, items, ExpandTarget::Node, None, false);
     let graph = b.build();

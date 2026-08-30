@@ -3,12 +3,13 @@
 //! Directories do not stop a stray dependency; this does. The rules:
 //!
 //! 1. **Core is self-contained.** A crate under `crates/core/` depends only on
-//!    crates under `crates/core/` — normal, build, and dev alike. Core never names
-//!    a component, a distribution, or the binary.
-//! 2. **Components see core, and only core.** A crate under `crates/<component>/`
-//!    (anything that is not `core`) depends only on core and on its own component.
-//!    Components never depend on each other — anything two components need is
-//!    core — and never on the distribution, not even for tests.
+//!    crates under `crates/core/` — normal, build, and dev alike. Core never
+//!    names a component, a distribution, or the binary.
+//! 2. **Components see core, and only core.** A crate under
+//!    `crates/<component>/` (anything that is not `core`) depends only on core
+//!    and on its own component. Components never depend on each other —
+//!    anything two components need is core — and never on the distribution, not
+//!    even for tests.
 //! 3. Only the distribution (`crates/petri/`) may depend on component crates.
 //!
 //! The check reads `cargo metadata`, so it sees what cargo sees, not what the

@@ -49,14 +49,11 @@ fn finished_before_started_is_unknown_firing() {
         .expect("the entry node was dispatched");
 
     // The driver's racy order: the runner's Finished beats the StepStarted send.
-    let (state, _) = apply(
-        state,
-        Event::StepFinished {
-            firing,
-            attempt,
-            outcome: Outcome::success(ir::Value::Null),
-        },
-    );
+    let (state, _) = apply(state, Event::StepFinished {
+        firing,
+        attempt,
+        outcome: Outcome::success(ir::Value::Null),
+    });
     assert!(state.errors().is_empty(), "{:?}", state.errors());
     let (state, _) = apply(state, Event::StepStarted { firing, attempt });
 

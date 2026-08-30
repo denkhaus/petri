@@ -114,23 +114,17 @@ async fn realize_inner(
         let refs: Vec<&str> = create.iter().map(String::as_str).collect();
         run_docker(&refs).await?;
         run_docker(&["start", &name]).await?;
-        ctx.progress().progress(
-            scope.id,
-            Progress::ServiceStarted {
-                name: service.name.clone(),
-            },
-        );
+        ctx.progress().progress(scope.id, Progress::ServiceStarted {
+            name: service.name.clone(),
+        });
     }
     // Health after every service has started, so slow checks overlap.
     for service in &scope.services {
         let name = format!("{}{}", service_prefix(base), service.name);
         await_health(&name, &service.name).await?;
-        ctx.progress().progress(
-            scope.id,
-            Progress::ServiceHealthy {
-                name: service.name.clone(),
-            },
-        );
+        ctx.progress().progress(scope.id, Progress::ServiceHealthy {
+            name: service.name.clone(),
+        });
     }
     Ok(())
 }
@@ -182,8 +176,8 @@ async fn service_failure(service: &SmolStr, container: &str, what: &str) -> EnvE
         format!("; last output:\n{logs}")
     };
     EnvError::Backend {
-        backend: SmolStr::new("docker"),
+        backend:   SmolStr::new("docker"),
         operation: SmolStr::new("service"),
-        message: format!("service `{service}` {what}{tail}"),
+        message:   format!("service `{service}` {what}{tail}"),
     }
 }

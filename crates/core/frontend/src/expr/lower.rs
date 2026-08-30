@@ -1,11 +1,12 @@
 //! Lowering the syntax tree onto the engine's expression table.
 //!
-//! This crate ships one lowering, [`strict`]: the engine's own semantics, for the
-//! native format. A frontend with its own semantics (GitHub's loose comparison, say)
-//! writes its own lowering in its own crate against the same [`Roots`] trait and the
-//! same [`builtin`] gate. Nothing here evaluates: a lowering builds `ir::Expr` nodes,
-//! and every function it emits is looked up in `ir::expr::BUILTINS` first, so it
-//! cannot produce a call the engine will not take.
+//! This crate ships one lowering, [`strict`]: the engine's own semantics, for
+//! the native format. A frontend with its own semantics (GitHub's loose
+//! comparison, say) writes its own lowering in its own crate against the same
+//! [`Roots`] trait and the same [`builtin`] gate. Nothing here evaluates: a
+//! lowering builds `ir::Expr` nodes, and every function it emits is looked up
+//! in `ir::expr::BUILTINS` first, so it cannot produce a call the engine will
+//! not take.
 
 use ir::{BinOp, ExprId, ExprTable, UnOp};
 use serde_json::Value;
@@ -18,9 +19,9 @@ pub enum LowerError {
     UnknownFunction(String),
     #[error("`{name}` takes {expected} argument(s), got {got}")]
     Arity {
-        name: String,
+        name:     String,
         expected: usize,
-        got: usize,
+        got:      usize,
     },
     #[error("`{0}` is not a binding this format knows")]
     UnknownIdent(String),
@@ -28,23 +29,24 @@ pub enum LowerError {
     Custom(String),
 }
 
-/// Resolve a root identifier to an engine expression. How `github` or `steps` or
-/// `item` becomes an `ExprId` is the frontend's business; the lowering asks.
+/// Resolve a root identifier to an engine expression. How `github` or `steps`
+/// or `item` becomes an `ExprId` is the frontend's business; the lowering asks.
 pub trait Roots {
     /// Lower a bare identifier. `None` means "not a name I know".
     fn root(&mut self, name: &str, table: &mut ExprTable) -> Option<ExprId>;
 
     /// A dotted path from a root, for frontends that resolve some paths
-    /// structurally — `steps.build.outputs.x` becomes a run-context lookup rather
-    /// than field access on a `steps` object. `None` means "resolve it the ordinary
-    /// way": segment by segment, with the lowering's own property semantics.
+    /// structurally — `steps.build.outputs.x` becomes a run-context lookup
+    /// rather than field access on a `steps` object. `None` means "resolve
+    /// it the ordinary way": segment by segment, with the lowering's own
+    /// property semantics.
     fn path(&mut self, _root: &str, _path: &[&str], _table: &mut ExprTable) -> Option<ExprId> {
         None
     }
 
     /// Lower a function call the frontend wants to intercept — GitHub's status
-    /// functions, say, which depend on where the expression sits. `None` means "use
-    /// the builtin of the same name".
+    /// functions, say, which depend on where the expression sits. `None` means
+    /// "use the builtin of the same name".
     fn call(
         &mut self,
         _name: &str,
@@ -108,8 +110,8 @@ pub fn builtin(table: &mut ExprTable, name: &str, args: Vec<ExprId>) -> Result<E
 
 // ── Strict: the engine's own semantics ────────────────────────────────────
 
-/// Lower with the engine's semantics: `==` is `Eq`, `&&` is `And`, `!` is `Not`,
-/// functions are builtins by name. For the native format.
+/// Lower with the engine's semantics: `==` is `Eq`, `&&` is `And`, `!` is
+/// `Not`, functions are builtins by name. For the native format.
 pub fn strict(
     expr: &Expr,
     table: &mut ExprTable,

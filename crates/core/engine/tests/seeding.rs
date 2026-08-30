@@ -1,6 +1,6 @@
 //! Seed edges: the synthetic incoming edges for entry nodes and expansion clone
-//! entries. They exist so the firing rule needs no special case for a node with no
-//! declared incoming edge.
+//! entries. They exist so the firing rule needs no special case for a node with
+//! no declared incoming edge.
 
 mod support;
 
@@ -13,8 +13,9 @@ use ir::{
 use serde_json::json;
 use support::{Harness, NOOP};
 
-/// An entry node with `JoinPolicy::All` fires from exactly its seed token. `All`
-/// over one seed edge is satisfied by one token, so the policy needs no exception.
+/// An entry node with `JoinPolicy::All` fires from exactly its seed token.
+/// `All` over one seed edge is satisfied by one token, so the policy needs no
+/// exception.
 #[test]
 fn an_all_join_entry_node_fires_from_its_seed_token_alone() {
     let mut b = GraphBuilder::new();
@@ -45,15 +46,13 @@ fn an_all_join_entry_node_fires_from_its_seed_token_alone() {
     assert_eq!(h.start_count("entry"), 1);
 }
 
-/// Every join policy works on an entry node, because the seed edge is counted like
-/// any other incoming edge.
+/// Every join policy works on an entry node, because the seed edge is counted
+/// like any other incoming edge.
 #[test]
 fn every_join_policy_works_on_an_entry_node() {
-    for join in [
-        JoinPolicy::All,
-        JoinPolicy::Any,
-        JoinPolicy::Quorum { n: 1 },
-    ] {
+    for join in [JoinPolicy::All, JoinPolicy::Any, JoinPolicy::Quorum {
+        n: 1,
+    }] {
         let mut b = GraphBuilder::new();
         let scope = ir::ScopeId::new(0);
         let entry = b.add_step("entry", scope, NOOP);
@@ -67,8 +66,8 @@ fn every_join_policy_works_on_an_entry_node() {
     }
 }
 
-/// Seed edges are allocated above every declared id, so they collide with nothing,
-/// and they are never written into a routing group.
+/// Seed edges are allocated above every declared id, so they collide with
+/// nothing, and they are never written into a routing group.
 #[test]
 fn seed_edges_stay_out_of_the_graph() {
     let mut b = GraphBuilder::new();
@@ -115,8 +114,8 @@ fn seed_edges_stay_out_of_the_graph() {
     assert!(declared.is_subset(&live), "declared edges are still there");
 }
 
-/// A clone entry with `JoinPolicy::All` fires from its own seed edge, which is what
-/// lets a spliced subgraph start without a declared incoming edge.
+/// A clone entry with `JoinPolicy::All` fires from its own seed edge, which is
+/// what lets a spliced subgraph start without a declared incoming edge.
 #[test]
 fn clone_entries_are_seeded_the_same_way() {
     let mut b = GraphBuilder::new();
@@ -138,7 +137,7 @@ fn clone_entries_are_seeded_the_same_way() {
         items,
         ExpandTarget::Subgraph {
             entry: setup,
-            exit: run,
+            exit:  run,
         },
         None,
         false,

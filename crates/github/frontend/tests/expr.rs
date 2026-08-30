@@ -1,6 +1,6 @@
-//! Handoff §7 tests 1–2 for the GHA lowering specifically: GitHub's semantics come
-//! out of the engine's evaluator, every GitHub function has a table home, and the
-//! matrix rules are a composition of engine combinators.
+//! Handoff §7 tests 1–2 for the GHA lowering specifically: GitHub's semantics
+//! come out of the engine's evaluator, every GitHub function has a table home,
+//! and the matrix rules are a composition of engine combinators.
 
 use frontend::expr::lower::{EngineBindings, Roots};
 use frontend::expr::parse;
@@ -26,8 +26,8 @@ fn eval_gha(source: &str, statics: &StaticCtx) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("{source}: {e}"))
 }
 
-/// GitHub's semantics, checked by running the lowered expression through the engine
-/// — the frontend has no evaluator of its own.
+/// GitHub's semantics, checked by running the lowered expression through the
+/// engine — the frontend has no evaluator of its own.
 #[test]
 fn gha_lowering_produces_github_semantics() {
     let mut statics = StaticCtx::new();
@@ -71,8 +71,8 @@ fn gha_lowering_produces_github_semantics() {
     }
 }
 
-/// Every GitHub function has a home in the table, and the one that cannot is named
-/// with its reason. This is the "no frontend evaluator path" assertion in
+/// Every GitHub function has a home in the table, and the one that cannot is
+/// named with its reason. This is the "no frontend evaluator path" assertion in
 /// mechanical form: the frontend produces `ir::Expr` and nothing else.
 #[test]
 fn every_gha_function_has_a_home() {

@@ -1,9 +1,9 @@
 //! GitHub Actions workflow YAML → HIR.
 //!
-//! Pure: text in, `Graph` and diagnostics out. The only IO is reading the workflow's
-//! local composite actions, and that goes through [`FileSource`] so the caller decides
-//! what "the repository" is — a directory, or a map in a test. [`GitHubActions`] is
-//! this format as a [`Frontend`].
+//! Pure: text in, `Graph` and diagnostics out. The only IO is reading the
+//! workflow's local composite actions, and that goes through [`FileSource`] so
+//! the caller decides what "the repository" is — a directory, or a map in a
+//! test. [`GitHubActions`] is this format as a [`Frontend`].
 //!
 //! # What a job becomes
 //!
@@ -12,25 +12,26 @@
 //!   gate         steps, chained by plain `next:`           collector
 //! ```
 //!
-//! `J/start` is a noop whose precondition is the job's gate: `success()` over its
-//! `needs` (unless its `if:` names a status function), and its `if:`. `J/done` is a
-//! noop that summarizes the job — `{ result, outputs }` — from the payload the last
-//! step's edge carries, and fans out to every job that needs this one. A matrix job
-//! expands the region `J/start ..= J/last` per combination; `J/done` sits outside and
-//! folds the legs. Every `needs.J.*` and `success()` downstream reads `J/done`'s
-//! record, never a template edge.
+//! `J/start` is a noop whose precondition is the job's gate: `success()` over
+//! its `needs` (unless its `if:` names a status function), and its `if:`.
+//! `J/done` is a noop that summarizes the job — `{ result, outputs }` — from
+//! the payload the last step's edge carries, and fans out to every job that
+//! needs this one. A matrix job expands the region `J/start ..= J/last` per
+//! combination; `J/done` sits outside and folds the legs. Every `needs.J.*` and
+//! `success()` downstream reads `J/done`'s record, never a template edge.
 //!
 //! Step nodes carry no engine precondition: every step-level condition — an
 //! `if:`, a `pre-if`, a `post-if` — lowers into the step's config as a **gate**
 //! ([`gate`]) the step kind evaluates at spawn. The gate carries GitHub's
-//! job-status semantics explicitly: `success()` in a step means "no earlier step
-//! of this job failed and the job was not cancelled out from under it", built as
-//! an expression over the earlier steps' run-context records, and every step is
-//! additionally gated on the job having started. That is how a false job `if:`
-//! skips every step, and how `continue-on-error` (a `PartialSuccess`) does not
-//! fail the job. The gate is also what lets a condition read `hashFiles(...)` and
-//! `env.*` — including values earlier steps appended to `GITHUB_ENV` — which only
-//! the step, in the job environment, can resolve.
+//! job-status semantics explicitly: `success()` in a step means "no earlier
+//! step of this job failed and the job was not cancelled out from under it",
+//! built as an expression over the earlier steps' run-context records, and
+//! every step is additionally gated on the job having started. That is how a
+//! false job `if:` skips every step, and how `continue-on-error` (a
+//! `PartialSuccess`) does not fail the job. The gate is also what lets a
+//! condition read `hashFiles(...)` and `env.*` — including values earlier steps
+//! appended to `GITHUB_ENV` — which only the step, in the job environment, can
+//! resolve.
 //!
 //! # Cancellation
 //!
@@ -41,11 +42,11 @@
 //! decides against the real state: `cancelled()` is true, `success()` is false.
 //! Cleanup steps run; everything else self-skips, recording `Cancelled`. No
 //! condition text is sniffed to decide admission. A job whose own gate admitted
-//! it *after* the cancel — `if: always()` cleanup — records that on its `start`,
-//! and its interior steps then evaluate normally, as GitHub's do. `cancelled()`
-//! ORs in the `scope_cancelled` static, so a cancel that lands between steps — or
-//! a `fail_fast` scope cancel, which root-only `run.cancelled` cannot see — still
-//! reads as cancelled.
+//! it *after* the cancel — `if: always()` cleanup — records that on its
+//! `start`, and its interior steps then evaluate normally, as GitHub's do.
+//! `cancelled()` ORs in the `scope_cancelled` static, so a cancel that lands
+//! between steps — or a `fail_fast` scope cancel, which root-only
+//! `run.cancelled` cannot see — still reads as cancelled.
 //!
 //! # `runs-on: ${{ matrix.os }}`
 //!
@@ -77,15 +78,14 @@ pub mod runs_on;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use frontend::{Diagnostics, FileSource, Frontend, Lowered};
-use serde_json::Value;
-use smol_str::SmolStr;
-
 pub use action::{
     ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, REPO_PARAM_CONTEXT,
     REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
 };
+use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 pub use runners::RunnerMap;
+use serde_json::Value;
+use smol_str::SmolStr;
 
 /// Parse and lower a workflow file, with no source for `uses: owner/repo@ref`
 /// actions: they are rejected as `unsupported.action.remote`.
@@ -135,23 +135,24 @@ pub fn load_configured(
     )
 }
 
-/// GitHub Actions, as a [`Frontend`]: it claims anything under `.github/workflows/`.
+/// GitHub Actions, as a [`Frontend`]: it claims anything under
+/// `.github/workflows/`.
 ///
 /// Without an [`ActionSource`] it lowers `run:` steps and local composites and
-/// rejects actions from other repositories; with one, those resolve at load time.
-/// The [`RunnerMap`] starts as the built-in `ubuntu-*` labels;
+/// rejects actions from other repositories; with one, those resolve at load
+/// time. The [`RunnerMap`] starts as the built-in `ubuntu-*` labels;
 /// [`Self::with_runners`] installs the host's configuration.
 pub struct GitHubActions {
-    actions: Option<Arc<dyn ActionSource>>,
-    runners: RunnerMap,
+    actions:             Option<Arc<dyn ActionSource>>,
+    runners:             RunnerMap,
     substitute_checkout: bool,
 }
 
 impl Default for GitHubActions {
     fn default() -> Self {
         Self {
-            actions: None,
-            runners: RunnerMap::default(),
+            actions:             None,
+            runners:             RunnerMap::default(),
             substitute_checkout: true,
         }
     }
@@ -215,14 +216,14 @@ impl Frontend for GitHubActions {
     /// The `github`, `runner` and `vars` contexts a runner would supply.
     ///
     /// The repository slug comes from the checkout's `origin` remote — the same
-    /// identity the lowering's placement guards evaluate against, so the two can
-    /// never disagree. `github.sha`, `github.ref` and `github.ref_name` come
-    /// from the checkout's actual HEAD: run parameters are host-filled at run
-    /// start and recorded in the graph, so honest values here change no
-    /// lowering and break no replay — and `actions/checkout` fetches a commit
-    /// that exists instead of the fixed zero sha. Everything else stays fixed
-    /// (a local run is not a real GitHub event), and without a checkout the
-    /// fixed values stand in wholesale.
+    /// identity the lowering's placement guards evaluate against, so the two
+    /// can never disagree. `github.sha`, `github.ref` and `github.ref_name`
+    /// come from the checkout's actual HEAD: run parameters are host-filled
+    /// at run start and recorded in the graph, so honest values here change
+    /// no lowering and break no replay — and `actions/checkout` fetches a
+    /// commit that exists instead of the fixed zero sha. Everything else
+    /// stays fixed (a local run is not a real GitHub event), and without a
+    /// checkout the fixed values stand in wholesale.
     ///
     /// The one delta this creates from lowering: a *condition* reading
     /// `github.sha` resolves to the zero sha in the placement statics and to
@@ -278,8 +279,8 @@ impl Frontend for GitHubActions {
     }
 }
 
-/// `runner.os` as GitHub spells it: `Linux`, `macOS`, `Windows`. Workflows compare
-/// against these literally, and actions read `RUNNER_OS`.
+/// `runner.os` as GitHub spells it: `Linux`, `macOS`, `Windows`. Workflows
+/// compare against these literally, and actions read `RUNNER_OS`.
 pub fn runner_os(os: &str) -> &'static str {
     match os {
         "linux" => "Linux",

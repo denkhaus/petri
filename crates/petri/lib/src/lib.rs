@@ -1,15 +1,16 @@
 //! Petri, as it ships.
 //!
 //! This is the distribution: the one crate a consumer depends on, and the only
-//! crate in the tree that names every component. Core is `petri-runtime` and knows
-//! the native format and nothing else; each component — today, GitHub Actions —
-//! is its own crate and knows core. Here the two meet: [`runtime()`] is core's
-//! standard runtime with every in-tree component registered on it.
+//! crate in the tree that names every component. Core is `petri-runtime` and
+//! knows the native format and nothing else; each component — today, GitHub
+//! Actions — is its own crate and knows core. Here the two meet: [`runtime()`]
+//! is core's standard runtime with every in-tree component registered on it.
 //!
 //! Everything else is re-export. [`ir`], [`engine`], [`driver`], [`frontend`]
-//! (with [`frontend::gha`] and [`frontend::native`]), [`steps`] and [`executor`]
-//! (with [`executor::host`] and [`executor::docker`]) are reachable through this
-//! crate, so an external repository names one dependency and never a layer crate.
+//! (with [`frontend::gha`] and [`frontend::native`]), [`steps`] and
+//! [`executor`] (with [`executor::host`] and [`executor::docker`]) are
+//! reachable through this crate, so an external repository names one dependency
+//! and never a layer crate.
 //!
 //! The one thing here that is not wiring or re-export is [`host`]: the
 //! standalone host's durable run dir — `graph.json`, `events.jsonl`, and the
@@ -27,8 +28,7 @@
 //! # }
 //! ```
 
-pub use runtime::{LocalExecutor, RunOptions, Runtime};
-pub use runtime::{driver, engine, ir};
+pub use runtime::{LocalExecutor, RunOptions, Runtime, driver, engine, ir};
 
 pub mod host;
 
@@ -48,20 +48,22 @@ pub mod steps {
     pub use runtime::steps::*;
 }
 
-/// The GitHub Actions component's run-time half: its step kinds and action source.
+/// The GitHub Actions component's run-time half: its step kinds and action
+/// source.
 pub mod github {
     pub use github_actions::*;
 }
 
-/// The shipped configuration: core's standard runtime plus every in-tree component.
+/// The shipped configuration: core's standard runtime plus every in-tree
+/// component.
 ///
 /// GitHub Actions comes with an action source that fetches from GitHub into
-/// [`github::default_cache_dir`], its step kinds, and `GITHUB_TOKEN` as a secret:
-/// this machine's (`$GITHUB_TOKEN`, else `gh auth token`), or the empty string
-/// with a warning when it has none — actions then run anonymously. Its runner
-/// map knows the `ubuntu-*` labels; `PETRI_RUNNER_LABELS` (labels separated by
-/// commas or whitespace) adds third-party or self-hosted labels that name Linux
-/// environments this machine can stand in for.
+/// [`github::default_cache_dir`], its step kinds, and `GITHUB_TOKEN` as a
+/// secret: this machine's (`$GITHUB_TOKEN`, else `gh auth token`), or the empty
+/// string with a warning when it has none — actions then run anonymously. Its
+/// runner map knows the `ubuntu-*` labels; `PETRI_RUNNER_LABELS` (labels
+/// separated by commas or whitespace) adds third-party or self-hosted labels
+/// that name Linux environments this machine can stand in for.
 ///
 /// Every run also gets the per-run **ObjectService** — the local stand-in for
 /// GitHub's results backend — started beside the run dir (artifacts under
@@ -69,8 +71,9 @@ pub mod github {
 /// `ACTIONS_RESULTS_URL`/`ACTIONS_RUNTIME_TOKEN`. When it cannot start, the
 /// run proceeds and only the steps that need the backend fail, routably.
 ///
-/// A consumer that wants a different set builds one itself — `Runtime::standard()`
-/// for core alone, `Runtime::bare()` for nothing — and registers what it wants.
+/// A consumer that wants a different set builds one itself —
+/// `Runtime::standard()` for core alone, `Runtime::bare()` for nothing — and
+/// registers what it wants.
 pub fn runtime() -> Runtime {
     let actions = std::sync::Arc::new(github::GitActionSource::new(github::default_cache_dir()));
     let manifests: std::sync::Arc<dyn github::ActionSource> = actions.clone();
@@ -104,7 +107,7 @@ pub fn runtime() -> Runtime {
             match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
                 Ok(service) => {
                     let cap = github::ResultsServiceCap {
-                        port: service.port(),
+                        port:  service.port(),
                         token: service.token().into(),
                     };
                     (caps.provide(cap), Some(Box::new(service) as _))
@@ -121,14 +124,14 @@ pub fn runtime() -> Runtime {
 /// A runtime-registerable secret map plus a lazily loaded `GITHUB_TOKEN`.
 struct GithubSecrets {
     registered: executor::MapSecrets,
-    token: std::sync::OnceLock<Option<String>>,
+    token:      std::sync::OnceLock<Option<String>>,
 }
 
 impl GithubSecrets {
     fn new() -> Self {
         Self {
             registered: executor::MapSecrets::empty(),
-            token: std::sync::OnceLock::new(),
+            token:      std::sync::OnceLock::new(),
         }
     }
 
@@ -183,7 +186,8 @@ impl executor::SecretProvider for GithubSecrets {
     }
 }
 
-/// Ask `gh` for a token without letting a broken credential helper block forever.
+/// Ask `gh` for a token without letting a broken credential helper block
+/// forever.
 fn gh_auth_token() -> Option<String> {
     let mut child = std::process::Command::new("gh")
         .args(["auth", "token"])

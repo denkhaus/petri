@@ -1,14 +1,14 @@
 //! The compatibility corpus harness.
 //!
-//! Runs every corpus workflow through the GHA frontend and classifies the result.
-//! The bar is not 100% lowering. It is: every workflow either lowers, or is rejected
-//! with a specific `unsupported.*` code — zero panics, zero generic errors. The report
-//! also counts which actions the corpus uses most, so the action runner's gaps are
-//! ranked by how much they block.
+//! Runs every corpus workflow through the GHA frontend and classifies the
+//! result. The bar is not 100% lowering. It is: every workflow either lowers,
+//! or is rejected with a specific `unsupported.*` code — zero panics, zero
+//! generic errors. The report also counts which actions the corpus uses most,
+//! so the action runner's gaps are ranked by how much they block.
 //!
-//! The corpus data is not committed. `scripts/corpus-fetch.sh` downloads it, so on a
-//! fresh clone it is simply absent, and the corpus tests skip themselves rather than
-//! fail — see [`corpus_present`].
+//! The corpus data is not committed. `scripts/corpus-fetch.sh` downloads it, so
+//! on a fresh clone it is simply absent, and the corpus tests skip themselves
+//! rather than fail — see [`corpus_present`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,8 +29,8 @@ pub enum Class {
     Warnings,
     /// Rejected, and every error is an `unsupported.*` code.
     Unsupported,
-    /// Rejected with at least one error that is not `unsupported.*` — a reader gap,
-    /// or a genuinely malformed file. Investigate.
+    /// Rejected with at least one error that is not `unsupported.*` — a reader
+    /// gap, or a genuinely malformed file. Investigate.
     OtherError,
     /// The frontend panicked. Never acceptable.
     Panicked,
@@ -38,12 +38,12 @@ pub enum Class {
 
 #[derive(Clone, Debug)]
 pub struct Outcome {
-    pub repo: String,
-    pub file: String,
-    pub class: Class,
+    pub repo:        String,
+    pub file:        String,
+    pub class:       Class,
     pub diagnostics: Vec<Diagnostic>,
-    pub nodes: usize,
-    pub panic: Option<String>,
+    pub nodes:       usize,
+    pub panic:       Option<String>,
 }
 
 /// Features that put a workflow out of the corpus's scope entirely: Windows and
@@ -84,8 +84,9 @@ impl Outcome {
         out
     }
 
-    /// The workflow needs a Windows or macOS runner or shell somewhere, so it is
-    /// out of this corpus's scope by policy, whatever else it would need.
+    /// The workflow needs a Windows or macOS runner or shell somewhere, so it
+    /// is out of this corpus's scope by policy, whatever else it would
+    /// need.
     pub fn out_of_scope(&self) -> bool {
         self.unsupported_features()
             .iter()
@@ -130,13 +131,13 @@ impl Outcome {
 /// Is the corpus fetched?
 ///
 /// True when `root` exists and at least one repo directory under it has a
-/// `.github/workflows` directory. The corpus is gitignored, so a fresh clone has
-/// none of it until `scripts/corpus-fetch.sh` runs.
+/// `.github/workflows` directory. The corpus is gitignored, so a fresh clone
+/// has none of it until `scripts/corpus-fetch.sh` runs.
 ///
-/// The convention, mirroring `PETRI_REQUIRE_DOCKER` for the Docker battery: a corpus
-/// test skips with a message when this is false, and `PETRI_REQUIRE_CORPUS` turns that
-/// skip into a failure. CI sets it, because a silently skipped battery is
-/// indistinguishable from a passing one.
+/// The convention, mirroring `PETRI_REQUIRE_DOCKER` for the Docker battery: a
+/// corpus test skips with a message when this is false, and
+/// `PETRI_REQUIRE_CORPUS` turns that skip into a failure. CI sets it, because a
+/// silently skipped battery is indistinguishable from a passing one.
 pub fn corpus_present(root: &Path) -> bool {
     let Ok(repos) = std::fs::read_dir(root) else {
         return false;
@@ -179,8 +180,8 @@ pub fn workflows(corpus_root: &Path) -> Vec<(String, PathBuf, PathBuf)> {
     out
 }
 
-/// One reference in the action snapshot: resolved to a commit and its manifest, or
-/// the error the refresh hit.
+/// One reference in the action snapshot: resolved to a commit and its manifest,
+/// or the error the refresh hit.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(untagged)]
 pub enum SnapshotEntry {
@@ -198,7 +199,7 @@ enum RawSnapshotEntry {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolvedSnapshotEntry {
-    sha: String,
+    sha:      String,
     manifest: String,
 }
 
@@ -212,7 +213,7 @@ impl<'de> serde::Deserialize<'de> for SnapshotEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match RawSnapshotEntry::deserialize(deserializer)? {
             RawSnapshotEntry::Resolved(entry) => SnapshotEntry::Resolved {
-                sha: entry.sha,
+                sha:      entry.sha,
                 manifest: entry.manifest,
             },
             RawSnapshotEntry::Failed(entry) => SnapshotEntry::Failed { error: entry.error },
@@ -222,23 +223,25 @@ impl<'de> serde::Deserialize<'de> for SnapshotEntry {
 
 /// The offline action source for the corpus: every `uses:` reference the corpus
 /// makes, resolved once over the network by the refresh test
-/// (`--test snapshot -- --ignored`) and read back here with none. A reference the
-/// snapshot lacks answers `Unavailable` with no reason (a refresh may add it);
-/// one whose refresh failed answers `Unavailable` carrying the recorded upstream
-/// error (a private or removed repository — a refresh will not help). Either way
-/// the workflow classifies exactly as it would with no source at all:
-/// `unsupported.action.remote`, with a hint that now says which case it is.
+/// (`--test snapshot -- --ignored`) and read back here with none. A reference
+/// the snapshot lacks answers `Unavailable` with no reason (a refresh may add
+/// it); one whose refresh failed answers `Unavailable` carrying the recorded
+/// upstream error (a private or removed repository — a refresh will not help).
+/// Either way the workflow classifies exactly as it would with no source at
+/// all: `unsupported.action.remote`, with a hint that now says which case it
+/// is.
 pub struct SnapshotSource {
     entries: BTreeMap<String, SnapshotEntry>,
 }
 
 impl SnapshotSource {
-    /// The snapshot's file name under the corpus root. Gitignored with the rest of
-    /// the corpus data: fetched, not vendored.
+    /// The snapshot's file name under the corpus root. Gitignored with the rest
+    /// of the corpus data: fetched, not vendored.
     pub const FILE: &'static str = "actions-snapshot.json";
 
-    /// Load `<corpus>/actions-snapshot.json`. `None` when it has not been written;
-    /// a malformed file is a loud failure, not a quiet no-source run.
+    /// Load `<corpus>/actions-snapshot.json`. `None` when it has not been
+    /// written; a malformed file is a loud failure, not a quiet no-source
+    /// run.
     pub fn load(corpus_root: &Path) -> Option<Self> {
         let path = corpus_root.join(Self::FILE);
         let text = std::fs::read_to_string(&path).ok()?;
@@ -278,9 +281,9 @@ impl SnapshotSource {
 }
 
 impl SnapshotSource {
-    /// The `Unavailable` answer for the entry a lookup found: with the refresh's
-    /// recorded error as the reason when the reference failed, with none when it
-    /// is simply absent.
+    /// The `Unavailable` answer for the entry a lookup found: with the
+    /// refresh's recorded error as the reason when the reference failed,
+    /// with none when it is simply absent.
     fn unavailable(reference: String, entry: Option<&SnapshotEntry>) -> ActionSourceError {
         let reason = match entry {
             Some(SnapshotEntry::Failed { error }) => Some(error.clone()),
@@ -296,7 +299,7 @@ impl ActionSource for SnapshotSource {
         match self.entries.get(&key) {
             Some(SnapshotEntry::Resolved { sha, .. }) => Ok(PinnedAction {
                 reference: reference.clone(),
-                sha: SmolStr::new(sha),
+                sha:       SmolStr::new(sha),
             }),
             other => Err(Self::unavailable(key, other)),
         }
@@ -317,9 +320,9 @@ impl ActionSource for SnapshotSource {
     }
 }
 
-/// Lower one workflow, catching panics so a crash is a classified result rather than
-/// a dead harness. `actions` resolves `uses: owner/repo@ref`; without it they are
-/// rejected as `action.remote`.
+/// Lower one workflow, catching panics so a crash is a classified result rather
+/// than a dead harness. `actions` resolves `uses: owner/repo@ref`; without it
+/// they are rejected as `action.remote`.
 pub fn check_one(
     repo: &str,
     repo_root: &Path,
@@ -348,16 +351,16 @@ pub fn lower_one(
         Err(e) => {
             return (
                 Outcome {
-                    repo: repo.to_string(),
-                    file: rel,
-                    class: Class::OtherError,
+                    repo:        repo.to_string(),
+                    file:        rel,
+                    class:       Class::OtherError,
                     diagnostics: vec![Diagnostic::error(
                         "io",
                         frontend::Span::file(file.to_string_lossy().as_ref()),
                         e.to_string(),
                     )],
-                    nodes: 0,
-                    panic: None,
+                    nodes:       0,
+                    panic:       None,
                 },
                 None,
             );
@@ -382,12 +385,12 @@ pub fn lower_one(
                 .unwrap_or_else(|| "unknown panic".to_string());
             (
                 Outcome {
-                    repo: repo.to_string(),
-                    file: rel,
-                    class: Class::Panicked,
+                    repo:        repo.to_string(),
+                    file:        rel,
+                    class:       Class::Panicked,
                     diagnostics: Vec::new(),
-                    nodes: 0,
-                    panic: Some(message),
+                    nodes:       0,
+                    panic:       Some(message),
                 },
                 None,
             )
@@ -431,10 +434,10 @@ pub fn check_all(corpus_root: &Path, actions: Option<&Arc<dyn ActionSource>>) ->
 /// The report, as Markdown.
 ///
 /// `census` is a run of the same corpus with no action source: its
-/// `action.remote` rejections name every remote `uses:` reference, which is where
-/// the actions-by-frequency table comes from. With no snapshot the two runs are the
-/// same and callers pass `outcomes` twice. `actions_note` says how remote actions
-/// were resolved for this report.
+/// `action.remote` rejections name every remote `uses:` reference, which is
+/// where the actions-by-frequency table comes from. With no snapshot the two
+/// runs are the same and callers pass `outcomes` twice. `actions_note` says how
+/// remote actions were resolved for this report.
 pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -629,7 +632,8 @@ pub fn report(outcomes: &[Outcome], census: &[Outcome], actions_note: &str) -> S
     out
 }
 
-/// Workflows whose every step is a plain `run:` — candidates for running end to end.
+/// Workflows whose every step is a plain `run:` — candidates for running end to
+/// end.
 pub fn run_only_candidates(outcomes: &[Outcome]) -> Vec<&Outcome> {
     outcomes
         .iter()

@@ -48,7 +48,7 @@ impl Capabilities {
     /// host service is missing. The message names the type.
     pub fn require<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, StepFailure> {
         self.get::<T>().ok_or_else(|| StepFailure {
-            class: CAPABILITY_UNAVAILABLE_CLASS,
+            class:   CAPABILITY_UNAVAILABLE_CLASS,
             message: format!(
                 "no capability of type `{}` is registered for this run",
                 std::any::type_name::<T>()

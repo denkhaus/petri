@@ -12,22 +12,26 @@ pub enum EnvError {
     Signal(String),
     #[error("waiting on the process failed: {0}")]
     Wait(String),
-    /// The executor's backing system refused or failed: a container engine, a cloud
-    /// API, a remote agent. `backend` names it; the interface does not know the list.
+    /// The executor's backing system refused or failed: a container engine, a
+    /// cloud API, a remote agent. `backend` names it; the interface does
+    /// not know the list.
     #[error("{backend} {operation} failed: {message}")]
     Backend {
-        backend: SmolStr,
+        backend:   SmolStr,
         operation: SmolStr,
-        message: String,
+        message:   String,
     },
     /// `acquire`'s fence found prior work still alive that it could not safely
-    /// end — the executor's kill mechanism is gone or never engaged, and nothing
-    /// is ever signalled on a bare recorded id (it can be recycled to an
-    /// innocent; the no-innocent-signal invariant is absolute). The scope's
-    /// firings fail routably through the ordinary acquire-failure path; cleanup
-    /// belongs to the operator or host policy.
+    /// end — the executor's kill mechanism is gone or never engaged, and
+    /// nothing is ever signalled on a bare recorded id (it can be recycled
+    /// to an innocent; the no-innocent-signal invariant is absolute). The
+    /// scope's firings fail routably through the ordinary acquire-failure
+    /// path; cleanup belongs to the operator or host policy.
     #[error("prior work from generation {generation} survived the fence: {detail}")]
-    FenceLeaked { generation: SmolStr, detail: String },
+    FenceLeaked {
+        generation: SmolStr,
+        detail:     String,
+    },
     #[error("the environment is gone")]
     Gone,
 }
@@ -40,16 +44,18 @@ impl EnvError {
 
 /// What tearing an environment down actually managed to do.
 ///
-/// Release is best effort and never fails a run: a leaked resource is a problem to
-/// report, not a reason to lose the run's result. The resources are described, not
-/// enumerated — a workspace, a container, an instance — so the report is the same
-/// shape for every executor.
+/// Release is best effort and never fails a run: a leaked resource is a problem
+/// to report, not a reason to lose the run's result. The resources are
+/// described, not enumerated — a workspace, a container, an instance — so the
+/// report is the same shape for every executor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReleaseReport {
-    /// Resources that were torn down, described (`workspace /run/x`, `container c1`).
+    /// Resources that were torn down, described (`workspace /run/x`, `container
+    /// c1`).
     pub released: Vec<String>,
-    /// Resources deliberately left in place, described, with why implied by policy.
-    pub kept: Vec<String>,
+    /// Resources deliberately left in place, described, with why implied by
+    /// policy.
+    pub kept:     Vec<String>,
     pub problems: Vec<String>,
 }
 

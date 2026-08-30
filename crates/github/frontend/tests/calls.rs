@@ -386,10 +386,9 @@ jobs:
         .iter()
         .find(|n| n.name == "build/start")
         .unwrap();
-    assert_eq!(
-        graph.scope(start.scope).unwrap().runtime.requirements,
-        ["ubuntu-24.04"]
-    );
+    assert_eq!(graph.scope(start.scope).unwrap().runtime.requirements, [
+        "ubuntu-24.04"
+    ]);
 
     // No default: nothing standalone could ever place this file — only a
     // caller can. Its own class, so the corpus never reads it as a gap.

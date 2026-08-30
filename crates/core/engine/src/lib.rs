@@ -1,10 +1,10 @@
 //! A pure, sans-IO token-flow state machine.
 //!
-//! The engine executes an [`ir::Graph`] with token-flow semantics: a node fires when
-//! its join policy is satisfied by incoming tokens, and on completion its routing
-//! policy emits tokens on outgoing edges. All coordination state lives in
-//! [`EngineState`]; side effects happen in the host, behind the [`Command`] /
-//! [`Event`] boundary.
+//! The engine executes an [`ir::Graph`] with token-flow semantics: a node fires
+//! when its join policy is satisfied by incoming tokens, and on completion its
+//! routing policy emits tokens on outgoing edges. All coordination state lives
+//! in [`EngineState`]; side effects happen in the host, behind the [`Command`]
+//! / [`Event`] boundary.
 //!
 //! ```no_run
 //! # use engine::{EngineState, Event, apply};

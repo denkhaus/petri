@@ -179,7 +179,7 @@ fn a_later_request_may_reference_an_earlier_ones_node_but_not_the_reverse() {
     let graph = uploader_graph(SplicePolicy::Append);
     let depends = SpliceRequest::append(fragment(&["y"])).with_attachment(Attachment::DependsOn {
         node: NodeId::new(0),
-        on: ExistingNodeRef::new("x"),
+        on:   ExistingNodeRef::new("x"),
     });
     let mut h = Harness::new(graph.clone()).results(BTreeMap::from([(
         "up",
@@ -285,7 +285,7 @@ fn a_not_final_reference_gets_a_real_edge_and_emits_later() {
 
     let request = SpliceRequest::append(fragment(&["f"])).with_attachment(Attachment::DependsOn {
         node: NodeId::new(0),
-        on: ExistingNodeRef::new("slow"),
+        on:   ExistingNodeRef::new("slow"),
     });
     // The harness finishes `up` before `slow`, so `slow` is not final at splice
     // time: `f` must wait for the real edge to emit.
@@ -312,7 +312,7 @@ fn a_final_reference_gates_without_waiting() {
 
     let request = SpliceRequest::append(fragment(&["f"])).with_attachment(Attachment::DependsOn {
         node: NodeId::new(0),
-        on: ExistingNodeRef::new("pre"),
+        on:   ExistingNodeRef::new("pre"),
     });
     let mut h = Harness::new(graph.clone())
         .results(BTreeMap::from([("up", splice_outcome(vec![request]))]));
@@ -348,8 +348,9 @@ fn a_non_all_dependent_rejects_the_request() {
 
 // ── Replace and retraction ────────────────────────────────────────────────
 
-/// A fragment whose interior join can park: `wa -> wj <- wb`, entries `wa`/`wb`,
-/// exit `wj`. After `wa` finishes, `wj`'s admission is pending until `wb` does.
+/// A fragment whose interior join can park: `wa -> wj <- wb`, entries
+/// `wa`/`wb`, exit `wj`. After `wa` finishes, `wj`'s admission is pending until
+/// `wb` does.
 fn parking_fragment(prefix: &str) -> GraphFragment {
     let name = |suffix: &str| format!("{prefix}{suffix}");
     let mut wa = Node::new(
@@ -373,11 +374,11 @@ fn parking_fragment(prefix: &str) -> GraphFragment {
     wa.routing = ir::Routing::next(Edge::always(EdgeId::new(0), NodeId::new(2)));
     wb.routing = ir::Routing::next(Edge::always(EdgeId::new(1), NodeId::new(2)));
     GraphFragment {
-        body: ir::GraphBody {
-            nodes: vec![wa, wb, wj],
+        body:  ir::GraphBody {
+            nodes:  vec![wa, wb, wj],
             scopes: vec![Scope::new(ScopeId::new(0))],
-            exprs: Default::default(),
-            entry: vec![NodeId::new(0), NodeId::new(1)],
+            exprs:  Default::default(),
+            entry:  vec![NodeId::new(0), NodeId::new(1)],
         },
         exits: vec![NodeId::new(2)],
     }
@@ -580,20 +581,12 @@ fn a_retracted_admission_readmits_in_a_future_generation() {
         let one = b.exprs().lit(1);
         b.exprs().binary(ir::BinOp::Lt, generation, one)
     };
-    b.fan_out_groups(
-        head,
-        vec![
-            vec![ir::Arm::always(b1)],
-            vec![ir::Arm::when(b2, second_lap)],
-        ],
-    );
-    b.fan_out_groups(
-        b1,
-        vec![
-            vec![ir::Arm::always(x)],
-            vec![ir::Arm::when(head, first_lap).as_back()],
-        ],
-    );
+    b.fan_out_groups(head, vec![vec![ir::Arm::always(b1)], vec![ir::Arm::when(
+        b2, second_lap,
+    )]]);
+    b.fan_out_groups(b1, vec![vec![ir::Arm::always(x)], vec![
+        ir::Arm::when(head, first_lap).as_back(),
+    ]]);
     b.link(b2, x);
     b.graph_mut().entry = vec![head, up];
     let graph = b.build();
@@ -664,7 +657,7 @@ fn a_reference_to_a_key_retracted_by_the_same_transaction_rejects() {
 
     let depends = SpliceRequest::append(fragment(&["f"])).with_attachment(Attachment::DependsOn {
         node: NodeId::new(0),
-        on: ExistingNodeRef::new("x"),
+        on:   ExistingNodeRef::new("x"),
     });
     h.finish(
         up_f,

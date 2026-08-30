@@ -101,15 +101,12 @@ jobs:
         .map(|n| n.name.as_str())
         .filter(|n| !n.ends_with("/start") && !n.ends_with("/done"))
         .collect();
-    assert_eq!(
-        names,
-        vec![
-            "build/step-1/pre",
-            "build/step-1",
-            "build/step-2",
-            "build/step-1/post",
-        ]
-    );
+    assert_eq!(names, vec![
+        "build/step-1/pre",
+        "build/step-1",
+        "build/step-2",
+        "build/step-1/post",
+    ]);
 
     let main = node(&graph, "build/step-1");
     assert_eq!(main.step.kind.to_string(), DOCKER_ACTION_KIND);

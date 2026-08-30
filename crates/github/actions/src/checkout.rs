@@ -59,7 +59,7 @@ async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, St
     }
     let Some(source) = config.source.as_deref().filter(|s| !s.is_empty()) else {
         return Err(StepFailure {
-            class: CHECKOUT_CLASS,
+            class:   CHECKOUT_CLASS,
             message: format!(
                 "no local repository is configured for this run — the host fills the `{}.{}` \
                  run parameter from the workflow's repository root",
@@ -157,10 +157,12 @@ async fn snapshot_repository(
     // overlay needs both.
     let (_, porcelain) = tokio::try_join!(
         git(None, &clone_args),
-        git(
-            Some(source),
-            &["status", "--porcelain", "-z", "--untracked-files=all"],
-        ),
+        git(Some(source), &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all"
+        ],),
     )?;
     shape_clone(clone, config).await?;
 
@@ -218,10 +220,9 @@ async fn shape_clone(clone: &Path, config: &CheckoutConfig) -> Result<(), StepFa
     {
         let tracking = format!("refs/remotes/origin/{branch}");
         git(Some(clone), &["update-ref", &tracking, "HEAD"]).await?;
-        git(
-            Some(clone),
-            &["checkout", "--quiet", "-B", branch, &tracking],
-        )
+        git(Some(clone), &[
+            "checkout", "--quiet", "-B", branch, &tracking,
+        ])
         .await?;
     }
     if let (Some(server), Some(repository)) = (
@@ -288,14 +289,14 @@ async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure
         .env
         .spawn(executor::ProcessSpec {
             program: SmolStr::new("tar"),
-            args: vec![
+            args:    vec![
                 SmolStr::new("-xf"),
                 SmolStr::new(format!("{workspace}/{tar_rel}")),
                 SmolStr::new("-C"),
                 SmolStr::new(workspace),
             ],
-            env: Default::default(),
-            cwd: None,
+            env:     Default::default(),
+            cwd:     None,
         })
         .await
         .map_err(|e| checkout_error(format!("could not run `tar`: {e}")))?;

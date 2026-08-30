@@ -1,8 +1,8 @@
 //! Step kinds: the semantics of running one step, and the one registry.
 //!
 //! A step kind knows nothing about where a process runs. It receives an
-//! [`ExecEnv`](executor::ExecEnv) capability and uses it, which is why the process
-//! step is written once and runs either way.
+//! [`ExecEnv`](executor::ExecEnv) capability and uses it, which is why the
+//! process step is written once and runs either way.
 
 pub mod caps;
 pub mod ctx;

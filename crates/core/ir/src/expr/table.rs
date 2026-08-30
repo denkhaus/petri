@@ -1,4 +1,5 @@
-//! The flat expression store, and the construction helpers frontends build with.
+//! The flat expression store, and the construction helpers frontends build
+//! with.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

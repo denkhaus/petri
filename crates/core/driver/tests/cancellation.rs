@@ -1,4 +1,5 @@
-//! Handoff §7 tests 3, 4, 5 and 9: the cancellation ladder against real processes.
+//! Handoff §7 tests 3, 4, 5 and 9: the cancellation ladder against real
+//! processes.
 
 mod support;
 
@@ -11,8 +12,8 @@ use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
 
-/// A script that backgrounds a grandchild, ticks a heartbeat file, and then waits
-/// forever. If the group is signalled as a unit, the heartbeat stops.
+/// A script that backgrounds a grandchild, ticks a heartbeat file, and then
+/// waits forever. If the group is signalled as a unit, the heartbeat stops.
 const BACKGROUNDER: &str = r#"
 ( while :; do echo tick >> heartbeat; sleep 0.05; done ) &
 echo ready > ready
@@ -28,8 +29,9 @@ fn one_step(name: &str, run: &str) -> ir::Graph {
     graph
 }
 
-/// §7 test 3, host variant. A step that spawns a background grandchild dies as a
-/// unit: every signal goes to the process **group**, never to the child's pid.
+/// §7 test 3, host variant. A step that spawns a background grandchild dies as
+/// a unit: every signal goes to the process **group**, never to the child's
+/// pid.
 #[tokio::test]
 async fn cancel_kills_the_whole_process_group() {
     let dir = RunDir::new("group-kill");
@@ -73,8 +75,9 @@ async fn cancel_kills_the_whole_process_group() {
 }
 
 /// §7 test 4. A step that traps `SIGTERM`, cleans up and exits inside the grace
-/// period is still `Cancelled` — the ladder signalled, so the outcome is ours even
-/// though the exit status looks ordinary. Its outputs file is still parsed.
+/// period is still `Cancelled` — the ladder signalled, so the outcome is ours
+/// even though the exit status looks ordinary. Its outputs file is still
+/// parsed.
 #[tokio::test]
 async fn a_step_that_honours_term_still_reports_cancelled() {
     let dir = RunDir::new("term-honoured");
@@ -119,8 +122,8 @@ wait
     );
 }
 
-/// §7 test 5. A step that ignores `SIGTERM` gets `SIGKILL` once the grace period is
-/// up, and the escalation is on the record.
+/// §7 test 5. A step that ignores `SIGTERM` gets `SIGKILL` once the grace
+/// period is up, and the escalation is on the record.
 #[tokio::test]
 async fn a_step_that_ignores_term_is_killed_after_grace() {
     let dir = RunDir::new("term-ignored");
@@ -156,9 +159,9 @@ while :; do sleep 0.1; done
     );
 }
 
-/// §7 test 9. A step kind that ignores `Control::Cancel` and never returns cannot
-/// wedge a run: the driver stops waiting after `grace + slack` and synthesizes the
-/// terminal event itself.
+/// §7 test 9. A step kind that ignores `Control::Cancel` and never returns
+/// cannot wedge a run: the driver stops waiting after `grace + slack` and
+/// synthesizes the terminal event itself.
 #[tokio::test]
 async fn a_wedged_step_kind_cannot_wedge_the_run() {
     let dir = RunDir::new("wedged");
@@ -200,7 +203,8 @@ async fn a_wedged_step_kind_cannot_wedge_the_run() {
     );
 }
 
-/// Cancelling twice joins the ladder already in flight rather than restarting it.
+/// Cancelling twice joins the ladder already in flight rather than restarting
+/// it.
 #[tokio::test]
 async fn repeated_cancels_join_the_ladder() {
     let dir = RunDir::new("double-cancel");

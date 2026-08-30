@@ -26,29 +26,30 @@ use crate::{CONTAINER_WORKSPACE, PullPolicy, next_token, prepare_registry_image,
 
 /// Runs one-shot containers in one scope's world.
 pub(crate) struct OneShotRunner {
-    /// Container-name prefix for this scope's one-shots (`petri-<run>-<inst>-s`).
-    prefix: String,
+    /// Container-name prefix for this scope's one-shots
+    /// (`petri-<run>-<inst>-s`).
+    prefix:    String,
     /// The scope's workspace on the host, mounted at [`CONTAINER_WORKSPACE`].
     workspace: PathBuf,
     /// The scope's resolved env: one-shots live in the scope's world, so they
     /// see what every process of the scope sees. A spec's own env wins.
-    env: std::collections::BTreeMap<SmolStr, SmolStr>,
+    env:       std::collections::BTreeMap<SmolStr, SmolStr>,
     /// `--network` value — the job container's namespace for a containerized
     /// scope, the scope's network for a host scope with services. `None` is the
     /// daemon default.
-    network: Option<String>,
-    pull: PullPolicy,
-    scope: ScopeId,
-    progress: Arc<dyn ProgressSink>,
+    network:   Option<String>,
+    pull:      PullPolicy,
+    scope:     ScopeId,
+    progress:  Arc<dyn ProgressSink>,
     /// The scope's one-shot marker, recorded before the first launch so the
     /// acquire fence and release sweep of a Docker-free scope know whether
     /// there can be anything to look for.
-    marker: PathBuf,
-    marked: OnceCell<()>,
+    marker:    PathBuf,
+    marked:    OnceCell<()>,
     /// Image references this runner has already ensured. Presence cannot
     /// regress within a run, so a `pre`/`main`/`post` trio — or N steps naming
     /// one image — costs one probe, not N.
-    ensured: Mutex<HashSet<SmolStr>>,
+    ensured:   Mutex<HashSet<SmolStr>>,
 }
 
 impl OneShotRunner {
@@ -136,7 +137,7 @@ impl OneShotRunner {
         self.marked
             .get_or_try_init(|| async {
                 let io_error = |e: std::io::Error| EnvError::Workspace {
-                    path: self.marker.display().to_string(),
+                    path:    self.marker.display().to_string(),
                     message: e.to_string(),
                 };
                 if let Some(parent) = self.marker.parent() {
@@ -246,7 +247,7 @@ impl ContainerRunner for OneShotRunner {
 }
 
 struct OneShotProcess {
-    name: String,
+    name:  String,
     child: tokio::process::Child,
     lines: Option<LineStream>,
 }

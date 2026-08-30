@@ -11,9 +11,10 @@ use support::*;
 
 const SECRET: &str = "sk-live-9f3a2b7c1d4e";
 
-/// §7 test 8. A step echoes a secret and round-trips it through its outputs file.
-/// The log shows `***`, the output is masked too, and the raw event log holds only
-/// the reference — checked by grepping the log's bytes for the value.
+/// §7 test 8. A step echoes a secret and round-trips it through its outputs
+/// file. The log shows `***`, the output is masked too, and the raw event log
+/// holds only the reference — checked by grepping the log's bytes for the
+/// value.
 #[tokio::test]
 async fn a_secret_reaches_the_process_and_nothing_else() {
     let dir = RunDir::new("secrets");
@@ -50,8 +51,8 @@ async fn a_secret_reaches_the_process_and_nothing_else() {
         report.state.errors()
     );
 
-    // The step really did receive the value: it echoed something, and what came back
-    // is masked rather than empty.
+    // The step really did receive the value: it echoed something, and what came
+    // back is masked rather than empty.
     let lines = log_lines(&report);
     assert!(
         lines.iter().any(|l| l == "token is ***"),
@@ -102,8 +103,8 @@ async fn a_secret_reaches_the_process_and_nothing_else() {
     assert!(found_masked, "the persisted log was written, and masked");
 }
 
-/// A short secret is not masked, GHA-style: masking `ok` would turn every log into
-/// asterisks.
+/// A short secret is not masked, GHA-style: masking `ok` would turn every log
+/// into asterisks.
 #[tokio::test]
 async fn short_secrets_are_not_masked() {
     let dir = RunDir::new("short-secret");
@@ -134,8 +135,8 @@ async fn short_secrets_are_not_masked() {
     assert!(log_lines(&report).iter().any(|l| l == "value is ok"));
 }
 
-/// A `$secret` outside an env-shaped position is a step failure, not something to
-/// pass through as literal JSON.
+/// A `$secret` outside an env-shaped position is a step failure, not something
+/// to pass through as literal JSON.
 #[tokio::test]
 async fn a_misplaced_secret_reference_fails_the_step() {
     let dir = RunDir::new("misplaced-secret");
@@ -177,7 +178,8 @@ async fn a_misplaced_secret_reference_fails_the_step() {
     );
 }
 
-/// A secret that does not exist fails the step rather than passing an empty value.
+/// A secret that does not exist fails the step rather than passing an empty
+/// value.
 #[tokio::test]
 async fn an_unknown_secret_fails_the_step() {
     let dir = RunDir::new("unknown-secret");
@@ -248,7 +250,7 @@ impl steps::StepRunner for LeakyStep {
             .logs
             .send(ir::StepEvent::Artifact {
                 name: smol_str::SmolStr::new(format!("report-{token}")),
-                uri: format!("s3://bucket/{token}/report.tgz"),
+                uri:  format!("s3://bucket/{token}/report.tgz"),
             })
             .await;
         let _ = ctx
@@ -305,10 +307,10 @@ async fn an_artifact_carrying_a_registered_value_is_masked() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        artifacts,
-        vec![("report-***".into(), "s3://bucket/***/report.tgz".into())]
-    );
+    assert_eq!(artifacts, vec![(
+        "report-***".into(),
+        "s3://bucket/***/report.tgz".into()
+    )]);
 
     let log_bytes = serde_json::to_string(&report.state.log).expect("encode");
     assert!(
@@ -317,7 +319,8 @@ async fn an_artifact_carrying_a_registered_value_is_masked() {
     );
 }
 
-/// A multi-line secret is masked line by line, because the log is line-buffered.
+/// A multi-line secret is masked line by line, because the log is
+/// line-buffered.
 #[tokio::test]
 async fn multiline_secrets_are_masked_per_line() {
     let dir = RunDir::new("multiline-secret");

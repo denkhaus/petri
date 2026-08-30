@@ -1,7 +1,7 @@
 //! The environment a step runs in, and the process it runs.
 //!
-//! An [`ExecEnv`] is a capability handed to a step kind. The process step is written
-//! once against it and never mentions Docker.
+//! An [`ExecEnv`] is a capability handed to a step kind. The process step is
+//! written once against it and never mentions Docker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,19 +18,19 @@ use crate::error::EnvError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessSpec {
     pub program: SmolStr,
-    pub args: Vec<SmolStr>,
-    pub env: BTreeMap<SmolStr, SmolStr>,
+    pub args:    Vec<SmolStr>,
+    pub env:     BTreeMap<SmolStr, SmolStr>,
     /// Relative to the workspace root.
-    pub cwd: Option<PathBuf>,
+    pub cwd:     Option<PathBuf>,
 }
 
 impl ProcessSpec {
     pub fn new(program: &str, args: &[&str]) -> Self {
         Self {
             program: SmolStr::new(program),
-            args: args.iter().map(|a| SmolStr::new(*a)).collect(),
-            env: BTreeMap::new(),
-            cwd: None,
+            args:    args.iter().map(|a| SmolStr::new(*a)).collect(),
+            env:     BTreeMap::new(),
+            cwd:     None,
         }
     }
 
@@ -48,21 +48,22 @@ impl ProcessSpec {
 /// One captured output line, tagged with the stream it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogLine {
-    pub stream: ir::LogStream,
-    pub line: String,
+    pub stream:    ir::LogStream,
+    pub line:      String,
     /// The line hit the size cap and was cut.
     pub truncated: bool,
 }
 
 /// Captured output, merged across both streams in arrival order.
 ///
-/// One stream rather than the separate `stdout()` / `stderr()` of the handoff: the
-/// requirement is that lines are emitted in arrival order, and merging two receivers
-/// after the fact cannot recover an order that was never recorded. Each line carries
-/// its stream tag, so nothing is lost.
+/// One stream rather than the separate `stdout()` / `stderr()` of the handoff:
+/// the requirement is that lines are emitted in arrival order, and merging two
+/// receivers after the fact cannot recover an order that was never recorded.
+/// Each line carries its stream tag, so nothing is lost.
 pub type LineStream = mpsc::Receiver<LogLine>;
 
-/// The signals this package sends. Always to a process **group**, never to a pid.
+/// The signals this package sends. Always to a process **group**, never to a
+/// pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sig {
     Term,
@@ -88,7 +89,7 @@ impl Sig {
 /// How a process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitStatus {
-    pub code: Option<i32>,
+    pub code:   Option<i32>,
     /// The signal that killed it, when it was killed.
     pub signal: Option<i32>,
 }
@@ -96,14 +97,14 @@ pub struct ExitStatus {
 impl ExitStatus {
     pub fn code(code: i32) -> Self {
         Self {
-            code: Some(code),
+            code:   Some(code),
             signal: None,
         }
     }
 
     pub fn signalled(signal: i32) -> Self {
         Self {
-            code: None,
+            code:   None,
             signal: Some(signal),
         }
     }
@@ -113,8 +114,9 @@ impl ExitStatus {
     }
 }
 
-/// The mapping every executor needs when the process it waited on was a real child
-/// of this one: an exit code when there is one, otherwise the signal that killed it.
+/// The mapping every executor needs when the process it waited on was a real
+/// child of this one: an exit code when there is one, otherwise the signal that
+/// killed it.
 impl From<std::process::ExitStatus> for ExitStatus {
     fn from(status: std::process::ExitStatus) -> Self {
         use std::os::unix::process::ExitStatusExt;
@@ -129,23 +131,25 @@ impl From<std::process::ExitStatus> for ExitStatus {
 /// A running process, addressed as a process group.
 #[async_trait]
 pub trait ProcessHandle: Send {
-    /// The merged, stream-tagged output. Available once; later calls return `None`.
+    /// The merged, stream-tagged output. Available once; later calls return
+    /// `None`.
     fn lines(&mut self) -> Option<LineStream>;
 
     async fn wait(&mut self) -> Result<ExitStatus, EnvError>;
 
-    /// Signal the process **group**. Idempotent: signalling an already-dead group
-    /// is not an error.
+    /// Signal the process **group**. Idempotent: signalling an already-dead
+    /// group is not an error.
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError>;
 }
 
-/// The capability a step kind receives: somewhere to run a process, and a workspace
-/// reached only through this interface.
+/// The capability a step kind receives: somewhere to run a process, and a
+/// workspace reached only through this interface.
 ///
-/// Nothing here assumes the workspace is on the machine the driver runs on. A step
-/// kind that needs a file in the workspace asks the environment for it, and an
-/// executor whose workspace is remote — a cloud instance, an agent elsewhere — answers
-/// over whatever transport it has. The two local executors answer from the filesystem.
+/// Nothing here assumes the workspace is on the machine the driver runs on. A
+/// step kind that needs a file in the workspace asks the environment for it,
+/// and an executor whose workspace is remote — a cloud instance, an agent
+/// elsewhere — answers over whatever transport it has. The two local executors
+/// answer from the filesystem.
 #[async_trait]
 pub trait ExecEnv: Send + Sync {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError>;
@@ -157,9 +161,10 @@ pub trait ExecEnv: Send + Sync {
     /// Read a workspace-relative file. `Ok(None)` when it does not exist.
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError>;
 
-    /// Read at most `limit` bytes from a workspace-relative file. Implementations
-    /// should stop reading once the limit is exceeded. The default preserves
-    /// compatibility for remote executors and still rejects an oversized result.
+    /// Read at most `limit` bytes from a workspace-relative file.
+    /// Implementations should stop reading once the limit is exceeded. The
+    /// default preserves compatibility for remote executors and still
+    /// rejects an oversized result.
     async fn read_file_limited(
         &self,
         relative: &Path,
@@ -170,7 +175,7 @@ pub trait ExecEnv: Send + Sync {
         };
         if bytes.len() > limit {
             return Err(EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: format!("file exceeds the {limit}-byte read limit"),
             });
         }

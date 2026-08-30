@@ -13,13 +13,13 @@ use crate::splice::SpliceRequest;
 /// One unit of flow, sitting on an edge and waiting for a join.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Token {
-    pub edge: EdgeId,
+    pub edge:       EdgeId,
     /// Named `generation` rather than `gen`: `gen` is a reserved keyword in
     /// edition 2024.
     pub generation: Generation,
-    pub payload: Value,
+    pub payload:    Value,
     /// The firing that emitted this token. Seed tokens use `FiringId(0)`.
-    pub from: FiringId,
+    pub from:       FiringId,
 }
 
 impl Token {
@@ -33,8 +33,8 @@ impl Token {
     }
 
     /// A token seeded onto an entry node or an expansion clone. `edge` is the
-    /// synthetic seed edge the engine allocated for that node, so joins count it
-    /// like any other incoming edge.
+    /// synthetic seed edge the engine allocated for that node, so joins count
+    /// it like any other incoming edge.
     pub fn seeded(edge: EdgeId, generation: Generation, payload: Value) -> Self {
         Self {
             edge,
@@ -47,18 +47,19 @@ impl Token {
 
 /// How a firing ended.
 ///
-/// **This enum is closed.** These six variants are the complete and permanent status
-/// vocabulary. Any future frontend concept must map onto them; none may extend them.
-/// Attractor's first-class `RETRY` outcome, for instance, lowers to
-/// `Failure` with `class: "retry_requested"` plus a matching `retry_on`, not to a new
-/// variant.
+/// **This enum is closed.** These six variants are the complete and permanent
+/// status vocabulary. Any future frontend concept must map onto them; none may
+/// extend them. Attractor's first-class `RETRY` outcome, for instance, lowers
+/// to `Failure` with `class: "retry_requested"` plus a matching `retry_on`, not
+/// to a new variant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     Success,
     /// Soft failure or partial completion. Routing-visible, and success-like.
     ///
-    /// `underlying` carries the real failure whenever one was converted into this,
-    /// so the log never records a clean success for something that failed.
+    /// `underlying` carries the real failure whenever one was converted into
+    /// this, so the log never records a clean success for something that
+    /// failed.
     PartialSuccess {
         underlying: Option<FailureInfo>,
     },
@@ -107,16 +108,18 @@ impl Status {
         }
     }
 
-    /// The variant, without its payload. See [`From<&Status> for StatusKind`], which
-    /// holds the only copy of this mapping.
+    /// The variant, without its payload. See [`From<&Status> for StatusKind`],
+    /// which holds the only copy of this mapping.
     pub fn kind(&self) -> StatusKind {
         StatusKind::from(self)
     }
 
-    /// **The** definition of success-likeness. Joins, cancel scopes, default success
-    /// guards and retry all call this; none of them open-codes the match.
+    /// **The** definition of success-likeness. Joins, cancel scopes, default
+    /// success guards and retry all call this; none of them open-codes the
+    /// match.
     ///
-    /// A guard that needs to tell the two apart tests `partial_success()` explicitly.
+    /// A guard that needs to tell the two apart tests `partial_success()`
+    /// explicitly.
     pub fn is_success_like(&self) -> bool {
         matches!(self, Status::Success | Status::PartialSuccess { .. })
     }
@@ -158,17 +161,17 @@ impl Status {
 pub struct FailureInfo {
     pub message: String,
     /// What kind of failure this is, for `retry_on` to match: `"network"`,
-    /// `"rate_limit"`, `"exit_status:2"`, `"retry_requested"`. Step kinds set it.
-    /// Empty means unclassified.
+    /// `"rate_limit"`, `"exit_status:2"`, `"retry_requested"`. Step kinds set
+    /// it. Empty means unclassified.
     #[serde(default)]
-    pub class: SmolStr,
+    pub class:   SmolStr,
 }
 
 impl FailureInfo {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            class: SmolStr::default(),
+            class:   SmolStr::default(),
         }
     }
 
@@ -190,9 +193,9 @@ pub struct Metrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
+    pub exit_code:   Option<i32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub custom: BTreeMap<SmolStr, Value>,
+    pub custom:      BTreeMap<SmolStr, Value>,
 }
 
 impl Metrics {
@@ -210,21 +213,22 @@ impl Metrics {
 /// The result of one attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Outcome {
-    pub status: Status,
+    pub status:          Status,
     /// Structured output: the value guards and `map` expressions see.
-    pub output: Value,
+    pub output:          Value,
     #[serde(default)]
-    pub metrics: Metrics,
-    /// Writes into [`RunContext::kv`], merged in event order by the core. This is the
-    /// only path that writes run-scoped key/value state.
+    pub metrics:         Metrics,
+    /// Writes into [`RunContext::kv`], merged in event order by the core. This
+    /// is the only path that writes run-scoped key/value state.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub context_updates: BTreeMap<SmolStr, Value>,
-    /// Ordered splice requests. Only a firing's **final** attempt applies them, in
-    /// one transaction: every request prepares or none applies, and a rejection
-    /// converts the whole outcome to `Failure{class: invalid_splice}`. A non-final
-    /// attempt's requests are recorded in the event log and change nothing.
+    /// Ordered splice requests. Only a firing's **final** attempt applies them,
+    /// in one transaction: every request prepares or none applies, and a
+    /// rejection converts the whole outcome to `Failure{class:
+    /// invalid_splice}`. A non-final attempt's requests are recorded in the
+    /// event log and change nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub splices: Vec<SpliceRequest>,
+    pub splices:         Vec<SpliceRequest>,
 }
 
 impl Outcome {
@@ -288,12 +292,12 @@ impl Outcome {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeRecord {
     /// The final attempt's status, raw.
-    pub status: Status,
-    pub output: Value,
+    pub status:     Status,
+    pub output:     Value,
     /// The latest generation to complete.
     pub generation: Generation,
     /// How many attempts the final firing took.
-    pub attempts: u32,
+    pub attempts:   u32,
 }
 
 impl NodeRecord {
@@ -311,26 +315,28 @@ impl NodeRecord {
 
 /// Run-scoped state that expressions can read.
 ///
-/// Written **only** inside `apply`, in event order: node records when a firing's
-/// final attempt finishes, and `kv` merged from `Outcome::context_updates` in that
-/// same order, last write winning. No other write path exists, which is what keeps
-/// the core pure and replay byte-identical.
+/// Written **only** inside `apply`, in event order: node records when a
+/// firing's final attempt finishes, and `kv` merged from
+/// `Outcome::context_updates` in that same order, last write winning. No other
+/// write path exists, which is what keeps the core pure and replay
+/// byte-identical.
 ///
-/// **`kv` merges on final attempts only**, like the node records. Guards read `kv`
-/// concurrently — a parallel node's routing can consult it mid-run — so merging a
-/// retried attempt's writes would let work that was later discarded steer routing
-/// elsewhere in the graph. The invariant is that retries are invisible everywhere
-/// except the event log. Per-attempt data is not lost: every attempt's finish record
-/// carries its full outcome, `context_updates` included, so tooling reads it from the
-/// log. It simply never enters the routing-visible store.
+/// **`kv` merges on final attempts only**, like the node records. Guards read
+/// `kv` concurrently — a parallel node's routing can consult it mid-run — so
+/// merging a retried attempt's writes would let work that was later discarded
+/// steer routing elsewhere in the graph. The invariant is that retries are
+/// invisible everywhere except the event log. Per-attempt data is not lost:
+/// every attempt's finish record carries its full outcome, `context_updates`
+/// included, so tooling reads it from the log. It simply never enters the
+/// routing-visible store.
 ///
-/// This is derived state — reconstructible from the event log. It is part of the
-/// engine state, but it is never checkpointed as a separate artifact.
+/// This is derived state — reconstructible from the event log. It is part of
+/// the engine state, but it is never checkpointed as a separate artifact.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunContext {
     /// Keyed by node instance name, so a matrix clone records under `build#2`.
     pub nodes: BTreeMap<SmolStr, NodeRecord>,
-    pub kv: BTreeMap<SmolStr, Value>,
+    pub kv:    BTreeMap<SmolStr, Value>,
 }
 
 impl RunContext {
@@ -398,16 +404,17 @@ pub enum LogStream {
 /// A signal delivered to a live firing.
 ///
 /// Reserved seam: `Pause` lands here in v2 and reuses the same cancel-scope
-/// machinery, so this enum is non-exhaustive from day one. `Steer` and `Approve`
-/// shipped as [`Control::Deliver`].
+/// machinery, so this enum is non-exhaustive from day one. `Steer` and
+/// `Approve` shipped as [`Control::Deliver`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Control {
     /// Ask the step to stop: the polite ladder (TERM, grace, KILL).
     Cancel,
-    /// Stop the step now: straight to `SIGKILL`, no ladder, no grace. Delivered by
-    /// a `KillRequested` — to every live firing in the killed closure, ones already
-    /// politely cancelling included, which a plain `Cancel` cannot say.
+    /// Stop the step now: straight to `SIGKILL`, no ladder, no grace. Delivered
+    /// by a `KillRequested` — to every live firing in the killed closure,
+    /// ones already politely cancelling included, which a plain `Cancel`
+    /// cannot say.
     Kill,
     /// A value delivered to a waiting step: a human's answer, a supervisor's
     /// instruction. May be delivered repeatedly to one firing (steering is a

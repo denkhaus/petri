@@ -1,16 +1,16 @@
 //! Combinators over lists of records, as pure functions.
 //!
-//! These are the pieces a frontend composes to expand a build matrix — any frontend's
-//! matrix. A cartesian product, removing records that match a partial record, and
-//! merging partial records into the ones they match. None of them knows what a
-//! `strategy.matrix`, an `exclude:` or an `adjustments:` is; the frontend that does
-//! spells its format's rule out of these.
+//! These are the pieces a frontend composes to expand a build matrix — any
+//! frontend's matrix. A cartesian product, removing records that match a
+//! partial record, and merging partial records into the ones they match. None
+//! of them knows what a `strategy.matrix`, an `exclude:` or an `adjustments:`
+//! is; the frontend that does spells its format's rule out of these.
 
 use serde_json::{Map, Value};
 
-/// Every combination of one value from each key, in key order, the first key varying
-/// slowest. Anything that is not an object yields an empty list; a scalar value is a
-/// one-element axis.
+/// Every combination of one value from each key, in key order, the first key
+/// varying slowest. Anything that is not an object yields an empty list; a
+/// scalar value is a one-element axis.
 pub fn cartesian(axes: &Value) -> Vec<Value> {
     let Some(map) = axes.as_object() else {
         return Vec::new();
@@ -44,8 +44,8 @@ fn matches(record: &Map<String, Value>, partial: &Map<String, Value>) -> bool {
         .all(|(k, v)| record.get(k).is_some_and(|have| have == v))
 }
 
-/// Remove every record that matches any of the partial records. A `partials` that is
-/// not an array removes nothing.
+/// Remove every record that matches any of the partial records. A `partials`
+/// that is not an array removes nothing.
 pub fn reject_where(records: &Value, partials: &Value) -> Vec<Value> {
     let records: Vec<Value> = match records {
         Value::Array(items) => items.clone(),
@@ -67,14 +67,15 @@ pub fn reject_where(records: &Value, partials: &Value) -> Vec<Value> {
 /// Merge partial records into the records they are compatible with.
 ///
 /// For each partial, in order: it is compatible with a record when none of its
-/// `protected` keys disagree with that record. Its other keys are then added to every
-/// compatible record (overwriting anything an earlier partial added, never a protected
-/// key). A partial compatible with no record is appended as a new record. Only the
-/// original records are candidates — a record an earlier partial appended is never
-/// extended by a later one.
+/// `protected` keys disagree with that record. Its other keys are then added to
+/// every compatible record (overwriting anything an earlier partial added,
+/// never a protected key). A partial compatible with no record is appended as a
+/// new record. Only the original records are candidates — a record an earlier
+/// partial appended is never extended by a later one.
 ///
-/// This is the shape of GitHub's `include` and of Buildkite's `adjustments`, with the
-/// format's rule about which keys are protected supplied by the caller.
+/// This is the shape of GitHub's `include` and of Buildkite's `adjustments`,
+/// with the format's rule about which keys are protected supplied by the
+/// caller.
 pub fn extend_where(records: &Value, partials: &Value, protected: &Value) -> Vec<Value> {
     let mut records: Vec<Map<String, Value>> = match records {
         Value::Array(items) => items.iter().filter_map(Value::as_object).cloned().collect(),

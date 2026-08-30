@@ -1,44 +1,44 @@
 //! What GitHub's contexts mean in engine terms.
 //!
-//! An expression in a workflow file sits somewhere — a job's `if:`, a step's `run:`,
-//! a composite action's output — and what `steps.build.outputs.x` or `success()` means
-//! depends on where. [`Site`] is that "where". [`GhaRoots`] turns a context reference
-//! into an engine expression for it, and the whole thing rides on the ordinary GHA
-//! lowering: there is no evaluator here, only construction.
+//! An expression in a workflow file sits somewhere — a job's `if:`, a step's
+//! `run:`, a composite action's output — and what `steps.build.outputs.x` or
+//! `success()` means depends on where. [`Site`] is that "where". [`GhaRoots`]
+//! turns a context reference into an engine expression for it, and the whole
+//! thing rides on the ordinary GHA lowering: there is no evaluator here, only
+//! construction.
 
 use std::collections::BTreeMap;
 
 use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::{LowerError, Roots, builtin};
-
-use crate::expr_lower::gha;
 use frontend::expr::{Expr, Literal, Segment, parse, split_template};
 use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{BinOp, ExprId, ExprOrValue, ExprTable, UnOp, Value};
 use serde_json::json;
 
+use crate::expr_lower::gha;
+
 /// The node-name separator between a job and its steps, and between a composite
 /// caller and its inner steps. Node names are `job/step`, `job/caller/inner`.
 pub const SEP: char = '/';
 
-/// A GitHub status tag as the engine records it, mapped to how GitHub reports it.
-/// The engine has `partial_success` and `timed_out`; GitHub has neither.
+/// A GitHub status tag as the engine records it, mapped to how GitHub reports
+/// it. The engine has `partial_success` and `timed_out`; GitHub has neither.
 pub fn outcome_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
-    // outcome: the result before continue-on-error — partial_success reads as failure.
-    remap_status(
-        table,
-        status,
-        &[("partial_success", "failure"), ("timed_out", "failure")],
-    )
+    // outcome: the result before continue-on-error — partial_success reads as
+    // failure.
+    remap_status(table, status, &[
+        ("partial_success", "failure"),
+        ("timed_out", "failure"),
+    ])
 }
 
 pub fn conclusion_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
     // conclusion: after continue-on-error — partial_success reads as success.
-    remap_status(
-        table,
-        status,
-        &[("partial_success", "success"), ("timed_out", "failure")],
-    )
+    remap_status(table, status, &[
+        ("partial_success", "success"),
+        ("timed_out", "failure"),
+    ])
 }
 
 fn remap_status(table: &mut ExprTable, status: ExprId, pairs: &[(&str, &str)]) -> ExprId {
@@ -73,11 +73,11 @@ pub enum SecretMap {
 pub struct UndeclaredSecret;
 
 impl SecretMap {
-    /// The provider name for a callee's `secrets.NAME`: `Ok(Some)` to reference,
-    /// `Ok(None)` for a declared-but-absent optional (the value is empty), and
-    /// `Err` for a name this call never granted. `GITHUB_TOKEN` is the runner's
-    /// token, not a caller-granted secret: it crosses every call boundary
-    /// unmapped, as on GitHub.
+    /// The provider name for a callee's `secrets.NAME`: `Ok(Some)` to
+    /// reference, `Ok(None)` for a declared-but-absent optional (the value
+    /// is empty), and `Err` for a name this call never granted.
+    /// `GITHUB_TOKEN` is the runner's token, not a caller-granted secret:
+    /// it crosses every call boundary unmapped, as on GitHub.
     pub fn resolve(&self, name: &str) -> Result<Option<String>, UndeclaredSecret> {
         if name.eq_ignore_ascii_case(GITHUB_TOKEN_SECRET) {
             return Ok(Some(GITHUB_TOKEN_SECRET.to_string()));
@@ -95,67 +95,69 @@ impl SecretMap {
 /// Where an expression sits.
 #[derive(Clone)]
 pub struct Site {
-    pub job_id: String,
+    pub job_id:            String,
     /// `job/step` names of the steps before this one in the job, in order.
-    pub earlier_steps: Vec<String>,
+    pub earlier_steps:     Vec<String>,
     /// Every step of this job, for `steps.<id>` lookups: id → node name.
-    pub step_names: BTreeMap<String, String>,
+    pub step_names:        BTreeMap<String, String>,
     /// The job's `needs`, with each needed job's `done` node name.
-    pub needs: BTreeMap<String, String>,
-    /// The job is a matrix job, so node names take a `#index` suffix at run time.
-    pub matrix: bool,
+    pub needs:             BTreeMap<String, String>,
+    /// The job is a matrix job, so node names take a `#index` suffix at run
+    /// time.
+    pub matrix:            bool,
     /// Static matrix leg count, when the matrix is a literal.
-    pub matrix_total: Option<usize>,
-    pub fail_fast: bool,
-    pub max_parallel: Option<u32>,
+    pub matrix_total:      Option<usize>,
+    pub fail_fast:         bool,
+    pub max_parallel:      Option<u32>,
     /// Step-level `env`, for `env.X` inside the step.
-    pub step_env: BTreeMap<String, ExprOrValue>,
+    pub step_env:          BTreeMap<String, ExprOrValue>,
     /// Composite action inputs in scope: input name → already-lowered value.
-    pub action_inputs: Option<BTreeMap<String, ExprId>>,
+    pub action_inputs:     Option<BTreeMap<String, ExprId>>,
     /// Workflow-scope inputs — a called workflow's bound `with:`, or a directly
     /// run workflow's typed run-parameter reads. `action_inputs` shadows this
     /// inside a composite body, where `inputs` means the action's own.
-    pub workflow_inputs: Option<BTreeMap<String, ExprId>>,
+    pub workflow_inputs:   Option<BTreeMap<String, ExprId>>,
     /// How `secrets.*` names map to the provider's at this site.
-    pub secrets: SecretMap,
+    pub secrets:           SecretMap,
     /// Inside `on.workflow_call.outputs` values: callee job id → its `done`
     /// node name, for the `jobs.<id>.*` context. `None` anywhere else — the
     /// context is out of scope there, even for a callee with no jobs.
-    pub callee_jobs: Option<BTreeMap<String, String>>,
+    pub callee_jobs:       Option<BTreeMap<String, String>>,
     /// The site sits inside an expansion region without being a matrix job
     /// itself — a called workflow's job under a matrix call. Node names take
     /// the `#index` suffix, but the `matrix` context stays empty.
-    pub in_expansion: bool,
-    /// Composite action outputs the caller can see: step id → (output name → expr).
+    pub in_expansion:      bool,
+    /// Composite action outputs the caller can see: step id → (output name →
+    /// expr).
     pub composite_outputs: BTreeMap<String, BTreeMap<String, ExprId>>,
     /// The job's own `start` node name (its gate).
-    pub start_node: String,
+    pub start_node:        String,
 }
 
 impl Site {
     pub fn new(job_id: &str) -> Self {
         Self {
-            job_id: job_id.to_string(),
-            earlier_steps: Vec::new(),
-            step_names: BTreeMap::new(),
-            needs: BTreeMap::new(),
-            matrix: false,
-            matrix_total: None,
-            fail_fast: true,
-            max_parallel: None,
-            step_env: BTreeMap::new(),
-            action_inputs: None,
-            workflow_inputs: None,
-            secrets: SecretMap::Inherit,
-            callee_jobs: None,
-            in_expansion: false,
+            job_id:            job_id.to_string(),
+            earlier_steps:     Vec::new(),
+            step_names:        BTreeMap::new(),
+            needs:             BTreeMap::new(),
+            matrix:            false,
+            matrix_total:      None,
+            fail_fast:         true,
+            max_parallel:      None,
+            step_env:          BTreeMap::new(),
+            action_inputs:     None,
+            workflow_inputs:   None,
+            secrets:           SecretMap::Inherit,
+            callee_jobs:       None,
+            in_expansion:      false,
             composite_outputs: BTreeMap::new(),
-            start_node: format!("{job_id}{SEP}start"),
+            start_node:        format!("{job_id}{SEP}start"),
         }
     }
 
-    /// The run-context record for a node of this job, as an expression: static for a
-    /// plain job, `nodes[name + '#' + index]` inside a matrix clone.
+    /// The run-context record for a node of this job, as an expression: static
+    /// for a plain job, `nodes[name + '#' + index]` inside a matrix clone.
     pub fn node_record(&self, table: &mut ExprTable, name: &str) -> ExprId {
         let nodes = table.var("nodes");
         if self.matrix || self.in_expansion {
@@ -213,8 +215,8 @@ impl Site {
     }
 
     /// The job really started: its `start` node ran. A start skipped by the
-    /// job's gate — or recorded `Cancelled` because the cancel landed before the
-    /// job began — reads as not started, so the job's steps do not run.
+    /// job's gate — or recorded `Cancelled` because the cancel landed before
+    /// the job began — reads as not started, so the job's steps do not run.
     pub fn job_started(&self, table: &mut ExprTable) -> ExprId {
         self.node_has_status(table, &self.start_node, "success")
     }
@@ -237,15 +239,17 @@ impl Site {
         table.binary(BinOp::Eq, flag, yes)
     }
 
-    /// The run was cancelled out from under this job: the scope is cancelled and
-    /// the job was not admitted as cleanup. This is what makes a plain step read
-    /// `success()` false after a cancel — GitHub's runner evaluates remaining
-    /// steps with the job status `Cancelled` — while the steps of a cleanup job
-    /// scheduled after the cancel evaluate normally.
+    /// The run was cancelled out from under this job: the scope is cancelled
+    /// and the job was not admitted as cleanup. This is what makes a plain
+    /// step read `success()` false after a cancel — GitHub's runner
+    /// evaluates remaining steps with the job status `Cancelled` — while
+    /// the steps of a cleanup job scheduled after the cancel evaluate
+    /// normally.
     ///
-    /// Composite inner steps skip the term: the caller's gate — evaluated at the
-    /// caller's site, where the term applies — speaks for the interrupt, and a
-    /// composite admitted by `always()` runs its inner steps as GitHub does.
+    /// Composite inner steps skip the term: the caller's gate — evaluated at
+    /// the caller's site, where the term applies — speaks for the
+    /// interrupt, and a composite admitted by `always()` runs its inner
+    /// steps as GitHub does.
     fn cancel_interrupt(&self, table: &mut ExprTable) -> ExprId {
         if self.action_inputs.is_some() {
             return table.lit(false);
@@ -314,14 +318,14 @@ impl Site {
     ///
     /// In a step: over the earlier steps of the job (GitHub's job status). In a
     /// job's `if:`: over the needed jobs. `always()` is `true` everywhere.
-    /// `cancelled()` also ORs in the engine's `scope_cancelled` static: a cancel
-    /// that lands between steps cancels no step record, a not-yet-started job has
-    /// no cancelled needs, and a `fail_fast` splice cancel is not a root cancel —
-    /// `scope_cancelled` covers all three. `success()` is false under a cancel —
-    /// a step's, unless the job was admitted as cleanup after the cancel
-    /// ([`Self::cancel_interrupt`]); a job's, always — which is how a plain step
-    /// or job stops when the run is cancelled without any admission flag sniffing
-    /// condition text.
+    /// `cancelled()` also ORs in the engine's `scope_cancelled` static: a
+    /// cancel that lands between steps cancels no step record, a
+    /// not-yet-started job has no cancelled needs, and a `fail_fast` splice
+    /// cancel is not a root cancel — `scope_cancelled` covers all three.
+    /// `success()` is false under a cancel — a step's, unless the job was
+    /// admitted as cleanup after the cancel ([`Self::cancel_interrupt`]); a
+    /// job's, always — which is how a plain step or job stops when the run
+    /// is cancelled without any admission flag sniffing condition text.
     pub fn status_function(&self, table: &mut ExprTable, name: &str, at_step: bool) -> ExprId {
         match (name, at_step) {
             ("always", _) => table.lit(true),
@@ -357,22 +361,22 @@ impl Site {
 
 /// How the lowering resolves GitHub's contexts.
 pub struct GhaRoots<'s> {
-    pub site: &'s Site,
-    pub at_step: bool,
-    pub diags: &'s mut Diagnostics,
-    pub span: Span,
-    /// Set when a `secrets.*` reference was seen; the caller decides whether the
-    /// position allowed it.
-    pub saw_secret: bool,
-    /// Set when a `hashFiles(...)` call lowered to its sentinel; the caller decides
-    /// whether the position allowed it.
-    pub saw_hashfiles: bool,
+    pub site:                  &'s Site,
+    pub at_step:               bool,
+    pub diags:                 &'s mut Diagnostics,
+    pub span:                  Span,
+    /// Set when a `secrets.*` reference was seen; the caller decides whether
+    /// the position allowed it.
+    pub saw_secret:            bool,
+    /// Set when a `hashFiles(...)` call lowered to its sentinel; the caller
+    /// decides whether the position allowed it.
+    pub saw_hashfiles:         bool,
     /// Set when `github.workspace` lowered to its sentinel; the caller decides
     /// whether the position allowed it.
-    pub saw_workspace: bool,
+    pub saw_workspace:         bool,
     /// Set when `runner.temp` lowered to its sentinel; the caller decides
     /// whether the position allowed it.
-    pub saw_runner_temp: bool,
+    pub saw_runner_temp:       bool,
     /// Set when `runner.tool_cache` lowered to its sentinel; the caller
     /// decides whether the position allowed it.
     pub saw_runner_tool_cache: bool,
@@ -685,9 +689,9 @@ impl Roots for GhaRoots<'_> {
             n @ ("always" | "success" | "failure" | "cancelled") => {
                 if !args.is_empty() {
                     return Some(Err(LowerError::Arity {
-                        name: name.to_string(),
+                        name:     name.to_string(),
                         expected: 0,
-                        got: args.len(),
+                        got:      args.len(),
                     }));
                 }
                 Some(Ok(self.site.status_function(table, n, self.at_step)))
@@ -797,11 +801,11 @@ pub(crate) fn literal_hashfiles_patterns(
 /// One parsed expression lowered through the GHA roots, with the flags a caller
 /// needs for its position-specific rules.
 pub(crate) struct LoweredExpr {
-    pub id: ExprId,
-    pub saw_secret: bool,
-    pub saw_hashfiles: bool,
-    pub saw_workspace: bool,
-    pub saw_runner_temp: bool,
+    pub id:                    ExprId,
+    pub saw_secret:            bool,
+    pub saw_hashfiles:         bool,
+    pub saw_workspace:         bool,
+    pub saw_runner_temp:       bool,
     pub saw_runner_tool_cache: bool,
 }
 
@@ -901,12 +905,13 @@ pub enum LoweredScalar {
 /// Lower one scalar from the workflow: literal, templated string, or a whole
 /// expression.
 ///
-/// `env_shaped` says whether secrets may appear here at all: in a step's config —
-/// `run:`, `env:`, `with:` — they may, because the step resolves them at spawn. A
-/// bare `${{ secrets.X }}` becomes a `$secret` reference; a secret inside a larger
-/// expression or string becomes its sentinel in the lowered text. Anywhere else —
-/// an `if:`, a job output, a matrix — a secret is rejected: the engine would be
-/// evaluating over the sentinel and calling it the value.
+/// `env_shaped` says whether secrets may appear here at all: in a step's config
+/// — `run:`, `env:`, `with:` — they may, because the step resolves them at
+/// spawn. A bare `${{ secrets.X }}` becomes a `$secret` reference; a secret
+/// inside a larger expression or string becomes its sentinel in the lowered
+/// text. Anywhere else — an `if:`, a job output, a matrix — a secret is
+/// rejected: the engine would be evaluating over the sentinel and calling it
+/// the value.
 pub fn lower_scalar(
     text: &str,
     span: Span,
@@ -1057,9 +1062,10 @@ fn secret_expr_name(source: &str) -> Option<String> {
     secret_name(root, &path)
 }
 
-/// The secret a whole-value reference names: `secrets.X` is `X`, and `github.token`
-/// is [`GITHUB_TOKEN_SECRET`] — the token is a secret the run's provider holds, never
-/// a run parameter, so it cannot reach the graph or the log.
+/// The secret a whole-value reference names: `secrets.X` is `X`, and
+/// `github.token` is [`GITHUB_TOKEN_SECRET`] — the token is a secret the run's
+/// provider holds, never a run parameter, so it cannot reach the graph or the
+/// log.
 fn secret_name(root: &str, path: &[&str]) -> Option<String> {
     match (root.to_ascii_lowercase().as_str(), path) {
         ("secrets", [name]) => Some(name.to_string()),
@@ -1079,7 +1085,8 @@ const SENTINEL_CLOSE: &str = "\u{E001}";
 const SENTINEL_ESCAPE: char = '\u{E002}';
 
 /// Escape private-use marker characters in literal workflow text. Generated
-/// placeholders are added after this step, so literal text cannot impersonate one.
+/// placeholders are added after this step, so literal text cannot impersonate
+/// one.
 pub fn escape_sentinel_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -1097,8 +1104,8 @@ pub fn has_sentinel_escape(text: &str) -> bool {
     text.contains(SENTINEL_ESCAPE)
 }
 
-/// Restore text escaped by [`escape_sentinel_text`] after generated placeholders
-/// have been resolved.
+/// Restore text escaped by [`escape_sentinel_text`] after generated
+/// placeholders have been resolved.
 pub fn unescape_sentinel_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -1122,10 +1129,11 @@ pub fn unescape_sentinel_text(text: &str) -> String {
 }
 
 /// The stand-in for secret `name` inside a lowered string: what the graph, the
-/// resolved config and the event log carry in its place. The step kinds that run
-/// GitHub steps replace it with the value at spawn ([`replace_secret_sentinels`]).
-/// Private-use characters bracket it. Literal workflow text escapes those
-/// characters before generated placeholders are added.
+/// resolved config and the event log carry in its place. The step kinds that
+/// run GitHub steps replace it with the value at spawn
+/// ([`replace_secret_sentinels`]). Private-use characters bracket it. Literal
+/// workflow text escapes those characters before generated placeholders are
+/// added.
 pub fn secret_sentinel(name: &str) -> String {
     format!("{SENTINEL_OPEN}{name}{SENTINEL_CLOSE}")
 }
@@ -1183,10 +1191,10 @@ pub fn replace_runner_tool_cache_sentinels(text: &str, tool_cache: &str) -> Stri
 
 /// The stand-in for a bare `env.NAME` reference in step config (`run:`, `env:`,
 /// `with:`), carrying the name as [`secret_sentinel`] carries its. The engine's
-/// `env` binding is the scope env, frozen at firing, so it can never see what an
-/// earlier step appended through `GITHUB_ENV`; the step substitutes this marker
-/// at spawn from the environment its process receives, so the expression and
-/// the variable cannot diverge — the gate's `$env` leaf, in flat-text form.
+/// `env` binding is the scope env, frozen at firing, so it can never see what
+/// an earlier step appended through `GITHUB_ENV`; the step substitutes this
+/// marker at spawn from the environment its process receives, so the expression
+/// and the variable cannot diverge — the gate's `$env` leaf, in flat-text form.
 /// Only a bare reference standing alone in its template segment lowers this way
 /// ([`lower_scalar`]): under an operator or function the engine would evaluate
 /// over the marker, so those keep the engine's scope-env meaning, exactly as
@@ -1202,7 +1210,8 @@ pub fn has_env_sentinel(text: &str) -> bool {
     text.contains(ENV_OPEN)
 }
 
-/// Replace every env sentinel in `text` with what `resolve` returns for its name.
+/// Replace every env sentinel in `text` with what `resolve` returns for its
+/// name.
 pub fn replace_env_sentinels<E>(
     text: &str,
     mut resolve: impl FnMut(&str) -> Result<String, E>,
@@ -1210,7 +1219,8 @@ pub fn replace_env_sentinels<E>(
     replace_marked(text, ENV_OPEN, &mut resolve)
 }
 
-/// Replace every secret sentinel in `text` with what `resolve` returns for its name.
+/// Replace every secret sentinel in `text` with what `resolve` returns for its
+/// name.
 pub fn replace_secret_sentinels<E>(
     text: &str,
     mut resolve: impl FnMut(&str) -> Result<String, E>,
@@ -1220,7 +1230,8 @@ pub fn replace_secret_sentinels<E>(
 
 /// The stand-in for `hashFiles(patterns…)` inside a lowered string, like
 /// [`secret_sentinel`]: the step kinds that run GitHub steps replace it with the
-/// hash at spawn ([`replace_hashfiles_sentinels`]), computed against the workspace.
+/// hash at spawn ([`replace_hashfiles_sentinels`]), computed against the
+/// workspace.
 pub fn hashfiles_sentinel(patterns: &[String]) -> String {
     let payload = serde_json::to_string(patterns)
         .expect("strings encode")
@@ -1234,8 +1245,8 @@ pub fn has_hashfiles_sentinel(text: &str) -> bool {
 }
 
 /// Every pattern list named by a hashFiles sentinel in `text`, in order of
-/// appearance. A run-time caller computes each hash asynchronously, then splices
-/// the results in with [`replace_hashfiles_sentinels`].
+/// appearance. A run-time caller computes each hash asynchronously, then
+/// splices the results in with [`replace_hashfiles_sentinels`].
 pub fn hashfiles_calls(text: &str) -> Vec<Vec<String>> {
     if !has_hashfiles_sentinel(text) {
         return Vec::new();
@@ -1258,8 +1269,8 @@ pub fn hashfiles_calls(text: &str) -> Vec<Vec<String>> {
     out
 }
 
-/// Replace every hashFiles sentinel in `text` with what `resolve` returns for its
-/// pattern list.
+/// Replace every hashFiles sentinel in `text` with what `resolve` returns for
+/// its pattern list.
 pub fn replace_hashfiles_sentinels<E>(
     text: &str,
     mut resolve: impl FnMut(&[String]) -> Result<String, E>,
@@ -1301,7 +1312,8 @@ fn replace_marked<E>(
     Ok(out)
 }
 
-/// A config value from a lowered scalar: literal, `{"$expr": id}`, or `{"$secret": name}`.
+/// A config value from a lowered scalar: literal, `{"$expr": id}`, or
+/// `{"$secret": name}`.
 pub fn config_value(lowered: LoweredScalar) -> Value {
     match lowered {
         LoweredScalar::Literal(v) => v,

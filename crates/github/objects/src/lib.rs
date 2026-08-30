@@ -9,12 +9,12 @@
 //! and downloads going through signed URLs the service mints. This crate
 //! serves exactly that surface locally:
 //!
-//! - **The token is also the auth.** One unsigned JWT per run carries the
-//!   `scp` claim the toolkit decodes without verifying, plus a random nonce —
-//!   the listener accepts only that exact bearer string, and signed URLs are
-//!   HMAC query tokens under a per-run secret. The listener binds beyond
-//!   loopback so containers can reach it (`host.docker.internal`), and the
-//!   token is what keeps that from being an open write endpoint on the LAN.
+//! - **The token is also the auth.** One unsigned JWT per run carries the `scp`
+//!   claim the toolkit decodes without verifying, plus a random nonce — the
+//!   listener accepts only that exact bearer string, and signed URLs are HMAC
+//!   query tokens under a per-run secret. The listener binds beyond loopback so
+//!   containers can reach it (`host.docker.internal`), and the token is what
+//!   keeps that from being an open write endpoint on the LAN.
 //! - **One service per run.** The host starts it beside the run dir and hands
 //!   its capability to the run's steps; it dies with the run. A resumed run
 //!   starts a fresh listener over the same store — the store is the durable
@@ -70,10 +70,10 @@ pub fn tool_cache_dir(store: &Path) -> PathBuf {
 
 /// A running object service: listener, token, stores. Drop tears it down.
 pub struct ObjectService {
-    port: u16,
-    token: String,
+    port:     u16,
+    token:    String,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    thread: Option<JoinHandle<()>>,
+    thread:   Option<JoinHandle<()>>,
 }
 
 impl ObjectService {

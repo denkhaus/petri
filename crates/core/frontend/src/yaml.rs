@@ -1,9 +1,9 @@
 //! YAML with positions.
 //!
-//! Every node knows where it came from, so a diagnostic can point at the line. This
-//! wraps `marked_yaml` in a small API shaped for what frontends do: look up keys,
-//! iterate sequences, read scalars as the type the format expects, and complain with
-//! a span when the shape is wrong.
+//! Every node knows where it came from, so a diagnostic can point at the line.
+//! This wraps `marked_yaml` in a small API shaped for what frontends do: look
+//! up keys, iterate sequences, read scalars as the type the format expects, and
+//! complain with a span when the shape is wrong.
 
 use marked_yaml::Node as MarkedNode;
 use marked_yaml::types::{MarkedMappingNode, MarkedScalarNode, MarkedSequenceNode};
@@ -21,18 +21,19 @@ pub struct Document {
 }
 
 impl Document {
-    /// Parse a file's text. A syntax error becomes a `yaml.syntax` diagnostic rather
-    /// than a panic or a bare `Err`.
+    /// Parse a file's text. A syntax error becomes a `yaml.syntax` diagnostic
+    /// rather than a panic or a bare `Err`.
     ///
-    /// Coercion prevention is on: a quoted scalar (`''`, `'true'`, `'123'`) stays a
-    /// string, so [`Scalar::is_plain`] really means "written unquoted" and only
-    /// plain scalars type-infer. Anchors and aliases resolve while loading, each
-    /// alias a copy of the anchored node that keeps the anchor site's spans.
+    /// Coercion prevention is on: a quoted scalar (`''`, `'true'`, `'123'`)
+    /// stays a string, so [`Scalar::is_plain`] really means "written
+    /// unquoted" and only plain scalars type-infer. Anchors and aliases
+    /// resolve while loading, each alias a copy of the anchored node that
+    /// keeps the anchor site's spans.
     ///
-    /// One scanner strictness is repaired rather than reported: a multi-line flow
-    /// collection whose closing `]`/`}` sits at its key's indentation — which
-    /// GitHub accepts — is re-indented (whitespace only, so nothing moves but the
-    /// bracket) and parsed again. See [`pad_flow_close`].
+    /// One scanner strictness is repaired rather than reported: a multi-line
+    /// flow collection whose closing `]`/`}` sits at its key's indentation
+    /// — which GitHub accepts — is re-indented (whitespace only, so nothing
+    /// moves but the bracket) and parsed again. See [`pad_flow_close`].
     pub fn parse(file: &str, text: &str, diags: &mut Diagnostics) -> Option<Document> {
         let mut current = std::borrow::Cow::Borrowed(text);
         // Bounded: each repair pads one closer line, and a file has finitely many;
@@ -96,7 +97,7 @@ impl Document {
 
     pub fn root(&self) -> Node<'_> {
         Node {
-            file: &self.file,
+            file:  &self.file,
             inner: &self.root,
         }
     }
@@ -120,12 +121,13 @@ fn position_in_message(message: &str) -> Option<(u32, u32)> {
 }
 
 /// The scanner rejects a multi-line flow collection whose closing `]`/`}` line
-/// sits at (or left of) the opening line's indentation — but only after a quoted
-/// item, and GitHub accepts the shape everywhere. When the "invalid indentation"
-/// error points at such a line, return the text with that one line re-indented
-/// past its opener. Whitespace only: nothing moves but the bracket, so every
-/// other span in the document stays put, and the caller re-parses to verify.
-/// `None` when the error line is anything but a lone closer — a real error.
+/// sits at (or left of) the opening line's indentation — but only after a
+/// quoted item, and GitHub accepts the shape everywhere. When the "invalid
+/// indentation" error points at such a line, return the text with that one line
+/// re-indented past its opener. Whitespace only: nothing moves but the bracket,
+/// so every other span in the document stays put, and the caller re-parses to
+/// verify. `None` when the error line is anything but a lone closer — a real
+/// error.
 fn pad_flow_close(text: &str, line: u32) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
     let idx = (line as usize).checked_sub(1)?;
@@ -180,8 +182,8 @@ fn flow_opener(lines: &[&str], close: usize, close_slice: &str) -> Option<usize>
     None
 }
 
-/// Whether the lines before `line` close a flow collection that opened on an earlier
-/// line — the shape the underlying reader gets wrong.
+/// Whether the lines before `line` close a flow collection that opened on an
+/// earlier line — the shape the underlying reader gets wrong.
 fn multiline_flow_before(text: &str, line: usize) -> bool {
     let lines: Vec<&str> = text.lines().collect();
     if line == 0 {
@@ -210,7 +212,7 @@ fn multiline_flow_before(text: &str, line: usize) -> bool {
 /// A node in the document, with its file attached so it can produce spans.
 #[derive(Clone, Copy)]
 pub struct Node<'a> {
-    file: &'a str,
+    file:  &'a str,
     inner: &'a MarkedNode,
 }
 
@@ -226,24 +228,24 @@ impl<'a> Node<'a> {
 
     pub fn as_mapping(&self) -> Option<Mapping<'a>> {
         self.inner.as_mapping().map(|m| Mapping {
-            file: self.file,
+            file:  self.file,
             inner: m,
-            span: self.span(),
+            span:  self.span(),
         })
     }
 
     pub fn as_sequence(&self) -> Option<Sequence<'a>> {
         self.inner.as_sequence().map(|s| Sequence {
-            file: self.file,
+            file:  self.file,
             inner: s,
-            span: self.span(),
+            span:  self.span(),
         })
     }
 
     pub fn as_scalar(&self) -> Option<Scalar<'a>> {
         self.inner.as_scalar().map(|s| Scalar {
             inner: s,
-            span: self.span(),
+            span:  self.span(),
         })
     }
 
@@ -311,8 +313,8 @@ impl<'a> Node<'a> {
         scalar
     }
 
-    /// Convert to a JSON value, inferring scalar types the way YAML 1.2 core does
-    /// for plain scalars and keeping quoted scalars as strings.
+    /// Convert to a JSON value, inferring scalar types the way YAML 1.2 core
+    /// does for plain scalars and keeping quoted scalars as strings.
     pub fn to_json(&self) -> Value {
         if let Some(m) = self.as_mapping() {
             let mut out = serde_json::Map::new();
@@ -331,9 +333,9 @@ impl<'a> Node<'a> {
 }
 
 pub struct Mapping<'a> {
-    file: &'a str,
+    file:  &'a str,
     inner: &'a MarkedMappingNode,
-    span: Span,
+    span:  Span,
 }
 
 impl<'a> Mapping<'a> {
@@ -343,7 +345,7 @@ impl<'a> Mapping<'a> {
 
     pub fn get(&self, key: &str) -> Option<Node<'a>> {
         self.inner.get(key).map(|n| Node {
-            file: self.file,
+            file:  self.file,
             inner: n,
         })
     }
@@ -355,7 +357,7 @@ impl<'a> Mapping<'a> {
             .iter()
             .find(|(k, _)| k.as_str().to_lowercase() == lowered)
             .map(|(_, n)| Node {
-                file: self.file,
+                file:  self.file,
                 inner: n,
             })
     }
@@ -367,13 +369,10 @@ impl<'a> Mapping<'a> {
     /// Entries in document order.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, Node<'a>)> + '_ {
         self.inner.iter().map(|(k, v)| {
-            (
-                k.as_str(),
-                Node {
-                    file: self.file,
-                    inner: v,
-                },
-            )
+            (k.as_str(), Node {
+                file:  self.file,
+                inner: v,
+            })
         })
     }
 
@@ -400,8 +399,8 @@ impl<'a> Mapping<'a> {
         self.inner.is_empty()
     }
 
-    /// Report every key not in `allowed` as `code`. Formats reject unknown keys so a
-    /// typo cannot be silently ignored.
+    /// Report every key not in `allowed` as `code`. Formats reject unknown keys
+    /// so a typo cannot be silently ignored.
     pub fn reject_unknown_keys(&self, allowed: &[&str], diags: &mut Diagnostics, where_: &str) {
         for (key, span) in self.keys() {
             if !allowed.contains(&key) {
@@ -416,9 +415,9 @@ impl<'a> Mapping<'a> {
 }
 
 pub struct Sequence<'a> {
-    file: &'a str,
+    file:  &'a str,
     inner: &'a MarkedSequenceNode,
-    span: Span,
+    span:  Span,
 }
 
 impl<'a> Sequence<'a> {
@@ -428,7 +427,7 @@ impl<'a> Sequence<'a> {
 
     pub fn iter(&self) -> impl Iterator<Item = Node<'a>> + '_ {
         self.inner.iter().map(|n| Node {
-            file: self.file,
+            file:  self.file,
             inner: n,
         })
     }
@@ -444,7 +443,7 @@ impl<'a> Sequence<'a> {
 
 pub struct Scalar<'a> {
     inner: &'a MarkedScalarNode,
-    span: Span,
+    span:  Span,
 }
 
 impl<'a> Scalar<'a> {

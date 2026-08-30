@@ -1,8 +1,9 @@
 //! A recursive-descent parser for the `${{ }}` grammar.
 //!
-//! Precedence, loosest to tightest: `||`, `&&`, `== !=`, `< <= > >=`, unary `!`,
-//! then postfix `.name`, `[expr]`, `.*`, and calls. Comparison operators are
-//! non-associative in GitHub (`a < b < c` is an error); this parser follows that.
+//! Precedence, loosest to tightest: `||`, `&&`, `== !=`, `< <= > >=`, unary
+//! `!`, then postfix `.name`, `[expr]`, `.*`, and calls. Comparison operators
+//! are non-associative in GitHub (`a < b < c` is an error); this parser follows
+//! that.
 
 use super::ast::{BinaryOp, Expr, Literal, UnaryOp};
 use super::lexer::{LexError, Token, TokenKind, lex};
@@ -14,8 +15,8 @@ pub enum ParseError {
     #[error("expected {expected}, found {found}")]
     Unexpected {
         expected: String,
-        found: String,
-        offset: usize,
+        found:    String,
+        offset:   usize,
     },
     #[error("comparison operators do not chain; parenthesize one side")]
     ChainedComparison { offset: usize },
@@ -57,8 +58,8 @@ pub fn parse(source: &str) -> Result<Expr, ParseError> {
 
 struct Parser {
     tokens: Vec<Token>,
-    pos: usize,
-    depth: usize,
+    pos:    usize,
+    depth:  usize,
 }
 
 impl Parser {
@@ -90,8 +91,8 @@ impl Parser {
         let t = self.peek();
         ParseError::Unexpected {
             expected: expected.to_string(),
-            found: describe(&t.kind),
-            offset: t.offset,
+            found:    describe(&t.kind),
+            offset:   t.offset,
         }
     }
 

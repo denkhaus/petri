@@ -47,11 +47,11 @@ type Body = BoxBody<Bytes, io::Error>;
 type HmacSha256 = Hmac<Sha256>;
 
 pub(crate) struct Backend {
-    token: String,
-    key: [u8; 32],
-    port: u16,
+    token:     String,
+    key:       [u8; 32],
+    port:      u16,
     artifacts: ArtifactStore,
-    cache: CacheStore,
+    cache:     CacheStore,
 }
 
 impl Backend {
@@ -146,24 +146,24 @@ async fn handle(
 /// A twirp error: the spec's JSON body with its mapped HTTP status.
 struct Twirp {
     status: StatusCode,
-    code: &'static str,
-    msg: String,
+    code:   &'static str,
+    msg:    String,
 }
 
 impl Twirp {
     fn not_found(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            msg: msg.into(),
+            code:   "not_found",
+            msg:    msg.into(),
         }
     }
 
     fn invalid(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            code: "invalid_argument",
-            msg: msg.into(),
+            code:   "invalid_argument",
+            msg:    msg.into(),
         }
     }
 }
@@ -189,8 +189,8 @@ async fn twirp(
     if bearer != Some(backend.token()) {
         return Ok(twirp_error(&Twirp {
             status: StatusCode::UNAUTHORIZED,
-            code: "unauthenticated",
-            msg: "the run token is required".into(),
+            code:   "unauthenticated",
+            msg:    "the run token is required".into(),
         }));
     }
     let host = req
@@ -233,8 +233,8 @@ async fn twirp(
         }
         (_, other) => Err(Twirp {
             status: StatusCode::NOT_FOUND,
-            code: "bad_route",
-            msg: format!("no such method: {other}"),
+            code:   "bad_route",
+            msg:    format!("no such method: {other}"),
         }),
     })
     .await
@@ -327,8 +327,8 @@ fn delete_artifact(backend: &Backend, request: &Value) -> Result<Value, Twirp> {
 fn store_error(e: io::Error) -> Twirp {
     Twirp {
         status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "internal",
-        msg: e.to_string(),
+        code:   "internal",
+        msg:    e.to_string(),
     }
 }
 

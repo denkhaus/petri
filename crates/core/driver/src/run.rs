@@ -45,44 +45,45 @@ pub const KILLED_BEFORE_RESUME: &str = "killed_before_resume";
 
 /// No step kind is registered for a node's `StepRef.kind`.
 ///
-/// `validate_with(graph, Some(&registry))` reports this at load; the guard here is
-/// the backstop for a caller that skipped validation.
+/// `validate_with(graph, Some(&registry))` reports this at load; the guard here
+/// is the backstop for a caller that skipped validation.
 pub const NO_RUNNER: &str = "no_runner";
 
-/// After the first root cancel, how long admitted cleanup gets before the driver
-/// feeds back `KillRequested` (§10, resolved decision 3).
+/// After the first root cancel, how long admitted cleanup gets before the
+/// driver feeds back `KillRequested` (§10, resolved decision 3).
 pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(120);
 
-/// Capacity of a firing's control channel. A named implementation constant, not a
-/// compatibility rule: reliable delivery and ordering hold when the channel is
-/// full, because every send rides the firing's serialized forwarder.
+/// Capacity of a firing's control channel. A named implementation constant, not
+/// a compatibility rule: reliable delivery and ordering hold when the channel
+/// is full, because every send rides the firing's serialized forwarder.
 pub const CONTROL_CHANNEL_CAPACITY: usize = 32;
 
 /// Knobs, with the defaults from the handoff's table.
 #[derive(Clone, Debug)]
 pub struct RunConfig {
-    pub run_dir: PathBuf,
+    pub run_dir:             PathBuf,
     /// Between `SIGTERM` and `SIGKILL`, per scope.
-    pub grace: Duration,
-    /// How much longer than `grace` a step gets before the driver stops waiting.
+    pub grace:               Duration,
+    /// How much longer than `grace` a step gets before the driver stops
+    /// waiting.
     pub hard_deadline_slack: Duration,
     /// Between the first root cancel and the `KillRequested` that ends whatever
     /// cleanup is still running.
-    pub cleanup_grace: Duration,
-    pub keep_workspaces: Retention,
+    pub cleanup_grace:       Duration,
+    pub keep_workspaces:     Retention,
     /// Echo step output to this process's stdout.
-    pub echo_logs: bool,
+    pub echo_logs:           bool,
 }
 
 impl RunConfig {
     pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         Self {
-            run_dir: run_dir.into(),
-            grace: executor::DEFAULT_GRACE,
+            run_dir:             run_dir.into(),
+            grace:               executor::DEFAULT_GRACE,
             hard_deadline_slack: Duration::from_secs(5),
-            cleanup_grace: DEFAULT_CLEANUP_GRACE,
-            keep_workspaces: Retention::default(),
-            echo_logs: false,
+            cleanup_grace:       DEFAULT_CLEANUP_GRACE,
+            keep_workspaces:     Retention::default(),
+            echo_logs:           false,
         }
     }
 
@@ -123,14 +124,14 @@ pub struct ResumeInfo {
     /// The rebuilt log: the loaded prefix plus the regenerated suffix. A host
     /// whose own durable ingest lagged further behind than the loaded log
     /// catches up from here before attaching.
-    pub log: EventLog,
+    pub log:          EventLog,
     /// How many records were loaded; everything past them was regenerated.
-    pub loaded: usize,
+    pub loaded:       usize,
 }
 
 /// What a resumed driver owes before entering the normal loop.
 struct PendingResume {
-    commands: Vec<Command>,
+    commands:    Vec<Command>,
     /// Where the loaded log ended. Records past this are the regenerated
     /// suffix, handed to observers before any pending command is dispatched.
     suffix_from: usize,
@@ -138,36 +139,37 @@ struct PendingResume {
 
 /// How a run ended, and what it left behind.
 pub struct RunReport {
-    pub status: RunStatus,
-    pub state: EngineState,
-    pub releases: Vec<ReleaseReport>,
+    pub status:          RunStatus,
+    pub state:           EngineState,
+    pub releases:        Vec<ReleaseReport>,
     /// What each failing observer's `finish` reported. Never changes `status`:
     /// a host with fatal-sink semantics watches its own observer and cancels.
     pub observer_errors: Vec<ObserveError>,
 }
 
-/// Why a step was told to stop. The distinction cannot be made by the step — only
-/// the driver knows which arrived first.
+/// Why a step was told to stop. The distinction cannot be made by the step —
+/// only the driver knows which arrived first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CancelReason {
     Requested,
     TimedOut,
 }
 
-/// How a host-delivered control landed. Hosts retry or report per class: answers
-/// are must-deliver, steering is best-effort.
+/// How a host-delivered control landed. Hosts retry or report per class:
+/// answers are must-deliver, steering is best-effort.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliverDisposition {
     /// The value reached the firing's control channel.
     Delivered,
-    /// The firing was not live — unknown, finished, cancelling, awaiting a retry —
-    /// or it ended before the delivery cleared the channel.
+    /// The firing was not live — unknown, finished, cancelling, awaiting a
+    /// retry — or it ended before the delivery cleared the channel.
     NotLive,
 }
 
 type DeliverAck = tokio::sync::oneshot::Sender<DeliverDisposition>;
 
-/// Cancel a running run, or deliver a value into one of its firings, from outside.
+/// Cancel a running run, or deliver a value into one of its firings, from
+/// outside.
 #[derive(Clone)]
 pub struct RunHandle {
     tx: mpsc::Sender<Signal>,
@@ -182,13 +184,14 @@ impl RunHandle {
             .await;
     }
 
-    /// Deliver a control to a live firing — a human gate's answer, a supervisor's
-    /// steering — through the engine, so question and answer are both in the log.
+    /// Deliver a control to a live firing — a human gate's answer, a
+    /// supervisor's steering — through the engine, so question and answer
+    /// are both in the log.
     ///
     /// The disposition is completed by the firing's forwarder: `Delivered` only
-    /// after the value is in the firing's control channel, `NotLive` when the core
-    /// emitted no command (the event is still logged — the audit trail) or the
-    /// firing ended before the send completed.
+    /// after the value is in the firing's control channel, `NotLive` when the
+    /// core emitted no command (the event is still logged — the audit
+    /// trail) or the firing ended before the send completed.
     pub async fn deliver(&self, firing: FiringId, ctl: Control) -> DeliverDisposition {
         let (ack, disposition) = tokio::sync::oneshot::channel();
         if self
@@ -210,28 +213,28 @@ enum Signal {
     /// A host delivers a value into a firing, and wants to know how it landed.
     Deliver {
         firing: FiringId,
-        ctl: Control,
-        ack: DeliverAck,
+        ctl:    Control,
+        ack:    DeliverAck,
     },
     Progress {
         firing: FiringId,
-        event: StepEvent,
+        event:  StepEvent,
     },
     Finished {
-        firing: FiringId,
+        firing:  FiringId,
         attempt: Attempt,
         outcome: Outcome,
     },
     Timeout {
-        firing: FiringId,
+        firing:  FiringId,
         attempt: Attempt,
     },
     RetryDue {
-        firing: FiringId,
+        firing:       FiringId,
         next_attempt: Attempt,
     },
     HardDeadline {
-        firing: FiringId,
+        firing:  FiringId,
         attempt: Attempt,
     },
 }
@@ -239,50 +242,50 @@ enum Signal {
 /// One control send, queued on a firing's forwarder.
 struct Forward {
     ctl: Control,
-    /// Completed by the forwarder: `Delivered` once the send lands, `NotLive` when
-    /// the receiver is gone. Stop signals carry no ack.
+    /// Completed by the forwarder: `Delivered` once the send lands, `NotLive`
+    /// when the receiver is gone. Stop signals carry no ack.
     ack: Option<DeliverAck>,
 }
 
 struct Task {
-    name: SmolStr,
-    scope: ScopeId,
-    attempt: Attempt,
+    name:     SmolStr,
+    scope:    ScopeId,
+    attempt:  Attempt,
     /// The firing's serialized forwarder: control sends await channel capacity
-    /// here, in order, so the driver loop never blocks on a full channel. When the
-    /// firing ends the receiver drops, pending sends fail, and their acks resolve
-    /// `NotLive`.
+    /// here, in order, so the driver loop never blocks on a full channel. When
+    /// the firing ends the receiver drops, pending sends fail, and their
+    /// acks resolve `NotLive`.
     forwards: mpsc::UnboundedSender<Forward>,
-    join: JoinHandle<()>,
-    timeout: Option<JoinHandle<()>>,
+    join:     JoinHandle<()>,
+    timeout:  Option<JoinHandle<()>>,
     deadline: Option<JoinHandle<()>>,
-    reason: Option<CancelReason>,
+    reason:   Option<CancelReason>,
 }
 
 pub struct Driver {
-    engine: EngineState,
-    executor: Arc<dyn Executor>,
-    runners: Arc<Registry>,
-    secrets: Arc<dyn SecretProvider>,
-    progress: Arc<dyn ProgressSink>,
-    sink: Arc<LogSink>,
-    config: RunConfig,
-    envs: HashMap<ScopeId, EnvHandle>,
+    engine:           EngineState,
+    executor:         Arc<dyn Executor>,
+    runners:          Arc<Registry>,
+    secrets:          Arc<dyn SecretProvider>,
+    progress:         Arc<dyn ProgressSink>,
+    sink:             Arc<LogSink>,
+    config:           RunConfig,
+    envs:             HashMap<ScopeId, EnvHandle>,
     acquire_failures: HashMap<ScopeId, String>,
-    scope_failed: HashSet<ScopeId>,
-    tasks: HashMap<FiringId, Task>,
-    caps: Capabilities,
-    observers: Vec<Arc<dyn EventObserver>>,
+    scope_failed:     HashSet<ScopeId>,
+    tasks:            HashMap<FiringId, Task>,
+    caps:             Capabilities,
+    observers:        Vec<Arc<dyn EventObserver>>,
     /// Per-run host services riding this run's lifetime: held untouched until
     /// the driver drops, which is their teardown.
-    run_guards: Vec<Box<dyn std::any::Any + Send + Sync>>,
-    releases: Vec<JoinHandle<ReleaseReport>>,
+    run_guards:       Vec<Box<dyn std::any::Any + Send + Sync>>,
+    releases:         Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
-    cleanup_timer: Option<JoinHandle<()>>,
+    cleanup_timer:    Option<JoinHandle<()>>,
     /// Set by [`Driver::resume`]; consumed at the top of [`Driver::run`].
-    resume: Option<PendingResume>,
-    tx: mpsc::Sender<Signal>,
-    rx: mpsc::Receiver<Signal>,
+    resume:           Option<PendingResume>,
+    tx:               mpsc::Sender<Signal>,
+    rx:               mpsc::Receiver<Signal>,
 }
 
 /// A stop's outcome: `status`, with the escalation that ended the step in the
@@ -326,13 +329,13 @@ impl Driver {
         let point = engine::resume(graph, &log)?;
         let info = ResumeInfo {
             redispatched: point.redispatched,
-            log: point.state.log.clone(),
-            loaded: log.len(),
+            log:          point.state.log.clone(),
+            loaded:       log.len(),
         };
         let mut driver = Self::with_state(point.state, executor, runners, secrets, config);
         if !log.is_empty() {
             driver.resume = Some(PendingResume {
-                commands: point.pending,
+                commands:    point.pending,
                 suffix_from: log.len(),
             });
         }
@@ -537,8 +540,8 @@ impl Driver {
 
     /// Append-then-apply, then dispatch whatever the core asked for.
     ///
-    /// The append happens inside `apply`, which records this event as `External` and
-    /// everything it derives as `Core`.
+    /// The append happens inside `apply`, which records this event as
+    /// `External` and everything it derives as `Core`.
     async fn feed(&mut self, event: Event) {
         for command in self.apply_event(event) {
             self.dispatch(command).await;
@@ -574,11 +577,12 @@ impl Driver {
     /// A host delivery: feed `ControlRequested` and report the disposition.
     ///
     /// The command-or-no-command result of `apply` is the disposition:
-    /// `ControlRequested` yields at most one command, a `DeliverControl` carrying
-    /// the `Deliver` (see `on_control_requested`). When it comes out, the ack
-    /// travels with the forward and the forwarder completes it; when none does —
-    /// the firing is dead, unknown, cancelling or awaiting a retry — the event is
-    /// in the log regardless (the audit trail) and the host hears `NotLive`.
+    /// `ControlRequested` yields at most one command, a `DeliverControl`
+    /// carrying the `Deliver` (see `on_control_requested`). When it comes
+    /// out, the ack travels with the forward and the forwarder completes
+    /// it; when none does — the firing is dead, unknown, cancelling or
+    /// awaiting a retry — the event is in the log regardless (the audit
+    /// trail) and the host hears `NotLive`.
     fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
         let commands = self.apply_event(Event::ControlRequested { firing, ctl });
         match commands.into_iter().next() {
@@ -746,11 +750,11 @@ impl Driver {
             .services
             .iter()
             .map(|service| executor::ServiceSpec {
-                name: service.name.clone(),
-                image: service.image.clone(),
-                env: resolve(&service.env),
-                ports: service.ports.clone(),
-                options: service.options.clone(),
+                name:        service.name.clone(),
+                image:       service.image.clone(),
+                env:         resolve(&service.env),
+                ports:       service.ports.clone(),
+                options:     service.options.clone(),
                 credentials: service.credentials.clone(),
             })
             .collect();
@@ -894,19 +898,16 @@ impl Driver {
                 })
             });
 
-        self.tasks.insert(
-            firing,
-            Task {
-                name,
-                scope,
-                attempt,
-                forwards: forward_tx,
-                join,
-                timeout,
-                deadline: None,
-                reason: None,
-            },
-        );
+        self.tasks.insert(firing, Task {
+            name,
+            scope,
+            attempt,
+            forwards: forward_tx,
+            join,
+            timeout,
+            deadline: None,
+            reason: None,
+        });
     }
 
     fn fail_now(&mut self, firing: FiringId, attempt: Attempt, message: &str, class: &str) {
@@ -928,10 +929,10 @@ impl Driver {
 
     /// Tell a step to stop, and start the clock on how long it may take.
     ///
-    /// The send itself rides the firing's forwarder — the control channel may be
-    /// full of pending deliveries, and that must never block the driver loop — so
-    /// the deadline is armed here, at signal time, not after the send lands: the
-    /// deadline is what guarantees progress.
+    /// The send itself rides the firing's forwarder — the control channel may
+    /// be full of pending deliveries, and that must never block the driver
+    /// loop — so the deadline is armed here, at signal time, not after the
+    /// send lands: the deadline is what guarantees progress.
     fn stop_step(&mut self, firing: FiringId, ctl: Control, reason: CancelReason) {
         let Some(task) = self.tasks.get_mut(&firing) else {
             return;
@@ -967,10 +968,11 @@ impl Driver {
 
     /// Queue a `Deliver` on the firing's forwarder: no deadline, no reason.
     ///
-    /// `$secret` references in the payload resolve here, at command-dispatch time —
-    /// the logged event keeps the reference, so dynamic values never enter the log.
-    /// An unresolvable reference — the post-resume shape, where the host must
-    /// re-provide dynamic values — fails the step with `secret_unavailable`.
+    /// `$secret` references in the payload resolve here, at command-dispatch
+    /// time — the logged event keeps the reference, so dynamic values never
+    /// enter the log. An unresolvable reference — the post-resume shape,
+    /// where the host must re-provide dynamic values — fails the step with
+    /// `secret_unavailable`.
     fn forward_deliver(&mut self, firing: FiringId, payload: Value, ack: Option<DeliverAck>) {
         let payload = match resolve_secret_refs(payload, self.secrets.as_ref()) {
             Ok(payload) => payload,
@@ -1123,7 +1125,7 @@ impl Driver {
             }
             StepEvent::Artifact { name, uri } => StepEvent::Artifact {
                 name: SmolStr::new(self.sink.masker().mask(&name)),
-                uri: self.sink.masker().mask(&uri),
+                uri:  self.sink.masker().mask(&uri),
             },
             StepEvent::Custom(value) => StepEvent::Custom(self.sink.mask_value(&value)),
         }
@@ -1138,9 +1140,9 @@ fn value_to_string(value: &Value) -> String {
 }
 
 /// Replace every `{"$secret": "NAME"}` reference in a `Deliver` payload — the
-/// exact one-key form, anywhere in the value — with its resolved secret. Returns
-/// the first unresolvable name. Resolution registers the value with the masker,
-/// so anything resolvable is maskable by construction.
+/// exact one-key form, anywhere in the value — with its resolved secret.
+/// Returns the first unresolvable name. Resolution registers the value with the
+/// masker, so anything resolvable is maskable by construction.
 fn resolve_secret_refs(value: Value, secrets: &dyn SecretProvider) -> Result<Value, SmolStr> {
     match value {
         Value::Object(map) => {

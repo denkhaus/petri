@@ -182,47 +182,44 @@ jobs:
 
 fn assert_env_files(report: &RunReportPlus) {
     assert_success(report);
-    assert_lines(
-        report,
-        &[
-            "writer-done",
-            // `GITHUB_ENV`, read as the variable, inline, through a step-env
-            // copy, and overriding a value declared in the workflow.
-            "shellvar=[plain-value]",
-            "inline=[plain-value]",
-            "stepenv=[plain-value]",
-            "declared=[from-env-file]",
-            // A step's own `env:` still beats the job's accumulated file, as
-            // the runner applies the action's env block last.
-            "step-wins=[from-step-env]",
-            // A heredoc value keeps every newline — and a body line that merely
-            // starts with the delimiter does not close it.
-            "multi-roundtrip",
-            "inline-multi-matches",
-            // A CRLF line reads as its value alone. GitHub's Linux runner
-            // splits on `\n` only (its `\r\n` branch is `#if OS_WINDOWS`) and
-            // would keep the `\r`; this runner strips it everywhere, as the
-            // Windows runner does — a deliberate lenience, pinned.
-            "crlf-stripped",
-            // Only the first `=` splits.
-            "equals=[a=b=c]",
-            "utf8=[héllo wörld ✓]",
-            // `GITHUB_PATH`: two entries from one step land newest-first, and
-            // a tool placed there runs — the newest wins the name.
-            "path-newest-first",
-            "tool-b-ran",
-            // `GITHUB_OUTPUT`, inline and through a step-env copy of a heredoc.
-            "output-plain=[out-plain]",
-            "output-multi-roundtrip",
-            // Gates over the env and over the outputs.
-            "gate-saw-env",
-            "gate-saw-output",
-            // Re-adding a path entry moves it to the front (GitHub removes the
-            // duplicate before appending), so the older tool wins again.
-            "path-moved-to-front",
-            "tool-a-ran",
-        ],
-    );
+    assert_lines(report, &[
+        "writer-done",
+        // `GITHUB_ENV`, read as the variable, inline, through a step-env
+        // copy, and overriding a value declared in the workflow.
+        "shellvar=[plain-value]",
+        "inline=[plain-value]",
+        "stepenv=[plain-value]",
+        "declared=[from-env-file]",
+        // A step's own `env:` still beats the job's accumulated file, as
+        // the runner applies the action's env block last.
+        "step-wins=[from-step-env]",
+        // A heredoc value keeps every newline — and a body line that merely
+        // starts with the delimiter does not close it.
+        "multi-roundtrip",
+        "inline-multi-matches",
+        // A CRLF line reads as its value alone. GitHub's Linux runner
+        // splits on `\n` only (its `\r\n` branch is `#if OS_WINDOWS`) and
+        // would keep the `\r`; this runner strips it everywhere, as the
+        // Windows runner does — a deliberate lenience, pinned.
+        "crlf-stripped",
+        // Only the first `=` splits.
+        "equals=[a=b=c]",
+        "utf8=[héllo wörld ✓]",
+        // `GITHUB_PATH`: two entries from one step land newest-first, and
+        // a tool placed there runs — the newest wins the name.
+        "path-newest-first",
+        "tool-b-ran",
+        // `GITHUB_OUTPUT`, inline and through a step-env copy of a heredoc.
+        "output-plain=[out-plain]",
+        "output-multi-roundtrip",
+        // Gates over the env and over the outputs.
+        "gate-saw-env",
+        "gate-saw-output",
+        // Re-adding a path entry moves it to the front (GitHub removes the
+        // duplicate before appending), so the older tool wins again.
+        "path-moved-to-front",
+        "tool-a-ran",
+    ]);
     assert!(
         !log_lines(report).iter().any(|l| l == "never"),
         "the stale gate stays closed"
@@ -236,10 +233,9 @@ fn assert_env_files(report: &RunReportPlus) {
     assert_eq!(output["flag"], json!("yes"));
 
     // The summary, byte for byte, including its trailing newline.
-    assert_eq!(
-        step_summaries(report),
-        vec!["## Summary\n- from bash\n".to_string()]
-    );
+    assert_eq!(step_summaries(report), vec![
+        "## Summary\n- from bash\n".to_string()
+    ]);
 }
 
 #[tokio::test]
@@ -328,32 +324,29 @@ jobs:
 
 fn assert_working_directories(report: &RunReportPlus) {
     assert_success(report);
-    assert_lines(
-        report,
-        &[
-            // `.` and `./` on the first step of each job: the workspace itself,
-            // before anything has created `repo/`.
-            "dot-is-the-workspace",
-            "dot-slash-is-the-workspace",
-            "inherits-workflow-default",
-            "marker-persisted",
-            "inherits-job-default",
-            "step-overrides-job",
-            // The spellings GitHub combines away all land in the same directory.
-            "dot-slash-prefix-resolves",
-            "trailing-dot-resolves",
-            "trailing-slash-resolves",
-            "nested-relative-resolves",
-            "interior-dot-resolves",
-            // A custom `{0}` template with a working directory: the script is
-            // staged and run from that directory, with the template's own
-            // flags (`-u` here, which the direct bash invocation lacks).
-            "template-runs-in-step-dir",
-            "template-flags-active",
-            // A step override does not leak into the step after it.
-            "job-default-again",
-        ],
-    );
+    assert_lines(report, &[
+        // `.` and `./` on the first step of each job: the workspace itself,
+        // before anything has created `repo/`.
+        "dot-is-the-workspace",
+        "dot-slash-is-the-workspace",
+        "inherits-workflow-default",
+        "marker-persisted",
+        "inherits-job-default",
+        "step-overrides-job",
+        // The spellings GitHub combines away all land in the same directory.
+        "dot-slash-prefix-resolves",
+        "trailing-dot-resolves",
+        "trailing-slash-resolves",
+        "nested-relative-resolves",
+        "interior-dot-resolves",
+        // A custom `{0}` template with a working directory: the script is
+        // staged and run from that directory, with the template's own
+        // flags (`-u` here, which the direct bash invocation lacks).
+        "template-runs-in-step-dir",
+        "template-flags-active",
+        // A step override does not leak into the step after it.
+        "job-default-again",
+    ]);
 }
 
 /// A workflow with no defaults anywhere: the step runs in `GITHUB_WORKSPACE`.
@@ -421,14 +414,11 @@ jobs:
 
 fn assert_env_file_deleted(report: &RunReportPlus) {
     assert_success(report);
-    assert_lines(
-        report,
-        &[
-            "deleted-ok",
-            "replaced-ok",
-            "lost=[] stale=[] replaced=[from-the-new-file]",
-        ],
-    );
+    assert_lines(report, &[
+        "deleted-ok",
+        "replaced-ok",
+        "lost=[] stale=[] replaced=[from-the-new-file]",
+    ]);
     let noise: Vec<String> = log_lines(report)
         .into_iter()
         .filter(|l| l.starts_with("Warning:") || l.starts_with("Error:"))
@@ -505,17 +495,14 @@ fn assert_malformed_env_fails(report: &RunReportPlus) {
         history_summary(report)
     );
     let lines = log_lines(report);
-    assert_lines(
-        report,
-        &[
-            "bad-script-finished",
-            "saw-env-failure",
-            "soft-script-finished",
-            "after-soft-ran",
-            "output-script-finished",
-            "saw-output-failure",
-        ],
-    );
+    assert_lines(report, &[
+        "bad-script-finished",
+        "saw-env-failure",
+        "soft-script-finished",
+        "after-soft-ran",
+        "output-script-finished",
+        "saw-output-failure",
+    ]);
     for absent in ["never-after-bad", "never-after-bad-output"] {
         assert!(!lines.iter().any(|l| l == absent), "{absent}: {lines:?}");
     }

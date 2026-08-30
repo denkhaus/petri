@@ -1,5 +1,5 @@
-//! Handoff §7 test 6: `Budget.timeout` runs the same ladder, and the race with a
-//! natural exit is resolved by arrival order, which the log makes canonical.
+//! Handoff §7 test 6: `Budget.timeout` runs the same ladder, and the race with
+//! a natural exit is resolved by arrival order, which the log makes canonical.
 
 mod support;
 
@@ -22,8 +22,8 @@ fn timed_step(run: &str, limit: Duration) -> ir::Graph {
     graph
 }
 
-/// A step that outlives its budget is `TimedOut`, not `Cancelled`: only the driver
-/// knows a timer got there first.
+/// A step that outlives its budget is `TimedOut`, not `Cancelled`: only the
+/// driver knows a timer got there first.
 #[tokio::test]
 async fn a_step_that_outlives_its_budget_times_out() {
     let dir = RunDir::new("timeout");
@@ -47,7 +47,8 @@ async fn a_step_that_outlives_its_budget_times_out() {
     assert_replay_identical(&graph, &report);
 }
 
-/// The timeout is per attempt, not per firing: each retry gets the whole budget.
+/// The timeout is per attempt, not per firing: each retry gets the whole
+/// budget.
 #[tokio::test]
 async fn the_timeout_applies_per_attempt() {
     let dir = RunDir::new("timeout-per-attempt");
@@ -66,9 +67,9 @@ async fn the_timeout_applies_per_attempt() {
         .with_retry_on(ir::RetryOn::statuses(vec![ir::StatusKind::TimedOut]))
         .with_backoff(ir::Backoff {
             initial: Duration::from_millis(10),
-            factor: 1.0,
-            max: Duration::from_millis(50),
-            jitter: true,
+            factor:  1.0,
+            max:     Duration::from_millis(50),
+            jitter:  true,
         });
     let graph = b.build();
     validate(&graph).expect("valid");
@@ -97,8 +98,9 @@ async fn the_timeout_applies_per_attempt() {
     assert_replay_identical(&graph, &report);
 }
 
-/// A timeout racing a natural exit resolves one way or the other in real time, and
-/// replay reproduces whichever it was — the log made the arrival order canonical.
+/// A timeout racing a natural exit resolves one way or the other in real time,
+/// and replay reproduces whichever it was — the log made the arrival order
+/// canonical.
 #[tokio::test]
 async fn a_timeout_racing_a_natural_exit_replays_identically() {
     for attempt in 0..8 {

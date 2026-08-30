@@ -1,11 +1,12 @@
 //! Handoff §7 test 9: real corpus workflows, run end to end on the executor.
 //!
-//! Both workflows drive `gh`. Running them for real would call GitHub's API with the
-//! machine's credentials, so `gh` is a stub on `PATH` that records its invocations
-//! and answers the one query the scripts make. Everything else — bash, the outputs
-//! file, env layering, `if:` gates over the `github` context, job summaries — is the
-//! real thing, on real processes through `runtime::Runtime`, with replay verified byte
-//! for byte by the runtime itself.
+//! Both workflows drive `gh`. Running them for real would call GitHub's API
+//! with the machine's credentials, so `gh` is a stub on `PATH` that records its
+//! invocations and answers the one query the scripts make. Everything else —
+//! bash, the outputs file, env layering, `if:` gates over the `github` context,
+//! job summaries — is the real thing, on real processes through
+//! `runtime::Runtime`, with replay verified byte for byte by the runtime
+//! itself.
 //!
 //! The corpus is fetched, not committed, so these skip when it is absent. See
 //! `acceptance::corpus_present` for the convention.
@@ -28,8 +29,8 @@ fn corpus_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../corpus")
 }
 
-/// Is this corpus repo fetched? These tests name specific files, so it is that repo's
-/// workflows that have to be on disk, not merely some of the corpus.
+/// Is this corpus repo fetched? These tests name specific files, so it is that
+/// repo's workflows that have to be on disk, not merely some of the corpus.
 ///
 /// `PETRI_REQUIRE_CORPUS` turns the skip into a failure; CI sets it.
 fn corpus_repo_ready(repo: &str) -> bool {
@@ -47,18 +48,17 @@ fn lower(repo: &str, workflow: &str) -> Graph {
     let root = corpus_root().join(repo);
     let file = root.join(".github/workflows").join(workflow);
     let text = std::fs::read_to_string(&file).expect("corpus workflow");
-    let lowered = load(
-        &format!(".github/workflows/{workflow}"),
-        &text,
-        &DirFiles { root },
-    );
+    let lowered = load(&format!(".github/workflows/{workflow}"), &text, &DirFiles {
+        root,
+    });
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
     }
     lowered.graph.expect("the workflow lowers")
 }
 
-/// Point every scope's `PATH` at the stub, and give the run its `github` context.
+/// Point every scope's `PATH` at the stub, and give the run its `github`
+/// context.
 fn prepare(
     mut graph: Graph,
     bin: &std::path::Path,
@@ -113,8 +113,8 @@ fn fresh_dir(label: &str) -> std::path::PathBuf {
 }
 
 /// facebook/react `shared_cleanup_stale_branch_caches.yml`: one job, one `run:`
-/// step that lists caches with `gh` and deletes each. With the stub answering two
-/// cache ids, the script deletes both.
+/// step that lists caches with `gh` and deletes each. With the stub answering
+/// two cache ids, the script deletes both.
 #[tokio::test]
 async fn react_cleanup_stale_branch_caches_runs() {
     if !corpus_repo_ready("facebook__react") {
@@ -177,9 +177,9 @@ async fn react_cleanup_stale_branch_caches_runs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// nodejs/node `comment-labeled.yml`: three jobs gated on `github.event.label.name`.
-/// With the label set to `stalled`, exactly one runs and posts through `gh`; the
-/// other two are skipped by their `if:`.
+/// nodejs/node `comment-labeled.yml`: three jobs gated on
+/// `github.event.label.name`. With the label set to `stalled`, exactly one runs
+/// and posts through `gh`; the other two are skipped by their `if:`.
 #[tokio::test]
 async fn nodejs_comment_labeled_runs_the_matching_job() {
     if !corpus_repo_ready("nodejs__node") {
@@ -212,7 +212,8 @@ async fn nodejs_comment_labeled_runs_the_matching_job() {
         calls.contains("gh issue comment 4242 --repo nodejs/node"),
         "the stalled job ran with the issue number from the event: {calls}"
     );
-    // One invocation; the body it posted spans lines, so count invocations, not lines.
+    // One invocation; the body it posted spans lines, so count invocations, not
+    // lines.
     let invocations = calls.lines().filter(|l| l.starts_with("gh ")).count();
     assert_eq!(
         invocations,

@@ -1,9 +1,9 @@
 //! Diagnostics: the one way every frontend reports a problem.
 //!
 //! Rejection is loud and specific. A construct the engine cannot express is an
-//! `unsupported.*` Error with a hint naming the alternative or the package that will
-//! add it — never parsed and ignored, never silently approximated. A file with any
-//! Error produces no graph.
+//! `unsupported.*` Error with a hint naming the alternative or the package that
+//! will add it — never parsed and ignored, never silently approximated. A file
+//! with any Error produces no graph.
 
 use std::fmt;
 
@@ -16,11 +16,12 @@ pub enum Severity {
     Error,
 }
 
-/// A position in a source file. Lines and columns are 1-based; `0` means unknown.
+/// A position in a source file. Lines and columns are 1-based; `0` means
+/// unknown.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
-    pub file: SmolStr,
-    pub line: u32,
+    pub file:   SmolStr,
+    pub line:   u32,
     pub column: u32,
 }
 
@@ -52,12 +53,13 @@ impl fmt::Display for Span {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub severity: Severity,
-    /// Stable and greppable: `unsupported.concurrency`, `expr.parse`, `yaml.syntax`.
-    pub code: SmolStr,
-    pub message: String,
+    /// Stable and greppable: `unsupported.concurrency`, `expr.parse`,
+    /// `yaml.syntax`.
+    pub code:     SmolStr,
+    pub message:  String,
     /// What to do instead.
-    pub hint: Option<String>,
-    pub span: Span,
+    pub hint:     Option<String>,
+    pub span:     Span,
 }
 
 impl Diagnostic {
@@ -81,8 +83,8 @@ impl Diagnostic {
         }
     }
 
-    /// An `unsupported.<feature>` error: the construct is real, and the engine cannot
-    /// run it yet. `hint` says where it is headed.
+    /// An `unsupported.<feature>` error: the construct is real, and the engine
+    /// cannot run it yet. `hint` says where it is headed.
     pub fn unsupported(feature: &str, span: Span, message: impl Into<String>, hint: &str) -> Self {
         Self::error(&format!("unsupported.{feature}"), span, message).with_hint(hint)
     }
@@ -120,8 +122,8 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-/// Collects diagnostics while a frontend works. Frontends never bail on the first
-/// problem: one pass reports everything it can.
+/// Collects diagnostics while a frontend works. Frontends never bail on the
+/// first problem: one pass reports everything it can.
 #[derive(Clone, Debug, Default)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
@@ -187,11 +189,11 @@ impl Diagnostics {
     }
 }
 
-/// What a frontend hands back: a graph when there were no errors, and everything it
-/// had to say either way.
+/// What a frontend hands back: a graph when there were no errors, and
+/// everything it had to say either way.
 #[derive(Debug)]
 pub struct Lowered {
-    pub graph: Option<ir::Graph>,
+    pub graph:       Option<ir::Graph>,
     pub diagnostics: Diagnostics,
 }
 

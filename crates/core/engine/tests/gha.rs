@@ -1,5 +1,5 @@
-//! §6, "GHA frontend mapping". GitHub Actions lowers onto the degenerate subset:
-//! no back edges, no `Any` or `Quorum` joins, no multi-arm groups.
+//! §6, "GHA frontend mapping". GitHub Actions lowers onto the degenerate
+//! subset: no back edges, no `Any` or `Quorum` joins, no multi-arm groups.
 
 mod support;
 
@@ -59,7 +59,7 @@ fn workflow() -> (Graph, NodeId) {
         suites,
         ExpandTarget::Subgraph {
             entry: setup,
-            exit: run,
+            exit:  run,
         },
         None,
         true,

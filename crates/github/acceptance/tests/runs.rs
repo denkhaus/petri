@@ -23,10 +23,11 @@
 //! runs its native architecture and `runner.arch` says so; set to amd64 on an
 //! arm64 host, the sweep reproduces GitHub's x64 runners under emulation.
 //!
-//! The sweep is token-less by default (see [`sweep_token`]); `PETRI_SWEEP_TOKEN`
-//! opts a real token in — `PETRI_SWEEP_TOKEN=$(gh auth token)` — for a
-//! measurement free of GitHub's anonymous rate limit. Opt-in only: corpus code
-//! then runs with that identity, bounded by the token's own permissions.
+//! The sweep is token-less by default (see [`sweep_token`]);
+//! `PETRI_SWEEP_TOKEN` opts a real token in — `PETRI_SWEEP_TOKEN=$(gh auth
+//! token)` — for a measurement free of GitHub's anonymous rate limit. Opt-in
+//! only: corpus code then runs with that identity, bounded by the token's own
+//! permissions.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,15 +48,15 @@ use runtime::{RunOptions, Runtime};
 use serde_json::json;
 
 /// The sweep's `GITHUB_TOKEN`: `PETRI_SWEEP_TOKEN` when the operator opted a
-/// real one in, else **empty**. Empty still resolves `${{ secrets.GITHUB_TOKEN }}`
-/// and `github.token`, and the toolkit treats it as "no auth" — API calls go
-/// anonymous (the setup-* version manifests, github-script reads) and succeed
-/// where a *bogus* value gets `401 Bad credentials`: GitHub accepts absent
-/// credentials and rejects invalid ones. Token-less by default, so corpus code
-/// can never act with the user's identity; it is also the value a bare machine
-/// with no `gh` login gets from the distribution. The anonymous tier is
-/// rate-limited (60/hour/IP), which a whole-corpus sweep exceeds — hence the
-/// opt-in.
+/// real one in, else **empty**. Empty still resolves `${{ secrets.GITHUB_TOKEN
+/// }}` and `github.token`, and the toolkit treats it as "no auth" — API calls
+/// go anonymous (the setup-* version manifests, github-script reads) and
+/// succeed where a *bogus* value gets `401 Bad credentials`: GitHub accepts
+/// absent credentials and rejects invalid ones. Token-less by default, so
+/// corpus code can never act with the user's identity; it is also the value a
+/// bare machine with no `gh` login gets from the distribution. The anonymous
+/// tier is rate-limited (60/hour/IP), which a whole-corpus sweep exceeds —
+/// hence the opt-in.
 fn sweep_token() -> String {
     std::env::var("PETRI_SWEEP_TOKEN").unwrap_or_default()
 }
@@ -118,8 +119,8 @@ async fn corpus_run_sweep() {
             continue;
         }
         let record = RunRecord {
-            repo: repo.clone(),
-            file: outcome.file.clone(),
+            repo:   repo.clone(),
+            file:   outcome.file.clone(),
             result: RunResult::NotLowered {
                 features: outcome.unsupported_features(),
             },
@@ -465,15 +466,15 @@ fn first_failure(
         .map(|e| format!("{e}"))
         .collect();
     RunResult::Fail(FirstFailure {
-        node: "(run)".to_string(),
-        step: "(run)".to_string(),
-        class: String::new(),
-        message: if errors.is_empty() {
+        node:     "(run)".to_string(),
+        step:     "(run)".to_string(),
+        class:    String::new(),
+        message:  if errors.is_empty() {
             format!("run ended {:?} with no failing record", report.status)
         } else {
             format!("engine error: {}", errors.join(" | "))
         },
-        tail: Vec::new(),
+        tail:     Vec::new(),
         expected: None,
     })
 }

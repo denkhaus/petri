@@ -608,8 +608,8 @@ pub fn containerize(
         }
         let image = image_for(&scope.runtime.requirements);
         scope.runtime.target = RuntimeTarget::Container {
-            image: SmolStr::new(&image),
-            options: platform
+            image:       SmolStr::new(&image),
+            options:     platform
                 .map(|p| vec![SmolStr::new("--platform"), SmolStr::new(p)])
                 .unwrap_or_default(),
             credentials: None,
@@ -670,8 +670,8 @@ pub fn cap_expansions(graph: &mut Graph) {
 /// behind it, or the step family when there is none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepIdentity {
-    /// A remote action: the bare `owner/repo[/path]` and whether this call reads
-    /// another run's artifacts (`download-artifact` with `run-id:`).
+    /// A remote action: the bare `owner/repo[/path]` and whether this call
+    /// reads another run's artifacts (`download-artifact` with `run-id:`).
     Action { bare: String, cross_run: bool },
     /// A local (`./`) action step.
     LocalAction(String),
@@ -758,7 +758,7 @@ fn action_identity(config: &Value) -> StepIdentity {
     match location {
         ActionLocation::Pinned(pinned) => StepIdentity::Action {
             cross_run: reads_another_run(&pinned, config),
-            bare: bare_reference(&pinned),
+            bare:      bare_reference(&pinned),
         },
         ActionLocation::Local { local } => StepIdentity::LocalAction(local),
     }
@@ -974,8 +974,8 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
 /// One workflow's sweep result.
 #[derive(Clone, Debug)]
 pub struct RunRecord {
-    pub repo: String,
-    pub file: String,
+    pub repo:   String,
+    pub file:   String,
     pub result: RunResult,
 }
 
@@ -988,7 +988,8 @@ pub enum RunResult {
     /// The wall-clock cap fired. `wedged` means even the cancel did not bring
     /// the run down and it was abandoned.
     TimedOut { wedged: bool },
-    /// In scope but rejected at lowering — carried for the denominator, never run.
+    /// In scope but rejected at lowering — carried for the denominator, never
+    /// run.
     NotLowered { features: Vec<String> },
 }
 
@@ -996,15 +997,15 @@ pub enum RunResult {
 #[derive(Clone, Debug)]
 pub struct FirstFailure {
     /// The firing-record name, as recorded.
-    pub node: String,
+    pub node:     String,
     /// The step behind it — [`StepIdentity::label`].
-    pub step: String,
+    pub step:     String,
     /// The failure class the step reported (empty when unclassified).
-    pub class: String,
-    pub message: String,
+    pub class:    String,
+    pub message:  String,
     /// The step's last log lines — what the failure actually said — plus the
     /// last [`error_line`] when later noise pushed it out of the window.
-    pub tail: Vec<String>,
+    pub tail:     Vec<String>,
     /// Present when the failure is server-coupled ([`expected_reason`]).
     pub expected: Option<String>,
 }
@@ -1207,10 +1208,11 @@ fn sanitize_cell(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use frontend_gha::action::ActionRef;
     use frontend_gha::load;
     use ir::Expr;
+
+    use super::*;
 
     fn lower(text: &str) -> Graph {
         let lowered = load(".github/workflows/test.yml", text, &frontend::NoFiles);
@@ -1228,7 +1230,7 @@ mod tests {
         ) -> Result<PinnedAction, frontend_gha::action::ActionSourceError> {
             Ok(PinnedAction {
                 reference: reference.clone(),
-                sha: "0123456789012345678901234567890123456789".into(),
+                sha:       "0123456789012345678901234567890123456789".into(),
             })
         }
 
@@ -1611,7 +1613,7 @@ mod tests {
     fn pinned(reference: &str) -> ActionLocation {
         ActionLocation::Pinned(PinnedAction {
             reference: ActionRef::parse(reference).expect("a valid reference"),
-            sha: "0123456789012345678901234567890123456789".into(),
+            sha:       "0123456789012345678901234567890123456789".into(),
         })
     }
 
@@ -1621,13 +1623,10 @@ mod tests {
             "action": serde_json::to_value(pinned("actions/download-artifact@v4")).unwrap(),
             "inputs": {"name": "dist"},
         });
-        assert_eq!(
-            action_identity(&plain),
-            StepIdentity::Action {
-                bare: "actions/download-artifact".to_string(),
-                cross_run: false
-            }
-        );
+        assert_eq!(action_identity(&plain), StepIdentity::Action {
+            bare:      "actions/download-artifact".to_string(),
+            cross_run: false,
+        });
         let cross = serde_json::json!({
             "action": serde_json::to_value(pinned("actions/download-artifact@v4")).unwrap(),
             "inputs": {"run-id": "123"},
@@ -1642,7 +1641,7 @@ mod tests {
     #[test]
     fn classification_separates_gap_from_server_coupled() {
         let setup = StepIdentity::Action {
-            bare: "actions/setup-python".to_string(),
+            bare:      "actions/setup-python".to_string(),
             cross_run: false,
         };
         assert_eq!(expected_reason(&setup, "exit_status:1", false), None);
@@ -1651,7 +1650,7 @@ mod tests {
             Some("needs a repository secret".to_string())
         );
         let oidc = StepIdentity::Action {
-            bare: "actions/attest-build-provenance".to_string(),
+            bare:      "actions/attest-build-provenance".to_string(),
             cross_run: false,
         };
         assert_eq!(
@@ -1661,7 +1660,7 @@ mod tests {
         // A mutating action is expected whatever the credential: the sweep
         // must never see its write succeed.
         let mutating = StepIdentity::Action {
-            bare: "dessant/lock-threads".to_string(),
+            bare:      "dessant/lock-threads".to_string(),
             cross_run: false,
         };
         assert_eq!(
@@ -1671,7 +1670,7 @@ mod tests {
         // The real checkout cannot fetch without a credential; that is the
         // sweep's constraint, not a runtime-tier gap.
         let checkout = StepIdentity::Action {
-            bare: "actions/checkout".to_string(),
+            bare:      "actions/checkout".to_string(),
             cross_run: false,
         };
         assert!(expected_reason(&checkout, "exit_status:1", false).is_some());
@@ -1710,7 +1709,7 @@ mod log_tests {
     #[test]
     fn stubbed_build_uploads_classify_from_the_log() {
         let upload = StepIdentity::Action {
-            bare: "actions/upload-artifact".to_string(),
+            bare:      "actions/upload-artifact".to_string(),
             cross_run: false,
         };
         let miss = vec![
@@ -1724,14 +1723,14 @@ mod log_tests {
         // github-script: an unhandled throw inside the inline script is the
         // script's own business (locally, usually the empty event).
         let script = StepIdentity::Action {
-            bare: "actions/github-script".to_string(),
+            bare:      "actions/github-script".to_string(),
             cross_run: false,
         };
         let threw = vec!["Error: Unhandled error: SyntaxError: Unexpected token ';'".to_string()];
         assert!(expected_from_log(&script, &threw).is_some());
         assert!(expected_from_log(&script, &["exit 1".to_string()]).is_none());
         let other = StepIdentity::Action {
-            bare: "actions/setup-node".to_string(),
+            bare:      "actions/setup-node".to_string(),
             cross_run: false,
         };
         assert!(expected_from_log(&other, &miss).is_none());
@@ -1770,7 +1769,7 @@ mod log_tests {
     #[test]
     fn paths_filter_without_a_repository_classifies_and_git_mode_failures_do_not() {
         let filter = StepIdentity::Action {
-            bare: "dorny/paths-filter".to_string(),
+            bare:      "dorny/paths-filter".to_string(),
             cross_run: false,
         };
         let no_repo = vec![
@@ -1793,7 +1792,7 @@ mod log_tests {
         ];
         assert!(expected_from_log(&filter, &stray).is_none());
         let other = StepIdentity::Action {
-            bare: "actions/setup-node".to_string(),
+            bare:      "actions/setup-node".to_string(),
             cross_run: false,
         };
         assert!(expected_from_log(&other, &no_repo).is_none());
@@ -1805,7 +1804,7 @@ mod log_tests {
     #[test]
     fn codeql_analyze_own_run_lookup_classifies_and_finalize_fatals_do_not() {
         let analyze = StepIdentity::Action {
-            bare: "github/codeql-action/analyze".to_string(),
+            bare:      "github/codeql-action/analyze".to_string(),
             cross_run: false,
         };
         let not_found = vec![
@@ -1833,7 +1832,7 @@ mod log_tests {
         assert!(expected_from_log(&analyze, &finalize).is_none());
         // The same 404 under a different action names a different problem.
         let other = StepIdentity::Action {
-            bare: "github/codeql-action/init".to_string(),
+            bare:      "github/codeql-action/init".to_string(),
             cross_run: false,
         };
         assert!(expected_from_log(&other, &not_found).is_none());

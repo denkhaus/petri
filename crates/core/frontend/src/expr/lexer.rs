@@ -31,10 +31,10 @@ pub enum TokenKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token {
-    pub kind: TokenKind,
+    pub kind:   TokenKind,
     /// Byte offset of the token's first character.
     pub offset: usize,
-    pub len: usize,
+    pub len:    usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -153,7 +153,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     push(TokenKind::Eq, 2);
                     i += 2;
                 } else {
-                    return Err(LexError::Unexpected { ch: '=', offset: i });
+                    return Err(LexError::Unexpected {
+                        ch:     '=',
+                        offset: i,
+                    });
                 }
             }
             '&' => {
@@ -161,7 +164,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     push(TokenKind::And, 2);
                     i += 2;
                 } else {
-                    return Err(LexError::Unexpected { ch: '&', offset: i });
+                    return Err(LexError::Unexpected {
+                        ch:     '&',
+                        offset: i,
+                    });
                 }
             }
             '|' => {
@@ -169,7 +175,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     push(TokenKind::Or, 2);
                     i += 2;
                 } else {
-                    return Err(LexError::Unexpected { ch: '|', offset: i });
+                    return Err(LexError::Unexpected {
+                        ch:     '|',
+                        offset: i,
+                    });
                 }
             }
             '\'' => {
@@ -220,16 +229,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             }
             other => {
                 return Err(LexError::Unexpected {
-                    ch: other,
+                    ch:     other,
                     offset: i,
                 });
             }
         }
     }
     tokens.push(Token {
-        kind: TokenKind::Eof,
+        kind:   TokenKind::Eof,
         offset: source.len(),
-        len: 0,
+        len:    0,
     });
     Ok(tokens)
 }
@@ -251,13 +260,13 @@ fn lex_number(source: &str, start: usize) -> Result<(f64, usize), LexError> {
         }
         if i == hex_start {
             return Err(LexError::BadNumber {
-                text: source[start..i].to_string(),
+                text:   source[start..i].to_string(),
                 offset: start,
             });
         }
         let magnitude =
             i64::from_str_radix(&source[hex_start..i], 16).map_err(|_| LexError::BadNumber {
-                text: source[start..i].to_string(),
+                text:   source[start..i].to_string(),
                 offset: start,
             })? as f64;
         let value = if bytes[start] == b'-' {
@@ -295,14 +304,14 @@ fn lex_number(source: &str, start: usize) -> Result<(f64, usize), LexError> {
     let text = &source[start..i];
     if i == body_start {
         return Err(LexError::BadNumber {
-            text: text.to_string(),
+            text:   text.to_string(),
             offset: start,
         });
     }
     text.parse::<f64>()
         .map(|n| (n, i - start))
         .map_err(|_| LexError::BadNumber {
-            text: text.to_string(),
+            text:   text.to_string(),
             offset: start,
         })
 }

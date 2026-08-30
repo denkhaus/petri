@@ -1,5 +1,6 @@
-//! `ResolvedFiring` is where "no unresolved `ExprId` crosses the executor boundary"
-//! is enforced. The invariant lives in the type, not in a review comment.
+//! `ResolvedFiring` is where "no unresolved `ExprId` crosses the executor
+//! boundary" is enforced. The invariant lives in the type, not in a review
+//! comment.
 
 mod support;
 
@@ -37,9 +38,9 @@ fn the_constructor_refuses_an_unresolved_config() {
     assert_eq!(err.reason, engine::BoundaryViolation::UnresolvedExpression);
 }
 
-/// A secret reference is the one non-literal form that may cross the boundary. It
-/// has to: a `ResolvedFiring` is serialized into the event log, so resolving the
-/// value here would write the secret to disk.
+/// A secret reference is the one non-literal form that may cross the boundary.
+/// It has to: a `ResolvedFiring` is serialized into the event log, so resolving
+/// the value here would write the secret to disk.
 #[test]
 fn a_secret_reference_is_allowed_across_the_boundary() {
     let ok = firing(json!({ "env": { "TOKEN": { SECRET_REF_KEY: "DEPLOY_KEY" } } }))
@@ -58,8 +59,8 @@ fn a_secret_reference_is_allowed_across_the_boundary() {
     assert_eq!(err.reason, engine::BoundaryViolation::MalformedSecretRef);
 }
 
-/// The sibling of the expression wire-tamper test: hand-editing a secret reference
-/// into a bad shape on the wire is caught on the way back in.
+/// The sibling of the expression wire-tamper test: hand-editing a secret
+/// reference into a bad shape on the wire is caught on the way back in.
 #[test]
 fn deserialization_rejects_a_tampered_secret_reference() {
     let clean = firing(json!({ "env": { "TOKEN": { SECRET_REF_KEY: "DEPLOY_KEY" } } })).unwrap();
@@ -78,8 +79,8 @@ fn deserialization_rejects_a_tampered_secret_reference() {
     assert!(!encoded.contains("s3cr3t-value"));
 }
 
-/// Deserialization goes through the same constructor, so a value read off the wire
-/// carries the invariant too.
+/// Deserialization goes through the same constructor, so a value read off the
+/// wire carries the invariant too.
 #[test]
 fn deserialization_cannot_smuggle_a_placeholder_through() {
     let clean = firing(json!({ "region": "eu" })).unwrap();
@@ -129,8 +130,8 @@ fn the_core_resolves_config_before_the_boundary() {
     }
 }
 
-/// A placeholder the resolver cannot read — `$expr` with a non-numeric value — is
-/// caught at the boundary and fails that node, instead of reaching a step.
+/// A placeholder the resolver cannot read — `$expr` with a non-numeric value —
+/// is caught at the boundary and fails that node, instead of reaching a step.
 #[test]
 fn a_malformed_placeholder_fails_the_node_at_the_boundary() {
     let mut b = GraphBuilder::new();
@@ -151,8 +152,8 @@ fn a_malformed_placeholder_fails_the_node_at_the_boundary() {
     ));
 }
 
-/// `validate_plan` catches the same thing at load time, so the runtime check is a
-/// backstop rather than the only line of defence.
+/// `validate_plan` catches the same thing at load time, so the runtime check is
+/// a backstop rather than the only line of defence.
 #[test]
 fn load_time_validation_catches_it_first() {
     let mut b = GraphBuilder::new();

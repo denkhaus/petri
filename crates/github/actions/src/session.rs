@@ -1,14 +1,14 @@
 //! The runner contract around one step.
 //!
 //! GitHub gives every step five files to write commands into — `GITHUB_OUTPUT`,
-//! `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY` — and applies
-//! them when the step ends: outputs to the step's record, env and path to every
-//! later step of the job, state to the action's later phases. A [`Session`] creates
-//! the files before the step, hands the process step a config pointing at them, and
-//! reads them back afterwards.
+//! `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY` — and
+//! applies them when the step ends: outputs to the step's record, env and path
+//! to every later step of the job, state to the action's later phases. A
+//! [`Session`] creates the files before the step, hands the process step a
+//! config pointing at them, and reads them back afterwards.
 //!
-//! Everything lives in the workspace, reached through `ExecEnv`, so this works the
-//! same whether the job runs on this machine or in a container:
+//! Everything lives in the workspace, reached through `ExecEnv`, so this works
+//! the same whether the job runs on this machine or in a container:
 //!
 //! ```text
 //! <workspace>/repo/                 GITHUB_WORKSPACE — what `actions/checkout` fills
@@ -61,25 +61,25 @@ const TOOL_CACHE_DIR: &str = ".ci/toolcache";
 const COMMAND_FILE_LIMIT: usize = 1024 * 1024;
 
 /// How long to wait for the command sink after the process step returns. The
-/// process step itself stops draining output after its own limit, so a straggler
-/// holding stdout open cannot wedge the step here either.
+/// process step itself stops draining output after its own limit, so a
+/// straggler holding stdout open cannot wedge the step here either.
 pub(crate) const SINK_LIMIT: Duration = Duration::from_secs(6);
 
 /// The step's own files, relative to the workspace root.
 struct StepFiles {
-    env: PathBuf,
-    path: PathBuf,
-    state: PathBuf,
+    env:     PathBuf,
+    path:    PathBuf,
+    state:   PathBuf,
     summary: PathBuf,
 }
 
 pub struct Session {
-    env: Arc<dyn ExecEnv>,
+    env:        Arc<dyn ExecEnv>,
     /// The workspace root as the process sees it.
-    workspace: String,
-    files: StepFiles,
-    job_env: BTreeMap<String, String>,
-    job_path: Vec<String>,
+    workspace:  String,
+    files:      StepFiles,
+    job_env:    BTreeMap<String, String>,
+    job_path:   Vec<String>,
     /// The host's persistent tool cache, when the host registered one
     /// ([`crate::ToolCacheCap`]): [`resolved_tool_cache`] points steps at it
     /// where this environment's filesystem has it.
@@ -92,7 +92,7 @@ pub struct Effects {
     /// `::set-output::` values, for the record's output.
     pub outputs: Map<String, Value>,
     /// `GITHUB_STATE` plus `::save-state::`.
-    pub state: Map<String, Value>,
+    pub state:   Map<String, Value>,
     /// `GITHUB_STEP_SUMMARY`, when the step wrote one.
     pub summary: String,
     /// Commands the sink refused (`set-env`/`add-path` without the opt-in):
@@ -207,9 +207,9 @@ impl Session {
             .join("steps")
             .join(ctx.firing.raw().to_string());
         let files = StepFiles {
-            env: dir.join("env"),
-            path: dir.join("path"),
-            state: dir.join("state"),
+            env:     dir.join("env"),
+            path:    dir.join("path"),
+            state:   dir.join("state"),
             summary: dir.join("summary"),
         };
         tokio::try_join!(
@@ -270,8 +270,8 @@ impl Session {
     }
 
     /// The environment every step gets on top of the scope's: the job's
-    /// accumulated `GITHUB_ENV` first (a step's own `env:` wins over it), then the
-    /// files and directories of the contract.
+    /// accumulated `GITHUB_ENV` first (a step's own `env:` wins over it), then
+    /// the files and directories of the contract.
     ///
     /// `RUNNER_TOOL_CACHE` is deliberately *not* here: its value depends on
     /// the step's own `env:` config ([`resolved_tool_cache`]), so
@@ -396,8 +396,8 @@ impl Session {
         out
     }
 
-    /// Write the resolved script to the step's `script` file and turn the process
-    /// into `sh` running the shell template over it.
+    /// Write the resolved script to the step's `script` file and turn the
+    /// process into `sh` running the shell template over it.
     async fn stage_script(
         &self,
         mut process: ProcessConfig,
@@ -548,16 +548,13 @@ impl Session {
                 let _ = logs
                     .send(StepEvent::Log {
                         stream: LogStream::Stderr,
-                        line: format!("Error: {}", failure.message),
+                        line:   format!("Error: {}", failure.message),
                     })
                     .await;
-                (
-                    runner_files_failure(outcome, soft_fail, failure),
-                    Effects {
-                        refused,
-                        ..Effects::default()
-                    },
-                )
+                (runner_files_failure(outcome, soft_fail, failure), Effects {
+                    refused,
+                    ..Effects::default()
+                })
             }
         };
         if !effects.summary.is_empty() {
@@ -630,7 +627,7 @@ pub(crate) fn forward_lines(
                 if sink
                     .send(StepEvent::Log {
                         stream: line.stream,
-                        line: line.line,
+                        line:   line.line,
                     })
                     .await
                     .is_err()
@@ -678,7 +675,7 @@ pub(crate) fn resolve_sentinel_text(
                 .resolve(name)
                 .map(|secret| escape_sentinel_text(&secret.expose()))
                 .map_err(|e| StepFailure {
-                    class: steps::SECRET_UNAVAILABLE_CLASS,
+                    class:   steps::SECRET_UNAVAILABLE_CLASS,
                     message: e.to_string(),
                 })
         })?
@@ -737,9 +734,9 @@ where
         .map(|(_, v)| v)
 }
 
-/// Replace the secret sentinels the frontend lowered into the script and the env
-/// with their values. A whole-value `$secret` reference is left for the process
-/// step, which resolves it the same way.
+/// Replace the secret sentinels the frontend lowered into the script and the
+/// env with their values. A whole-value `$secret` reference is left for the
+/// process step, which resolves it the same way.
 fn resolve_secret_sentinels(
     mut process: ProcessConfig,
     secrets: &dyn SecretProvider,
@@ -752,7 +749,7 @@ fn resolve_secret_sentinels(
 /// `GITHUB_OUTPUT`, `GITHUB_ENV` and `GITHUB_STATE`.
 fn parse_env_file(text: &str, what: &str) -> Result<Map<String, Value>, StepFailure> {
     steps::parse_outputs(text).map_err(|e| StepFailure {
-        class: RUNNER_FILES_CLASS,
+        class:   RUNNER_FILES_CLASS,
         message: format!("could not read what the step wrote to `{what}`: {e}"),
     })
 }
@@ -872,7 +869,7 @@ async fn write(env: &dyn ExecEnv, relative: &Path, contents: &[u8]) -> Result<()
     env.write_file(relative, contents)
         .await
         .map_err(|e| StepFailure {
-            class: RUNNER_FILES_CLASS,
+            class:   RUNNER_FILES_CLASS,
             message: format!("could not write `{}`: {e}", relative.display()),
         })
 }
@@ -894,7 +891,7 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|e| StepFailure {
-            class: RUNNER_FILES_CLASS,
+            class:   RUNNER_FILES_CLASS,
             message: format!(
                 "`{}` is not what this runner wrote: {e}",
                 relative.display()
@@ -906,7 +903,7 @@ async fn read_limited(env: &dyn ExecEnv, relative: &Path) -> Result<Option<Vec<u
     env.read_file_limited(relative, COMMAND_FILE_LIMIT)
         .await
         .map_err(|e| StepFailure {
-            class: RUNNER_FILES_CLASS,
+            class:   RUNNER_FILES_CLASS,
             message: format!("could not read `{}`: {e}", relative.display()),
         })
 }
@@ -980,15 +977,15 @@ mod tests {
         let literal = "\u{E000}petri-secret:NOT_A_SECRET\u{E001}";
         let secret_value = "value-\u{E002}-\u{E000}-\u{E001}";
         let process = ProcessConfig {
-            run: format!(
+            run:                format!(
                 "{} {}",
                 escape_sentinel_text(literal),
                 secret_sentinel("REAL")
             ),
-            shell: Shell::Sh,
-            env: BTreeMap::new(),
-            working_dir: None,
-            soft_fail: steps::SoftFail::default(),
+            shell:              Shell::Sh,
+            env:                BTreeMap::new(),
+            working_dir:        None,
+            soft_fail:          steps::SoftFail::default(),
             output_env_aliases: Vec::new(),
         };
         let secrets = executor::MapSecrets::from_pairs(&[("REAL", secret_value)]);

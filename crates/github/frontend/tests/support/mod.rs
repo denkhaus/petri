@@ -1,5 +1,5 @@
-//! Lowering helpers: text in, graph or diagnostics out. Nothing here runs a graph —
-//! the run harness lives with the acceptance battery.
+//! Lowering helpers: text in, graph or diagnostics out. Nothing here runs a
+//! graph — the run harness lives with the acceptance battery.
 
 #![allow(dead_code)]
 

@@ -1,6 +1,7 @@
 //! The two-tier stop wiring (§10): the first root cancel is polite and admits
-//! `run_on_cancel` cleanup; the cleanup-grace timer — or a second cancel — feeds
-//! `KillRequested`, and after a kill nothing starts and nothing waits out a grace.
+//! `run_on_cancel` cleanup; the cleanup-grace timer — or a second cancel —
+//! feeds `KillRequested`, and after a kill nothing starts and nothing waits out
+//! a grace.
 
 mod support;
 
@@ -88,9 +89,10 @@ async fn cleanup_runs_after_a_cancel() {
     assert_replay_identical(&graph, &report);
 }
 
-/// §6 driver test 2, first half: cleanup-grace expiry feeds `KillRequested`. The
-/// cleanup ignores TERM, and the grace between TERM and KILL is set long, so only
-/// an immediate `SIGKILL` — no ladder, no grace wait — explains the timing.
+/// §6 driver test 2, first half: cleanup-grace expiry feeds `KillRequested`.
+/// The cleanup ignores TERM, and the grace between TERM and KILL is set long,
+/// so only an immediate `SIGKILL` — no ladder, no grace wait — explains the
+/// timing.
 #[tokio::test]
 async fn cleanup_grace_expiry_feeds_kill() {
     let dir = RunDir::new("cleanup-grace-kill");

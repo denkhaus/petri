@@ -9,13 +9,12 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, ExpandTarget, ExprId, NodeId, Scope, ScopeId, StepRef, Value};
 use serde_json::{Map, json};
 
+use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
 use crate::action::Phase;
 use crate::call::CalleeSource;
 use crate::exprs::{LoweredScalar, SEP, Site, lower_scalar, result_priority, whole_value_secret};
 use crate::model::{Defaults, Job};
 use crate::runs_on;
-
-use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
 
 impl<'w, 'a> Lowering<'w, 'a> {
     /// Inside a called workflow, every job gate carries the call's own
@@ -91,16 +90,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
         // truthful summary in every cancel case.
         self.b.node_mut(done).run_on_cancel = true;
         self.spans.insert(done, job.span.clone());
-        self.jobs.insert(
-            job.id.clone(),
-            JobNodes {
-                scope,
-                start,
-                done,
-                last: start,
-                matrix,
-            },
-        );
+        self.jobs.insert(job.id.clone(), JobNodes {
+            scope,
+            start,
+            done,
+            last: start,
+            matrix,
+        });
     }
 
     /// A workflow call's bracket: `start` (the caller-side gate, and the
@@ -151,16 +147,13 @@ impl<'w, 'a> Lowering<'w, 'a> {
         );
         self.b.node_mut(done).run_on_cancel = true;
         self.spans.insert(done, job.span.clone());
-        self.jobs.insert(
-            job.id.clone(),
-            JobNodes {
-                scope,
-                start,
-                done,
-                last: exit,
-                matrix,
-            },
-        );
+        self.jobs.insert(job.id.clone(), JobNodes {
+            scope,
+            start,
+            done,
+            last: exit,
+            matrix,
+        });
         self.frame_ctx[callee].exit = Some(exit);
     }
 
@@ -399,7 +392,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
         for (step, plan) in job.steps.iter().zip(&plans) {
             let inherited = Defaults {
-                shell: step.shell.or(job.defaults.shell).or(self.wf.defaults.shell),
+                shell:             step.shell.or(job.defaults.shell).or(self.wf.defaults.shell),
                 working_directory: step
                     .working_directory
                     .or(job.defaults.working_directory)
@@ -472,7 +465,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             } else {
                 ExpandTarget::Subgraph {
                     entry: start,
-                    exit: last,
+                    exit:  last,
                 }
             };
             ir::parallel_for_each(
@@ -518,9 +511,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
     }
 
     /// Link `id` after `previous` and make it visible to the steps after it.
-    /// Every chained node runs on cancel: after a polite cancel it fires and its
-    /// gate decides, which is the whole cancellation story (no admission
-    /// sniffing). Matrix templates pass the flag to their clones.
+    /// Every chained node runs on cancel: after a polite cancel it fires and
+    /// its gate decides, which is the whole cancellation story (no
+    /// admission sniffing). Matrix templates pass the flag to their clones.
     fn chain_node(
         &mut self,
         previous: &mut NodeId,
@@ -565,11 +558,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// The `{ result, outputs }` summary the last step's edge carries into `done`,
-    /// evaluated in that step's outcome context. A `tolerated` job reports
-    /// `success` where it would report `failure` — GitHub's conclusion for a
-    /// `continue-on-error` job, and the value `needs.<job>.result` carries —
-    /// while a cancel still reports `cancelled`.
+    /// The `{ result, outputs }` summary the last step's edge carries into
+    /// `done`, evaluated in that step's outcome context. A `tolerated` job
+    /// reports `success` where it would report `failure` — GitHub's
+    /// conclusion for a `continue-on-error` job, and the value
+    /// `needs.<job>.result` carries — while a cancel still reports
+    /// `cancelled`.
     fn job_summary(
         &mut self,
         job: &Job<'a>,
@@ -723,8 +717,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         json!({ EXPR_PLACEHOLDER_KEY: summary.raw() })
     }
 
-    /// `strategy.matrix` as an expression: a literal object with any `${{ }}` values
-    /// lowered in place, or the whole thing an expression.
+    /// `strategy.matrix` as an expression: a literal object with any `${{ }}`
+    /// values lowered in place, or the whole thing an expression.
     fn matrix_expr(&mut self, node: Node<'_>, site: &Site) -> Option<ExprId> {
         self.yaml_expr(node, site)
     }

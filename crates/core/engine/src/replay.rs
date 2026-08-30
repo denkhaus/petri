@@ -1,16 +1,16 @@
 //! Replay: rebuild a run from its event log. Resume: rebuild it and say what
 //! is still owed.
 //!
-//! Only [`EventSource::External`] records are fed back. Everything the core produced
-//! — routed tokens, splices, cascading cancellations — it produces again. That is
-//! what makes a byte-identical replayed log a real determinism check rather than a
-//! copy: if any core decision depended on a clock, on iteration order, or on
-//! anything outside the state, the two logs diverge.
+//! Only [`EventSource::External`] records are fed back. Everything the core
+//! produced — routed tokens, splices, cascading cancellations — it produces
+//! again. That is what makes a byte-identical replayed log a real determinism
+//! check rather than a copy: if any core decision depended on a clock, on
+//! iteration order, or on anything outside the state, the two logs diverge.
 //!
-//! [`resume`] leans on the same determinism from the other side: because `apply`
-//! regenerates every command byte-identically, nothing about in-flight work needs
-//! separate persistence — the log alone says which effects a dead driver still
-//! owed.
+//! [`resume`] leans on the same determinism from the other side: because
+//! `apply` regenerates every command byte-identically, nothing about in-flight
+//! work needs separate persistence — the log alone says which effects a dead
+//! driver still owed.
 
 use std::collections::BTreeMap;
 
@@ -23,8 +23,8 @@ use crate::state::EngineState;
 
 /// Replay a log against the graph the run started from.
 ///
-/// The graph must be the original one, before any splice: expansions are re-derived
-/// from the events, not read back from a mutated graph.
+/// The graph must be the original one, before any splice: expansions are
+/// re-derived from the events, not read back from a mutated graph.
 pub fn replay(graph: Graph, log: &EventLog) -> EngineState {
     replay_with(graph, log, drop)
 }
@@ -63,16 +63,17 @@ pub struct ReplayMismatch {
 pub struct ResumePoint {
     /// The rebuilt state. Its log is the loaded prefix plus every record replay
     /// regenerated past it.
-    pub state: EngineState,
+    pub state:        EngineState,
     /// The effects still owed, in dispatch order: `AcquireScope` for each held
-    /// scope, then — per live firing — either its last `StartStep` (not awaiting
-    /// a retry) or its last `ScheduleRetry` (awaiting one). The two sets are
-    /// disjoint because `awaiting_retry()` is a subset of `live_firings()`, and
-    /// re-issuing both would execute the step before its backoff.
-    pub pending: Vec<Command>,
-    /// The firings whose step will actually execute again — live, not awaiting a
-    /// retry, not cancelling. Resume is invisible in the log, so this is where a
-    /// host learns what to mint new execution identities for.
+    /// scope, then — per live firing — either its last `StartStep` (not
+    /// awaiting a retry) or its last `ScheduleRetry` (awaiting one). The
+    /// two sets are disjoint because `awaiting_retry()` is a subset of
+    /// `live_firings()`, and re-issuing both would execute the step before
+    /// its backoff.
+    pub pending:      Vec<Command>,
+    /// The firings whose step will actually execute again — live, not awaiting
+    /// a retry, not cancelling. Resume is invisible in the log, so this is
+    /// where a host learns what to mint new execution identities for.
     pub redispatched: Vec<FiringId>,
 }
 
@@ -85,8 +86,8 @@ pub struct ResumePoint {
 ///
 /// Deliberately absent from `pending`: `DeliverControl` — a logged
 /// `ControlRequested{Deliver}` made the state reproducible, but the payload is
-/// not re-forwarded; the resumed step waits again and the host re-sends what its
-/// own store says is outstanding.
+/// not re-forwarded; the resumed step waits again and the host re-sends what
+/// its own store says is outstanding.
 pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatch> {
     let mut last_start: BTreeMap<FiringId, Command> = BTreeMap::new();
     let mut last_retry: BTreeMap<FiringId, Command> = BTreeMap::new();
@@ -138,8 +139,8 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
 }
 
 /// The loaded log must be a byte-prefix of the regenerated one. Byte-wise per
-/// record — record `PartialEq` is weaker (JSON maps compare order-insensitively).
-/// `verify_replay` is this plus "and no longer".
+/// record — record `PartialEq` is weaker (JSON maps compare
+/// order-insensitively). `verify_replay` is this plus "and no longer".
 fn verify_prefix(loaded: &EventLog, rebuilt: &EventLog) -> Result<(), ReplayMismatch> {
     let mismatch = |first_divergence| ReplayMismatch {
         original_records: loaded.len(),
@@ -161,8 +162,8 @@ fn verify_prefix(loaded: &EventLog, rebuilt: &EventLog) -> Result<(), ReplayMism
 
 /// Replay a log and check that the result is byte-identical to the original.
 ///
-/// This is the determinism canary. Run it wherever a new source of state enters the
-/// core.
+/// This is the determinism canary. Run it wherever a new source of state enters
+/// the core.
 pub fn verify_replay(graph: Graph, log: &EventLog) -> Result<EngineState, ReplayMismatch> {
     let state = replay(graph, log);
     verify_prefix(log, &state.log)?;

@@ -1,53 +1,58 @@
 //! The host executor: a workspace directory and real processes on this machine.
 //!
 //! Implements the [`executor`] interface with nothing in between a step and the
-//! operating system. Each step is spawned into its own process group, so a `run:`
-//! script that backgrounds children can be signalled — and dies — as a unit.
+//! operating system. Each step is spawned into its own process group, so a
+//! `run:` script that backgrounds children can be signalled — and dies — as a
+//! unit.
 //!
 //! # The sentinel
 //!
-//! Each spawn starts the group with a tiny supervisor, the **sentinel**: the group
-//! leader, which runs the workload as a member of the same group, records the
-//! workload's exit status beside the workspace via atomic write (the same wrapper
-//! pattern the Docker executor uses for exit-status truth), closes its inherited
-//! copies of the stdout/stderr pipes once the workload is running (so the pipes
-//! reach EOF when the workload exits), ignores `SIGTERM` so the polite ladder
-//! passes through it, and then stays alive until the scope is released.
+//! Each spawn starts the group with a tiny supervisor, the **sentinel**: the
+//! group leader, which runs the workload as a member of the same group, records
+//! the workload's exit status beside the workspace via atomic write (the same
+//! wrapper pattern the Docker executor uses for exit-status truth), closes its
+//! inherited copies of the stdout/stderr pipes once the workload is running (so
+//! the pipes reach EOF when the workload exits), ignores `SIGTERM` so the
+//! polite ladder passes through it, and then stays alive until the scope is
+//! released.
 //!
-//! The sentinel is what makes release **safe**. While it lives the group is never
-//! empty, so the kernel cannot recycle the pgid; and the executor owns its unreaped
-//! handle, so even a sentinel the workload killed pins the id as a zombie. Release
-//! sends its one `killpg(SIGKILL)` while the id is still pinned, reaps the
-//! sentinel — only then can the kernel recycle the id — and afterwards only
-//! **observes** group death by non-signalling means (procfs on Linux, libproc on
-//! macOS). No signal is ever sent after the reap frees the id, so a recycled id can
-//! at most cause a spurious report entry, never a signal to an innocent. A
-//! root-owned member (a step that used `sudo`) may survive the `killpg`; that is a
-//! failure-to-kill, reported, categorically different from killing an innocent.
+//! The sentinel is what makes release **safe**. While it lives the group is
+//! never empty, so the kernel cannot recycle the pgid; and the executor owns
+//! its unreaped handle, so even a sentinel the workload killed pins the id as a
+//! zombie. Release sends its one `killpg(SIGKILL)` while the id is still
+//! pinned, reaps the sentinel — only then can the kernel recycle the id — and
+//! afterwards only **observes** group death by non-signalling means (procfs on
+//! Linux, libproc on macOS). No signal is ever sent after the reap frees the
+//! id, so a recycled id can at most cause a spurious report entry, never a
+//! signal to an innocent. A root-owned member (a step that used `sudo`) may
+//! survive the `killpg`; that is a failure-to-kill, reported, categorically
+//! different from killing an innocent.
 //!
-//! `wait` follows a recorded status or group death, whichever comes first — never
-//! the sentinel's own exit. An `ESRCH` probe could not do this: the unreaped
-//! zombie sentinel keeps the group visible to `kill(-pgid, 0)` until release.
+//! `wait` follows a recorded status or group death, whichever comes first —
+//! never the sentinel's own exit. An `ESRCH` probe could not do this: the
+//! unreaped zombie sentinel keeps the group visible to `kill(-pgid, 0)` until
+//! release.
 //!
 //! # The fence
 //!
-//! A driver crash kills none of this — the sentinel and workload survive, and the
-//! in-memory registry that release would have used dies with the process. So
-//! `acquire` **fences prior work** (the [`Executor::acquire`] contract): each
-//! acquisition gets a **generation** directory under `groups/`, holding that
-//! acquisition's status files and its **group records** — the sentinel's first
-//! act is to durably record its pgid there (temp-then-rename), its second to
-//! check for the generation's `fenced` marker, and only then does the workload
-//! spawn. The fencer writes `fenced` into every prior generation *before*
-//! reading its records; whatever the interleaving, a workload that ever starts
-//! was discoverable at fence time, and a fenced generation can never start one.
+//! A driver crash kills none of this — the sentinel and workload survive, and
+//! the in-memory registry that release would have used dies with the process.
+//! So `acquire` **fences prior work** (the [`Executor::acquire`] contract):
+//! each acquisition gets a **generation** directory under `groups/`, holding
+//! that acquisition's status files and its **group records** — the sentinel's
+//! first act is to durably record its pgid there (temp-then-rename), its second
+//! to check for the generation's `fenced` marker, and only then does the
+//! workload spawn. The fencer writes `fenced` into every prior generation
+//! *before* reading its records; whatever the interleaving, a workload that
+//! ever starts was discoverable at fence time, and a fenced generation can
+//! never start one.
 //!
 //! A bare persisted pgid is never trusted with a signal: the kernel can recycle
 //! it once the whole group is dead, and a pid verified one instant can be
-//! recycled the next. So while anything of the group lives, *it* is the killer —
-//! a watcher inside the group polls for the marker and kills its own group from
-//! inside, where identity is certain; the fencer only waits for the group to
-//! drain. A group that never drains — its kill mechanism died with an OOM'd
+//! recycled the next. So while anything of the group lives, *it* is the killer
+//! — a watcher inside the group polls for the marker and kills its own group
+//! from inside, where identity is certain; the fencer only waits for the group
+//! to drain. A group that never drains — its kill mechanism died with an OOM'd
 //! sentinel, or the recorded pgid now belongs to someone else — fails the
 //! acquire with the typed [`EnvError::FenceLeaked`], and **no signal is sent**.
 //! Per-generation status files are the other half of the same fence: a stale
@@ -116,11 +121,11 @@ fn sentinel_shell() -> &'static str {
 ///   fencer writes markers before reading records, so a sentinel that misses
 ///   the marker at its check was published in time to be discovered, and a
 ///   fenced generation can never start a workload.
-/// - The workload is spawned **before** `trap '' TERM`: an ignored disposition is
-///   inherited across fork+exec and could never be un-ignored by the workload, so
-///   trapping first would break every step that handles `SIGTERM` itself. The
-///   window in which a `TERM` could still hit the sentinel is microseconds at
-///   spawn time.
+/// - The workload is spawned **before** `trap '' TERM`: an ignored disposition
+///   is inherited across fork+exec and could never be un-ignored by the
+///   workload, so trapping first would break every step that handles `SIGTERM`
+///   itself. The window in which a `TERM` could still hit the sentinel is
+///   microseconds at spawn time.
 /// - `exec >/dev/null 2>&1` drops the sentinel's copies of the stdout/stderr
 ///   pipes only after the workload holds them, so the pipes reach EOF exactly
 ///   when the workload (and whatever it spawned) lets go. The fence watcher is
@@ -135,7 +140,8 @@ fn sentinel_shell() -> &'static str {
 ///   inherited the ignored TERM) right after `wait` returns — so when a hostile
 ///   workload murders its sentinel, the group still empties when the workload
 ///   ends and `wait`'s group-death observation keeps its meaning.
-/// - The status is written temp-then-rename, so a reader never sees half a file.
+/// - The status is written temp-then-rename, so a reader never sees half a
+///   file.
 /// - The final loop is what pins the pgid until release, polling the marker at
 ///   a gentler cadence: a fenced generation with stragglers — or nothing but
 ///   its pinning sentinel — still dies from inside.
@@ -164,16 +170,16 @@ done
 
 /// Runs steps as processes on this machine.
 pub struct HostExecutor {
-    run_dir: PathBuf,
-    retention: Retention,
+    run_dir:     PathBuf,
+    retention:   Retention,
     fence_drain: Duration,
 }
 
 impl HostExecutor {
     pub fn new(run_dir: impl Into<PathBuf>) -> Self {
         Self {
-            run_dir: run_dir.into(),
-            retention: Retention::default(),
+            run_dir:     run_dir.into(),
+            retention:   Retention::default(),
             fence_drain: FENCE_DRAIN_DEADLINE,
         }
     }
@@ -200,22 +206,22 @@ impl HostExecutor {
 
 /// One spawn's process group, pinned from spawn to release.
 ///
-/// The `sentinel` handle is deliberately never awaited before release: a reaped —
-/// or dropped, tokio's orphan reaper counts — sentinel would free the pgid for
-/// kernel reuse, and release's `killpg` could then reach an innocent.
+/// The `sentinel` handle is deliberately never awaited before release: a reaped
+/// — or dropped, tokio's orphan reaper counts — sentinel would free the pgid
+/// for kernel reuse, and release's `killpg` could then reach an innocent.
 #[derive(Debug)]
 struct PinnedGroup {
-    pgid: i32,
+    pgid:     i32,
     sentinel: tokio::process::Child,
 }
 
-/// What release needs: the workspace, whether to keep it, and every process group
-/// still pinned.
+/// What release needs: the workspace, whether to keep it, and every process
+/// group still pinned.
 #[derive(Clone, Debug)]
 struct HostTeardown {
-    path: PathBuf,
+    path:      PathBuf,
     retention: Retention,
-    groups: Arc<Mutex<Vec<PinnedGroup>>>,
+    groups:    Arc<Mutex<Vec<PinnedGroup>>>,
 }
 
 #[async_trait]
@@ -231,9 +237,9 @@ impl Executor for HostExecutor {
         // itself and handing this executor a spec with none.
         if !scope.services.is_empty() {
             return Err(EnvError::Backend {
-                backend: SmolStr::new("host"),
+                backend:   SmolStr::new("host"),
                 operation: SmolStr::new("acquire"),
-                message: "this scope declares service containers, which the host executor \
+                message:   "this scope declares service containers, which the host executor \
                           cannot realize; use the local executor"
                     .into(),
             });
@@ -242,7 +248,7 @@ impl Executor for HostExecutor {
         tokio::fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: workspace.display().to_string(),
+                path:    workspace.display().to_string(),
                 message: e.to_string(),
             })?;
         // Group records and status files live beside the workspace, not in it,
@@ -256,7 +262,7 @@ impl Executor for HostExecutor {
         tokio::fs::create_dir_all(&groups_root)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: groups_root.display().to_string(),
+                path:    groups_root.display().to_string(),
                 message: e.to_string(),
             })?;
         fence_prior_generations(&groups_root, self.fence_drain).await?;
@@ -264,7 +270,7 @@ impl Executor for HostExecutor {
         tokio::fs::create_dir_all(&gen_dir)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: gen_dir.display().to_string(),
+                path:    gen_dir.display().to_string(),
                 message: e.to_string(),
             })?;
         let groups = Arc::new(Mutex::new(Vec::new()));
@@ -353,15 +359,15 @@ impl Executor for HostExecutor {
 }
 
 struct HostEnv {
-    workspace: PathBuf,
+    workspace:     PathBuf,
     workspace_str: String,
     /// This acquisition's generation dir: its status files, group records, and
     /// fence marker.
-    gen_dir: PathBuf,
-    env: BTreeMap<SmolStr, SmolStr>,
-    grace: Duration,
-    groups: Arc<Mutex<Vec<PinnedGroup>>>,
-    seq: AtomicU64,
+    gen_dir:       PathBuf,
+    env:           BTreeMap<SmolStr, SmolStr>,
+    grace:         Duration,
+    groups:        Arc<Mutex<Vec<PinnedGroup>>>,
+    seq:           AtomicU64,
 }
 
 #[async_trait]
@@ -374,7 +380,7 @@ impl ExecEnv for HostEnv {
         tokio::fs::create_dir_all(&cwd)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: cwd.display().to_string(),
+                path:    cwd.display().to_string(),
                 message: e.to_string(),
             })?;
 
@@ -462,7 +468,7 @@ impl ExecEnv for HostEnv {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: e.to_string(),
             }),
         }
@@ -479,7 +485,7 @@ impl ExecEnv for HostEnv {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(EnvError::Workspace {
-                    path: relative.display().to_string(),
+                    path:    relative.display().to_string(),
                     message: e.to_string(),
                 });
             }
@@ -489,12 +495,12 @@ impl ExecEnv for HostEnv {
             .read_to_end(&mut bytes)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: e.to_string(),
             })?;
         if bytes.len() > limit {
             return Err(EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: format!("file exceeds the {limit}-byte read limit"),
             });
         }
@@ -507,14 +513,14 @@ impl ExecEnv for HostEnv {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| EnvError::Workspace {
-                    path: parent.display().to_string(),
+                    path:    parent.display().to_string(),
                     message: e.to_string(),
                 })?;
         }
         tokio::fs::write(&path, contents)
             .await
             .map_err(|e| EnvError::Workspace {
-                path: relative.display().to_string(),
+                path:    relative.display().to_string(),
                 message: e.to_string(),
             })
     }
@@ -525,14 +531,14 @@ impl ExecEnv for HostEnv {
 }
 
 struct HostProcess {
-    /// The sentinel's pid, which is the group id. The sentinel — not the workload
-    /// — is the group leader.
-    pgid: i32,
+    /// The sentinel's pid, which is the group id. The sentinel — not the
+    /// workload — is the group leader.
+    pgid:        i32,
     status_file: PathBuf,
-    /// The first resolution wins and is cached: `wait` may be called again after
-    /// each rung of the cancellation ladder.
-    status: Option<ExitStatus>,
-    lines: Option<LineStream>,
+    /// The first resolution wins and is cached: `wait` may be called again
+    /// after each rung of the cancellation ladder.
+    status:      Option<ExitStatus>,
+    lines:       Option<LineStream>,
 }
 
 #[async_trait]
@@ -542,7 +548,8 @@ impl ProcessHandle for HostProcess {
     }
 
     /// A recorded status or group death, whichever comes first — never the
-    /// sentinel's own exit, and never a `waitpid` on it (release owns the reap).
+    /// sentinel's own exit, and never a `waitpid` on it (release owns the
+    /// reap).
     async fn wait(&mut self) -> Result<ExitStatus, EnvError> {
         if let Some(status) = self.status {
             return Ok(status);
@@ -634,7 +641,7 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
         let marker = gen_dir.join(FENCED_MARKER);
         if let Err(e) = std::fs::write(&marker, b"") {
             return Err(EnvError::Workspace {
-                path: marker.display().to_string(),
+                path:    marker.display().to_string(),
                 message: e.to_string(),
             });
         }
@@ -719,7 +726,8 @@ fn group_is_live(pgid: i32) -> bool {
     sentinel_is_live(pgid) || live_group_members(pgid) > 0
 }
 
-/// One `/proc/<pgid>/stat` read: the sentinel, live and still leading the group.
+/// One `/proc/<pgid>/stat` read: the sentinel, live and still leading the
+/// group.
 #[cfg(target_os = "linux")]
 fn sentinel_is_live(pgid: i32) -> bool {
     std::fs::read_to_string(format!("/proc/{pgid}/stat"))
@@ -732,8 +740,9 @@ fn sentinel_is_live(pgid: i32) -> bool {
     unsafe { is_live(pgid) }
 }
 
-/// How many *live* processes remain in the group. Non-signalling, and zombies do
-/// not count: they cannot run, and the unreaped sentinel is deliberately one.
+/// How many *live* processes remain in the group. Non-signalling, and zombies
+/// do not count: they cannot run, and the unreaped sentinel is deliberately
+/// one.
 #[cfg(target_os = "linux")]
 fn live_group_members(pgid: i32) -> usize {
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -754,8 +763,8 @@ fn live_group_members(pgid: i32) -> usize {
         .count()
 }
 
-/// Parse one `/proc/<pid>/stat` line: `pid (comm) state ppid pgrp ...`. The comm
-/// can hold spaces and parentheses, so the split is after the *last* `)`.
+/// Parse one `/proc/<pid>/stat` line: `pid (comm) state ppid pgrp ...`. The
+/// comm can hold spaces and parentheses, so the split is after the *last* `)`.
 #[cfg(target_os = "linux")]
 fn stat_is_live_in_group(stat: &str, pgid: i32) -> bool {
     let Some((_, rest)) = stat.rsplit_once(')') else {
