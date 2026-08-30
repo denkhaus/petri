@@ -72,7 +72,10 @@ impl ArtifactStore {
     /// Begin an upload: allocate the artifact's id. The id high-water mark is
     /// persisted now, so a resumed run never re-issues an id.
     pub(crate) fn begin(&self, name: &str) -> io::Result<i64> {
-        let mut state = self.state.lock().expect("the store lock");
+        let mut state = self
+            .state
+            .lock()
+            .expect("the artifact store lock is not poisoned");
         state.index.next_id += 1;
         let id = state.index.next_id;
         state.pending.insert(name.to_string(), id);
@@ -88,7 +91,10 @@ impl ArtifactStore {
         name: &str,
         digest: Option<String>,
     ) -> io::Result<Option<Artifact>> {
-        let mut state = self.state.lock().expect("the store lock");
+        let mut state = self
+            .state
+            .lock()
+            .expect("the artifact store lock is not poisoned");
         let Some(id) = state.pending.remove(name) else {
             return Ok(None);
         };
@@ -117,7 +123,7 @@ impl ArtifactStore {
     pub(crate) fn list(&self) -> Vec<Artifact> {
         self.state
             .lock()
-            .expect("the store lock")
+            .expect("the artifact store lock is not poisoned")
             .index
             .artifacts
             .clone()
@@ -126,7 +132,7 @@ impl ArtifactStore {
     pub(crate) fn find(&self, name: &str) -> Option<Artifact> {
         self.state
             .lock()
-            .expect("the store lock")
+            .expect("the artifact store lock is not poisoned")
             .index
             .artifacts
             .iter()
@@ -136,7 +142,10 @@ impl ArtifactStore {
 
     /// Remove `name`, content and index entry both.
     pub(crate) fn delete(&self, name: &str) -> io::Result<Option<i64>> {
-        let mut state = self.state.lock().expect("the store lock");
+        let mut state = self
+            .state
+            .lock()
+            .expect("the artifact store lock is not poisoned");
         let Some(position) = state.index.artifacts.iter().position(|a| a.name == name) else {
             return Ok(None);
         };

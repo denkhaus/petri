@@ -580,7 +580,11 @@ impl Roots for GhaRoots<'_> {
             // `jobs.<id>.result` read the (inlined) job's done record, exactly as
             // `needs.*` does.
             "jobs" if self.site.callee_jobs.is_some() => {
-                let callee_jobs = self.site.callee_jobs.as_ref().expect("guarded");
+                let callee_jobs = self
+                    .site
+                    .callee_jobs
+                    .as_ref()
+                    .expect("the match guard proved the site has callee jobs");
                 let [job, what, rest @ ..] = path else {
                     return Some(table.lit(Value::Null));
                 };

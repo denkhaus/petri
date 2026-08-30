@@ -40,7 +40,9 @@ fn inner(expr: &Expr, table: &mut ExprTable, roots: &mut dyn Roots) -> Result<Lo
         // A dotted path is offered to the frontend whole, so `steps.build.outputs.x`
         // can resolve structurally. Anything it declines lowers segment by segment.
         Expr::Property(..) | Expr::Index(..) if expr.dotted_path().is_some() => {
-            let (root, path) = expr.dotted_path().expect("checked");
+            let (root, path) = expr
+                .dotted_path()
+                .expect("the match guard proved this expression is a dotted path");
             if let Some(id) = roots.path(root, &path, table) {
                 return Ok(plain(id));
             }

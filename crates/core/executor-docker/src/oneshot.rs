@@ -92,7 +92,7 @@ impl OneShotRunner {
             && self
                 .ensured
                 .lock()
-                .expect("ensured images")
+                .expect("the ensured-image set is not poisoned")
                 .contains(&reference)
         {
             return Ok(reference);
@@ -127,7 +127,7 @@ impl OneShotRunner {
         if memoize {
             self.ensured
                 .lock()
-                .expect("ensured images")
+                .expect("the ensured-image set is not poisoned")
                 .insert(reference.clone());
         }
         Ok(reference)

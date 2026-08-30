@@ -26,7 +26,10 @@ impl<S> ExprTable<S> {
     }
 
     pub fn push(&mut self, expr: Expr<S>) -> ExprId<S> {
-        let id = ExprId::new(u32::try_from(self.exprs.len()).expect("expression table overflow"));
+        let id = ExprId::new(
+            u32::try_from(self.exprs.len())
+                .expect("an expression table never exceeds u32::MAX entries"),
+        );
         self.exprs.push(expr);
         id
     }

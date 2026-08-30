@@ -82,7 +82,10 @@ impl CacheStore {
     /// Reserve an upload. `None` when the entry already exists — immutable, as
     /// on GitHub — else the blob id the signed upload URL names.
     pub(crate) fn reserve(&self, key: &str, version: &str) -> io::Result<Option<String>> {
-        let _guard = self.lock.lock().expect("the store lock");
+        let _guard = self
+            .lock
+            .lock()
+            .expect("the cache store lock is not poisoned");
         let index = self.read_index()?;
         if index
             .entries
@@ -103,7 +106,10 @@ impl CacheStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        let _guard = self.lock.lock().expect("the store lock");
+        let _guard = self
+            .lock
+            .lock()
+            .expect("the cache store lock is not poisoned");
         let mut index = self.read_index()?;
         index.next_entry += 1;
         let entry_id = index.next_entry;
@@ -132,7 +138,10 @@ impl CacheStore {
         restore_keys: &[String],
         version: &str,
     ) -> io::Result<Option<CacheEntry>> {
-        let _guard = self.lock.lock().expect("the store lock");
+        let _guard = self
+            .lock
+            .lock()
+            .expect("the cache store lock is not poisoned");
         let mut index = self.read_index()?;
         let found = {
             let same_version: Vec<&CacheEntry> = index

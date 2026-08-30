@@ -263,7 +263,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
     /// workflow calls.
     fn apply_strategy(&mut self, job: &Job<'a>, site: &mut Site) -> Option<ExprId> {
         let strategy = job.strategy.as_ref().filter(|s| s.matrix.is_some())?;
-        let matrix_node = strategy.matrix.expect("filtered");
+        let matrix_node = strategy
+            .matrix
+            .expect("the strategy was filtered to those that have a matrix");
         let matrix_expr = self.matrix_expr(matrix_node, site);
         let inputs = self.placement_inputs();
         site.matrix_total = runs_on::static_legs(matrix_node, &inputs, &self.github_identity)

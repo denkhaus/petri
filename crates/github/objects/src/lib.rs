@@ -36,6 +36,8 @@ use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 use std::{env, io};
 
+use tokio::net::TcpListener as AsyncTcpListener;
+use tokio::runtime;
 use tokio::sync::oneshot;
 
 /// The persistent store root — the host-scoped half of the object world: the
@@ -90,9 +92,20 @@ impl ObjectService {
         let backend = Arc::new(http::Backend::new(artifacts, cache, port)?);
         let token = backend.token().to_string();
         let (shutdown, rx) = oneshot::channel();
+        // The runtime and the reactor registration are built here rather than on
+        // the service thread: both can fail on an exhausted process, and a
+        // caller that has already been handed an `ObjectService` would never
+        // learn of it.
+        let rt = runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let listener = {
+            let _guard = rt.enter();
+            AsyncTcpListener::from_std(listener)?
+        };
         let thread = Builder::new()
             .name("petri-objects".into())
-            .spawn(move || http::serve(listener, backend, rx))?;
+            .spawn(move || rt.block_on(http::serve(listener, backend, rx)))?;
         Ok(Self {
             port,
             token,

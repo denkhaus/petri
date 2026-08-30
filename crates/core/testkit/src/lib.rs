@@ -35,7 +35,12 @@ impl RunDir {
     pub fn new(label: &str) -> Self {
         let unique = format!("{label}-{}-{}", process::id(), unique_id());
         let path = env::temp_dir().join("petri-tests").join(unique);
-        fs::create_dir_all(&path).expect("run dir");
+        fs::create_dir_all(&path).unwrap_or_else(|e| {
+            panic!(
+                "could not create the test run dir `{}`: {e}",
+                path.display()
+            )
+        });
         Self { path }
     }
 

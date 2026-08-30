@@ -25,7 +25,6 @@
 
 use std::convert::Infallible;
 use std::io;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -47,7 +46,7 @@ use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener as AsyncTcpListener;
 use tokio::sync::{mpsc, oneshot};
-use tokio::{fs as async_fs, io as async_io, runtime, task};
+use tokio::{fs as async_fs, io as async_io, task};
 
 use crate::cache::{CacheStore, DEFAULT_BUDGET};
 use crate::store::ArtifactStore;
@@ -95,38 +94,31 @@ impl Backend {
     }
 }
 
-/// The server: a single-threaded runtime on the caller's thread, alive until
-/// `shutdown` fires. Dropping the runtime aborts in-flight connections — the
-/// run is over, its steps are done.
-pub(crate) fn serve(
-    listener: TcpListener,
+/// The accept loop, alive until `shutdown` fires. The caller owns the
+/// single-threaded runtime this drives; dropping it aborts in-flight
+/// connections — the run is over, its steps are done.
+pub(crate) async fn serve(
+    listener: AsyncTcpListener,
     backend: Arc<Backend>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
-    let rt = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("a runtime for the object service");
-    rt.block_on(async move {
-        let listener = AsyncTcpListener::from_std(listener).expect("the bound listener registers");
-        loop {
-            tokio::select! {
-                _ = &mut shutdown => break,
-                accepted = listener.accept() => {
-                    let Ok((stream, _)) = accepted else { continue };
-                    let backend = Arc::clone(&backend);
-                    tokio::spawn(async move {
-                        let service = service_fn(move |req| {
-                            handle(Arc::clone(&backend), req)
-                        });
-                        let _ = http1::Builder::new()
-                            .serve_connection(TokioIo::new(stream), service)
-                            .await;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let backend = Arc::clone(&backend);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        handle(Arc::clone(&backend), req)
                     });
-                }
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
             }
         }
-    });
+    }
 }
 
 async fn handle(
