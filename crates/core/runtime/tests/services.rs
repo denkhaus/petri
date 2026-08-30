@@ -10,7 +10,9 @@ use smol_str::SmolStr;
 use testkit::{RunDir, docker_ready};
 
 const REDIS: &str = "redis:7-alpine";
-const RESOLVE_REDIS: &str = "tries=0; until nslookup redis; do tries=$((tries + 1)); [ \"$tries\" -ge 10 ] && exit 1; sleep 1; done";
+// The trailing dot prevents a host-provided DNS search suffix from hiding
+// Docker's network alias.
+const RESOLVE_REDIS: &str = "nslookup redis.";
 
 fn redis_service(published: Option<&str>) -> ServiceSpec {
     let mut service = ServiceSpec::new("redis", REDIS);

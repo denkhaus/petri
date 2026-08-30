@@ -204,14 +204,9 @@ jobs:
       redis:
         image: redis:7-alpine
     steps:
-      - run: |
-          tries=0
-          until nslookup redis; do
-            tries=$((tries + 1))
-            [ "$tries" -ge 10 ] && exit 1
-            sleep 1
-          done
-          echo service-resolved
+      # The trailing dot prevents a host-provided DNS search suffix from hiding
+      # Docker's network alias.
+      - run: nslookup redis. && echo service-resolved
         shell: sh
 "#;
     let graph = lower_ok(text);
