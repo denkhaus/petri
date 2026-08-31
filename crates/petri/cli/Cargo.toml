@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "The petri command line."
+publish = false
 
 [lints]
 workspace = true

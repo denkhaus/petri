@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "A token-flow workflow engine: core, plus every component it ships with."
+publish = false
 
 [lints]
 workspace = true

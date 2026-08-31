@@ -13,13 +13,15 @@ crates/core/frontend   what every format shares; frontend-native is core's own f
 crates/core/runtime    core assembled: the `Runtime` builder components register onto
 crates/core/cli        the command line, format-agnostic; the shipped binary hands it a runtime
 crates/core/testkit    the scaffolding the end-to-end batteries share
-crates/github          the GitHub Actions component: frontend, corpus, acceptance battery
+crates/github/frontend   the GitHub Actions frontend: lowers workflow files to the IR
+crates/github/actions    the GitHub Actions step kinds: run, action, checkout
+crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
+crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
 ```
 
-Crate organization follows `.ai/plans/crate-organization.md`: packages are named
-`petri-*` and arrows point down. Core never depends on a component; components
+Packages are named `petri-*` and arrows point down. Core never depends on a component; components
 depend on core and never on each other; only the distribution names them all.
 `crates/petri/lib/tests/layering.rs` enforces this from `cargo metadata`. The next
 format (CircleCI, RWX, fabro) is a `crates/<component>/` directory and one
