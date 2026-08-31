@@ -90,7 +90,18 @@ async fn realize_inner(
     }
     let mut failed = None;
     while let Some(joined) = pulls.join_next().await {
-        let result = joined.expect("image pull task does not panic");
+        // Every task is joined before the set drops, so a `JoinError` here is
+        // a panicked pull (a host-supplied `ProgressSink`, say), never an
+        // abort. It fails this scope routably like any other pull failure —
+        // the driver awaits acquire inline, so an unwound panic would kill the
+        // driver loop instead: no release, no report.
+        let result = joined.unwrap_or_else(|join_error| {
+            Err(EnvError::Backend {
+                backend:   SmolStr::new("docker"),
+                operation: SmolStr::new("pull"),
+                message:   format!("an image pull task panicked: {join_error}"),
+            })
+        });
         failed = failed.or(result.err());
     }
     if let Some(error) = failed {

@@ -1,6 +1,5 @@
 //! The driver loop.
 
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::mem;
@@ -64,6 +63,14 @@ pub const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(120);
 /// a compatibility rule: reliable delivery and ordering hold when the channel
 /// is full, because every send rides the firing's serialized forwarder.
 pub const CONTROL_CHANNEL_CAPACITY: usize = 32;
+
+/// Capacity of the driver's signal channel — every executor and step signal
+/// (step events, finishes, retry and deadline timers, host cancels) funnels
+/// through it into the driver loop. Generous, so a burst of concurrent
+/// firings' progress buffers while the loop applies a record; the senders are
+/// all tasks that tolerate awaiting capacity, so fullness costs latency, never
+/// ordering or delivery.
+const SIGNAL_CHANNEL_CAPACITY: usize = 1024;
 
 /// Knobs, with the defaults from the handoff's table.
 #[derive(Clone, Debug)]
@@ -278,6 +285,20 @@ struct Task {
     reason:   Option<CancelReason>,
 }
 
+/// A per-run host service riding a run's lifetime — an object-store listener,
+/// a proxy, anything a provisioner starts beside the run dir. The driver holds
+/// each guard untouched while the run executes and awaits
+/// [`RunGuard::teardown`] before the report, so a service whose teardown joins
+/// a thread never blocks a Tokio worker from `Drop`. A driver that never
+/// finishes — a dropped `run` future — falls back to plain drop, so a guard's
+/// `Drop` stays its safety net.
+#[async_trait::async_trait]
+pub trait RunGuard: Send + Sync {
+    /// Explicit async teardown. The default just drops `self`, so a guard
+    /// whose `Drop` already tears down without blocking implements nothing.
+    async fn teardown(self: Box<Self>) {}
+}
+
 pub struct Driver {
     engine:           EngineState,
     executor:         Arc<dyn Executor>,
@@ -293,8 +314,8 @@ pub struct Driver {
     caps:             Capabilities,
     observers:        Vec<Arc<dyn EventObserver>>,
     /// Per-run host services riding this run's lifetime: held untouched until
-    /// the driver drops, which is their teardown.
-    run_guards:       Vec<Box<dyn Any + Send + Sync>>,
+    /// the run ends, when their teardown is awaited.
+    run_guards:       Vec<Box<dyn RunGuard>>,
     releases:         Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer:    Option<JoinHandle<()>>,
@@ -382,7 +403,7 @@ impl Driver {
     ) -> Self {
         let sink =
             Arc::new(LogSink::new(&config.run_dir, secrets.masker()).echoing(config.echo_logs));
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(SIGNAL_CHANNEL_CAPACITY);
         Self {
             engine,
             executor,
@@ -422,10 +443,11 @@ impl Driver {
     }
 
     /// Hold a per-run host service for this run's lifetime. The driver never
-    /// looks inside; dropping the driver drops the guard, which is the
-    /// service's teardown.
+    /// looks inside; when the run ends it awaits the guard's
+    /// [`RunGuard::teardown`], and a driver dropped mid-run drops the guard
+    /// instead.
     #[must_use]
-    pub fn with_run_guard(mut self, guard: Box<dyn Any + Send + Sync>) -> Self {
+    pub fn with_run_guard(mut self, guard: Box<dyn RunGuard>) -> Self {
         self.run_guards.push(guard);
         self
     }
@@ -501,6 +523,13 @@ impl Driver {
                 tracing::warn!(error = ?error, "observer finish failed");
                 observer_errors.push(error);
             }
+        }
+
+        // Per-run services come down before the report: teardown can be real
+        // work — a listener thread joining — so it is awaited here instead of
+        // blocking a worker from the guards' `Drop`.
+        for guard in mem::take(&mut self.run_guards) {
+            guard.teardown().await;
         }
 
         // The run's own failures, which no caller reads: reported once here,
@@ -938,6 +967,11 @@ impl Driver {
         // channel capacity, so backpressure never reaches the driver loop and
         // sends land in order. It drains what is queued when the task goes away —
         // a dropped receiver resolves the remaining acks `NotLive`.
+        //
+        // Unbounded, with a bound in practice: an acked caller awaits its ack
+        // before sending again, so the queue holds at most one `Forward` per
+        // concurrent host caller, plus the driver's own ack-less stop signals —
+        // a handful per escalation, never per unit of work.
         let (forward_tx, mut forward_rx) = mpsc::unbounded_channel::<Forward>();
         tokio::spawn(async move {
             while let Some(forward) = forward_rx.recv().await {

@@ -17,6 +17,6 @@ mod sink;
 pub use observe::{EventObserver, ObserveError};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,
-    DeliverDisposition, Driver, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo, RunConfig,
+    DeliverDisposition, Driver, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo, RunConfig, RunGuard,
     RunHandle, RunReport,
 };

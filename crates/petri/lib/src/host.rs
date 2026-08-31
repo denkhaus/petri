@@ -209,6 +209,13 @@ enum Msg {
 /// channel does the IO, so `on_record` never blocks the driver loop; each
 /// record is flushed as it lands, without fsync. `finish` drains the queue,
 /// flushes, and reports any write error.
+///
+/// Unbounded is deliberate: losslessness is the observer contract, and a
+/// bounded channel would force `on_record` to either block the driver loop or
+/// `try_send` and drop records — changing the contract, not just the buffer.
+/// The memory trade is bounded by the run itself: the queue can hold at most
+/// the records a run produces, which the file gets anyway, and only as far as
+/// the writer trails the loop.
 pub struct JsonlEventLog {
     tx:         Sender<Msg>,
     /// Records below this seq are already in the file — the resume case, where

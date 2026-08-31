@@ -21,8 +21,9 @@
 //!   half, the listener is not.
 //!
 //! The server runs on its own thread with its own single-threaded runtime, so
-//! starting it needs no async context and dropping the [`ObjectService`] tears
-//! it down from any context.
+//! starting it needs no async context. Teardown is
+//! [`ObjectService::shutdown`] where an async context exists — it joins the
+//! thread off-worker — with drop as the blocking fallback from any context.
 
 mod cache;
 mod http;
@@ -37,8 +38,8 @@ use std::thread::{Builder, JoinHandle};
 use std::{env, io};
 
 use tokio::net::TcpListener as AsyncTcpListener;
-use tokio::runtime;
 use tokio::sync::oneshot;
+use tokio::{runtime, task};
 
 /// The persistent store root — the host-scoped half of the object world: the
 /// cache entries and the tool cache, owned by one root so one component prunes
@@ -73,7 +74,9 @@ pub fn tool_cache_dir(store: &Path) -> PathBuf {
     store.join("toolcache").join(env::consts::OS)
 }
 
-/// A running object service: listener, token, stores. Drop tears it down.
+/// A running object service: listener, token, stores.
+/// [`ObjectService::shutdown`] tears it down; drop is the fallback for callers
+/// without an async context.
 pub struct ObjectService {
     port:     u16,
     token:    String,
@@ -127,15 +130,37 @@ impl ObjectService {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    /// Stop the listener and join its thread without blocking a Tokio worker.
+    /// The join waits on the service runtime's drop, which waits on in-flight
+    /// blocking store work — real time, so it rides `spawn_blocking`. After
+    /// this, drop has nothing left to do.
+    pub async fn shutdown(mut self) {
+        let (Some(shutdown), Some(thread)) = (self.shutdown.take(), self.thread.take()) else {
+            return;
+        };
+        let _ = shutdown.send(());
+        match task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => tracing::warn!("object service thread panicked"),
+            Err(error) => {
+                tracing::warn!(error = ?error, "object service join task did not complete");
+            }
+        }
+    }
 }
 
 impl Drop for ObjectService {
     fn drop(&mut self) {
+        // A no-op after `shutdown`, which takes both halves. This path blocks
+        // on the join, so an async caller uses `shutdown` instead.
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::warn!("object service thread panicked");
         }
     }
 }

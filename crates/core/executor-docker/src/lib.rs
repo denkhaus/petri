@@ -55,7 +55,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fmt};
 
 use async_trait::async_trait;
-use executor::lines::pump;
+use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
     AcquireContext, ContainerRunner, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus,
     LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
@@ -946,7 +946,7 @@ impl ExecEnv for DockerEnv {
             source:  e,
         })?;
 
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(pump(stdout, ir::LogStream::Stdout, tx.clone()));
         }

@@ -13,7 +13,7 @@ use std::process::{self, Stdio};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use executor::lines::pump;
+use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
     AcquireContext, ContainerImage, ContainerRunner, EnvError, ExitStatus, LineStream,
     OneShotContainer, ProcessHandle, Progress, ProgressSink, ScopeSpec, Sig,
@@ -248,7 +248,7 @@ impl ContainerRunner for OneShotRunner {
             source:  e,
         })?;
 
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(pump(stdout, ir::LogStream::Stdout, tx.clone()));
         }

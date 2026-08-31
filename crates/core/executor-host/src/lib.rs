@@ -74,7 +74,7 @@ use std::{env, fs, io, process};
 use std::{mem, ptr};
 
 use async_trait::async_trait;
-use executor::lines::pump;
+use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
     AcquireContext, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle,
     ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
@@ -483,7 +483,7 @@ impl ExecEnv for HostEnv {
             .cast_signed();
         tracing::Span::current().record("pgid", pgid);
 
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(pump(stdout, ir::LogStream::Stdout, tx.clone()));
         }
@@ -492,12 +492,16 @@ impl ExecEnv for HostEnv {
         }
         drop(tx);
 
-        // The registry owns the sentinel from here to release.
-        if let Ok(mut groups) = self.groups.lock() {
-            groups.push(PinnedGroup {
-                pgid,
-                sentinel: child,
-            });
+        // The registry owns the sentinel from here to release. A poisoned lock
+        // still has to take the group: dropping it here would leak exactly the
+        // process group release drains a poisoned lock to preserve.
+        let group = PinnedGroup {
+            pgid,
+            sentinel: child,
+        };
+        match self.groups.lock() {
+            Ok(mut held) => held.push(group),
+            Err(poisoned) => poisoned.into_inner().push(group),
         }
 
         Ok(Box::new(HostProcess {

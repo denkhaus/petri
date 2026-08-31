@@ -30,7 +30,7 @@ use tracing::field::Empty;
 use tracing::{Instrument as _, Span};
 
 use crate::action::{ActionSourceCap, input_variable, stage};
-use crate::commands::CommandSink;
+use crate::commands::{COMMAND_SINK_CAPACITY, CommandSink};
 use crate::config::{ActionLocation, DockerActionConfig, DockerActionImage, DockerfileImage};
 use crate::session::{
     REPO_DIR, SINK_LIMIT, Session, UNSECURE_COMMANDS_KEY, ci_get, fold_into_outcome, forward_lines,
@@ -237,7 +237,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
 
     // The command sink watches the container's output for `::` commands, the
     // same contract every GitHub step gets.
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::channel(COMMAND_SINK_CAPACITY);
     let sink = CommandSink::new(ctx.logs.clone(), ctx.secrets.masker(), allow_unsecure);
     let collected = sink.effects();
     let sink_task = tokio::spawn(sink.run(rx).instrument(Span::current()));

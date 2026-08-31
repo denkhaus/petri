@@ -135,7 +135,10 @@ pub fn runtime() -> Runtime {
                         port:  service.port(),
                         token: service.token().into(),
                     };
-                    (caps.provide(cap), Some(Box::new(service) as _))
+                    (
+                        caps.provide(cap),
+                        Some(Box::new(ObjectServiceGuard(service)) as _),
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(error = ?error, "results service unavailable");
@@ -144,6 +147,17 @@ pub fn runtime() -> Runtime {
             }
         })
         .secrets(secrets)
+}
+
+/// The ObjectService as the driver's run guard: teardown is the service's
+/// explicit async shutdown, so joining its thread never blocks a Tokio worker.
+struct ObjectServiceGuard(github_objects::ObjectService);
+
+#[async_trait::async_trait]
+impl driver::RunGuard for ObjectServiceGuard {
+    async fn teardown(self: Box<Self>) {
+        self.0.shutdown().await;
+    }
 }
 
 /// A runtime-registerable secret map plus a lazily loaded `GITHUB_TOKEN`.

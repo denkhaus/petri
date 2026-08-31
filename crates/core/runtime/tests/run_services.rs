@@ -1,21 +1,25 @@
 //! The per-run service seam: a provisioner runs once per driver with the run
 //! directory, its capability reaches the run's steps, and its guard — the
-//! running service — is dropped when the run is over. Teardown is drop, so
-//! "the service dies with the run" is structural, not a callback anyone can
-//! forget.
+//! running service — is torn down when the run is over. The default teardown
+//! is drop, so "the service dies with the run" is structural, not a callback
+//! anyone can forget.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{env, fs, process};
 
+use runtime::driver::RunGuard;
 use runtime::ir::{GraphBuilder, RunStatus, Scope, ScopeId};
 use runtime::{RunOptions, Runtime};
 
 /// The capability a provisioned service hands the run.
 struct ProbeCap;
 
-/// The "service": alive until the driver drops it.
+/// The "service": alive until the driver tears it down. The default
+/// [`RunGuard::teardown`] drops, which is what the flag observes.
 struct ProbeGuard(Arc<AtomicBool>);
+
+impl RunGuard for ProbeGuard {}
 
 impl Drop for ProbeGuard {
     fn drop(&mut self) {

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use frontend_gha::load;
 use github_actions::GitActionSource;
-use runtime::driver::RunReport;
+use runtime::driver::{RunGuard, RunReport};
 use runtime::executor::{MapSecrets, Retention};
 use runtime::frontend::{FileSource, MapFiles, NoFiles};
 use runtime::ir::Graph;
@@ -149,6 +149,18 @@ pub(crate) fn lower_with_actions(text: &str, source: &Arc<GitActionSource>) -> G
     lowered.graph.expect("the workflow lowers")
 }
 
+/// The distribution's run guard for the ObjectService, mirrored here: teardown
+/// is the service's explicit async shutdown, so joining its thread never
+/// blocks a Tokio worker.
+struct ObjectServiceGuard(github_objects::ObjectService);
+
+#[async_trait::async_trait]
+impl RunGuard for ObjectServiceGuard {
+    async fn teardown(self: Box<Self>) {
+        self.0.shutdown().await;
+    }
+}
+
 /// The distribution's per-run ObjectService wiring, assembled here because a
 /// component's tests may not depend on the distribution: the service starts
 /// beside the run dir and its capability reaches the steps. `cache_store` is
@@ -166,7 +178,10 @@ pub(crate) fn with_object_service(rt: Runtime, cache_store: Option<PathBuf>) -> 
                     port:  service.port(),
                     token: service.token().into(),
                 };
-                (caps.provide(cap), Some(Box::new(service) as _))
+                (
+                    caps.provide(cap),
+                    Some(Box::new(ObjectServiceGuard(service)) as _),
+                )
             }
             Err(error) => {
                 eprintln!("warning: no results service: {error}");

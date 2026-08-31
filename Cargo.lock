@@ -724,6 +724,7 @@ dependencies = [
 name = "petri-github-acceptance"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "petri-frontend",
  "petri-frontend-gha",
  "petri-github-actions",

@@ -6,13 +6,12 @@
 //! written once. The CLI, the acceptance harness, and an external repository
 //! all configure the same builder; extension is registration, not new plumbing.
 
-use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fs, io, process};
 
-use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunReport};
+use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunGuard, RunReport};
 use engine::{EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
@@ -79,8 +78,9 @@ pub enum LoadError {
 
 /// What a per-run service provisioner returns beside the capabilities: the
 /// running service, opaque to the runtime. The driver holds it for the run's
-/// lifetime; drop is teardown.
-pub type RunServiceGuard = Box<dyn Any + Send + Sync>;
+/// lifetime and awaits its [`RunGuard::teardown`] when the run ends; drop is
+/// the fallback for a run that never finishes.
+pub type RunServiceGuard = Box<dyn RunGuard>;
 
 /// A per-run service provisioner — see [`Runtime::run_services`].
 type RunProvisioner = Arc<

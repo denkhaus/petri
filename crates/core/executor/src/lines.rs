@@ -12,6 +12,13 @@ use crate::env::LogLine;
 /// Lines longer than this are cut, with a marker.
 pub(crate) const LINE_CAP: usize = 64 * 1024;
 
+/// Capacity of the per-process line channel every executor strings between its
+/// [`pump`] tasks and the step's reader. One decision, decided here: enough
+/// slack that a chatty child keeps streaming while the reader is busy, small
+/// enough that a stalled reader backpressures the pumps instead of buffering
+/// the log in memory.
+pub const LINE_CHANNEL_CAPACITY: usize = 256;
+
 const TRUNCATION_MARKER: &str = " …[line truncated]";
 
 /// Read one stream line by line, capping each line, and forward in arrival

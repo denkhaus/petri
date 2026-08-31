@@ -92,6 +92,13 @@ pub(crate) struct CommandEffects {
     pub refused: Vec<String>,
 }
 
+/// Capacity of the channel feeding a step's [`CommandSink`]. One decision for
+/// every command-watching step (process sessions and docker actions alike):
+/// enough slack that a burst of output lines keeps flowing while the sink
+/// applies a command, small enough that a stalled sink backpressures the
+/// producer instead of buffering the log.
+pub(crate) const COMMAND_SINK_CAPACITY: usize = 64;
+
 /// The sink one step's log events pass through.
 pub(crate) struct CommandSink {
     out:            mpsc::Sender<StepEvent>,

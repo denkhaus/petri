@@ -48,7 +48,7 @@ use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{Instrument as _, Span};
 
-use crate::commands::{CommandEffects, CommandSink};
+use crate::commands::{COMMAND_SINK_CAPACITY, CommandEffects, CommandSink};
 use crate::config::ShellScript;
 use crate::hashfiles;
 
@@ -632,7 +632,7 @@ impl Session {
             },
             None => process,
         };
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(COMMAND_SINK_CAPACITY);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
         let collected = sink.effects();
         let sink_task = tokio::spawn(sink.run(rx).instrument(Span::current()));

@@ -32,7 +32,7 @@ use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Ending, Step, StepCtx, StepFailure, ending_outcome, ladder};
 use tokio::process::Command;
-use tokio::{fs as async_fs, task};
+use tokio::{fs as async_fs, task, time};
 
 use crate::config::CheckoutConfig;
 use crate::gate;
@@ -324,9 +324,15 @@ async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure
         })
         .await
         .map_err(|e| checkout_error(format!("could not run `tar`: {e}")))?;
-    let _ = session::forward_lines(handle.lines(), ctx.logs.clone());
+    let drain = session::forward_lines(handle.lines(), ctx.logs.clone());
     let grace = ctx.env.grace();
-    Ok(ladder(&mut *handle, &mut ctx.control, grace).await)
+    let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
+    // `tar`'s tail output lands before the step outcome, under the same bound
+    // the docker action's sink drain uses.
+    if let Some(drain) = drain {
+        let _ = time::timeout(session::SINK_LIMIT, drain).await;
+    }
+    Ok(ending)
 }
 
 /// Filesystem-heavy snapshot work runs on the blocking pool, not this
