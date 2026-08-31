@@ -687,12 +687,12 @@ fn loop_head_normalization_rewrites_quorum_one_to_any() {
         "the invariant stays strict"
     );
 
-    assert_eq!(ir::normalize_loop_heads(&mut graph), 1);
+    assert_eq!(graph.normalize_loop_heads(), 1);
     assert_eq!(graph.node(head).unwrap().join, JoinPolicy::Any);
     validate(&graph).expect("valid after normalization");
 
     // It only touches loop heads, and only `Quorum { n: 1 }`.
-    assert_eq!(ir::normalize_loop_heads(&mut graph), 0);
+    assert_eq!(graph.normalize_loop_heads(), 0);
 }
 
 /// `Completion::TerminalNode` must name a node that exists — and nothing more:

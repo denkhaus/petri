@@ -305,7 +305,7 @@ async fn image_present(image: &str) -> bool {
     run_docker(&["image", "inspect", image]).await.is_ok()
 }
 
-fn announce_pull(progress: &Arc<dyn executor::ProgressSink>, scope: ir::ScopeId, image: &str) {
+fn announce_pull(progress: &dyn executor::ProgressSink, scope: ir::ScopeId, image: &str) {
     progress.progress(scope, executor::Progress::PullingImage {
         image: SmolStr::new(image),
     });
@@ -315,7 +315,7 @@ fn announce_pull(progress: &Arc<dyn executor::ProgressSink>, scope: ir::ScopeId,
 pub(crate) async fn prepare_registry_image(
     image: &str,
     scope: ir::ScopeId,
-    progress: &Arc<dyn executor::ProgressSink>,
+    progress: &dyn executor::ProgressSink,
 ) -> Result<(), EnvError> {
     if !image_present(image).await {
         announce_pull(progress, scope, image);
@@ -376,12 +376,12 @@ pub(crate) async fn prepare_image(
     ctx: &AcquireContext,
 ) -> Result<(), EnvError> {
     let Some(credentials) = credentials else {
-        return prepare_registry_image(image, scope, ctx.progress()).await;
+        return prepare_registry_image(image, scope, ctx.progress().as_ref()).await;
     };
     if image_present(image).await {
         return Ok(());
     }
-    announce_pull(ctx.progress(), scope, image);
+    announce_pull(ctx.progress().as_ref(), scope, image);
     pull_with_credentials(image, credentials, ctx).await
 }
 

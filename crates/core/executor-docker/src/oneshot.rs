@@ -99,7 +99,7 @@ impl OneShotRunner {
         }
         match image {
             ContainerImage::Registry { image } => {
-                prepare_registry_image(image, self.scope, &self.progress).await?;
+                prepare_registry_image(image, self.scope, self.progress.as_ref()).await?;
             }
             ContainerImage::Build {
                 context,

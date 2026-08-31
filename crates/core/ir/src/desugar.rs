@@ -10,7 +10,7 @@
 
 use crate::builder::{Arm, GraphBuilder};
 use crate::expr::{BinOp, ExprTable};
-use crate::graph::{Budget, ExpandTarget, Expansion, Graph, JoinPolicy};
+use crate::graph::{Budget, ExpandTarget, Expansion, JoinPolicy};
 use crate::ids::{EdgeId, ExprId, NodeId};
 
 /// The expressions a sequential `for_each` needs. The loop state is one object,
@@ -169,35 +169,6 @@ pub fn collector_exprs(t: &mut ExprTable) -> CollectorExprs {
     let ordered = t.call("pluck", vec![sorted, value_key]);
 
     CollectorExprs { indexed, ordered }
-}
-
-/// Rewrite `JoinPolicy::Quorum { n: 1 }` to `Any` on every loop head.
-///
-/// `Quorum { n: 1 }` and `Any` behave identically today, but invariant 8 admits
-/// only `Any` on a loop head: one canonical spelling is easier to grep and to
-/// review, and the equivalence is a property of the current join semantics
-/// rather than a guarantee worth making load-bearing. A frontend that naturally
-/// produces `Quorum { n: 1 }` runs this pass instead of the invariant being
-/// relaxed.
-///
-/// Run it after lowering and before validating. Returns how many nodes it
-/// changed.
-pub fn normalize_loop_heads(graph: &mut Graph) -> usize {
-    let heads: Vec<NodeId> = graph
-        .edges()
-        .filter(|edge| edge.back)
-        .map(|edge| edge.to)
-        .collect();
-    let mut changed = 0;
-    for head in heads {
-        if let Some(node) = graph.body.node_mut(head)
-            && node.join == (JoinPolicy::Quorum { n: 1 })
-        {
-            node.join = JoinPolicy::Any;
-            changed += 1;
-        }
-    }
-    changed
 }
 
 /// Mark a node for parallel expansion: `for_each ... parallel: true`.

@@ -83,7 +83,7 @@ pub enum LoadError {
 pub type RunServiceGuard = Box<dyn RunGuard>;
 
 /// A per-run service provisioner — see [`Runtime::run_services`].
-type RunProvisioner = Arc<
+type RunProvisioner = Box<
     dyn Fn(
             &Path,
             ::steps::CapabilitiesBuilder,
@@ -94,7 +94,7 @@ type RunProvisioner = Arc<
 
 /// The assembled system: frontends, step kinds, executors, secrets, options.
 pub struct Runtime {
-    frontends:    Vec<Arc<dyn Frontend>>,
+    frontends:    Vec<Box<dyn Frontend>>,
     steps:        ::steps::Registry,
     executor:     Option<Arc<dyn Executor>>,
     secrets:      Arc<dyn SecretProvider>,
@@ -126,7 +126,7 @@ impl Runtime {
     )]
     pub fn standard() -> Self {
         Self {
-            frontends:    vec![Arc::new(frontend_native::Native)],
+            frontends:    vec![Box::new(frontend_native::Native)],
             steps:        crate::steps::standard(),
             executor:     None,
             secrets:      Arc::new(MapSecrets::empty()),
@@ -162,7 +162,7 @@ impl Runtime {
     /// format is asked before the native catch-all.
     #[must_use]
     pub fn frontend(mut self, frontend: impl Frontend + 'static) -> Self {
-        self.frontends.insert(0, Arc::new(frontend));
+        self.frontends.insert(0, Box::new(frontend));
         self
     }
 
@@ -245,7 +245,7 @@ impl Runtime {
             + Sync
             + 'static,
     {
-        self.provisioners.push(Arc::new(provision));
+        self.provisioners.push(Box::new(provision));
         self
     }
 

@@ -278,7 +278,7 @@ pub(crate) fn lower(
     }
     let builder = mem::replace(&mut lw.b, GraphBuilder::bare());
     let mut graph = builder.build();
-    ir::normalize_loop_heads(&mut graph);
+    graph.normalize_loop_heads();
     let report = ir::check(&graph);
     for error in &report.errors {
         let span = error

@@ -25,8 +25,8 @@ pub mod validate;
 
 pub use builder::{Arm, GraphBuilder};
 pub use desugar::{
-    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, normalize_loop_heads,
-    parallel_for_each, sequential_for_each, sequential_for_each_over,
+    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, parallel_for_each,
+    sequential_for_each, sequential_for_each_over,
 };
 pub use expr::{
     BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, is_truthy,

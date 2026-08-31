@@ -997,15 +997,3 @@ fn reachable<S>(
     }
     seen
 }
-
-/// Map of edge id to the node it leaves, built once for callers that need it
-/// often.
-pub fn edge_sources<S>(graph: &GraphBody<S>) -> HashMap<EdgeId<S>, NodeId<S>> {
-    let mut map = HashMap::new();
-    for node in &graph.nodes {
-        for edge in node.routing.edges() {
-            map.insert(edge.id, node.id);
-        }
-    }
-    map
-}

@@ -191,7 +191,7 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
     let builder = mem::replace(&mut ctx.b, GraphBuilder::bare());
     let mut graph = builder.build();
     // Normalize, don't relax: `Quorum{1}` on a loop head becomes `Any`.
-    ir::normalize_loop_heads(&mut graph);
+    graph.normalize_loop_heads();
     let report = ir::check(&graph);
     for error in &report.errors {
         let span = error

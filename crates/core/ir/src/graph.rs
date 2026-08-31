@@ -898,3 +898,34 @@ impl<S> Graph<S> {
         self
     }
 }
+
+impl Graph {
+    /// Rewrite `JoinPolicy::Quorum { n: 1 }` to `Any` on every loop head.
+    ///
+    /// `Quorum { n: 1 }` and `Any` behave identically today, but invariant 8
+    /// admits only `Any` on a loop head: one canonical spelling is easier to
+    /// grep and to review, and the equivalence is a property of the current
+    /// join semantics rather than a guarantee worth making load-bearing. A
+    /// frontend that naturally produces `Quorum { n: 1 }` runs this pass
+    /// instead of the invariant being relaxed.
+    ///
+    /// Run it after lowering and before validating. Returns how many nodes it
+    /// changed.
+    pub fn normalize_loop_heads(&mut self) -> usize {
+        let heads: Vec<NodeId> = self
+            .edges()
+            .filter(|edge| edge.back)
+            .map(|edge| edge.to)
+            .collect();
+        let mut changed = 0;
+        for head in heads {
+            if let Some(node) = self.body.node_mut(head)
+                && node.join == (JoinPolicy::Quorum { n: 1 })
+            {
+                node.join = JoinPolicy::Any;
+                changed += 1;
+            }
+        }
+        changed
+    }
+}
