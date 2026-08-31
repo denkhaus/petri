@@ -4,7 +4,10 @@ The run-time counterpart of REPORT.md: every in-scope workflow that lowers, run 
 
 Sweep configuration: host scopes rewritten to the pinned runner images `ghcr.io/lithoscomputer/ubuntu-24.04:slim-b253b0b6004f` (22.04/26.04 variants by label; the privileged dind flavor where the graph drives a Docker engine), matrices capped to their first leg, each workflow capped at 900s wall clock, parallelism 4; the full-image list runs on the ubuntu-latest capture, since its workflows compile native gems against full-image packages. The artifact and cache backends are live: each run gets the distribution's ObjectService, cache and tool cache in the host store, persistent across sweeps. Identity: `github.sha` is the repo's pinned corpus commit (`corpus-pins.txt`) — the sweep's analog of `default_params` reading HEAD — so `checkout` fetches real state; a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API calls, so no anonymous rate limit applied. Each workflow fired as its own primary trigger with a simulated event payload (fabricated resource #999999).
 
-248 workflows in scope; 243 lower and were run.
+248 workflows were in scope when this sweep ran; 243 lowered and ran. Petri
+now also lowers `facebook/react`'s `runtime_build_and_test.yml`, but that
+workflow has not had a new corpus runtime sweep since background-step support
+landed.
 
 | Result (of the 243 run) | Count | Share |
 |---|---|---|
@@ -166,7 +169,7 @@ First failures the sweep's own stance produces or no token-less local run can fi
 | facebook/react | `compiler_typescript.yml` | pass | — |
 | facebook/react | `devtools_discord_notify.yml` | pass | — |
 | facebook/react | `devtools_regression_tests.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: build. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
-| facebook/react | `runtime_build_and_test.yml` | not lowered | `step.background` |
+| facebook/react | `runtime_build_and_test.yml` | not rerun after background-step support | — |
 | facebook/react | `runtime_commit_artifacts.yml` | expected failure | `actions/upload-artifact` — step exited with status 1 · `Error: No files were found with the provided path: build/. No artifacts will be uploaded.` _(uploads outputs a stubbed build never produced)_ |
 | facebook/react | `runtime_discord_notify.yml` | pass | — |
 | facebook/react | `runtime_eslint_plugin_e2e.yml` | pass | — |

@@ -34,6 +34,15 @@ pub const DOCKER_ACTION_KIND: &str = "github/docker_action";
 /// through to the real action.
 pub const CHECKOUT_KIND: &str = "github/checkout";
 
+/// The private terminal that captures one background branch's result.
+pub const BACKGROUND_COMPLETE_KIND: &str = "github/background_complete";
+/// The launch-point step that snapshots the foreground environment.
+pub const BACKGROUND_START_KIND: &str = "github/background_start";
+/// The join-time step that publishes a background branch.
+pub const BACKGROUND_PUBLISH_KIND: &str = "github/background_publish";
+/// A wait control step that folds the included background conclusions.
+pub const BACKGROUND_WAIT_KIND: &str = "github/background_wait";
+
 /// The run-parameter context and key naming the run's repository root:
 /// the host fills `petri.repo`, and a [`CHECKOUT_KIND`] node's config reads
 /// it back at firing. One spelling, shared by writer and reader.

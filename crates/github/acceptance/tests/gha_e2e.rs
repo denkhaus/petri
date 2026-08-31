@@ -1143,6 +1143,445 @@ fn assert_step_env_config_lines(report: &RunReportPlus) {
     }
 }
 
+// ── Background steps ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn background_results_and_environment_publish_at_the_wait() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        name: Background worker
+        background: true
+        run: |
+          sleep 0.2
+          echo "value=ready" >> "$GITHUB_OUTPUT"
+          echo "BACKGROUND_VALUE=ready" >> "$GITHUB_ENV"
+          echo background >> "$RUNNER_TEMP/order"
+      - run: |
+          echo foreground >> "$RUNNER_TEMP/order"
+          echo "before=[${{ steps.worker.outcome }}][$BACKGROUND_VALUE]"
+      - wait: worker
+      - run: |
+          echo "after=[${{ steps.worker.outcome }}][${{ steps.worker.conclusion }}][${{ steps.worker.outputs.value }}][$BACKGROUND_VALUE]"
+          cat "$RUNNER_TEMP/order"
+"#,
+    );
+    let report = run_host(graph, "background-publish").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"before=[][]".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"after=[success][success][ready][ready]".to_string()),
+        "{lines:?}"
+    );
+    let foreground = lines.iter().position(|line| line == "foreground").unwrap();
+    let background = lines.iter().position(|line| line == "background").unwrap();
+    assert!(foreground < background, "background overlapped: {lines:?}");
+    assert_eq!(status_of(&report, "j/worker").as_deref(), Some("success"));
+}
+
+#[tokio::test]
+async fn a_background_failure_surfaces_only_at_its_wait() {
+    let graph = lower_ok(
+        r"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        background: true
+        run: exit 7
+      - run: echo before-wait-ran
+      - wait: worker
+      - run: echo plain-after-wait
+      - if: failure()
+        run: echo failure-after-wait
+",
+    );
+    let report = run_host(graph, "background-failure").await;
+    assert_eq!(report.status, RunStatus::Failed);
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"before-wait-ran".to_string()), "{lines:?}");
+    assert!(
+        !lines.contains(&"plain-after-wait".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"failure-after-wait".to_string()),
+        "{lines:?}"
+    );
+    assert_eq!(status_of(&report, "j/worker").as_deref(), Some("failure"));
+}
+
+#[tokio::test]
+async fn a_skipped_background_step_never_enters_the_steps_context() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        if: false
+        background: true
+        run: exit 1
+      - wait: worker
+      - run: echo "result=[${{ steps.worker.outcome }}]"
+"#,
+    );
+    let report = run_host(graph, "background-skipped").await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        log_lines(&report).contains(&"result=[]".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+    assert!(status_of(&report, "j/worker").is_none());
+}
+
+#[tokio::test]
+async fn background_continue_on_error_uses_the_target_conclusion() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        background: true
+        continue-on-error: true
+        run: exit 9
+      - wait: worker
+      - run: echo "status=[${{ steps.worker.outcome }}][${{ steps.worker.conclusion }}]"
+"#,
+    );
+    let report = run_host(graph, "background-soft-fail").await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        log_lines(&report).contains(&"status=[failure][success]".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+    assert_eq!(
+        status_of(&report, "j/worker").as_deref(),
+        Some("partial_success")
+    );
+}
+
+#[tokio::test]
+async fn wait_all_continue_on_error_softens_the_join_not_the_target() {
+    let graph = lower_ok(
+        r"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        background: true
+        run: exit 4
+      - wait-all:
+        continue-on-error: true
+      - run: echo after-soft-wait
+",
+    );
+    let report = run_host(graph, "background-soft-wait").await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        log_lines(&report).contains(&"after-soft-wait".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+    assert_eq!(status_of(&report, "j/worker").as_deref(), Some("failure"));
+}
+
+#[tokio::test]
+async fn the_implicit_wait_surfaces_an_unjoined_failure() {
+    let graph = lower_ok(
+        r"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        background: true
+        run: sleep 0.1 && exit 3
+      - run: echo foreground-finished
+",
+    );
+    let report = run_host(graph, "background-implicit-failure").await;
+    assert_eq!(report.status, RunStatus::Failed);
+    assert!(
+        log_lines(&report).contains(&"foreground-finished".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+    assert_eq!(status_of(&report, "j/worker").as_deref(), Some("failure"));
+}
+
+#[tokio::test]
+async fn a_repeated_explicit_wait_reapplies_path_effects() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: one
+        background: true
+        run: echo "$RUNNER_TEMP/one" >> "$GITHUB_PATH"
+      - id: two
+        background: true
+        run: echo "$RUNNER_TEMP/two" >> "$GITHUB_PATH"
+      - wait: one
+      - run: echo "first=${PATH%%:*}"
+      - wait: two
+      - run: echo "second=${PATH%%:*}"
+      - wait: one
+      - run: echo "repeated=${PATH%%:*}"
+"#,
+    );
+    let report = run_host(graph, "background-repeat-wait").await;
+    assert_eq!(report.status, RunStatus::Success);
+    let lines = log_lines(&report);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.ends_with("/one") && line.starts_with("first=")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.ends_with("/two") && line.starts_with("second=")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.ends_with("/one") && line.starts_with("repeated=")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_background_composite_stays_sequential_and_private_until_the_wait() {
+    let action = r#"
+name: Background composite
+outputs:
+  value:
+    value: ${{ steps.second.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: first
+      shell: bash
+      run: echo "INNER_VALUE=from-first" >> "$GITHUB_ENV"
+    - id: second
+      shell: bash
+      run: |
+        echo "inner=$INNER_VALUE"
+        echo "value=$INNER_VALUE" >> "$GITHUB_OUTPUT"
+"#;
+    let workflow = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: composite
+        background: true
+        uses: ./.github/actions/background
+      - run: echo "before=[$INNER_VALUE][${{ steps.composite.outputs.value }}]"
+      - wait: composite
+      - run: echo "after=[$INNER_VALUE][${{ steps.composite.outputs.value }}]"
+"#;
+    let files = files(&[(".github/actions/background/action.yml", action)]);
+    let report = run_host(lower_ok_with(workflow, &files), "background-composite").await;
+    assert_eq!(report.status, RunStatus::Success);
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"before=[][]".to_string()), "{lines:?}");
+    assert!(lines.contains(&"inner=from-first".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"after=[from-first][from-first]".to_string()),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn matrix_legs_use_independent_background_channels() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - id: worker
+        name: Worker ${{ matrix.n }}
+        background: true
+        run: |
+          echo "LEG=${{ matrix.n }}" >> "$GITHUB_ENV"
+          echo "value=${{ matrix.n }}" >> "$GITHUB_OUTPUT"
+      - wait: worker
+      - run: echo "leg=[${{ matrix.n }}][$LEG][${{ steps.worker.outputs.value }}]"
+"#,
+    );
+    let report = run_host(graph, "background-matrix").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"leg=[1][1][1]".to_string()), "{lines:?}");
+    assert!(lines.contains(&"leg=[2][2][2]".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"Worker 1: Succeeded".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Worker 2: Succeeded".to_string()),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn parallel_members_join_before_the_next_step() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - id: slow
+            run: |
+              sleep 0.1
+              echo "value=slow" >> "$GITHUB_OUTPUT"
+          - id: fast
+            run: echo "value=fast" >> "$GITHUB_OUTPUT"
+      - run: echo "joined=[${{ steps.slow.outputs.value }}][${{ steps.fast.outputs.value }}]"
+"#,
+    );
+    let report = run_host(graph, "background-parallel").await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        log_lines(&report).contains(&"joined=[slow][fast]".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+}
+
+#[tokio::test]
+async fn wait_all_publishes_environment_in_registration_order() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: one
+        background: true
+        run: |
+          sleep 0.1
+          echo "SHARED=one" >> "$GITHUB_ENV"
+      - id: two
+        background: true
+        run: echo "SHARED=two" >> "$GITHUB_ENV"
+      - wait-all:
+      - run: echo "shared=$SHARED"
+"#,
+    );
+    let report = run_host(graph, "background-registration-order").await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        log_lines(&report).contains(&"shared=two".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+}
+
+#[tokio::test]
+async fn a_background_timeout_fails_its_wait() {
+    let graph = lower_ok(
+        r"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: worker
+        background: true
+        timeout-minutes: 0.001
+        run: sleep 2
+      - wait: worker
+",
+    );
+    let report = run_host(graph, "background-timeout").await;
+    assert_eq!(report.status, RunStatus::Failed);
+    assert_eq!(status_of(&report, "j/worker").as_deref(), Some("timed_out"));
+    assert!(
+        log_lines(&report).contains(
+            &"The background step 'sleep 2' has timed out after 0.001 minutes".to_string()
+        ),
+        "{:?}",
+        log_lines(&report)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_publication_works_in_a_job_container() {
+    if !testkit::is_docker_ready().await {
+        return;
+    }
+    let graph = lower_ok(&format!(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    container: {RUNNER_IMAGE_2404}
+    steps:
+      - id: worker
+        background: true
+        run: |
+          echo "value=boxed" >> "$GITHUB_OUTPUT"
+          echo "BOXED=boxed" >> "$GITHUB_ENV"
+      - wait: worker
+      - run: echo "boxed=[$BOXED][${{{{ steps.worker.outputs.value }}}}]"
+"#
+    ));
+    let report = run_host(graph, "background-boxed").await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(
+        log_lines(&report).contains(&"boxed=[boxed][boxed]".to_string()),
+        "{:?}",
+        log_lines(&report)
+    );
+}
+
 /// Inline `${{ env.NAME }}` in a later step's config sees what an earlier step
 /// appended through `GITHUB_ENV` — on GitHub the runner renders step config
 /// with that environment — and lands on exactly the value the process

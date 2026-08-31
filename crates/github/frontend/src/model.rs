@@ -120,9 +120,11 @@ pub(crate) struct Strategy<'a> {
 
 #[derive(Clone)]
 pub(crate) struct Step<'a> {
-    /// Position in the job, 0-based. Steps without an `id` are named from it.
-    pub index:             usize,
+    /// The stable graph-local fallback when the step has no explicit `id`.
+    /// Parallel members include both their group and member positions.
+    pub implicit_id:       String,
     pub id:                Option<String>,
+    pub name:              Option<Node<'a>>,
     pub span:              Span,
     pub condition:         Option<Node<'a>>,
     pub run:               Option<Node<'a>>,
@@ -133,6 +135,12 @@ pub(crate) struct Step<'a> {
     pub working_directory: Option<Node<'a>>,
     pub continue_on_error: Option<Node<'a>>,
     pub timeout_minutes:   Option<Node<'a>>,
+    /// The executable step runs without advancing the foreground chain.
+    pub background:        bool,
+    /// Background node names joined by this control step.
+    pub wait:              Option<Vec<String>>,
+    /// Join every background step not published by an earlier wait.
+    pub wait_all:          bool,
 }
 
 impl Step<'_> {
@@ -140,8 +148,12 @@ impl Step<'_> {
     pub(crate) fn node_name(&self) -> String {
         match &self.id {
             Some(id) => id.clone(),
-            None => format!("step-{}", self.index + 1),
+            None => self.implicit_id.clone(),
         }
+    }
+
+    pub(crate) fn is_wait(&self) -> bool {
+        self.wait.is_some() || self.wait_all
     }
 }
 
@@ -191,6 +203,8 @@ const STEP_KEYS: &[&str] = &[
     "background",
     "wait",
     "wait-all",
+    "cancel",
+    "parallel",
 ];
 
 /// Read a workflow. Returns `None` only when the document is not a workflow at
@@ -421,14 +435,72 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
         ),
         Some(s) => {
             if let Some(seq) = s.expect_sequence(diags, "`steps`") {
-                for (index, step) in seq.iter().enumerate() {
-                    if let Some(step) = read_step(id, index, step, diags) {
+                for (index, node) in seq.iter().enumerate() {
+                    let implicit_id = format!("step-{}", index + 1);
+                    let parallel = node.as_mapping().and_then(|step| step.get("parallel"));
+                    let Some(parallel) = parallel else {
+                        if let Some(step) = read_step_as(id, index, implicit_id, node, true, diags)
+                        {
+                            steps.push(step);
+                        }
+                        continue;
+                    };
+                    let Some(wrapper) =
+                        node.expect_mapping(diags, &format!("step {} of job `{id}`", index + 1))
+                    else {
+                        continue;
+                    };
+                    wrapper.reject_unknown_keys(
+                        &["parallel"],
+                        diags,
+                        &format!("parallel step {} of job `{id}`", index + 1),
+                    );
+                    let Some(members) = parallel.expect_sequence(diags, "`parallel`") else {
+                        continue;
+                    };
+                    let mut targets = Vec::new();
+                    for (member_index, member) in members.iter().enumerate() {
+                        let member_id = format!("step-{}-{}", index + 1, member_index + 1);
+                        let Some(mut step) =
+                            read_step_as(id, index, member_id, member, true, diags)
+                        else {
+                            continue;
+                        };
+                        if step.run.is_none() && step.uses.is_none() {
+                            diags.error(
+                                "gha.bad_step",
+                                step.span.clone(),
+                                "a `parallel` member must be a `run` or `uses` step",
+                            );
+                            continue;
+                        }
+                        step.background = true;
+                        targets.push(step.node_name());
                         steps.push(step);
                     }
+                    steps.push(Step {
+                        implicit_id:       format!("parallel-{}", index + 1),
+                        id:                None,
+                        name:              None,
+                        span:              node.span(),
+                        condition:         None,
+                        run:               None,
+                        uses:              None,
+                        with:              Vec::new(),
+                        env:               Vec::new(),
+                        shell:             None,
+                        working_directory: None,
+                        continue_on_error: None,
+                        timeout_minutes:   None,
+                        background:        false,
+                        wait:              Some(targets),
+                        wait_all:          false,
+                    });
                 }
             }
         }
     }
+    resolve_wait_targets(id, &mut steps, diags);
 
     let strategy = m.get("strategy").and_then(|s| {
         let sm = s.expect_mapping(diags, "`strategy`")?;
@@ -598,6 +670,24 @@ pub(crate) fn read_step<'a>(
     node: Node<'a>,
     diags: &mut Diagnostics,
 ) -> Option<Step<'a>> {
+    read_step_as(
+        job,
+        index,
+        format!("step-{}", index + 1),
+        node,
+        false,
+        diags,
+    )
+}
+
+fn read_step_as<'a>(
+    job: &str,
+    index: usize,
+    implicit_id: String,
+    node: Node<'a>,
+    allow_background: bool,
+    diags: &mut Diagnostics,
+) -> Option<Step<'a>> {
     let m = node.expect_mapping(diags, &format!("step {} of job `{job}`", index + 1))?;
     m.reject_unknown_keys(
         STEP_KEYS,
@@ -605,22 +695,118 @@ pub(crate) fn read_step<'a>(
         &format!("step {} of job `{job}`", index + 1),
     );
 
-    // Background steps and the `wait:` steps that join them. The IR can express
-    // this — a background step is a fan-out, a `wait` is an `All` join — but
-    // that is a lowering decision for the spec, so it is rejected specifically
-    // for now.
-    let mut background = false;
-    for key in ["background", "wait", "wait-all"] {
-        if let Some(node) = m.get(key) {
-            background = true;
-            diags.unsupported(
-                "step.background",
-                node.span(),
-                format!("step {} of job `{job}` uses `{key}:` (background steps)", index + 1),
-                "a background step is a fan-out and its `wait:` an all-join, both of which the engine has; \
-                 mapping them is a spec decision, not yet made",
-            );
+    let background = match m.get("background") {
+        None => false,
+        Some(value) => {
+            if let Some(value) = value.as_scalar().and_then(|s| s.as_bool()) {
+                value
+            } else {
+                diags.error(
+                    "gha.bad_step",
+                    value.span(),
+                    "`background` must be `true` or `false`",
+                );
+                false
+            }
         }
+    };
+    if background && !allow_background {
+        diags.error(
+            "gha.bad_step",
+            m.get("background")
+                .map_or_else(|| node.span(), |n| n.span()),
+            "`background` is not allowed inside a composite action",
+        );
+    }
+
+    let wait = m.get("wait").map(|value| {
+        if let Some(id) = value.as_str().filter(|id| !id.is_empty()) {
+            return vec![id.to_string()];
+        }
+        if let Some(ids) = value.as_sequence() {
+            return ids
+                .iter()
+                .filter_map(|item| {
+                    if let Some(id) = item.as_str().filter(|id| !id.is_empty()) {
+                        Some(id.to_string())
+                    } else {
+                        diags.error(
+                            "gha.bad_step",
+                            item.span(),
+                            "each `wait` target must be a non-empty step id",
+                        );
+                        None
+                    }
+                })
+                .collect();
+        }
+        diags.error(
+            "gha.bad_step",
+            value.span(),
+            "`wait` must name a step id or a list of step ids",
+        );
+        Vec::new()
+    });
+    let wait_all = match m.get("wait-all") {
+        None => false,
+        Some(value)
+            if value.as_scalar().is_some_and(|s| s.is_null())
+                || value.as_scalar().and_then(|s| s.as_bool()) == Some(true) =>
+        {
+            true
+        }
+        Some(value) => {
+            diags.error(
+                "gha.bad_step",
+                value.span(),
+                "`wait-all` must be empty or `true`",
+            );
+            true
+        }
+    };
+    if let Some(cancel) = m.get("cancel") {
+        diags.unsupported(
+            "step.cancel",
+            cancel.span(),
+            "a `cancel` background control step",
+            "targeted background cancellation needs an engine control path; use `wait` or `wait-all` for now",
+        );
+    }
+    if let Some(parallel) = m.get("parallel") {
+        let message = if allow_background {
+            "nested `parallel` groups are not supported"
+        } else {
+            "`parallel` is not allowed inside a composite action"
+        };
+        diags.error("gha.bad_step", parallel.span(), message);
+    }
+    let control =
+        wait.is_some() || wait_all || m.contains_key("cancel") || m.contains_key("parallel");
+    if !allow_background && (wait.is_some() || wait_all) {
+        diags.unsupported(
+            "step.wait_composite",
+            node.span(),
+            "a background wait inside a composite action",
+            "place the wait in the calling job; composite-local background steps are not allowed",
+        );
+    }
+    let control_count = usize::from(wait.is_some())
+        + usize::from(wait_all)
+        + usize::from(m.contains_key("cancel"))
+        + usize::from(m.contains_key("parallel"));
+    if control_count > 1 || (background && control) {
+        diags.error(
+            "gha.bad_step",
+            node.span(),
+            "a step cannot combine background control forms",
+        );
+    }
+    if control && m.get("if").is_some() {
+        diags.error(
+            "gha.bad_step",
+            m.get("if").map_or_else(|| node.span(), |n| n.span()),
+            "background control steps do not support `if`",
+        );
     }
 
     let run = m.get("run");
@@ -628,8 +814,8 @@ pub(crate) fn read_step<'a>(
         .get("uses")
         .and_then(|u| u.as_str().map(|s| (s.to_string(), u.span())));
     match (&run, &uses) {
-        // A background step needs neither: `wait:` is what it does.
-        (None, None) if background => {}
+        // A background control step has neither: waiting is what it does.
+        (None, None) if control => {}
         (None, None) => diags.error(
             "gha.bad_step",
             node.span(),
@@ -649,6 +835,13 @@ pub(crate) fn read_step<'a>(
         // Exactly one of the two: the shapes this function goes on to lower.
         (Some(_), None) | (None, Some(_)) => {}
     }
+    if control && (run.is_some() || uses.is_some()) {
+        diags.error(
+            "gha.bad_step",
+            node.span(),
+            "a background control step cannot also contain `run` or `uses`",
+        );
+    }
 
     // `with:` belongs to `uses:` steps; GitHub rejects it elsewhere ("Unexpected
     // value 'with'"). The raw key, not the parsed reference, decides — a malformed
@@ -667,8 +860,9 @@ pub(crate) fn read_step<'a>(
     }
 
     Some(Step {
-        index,
+        implicit_id,
         id: m.get("id").and_then(|n| n.as_str()).map(str::to_string),
+        name: m.get("name"),
         span: node.span(),
         condition: m.get("if"),
         run,
@@ -679,7 +873,50 @@ pub(crate) fn read_step<'a>(
         working_directory: m.get("working-directory"),
         continue_on_error: m.get("continue-on-error"),
         timeout_minutes: m.get("timeout-minutes"),
+        background,
+        wait,
+        wait_all,
     })
+}
+
+/// Resolve explicit `wait:` ids to the stable node names used by lowering.
+/// Only an earlier background step is a valid target: a later one has not
+/// started and can never satisfy this point in the foreground chain.
+fn resolve_wait_targets(job: &str, steps: &mut [Step<'_>], diags: &mut Diagnostics) {
+    use std::collections::BTreeMap;
+
+    let mut background_ids = BTreeMap::new();
+    let mut background_nodes = BTreeMap::new();
+    for step in steps {
+        if step.background {
+            let node_name = step.node_name();
+            background_nodes.insert(node_name.clone(), node_name.clone());
+            if let Some(id) = &step.id {
+                background_ids.insert(id.clone(), node_name);
+            }
+            continue;
+        }
+        let Some(targets) = &mut step.wait else {
+            continue;
+        };
+        let known = if step.implicit_id.starts_with("parallel-") {
+            &background_nodes
+        } else {
+            &background_ids
+        };
+        for target in targets {
+            match known.get(target) {
+                Some(node_name) => target.clone_from(node_name),
+                None => diags.error(
+                    "gha.bad_step",
+                    step.span.clone(),
+                    format!(
+                        "`wait: {target}` in job `{job}` does not name an earlier background step"
+                    ),
+                ),
+            }
+        }
+    }
 }
 
 fn read_defaults<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Defaults<'a> {

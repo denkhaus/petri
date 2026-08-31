@@ -407,6 +407,10 @@ async fn run_one(
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
         .step(github_actions::CheckoutStep)
+        .step(github_actions::BackgroundStartStep)
+        .step(github_actions::BackgroundCompleteStep)
+        .step(github_actions::BackgroundPublishStep)
+        .step(github_actions::BackgroundWaitStep)
         .capability(ActionSourceCap(trees))
         .capability(github_actions::ToolCacheCap(tool_cache))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", &sweep_token())]));

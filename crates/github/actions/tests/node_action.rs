@@ -16,7 +16,8 @@ use std::{env, fs};
 use frontend::NoFiles;
 use frontend_gha::load_with;
 use github_actions::{
-    ActionRef, ActionSourceCap, ActionStep, ActionTreeSource, GitActionSource, RunStep,
+    ActionRef, ActionSourceCap, ActionStep, ActionTreeSource, BackgroundCompleteStep,
+    BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep, GitActionSource, RunStep,
 };
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{Graph, RunStatus};
@@ -170,6 +171,10 @@ fn runtime(dir: &Path, source: &Arc<GitActionSource>) -> Runtime {
         .options(options)
         .step(RunStep)
         .step(ActionStep)
+        .step(BackgroundStartStep)
+        .step(BackgroundCompleteStep)
+        .step(BackgroundPublishStep)
+        .step(BackgroundWaitStep)
         .capability(ActionSourceCap(trees))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", FIXTURE_TOKEN)]))
 }
@@ -319,6 +324,74 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
     assert_eq!(
         record.outcome.output[github_actions::STATE_OUTPUT_KEY],
         json!({ "token": "abc123", "saved": "yes" })
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the skip note and diagnostics"
+)]
+async fn a_javascript_action_can_run_in_the_background() {
+    if !have("git") || !have("node") {
+        eprintln!("skipping: git and node are needed");
+        return;
+    }
+    let run_dir = testkit::RunDir::new("gha-background-action");
+    let dir = run_dir.path();
+    let remotes = dir.join("remotes");
+    fixture_action(&remotes);
+    let source = Arc::new(
+        GitActionSource::new(dir.join("cache"))
+            .with_remote_base(format!("file://{}", remotes.display())),
+    );
+    let workflow = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: hello
+        background: true
+        uses: acme/hello@v1
+        with:
+          name: Background
+      - run: echo "before=[$HELLO_ENV][${{ steps.hello.outputs.greeting }}]"
+      - wait: hello
+      - run: |
+          echo "after=[$HELLO_ENV][${{ steps.hello.outputs.greeting }}]"
+          hellotool
+"#;
+    let lowered = load_with(
+        ".github/workflows/background.yml",
+        workflow,
+        &NoFiles,
+        Some(source.as_ref()),
+    );
+    for diagnostic in lowered.diagnostics.iter() {
+        eprintln!("{diagnostic}");
+    }
+    let graph = with_params(lowered.graph.expect("the workflow lowers"));
+    let report = runtime(dir, &source)
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = testkit::log_lines(&report);
+    assert!(lines.contains(&"before=[][]".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"after=[from-action][Hello, Background]".to_string()),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"hellotool-ran".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"post saw abc123 yes".to_string()),
+        "{lines:?}"
     );
 }
 

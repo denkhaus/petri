@@ -118,6 +118,10 @@ pub fn runtime() -> Runtime {
         .step(github::ActionStep)
         .step(github::DockerActionStep)
         .step(github::CheckoutStep)
+        .step(github::BackgroundStartStep)
+        .step(github::BackgroundCompleteStep)
+        .step(github::BackgroundPublishStep)
+        .step(github::BackgroundWaitStep)
         .capability(github::ActionSourceCap(trees))
         .capability(github::ToolCacheCap(tool_cache))
         .run_services(move |run_dir, caps| {

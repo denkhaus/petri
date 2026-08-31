@@ -32,38 +32,44 @@ pub enum ShellScript {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
-    pub run:           String,
+    pub run:             String,
     /// The step's condition, as the frontend's gate tree. The step evaluates it
     /// before session files are created and before any process spawns; false
     /// means `Outcome::skipped()` — or a cancelled outcome when `cancelled` is
     /// set. Absent means run.
     #[serde(default)]
-    pub gate:          Option<Value>,
+    pub gate:            Option<Value>,
     /// The engine's `scope_cancelled` static at firing time: a false gate then
     /// records `Cancelled`, as GitHub reports post-cancel non-cleanup steps.
     #[serde(default)]
-    pub cancelled:     bool,
+    pub cancelled:       bool,
     #[serde(default)]
-    pub shell:         Shell,
+    pub shell:           Shell,
     /// A custom shell template (`bash -el {0}`, `python {0}`): the step writes
     /// the script to a file and substitutes its path for `{0}`, as GitHub
     /// does. When set, `shell` is not used.
     #[serde(default)]
-    pub shell_command: Option<String>,
+    pub shell_command:   Option<String>,
     /// Preparation for a built-in shell whose script contract is more than its
     /// command template. Custom shell templates leave this as `plain`.
     #[serde(default)]
-    pub shell_script:  ShellScript,
+    pub shell_script:    ShellScript,
     #[serde(default)]
-    pub env:           BTreeMap<SmolStr, ValueOrSecretRef>,
+    pub env:             BTreeMap<SmolStr, ValueOrSecretRef>,
     /// `working-directory`, relative to `GITHUB_WORKSPACE`.
     #[serde(default)]
-    pub working_dir:   Option<PathBuf>,
+    pub working_dir:     Option<PathBuf>,
     #[serde(default)]
-    pub soft_fail:     SoftFail,
+    pub soft_fail:       SoftFail,
     /// `github.event`, written to the file `GITHUB_EVENT_PATH` names.
     #[serde(default)]
-    pub event:         Value,
+    pub event:           Value,
+    /// Job-environment channel for one matrix or expansion leg.
+    #[serde(default)]
+    pub job_environment: Option<String>,
+    /// Private job-environment channel for one background step.
+    #[serde(default)]
+    pub background:      Option<String>,
 }
 
 /// `github/checkout`: the local-checkout substitute — the workspace
@@ -74,74 +80,88 @@ pub struct CheckoutConfig {
     /// The repository's host path, from the `petri.repo` run parameter. A run
     /// whose host filled nothing resolves to null — the step fails routably.
     #[serde(default)]
-    pub source:     Option<String>,
+    pub source:          Option<String>,
     /// The `path:` input: destination relative to `GITHUB_WORKSPACE`.
     #[serde(default)]
-    pub path:       Option<String>,
+    pub path:            Option<String>,
     /// The run's fully-qualified ref (`github.ref`): a `refs/heads/*` value
     /// names the branch the snapshot leaves checked out, as GitHub's checkout
     /// does; anything else stays as the clone landed (detached).
     #[serde(default, rename = "ref")]
-    pub reference:  Option<String>,
+    pub reference:       Option<String>,
     /// `github.repository` — with `server_url`, the URL the snapshot's
     /// `origin` remote is set to, as GitHub's checkout configures it.
     #[serde(default)]
-    pub repository: Option<String>,
+    pub repository:      Option<String>,
     /// `github.server_url`.
     #[serde(default)]
-    pub server_url: Option<String>,
+    pub server_url:      Option<String>,
     /// The step's condition, as the frontend's gate tree; see [`RunConfig`].
     #[serde(default)]
-    pub gate:       Option<Value>,
+    pub gate:            Option<Value>,
     #[serde(default)]
-    pub cancelled:  bool,
+    pub cancelled:       bool,
     #[serde(default)]
-    pub soft_fail:  SoftFail,
+    pub soft_fail:       SoftFail,
+    /// Job-environment channel for one matrix or expansion leg.
+    #[serde(default)]
+    pub job_environment: Option<String>,
+    /// Private job-environment channel for one background step.
+    #[serde(default)]
+    pub background:      Option<String>,
 }
 
 /// `github/action`: one phase of a JavaScript action.
 #[derive(Debug)]
 pub struct ActionConfig {
-    pub action:    ActionLocation,
+    pub action:          ActionLocation,
     /// `runs.main`, `runs.pre` or `runs.post`, relative to the action
     /// directory.
-    pub entry:     String,
+    pub entry:           String,
     /// The phase's condition (`if:`, `pre-if`, `post-if`) as the frontend's
     /// gate tree, evaluated before anything is staged or spawned. Absent
     /// means run.
-    pub gate:      Option<Value>,
+    pub gate:            Option<Value>,
     /// The engine's `scope_cancelled` static at firing time; see `RunConfig`.
-    pub cancelled: bool,
+    pub cancelled:       bool,
     /// Declared inputs with the caller's values or their defaults, plus
     /// undeclared `with:` keys. Each becomes `INPUT_<NAME>`.
-    pub inputs:    BTreeMap<String, ValueOrSecretRef>,
-    pub env:       BTreeMap<SmolStr, ValueOrSecretRef>,
+    pub inputs:          BTreeMap<String, ValueOrSecretRef>,
+    pub env:             BTreeMap<SmolStr, ValueOrSecretRef>,
     /// State an earlier phase of this action saved; each entry becomes
     /// `STATE_<name>`.
-    pub state:     BTreeMap<String, Value>,
-    pub soft_fail: SoftFail,
-    pub event:     Value,
+    pub state:           BTreeMap<String, Value>,
+    pub soft_fail:       SoftFail,
+    pub event:           Value,
+    /// Job-environment channel for one matrix or expansion leg.
+    pub job_environment: Option<String>,
+    /// Private job-environment channel for one background step.
+    pub background:      Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawActionConfig {
-    action:    ActionLocation,
-    entry:     String,
+    action:          ActionLocation,
+    entry:           String,
     #[serde(default)]
-    gate:      Option<Value>,
+    gate:            Option<Value>,
     #[serde(default)]
-    cancelled: bool,
+    cancelled:       bool,
     #[serde(default)]
-    inputs:    BTreeMap<String, ValueOrSecretRef>,
+    inputs:          BTreeMap<String, ValueOrSecretRef>,
     #[serde(default)]
-    env:       BTreeMap<SmolStr, ValueOrSecretRef>,
+    env:             BTreeMap<SmolStr, ValueOrSecretRef>,
     #[serde(default)]
-    state:     BTreeMap<String, Value>,
+    state:           BTreeMap<String, Value>,
     #[serde(default)]
-    soft_fail: SoftFail,
+    soft_fail:       SoftFail,
     #[serde(default)]
-    event:     Value,
+    event:           Value,
+    #[serde(default)]
+    job_environment: Option<String>,
+    #[serde(default)]
+    background:      Option<String>,
 }
 
 /// The manifest's entry (`runs.main`/`pre`/`post`), validated the way the
@@ -167,15 +187,17 @@ impl<'de> Deserialize<'de> for ActionConfig {
         // only the entry's join against it is this config's own invariant.
         validate_entry(&raw.action, &raw.entry).map_err(de::Error::custom)?;
         Ok(Self {
-            action:    raw.action,
-            entry:     raw.entry,
-            gate:      raw.gate,
-            cancelled: raw.cancelled,
-            inputs:    raw.inputs,
-            env:       raw.env,
-            state:     raw.state,
-            soft_fail: raw.soft_fail,
-            event:     raw.event,
+            action:          raw.action,
+            entry:           raw.entry,
+            gate:            raw.gate,
+            cancelled:       raw.cancelled,
+            inputs:          raw.inputs,
+            env:             raw.env,
+            state:           raw.state,
+            soft_fail:       raw.soft_fail,
+            event:           raw.event,
+            job_environment: raw.job_environment,
+            background:      raw.background,
         })
     }
 }
@@ -185,39 +207,45 @@ impl<'de> Deserialize<'de> for ActionConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DockerActionConfig {
-    pub image:      DockerActionImage,
+    pub image:           DockerActionImage,
     /// The phase's entrypoint (`runs.entrypoint`, a `with.entrypoint`, or the
     /// phase's `pre-entrypoint`/`post-entrypoint`); the image's own when
     /// absent.
     #[serde(default)]
-    pub entrypoint: Option<Value>,
+    pub entrypoint:      Option<Value>,
     /// `runs.args`, one argument per entry (main phase only).
     #[serde(default)]
-    pub args:       Vec<Value>,
+    pub args:            Vec<Value>,
     /// A `uses: docker://` step's `with.args`: one string, shell-split after
     /// expressions and secrets resolve, as GitHub does.
     #[serde(default)]
-    pub args_text:  Option<Value>,
+    pub args_text:       Option<Value>,
     /// The phase's condition as the frontend's gate tree; see [`RunConfig`].
     #[serde(default)]
-    pub gate:       Option<Value>,
+    pub gate:            Option<Value>,
     /// The engine's `scope_cancelled` static at firing time; see [`RunConfig`].
     #[serde(default)]
-    pub cancelled:  bool,
+    pub cancelled:       bool,
     /// Declared inputs with the caller's values or their defaults, plus
     /// undeclared `with:` keys. Each becomes `INPUT_<NAME>`.
     #[serde(default)]
-    pub inputs:     BTreeMap<String, Value>,
+    pub inputs:          BTreeMap<String, Value>,
     #[serde(default)]
-    pub env:        BTreeMap<SmolStr, ValueOrSecretRef>,
+    pub env:             BTreeMap<SmolStr, ValueOrSecretRef>,
     /// State an earlier phase of this action saved; each entry becomes
     /// `STATE_<name>`.
     #[serde(default)]
-    pub state:      BTreeMap<String, Value>,
+    pub state:           BTreeMap<String, Value>,
     #[serde(default)]
-    pub soft_fail:  SoftFail,
+    pub soft_fail:       SoftFail,
     #[serde(default)]
-    pub event:      Value,
+    pub event:           Value,
+    /// Job-environment channel for one matrix or expansion leg.
+    #[serde(default)]
+    pub job_environment: Option<String>,
+    /// Private job-environment channel for one background step.
+    #[serde(default)]
+    pub background:      Option<String>,
 }
 
 /// Where a Docker action's image comes from.

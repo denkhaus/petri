@@ -509,11 +509,13 @@ in brackets.
    output that is a whole-value secret is dropped with a warning
    (`ignored.secret_output`), as GitHub drops it.
 
-6. **Background steps** [`unsupported.step.background`]. facebook/react and
-   vercel/next.js use `background: true` on a step and `wait: <id>` / `wait-all` later
-   — GitHub syntax newer than this implementation's knowledge. The IR can express it
-   exactly: a background step is a fan-out, a `wait` is an `All` join. Mapping it is a
-   spec decision.
+6. **Background steps are a job-local DAG** — resolved. `background: true`
+   fans a `run:` or `uses:` step out from the foreground chain. `wait`,
+   `wait-all`, and `parallel` add explicit joins, and an implicit wait joins
+   remaining work before post-action cleanup. A private environment channel
+   defers outputs, `GITHUB_ENV`, and `GITHUB_PATH` until the join publishes the
+   step. Targeted `cancel` remains rejected as `unsupported.step.cancel`
+   because the engine has no per-background control path.
 
 7. **Local actions are resolved against the checked-out workspace, at run time**
    [`unsupported.action.local_missing`]. `uses: ./localClone` and

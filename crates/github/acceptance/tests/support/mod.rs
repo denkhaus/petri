@@ -231,6 +231,10 @@ fn runtime(dir: &Path) -> Runtime {
         .step(github_actions::ActionStep)
         .step(github_actions::DockerActionStep)
         .step(github_actions::CheckoutStep)
+        .step(github_actions::BackgroundStartStep)
+        .step(github_actions::BackgroundCompleteStep)
+        .step(github_actions::BackgroundPublishStep)
+        .step(github_actions::BackgroundWaitStep)
         // The distribution's token-less stance, so batteries test the shipped
         // semantics: `github.token` resolves to the empty string — the toolkit
         // treats it as "no auth" and reads anonymously — never a missing

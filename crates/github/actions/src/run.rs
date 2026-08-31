@@ -34,12 +34,28 @@ impl Step for RunStep {
     async fn run(&self, config: RunConfig, ctx: StepCtx) -> Outcome {
         // The gate first: nothing is created and nothing spawns for a step whose
         // condition is false.
-        match gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await {
+        match gate::refusal(
+            config.gate.as_ref(),
+            config.cancelled,
+            &config.env,
+            config.job_environment.as_deref(),
+            config.background.as_deref(),
+            &ctx,
+        )
+        .await
+        {
             Ok(None) => {}
             Ok(Some(outcome)) => return outcome,
             Err(failure) => return failure.into(),
         }
-        let session = match Session::begin(&ctx, &config.event).await {
+        let session = match Session::begin(
+            &ctx,
+            &config.event,
+            config.job_environment.as_deref(),
+            config.background.as_deref(),
+        )
+        .await
+        {
             Ok(session) => session,
             Err(failure) => return failure.into(),
         };

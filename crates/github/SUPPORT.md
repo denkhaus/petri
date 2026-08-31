@@ -43,8 +43,8 @@ itself without stopping the others, and the per-leg results are preserved on the
 job's `start` node. `on:` is accepted as metadata — a local run fires the
 workflow directly; `github.event` comes from the run's parameters. `name:` and
 `run-name:` — the workflow, job and step display names — are accepted as
-metadata too; nodes are named by their ids, so the display names carry no
-semantics to drop.
+metadata too. Nodes are named by their ids. A background wait also uses the
+target step's display name in its verdict log.
 
 **Steps.** `run:` steps; `uses:` for JavaScript actions (fetched from their
 repositories, resolved to a pinned commit at load time, `pre`/`main`/`post`
@@ -60,6 +60,18 @@ expression-interpolated over `inputs`, `entrypoint` and `with.args`/
 as JavaScript actions' phases; `with:` inputs with declared defaults; step ids
 and `steps.<id>.outputs`. A missing required action input warns and runs, as
 GitHub's runner does.
+
+**Background steps.** `background: true` works on `run:` and `uses:` steps,
+including JavaScript, Docker, and composite actions. `wait: <id>`,
+`wait: [ids]`, `wait-all:`, and `parallel:` join background work. An implicit
+wait joins all remaining background work before post-action cleanup. A target
+does not enter `steps.*`, publish outputs, or apply `GITHUB_ENV` and
+`GITHUB_PATH` changes until a wait includes it. Failures also surface at that
+wait. A skipped target stays absent. Explicit repeated waits republish their
+targets, including the runner's `GITHUB_PATH` reordering behavior. Matrix legs
+use independent background channels. Petri does not enforce GitHub's limit of
+10 concurrent background steps per job; it starts every admitted background
+step at once.
 
 **Local checkout.** A supportable `actions/checkout` call substitutes at
 lowering for the `github/checkout` step: the workspace materializes from the
@@ -266,7 +278,8 @@ workflow counts in brackets rank the pressure.
 | `container.ports`, `container.volumes`, `services.secret_env`, `services.volumes` | Container and service corners [0] | Job-container port mappings and volumes name runner-machine resources to map; secret-valued service env needs a resolution point inside acquire. |
 | `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [0] | Evaluate at lowering where the value is static, reject the rest. Step-level `continue-on-error` expressions resolve at firing now; the code remains for the job level and degenerate values. |
-| `step.background` | Background steps [2] | GitHub shipped these June 2026. |
+| `step.cancel` | Cancel one or more background steps [0] | The engine needs a targeted control path or a scope for each background branch. |
+| `step.wait_composite` | A background wait inside a composite action [0] | Composite actions cannot start background steps. A composite wait would need to address background state owned by its calling job. Put the wait in the calling job. |
 | `action.nested_local` | `./` actions inside a fetched composite or called workflow [2] | Stage the fetched repository so relative references resolve. |
 | `job_context` | `job.container` / `job.services` in an expression [0] | Service containers run (above), but their ids, networks and host port mappings are run-time facts the expression environment does not carry yet. Reach a service by its name and declared ports. |
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |

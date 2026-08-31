@@ -7,8 +7,8 @@ Remote `uses:` references resolve through the action snapshot: 305 references, 1
 | Result (of the in-scope 248) | Count | Share |
 |---|---|---|
 | lowered clean | 22 | 9% |
-| lowered with warnings | 221 | 89% |
-| rejected with a specific `unsupported.*` code | 5 | 2% |
+| lowered with warnings | 222 | 90% |
+| rejected with a specific `unsupported.*` code | 4 | 2% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -68,7 +68,6 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `action.local_missing` | 2 |
 | `runs_on.expression` | 2 |
 | `action.nested_local` | 1 |
-| `step.background` | 1 |
 
 ## Failures that are not specific rejections
 
@@ -198,7 +197,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | facebook/react | `compiler_typescript.yml` | warnings | 32 | — |
 | facebook/react | `devtools_discord_notify.yml` | warnings | 13 | — |
 | facebook/react | `devtools_regression_tests.yml` | warnings | 60 | — |
-| facebook/react | `runtime_build_and_test.yml` | unsupported | — | `step.background` |
+| facebook/react | `runtime_build_and_test.yml` | warnings | 358 | — |
 | facebook/react | `runtime_commit_artifacts.yml` | warnings | 59 | — |
 | facebook/react | `runtime_discord_notify.yml` | warnings | 13 | — |
 | facebook/react | `runtime_eslint_plugin_e2e.yml` | warnings | 14 | — |

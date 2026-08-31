@@ -75,8 +75,15 @@ async fn execute(config: CheckoutConfig, mut ctx: StepCtx) -> Result<Outcome, St
     static SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
     let no_env = BTreeMap::new();
-    if let Some(outcome) =
-        gate::refusal(config.gate.as_ref(), config.cancelled, &no_env, &ctx).await?
+    if let Some(outcome) = gate::refusal(
+        config.gate.as_ref(),
+        config.cancelled,
+        &no_env,
+        config.job_environment.as_deref(),
+        config.background.as_deref(),
+        &ctx,
+    )
+    .await?
     {
         return Ok(outcome);
     }

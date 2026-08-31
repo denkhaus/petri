@@ -65,12 +65,25 @@ impl Step for ActionStep {
 async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // The gate first: a phase whose condition is false stages nothing and spawns
     // nothing.
-    if let Some(outcome) =
-        gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
+    if let Some(outcome) = gate::refusal(
+        config.gate.as_ref(),
+        config.cancelled,
+        &config.env,
+        config.job_environment.as_deref(),
+        config.background.as_deref(),
+        &ctx,
+    )
+    .await?
     {
         return Ok(outcome);
     }
-    let session = Session::begin(&ctx, &config.event).await?;
+    let session = Session::begin(
+        &ctx,
+        &config.event,
+        config.job_environment.as_deref(),
+        config.background.as_deref(),
+    )
+    .await?;
 
     // Where the action's files are, as the process sees them.
     let (action_dir, repository, git_ref) = match &config.action {

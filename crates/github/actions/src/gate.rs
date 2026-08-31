@@ -30,7 +30,7 @@ use steps::{StepCtx, StepFailure, ValueOrSecretRef};
 
 use crate::hashfiles;
 use crate::session::{
-    ci_get, env_tool_cache, github_workspace_path, read_job_env, runner_temp_path, stringify,
+    ci_get, env_tool_cache, github_workspace_path, read_scoped_job_env, runner_temp_path, stringify,
 };
 
 /// The step's gate could not be read or evaluated.
@@ -44,10 +44,12 @@ pub(crate) async fn refusal(
     gate: Option<&Value>,
     cancelled: bool,
     env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    job_environment: Option<&str>,
+    background: Option<&str>,
     ctx: &StepCtx,
 ) -> Result<Option<Outcome>, StepFailure> {
     let Some(gate) = gate else { return Ok(None) };
-    if admitted(gate, env_config, ctx).await? {
+    if admitted(gate, env_config, job_environment, background, ctx).await? {
         return Ok(None);
     }
     Ok(Some(if cancelled {
@@ -62,6 +64,8 @@ pub(crate) async fn refusal(
 async fn admitted(
     gate: &Value,
     env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    job_environment: Option<&str>,
+    background: Option<&str>,
     ctx: &StepCtx,
 ) -> Result<bool, StepFailure> {
     let mut gate = Gate::try_from(gate).map_err(|message| StepFailure {
@@ -92,7 +96,7 @@ async fn admitted(
         .into_iter()
         .any(|text| Sentinel::Env.present_in(text));
     let job_env = if gate.reads_env() || wants_tool_cache || wants_env {
-        read_job_env(&*ctx.env).await?
+        read_scoped_job_env(&*ctx.env, job_environment, background).await?
     } else {
         BTreeMap::new()
     };

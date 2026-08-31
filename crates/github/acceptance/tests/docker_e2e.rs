@@ -52,6 +52,37 @@ jobs:
     assert_eq!(output_of(&report, "build/box")["answer"], "42");
 }
 
+#[tokio::test]
+async fn a_docker_url_action_can_run_in_the_background() {
+    if !is_docker_ready().await {
+        return;
+    }
+    let text = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - id: box
+        background: true
+        uses: docker://alpine:3.20
+        with:
+          args: sh -c 'echo "answer=42" >> "$GITHUB_OUTPUT"; echo "BOXED=docker" >> "$GITHUB_ENV"'
+      - run: echo "before=[$BOXED][${{ steps.box.outputs.answer }}]"
+      - wait: box
+      - run: echo "after=[$BOXED][${{ steps.box.outputs.answer }}]"
+"#;
+    let report = run_host(lower_ok(text), "docker-background-action").await;
+    assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
+    let lines = log_lines(&report);
+    assert!(lines.iter().any(|line| line == "before=[][]"), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line == "after=[docker][42]"),
+        "{lines:?}"
+    );
+    assert_eq!(output_of(&report, "build/box")["answer"], "42");
+}
+
 /// A local Dockerfile action builds from the checked-out repository and runs.
 /// The Dockerfile only has to exist at run time — GitHub resolves it against
 /// the workspace — so an earlier step writes it.

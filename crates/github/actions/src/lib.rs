@@ -16,6 +16,7 @@
 //! time.
 
 mod action;
+mod background;
 mod checkout;
 mod commands;
 mod config;
@@ -28,11 +29,16 @@ mod session;
 mod source;
 
 pub use action::{ActionSourceCap, ActionStep, ActionTreeSource};
+pub use background::{
+    BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep,
+};
 pub use checkout::CheckoutStep;
 pub use docker::DockerActionStep;
 pub use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 pub use frontend_gha::{
-    ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionSource, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND,
+    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND,
+    STATE_OUTPUT_KEY,
 };
 pub use results::{ResultsServiceCap, ToolCacheCap};
 pub use run::RunStep;

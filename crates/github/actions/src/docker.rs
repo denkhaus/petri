@@ -78,13 +78,26 @@ impl Step for DockerActionStep {
 async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
     // The gate first: a phase whose condition is false pulls nothing and
     // creates nothing.
-    if let Some(outcome) =
-        gate::refusal(config.gate.as_ref(), config.cancelled, &config.env, &ctx).await?
+    if let Some(outcome) = gate::refusal(
+        config.gate.as_ref(),
+        config.cancelled,
+        &config.env,
+        config.job_environment.as_deref(),
+        config.background.as_deref(),
+        &ctx,
+    )
+    .await?
     {
         return Ok(outcome);
     }
     let runner = ctx.require_container_runner()?;
-    let mut session = Session::begin(&ctx, &config.event).await?;
+    let mut session = Session::begin(
+        &ctx,
+        &config.event,
+        config.job_environment.as_deref(),
+        config.background.as_deref(),
+    )
+    .await?;
 
     let (image, repository, git_ref) = prepare_image(&config.image, &ctx).await?;
     if let ContainerImage::Build { tag, reuse, .. } = &image {

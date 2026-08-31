@@ -8,8 +8,9 @@
 //! # What a job becomes
 //!
 //! ```text
-//!   J/start ──► J/step-1 ──► J/step-2 ──► … ──► J/last ──► J/done ──► (each dependent's start)
-//!   gate         steps, chained by plain `next:`           collector
+//!   J/start ──► J/step-1 ──► J/wait ──► … ──► J/last ──► J/done ──► (each dependent's start)
+//!                    ▲                                     collector
+//!                    └──── J/background ────┘
 //! ```
 //!
 //! `J/start` is a noop whose precondition is the job's gate: `success()` over
@@ -19,6 +20,10 @@
 //! needs this one. A matrix job expands the region `J/start ..= J/last` per
 //! combination; `J/done` sits outside and folds the legs. Every `needs.J.*` and
 //! `success()` downstream reads `J/done`'s record, never a template edge.
+//! A background step fans out from the foreground chain. A wait joins its
+//! private completion, publishes the target's result and deferred environment
+//! changes, and then advances the chain. An implicit wait joins any remaining
+//! targets before action post phases.
 //!
 //! Step nodes carry no engine precondition: every step-level condition — an
 //! `if:`, a `pre-if`, a `post-if` — lowers into the step's config as a **gate**
@@ -81,8 +86,9 @@ use std::sync::Arc;
 use std::{fs, mem};
 
 pub use action::{
-    ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, REPO_PARAM_CONTEXT,
-    REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionSource, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND,
+    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND,
+    REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
 };
 use frontend::yaml::Document;
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};

@@ -7,17 +7,31 @@ use std::mem;
 use frontend::diag::Diagnostics;
 use frontend::yaml::Node;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
-use ir::{BinOp, ExpandTarget, ExprId, NodeId, Scope, ScopeId, StepRef, Value};
+use ir::{BinOp, ExpandTarget, ExprId, JoinPolicy, NodeId, Scope, ScopeId, StepRef, Value};
 use serde_json::{Map, json};
 
 use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
-use crate::action::Phase;
+use crate::action::{
+    ACTION_KIND, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND, BACKGROUND_START_KIND,
+    BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, Phase, RUN_KIND,
+};
 use crate::call::CalleeSource;
 use crate::exprs::{
-    ExprSite, LoweredScalar, SEP, Site, lower_scalar, result_priority, whole_value_secret,
+    ExprSite, LoweredScalar, SEP, Site, config_value, lower_scalar, result_priority,
+    whole_value_secret,
 };
-use crate::model::{Defaults, Job};
+use crate::model::{Defaults, Job, Step};
 use crate::{expr_lower, runs_on};
+
+struct BackgroundBranch {
+    completion:      NodeId,
+    completion_name: String,
+    public_name:     String,
+    display:         Value,
+    timeout_minutes: Option<String>,
+    published:       bool,
+    waiters:         Vec<NodeId>,
+}
 
 impl<'w, 'a> Lowering<'w, 'a> {
     /// Inside a called workflow, every job gate carries the call's own
@@ -343,6 +357,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // Matrix.
         let matrix_items = self.apply_strategy(job, &mut site);
+        let job_environment = self.job_environment_channel(&site);
 
         // The gate: needs + the job's own if — and, inside a called workflow,
         // the call's own admission.
@@ -352,10 +367,14 @@ impl<'w, 'a> Lowering<'w, 'a> {
             self.b.set_precondition(start, gate);
         }
 
-        // Steps.
+        // Steps. Executable steps have public names; wait controls do not.
         let mut names_so_far: Vec<String> = Vec::new();
         let mut step_names: BTreeMap<String, String> = BTreeMap::new();
-        for step in &job.steps {
+        for step in job
+            .steps
+            .iter()
+            .filter(|step| step.run.is_some() || step.uses.is_some())
+        {
             step_names.insert(
                 step.node_name(),
                 format!("{}{SEP}{}", job.id, step.node_name()),
@@ -382,6 +401,10 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         let mut previous = start;
         let mut chain: Vec<NodeId> = Vec::new();
+        let mut routes: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        let mut backgrounds: BTreeMap<String, BackgroundBranch> = BTreeMap::new();
+        let mut background_order = Vec::new();
+        let mut wait_index = 0usize;
         for (step, plan) in job.steps.iter().zip(&plans) {
             if let Some(plan) = plan
                 && plan.has_pre()
@@ -397,10 +420,48 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     Phase::Pre,
                 )
             {
-                self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
+                self.configure_job_environment(id, job_environment.as_ref());
+                self.chain_node(
+                    &mut routes,
+                    &mut previous,
+                    &mut chain,
+                    &mut names_so_far,
+                    &mut site,
+                    id,
+                );
             }
         }
         for (step, plan) in job.steps.iter().zip(&plans) {
+            if step.is_wait() {
+                let targets = if step.wait_all {
+                    background_order
+                        .iter()
+                        .filter(|name| {
+                            backgrounds
+                                .get(*name)
+                                .is_some_and(|branch| !branch.published)
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    step.wait.clone().unwrap_or_default()
+                };
+                self.background_wait(
+                    job,
+                    step,
+                    scope,
+                    &mut site,
+                    &mut routes,
+                    &mut previous,
+                    &mut chain,
+                    &mut names_so_far,
+                    &mut backgrounds,
+                    &targets,
+                    wait_index,
+                );
+                wait_index += 1;
+                continue;
+            }
             let inherited = Defaults {
                 shell:             step.shell.or(job.defaults.shell).or(self.wf.defaults.shell),
                 working_directory: step
@@ -419,10 +480,88 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 0,
                 plan.as_ref(),
             );
-            for id in nodes {
-                self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
+            for id in &nodes {
+                self.configure_job_environment(*id, job_environment.as_ref());
+            }
+            if step.background {
+                if nodes.is_empty() {
+                    continue;
+                }
+                let key = step.node_name();
+                let channel = self.background_channel(&site, background_order.len());
+                self.launch_background(
+                    job,
+                    step,
+                    scope,
+                    &mut site,
+                    &mut routes,
+                    &mut previous,
+                    &mut chain,
+                    &nodes,
+                    &channel,
+                    job_environment.as_ref(),
+                    &mut backgrounds,
+                );
+                background_order.push(key);
+            } else {
+                for id in nodes {
+                    self.chain_node(
+                        &mut routes,
+                        &mut previous,
+                        &mut chain,
+                        &mut names_so_far,
+                        &mut site,
+                        id,
+                    );
+                }
             }
         }
+
+        // GitHub inserts this barrier before action post phases. It publishes
+        // only targets no earlier wait-all (or first explicit wait) completed.
+        let implicit_targets: Vec<String> = background_order
+            .iter()
+            .filter(|name| {
+                backgrounds
+                    .get(*name)
+                    .is_some_and(|branch| !branch.published)
+            })
+            .cloned()
+            .collect();
+        if !implicit_targets.is_empty() {
+            let implicit = Step {
+                implicit_id:       "implicit-wait-all".into(),
+                id:                None,
+                name:              None,
+                span:              job.span.clone(),
+                condition:         None,
+                run:               None,
+                uses:              None,
+                with:              Vec::new(),
+                env:               Vec::new(),
+                shell:             None,
+                working_directory: None,
+                continue_on_error: None,
+                timeout_minutes:   None,
+                background:        false,
+                wait:              None,
+                wait_all:          true,
+            };
+            self.background_wait(
+                job,
+                &implicit,
+                scope,
+                &mut site,
+                &mut routes,
+                &mut previous,
+                &mut chain,
+                &mut names_so_far,
+                &mut backgrounds,
+                &implicit_targets,
+                wait_index,
+            );
+        }
+
         for (step, plan) in job.steps.iter().zip(&plans).rev() {
             if let Some(plan) = plan
                 && plan.has_post()
@@ -438,11 +577,44 @@ impl<'w, 'a> Lowering<'w, 'a> {
                     Phase::Post,
                 )
             {
-                self.chain_node(&mut previous, &mut chain, &mut names_so_far, &mut site, id);
+                self.configure_job_environment(id, job_environment.as_ref());
+                self.chain_node(
+                    &mut routes,
+                    &mut previous,
+                    &mut chain,
+                    &mut names_so_far,
+                    &mut site,
+                    id,
+                );
             }
         }
 
-        let last = *chain.last().unwrap_or(&start);
+        // A background completion may feed several explicit waits. The one
+        // fan-out preserves a completion token for each join.
+        for branch in backgrounds.values() {
+            match branch.waiters.as_slice() {
+                [] => {}
+                [only] => {
+                    self.b.link(branch.completion, *only);
+                }
+                many => {
+                    self.b.fan_out(branch.completion, many);
+                }
+            }
+        }
+        for (from, targets) in routes {
+            match targets.as_slice() {
+                [] => {}
+                [only] => {
+                    self.b.link(from, *only);
+                }
+                many => {
+                    self.b.fan_out(from, many);
+                }
+            }
+        }
+
+        let last = previous;
         if let Some(j) = self.jobs.get_mut(&job.id) {
             j.last = last;
         }
@@ -520,12 +692,352 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
+    fn background_channel(&mut self, site: &Site, ordinal: usize) -> Value {
+        let base = format!("background-{}", ordinal + 1);
+        if !(site.matrix || site.in_expansion) {
+            return json!(base);
+        }
+        let t = self.b.exprs();
+        let prefix = t.lit(format!("{base}#"));
+        let index = t.var("index");
+        let key = t.binary(BinOp::Add, prefix, index);
+        json!({ EXPR_PLACEHOLDER_KEY: key.raw() })
+    }
+
+    fn job_environment_channel(&mut self, site: &Site) -> Option<Value> {
+        if !(site.matrix || site.in_expansion) {
+            return None;
+        }
+        let t = self.b.exprs();
+        let prefix = t.lit("leg#");
+        let index = t.var("index");
+        let key = t.binary(BinOp::Add, prefix, index);
+        Some(json!({ EXPR_PLACEHOLDER_KEY: key.raw() }))
+    }
+
+    fn configure_job_environment(&mut self, id: NodeId, channel: Option<&Value>) {
+        let Some(channel) = channel else { return };
+        let node = self.b.node_mut(id);
+        if matches!(
+            node.step.kind.as_ref(),
+            RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND
+        ) && let Value::Object(config) = &mut node.step.config
+        {
+            config.insert("job_environment".into(), channel.clone());
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "background lowering carries the job's graph, expression, and branch state together"
+    )]
+    fn launch_background(
+        &mut self,
+        job: &Job<'a>,
+        step: &Step<'a>,
+        scope: ScopeId,
+        site: &mut Site,
+        routes: &mut BTreeMap<NodeId, Vec<NodeId>>,
+        previous: &mut NodeId,
+        chain: &mut Vec<NodeId>,
+        nodes: &[NodeId],
+        channel: &Value,
+        job_environment: Option<&Value>,
+        backgrounds: &mut BTreeMap<String, BackgroundBranch>,
+    ) {
+        let public_name = format!("{}{SEP}{}", job.id, step.node_name());
+        let start_name = format!("{public_name}{SEP}background-start");
+        let start = self.b.add_node(
+            &start_name,
+            scope,
+            StepRef::new(
+                BACKGROUND_START_KIND,
+                json!({ "key": channel, "job_environment": job_environment }),
+            ),
+        );
+        self.b.node_mut(start).run_on_cancel = true;
+        self.b.node_mut(start).tolerates_failure = true;
+        self.spans.insert(start, step.span.clone());
+        routes.entry(*previous).or_default().push(start);
+        *previous = start;
+        chain.push(start);
+        for id in nodes {
+            let node = self.b.node_mut(*id);
+            node.run_on_cancel = true;
+            node.tolerates_failure = true;
+            if node.name == public_name {
+                node.name = format!("{public_name}{SEP}background").into();
+            }
+            if matches!(
+                node.step.kind.as_ref(),
+                RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND
+            ) && let Value::Object(config) = &mut node.step.config
+            {
+                config.insert("background".into(), channel.clone());
+            }
+            chain.push(*id);
+        }
+        routes.entry(start).or_default().push(nodes[0]);
+        for pair in nodes.windows(2) {
+            routes.entry(pair[0]).or_default().push(pair[1]);
+        }
+
+        let node_names: Vec<String> = nodes
+            .iter()
+            .filter_map(|id| self.b.graph().node(*id).map(|node| node.name.to_string()))
+            .collect();
+        let worker_status = self.background_status(site, &node_names);
+        let start_failed = self.any_status(site, &[start_name], &["failure", "timed_out"]);
+        let failure = self.b.exprs().lit("failure");
+        let status = self.b.exprs().cond(start_failed, failure, worker_status);
+        let output = if let Some(outputs) = site.composite_outputs.remove(&step.node_name()) {
+            let entries: Vec<_> = outputs
+                .iter()
+                .map(|(name, id)| (name.as_str(), *id))
+                .collect();
+            self.b.exprs().object(entries)
+        } else {
+            let record = site.node_record(
+                self.b.exprs(),
+                node_names.last().expect("a background has a terminal"),
+            );
+            self.b.exprs().field(record, "output")
+        };
+        let completion_name = format!("{public_name}{SEP}background-done");
+        let completion = self.b.add_node(
+            &completion_name,
+            scope,
+            StepRef::new(
+                BACKGROUND_COMPLETE_KIND,
+                json!({
+                    "status": { EXPR_PLACEHOLDER_KEY: status.raw() },
+                    "output": { EXPR_PLACEHOLDER_KEY: output.raw() },
+                    "key": channel,
+                    "job_environment": job_environment,
+                }),
+            ),
+        );
+        self.b.node_mut(completion).run_on_cancel = true;
+        self.b.node_mut(completion).tolerates_failure = true;
+        self.spans.insert(completion, step.span.clone());
+        chain.push(completion);
+        routes
+            .entry(*nodes.last().expect("a background has a terminal"))
+            .or_default()
+            .push(completion);
+
+        backgrounds.insert(step.node_name(), BackgroundBranch {
+            completion,
+            completion_name,
+            public_name,
+            display: self.background_display(step, site),
+            timeout_minutes: step
+                .timeout_minutes
+                .and_then(|value| value.as_scalar())
+                .map(|value| value.as_str().to_string()),
+            published: false,
+            waiters: Vec::new(),
+        });
+    }
+
+    fn background_status(&mut self, site: &Site, names: &[String]) -> ExprId {
+        if let [name] = names {
+            return site.node_status(self.b.exprs(), name);
+        }
+        let failed = self.any_status(site, names, &["failure", "timed_out"]);
+        let cancelled = self.any_status(site, names, &["cancelled"]);
+        let partial = self.any_status(site, names, &["partial_success"]);
+        let succeeded = self.any_status(site, names, &["success"]);
+        let t = self.b.exprs();
+        let skipped = t.lit("skipped");
+        let success = t.lit("success");
+        let partial_success = t.lit("partial_success");
+        let cancelled_tag = t.lit("cancelled");
+        let failure = t.lit("failure");
+        let status = t.cond(succeeded, success, skipped);
+        let status = t.cond(partial, partial_success, status);
+        let status = t.cond(cancelled, cancelled_tag, status);
+        t.cond(failed, failure, status)
+    }
+
+    fn any_status(&mut self, site: &Site, names: &[String], tags: &[&str]) -> ExprId {
+        let mut terms = Vec::new();
+        for name in names {
+            for tag in tags {
+                terms.push(site.node_has_status(self.b.exprs(), name, tag));
+            }
+        }
+        let mut terms = terms.into_iter();
+        let Some(mut value) = terms.next() else {
+            return self.b.exprs().lit(false);
+        };
+        for term in terms {
+            value = self.b.exprs().binary(BinOp::Or, value, term);
+        }
+        value
+    }
+
+    fn background_display(&mut self, step: &Step<'a>, site: &Site) -> Value {
+        if let Some(name) = step.name
+            && let Some(text) = name.as_str()
+            && let Some(value) = lower_scalar(
+                text,
+                name.span(),
+                site,
+                ExprSite::Step,
+                false,
+                self.b.exprs(),
+                &mut self.diags,
+            )
+        {
+            return config_value(value);
+        }
+        if let Some((reference, _)) = &step.uses {
+            return json!(reference);
+        }
+        json!(
+            step.run
+                .and_then(|run| run.as_str())
+                .and_then(|run| run.lines().next())
+                .filter(|line| !line.is_empty())
+                .unwrap_or("Run")
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a wait joins graph state and updates the foreground expression site"
+    )]
+    fn background_wait(
+        &mut self,
+        job: &Job<'a>,
+        step: &Step<'a>,
+        scope: ScopeId,
+        site: &mut Site,
+        routes: &mut BTreeMap<NodeId, Vec<NodeId>>,
+        previous: &mut NodeId,
+        chain: &mut Vec<NodeId>,
+        names: &mut Vec<String>,
+        backgrounds: &mut BTreeMap<String, BackgroundBranch>,
+        targets: &[String],
+        wait_index: usize,
+    ) {
+        let mut verdicts = Vec::new();
+        for (target_index, target) in targets.iter().enumerate() {
+            let Some(branch) = backgrounds.get_mut(target) else {
+                continue;
+            };
+            let first_publication = !branch.published;
+            branch.published = true;
+            let completion_name = branch.completion_name.clone();
+            let public_name = branch.public_name.clone();
+            let display = branch.display.clone();
+            let timeout_minutes = branch.timeout_minutes.clone();
+
+            let decision_name = format!(
+                "{}{SEP}__background-wait-{}-{}-decision",
+                job.id,
+                wait_index + 1,
+                target_index + 1
+            );
+            let decision = self.b.add_step(&decision_name, scope, "noop");
+            self.b.node_mut(decision).run_on_cancel = true;
+            routes.entry(*previous).or_default().push(decision);
+            branch.waiters.push(decision);
+            chain.push(decision);
+
+            let result = {
+                let record = site.node_record(self.b.exprs(), &completion_name);
+                self.b.exprs().field(record, "output")
+            };
+            let result_status = self.b.exprs().field(result, "status");
+            let skipped = self.b.exprs().lit("skipped");
+            let publish_guard = self.b.exprs().binary(BinOp::Ne, result_status, skipped);
+            let publish_name = if first_publication {
+                public_name
+            } else {
+                format!(
+                    "{}{SEP}__background-wait-{}-{}-publish",
+                    job.id,
+                    wait_index + 1,
+                    target_index + 1
+                )
+            };
+            let publish = self.b.add_node(
+                &publish_name,
+                scope,
+                StepRef::new(
+                    BACKGROUND_PUBLISH_KIND,
+                    json!({ "result": { EXPR_PLACEHOLDER_KEY: result.raw() } }),
+                ),
+            );
+            self.b.node_mut(publish).run_on_cancel = true;
+            self.b.node_mut(publish).tolerates_failure = true;
+            let bypass_name = format!(
+                "{}{SEP}__background-wait-{}-{}-bypass",
+                job.id,
+                wait_index + 1,
+                target_index + 1
+            );
+            let bypass = self.b.add_step(&bypass_name, scope, "noop");
+            self.b.node_mut(bypass).run_on_cancel = true;
+            let merge_name = format!(
+                "{}{SEP}__background-wait-{}-{}-merge",
+                job.id,
+                wait_index + 1,
+                target_index + 1
+            );
+            let merge = self.b.add_step(&merge_name, scope, "noop");
+            self.b.node_mut(merge).run_on_cancel = true;
+            self.b.set_join(merge, JoinPolicy::Any);
+            self.b.select(decision, vec![
+                ir::Arm::when(publish, publish_guard),
+                ir::Arm::always(bypass),
+            ]);
+            self.b.link(publish, merge);
+            self.b.link(bypass, merge);
+            chain.extend([publish, bypass, merge]);
+            *previous = merge;
+
+            let published_status = site.node_status(self.b.exprs(), &publish_name);
+            let status = self
+                .b
+                .exprs()
+                .call("default", vec![published_status, result_status]);
+            verdicts.push(json!({
+                "name": display,
+                "status": { EXPR_PLACEHOLDER_KEY: status.raw() },
+                "timeout_minutes": timeout_minutes,
+            }));
+        }
+
+        let mut config = Map::new();
+        config.insert("targets".into(), Value::Array(verdicts));
+        if let Some(value) = self.soft_fail_value(step.continue_on_error, site, false) {
+            config.insert("continue_on_error".into(), value);
+        }
+        let wait_name = format!("{}{SEP}__background-wait-{}", job.id, wait_index + 1);
+        let wait = self.b.add_node(
+            &wait_name,
+            scope,
+            StepRef::new(BACKGROUND_WAIT_KIND, Value::Object(config)),
+        );
+        self.b.node_mut(wait).run_on_cancel = true;
+        self.spans.insert(wait, step.span.clone());
+        routes.entry(*previous).or_default().push(wait);
+        chain.push(wait);
+        *previous = wait;
+        names.push(wait_name);
+        site.earlier_steps.clone_from(names);
+    }
+
     /// Link `id` after `previous` and make it visible to the steps after it.
     /// Every chained node runs on cancel: after a polite cancel it fires and
     /// its gate decides, which is the whole cancellation story (no
     /// admission sniffing). Matrix templates pass the flag to their clones.
     fn chain_node(
         &mut self,
+        routes: &mut BTreeMap<NodeId, Vec<NodeId>>,
         previous: &mut NodeId,
         chain: &mut Vec<NodeId>,
         names: &mut Vec<String>,
@@ -533,7 +1045,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         id: NodeId,
     ) {
         self.b.node_mut(id).run_on_cancel = true;
-        self.b.link(*previous, id);
+        routes.entry(*previous).or_default().push(id);
         chain.push(id);
         *previous = id;
         let name = self

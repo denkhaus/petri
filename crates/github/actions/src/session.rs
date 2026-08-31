@@ -55,8 +55,6 @@ pub(crate) const REPO_DIR: &str = "repo";
 /// The step could not set up or read back its runner files.
 pub(crate) const RUNNER_FILES_CLASS: FailureClass = FailureClass::new_static("runner_files");
 
-const JOB_ENV_FILE: &str = ".ci/github/job-env.json";
-const JOB_PATH_FILE: &str = ".ci/github/job-path.json";
 const EVENT_FILE: &str = ".ci/github/event.json";
 const TEMP_DIR: &str = ".ci/temp";
 const TOOL_CACHE_DIR: &str = ".ci/toolcache";
@@ -163,16 +161,19 @@ impl ResolvedProcess {
 }
 
 pub(crate) struct Session {
-    env:        Arc<dyn ExecEnv>,
+    env:            Arc<dyn ExecEnv>,
     /// The workspace root as the process sees it.
-    workspace:  String,
-    files:      StepFiles,
-    job_env:    BTreeMap<String, String>,
-    job_path:   Vec<String>,
+    workspace:      String,
+    files:          StepFiles,
+    job_env:        BTreeMap<String, String>,
+    job_path:       Vec<String>,
+    job_env_file:   PathBuf,
+    job_path_file:  PathBuf,
+    deferred_files: Option<(PathBuf, PathBuf)>,
     /// The host's persistent tool cache, when the host registered one
     /// ([`crate::ToolCacheCap`]): [`resolved_tool_cache`] points steps at it
     /// where this environment's filesystem has it.
-    tool_cache: Option<PathBuf>,
+    tool_cache:     Option<PathBuf>,
 }
 
 /// What the step left behind, for the step kind to fold into its outcome.
@@ -213,14 +214,24 @@ pub(crate) fn set_env_blocked(name: &str) -> Option<&'static str> {
         .find(|blocked| blocked.eq_ignore_ascii_case(name))
 }
 
-/// The job's accumulated `GITHUB_ENV`, read without creating any session files:
-/// what a gate's `env.NAME` leaf sees before the step commits to running.
-pub(crate) async fn read_job_env(
+/// The environment visible inside a background branch. Its first step starts
+/// from the foreground snapshot; later steps read the branch's private file.
+pub(crate) async fn read_scoped_job_env(
     env: &dyn ExecEnv,
+    job_environment: Option<&str>,
+    background: Option<&str>,
 ) -> Result<BTreeMap<String, String>, StepFailure> {
-    Ok(read_json(env, Path::new(JOB_ENV_FILE))
-        .await?
-        .unwrap_or_default())
+    if let Some(key) = background {
+        let path = background_file(key, "job-env.json");
+        if let Some(value) = read_json(env, &path).await? {
+            return Ok(value);
+        }
+    }
+    Ok(
+        read_json(env, &job_environment_file(job_environment, "job-env.json"))
+            .await?
+            .unwrap_or_default(),
+    )
 }
 
 /// `GITHUB_WORKSPACE` as the job environment sees it, without a session.
@@ -310,7 +321,12 @@ pub(crate) fn runner_temp_path(root: &str) -> String {
 
 impl Session {
     /// Create the step's files and read what the job has accumulated so far.
-    pub(crate) async fn begin(ctx: &StepCtx, event: &Value) -> Result<Self, StepFailure> {
+    pub(crate) async fn begin(
+        ctx: &StepCtx,
+        event: &Value,
+        job_environment: Option<&str>,
+        background: Option<&str>,
+    ) -> Result<Self, StepFailure> {
         let env = ctx.env.clone();
         let workspace = env.workspace_path().to_string();
         let dir = PathBuf::from(RUNNER_DIR)
@@ -335,15 +351,42 @@ impl Session {
         let event_bytes = serde_json::to_vec(&event).unwrap_or_else(|_| b"{}".to_vec());
         let temp_keep = Path::new(TEMP_DIR).join(".keep");
         let tool_keep = Path::new(TOOL_CACHE_DIR).join(".keep");
-        let ((), (), (), job_env, job_path) = tokio::try_join!(
+        let ((), (), ()) = tokio::try_join!(
             write(&*env, Path::new(EVENT_FILE), &event_bytes),
             write(&*env, &temp_keep, b""),
             write(&*env, &tool_keep, b""),
-            read_json(&*env, Path::new(JOB_ENV_FILE)),
-            read_json(&*env, Path::new(JOB_PATH_FILE)),
         )?;
-        let job_env: BTreeMap<String, String> = job_env.unwrap_or_default();
-        let job_path: Vec<String> = job_path.unwrap_or_default();
+        let foreground_env_file = job_environment_file(job_environment, "job-env.json");
+        let foreground_path_file = job_environment_file(job_environment, "job-path.json");
+        let (job_env_file, job_path_file, deferred_files) = match background {
+            Some(key) => (
+                background_file(key, "job-env.json"),
+                background_file(key, "job-path.json"),
+                Some((
+                    background_file(key, "deferred-env.json"),
+                    background_file(key, "deferred-path.json"),
+                )),
+            ),
+            None => (
+                foreground_env_file.clone(),
+                foreground_path_file.clone(),
+                None,
+            ),
+        };
+        let job_env = match read_json(&*env, &job_env_file).await? {
+            Some(value) => value,
+            None if background.is_some() => read_json(&*env, &foreground_env_file)
+                .await?
+                .unwrap_or_default(),
+            None => BTreeMap::new(),
+        };
+        let job_path = match read_json(&*env, &job_path_file).await? {
+            Some(value) => value,
+            None if background.is_some() => read_json(&*env, &foreground_path_file)
+                .await?
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         let tool_cache = ctx
             .capability::<crate::ToolCacheCap>()
             .map(|cap| cap.0.clone());
@@ -353,6 +396,9 @@ impl Session {
             files,
             job_env,
             job_path,
+            job_env_file,
+            job_path_file,
+            deferred_files,
             tool_cache,
         })
     }
@@ -778,6 +824,7 @@ impl Session {
         // path's own message; whatever is blocked here came from the file.
         env.extend(commands.env);
         let mut blocked = Vec::new();
+        let mut env_delta = BTreeMap::new();
         for (key, value) in env {
             if let Some(name) = set_env_blocked(&key) {
                 blocked.push(format!(
@@ -785,25 +832,42 @@ impl Session {
                 ));
                 continue;
             }
-            self.job_env.insert(key, stringify(&value));
+            let value = stringify(&value);
+            self.job_env.insert(key.clone(), value.clone());
+            env_delta.insert(key, value);
         }
         // Each entry goes in front of the ones before it.
-        let new_paths = path_text
+        let new_paths: Vec<String> = path_text
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_string)
-            .chain(commands.path);
-        for path in new_paths {
-            self.job_path.retain(|p| p != &path);
-            self.job_path.insert(0, path);
+            .chain(commands.path)
+            .collect();
+        for path in &new_paths {
+            self.job_path.retain(|p| p != path);
+            self.job_path.insert(0, path.clone());
         }
         let job_env = serde_json::to_vec(&self.job_env).expect("a string map encodes");
         let job_path = serde_json::to_vec(&self.job_path).expect("a string list encodes");
         tokio::try_join!(
-            write(&*self.env, Path::new(JOB_ENV_FILE), &job_env),
-            write(&*self.env, Path::new(JOB_PATH_FILE), &job_path),
+            write(&*self.env, &self.job_env_file, &job_env),
+            write(&*self.env, &self.job_path_file, &job_path),
         )?;
+        if let Some((env_file, path_file)) = &self.deferred_files {
+            let mut deferred_env: BTreeMap<String, String> =
+                read_json(&*self.env, env_file).await?.unwrap_or_default();
+            deferred_env.extend(env_delta);
+            let mut deferred_path: Vec<String> =
+                read_json(&*self.env, path_file).await?.unwrap_or_default();
+            deferred_path.extend(new_paths);
+            let deferred_env = serde_json::to_vec(&deferred_env).expect("a string map encodes");
+            let deferred_path = serde_json::to_vec(&deferred_path).expect("a string list encodes");
+            tokio::try_join!(
+                write(&*self.env, env_file, &deferred_env),
+                write(&*self.env, path_file, &deferred_path),
+            )?;
+        }
 
         let mut state = parse_env_file(&state_text, "GITHUB_STATE")?;
         state.extend(commands.state);
@@ -815,6 +879,81 @@ impl Session {
             blocked,
         })
     }
+}
+
+/// Merge one completed background branch's deferred environment effects into
+/// the foreground. The private files are retained so an explicit repeated
+/// wait can apply the same effects again, matching GitHub's coordinator.
+pub(crate) async fn publish_background(
+    env: &dyn ExecEnv,
+    key: &str,
+    job_environment: Option<&str>,
+) -> Result<(), StepFailure> {
+    let env_delta: BTreeMap<String, String> =
+        read_json(env, &background_file(key, "deferred-env.json"))
+            .await?
+            .unwrap_or_default();
+    let path_delta: Vec<String> = read_json(env, &background_file(key, "deferred-path.json"))
+        .await?
+        .unwrap_or_default();
+    let job_env_file = job_environment_file(job_environment, "job-env.json");
+    let job_path_file = job_environment_file(job_environment, "job-path.json");
+    let mut job_env: BTreeMap<String, String> =
+        read_json(env, &job_env_file).await?.unwrap_or_default();
+    let mut job_path: Vec<String> = read_json(env, &job_path_file).await?.unwrap_or_default();
+    job_env.extend(env_delta);
+    for path in path_delta {
+        job_path.retain(|present| present != &path);
+        job_path.insert(0, path);
+    }
+    let job_env = serde_json::to_vec(&job_env).expect("a string map encodes");
+    let job_path = serde_json::to_vec(&job_path).expect("a string list encodes");
+    tokio::try_join!(
+        write(env, &job_env_file, &job_env),
+        write(env, &job_path_file, &job_path),
+    )?;
+    Ok(())
+}
+
+/// Snapshot the foreground job environment for a newly launched background
+/// branch and clear any stale deferred deltas for the same graph node.
+pub(crate) async fn initialize_background(
+    env: &dyn ExecEnv,
+    key: &str,
+    job_environment: Option<&str>,
+) -> Result<(), StepFailure> {
+    let job_env_file = job_environment_file(job_environment, "job-env.json");
+    let job_path_file = job_environment_file(job_environment, "job-path.json");
+    let job_env: BTreeMap<String, String> =
+        read_json(env, &job_env_file).await?.unwrap_or_default();
+    let job_path: Vec<String> = read_json(env, &job_path_file).await?.unwrap_or_default();
+    let job_env = serde_json::to_vec(&job_env).expect("a string map encodes");
+    let job_path = serde_json::to_vec(&job_path).expect("a string list encodes");
+    let env_file = background_file(key, "job-env.json");
+    let path_file = background_file(key, "job-path.json");
+    let deferred_env_file = background_file(key, "deferred-env.json");
+    let deferred_path_file = background_file(key, "deferred-path.json");
+    tokio::try_join!(
+        write(env, &env_file, &job_env),
+        write(env, &path_file, &job_path),
+        write(env, &deferred_env_file, b"{}"),
+        write(env, &deferred_path_file, b"[]"),
+    )?;
+    Ok(())
+}
+
+fn background_file(key: &str, name: &str) -> PathBuf {
+    Path::new(RUNNER_DIR)
+        .join("background")
+        .join(key)
+        .join(name)
+}
+
+fn job_environment_file(key: Option<&str>, name: &str) -> PathBuf {
+    key.map_or_else(
+        || Path::new(RUNNER_DIR).join(name),
+        |key| Path::new(RUNNER_DIR).join("jobs").join(key).join(name),
+    )
 }
 
 /// Forward a process handle's output lines into `sink` as log events, on
