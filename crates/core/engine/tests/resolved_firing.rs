@@ -152,24 +152,6 @@ fn a_malformed_placeholder_fails_the_node_at_the_boundary() {
     ));
 }
 
-/// `validate_plan` catches the same thing at load time, so the runtime check is
-/// a backstop rather than the only line of defence.
-#[test]
-fn load_time_validation_catches_it_first() {
-    let mut b = GraphBuilder::new();
-    let scope = ScopeId::new(0);
-    let a = b.add_step("a", scope, NOOP);
-    let value = b.exprs().lit(1);
-    b.node_mut(a).step = StepRef::new(NOOP, json!({ "x": { EXPR_PLACEHOLDER_KEY: value.raw() } }));
-    let graph = b.build();
-
-    let errors = ir::validate_plan(&graph).expect_err("not an executable plan");
-    assert!(errors.iter().any(|e| matches!(
-        e,
-        ir::ValidationError::HirConfigInPlan { path, .. } if path == "x"
-    )));
-}
-
 /// The payload names the firing, so a host can correlate it with the events it
 /// sends back.
 #[test]

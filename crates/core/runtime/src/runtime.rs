@@ -10,7 +10,7 @@ use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, fs, process};
+use std::{env, fs, io, process};
 
 use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunReport};
 use engine::{EventLog, ReplayMismatch};
@@ -56,6 +56,25 @@ impl RunOptions {
             verify_replay:       true,
         }
     }
+}
+
+/// Why a workflow file could not be loaded at all: an IO-or-usage problem, as
+/// opposed to a rejected workflow, which comes back as diagnostics.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    /// `--format` (or its API equivalent) named a format no registered
+    /// frontend answers to.
+    #[error("unknown format `{name}`; known formats: {}", known.join(", "))]
+    UnknownFormat { name: String, known: Vec<String> },
+    /// No `--format` was given and no registered frontend claims the path.
+    #[error("no frontend claims `{}`", path.display())]
+    NoFrontend { path: PathBuf },
+    #[error("could not read {}", path.display())]
+    Read {
+        path:   PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// What a per-run service provisioner returns beside the capabilities: the
@@ -251,18 +270,20 @@ impl Runtime {
 
     /// The frontend for a file: by `name` when given, else the first that
     /// claims the path.
-    pub fn frontend_for(&self, path: &Path, name: Option<&str>) -> Result<&dyn Frontend, String> {
+    pub fn frontend_for(
+        &self,
+        path: &Path,
+        name: Option<&str>,
+    ) -> Result<&dyn Frontend, LoadError> {
         let all: Vec<&dyn Frontend> = self.frontends.iter().map(AsRef::as_ref).collect();
         match name {
-            Some(name) => frontend::by_name(&all, name).ok_or_else(|| {
-                let known: Vec<&str> = all.iter().map(|f| f.name()).collect();
-                format!(
-                    "unknown format `{name}`; known formats: {}",
-                    known.join(", ")
-                )
+            Some(name) => frontend::by_name(&all, name).ok_or_else(|| LoadError::UnknownFormat {
+                name:  name.to_string(),
+                known: all.iter().map(|f| f.name().to_string()).collect(),
             }),
-            None => frontend::detect(&all, path)
-                .ok_or_else(|| format!("no frontend claims `{}`", path.display())),
+            None => frontend::detect(&all, path).ok_or_else(|| LoadError::NoFrontend {
+                path: path.to_path_buf(),
+            }),
         }
     }
 
@@ -287,13 +308,15 @@ impl Runtime {
         file: &Path,
         format: Option<&str>,
         repo: Option<&Path>,
-    ) -> Result<Lowered, String> {
+    ) -> Result<Lowered, LoadError> {
         let frontend = self.frontend_for(file, format)?;
         let span = tracing::Span::current();
         span.record("frontend", frontend.name());
         let repo = repo.map_or_else(|| frontend.repo_root(file), Path::to_path_buf);
-        let text = fs::read_to_string(file)
-            .map_err(|e| format!("could not read {}: {e}", file.display()))?;
+        let text = fs::read_to_string(file).map_err(|e| LoadError::Read {
+            path:   file.to_path_buf(),
+            source: e,
+        })?;
         let name = file
             .strip_prefix(&repo)
             .unwrap_or(file)
@@ -309,16 +332,17 @@ impl Runtime {
 
     /// [`Runtime::lower`], then validate the graph against the step registry,
     /// so an unregistered kind or a bad literal config is a diagnostic here
-    /// rather than a step failure at firing time.
+    /// rather than a step failure at firing time. Only the registry pass runs:
+    /// the frontend already ran the structural passes when it lowered.
     pub fn check(
         &self,
         file: &Path,
         format: Option<&str>,
         repo: Option<&Path>,
-    ) -> Result<Lowered, String> {
+    ) -> Result<Lowered, LoadError> {
         let mut lowered = self.lower(file, format, repo)?;
         if let Some(graph) = lowered.graph.take() {
-            match ir::validate_with(&graph, Some(&self.steps)) {
+            match ir::validate_step_kinds(&graph, &self.steps) {
                 Ok(()) => lowered.graph = Some(graph),
                 Err(errors) => {
                     let span = Span::file(file.to_string_lossy().as_ref());

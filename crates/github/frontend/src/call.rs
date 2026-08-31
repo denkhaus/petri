@@ -20,7 +20,10 @@ use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::Document;
 
-use crate::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction, unavailable_hint};
+use crate::action::{
+    ActionRef, ActionSource, ActionSourceError, PinnedAction, RefError, render_chain,
+    unavailable_hint,
+};
 use crate::model::{self, Workflow};
 
 /// GitHub's nesting limit: a top-level workflow and up to three levels of
@@ -97,8 +100,20 @@ impl CallTarget {
     }
 }
 
+/// Why a `uses:` cannot even name a target, before any fetch is tried.
+#[derive(Debug, thiserror::Error)]
+enum CallTargetError {
+    #[error(transparent)]
+    Reference(#[from] RefError),
+    #[error(
+        "a reusable-workflow reference names a `.yml` file: \
+         `owner/repo/.github/workflows/name.yml@ref`"
+    )]
+    NotWorkflowFile,
+}
+
 /// The target a `uses:` names, seen from `caller`.
-fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
+fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, CallTargetError> {
     if let Some(rest) = same_repo(uses) {
         return Ok(match caller {
             CalleeSource::Root | CalleeSource::Local => CallTarget::Local {
@@ -113,7 +128,7 @@ fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
             }
         });
     }
-    let reference = ActionRef::parse(uses).map_err(|e| e.to_string())?;
+    let reference = ActionRef::parse(uses)?;
     #[expect(
         clippy::case_sensitive_file_extension_comparisons,
         reason = "the reference names a file in another repository as written, and `.YML` is a \
@@ -125,9 +140,7 @@ fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
         .as_deref()
         .is_some_and(|p| p.ends_with(".yml") || p.ends_with(".yaml"))
     {
-        return Err("a reusable-workflow reference names a `.yml` file: \
-                    `owner/repo/.github/workflows/name.yml@ref`"
-            .into());
+        return Err(CallTargetError::NotWorkflowFile);
     }
     Ok(CallTarget::Remote { reference })
 }
@@ -174,11 +187,11 @@ fn walk(
     for (uses, span) in calls {
         let target = match target_of(source, &uses) {
             Ok(target) => target,
-            Err(message) => {
+            Err(error) => {
                 diags.error(
                     "gha.bad_call",
                     span.clone(),
-                    format!("`uses: {uses}`: {message}"),
+                    format!("`uses: {uses}`: {}", render_chain(&error)),
                 );
                 continue;
             }
@@ -305,7 +318,7 @@ fn fetch(
                     diags.error(
                         "action.unresolved",
                         span.clone(),
-                        format!("`uses: {identity}`: {other}"),
+                        format!("`uses: {identity}`: {}", render_chain(&other)),
                     );
                     None
                 }

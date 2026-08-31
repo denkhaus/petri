@@ -15,6 +15,7 @@
 //! run parameters a run would otherwise have to hard-code — so no command here
 //! has a special case for one format.
 
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
 use std::{env, fs};
@@ -24,7 +25,7 @@ use runtime::driver::RunHandle;
 use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, Lowered};
 use runtime::ir::{CancelScopeId, Graph, RunStatus};
-use runtime::{RunOptions, Runtime};
+use runtime::{LoadError, RunOptions, Runtime};
 use tracing::field::{Empty, display};
 
 #[derive(Parser)]
@@ -120,6 +121,19 @@ pub async fn main(make: impl Fn() -> Runtime) -> ExitCode {
     }
 }
 
+/// An error and its whole `source()` chain on one line, so a typed cause
+/// (the io error under a failed read, say) actually reaches the user.
+fn error_chain(error: &dyn Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 /// Lower and validate, or explain why not. `Err` carries the exit code.
 #[expect(
     clippy::print_stdout,
@@ -148,8 +162,8 @@ fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered,
             }
             Ok(lowered)
         }
-        Err(message) => {
-            eprintln!("error: {message}");
+        Err(error) => {
+            eprintln!("error: {}", error_chain(&error));
             Err(ExitCode::from(2))
         }
     }
@@ -332,7 +346,11 @@ fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
     let log: EventLog = match serde_json::from_str(&text) {
         Ok(log) => log,
         Err(e) => {
-            eprintln!("error: {} is not an event log: {e}", log_path.display());
+            eprintln!(
+                "error: {} is not an event log: {}",
+                log_path.display(),
+                error_chain(&e)
+            );
             return ExitCode::from(2);
         }
     };
@@ -355,9 +373,21 @@ fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
 
 /// Fill in what the file's own format says a host owes it, without overwriting
 /// a parameter the graph already carries.
+#[expect(
+    clippy::print_stderr,
+    reason = "a mistyped `--format` must reach the user instead of being swallowed"
+)]
 fn default_params(rt: &Runtime, target: &FileArgs, graph: &mut Graph) {
-    let Ok(frontend) = rt.frontend_for(&target.file, target.format.as_deref()) else {
-        return;
+    let frontend = match rt.frontend_for(&target.file, target.format.as_deref()) {
+        Ok(frontend) => frontend,
+        // A named format that does not exist is a usage error worth saying,
+        // even from this backstop; a path no frontend claims stays quiet —
+        // there are simply no defaults to fill in.
+        Err(error @ LoadError::UnknownFormat { .. }) => {
+            eprintln!("warning: {error}");
+            return;
+        }
+        Err(_) => return,
     };
     let repo = target
         .repo

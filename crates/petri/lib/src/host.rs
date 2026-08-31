@@ -40,7 +40,7 @@ use runtime::Runtime;
 use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
 use runtime::engine::{self, EngineState, EventLog, EventRecord, InvalidRecords};
 use runtime::executor::Masker;
-use runtime::ir::Graph;
+use runtime::ir::{self, Graph};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -80,6 +80,15 @@ pub enum HostError {
         #[source]
         source: serde_json::Error,
     },
+    /// The recorded graph deserialized but fails validation — deserialization
+    /// is not validation, and a resumed run must not trust `graph.json` past
+    /// its syntax.
+    #[error("`{path}` failed validation: {count} error(s); first: {first}")]
+    InvalidGraph {
+        path:  PathBuf,
+        count: usize,
+        first: String,
+    },
     #[error(transparent)]
     Resume(#[from] ResumeError),
     #[error(transparent)]
@@ -93,14 +102,18 @@ pub enum HostError {
 /// [`DecodedEvents::torn`]). A newline-terminated line that fails to decode
 /// refuses the load — corruption or tampering must not be silently accepted as
 /// a crash prefix.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum EventsDecodeError {
     #[error("no complete header line")]
     MissingHeader,
-    #[error("the header line is not `{{\"version\": N}}`: {0}")]
-    BadHeader(String),
-    #[error("line {line} is not an event record: {message}")]
-    BadRecord { line: usize, message: String },
+    #[error("the header line is not `{{\"version\": N}}`")]
+    BadHeader(#[source] serde_json::Error),
+    #[error("line {line} is not an event record")]
+    BadRecord {
+        line:   usize,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error(transparent)]
     Invalid(#[from] InvalidRecords),
 }
@@ -135,14 +148,13 @@ pub fn decode_events(bytes: &[u8]) -> Result<DecodedEvents, EventsDecodeError> {
     let Some(header) = lines.next() else {
         return Err(EventsDecodeError::MissingHeader);
     };
-    let header: Header =
-        serde_json::from_slice(header).map_err(|e| EventsDecodeError::BadHeader(e.to_string()))?;
+    let header: Header = serde_json::from_slice(header).map_err(EventsDecodeError::BadHeader)?;
 
     let mut records: Vec<EventRecord> = Vec::new();
     for (index, line) in lines.enumerate() {
         let record = serde_json::from_slice(line).map_err(|e| EventsDecodeError::BadRecord {
-            line:    index + 2,
-            message: e.to_string(),
+            line:   index + 2,
+            source: e,
         })?;
         records.push(record);
     }
@@ -266,7 +278,7 @@ fn write_records(mut file: File, path: &Path, rx: &Receiver<Msg>) {
                     Some(message) => Err(ObserveError::new(EVENTS_FILE, message)),
                     None => file
                         .flush()
-                        .map_err(|e| ObserveError::new(EVENTS_FILE, e.to_string())),
+                        .map_err(|e| ObserveError::new(EVENTS_FILE, "flush failed").with_source(e)),
                 };
                 let _ = reply.send(result);
             }
@@ -374,6 +386,16 @@ pub fn resume_driver(rt: &Runtime) -> Result<(Driver, ResumeInfo), HostError> {
 /// read for verification.
 fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostError> {
     let run_dir = rt.run_options().run_dir.clone();
+    // A fresh run's graph was validated when it lowered; the recorded one gets
+    // the same full check here — structure and step registry both, since
+    // nothing else has looked at these bytes.
+    if let Err(errors) = ir::validate_with(&graph, Some(rt.registry())) {
+        return Err(HostError::InvalidGraph {
+            path:  run_dir.join(GRAPH_FILE),
+            count: errors.len(),
+            first: errors[0].to_string(),
+        });
+    }
     // The §11 contract holds on resume too; a refusal here is a refusal to
     // continue, not to write.
     encode_graph_checked(&graph, &rt.masker())?;

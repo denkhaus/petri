@@ -34,6 +34,8 @@
 //! sketch might use — because a resolved engine leaf can be *any* JSON value,
 //! and an unwrapped object could not be told apart from an operator node.
 
+use std::str::FromStr;
+
 use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::literal_value;
 use frontend::expr::{BinaryOp, Expr, UnaryOp};
@@ -89,8 +91,8 @@ impl GateOp {
         }
     }
 
-    pub fn parse(symbol: &str) -> Option<Self> {
-        Some(match symbol {
+    pub fn parse(symbol: &str) -> Result<Self, GateOpError> {
+        Ok(match symbol {
             "==" => Self::Eq,
             "!=" => Self::Ne,
             "<" => Self::Lt,
@@ -100,10 +102,23 @@ impl GateOp {
             "&&" => Self::And,
             "||" => Self::Or,
             "!" => Self::Not,
-            _ => return None,
+            _ => return Err(GateOpError(symbol.to_string())),
         })
     }
 }
+
+impl FromStr for GateOp {
+    type Err = GateOpError;
+
+    fn from_str(symbol: &str) -> Result<Self, Self::Err> {
+        Self::parse(symbol)
+    }
+}
+
+/// A symbol that is not one of the nine gate operators.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("`{0}` is not a gate operator")]
+pub struct GateOpError(pub String);
 
 /// One node of a gate.
 #[derive(Clone, Debug, PartialEq)]
@@ -227,7 +242,7 @@ impl TryFrom<&Value> for Gate {
             });
         }
         if let (Some(op), Some(args)) = (map.get(OP_KEY), map.get(ARGS_KEY)) {
-            let Some(op) = op.as_str().and_then(GateOp::parse) else {
+            let Some(op) = op.as_str().and_then(|s| GateOp::parse(s).ok()) else {
                 return Err(format!("`{op}` is not a gate operator"));
             };
             let Some(args) = args.as_array() else {
@@ -546,6 +561,15 @@ mod tests {
     )]
     fn no_env(_: &str) -> Result<Option<Value>, ()> {
         Ok(None)
+    }
+
+    #[test]
+    fn gate_ops_round_trip_through_their_symbols() {
+        use GateOp::{And, Eq, Ge, Gt, Le, Lt, Ne, Not, Or};
+        for op in [Eq, Ne, Lt, Le, Gt, Ge, And, Or, Not] {
+            assert_eq!(GateOp::parse(op.symbol()), Ok(op));
+        }
+        assert!(GateOp::parse("??").is_err());
     }
 
     #[test]

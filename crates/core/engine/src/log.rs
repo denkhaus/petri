@@ -95,7 +95,7 @@ pub struct EventRecord {
 }
 
 /// A log whose version is not the one this build speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("event log is version {found}; this build reads version {expected}")]
 pub struct UnsupportedLogVersion {
     pub found:    u32,

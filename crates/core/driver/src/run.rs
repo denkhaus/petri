@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -791,7 +792,10 @@ impl Driver {
             }
             Err(error) => {
                 // Not a run abort: every firing in this scope fails, routably.
-                self.acquire_failures.insert(scope, error.to_string());
+                // This is the deliberate render point — the failure becomes
+                // `FailureInfo.message`, a rendered projection — so the whole
+                // source chain is flattened into it here.
+                self.acquire_failures.insert(scope, render_chain(&error));
             }
         }
     }
@@ -1277,6 +1281,19 @@ fn value_to_string(value: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// An error and its whole `source()` chain on one line, for the places that
+/// must flatten a typed error into a recorded message.
+fn render_chain(error: &dyn Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
 }
 
 /// Replace every `{"$secret": "NAME"}` reference in a `Deliver` payload — the

@@ -88,7 +88,10 @@ impl GitActionSource {
     fn ensure_bare(&self, reference: &ActionRef) -> Result<PathBuf, ActionSourceError> {
         reference
             .validate()
-            .map_err(|e| fetch_error(reference, e.to_string()))?;
+            .map_err(|e| ActionSourceError::InvalidReference {
+                reference: reference.to_string(),
+                source:    e,
+            })?;
         let dir = self.bare_dir(reference);
         if !dir.join("HEAD").is_file() {
             fs::create_dir_all(&dir).map_err(|e| fetch_error(reference, e.to_string()))?;
@@ -121,7 +124,10 @@ impl GitActionSource {
     fn fetch(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
         pinned
             .validate()
-            .map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
+            .map_err(|e| ActionSourceError::InvalidReference {
+                reference: pinned.reference.to_string(),
+                source:    e,
+            })?;
         let reference = &pinned.reference;
         let bare = self.ensure_bare(reference)?;
         if Self::has_commit(&bare, &pinned.sha) {

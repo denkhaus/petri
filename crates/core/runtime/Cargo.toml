@@ -26,6 +26,7 @@ frontend = { workspace = true }
 frontend-native = { workspace = true }
 async-trait = { workspace = true }
 smol_str = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

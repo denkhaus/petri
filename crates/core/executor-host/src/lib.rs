@@ -258,10 +258,7 @@ impl HostExecutor {
         let workspace = self.workspace_for(&scope.instance);
         async_fs::create_dir_all(&workspace)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    workspace.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("create", workspace.display(), e))?;
         // Group records and status files live beside the workspace, not in it,
         // so steps never see them and workspace teardown never races the
         // sentinel's rename — one generation dir per acquisition, which is what
@@ -272,20 +269,14 @@ impl HostExecutor {
         );
         async_fs::create_dir_all(&groups_root)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    groups_root.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("create", groups_root.display(), e))?;
         fence_prior_generations(&groups_root, self.fence_drain).await?;
         let generation = fresh_generation_id();
         tracing::Span::current().record("generation", generation.as_str());
         let gen_dir = groups_root.join(&generation);
         async_fs::create_dir_all(&gen_dir)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    gen_dir.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("create", gen_dir.display(), e))?;
         let groups = Arc::new(Mutex::new(Vec::new()));
         Ok(EnvHandle::new(
             scope.id,
@@ -449,10 +440,7 @@ impl ExecEnv for HostEnv {
         };
         async_fs::create_dir_all(&cwd)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    cwd.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("create", cwd.display(), e))?;
 
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
         let status_file = self.gen_dir.join(format!("{n}.status"));
@@ -484,13 +472,13 @@ impl ExecEnv for HostEnv {
 
         let mut child = command.spawn().map_err(|e| EnvError::Spawn {
             program: spec.program.clone(),
-            message: e.to_string(),
+            source:  e,
         })?;
         let pgid = child
             .id()
             .ok_or_else(|| EnvError::Spawn {
                 program: spec.program.clone(),
-                message: "the child exited before its pid could be read".into(),
+                source:  io::Error::other("the child exited before its pid could be read"),
             })?
             .cast_signed();
         tracing::Span::current().record("pgid", pgid);
@@ -541,10 +529,7 @@ impl ExecEnv for HostEnv {
         match async_fs::read(self.workspace.join(relative)).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: e.to_string(),
-            }),
+            Err(e) => Err(EnvError::workspace("read", relative.display(), e)),
         }
     }
 
@@ -558,25 +543,20 @@ impl ExecEnv for HostEnv {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(EnvError::Workspace {
-                    path:    relative.display().to_string(),
-                    message: e.to_string(),
-                });
+                return Err(EnvError::workspace("open", relative.display(), e));
             }
         };
         let mut bytes = Vec::new();
         file.take(limit as u64 + 1)
             .read_to_end(&mut bytes)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("read", relative.display(), e))?;
         if bytes.len() > limit {
-            return Err(EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: format!("file exceeds the {limit}-byte read limit"),
-            });
+            return Err(EnvError::workspace(
+                "read",
+                relative.display(),
+                executor::oversized_read(limit),
+            ));
         }
         Ok(Some(bytes))
     }
@@ -586,17 +566,11 @@ impl ExecEnv for HostEnv {
         if let Some(parent) = path.parent() {
             async_fs::create_dir_all(parent)
                 .await
-                .map_err(|e| EnvError::Workspace {
-                    path:    parent.display().to_string(),
-                    message: e.to_string(),
-                })?;
+                .map_err(|e| EnvError::workspace("create", parent.display(), e))?;
         }
         async_fs::write(&path, contents)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: e.to_string(),
-            })
+            .map_err(|e| EnvError::workspace("write", relative.display(), e))
     }
 
     fn grace(&self) -> Duration {
@@ -698,11 +672,11 @@ impl ProcessHandle for HostProcess {
                     error = ?error,
                     "process group signal failed"
                 );
-                return Err(EnvError::Signal(format!(
-                    "killpg({}, {}) failed: {error}",
-                    self.pgid,
-                    sig.name()
-                )));
+                return Err(EnvError::Signal {
+                    pgid:   self.pgid,
+                    signal: sig.name(),
+                    source: error,
+                });
             }
 
             if sig != Sig::Kill || !group_is_live(self.pgid) {
@@ -763,10 +737,7 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
         // closes on this ordering.
         let marker = gen_dir.join(FENCED_MARKER);
         if let Err(e) = fs::write(&marker, b"") {
-            return Err(EnvError::Workspace {
-                path:    marker.display().to_string(),
-                message: e.to_string(),
-            });
+            return Err(EnvError::workspace("write", marker.display(), e));
         }
         let Ok(records) = fs::read_dir(&gen_dir) else {
             continue;

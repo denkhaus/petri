@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{fmt, process};
+use std::{fmt, io, process};
 
 use async_trait::async_trait;
 use smol_str::SmolStr;
@@ -196,10 +196,11 @@ pub trait ExecEnv: Send + Sync {
             return Ok(None);
         };
         if bytes.len() > limit {
-            return Err(EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: format!("file exceeds the {limit}-byte read limit"),
-            });
+            return Err(EnvError::workspace(
+                "read",
+                relative.display(),
+                oversized_read(limit),
+            ));
         }
         Ok(Some(bytes))
     }
@@ -243,4 +244,13 @@ pub trait ExecEnv: Send + Sync {
     fn shares_host_filesystem(&self) -> bool {
         false
     }
+}
+
+/// The refusal behind every [`ExecEnv::read_file_limited`] overrun, shared so
+/// each executor reports the limit the same way.
+pub fn oversized_read(limit: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("the file exceeds the {limit}-byte read limit"),
+    )
 }

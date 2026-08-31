@@ -56,7 +56,6 @@ fn matrix_graph(max_parallel: Option<u32>, fail_fast: bool) -> ir::Graph {
 fn for_each_clones_the_node_and_the_collector_waits_for_all_of_them() {
     let graph = matrix_graph(None, false);
     validate(&graph).expect("valid");
-    assert!(!graph.is_plan(), "an unexpanded graph is HIR, not a plan");
 
     let mut h = Harness::new(graph).respond_with(|info| match info.base.as_str() {
         "plan" => Outcome::success(json!(["us-east", "us-west", "eu"])),

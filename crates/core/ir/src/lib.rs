@@ -49,10 +49,10 @@ pub use splice::{
     Attachment, ExistingNodeRef, FragmentErrorKind, FragmentValidationError, GraphFragment,
     ReplaceScope, SpliceMode, SplicePolicy, SpliceRequest, validate_fragment, validate_request,
 };
-pub use step::{Digest, StepKind, StepKinds};
+pub use step::{Digest, StepFailure, StepKind, StepKinds};
 pub use validate::{
     ValidationError, ValidationLocation, ValidationReport, ValidationWarning, check, validate,
-    validate_plan, validate_with,
+    validate_step_kinds, validate_with,
 };
 
 /// The value type carried by tokens, outcomes and step configuration.

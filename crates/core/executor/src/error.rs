@@ -1,17 +1,35 @@
 //! Failures from materializing or using an environment.
 
+use std::{fmt, io};
+
 use smol_str::SmolStr;
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum EnvError {
-    #[error("could not create the workspace at {path}: {message}")]
-    Workspace { path: String, message: String },
-    #[error("could not spawn `{program}`: {message}")]
-    Spawn { program: SmolStr, message: String },
-    #[error("could not signal the process group: {0}")]
-    Signal(String),
-    #[error("waiting on the process failed: {0}")]
-    Wait(String),
+    /// A filesystem operation on or beside the workspace failed. `action` is
+    /// the verb ("create", "read", "write", ...), `path` where.
+    #[error("could not {action} `{path}`")]
+    Workspace {
+        action: &'static str,
+        path:   String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not spawn `{program}`")]
+    Spawn {
+        program: SmolStr,
+        #[source]
+        source:  io::Error,
+    },
+    #[error("could not signal process group {pgid} with {signal}")]
+    Signal {
+        pgid:   i32,
+        signal: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("waiting on the process failed")]
+    Wait(#[source] io::Error),
     /// The executor's backing system refused or failed: a container engine, a
     /// cloud API, a remote agent. `backend` names it; the interface does
     /// not know the list.
@@ -50,11 +68,21 @@ impl EnvError {
         match self {
             Self::Workspace { .. } => "workspace",
             Self::Spawn { .. } => "spawn",
-            Self::Signal(_) => "signal",
+            Self::Signal { .. } => "signal",
             Self::Wait(_) => "wait",
             Self::Backend { .. } => "backend",
             Self::FenceLeaked { .. } => "fence_leaked",
             Self::Gone => "gone",
+        }
+    }
+
+    /// A failed filesystem operation on the workspace side, in one call:
+    /// `action` is the verb, `path` where, `source` the failure itself.
+    pub fn workspace(action: &'static str, path: impl fmt::Display, source: io::Error) -> Self {
+        Self::Workspace {
+            action,
+            path: path.to_string(),
+            source,
         }
     }
 }

@@ -12,7 +12,6 @@ use crate::graph::{
     Completion, ExpandTarget, Expansion, ExprOrValue, Graph, GraphBody, Guard, JoinPolicy,
 };
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
-use crate::placeholder::placeholder_path;
 use crate::step::StepKinds;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -38,8 +37,14 @@ pub enum ValidationError<S = Live> {
     },
     #[error("node {node} uses step kind `{kind}` which is not registered")]
     UnknownStepKind { node: NodeId<S>, kind: StepKindId },
-    #[error("node {node} has an invalid step config: {message}")]
-    BadStepConfig { node: NodeId<S>, message: String },
+    #[error("node {node} has an invalid step config ({class}): {message}")]
+    BadStepConfig {
+        node:    NodeId<S>,
+        /// The step's own failure class — the same one a firing-time rejection
+        /// of this config carries (`bad_config`, or a `check_raw` class).
+        class:   SmolStr,
+        message: String,
+    },
     #[error("the graph has no entry nodes")]
     NoEntry,
     #[error("entry list refers to unknown node {0}")]
@@ -81,10 +86,6 @@ pub enum ValidationError<S = Live> {
     // ── Invariant 6 ────────────────────────────────────────────────────────
     #[error("{site} refers to expression {expr}, which is not in the table")]
     UnknownExpr { site: SmolStr, expr: ExprId<S> },
-    #[error("node {0} still carries an `expand`; executable plans are fully lowered")]
-    HirFieldInPlan(NodeId<S>),
-    #[error("node {node} still carries an unresolved config placeholder at `{path}`")]
-    HirConfigInPlan { node: NodeId<S>, path: String },
 
     // ── Invariant 8 ────────────────────────────────────────────────────────
     #[error(
@@ -154,6 +155,9 @@ impl<S> ValidationError<S> {
             Self::UnknownScope { .. } => "validate.unknown_scope",
             Self::UnknownTarget { .. } => "validate.unknown_target",
             Self::UnknownStepKind { .. } => "step.unknown_kind",
+            // Deliberately not the step's own `class`: the code is a
+            // machine-matched contract, and its stability beats specificity.
+            // The class is in the message instead.
             Self::BadStepConfig { .. } => "step.bad_config",
             Self::NoEntry => "validate.no_entry",
             Self::UnknownEntry(_) => "validate.unknown_entry",
@@ -167,7 +171,6 @@ impl<S> ValidationError<S> {
             Self::LoopHeadMustJoinAny(_) => "validate.loop_head_must_join_any",
             Self::DuplicateEdgeId(_) | Self::ReservedEdgeId(_) => "validate.edge_id",
             Self::UnknownExpr { .. } => "validate.unknown_expr",
-            Self::HirFieldInPlan(_) | Self::HirConfigInPlan { .. } => "validate.hir_in_plan",
             Self::ExitUnreachable { .. }
             | Self::ExitNotPostdominator { .. }
             | Self::BoundaryCrossing { .. } => "validate.expansion_region",
@@ -196,11 +199,9 @@ impl<S> ValidationError<S> {
             | Self::ExitUnreachable { node, .. }
             | Self::ExitNotPostdominator { node, .. }
             | Self::BoundaryCrossing { node, .. }
-            | Self::HirConfigInPlan { node, .. }
             | Self::ZeroBudget(node)
             | Self::UnboundedLoopBudget(node)
-            | Self::LoopHeadMustJoinAny(node)
-            | Self::HirFieldInPlan(node) => ValidationLocation::Node(*node),
+            | Self::LoopHeadMustJoinAny(node) => ValidationLocation::Node(*node),
             Self::UnknownTarget { edge, .. }
             | Self::DuplicateEdgeId(edge)
             | Self::ReservedEdgeId(edge) => ValidationLocation::Edge(*edge),
@@ -235,14 +236,12 @@ impl<S> ValidationError<S> {
             | Self::ExitUnreachable { node, .. }
             | Self::ExitNotPostdominator { node, .. }
             | Self::BoundaryCrossing { node, .. }
-            | Self::HirConfigInPlan { node, .. }
             | Self::UnknownEntry(node)
             | Self::DuplicateEntry(node)
             | Self::EntryHasIncoming(node)
             | Self::ZeroBudget(node)
             | Self::UnboundedLoopBudget(node)
-            | Self::LoopHeadMustJoinAny(node)
-            | Self::HirFieldInPlan(node) => Some(*node),
+            | Self::LoopHeadMustJoinAny(node) => Some(*node),
             Self::UnknownTarget { from, .. } => Some(*from),
             Self::CycleWithoutBackEdge(nodes) => nodes.first().copied(),
             Self::ScopeIdMismatch { .. }
@@ -390,20 +389,24 @@ pub(crate) fn check_with<S>(
     }
 }
 
-/// Validate an executable plan: everything [`validate`] checks, plus invariant
-/// 6's requirement that no HIR-only field survives.
-pub fn validate_plan<S>(graph: &Graph<S>) -> Result<(), Vec<ValidationError<S>>> {
-    let mut errors = collect(graph, None);
-    check_fully_lowered(&graph.body, &mut errors);
-    done(errors)
-}
-
 /// Validate a graph and resolve every step kind against `registry`.
 pub fn validate_with<S>(
     graph: &Graph<S>,
     registry: Option<&dyn StepKinds>,
 ) -> Result<(), Vec<ValidationError<S>>> {
     done(collect(graph, registry))
+}
+
+/// Only the registry-dependent pass: every step kind resolves and every
+/// literal config parses. For a graph whose structural passes already ran —
+/// one a frontend just lowered and validated.
+pub fn validate_step_kinds<S>(
+    graph: &Graph<S>,
+    registry: &dyn StepKinds,
+) -> Result<(), Vec<ValidationError<S>>> {
+    let mut errors = Vec::new();
+    check_step_kinds(&graph.body, registry, &mut errors);
+    done(errors)
 }
 
 fn done<S>(errors: Vec<ValidationError<S>>) -> Result<(), Vec<ValidationError<S>>> {
@@ -419,7 +422,10 @@ pub(crate) fn collect<S>(
     registry: Option<&dyn StepKinds>,
 ) -> Vec<ValidationError<S>> {
     let mut errors = Vec::new();
-    check_structure(&graph.body, registry, &mut errors);
+    check_structure(&graph.body, &mut errors);
+    if let Some(registry) = registry {
+        check_step_kinds(&graph.body, registry, &mut errors);
+    }
     check_completion(graph, &mut errors);
     collect_body_tail(&graph.body, &mut errors);
     errors
@@ -432,7 +438,10 @@ pub(crate) fn collect_body<S>(
     registry: Option<&dyn StepKinds>,
 ) -> Vec<ValidationError<S>> {
     let mut errors = Vec::new();
-    check_structure(body, registry, &mut errors);
+    check_structure(body, &mut errors);
+    if let Some(registry) = registry {
+        check_step_kinds(body, registry, &mut errors);
+    }
     collect_body_tail(body, &mut errors);
     errors
 }
@@ -449,11 +458,7 @@ fn collect_body_tail<S>(body: &GraphBody<S>, errors: &mut Vec<ValidationError<S>
 
 // ── Structure ─────────────────────────────────────────────────────────────
 
-fn check_structure<S>(
-    graph: &GraphBody<S>,
-    registry: Option<&dyn StepKinds>,
-    errors: &mut Vec<ValidationError<S>>,
-) {
+fn check_structure<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for (index, scope) in graph.scopes.iter().enumerate() {
         if scope.id.index() != index {
             errors.push(ValidationError::ScopeIdMismatch {
@@ -475,22 +480,6 @@ fn check_structure<S>(
                 node:  node.id,
                 scope: node.scope,
             });
-        }
-        if let Some(registry) = registry {
-            match registry.get(&node.step.kind) {
-                None => errors.push(ValidationError::UnknownStepKind {
-                    node: node.id,
-                    kind: node.step.kind.clone(),
-                }),
-                Some(kind) => {
-                    if let Err(message) = kind.validate_config(&node.step.config) {
-                        errors.push(ValidationError::BadStepConfig {
-                            node: node.id,
-                            message,
-                        });
-                    }
-                }
-            }
         }
         for edge in node.routing.edges() {
             if graph.node(edge.to).is_none() {
@@ -520,6 +509,32 @@ fn check_structure<S>(
         // contradiction, though, because the entry is seeded rather than joined.
         if graph.edges().any(|edge| edge.to == entry && !edge.back) {
             errors.push(ValidationError::EntryHasIncoming(entry));
+        }
+    }
+}
+
+/// The one registry-dependent pass: every node's step kind resolves, and its
+/// literal config passes the kind's own load-time check.
+fn check_step_kinds<S>(
+    graph: &GraphBody<S>,
+    registry: &dyn StepKinds,
+    errors: &mut Vec<ValidationError<S>>,
+) {
+    for node in &graph.nodes {
+        match registry.get(&node.step.kind) {
+            None => errors.push(ValidationError::UnknownStepKind {
+                node: node.id,
+                kind: node.step.kind.clone(),
+            }),
+            Some(kind) => {
+                if let Err(failure) = kind.validate_config(&node.step.config) {
+                    errors.push(ValidationError::BadStepConfig {
+                        node:    node.id,
+                        class:   SmolStr::new_static(failure.class),
+                        message: failure.message,
+                    });
+                }
+            }
         }
     }
 }
@@ -636,20 +651,6 @@ fn children<S>(expr: &Expr<S>) -> Vec<ExprId<S>> {
         Expr::Array(items) => items.clone(),
         Expr::Object(fields) => fields.iter().map(|(_, v)| *v).collect(),
         Expr::Call(_, args) => args.clone(),
-    }
-}
-
-fn check_fully_lowered<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
-    for node in &graph.nodes {
-        if node.expand.is_some() {
-            errors.push(ValidationError::HirFieldInPlan(node.id));
-        }
-        if let Some(path) = placeholder_path(&node.step.config) {
-            errors.push(ValidationError::HirConfigInPlan {
-                node: node.id,
-                path,
-            });
-        }
     }
 }
 

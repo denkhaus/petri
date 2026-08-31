@@ -10,7 +10,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_str::SmolStr;
 
+use crate::flow::{FailureInfo, Outcome, Status};
 use crate::ids::StepKindId;
+
+/// A step that failed before it could run, in the few bytes needed to say so.
+///
+/// The short-circuit arm used to be a whole `Outcome`, which made every caller
+/// pay for the larger of two identical types for no benefit. This carries the
+/// class and the message, and becomes an `Outcome` once, at the boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepFailure {
+    pub class:   &'static str,
+    pub message: String,
+}
+
+impl From<StepFailure> for Outcome {
+    fn from(failure: StepFailure) -> Self {
+        Self::new(
+            Status::Failure(FailureInfo::new(failure.message).with_class(failure.class)),
+            Value::Null,
+        )
+    }
+}
 
 /// A content digest of a step's inputs.
 ///
@@ -31,8 +52,9 @@ pub trait StepKind: Send + Sync {
 
     fn name(&self) -> &str;
 
-    /// Validate a node's `config` at load time.
-    fn validate_config(&self, _config: &Value) -> Result<(), String> {
+    /// Validate a node's `config` at load time. A rejection carries the same
+    /// class a firing-time rejection of the same config would.
+    fn validate_config(&self, _config: &Value) -> Result<(), StepFailure> {
         Ok(())
     }
 

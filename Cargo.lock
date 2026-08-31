@@ -804,6 +804,7 @@ dependencies = [
  "petri-steps",
  "petri-testkit",
  "smol_str",
+ "thiserror",
  "tokio",
  "tracing",
 ]

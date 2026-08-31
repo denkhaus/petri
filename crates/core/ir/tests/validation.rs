@@ -9,7 +9,6 @@ use ir::{
     Arm, Budget, Completion, Edge, EdgeId, ExpandTarget, Expansion, ExprId, ExprTable, Graph,
     GraphBuilder, Guard, JoinPolicy, Node, NodeId, Routing, Scope, ScopeId, SelectGroup,
     StepKindId, StepRef, ValidationError, ValidationLocation, ValidationWarning, Value, validate,
-    validate_plan,
 };
 use serde_json::json;
 
@@ -86,6 +85,7 @@ fn structural_errors_have_distinct_codes() {
         (
             ValidationError::BadStepConfig {
                 node,
+                class: "bad_config".into(),
                 message: "bad".to_string(),
             },
             "step.bad_config",
@@ -255,43 +255,6 @@ fn expression_references_must_resolve() {
         errors(&b.build())
             .iter()
             .any(|e| matches!(e, ValidationError::UnknownExpr { .. }))
-    );
-}
-
-/// Invariant 6: HIR-only fields must be gone from an executable plan.
-#[test]
-fn a_plan_may_not_carry_hir_fields() {
-    let mut b = GraphBuilder::new();
-    let scope = ScopeId::new(0);
-    let a = b.add_step("a", scope, NOOP);
-    let items = b.exprs().lit(json!([1, 2]));
-    b.set_expansion(a, Expansion::ForEach {
-        items,
-        target: ExpandTarget::Node,
-        max_parallel: None,
-        fail_fast: false,
-    });
-    let graph = b.build();
-
-    validate(&graph).expect("valid as HIR");
-    let plan_errors = validate_plan(&graph).expect_err("not a plan");
-    assert!(
-        plan_errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::HirFieldInPlan(_)))
-    );
-
-    // An unresolved config placeholder is the other half of the same rule.
-    let mut b = GraphBuilder::new();
-    let a = b.add_step("a", scope, NOOP);
-    let value = b.exprs().lit(1);
-    b.node_mut(a).step = StepRef::new(NOOP, json!({ "x": { EXPR_PLACEHOLDER_KEY: value.raw() } }));
-    let graph = b.build();
-    assert!(
-        validate_plan(&graph)
-            .expect_err("not a plan")
-            .iter()
-            .any(|e| matches!(e, ValidationError::HirConfigInPlan { .. }))
     );
 }
 

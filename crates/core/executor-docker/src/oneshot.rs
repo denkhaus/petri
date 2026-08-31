@@ -8,7 +8,6 @@
 //! client's exit code is the container's own.
 
 use std::collections::{BTreeMap, HashSet};
-use std::io;
 use std::path::PathBuf;
 use std::process::{self, Stdio};
 use std::sync::{Arc, Mutex};
@@ -140,14 +139,14 @@ impl OneShotRunner {
     async fn mark(&self) -> Result<(), EnvError> {
         self.marked
             .get_or_try_init(|| async {
-                let io_error = |e: io::Error| EnvError::Workspace {
-                    path:    self.marker.display().to_string(),
-                    message: e.to_string(),
-                };
                 if let Some(parent) = self.marker.parent() {
-                    fs::create_dir_all(parent).await.map_err(io_error)?;
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| EnvError::workspace("create", parent.display(), e))?;
                 }
-                fs::write(&self.marker, b"").await.map_err(io_error)
+                fs::write(&self.marker, b"")
+                    .await
+                    .map_err(|e| EnvError::workspace("write", self.marker.display(), e))
             })
             .await?;
         Ok(())
@@ -244,7 +243,7 @@ impl ContainerRunner for OneShotRunner {
 
         let mut child = command.spawn().map_err(|e| EnvError::Spawn {
             program: SmolStr::new("docker run"),
-            message: e.to_string(),
+            source:  e,
         })?;
 
         let (tx, rx) = mpsc::channel(256);
@@ -279,11 +278,7 @@ impl ProcessHandle for OneShotProcess {
     async fn wait(&mut self) -> Result<ExitStatus, EnvError> {
         // `docker run` forwards the container's exit code; the entrypoint is
         // PID 1, so there is no forked wrapper whose early return could lie.
-        let status = self
-            .child
-            .wait()
-            .await
-            .map_err(|e| EnvError::Wait(e.to_string()))?;
+        let status = self.child.wait().await.map_err(EnvError::Wait)?;
         Ok(ExitStatus::from(status))
     }
 

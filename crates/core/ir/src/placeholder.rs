@@ -64,9 +64,8 @@ pub fn malformed_secret_ref(config: &Value) -> Option<String> {
 /// Where the first unresolved expression placeholder sits in a config, as a
 /// dotted path (`""` when the whole config is one).
 ///
-/// Both halves of "no unresolved `ExprId` crosses the executor boundary" use
-/// this: [`validate_plan`](crate::validate::validate_plan) at load time, and
-/// `ResolvedFiring`'s constructor at firing time.
+/// This is how "no unresolved `ExprId` crosses the executor boundary" is
+/// enforced: `ResolvedFiring`'s constructor checks it at firing time.
 pub fn placeholder_path(config: &Value) -> Option<String> {
     fn walk(value: &Value, path: &str) -> Option<String> {
         match value {

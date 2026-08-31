@@ -12,6 +12,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use executor::{CONTAINER_RUNTIME_CLASS, ContainerRunner, ExecEnv, SecretProvider};
+// The failure struct lives in `ir` (validation returns it too); step-kind code
+// keeps reading it from here.
+pub use ir::StepFailure;
 use ir::placeholder::contains_placeholder;
 use ir::{Attempt, Control, FiringId, Outcome, StepEvent, StepKind, StepKindId, StepKinds, Value};
 use serde::de::DeserializeOwned;
@@ -85,26 +88,6 @@ impl StepCtx {
     }
 }
 
-/// A step that failed before it could run, in the few bytes needed to say so.
-///
-/// The short-circuit arm used to be a whole `Outcome`, which made every caller
-/// pay for the larger of two identical types for no benefit. This carries the
-/// class and the message, and becomes an `Outcome` once, at the boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StepFailure {
-    pub class:   &'static str,
-    pub message: String,
-}
-
-impl From<StepFailure> for Outcome {
-    fn from(failure: StepFailure) -> Self {
-        Self::new(
-            ir::Status::Failure(ir::FailureInfo::new(failure.message).with_class(failure.class)),
-            Value::Null,
-        )
-    }
-}
-
 /// A step kind, as an author writes one.
 ///
 /// One attempt per call. Retries are the core's business: a step never loops.
@@ -159,10 +142,8 @@ impl<S: Step> StepKind for Erased<S> {
         S::NAME
     }
 
-    fn validate_config(&self, config: &Value) -> Result<(), String> {
-        self.0
-            .check_raw(config)
-            .map_err(|f| format!("{}: {}", f.class, f.message))?;
+    fn validate_config(&self, config: &Value) -> Result<(), StepFailure> {
+        self.0.check_raw(config)?;
         if contains_placeholder(config) {
             // HIR: the value is still an expression. The typed check runs at firing
             // time, against the resolved config.
@@ -170,7 +151,10 @@ impl<S: Step> StepKind for Erased<S> {
         }
         serde_json::from_value::<S::Config>(config.clone())
             .map(drop)
-            .map_err(|e| e.to_string())
+            .map_err(|e| StepFailure {
+                class:   BAD_CONFIG_CLASS,
+                message: e.to_string(),
+            })
     }
 
     fn fingerprint(&self, config: &Value) -> Option<ir::Digest> {

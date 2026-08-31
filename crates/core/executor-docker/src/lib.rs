@@ -376,10 +376,7 @@ async fn pull_with_credentials(
     ));
     fs::create_dir_all(&config_dir)
         .await
-        .map_err(|e| EnvError::Workspace {
-            path:    config_dir.display().to_string(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| EnvError::workspace("create", config_dir.display(), e))?;
     let config = config_dir.display().to_string();
     let mut login: Vec<&str> = vec![
         "--config",
@@ -531,10 +528,7 @@ impl DockerExecutor {
         let workspace = self.workspace_for(&scope.instance);
         fs::create_dir_all(&workspace)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    workspace.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("create", workspace.display(), e))?;
 
         let span = tracing::Span::current();
         span.record("image", image.as_str());
@@ -839,10 +833,7 @@ impl ExecEnv for DockerEnv {
         let pgid_dir = self.workspace.join(".ci").join("pg");
         fs::create_dir_all(&pgid_dir)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    pgid_dir.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("create", pgid_dir.display(), e))?;
         let pgid_host = pgid_dir.join(&token);
         let pgid_in_container = format!("{CONTAINER_WORKSPACE}/.ci/pg/{token}");
 
@@ -854,10 +845,7 @@ impl ExecEnv for DockerEnv {
                 let host = self.workspace.join(rel);
                 fs::create_dir_all(&host)
                     .await
-                    .map_err(|e| EnvError::Workspace {
-                        path:    host.display().to_string(),
-                        message: e.to_string(),
-                    })?;
+                    .map_err(|e| EnvError::workspace("create", host.display(), e))?;
                 format!("{CONTAINER_WORKSPACE}/{}", rel.display())
             }
             None => CONTAINER_WORKSPACE.to_string(),
@@ -909,7 +897,7 @@ impl ExecEnv for DockerEnv {
 
         let mut child = command.spawn().map_err(|e| EnvError::Spawn {
             program: SmolStr::new("docker exec"),
-            message: e.to_string(),
+            source:  e,
         })?;
 
         let (tx, rx) = mpsc::channel(256);
@@ -952,10 +940,7 @@ impl ExecEnv for DockerEnv {
         match fs::read(self.workspace.join(relative)).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: e.to_string(),
-            }),
+            Err(e) => Err(EnvError::workspace("read", relative.display(), e)),
         }
     }
 
@@ -969,25 +954,20 @@ impl ExecEnv for DockerEnv {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(EnvError::Workspace {
-                    path:    relative.display().to_string(),
-                    message: e.to_string(),
-                });
+                return Err(EnvError::workspace("open", relative.display(), e));
             }
         };
         let mut bytes = Vec::new();
         file.take(limit as u64 + 1)
             .read_to_end(&mut bytes)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: e.to_string(),
-            })?;
+            .map_err(|e| EnvError::workspace("read", relative.display(), e))?;
         if bytes.len() > limit {
-            return Err(EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: format!("file exceeds the {limit}-byte read limit"),
-            });
+            return Err(EnvError::workspace(
+                "read",
+                relative.display(),
+                executor::oversized_read(limit),
+            ));
         }
         Ok(Some(bytes))
     }
@@ -997,17 +977,11 @@ impl ExecEnv for DockerEnv {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
-                .map_err(|e| EnvError::Workspace {
-                    path:    parent.display().to_string(),
-                    message: e.to_string(),
-                })?;
+                .map_err(|e| EnvError::workspace("create", parent.display(), e))?;
         }
         fs::write(&path, contents)
             .await
-            .map_err(|e| EnvError::Workspace {
-                path:    relative.display().to_string(),
-                message: e.to_string(),
-            })
+            .map_err(|e| EnvError::workspace("write", relative.display(), e))
     }
 
     fn grace(&self) -> Duration {
@@ -1069,11 +1043,7 @@ impl ProcessHandle for DockerProcess {
     }
 
     async fn wait(&mut self) -> Result<ExitStatus, EnvError> {
-        let client = self
-            .child
-            .wait()
-            .await
-            .map_err(|e| EnvError::Wait(e.to_string()))?;
+        let client = self.child.wait().await.map_err(EnvError::Wait)?;
 
         // The client returning does not mean the step is over, in two distinct ways,
         // and the group is the authority on both.
@@ -1309,32 +1279,32 @@ async fn run_docker_stdin(
 /// reader sees the whole id or none.
 async fn load_or_record_run_id(run_dir: &Path) -> Result<SmolStr, EnvError> {
     let path = run_dir.join(RUN_ID_FILE);
-    let io_error = |path: &Path, e: io::Error| EnvError::Workspace {
-        path:    path.display().to_string(),
-        message: e.to_string(),
-    };
+    let io_error =
+        |action, path: &Path, e: io::Error| EnvError::workspace(action, path.display(), e);
     match fs::read_to_string(&path).await {
         Ok(recorded) if !recorded.trim().is_empty() => return Ok(SmolStr::new(recorded.trim())),
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(io_error(&path, e)),
+        Err(e) => return Err(io_error("read", &path, e)),
     }
 
     let minted = fresh_run_id();
     fs::create_dir_all(run_dir)
         .await
-        .map_err(|e| io_error(run_dir, e))?;
+        .map_err(|e| io_error("create", run_dir, e))?;
     let staged = run_dir.join(format!("{RUN_ID_FILE}.tmp"));
     let mut file = File::create(&staged)
         .await
-        .map_err(|e| io_error(&staged, e))?;
+        .map_err(|e| io_error("create", &staged, e))?;
     file.write_all(minted.as_bytes())
         .await
-        .map_err(|e| io_error(&staged, e))?;
-    file.sync_all().await.map_err(|e| io_error(&staged, e))?;
+        .map_err(|e| io_error("write", &staged, e))?;
+    file.sync_all()
+        .await
+        .map_err(|e| io_error("sync", &staged, e))?;
     fs::rename(&staged, &path)
         .await
-        .map_err(|e| io_error(&path, e))?;
+        .map_err(|e| io_error("rename", &path, e))?;
     Ok(SmolStr::new(minted))
 }
 

@@ -14,8 +14,9 @@ use super::{
     ActionContext, ActionPlan, Lowering, PlanInput, PlanKind, scalar_text, scalar_text_opt,
 };
 use crate::action::{
-    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DOCKER_ACTION_KIND,
-    Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, STATE_OUTPUT_KEY, unavailable_hint,
+    ACTION_KIND, ActionLocation, ActionPathError, ActionRef, ActionSourceError, CHECKOUT_KIND,
+    DOCKER_ACTION_KIND, Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RefError,
+    STATE_OUTPUT_KEY, render_chain, unavailable_hint,
 };
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
@@ -32,7 +33,19 @@ pub(super) enum ResolveFailure {
     /// reference; the reason, when the source knows one, tells the hint
     /// whether refreshing the source could ever help.
     Unavailable(Option<String>),
-    Failed(String),
+    Failed(ResolveError),
+}
+
+/// The typed failure behind [`ResolveFailure::Failed`], kept whole so the
+/// diagnostic renders the full chain.
+#[derive(Clone, Debug, thiserror::Error)]
+pub(super) enum ResolveError {
+    #[error(transparent)]
+    Reference(#[from] RefError),
+    #[error(transparent)]
+    Pin(#[from] ActionPathError),
+    #[error(transparent)]
+    Source(#[from] ActionSourceError),
 }
 
 impl<'a> Lowering<'_, 'a> {
@@ -43,17 +56,17 @@ impl<'a> Lowering<'_, 'a> {
         }
         let source_failure = |e: ActionSourceError| match e {
             ActionSourceError::Unavailable { reason, .. } => ResolveFailure::Unavailable(reason),
-            other => ResolveFailure::Failed(other.to_string()),
+            other => ResolveFailure::Failed(other.into()),
         };
         let result = match self.actions {
             None => Err(ResolveFailure::NoSource),
             Some(source) => ActionRef::parse(name)
-                .map_err(|e| ResolveFailure::Failed(e.to_string()))
+                .map_err(|e| ResolveFailure::Failed(e.into()))
                 .and_then(|reference| source.resolve(&reference).map_err(source_failure))
                 .and_then(|pinned| {
                     pinned
                         .validate()
-                        .map_err(|e| ResolveFailure::Failed(e.to_string()))?;
+                        .map_err(|e| ResolveFailure::Failed(e.into()))?;
                     source
                         .manifest(&pinned)
                         .map(|text| (pinned, text))
@@ -118,11 +131,11 @@ impl<'a> Lowering<'_, 'a> {
                     );
                     None
                 }
-                Err(ResolveFailure::Failed(message)) => {
+                Err(ResolveFailure::Failed(error)) => {
                     self.diags.error(
                         "action.unresolved",
                         span.clone(),
-                        format!("`uses: {name}`: {message}"),
+                        format!("`uses: {name}`: {}", render_chain(&error)),
                     );
                     None
                 }

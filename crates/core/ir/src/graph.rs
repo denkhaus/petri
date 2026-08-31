@@ -850,11 +850,6 @@ impl<S> GraphBody<S> {
             .find(|n| n.routing.edges().any(|e| e.id == id))
             .map(|n| n.id)
     }
-
-    /// Whether this graph body is executable: no HIR-only fields remain.
-    pub fn is_plan(&self) -> bool {
-        self.nodes.iter().all(|n| n.expand.is_none())
-    }
 }
 
 /// A whole workflow: the reusable graph body plus run-level configuration.

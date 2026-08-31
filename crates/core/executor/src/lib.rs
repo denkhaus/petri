@@ -23,7 +23,9 @@ mod scope;
 mod secrets;
 
 pub use container::{CONTAINER_RUNTIME_CLASS, ContainerImage, ContainerRunner, OneShotContainer};
-pub use env::{ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSpec, Sig};
+pub use env::{
+    ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSpec, Sig, oversized_read,
+};
 pub use error::{EnvError, ReleaseReport};
 pub use progress::{NoProgress, Progress, ProgressSink};
 pub use scope::{

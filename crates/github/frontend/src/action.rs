@@ -7,6 +7,7 @@
 //! is the step's business at run time, through the same [`ActionSource`].
 
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -348,6 +349,14 @@ pub enum ActionSourceError {
     NoManifest(String),
     #[error("cannot fetch `{action}`: {message}")]
     Fetch { action: String, message: String },
+    /// The reference itself is unsafe to hand to a filesystem or to git, so
+    /// the source refuses to touch it.
+    #[error("cannot fetch `{reference}`")]
+    InvalidReference {
+        reference: String,
+        #[source]
+        source:    ActionPathError,
+    },
 }
 
 /// The hint for an [`ActionSourceError::Unavailable`] rejection. Two different
@@ -365,6 +374,19 @@ pub(crate) fn unavailable_hint(reason: Option<String>) -> String {
                  refreshing it (for a snapshot, the refresh test) may add it"
             .to_string(),
     }
+}
+
+/// An error and its `source()` chain flattened onto one line, for diagnostic
+/// messages — the rendered projection, where flattening is deliberate.
+pub(crate) fn render_chain(error: &dyn Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
 }
 
 /// Where actions come from.
