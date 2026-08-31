@@ -986,14 +986,23 @@ pub fn expected_from_log(identity: &StepIdentity, log: &[String]) -> Option<Stri
     // design, so an API call or ref fetch against it meets not-found. The
     // payload's *fields* were the fidelity; the resource never existed.
     // Cross-line: the request names the number ("Fetching … PR#999999") and
-    // the API's answer is its own bare line ("Error: Not Found").
+    // the API's answer is its own bare line ("Error: Not Found"). Some
+    // clients log only the API's docs URL, never the number — but under a
+    // sweep that fabricates every event resource, a pulls/issues read
+    // answering Not Found is a read of the fabricated resource by
+    // construction.
     let fabricated = SIMULATED_NUMBER.to_string();
-    if log.iter().any(|line| line.contains(&fabricated))
-        && log.iter().any(|line| {
-            line.contains("Not Found")
-                || line.contains("404")
-                || line.contains("couldn't find remote ref")
-        })
+    let not_found = log.iter().any(|line| {
+        line.contains("Not Found")
+            || line.contains("404")
+            || line.contains("couldn't find remote ref")
+    });
+    if not_found
+        && (log.iter().any(|line| line.contains(&fabricated))
+            || log.iter().any(|line| {
+                line.contains("docs.github.com/rest/pulls")
+                    || line.contains("docs.github.com/rest/issues")
+            }))
     {
         return Some(format!(
             "reads the simulated event's fabricated resource (nothing exists server-side \
