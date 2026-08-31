@@ -63,6 +63,6 @@ async fn without_the_capability_the_node_fails_and_the_run_reports() {
             .status
             .failure_info()
             .map(|f| f.class.as_str()),
-        Some(steps::CAPABILITY_UNAVAILABLE_CLASS)
+        Some(steps::CAPABILITY_UNAVAILABLE_CLASS.as_str())
     );
 }

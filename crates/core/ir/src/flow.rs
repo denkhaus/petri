@@ -184,34 +184,97 @@ impl Status {
     }
 }
 
+/// What kind of failure a [`FailureInfo`] carries — the tag `retry_on` and
+/// soft-fail routing match on. Step kinds set it: a static family name
+/// (`"workspace_setup"`, `"retry_requested"`) or one of the two computed
+/// families, [`FailureClass::exit_status`] and [`FailureClass::signal`].
+/// Serializes as the bare string, so the replay format is unchanged; empty
+/// means unclassified.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FailureClass(SmolStr);
+
+impl FailureClass {
+    /// A static class tag, allocation-free — how the step kinds' class
+    /// constants are built.
+    pub const fn new_static(class: &'static str) -> Self {
+        Self(SmolStr::new_static(class))
+    }
+
+    pub fn new(class: impl Into<SmolStr>) -> Self {
+        Self(class.into())
+    }
+
+    /// The conventional class for a process step that exited non-zero.
+    pub fn exit_status(code: i32) -> Self {
+        Self(SmolStr::new(format!("exit_status:{code}")))
+    }
+
+    /// The conventional class for a process ended by a foreign signal.
+    pub fn signal(signal: i32) -> Self {
+        Self(SmolStr::new(format!("signal:{signal}")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether the failure is unclassified.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<&str> for FailureClass {
+    fn from(class: &str) -> Self {
+        Self(SmolStr::new(class))
+    }
+}
+
+impl fmt::Display for FailureClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<&str> for FailureClass {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<str> for FailureClass {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureInfo {
     pub message: String,
-    /// What kind of failure this is, for `retry_on` to match: `"network"`,
-    /// `"rate_limit"`, `"exit_status:2"`, `"retry_requested"`. Step kinds set
-    /// it. Empty means unclassified.
+    /// See [`FailureClass`].
     #[serde(default)]
-    pub class:   SmolStr,
+    pub class:   FailureClass,
 }
 
 impl FailureInfo {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            class:   SmolStr::default(),
+            class:   FailureClass::default(),
         }
     }
 
     #[must_use]
-    pub fn with_class(mut self, class: &str) -> Self {
-        self.class = SmolStr::new(class);
+    pub fn with_class(mut self, class: impl Into<FailureClass>) -> Self {
+        self.class = class.into();
         self
     }
 
-    /// The conventional class for a process step that exited non-zero.
+    /// The conventional failure for a process step that exited non-zero.
     pub fn exit_status(code: i32) -> Self {
         Self::new(format!("step exited with status {code}"))
-            .with_class(&format!("exit_status:{code}"))
+            .with_class(FailureClass::exit_status(code))
     }
 }
 

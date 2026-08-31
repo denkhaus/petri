@@ -80,7 +80,7 @@ async fn a_missing_capability_fails_the_node_routably() {
         .find(|r| r.name == "greet")
         .expect("recorded");
     let failure = record.outcome.status.failure_info().expect("a failure");
-    assert_eq!(failure.class.as_str(), CAPABILITY_UNAVAILABLE_CLASS);
+    assert_eq!(failure.class, CAPABILITY_UNAVAILABLE_CLASS);
     assert!(
         failure.message.contains("Greeting"),
         "the message names the missing type: {}",

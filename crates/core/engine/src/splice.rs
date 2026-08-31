@@ -15,9 +15,9 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ir::{
-    BinOp, CancelScopeId, Edge, EdgeId, Expr, ExprId, ExprOrValue, FailureInfo, Generation, Guard,
-    JoinPolicy, Local, Node, NodeId, Outcome, Scope, ScopeId, SelectGroup, SpliceMode,
-    SplicePolicy, SpliceRequest, Status, StepRef, Token, Value, placeholder, validate,
+    BinOp, CancelScopeId, Edge, EdgeId, Expr, ExprId, ExprOrValue, FailureClass, FailureInfo,
+    Generation, Guard, JoinPolicy, Local, Node, NodeId, Outcome, Scope, ScopeId, SelectGroup,
+    SpliceMode, SplicePolicy, SpliceRequest, Status, StepRef, Token, Value, placeholder, validate,
     validate_request,
 };
 use smol_str::SmolStr;
@@ -30,7 +30,7 @@ use crate::state::{
 /// The failure class every rejected splice transaction converts to. Registered
 /// in the §13 table; an ordinary retry class — a matching `retry_on` re-runs
 /// the step, and a later attempt can succeed.
-pub const INVALID_SPLICE_CLASS: &str = "invalid_splice";
+pub const INVALID_SPLICE_CLASS: FailureClass = FailureClass::new_static("invalid_splice");
 
 /// The canonical invalid-splice conversion: the outcome becomes a
 /// `Failure{class: invalid_splice}` with `message`, output and metrics are

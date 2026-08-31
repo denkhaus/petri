@@ -309,16 +309,20 @@ impl ActionSource for SnapshotSource {
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
         let key = reference.to_string();
         match self.entries.get(&key) {
-            Some(SnapshotEntry::Resolved { sha, .. }) => Ok(PinnedAction {
-                reference: reference.clone(),
-                sha:       SmolStr::new(sha),
-            }),
+            Some(SnapshotEntry::Resolved { sha, .. }) => {
+                PinnedAction::try_new(reference.clone(), SmolStr::new(sha)).map_err(|e| {
+                    ActionSourceError::Unresolvable {
+                        reference: key,
+                        message:   e.to_string(),
+                    }
+                })
+            }
             other => Err(Self::unavailable(key, other)),
         }
     }
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-        let key = pinned.reference.to_string();
+        let key = pinned.reference().to_string();
         match self.entries.get(&key) {
             Some(SnapshotEntry::Resolved { manifest, .. }) => Ok(manifest.clone()),
             other => Err(Self::unavailable(key, other)),

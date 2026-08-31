@@ -149,7 +149,7 @@ pub fn runtime() -> Runtime {
 /// A runtime-registerable secret map plus a lazily loaded `GITHUB_TOKEN`.
 struct GithubSecrets {
     registered: executor::MapSecrets,
-    token:      OnceLock<Option<String>>,
+    token:      OnceLock<Option<executor::Secret>>,
 }
 
 impl GithubSecrets {
@@ -166,10 +166,11 @@ impl GithubSecrets {
     /// their API calls go anonymous (public reads work, rate-limited; writes
     /// fail with the API's own error). A missing-secret failure would instead
     /// stop every action that merely *names* the token, setup-* included.
-    fn load_token() -> Option<String> {
+    fn load_token() -> Option<executor::Secret> {
         let token = env::var("GITHUB_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty())
+            .map(|t| executor::Secret::new(t.into()))
             .or_else(gh_auth_token);
         if token.is_none() {
             tracing::warn!(
@@ -194,12 +195,12 @@ impl executor::SecretProvider for GithubSecrets {
         let value = self
             .token
             .get_or_init(Self::load_token)
-            .as_deref()
-            .unwrap_or_default();
+            .clone()
+            .map_or_else(Default::default, executor::Secret::expose);
         // An empty value never enters the mask set (the masker refuses short
         // values), so this is a no-op for the token-less case by construction.
-        self.registered.masker().register(value);
-        Ok(executor::Secret::new(value.into()))
+        self.registered.masker().register(&value);
+        Ok(executor::Secret::new(value))
     }
 
     fn register(&self, name: &str, value: &str) -> Result<(), executor::SecretError> {
@@ -213,7 +214,7 @@ impl executor::SecretProvider for GithubSecrets {
 
 /// Ask `gh` for a token without letting a broken credential helper block
 /// forever.
-fn gh_auth_token() -> Option<String> {
+fn gh_auth_token() -> Option<executor::Secret> {
     let mut child = Command::new("gh")
         .args(["auth", "token"])
         .stdout(Stdio::piped())
@@ -229,7 +230,8 @@ fn gh_auth_token() -> Option<String> {
                     .status
                     .success()
                     .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                    .filter(|token| !token.is_empty());
+                    .filter(|token| !token.is_empty())
+                    .map(|token| executor::Secret::new(token.into()));
             }
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(20));

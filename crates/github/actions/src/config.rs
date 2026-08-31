@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub(crate) use frontend_gha::action::ActionLocation;
-use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
+use frontend_gha::action::resolve_manifest_path;
 use ir::Value;
 use serde::{Deserialize, Deserializer, de};
 use smol_str::SmolStr;
@@ -163,12 +163,8 @@ fn validate_entry(action: &ActionLocation, entry: &str) -> Result<(), String> {
 impl<'de> Deserialize<'de> for ActionConfig {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = RawActionConfig::deserialize(deserializer)?;
-        match &raw.action {
-            ActionLocation::Pinned(pinned) => pinned.validate().map_err(de::Error::custom)?,
-            ActionLocation::Local { local } => {
-                validate_relative_action_path(local, true).map_err(de::Error::custom)?;
-            }
-        }
+        // The location validated itself while deserializing (both variants);
+        // only the entry's join against it is this config's own invariant.
         validate_entry(&raw.action, &raw.entry).map_err(de::Error::custom)?;
         Ok(Self {
             action:    raw.action,
@@ -284,10 +280,9 @@ mod entry_tests {
     use super::*;
 
     fn pinned(reference: &str) -> ActionLocation {
-        ActionLocation::Pinned(PinnedAction {
-            reference: ActionRef::parse(reference).expect("valid"),
-            sha:       SmolStr::new("0123456789012345678901234567890123456789"),
-        })
+        let reference = ActionRef::parse(reference).expect("valid");
+        let sha = SmolStr::new("0123456789012345678901234567890123456789");
+        ActionLocation::Pinned(PinnedAction::try_new(reference, sha).expect("a full commit id"))
     }
 
     #[test]

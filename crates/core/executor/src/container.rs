@@ -24,7 +24,8 @@ use crate::error::EnvError;
 /// executor provided no runner, or the container runtime is unreachable.
 /// Routable, like `capability_unavailable`: the step fails its node, never the
 /// run machinery.
-pub const CONTAINER_RUNTIME_CLASS: &str = "container_runtime";
+pub const CONTAINER_RUNTIME_CLASS: ir::FailureClass =
+    ir::FailureClass::new_static("container_runtime");
 
 /// Where a one-shot container's image comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]

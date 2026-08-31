@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use smol_str::SmolStr;
 
 use crate::expr::Expr;
+use crate::flow::FailureClass;
 use crate::graph::{
     Completion, ExpandTarget, Expansion, ExprOrValue, Graph, GraphBody, Guard, JoinPolicy,
 };
@@ -42,7 +43,7 @@ pub enum ValidationError<S = Live> {
         node:    NodeId<S>,
         /// The step's own failure class — the same one a firing-time rejection
         /// of this config carries (`bad_config`, or a `check_raw` class).
-        class:   SmolStr,
+        class:   FailureClass,
         message: String,
     },
     #[error("the graph has no entry nodes")]
@@ -530,7 +531,7 @@ fn check_step_kinds<S>(
                 if let Err(failure) = kind.validate_config(&node.step.config) {
                     errors.push(ValidationError::BadStepConfig {
                         node:    node.id,
-                        class:   SmolStr::new_static(failure.class),
+                        class:   failure.class,
                         message: failure.message,
                     });
                 }

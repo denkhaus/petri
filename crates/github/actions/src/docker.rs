@@ -13,14 +13,14 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 
 use executor::{ContainerImage, OneShotContainer};
-use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
+use frontend_gha::action::resolve_manifest_path;
 use frontend_gha::exprs::{
     escape_sentinel_text, has_env_sentinel, has_hashfiles_sentinel, has_runner_temp_sentinel,
     has_runner_tool_cache_sentinel, has_workspace_sentinel, replace_env_sentinels,
     replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
     replace_workspace_sentinels, secret_sentinel,
 };
-use ir::{Outcome, Value};
+use ir::{FailureClass, Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder, parse_outputs};
@@ -40,7 +40,7 @@ use crate::session::{
 use crate::{gate, hashfiles};
 
 /// The action's image could not be prepared.
-pub(crate) const IMAGE_CLASS: &str = "action_image";
+pub(crate) const IMAGE_CLASS: FailureClass = FailureClass::new_static("action_image");
 
 /// Where the once-per-run build markers live, relative to the workspace: a
 /// local action's Dockerfile builds fresh once per scope, then its tag is
@@ -303,22 +303,9 @@ async fn prepare_image(
             String::new(),
         )),
         DockerActionImage::Dockerfile(DockerfileImage { action, file }) => {
-            // The action's own location first — it is the climb budget the
-            // Dockerfile path resolves against, so it must hold no `..` itself.
-            match action {
-                ActionLocation::Pinned(pinned) => {
-                    pinned.validate().map_err(|e| StepFailure {
-                        class:   IMAGE_CLASS,
-                        message: e.to_string(),
-                    })?;
-                }
-                ActionLocation::Local { local } => {
-                    validate_relative_action_path(local, true).map_err(|e| StepFailure {
-                        class:   IMAGE_CLASS,
-                        message: e.to_string(),
-                    })?;
-                }
-            }
+            // The action's own location is the climb budget the Dockerfile
+            // path resolves against; deserializing the config already
+            // validated it holds no `..` itself (both variants).
             // GitHub builds with the *Dockerfile's parent directory* as the
             // context (the runner joins `runs.image` to the action directory
             // and takes its parent), and manifests depend on it: oss-fuzz's
@@ -341,13 +328,12 @@ async fn prepare_image(
                     let context = join_context(staged, parent);
                     let tag = image_tag(&format!(
                         "{}-{}-{}{}",
-                        pinned.reference.owner,
-                        pinned.reference.repo,
-                        &pinned.sha[..12],
+                        pinned.reference().owner(),
+                        pinned.reference().repo(),
+                        &pinned.sha()[..12],
                         pinned
-                            .reference
-                            .path
-                            .as_deref()
+                            .reference()
+                            .path()
                             .map(|p| format!("-{p}"))
                             .unwrap_or_default(),
                     ));
@@ -358,8 +344,8 @@ async fn prepare_image(
                             tag: SmolStr::new(tag),
                             reuse: true,
                         },
-                        pinned.reference.repository(),
-                        pinned.reference.git_ref.to_string(),
+                        pinned.reference().repository(),
+                        pinned.reference().git_ref().to_string(),
                     ))
                 }
                 ActionLocation::Local { local } => {

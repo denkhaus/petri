@@ -555,7 +555,7 @@ async fn a_killed_firing_is_finished_not_respawned() {
     assert_eq!(resumed_runs.load(Ordering::SeqCst), 0, "never re-spawned");
     assert_eq!(
         escalation_of(&resumed, "work").as_deref(),
-        Some(KILLED_BEFORE_RESUME)
+        Some(KILLED_BEFORE_RESUME.as_str())
     );
     assert_replay_identical(&graph, &resumed);
 }
@@ -591,7 +591,7 @@ async fn a_cancel_truncation_drives_to_a_quiescent_cancelled_report() {
     assert_eq!(resumed_runs.load(Ordering::SeqCst), 0, "not re-spawned");
     assert_eq!(
         escalation_of(&resumed, "work").as_deref(),
-        Some(CANCELLED_BEFORE_RESUME)
+        Some(CANCELLED_BEFORE_RESUME.as_str())
     );
     assert_replay_identical(&graph, &resumed);
 }
@@ -663,7 +663,7 @@ async fn the_synthesized_cancel_routes_and_cleanup_redispatches() {
     assert_eq!(resumed.status, RunStatus::Cancelled);
     assert_eq!(
         escalation_of(&resumed, "work").as_deref(),
-        Some(CANCELLED_BEFORE_RESUME)
+        Some(CANCELLED_BEFORE_RESUME.as_str())
     );
     assert_eq!(status_of(&resumed, "cleanup").as_deref(), Some("success"));
     assert_eq!(
@@ -913,7 +913,7 @@ async fn a_dynamic_secret_must_be_reregistered_after_resume() {
             .status
             .failure_info()
             .map(|f| f.class.as_str()),
-        Some(steps::SECRET_UNAVAILABLE_CLASS)
+        Some(steps::SECRET_UNAVAILABLE_CLASS.as_str())
     );
 
     // Re-registered: the same reference resolves, and the log stays clean.

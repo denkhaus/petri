@@ -54,8 +54,12 @@ pub(crate) enum Phase {
 }
 
 /// Where an action's files are, as a `github/action` config carries it.
+///
+/// Deserializing validates both variants — a pinned action structurally
+/// ([`PinnedAction`]'s own invariants) and a local path as a safe relative
+/// path — so a config that deserialized carries a usable location.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "RawActionLocation")]
 pub enum ActionLocation {
     /// Fetched from its repository at a commit, through the action source.
     Pinned(PinnedAction),
@@ -69,23 +73,84 @@ impl ActionLocation {
     /// or the checkout root (local). Empty for the root itself.
     pub fn directory(&self) -> &str {
         match self {
-            Self::Pinned(pinned) => pinned.reference.path.as_deref().unwrap_or(""),
+            Self::Pinned(pinned) => pinned.reference().path().unwrap_or(""),
             Self::Local { local } => local,
         }
     }
 }
 
+/// The unvalidated wire shape behind [`ActionLocation`]'s `Deserialize`:
+/// matching a variant is structural, and validation follows with a precise
+/// error instead of untagged deserialization's "no variant matched".
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawActionLocation {
+    Pinned(RawPinnedAction),
+    Local { local: String },
+}
+
+impl TryFrom<RawActionLocation> for ActionLocation {
+    type Error = ActionPathError;
+
+    fn try_from(raw: RawActionLocation) -> Result<Self, Self::Error> {
+        Ok(match raw {
+            RawActionLocation::Pinned(pinned) => Self::Pinned(pinned.try_into()?),
+            RawActionLocation::Local { local } => {
+                // Empty names the checkout root itself.
+                validate_relative_action_path(&local, true)?;
+                Self::Local { local }
+            }
+        })
+    }
+}
+
 /// `owner/repo[/path]@ref`, as written in `uses:`.
+///
+/// Every value is safe by construction: [`ActionRef::parse`] and the
+/// validating `Deserialize` both check the repository components, the git
+/// reference and the path before one exists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "RawActionRef")]
 pub struct ActionRef {
-    pub owner:   SmolStr,
-    pub repo:    SmolStr,
+    owner:   SmolStr,
+    repo:    SmolStr,
     /// A subdirectory of the repository holding the action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path:    Option<SmolStr>,
+    path:    Option<SmolStr>,
     /// The tag, branch or commit as written.
     #[serde(rename = "ref")]
-    pub git_ref: SmolStr,
+    git_ref: SmolStr,
+}
+
+/// The unvalidated wire shape behind [`ActionRef`]'s `Deserialize`; the field
+/// attributes mirror the `Serialize` side, so the format stays byte-identical.
+#[derive(Deserialize)]
+struct RawActionRef {
+    owner:   SmolStr,
+    repo:    SmolStr,
+    #[serde(default)]
+    path:    Option<SmolStr>,
+    #[serde(rename = "ref")]
+    git_ref: SmolStr,
+}
+
+impl TryFrom<RawActionRef> for ActionRef {
+    type Error = ActionPathError;
+
+    fn try_from(raw: RawActionRef) -> Result<Self, Self::Error> {
+        validate_repository_component(&raw.owner)?;
+        validate_repository_component(&raw.repo)?;
+        validate_git_ref(&raw.git_ref)?;
+        if let Some(path) = &raw.path {
+            validate_relative_action_path(path, false)?;
+        }
+        Ok(Self {
+            owner:   raw.owner,
+            repo:    raw.repo,
+            path:    raw.path,
+            git_ref: raw.git_ref,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -256,6 +321,34 @@ impl ActionRef {
         })
     }
 
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+
+    /// The subdirectory of the repository holding the action, when the
+    /// reference names one.
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    /// The tag, branch or commit as written.
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+
+    /// The same repository and ref with `path` replaced — how a remote
+    /// callee's `./file` call names a file of its own repository at the same
+    /// pin. The path is validated like any other.
+    pub fn with_path(mut self, path: &str) -> Result<Self, ActionPathError> {
+        validate_relative_action_path(path, false)?;
+        self.path = Some(SmolStr::new(path));
+        Ok(self)
+    }
+
     /// `owner/repo`.
     pub fn repository(&self) -> String {
         format!("{}/{}", self.owner, self.repo)
@@ -264,16 +357,6 @@ impl ActionRef {
     /// Whether the reference is already a full commit id.
     pub fn is_commit(&self) -> bool {
         self.git_ref.len() == 40 && self.git_ref.chars().all(|c| c.is_ascii_hexdigit())
-    }
-
-    pub fn validate(&self) -> Result<(), ActionPathError> {
-        validate_repository_component(&self.owner)?;
-        validate_repository_component(&self.repo)?;
-        validate_git_ref(&self.git_ref)?;
-        if let Some(path) = &self.path {
-            validate_relative_action_path(path, false)?;
-        }
-        Ok(())
     }
 }
 
@@ -297,10 +380,14 @@ impl fmt::Display for ActionRef {
 
 /// A reference resolved to a commit: what the graph carries. The reference
 /// stays alongside for messages and for `GITHUB_ACTION_REF`.
+///
+/// The commit is a full 40-digit hexadecimal id by construction:
+/// [`PinnedAction::try_new`] and the validating `Deserialize` both check it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "RawPinnedAction")]
 pub struct PinnedAction {
-    pub reference: ActionRef,
-    pub sha:       SmolStr,
+    reference: ActionRef,
+    sha:       SmolStr,
 }
 
 impl fmt::Display for PinnedAction {
@@ -310,15 +397,41 @@ impl fmt::Display for PinnedAction {
 }
 
 impl PinnedAction {
-    pub fn validate(&self) -> Result<(), ActionPathError> {
-        self.reference.validate()?;
-        if self.sha.len() != 40 || !self.sha.chars().all(|c| c.is_ascii_hexdigit()) {
+    pub fn try_new(reference: ActionRef, sha: impl Into<SmolStr>) -> Result<Self, ActionPathError> {
+        let sha = sha.into();
+        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(path_error(
-                &self.sha,
+                &sha,
                 "a pinned action needs a 40-digit hexadecimal commit",
             ));
         }
-        Ok(())
+        Ok(Self { reference, sha })
+    }
+
+    pub fn reference(&self) -> &ActionRef {
+        &self.reference
+    }
+
+    /// The full commit id the reference resolved to.
+    pub fn sha(&self) -> &str {
+        &self.sha
+    }
+}
+
+/// The unvalidated wire shape behind [`PinnedAction`]'s `Deserialize`. The
+/// reference stays raw here too, so [`RawActionLocation`]'s untagged variant
+/// match is purely structural and validation errors keep their messages.
+#[derive(Deserialize)]
+struct RawPinnedAction {
+    reference: RawActionRef,
+    sha:       SmolStr,
+}
+
+impl TryFrom<RawPinnedAction> for PinnedAction {
+    type Error = ActionPathError;
+
+    fn try_from(raw: RawPinnedAction) -> Result<Self, Self::Error> {
+        Self::try_new(ActionRef::try_from(raw.reference)?, raw.sha)
     }
 }
 
@@ -349,14 +462,6 @@ pub enum ActionSourceError {
     NoManifest(String),
     #[error("cannot fetch `{action}`: {message}")]
     Fetch { action: String, message: String },
-    /// The reference itself is unsafe to hand to a filesystem or to git, so
-    /// the source refuses to touch it.
-    #[error("cannot fetch `{reference}`")]
-    InvalidReference {
-        reference: String,
-        #[source]
-        source:    ActionPathError,
-    },
 }
 
 /// The hint for an [`ActionSourceError::Unavailable`] rejection. Two different
@@ -439,10 +544,14 @@ impl ActionSource for MapActionSource {
         let key = reference.to_string();
         let manifests = self.manifests.lock().expect("map is not poisoned");
         match manifests.get(&key) {
-            Some((sha, _)) => Ok(PinnedAction {
-                reference: reference.clone(),
-                sha:       SmolStr::new(sha),
-            }),
+            Some((sha, _)) => {
+                PinnedAction::try_new(reference.clone(), SmolStr::new(sha)).map_err(|e| {
+                    ActionSourceError::Unresolvable {
+                        reference: key,
+                        message:   e.to_string(),
+                    }
+                })
+            }
             None => Err(ActionSourceError::Unresolvable {
                 reference: key,
                 message:   "not in the map".into(),

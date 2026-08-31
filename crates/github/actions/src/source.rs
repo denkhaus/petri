@@ -52,24 +52,24 @@ impl GitActionSource {
         format!(
             "{}/{}/{}",
             self.remote_base.trim_end_matches('/'),
-            reference.owner,
-            reference.repo
+            reference.owner(),
+            reference.repo()
         )
     }
 
     fn bare_dir(&self, reference: &ActionRef) -> PathBuf {
         self.cache
             .join("repos")
-            .join(reference.owner.as_str())
-            .join(format!("{}.git", reference.repo))
+            .join(reference.owner())
+            .join(format!("{}.git", reference.repo()))
     }
 
     fn tree_entry_dir(&self, pinned: &PinnedAction) -> PathBuf {
         self.cache
             .join("trees")
-            .join(pinned.reference.owner.as_str())
-            .join(pinned.reference.repo.as_str())
-            .join(pinned.sha.as_str())
+            .join(pinned.reference().owner())
+            .join(pinned.reference().repo())
+            .join(pinned.sha())
             .join("root")
     }
 
@@ -86,12 +86,6 @@ impl GitActionSource {
     }
 
     fn ensure_bare(&self, reference: &ActionRef) -> Result<PathBuf, ActionSourceError> {
-        reference
-            .validate()
-            .map_err(|e| ActionSourceError::InvalidReference {
-                reference: reference.to_string(),
-                source:    e,
-            })?;
         let dir = self.bare_dir(reference);
         if !dir.join("HEAD").is_file() {
             fs::create_dir_all(&dir).map_err(|e| fetch_error(reference, e.to_string()))?;
@@ -114,23 +108,17 @@ impl GitActionSource {
         level = "debug",
         skip_all,
         fields(
-            owner = %pinned.reference.owner,
-            repo = %pinned.reference.repo,
-            git_ref = %pinned.reference.git_ref,
-            sha = %pinned.sha,
+            owner = %pinned.reference().owner(),
+            repo = %pinned.reference().repo(),
+            git_ref = %pinned.reference().git_ref(),
+            sha = %pinned.sha(),
             cached = Empty,
         )
     )]
     fn fetch(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
-        pinned
-            .validate()
-            .map_err(|e| ActionSourceError::InvalidReference {
-                reference: pinned.reference.to_string(),
-                source:    e,
-            })?;
-        let reference = &pinned.reference;
+        let reference = pinned.reference();
         let bare = self.ensure_bare(reference)?;
-        if Self::has_commit(&bare, &pinned.sha) {
+        if Self::has_commit(&bare, pinned.sha()) {
             Span::current().record("cached", true);
             return Ok(bare);
         }
@@ -139,23 +127,17 @@ impl GitActionSource {
         // transport, and GitHub also serves a commit id directly.
         let url = self.url(reference);
         git(
-            &[
-                "fetch",
-                "-q",
-                "--depth",
-                "1",
-                &url,
-                reference.git_ref.as_str(),
-            ],
+            &["fetch", "-q", "--depth", "1", &url, reference.git_ref()],
             Some(&bare),
         )
         .map_err(|e| fetch_error(reference, e))?;
-        if !Self::has_commit(&bare, &pinned.sha) {
+        if !Self::has_commit(&bare, pinned.sha()) {
             return Err(fetch_error(
                 reference,
                 format!(
                     "fetched `{}` but did not receive commit {} (the reference moved?)",
-                    reference.git_ref, pinned.sha
+                    reference.git_ref(),
+                    pinned.sha()
                 ),
             ));
         }
@@ -166,9 +148,9 @@ impl GitActionSource {
 fn fetch_error(reference: &ActionRef, message: String) -> ActionSourceError {
     let upstream_refusal = is_upstream_refusal(&message);
     tracing::error!(
-        owner = %reference.owner,
-        repo = %reference.repo,
-        git_ref = %reference.git_ref,
+        owner = %reference.owner(),
+        repo = %reference.repo(),
+        git_ref = %reference.git_ref(),
         upstream_refusal,
         "action source could not serve the reference"
     );
@@ -232,35 +214,22 @@ impl ActionSource for GitActionSource {
         level = "debug",
         skip_all,
         fields(
-            owner = %reference.owner,
-            repo = %reference.repo,
-            git_ref = %reference.git_ref,
+            owner = %reference.owner(),
+            repo = %reference.repo(),
+            git_ref = %reference.git_ref(),
             sha = Empty,
         )
     )]
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
-        reference
-            .validate()
-            .map_err(|e| ActionSourceError::Unresolvable {
-                reference: reference.to_string(),
-                message:   e.to_string(),
-            })?;
         if reference.is_commit() {
-            return Ok(PinnedAction {
-                reference: reference.clone(),
-                sha:       reference.git_ref.clone(),
-            });
+            let sha = SmolStr::new(reference.git_ref());
+            return Ok(PinnedAction::try_new(reference.clone(), sha)
+                .expect("a commit reference is a full hexadecimal id"));
         }
         let key = reference.to_string();
         let url = self.url(reference);
         let listing = git(
-            &[
-                "ls-remote",
-                "--tags",
-                "--heads",
-                &url,
-                reference.git_ref.as_str(),
-            ],
+            &["ls-remote", "--tags", "--heads", &url, reference.git_ref()],
             None,
         )
         .map_err(|message| {
@@ -279,9 +248,9 @@ impl ActionSource for GitActionSource {
         // Prefer the peeled tag (the commit an annotated tag points at), then the
         // tag itself, then a branch.
         let want = [
-            format!("refs/tags/{}^{{}}", reference.git_ref),
-            format!("refs/tags/{}", reference.git_ref),
-            format!("refs/heads/{}", reference.git_ref),
+            format!("refs/tags/{}^{{}}", reference.git_ref()),
+            format!("refs/tags/{}", reference.git_ref()),
+            format!("refs/heads/{}", reference.git_ref()),
         ];
         let mut found: Option<SmolStr> = None;
         for candidate in &want {
@@ -295,50 +264,50 @@ impl ActionSource for GitActionSource {
         }
         let sha = found.ok_or_else(|| ActionSourceError::Unresolvable {
             reference: key.clone(),
-            message:   format!("no tag or branch `{}` at {url}", reference.git_ref),
+            message:   format!("no tag or branch `{}` at {url}", reference.git_ref()),
         })?;
         Span::current().record("sha", sha.as_str());
-        let pinned = PinnedAction {
-            reference: reference.clone(),
-            sha,
-        };
-        Ok(pinned)
+        PinnedAction::try_new(reference.clone(), sha).map_err(|e| ActionSourceError::Unresolvable {
+            reference: key,
+            message:   e.to_string(),
+        })
     }
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-        let lock = self.repo_lock(&pinned.reference);
+        let lock = self.repo_lock(pinned.reference());
         let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
         let prefix = pinned
-            .reference
-            .path
-            .as_ref()
+            .reference()
+            .path()
             .map(|p| format!("{}/", p.trim_matches('/')))
             .unwrap_or_default();
         for name in ["action.yml", "action.yaml"] {
-            let spec = format!("{}:{prefix}{name}", pinned.sha);
+            let spec = format!("{}:{prefix}{name}", pinned.sha());
             if let Ok(text) = git(&["show", &spec], Some(&bare)) {
                 return Ok(text);
             }
         }
-        Err(ActionSourceError::NoManifest(pinned.reference.to_string()))
+        Err(ActionSourceError::NoManifest(
+            pinned.reference().to_string(),
+        ))
     }
 
     /// The one file the reference's path names, at the pinned commit — a
     /// remote called workflow's YAML.
     fn file(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-        let Some(path) = pinned.reference.path.as_deref() else {
+        let Some(path) = pinned.reference().path() else {
             return Err(ActionSourceError::Fetch {
-                action:  pinned.reference.to_string(),
+                action:  pinned.reference().to_string(),
                 message: "the reference names no file path".into(),
             });
         };
-        let lock = self.repo_lock(&pinned.reference);
+        let lock = self.repo_lock(pinned.reference());
         let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
-        let spec = format!("{}:{path}", pinned.sha);
+        let spec = format!("{}:{path}", pinned.sha());
         git(&["show", &spec], Some(&bare)).map_err(|message| ActionSourceError::Fetch {
-            action: pinned.reference.to_string(),
+            action: pinned.reference().to_string(),
             message,
         })
     }
@@ -355,14 +324,14 @@ impl ActionTreeSource for GitActionSource {
         level = "debug",
         skip_all,
         fields(
-            owner = %pinned.reference.owner,
-            repo = %pinned.reference.repo,
-            sha = %pinned.sha,
+            owner = %pinned.reference().owner(),
+            repo = %pinned.reference().repo(),
+            sha = %pinned.sha(),
             extracted = Empty,
         )
     )]
     fn tree(&self, pinned: &PinnedAction) -> Result<PathBuf, ActionSourceError> {
-        let lock = self.repo_lock(&pinned.reference);
+        let lock = self.repo_lock(pinned.reference());
         let _guard = lock.lock().expect("repository lock is not poisoned");
         let bare = self.fetch(pinned)?;
         let dir = self.tree_entry_dir(pinned);
@@ -372,10 +341,10 @@ impl ActionTreeSource for GitActionSource {
         if needs_extract {
             let _ = fs::remove_file(&complete);
             let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
-            extract(&bare, pinned.sha.as_str(), &dir)
-                .map_err(|e| fetch_error(&pinned.reference, e))?;
-            fs::write(&complete, b"").map_err(|e| fetch_error(&pinned.reference, e.to_string()))?;
+            fs::create_dir_all(&dir).map_err(|e| fetch_error(pinned.reference(), e.to_string()))?;
+            extract(&bare, pinned.sha(), &dir).map_err(|e| fetch_error(pinned.reference(), e))?;
+            fs::write(&complete, b"")
+                .map_err(|e| fetch_error(pinned.reference(), e.to_string()))?;
         }
         Ok(dir)
     }

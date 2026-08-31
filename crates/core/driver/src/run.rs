@@ -18,8 +18,8 @@ use executor::{
 };
 use ir::placeholder::SECRET_REF_KEY;
 use ir::{
-    Attempt, Control, EvalEnv, ExprOrValue, FailureInfo, FiringId, Graph, NodeId, Outcome,
-    RunContext, RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
+    Attempt, Control, EvalEnv, ExprOrValue, FailureClass, FailureInfo, FiringId, Graph, NodeId,
+    Outcome, RunContext, RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
 };
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
@@ -34,26 +34,27 @@ use crate::sink::LogSink;
 
 /// The failure class recorded when the driver had to abort a step that ignored
 /// `Control::Cancel`.
-pub const CANCEL_FORCED: &str = "cancel_forced";
+pub const CANCEL_FORCED: FailureClass = FailureClass::new_static("cancel_forced");
 
 /// The `cancel_escalation` value on a firing the polite tier had marked
 /// cancelling when the driver died: resume never re-spawns it — re-spawning
 /// real work only to stop it records nothing the stop had not already decided —
 /// and finishes it directly with the same `Cancelled` outcome a live cancel
 /// would have fed. Routes exactly as a live cancel's outcome would.
-pub const CANCELLED_BEFORE_RESUME: &str = "cancelled_before_resume";
+pub const CANCELLED_BEFORE_RESUME: FailureClass =
+    FailureClass::new_static("cancelled_before_resume");
 
 /// The kill-tier counterpart of [`CANCELLED_BEFORE_RESUME`]: same direct
 /// finish, and — the tier coming from the replayed state, where killed scopes
 /// are in the log — the outcome is recorded without routing, as a live kill's
 /// would be.
-pub const KILLED_BEFORE_RESUME: &str = "killed_before_resume";
+pub const KILLED_BEFORE_RESUME: FailureClass = FailureClass::new_static("killed_before_resume");
 
 /// No step kind is registered for a node's `StepRef.kind`.
 ///
 /// `validate_with(graph, Some(&registry))` reports this at load; the guard here
 /// is the backstop for a caller that skipped validation.
-pub(crate) const NO_RUNNER: &str = "no_runner";
+pub(crate) const NO_RUNNER: FailureClass = FailureClass::new_static("no_runner");
 
 /// After the first root cancel, how long admitted cleanup gets before the
 /// driver feeds back `KillRequested` (§10, resolved decision 3).
@@ -306,7 +307,7 @@ pub struct Driver {
 /// A stop's outcome: `status`, with the escalation that ended the step in the
 /// output — `Status::Cancelled` carries no `FailureInfo`, so the tag rides the
 /// output (§3.1 rule 5).
-fn escalation_outcome(status: Status, escalation: &str) -> Outcome {
+fn escalation_outcome(status: Status, escalation: &FailureClass) -> Outcome {
     Outcome::new(
         status,
         serde_json::json!({ CANCEL_ESCALATION_KEY: escalation }),
@@ -761,9 +762,9 @@ impl Driver {
     /// the log is its arrival order.
     fn finish_instead_of_resuming(&self, firing: FiringId, attempt: Attempt, node: NodeId) {
         let escalation = if self.engine.is_node_killed(node) {
-            KILLED_BEFORE_RESUME
+            &KILLED_BEFORE_RESUME
         } else {
-            CANCELLED_BEFORE_RESUME
+            &CANCELLED_BEFORE_RESUME
         };
         let outcome = escalation_outcome(Status::Cancelled, escalation);
         let tx = self.tx.clone();
@@ -1015,11 +1016,11 @@ impl Driver {
         });
     }
 
-    fn fail_now(&mut self, firing: FiringId, attempt: Attempt, message: &str, class: &str) {
+    fn fail_now(&mut self, firing: FiringId, attempt: Attempt, message: &str, class: FailureClass) {
         tracing::warn!(
             firing = firing.raw(),
             attempt = attempt.raw(),
-            failure_class = class,
+            failure_class = %class,
             "step could not be dispatched"
         );
         let outcome = Outcome::new(
@@ -1169,7 +1170,7 @@ impl Driver {
                 "the step did not return after Control::Cancel; the driver stopped waiting",
             )
             .await;
-        self.finish(firing, attempt, escalation_outcome(status, CANCEL_FORCED))
+        self.finish(firing, attempt, escalation_outcome(status, &CANCEL_FORCED))
             .await;
     }
 

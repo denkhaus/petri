@@ -25,13 +25,16 @@ use tokio::process::{Child, Command};
 use tokio::sync::{OnceCell, mpsc};
 use tracing::field::Empty;
 
-use crate::{CONTAINER_WORKSPACE, PullPolicy, next_token, prepare_registry_image, run_docker};
+use crate::{
+    CONTAINER_WORKSPACE, ContainerName, ContainerPrefix, next_token, prepare_registry_image,
+    run_docker,
+};
 
 /// Runs one-shot containers in one scope's world.
 pub(crate) struct OneShotRunner {
     /// Container-name prefix for this scope's one-shots
     /// (`petri-<run>-<inst>-s`).
-    prefix:    String,
+    prefix:    ContainerPrefix,
     /// The scope's workspace on the host, mounted at [`CONTAINER_WORKSPACE`].
     workspace: PathBuf,
     /// The scope's resolved env: one-shots live in the scope's world, so they
@@ -41,7 +44,6 @@ pub(crate) struct OneShotRunner {
     /// scope, the scope's network for a host scope with services. `None` is the
     /// daemon default.
     network:   Option<String>,
-    pull:      PullPolicy,
     scope:     ScopeId,
     progress:  Arc<dyn ProgressSink>,
     /// The scope's one-shot marker, recorded before the first launch so the
@@ -57,12 +59,11 @@ pub(crate) struct OneShotRunner {
 
 impl OneShotRunner {
     pub(crate) fn new(
-        prefix: String,
+        prefix: ContainerPrefix,
         workspace: PathBuf,
         marker: PathBuf,
         scope: &ScopeSpec,
         network: Option<String>,
-        pull: PullPolicy,
         ctx: &AcquireContext,
     ) -> Self {
         Self {
@@ -70,7 +71,6 @@ impl OneShotRunner {
             workspace,
             env: scope.env.clone(),
             network,
-            pull,
             scope: scope.id,
             progress: ctx.progress().clone(),
             marker,
@@ -79,7 +79,7 @@ impl OneShotRunner {
         }
     }
 
-    /// The image reference to run: a registry image pulled under the policy, or
+    /// The image reference to run: a registry image pulled when absent, or
     /// a workspace Dockerfile built under its tag (content-addressed tags are
     /// reused, across runs). Ensured once per reference — except a non-`reuse`
     /// build, which asks for a rebuild every time.
@@ -99,7 +99,7 @@ impl OneShotRunner {
         }
         match image {
             ContainerImage::Registry { image } => {
-                prepare_registry_image(image, self.pull, self.scope, &self.progress).await?;
+                prepare_registry_image(image, self.scope, &self.progress).await?;
             }
             ContainerImage::Build {
                 context,
@@ -177,7 +177,9 @@ impl ContainerRunner for OneShotRunner {
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         self.mark().await?;
         let image = self.prepare(&spec.image).await?;
-        let name = format!("{}{}-{}", self.prefix, process::id(), next_token());
+        let name = self
+            .prefix
+            .join(&format!("{}-{}", process::id(), next_token()));
         let span = tracing::Span::current();
         span.record("image", image.as_str());
         span.record("container", name.as_str());
@@ -197,7 +199,7 @@ impl ContainerRunner for OneShotRunner {
             "--rm".into(),
             "--init".into(),
             "--name".into(),
-            name.clone(),
+            name.to_string(),
             "-v".into(),
             mount,
             "-w".into(),
@@ -264,7 +266,7 @@ impl ContainerRunner for OneShotRunner {
 }
 
 struct OneShotProcess {
-    name:  String,
+    name:  ContainerName,
     child: Child,
     lines: Option<LineStream>,
 }
@@ -286,8 +288,8 @@ impl ProcessHandle for OneShotProcess {
         // The entrypoint is PID 1: `docker kill` reaches it directly. A
         // container already gone is what we wanted anyway.
         let result = match sig {
-            Sig::Term => run_docker(&["kill", "-s", "TERM", &self.name]).await,
-            Sig::Kill => run_docker(&["kill", &self.name]).await,
+            Sig::Term => run_docker(&["kill", "-s", "TERM", self.name.as_str()]).await,
+            Sig::Kill => run_docker(&["kill", self.name.as_str()]).await,
         };
         let _ = result;
         Ok(())

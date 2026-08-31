@@ -57,7 +57,7 @@ pub enum EnvError {
 impl EnvError {
     /// The failure class recorded when acquiring an environment fails, so a bad
     /// image or a down daemon routes like any other failure.
-    pub const ACQUIRE_CLASS: &'static str = "env_acquire";
+    pub const ACQUIRE_CLASS: ir::FailureClass = ir::FailureClass::new_static("env_acquire");
 
     /// A fixed discriminant, for diagnostics that may not carry the error
     /// itself. A `Backend` message is the backing system's own stderr — a

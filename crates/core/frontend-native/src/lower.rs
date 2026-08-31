@@ -597,7 +597,7 @@ impl Ctx<'_> {
                     on.failure_classes = list
                         .iter()
                         .filter_map(|c| c.as_str())
-                        .map(SmolStr::new)
+                        .map(ir::FailureClass::new)
                         .collect();
                 }
                 policy.retry_on = on;

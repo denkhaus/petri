@@ -29,7 +29,7 @@ use frontend_gha::exprs::{
 };
 use frontend_gha::gate::{Gate, GateOp, eval};
 use ir::expr::builtins::loose;
-use ir::{Outcome, Value};
+use ir::{FailureClass, Outcome, Value};
 use smol_str::SmolStr;
 use steps::{StepCtx, StepFailure, ValueOrSecretRef};
 
@@ -39,7 +39,7 @@ use crate::session::{
 };
 
 /// The step's gate could not be read or evaluated.
-const GATE_CLASS: &str = "gate";
+const GATE_CLASS: FailureClass = FailureClass::new_static("gate");
 
 /// Evaluate a step's gate and decide what a refused step records instead of
 /// running: `None` means run; a false gate is `Cancelled` when the scope was

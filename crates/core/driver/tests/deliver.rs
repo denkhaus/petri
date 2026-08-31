@@ -487,7 +487,7 @@ async fn an_unresolvable_reference_fails_the_step() {
             .status
             .failure_info()
             .map(|f| f.class.as_str()),
-        Some(steps::SECRET_UNAVAILABLE_CLASS)
+        Some(steps::SECRET_UNAVAILABLE_CLASS.as_str())
     );
     assert!(
         received.lock().expect("not poisoned").is_empty(),

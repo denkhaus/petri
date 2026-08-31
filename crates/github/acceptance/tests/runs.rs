@@ -462,7 +462,7 @@ fn first_failure(
         let expected = expected_reason(&identity, &class, !sweep_token().is_empty())
             .or_else(|| expected_from_log(&identity, &lines))
             .or_else(|| {
-                (caller_coupled && class == FIRING_ENV_CLASS).then(|| {
+                (caller_coupled && class == FIRING_ENV_CLASS.as_str()).then(|| {
                     "requires its caller's inputs (a reusable workflow run standalone)".to_string()
                 })
             })

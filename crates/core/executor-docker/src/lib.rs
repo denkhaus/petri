@@ -52,7 +52,7 @@ use std::process::{self, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{env, mem};
+use std::{env, fmt};
 
 use async_trait::async_trait;
 use executor::lines::pump;
@@ -109,13 +109,49 @@ pub const LIVENESS_POLL: Duration = Duration::from_millis(50);
 /// signalling the group. A cancel can arrive before the step has written it.
 pub(crate) const PGID_WAIT: Duration = Duration::from_secs(2);
 
-/// When to pull an image.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PullPolicy {
-    #[default]
-    IfNotPresent,
-    Always,
-    Never,
+/// A complete container name this executor minted — the job container's, a
+/// service's, a one-shot's. Distinct from [`ContainerPrefix`] so a rm/stop/kill
+/// target and a sweep pattern can never swap.
+#[derive(Clone, Debug)]
+pub(crate) struct ContainerName(String);
+
+impl ContainerName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContainerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A container-name prefix — the run's own, a scope's one-shot prefix, a
+/// scope's service prefix. What list/sweep matching starts from; never itself
+/// a container's name.
+#[derive(Clone, Debug)]
+pub(crate) struct ContainerPrefix(String);
+
+impl ContainerPrefix {
+    pub(crate) fn new(prefix: String) -> Self {
+        Self(prefix)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The full container name `suffix` gets under this prefix.
+    pub(crate) fn join(&self, suffix: &str) -> ContainerName {
+        ContainerName(format!("{}{suffix}", self.0))
+    }
+}
+
+impl fmt::Display for ContainerPrefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Runs steps inside containers.
@@ -125,7 +161,6 @@ pub struct DockerExecutor {
     /// or a fresh one recorded there.
     run_id:    OnceCell<SmolStr>,
     retention: Retention,
-    pull:      PullPolicy,
 }
 
 impl DockerExecutor {
@@ -134,19 +169,12 @@ impl DockerExecutor {
             run_dir:   run_dir.into(),
             run_id:    OnceCell::new(),
             retention: Retention::default(),
-            pull:      PullPolicy::default(),
         }
     }
 
     #[must_use]
     pub fn with_retention(mut self, retention: Retention) -> Self {
         self.retention = retention;
-        self
-    }
-
-    #[must_use]
-    pub fn with_pull_policy(mut self, pull: PullPolicy) -> Self {
-        self.pull = pull;
         self
     }
 
@@ -167,15 +195,24 @@ impl DockerExecutor {
 
     /// The name prefix every container of this run shares, for leak checks.
     pub async fn container_prefix(&self) -> Result<String, EnvError> {
-        Ok(format!("petri-{}-", self.run_id().await?))
+        Ok(self.run_prefix().await?.0)
     }
 
-    async fn container_name(&self, instance: &str) -> Result<String, EnvError> {
-        let sanitized: String = instance
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        Ok(format!("{}{sanitized}", self.container_prefix().await?))
+    async fn run_prefix(&self) -> Result<ContainerPrefix, EnvError> {
+        Ok(ContainerPrefix(format!("petri-{}-", self.run_id().await?)))
+    }
+
+    async fn container_name(&self, instance: &str) -> Result<ContainerName, EnvError> {
+        // The driver is the single producer of instance names and always
+        // writes `scope-<u32>` (see `ScopeSpec::instance`), already safe for
+        // a container name — no sanitization needed.
+        debug_assert!(
+            instance
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "instance names are the driver's `scope-<u32>`"
+        );
+        Ok(self.run_prefix().await?.join(instance))
     }
 
     /// The workspace directory a scope instance gets, shared with the host
@@ -187,6 +224,10 @@ impl DockerExecutor {
     /// The container-name prefix of a scope instance's one-shot containers, for
     /// fencing and leak checks.
     pub async fn one_shot_prefix(&self, instance: &str) -> Result<String, EnvError> {
+        Ok(self.one_shot_prefix_for(instance).await?.0)
+    }
+
+    async fn one_shot_prefix_for(&self, instance: &str) -> Result<ContainerPrefix, EnvError> {
         Ok(one_shot_prefix_of(&self.container_name(instance).await?))
     }
 
@@ -217,7 +258,7 @@ impl DockerExecutor {
         ctx: &AcquireContext,
     ) -> Result<Option<String>, EnvError> {
         let base = self.container_name(&scope.instance).await?;
-        services::realize(scope, &base, true, self.pull, ctx).await
+        services::realize(scope, &base, true, ctx).await
     }
 
     /// Tear down (or fence away) a host scope's service world: its containers
@@ -242,12 +283,11 @@ impl DockerExecutor {
         ctx: &AcquireContext,
     ) -> Result<Arc<dyn ContainerRunner>, EnvError> {
         Ok(Arc::new(OneShotRunner::new(
-            self.one_shot_prefix(&scope.instance).await?,
+            self.one_shot_prefix_for(&scope.instance).await?,
             self.workspace_for(&scope.instance),
             self.one_shot_marker(&scope.instance),
             scope,
             network,
-            self.pull,
             ctx,
         )))
     }
@@ -255,18 +295,14 @@ impl DockerExecutor {
 
 /// The one-shot container-name prefix hanging off a scope container's name.
 /// One spelling for the fence, the runner, and the release sweep.
-fn one_shot_prefix_of(container: &str) -> String {
-    format!("{container}-s")
+fn one_shot_prefix_of(container: &ContainerName) -> ContainerPrefix {
+    ContainerPrefix(format!("{container}-s"))
 }
 
-/// Whether the policy calls for a pull now. The presence probe runs only when
-/// the policy reads the answer.
-async fn should_pull(image: &str, pull: PullPolicy) -> bool {
-    match pull {
-        PullPolicy::Never => false,
-        PullPolicy::Always => true,
-        PullPolicy::IfNotPresent => run_docker(&["image", "inspect", image]).await.is_err(),
-    }
+/// Whether the daemon already has `image`. Present images are never re-pulled:
+/// a probe first, and the pull only when it misses.
+async fn image_present(image: &str) -> bool {
+    run_docker(&["image", "inspect", image]).await.is_ok()
 }
 
 fn announce_pull(progress: &Arc<dyn executor::ProgressSink>, scope: ir::ScopeId, image: &str) {
@@ -275,15 +311,13 @@ fn announce_pull(progress: &Arc<dyn executor::ProgressSink>, scope: ir::ScopeId,
     });
 }
 
-/// Make `image` available under the pull policy, announcing the pull when one
-/// happens.
+/// Make `image` available, announcing the pull when one happens.
 pub(crate) async fn prepare_registry_image(
     image: &str,
-    pull: PullPolicy,
     scope: ir::ScopeId,
     progress: &Arc<dyn executor::ProgressSink>,
 ) -> Result<(), EnvError> {
-    if should_pull(image, pull).await {
+    if !image_present(image).await {
         announce_pull(progress, scope, image);
         pull_image(&[], image).await?;
     }
@@ -333,19 +367,18 @@ pub(crate) async fn pull_image(config_args: &[&str], image: &str) -> Result<(), 
     }
 }
 
-/// Make `image` available under the pull policy, with or without registry
-/// credentials at the exact effect boundary.
+/// Make `image` available, with or without registry credentials at the exact
+/// effect boundary.
 pub(crate) async fn prepare_image(
     image: &str,
     credentials: Option<&ir::RegistryCredentials>,
-    pull: PullPolicy,
     scope: ir::ScopeId,
     ctx: &AcquireContext,
 ) -> Result<(), EnvError> {
     let Some(credentials) = credentials else {
-        return prepare_registry_image(image, pull, scope, ctx.progress()).await;
+        return prepare_registry_image(image, scope, ctx.progress()).await;
     };
-    if !should_pull(image, pull).await {
+    if image_present(image).await {
         return Ok(());
     }
     announce_pull(ctx.progress(), scope, image);
@@ -414,6 +447,11 @@ pub async fn sweep_containers(prefix: &str) {
     }
 }
 
+/// [`sweep_containers`], typed for the executor's own call sites.
+pub(crate) async fn sweep_prefixed(prefix: &ContainerPrefix) {
+    sweep_containers(prefix.as_str()).await;
+}
+
 /// Cleanup for an acquire nobody waited out. Release tears down what acquire
 /// returned; this covers what acquire had already realized when its future was
 /// dropped instead — the sweep abandoning a run that ignored its cancel is the
@@ -422,16 +460,16 @@ pub async fn sweep_containers(prefix: &str) {
 /// create task, which owns the window where the container's create is still in
 /// flight at the daemon and remove-by-name has nothing to see yet.
 struct AbandonGuard {
-    container: String,
+    container: ContainerName,
     services:  bool,
     abandoned: Arc<AtomicBool>,
     armed:     bool,
 }
 
 impl AbandonGuard {
-    fn arm(container: &str, services: bool) -> Self {
+    fn arm(container: &ContainerName, services: bool) -> Self {
         Self {
-            container: container.to_string(),
+            container: container.clone(),
             services,
             abandoned: Arc::new(AtomicBool::new(false)),
             armed: true,
@@ -455,14 +493,14 @@ impl Drop for AbandonGuard {
             return;
         }
         self.abandoned.store(true, Ordering::SeqCst);
-        let container = mem::take(&mut self.container);
+        let container = self.container.clone();
         let services = self.services;
         // Detached on purpose: there is no future left to await from. On a
         // runtime that is itself shutting down the spawn is dropped unrun —
         // best effort, like the rest of the fence.
         if let Ok(handle) = Handle::try_current() {
             handle.spawn(async move {
-                let _ = run_docker(&["rm", "-f", "-v", &container]).await;
+                let _ = run_docker(&["rm", "-f", "-v", container.as_str()]).await;
                 if services {
                     services::sweep(&container).await;
                 }
@@ -475,7 +513,7 @@ impl Drop for AbandonGuard {
 /// keep it.
 #[derive(Clone, Debug)]
 struct DockerTeardown {
-    container: String,
+    container: ContainerName,
     path:      PathBuf,
     retention: Retention,
     grace:     Duration,
@@ -532,7 +570,7 @@ impl DockerExecutor {
 
         let span = tracing::Span::current();
         span.record("image", image.as_str());
-        prepare_image(image, credentials.as_ref(), self.pull, scope.id, ctx).await?;
+        prepare_image(image, credentials.as_ref(), scope.id, ctx).await?;
 
         let name = self.container_name(&scope.instance).await?;
         span.record("container", name.as_str());
@@ -543,8 +581,8 @@ impl DockerExecutor {
         // the run dir, so a resuming process over the same run dir reaches the
         // crashed run's containers. One-shot containers and the service world a
         // crash left behind share the scope's prefixes and go the same way.
-        let _ = run_docker(&["rm", "-f", &name]).await;
-        sweep_containers(&one_shot_prefix_of(&name)).await;
+        let _ = run_docker(&["rm", "-f", name.as_str()]).await;
+        sweep_prefixed(&one_shot_prefix_of(&name)).await;
         if !scope.services.is_empty() {
             services::sweep(&name).await;
         }
@@ -558,7 +596,7 @@ impl DockerExecutor {
 
         // The scope's services first: the job container joins their network at
         // creation, and every service is healthy before any step can fire.
-        let network = match services::realize(scope, &name, false, self.pull, ctx).await {
+        let network = match services::realize(scope, &name, false, ctx).await {
             Ok(network) => network,
             Err(error) => {
                 // realize failed and cleaned up after itself.
@@ -572,7 +610,7 @@ impl DockerExecutor {
             "create".into(),
             "--init".into(),
             "--name".into(),
-            name.clone(),
+            name.to_string(),
             "-v".into(),
             mount,
             "-w".into(),
@@ -606,16 +644,17 @@ impl DockerExecutor {
                 let refs: Vec<&str> = create.iter().map(String::as_str).collect();
                 let result = async {
                     run_docker(&refs).await?;
-                    run_docker(&["start", &name]).await?;
+                    run_docker(&["start", name.as_str()]).await?;
                     // The environment a `docker exec` will start from,
                     // snapshotted once: the image's `Config.Env` with the `-e`
                     // flags above folded in — the fact behind
                     // [`ExecEnv::ambient_env`].
-                    run_docker(&["inspect", "--format", "{{json .Config.Env}}", &name]).await
+                    run_docker(&["inspect", "--format", "{{json .Config.Env}}", name.as_str()])
+                        .await
                 }
                 .await;
                 if abandoned.load(Ordering::SeqCst) {
-                    let _ = run_docker(&["rm", "-f", "-v", &name]).await;
+                    let _ = run_docker(&["rm", "-f", "-v", name.as_str()]).await;
                 }
                 result
             }
@@ -633,7 +672,7 @@ impl DockerExecutor {
             Err(error) => {
                 // A failed acquire leaks nothing: the services came up for a job
                 // container that will never exist.
-                let _ = run_docker(&["rm", "-f", &name]).await;
+                let _ = run_docker(&["rm", "-f", name.as_str()]).await;
                 if network.is_some() {
                     services::sweep(&name).await;
                 }
@@ -651,7 +690,6 @@ impl DockerExecutor {
             self.one_shot_marker(&scope.instance),
             scope,
             Some(format!("container:{name}")),
-            self.pull,
             ctx,
         );
 
@@ -734,13 +772,13 @@ impl Executor for DockerExecutor {
 
         // One-shot containers first: they may hang off the job container's
         // network namespace, and everything of the scope is meant to stop.
-        sweep_containers(&one_shot_prefix_of(container)).await;
+        sweep_prefixed(&one_shot_prefix_of(container)).await;
 
         // Container-level kill is exactly right here: everything inside is meant to
         // stop. `stop` sends TERM and waits, then `rm -f` guarantees no leak.
         let grace_secs = grace.as_secs().max(1).to_string();
-        let _ = run_docker(&["stop", "-t", &grace_secs, container]).await;
-        match run_docker(&["rm", "-f", "-v", container]).await {
+        let _ = run_docker(&["stop", "-t", &grace_secs, container.as_str()]).await;
+        match run_docker(&["rm", "-f", "-v", container.as_str()]).await {
             Ok(_) => report = report.released(format!("container {container}")),
             Err(e) => {
                 // A container left on the daemon. `e` is a `Backend` carrying
@@ -780,7 +818,7 @@ impl Executor for DockerExecutor {
 }
 
 struct DockerEnv {
-    container:     String,
+    container:     ContainerName,
     workspace:     PathBuf,
     /// The container's effective env, snapshotted at create.
     ambient:       BTreeMap<String, String>,
@@ -801,7 +839,7 @@ impl DockerEnv {
             .get_or_init(|| async {
                 let probe = run_docker(&[
                     "exec",
-                    &self.container,
+                    self.container.as_str(),
                     "sh",
                     "-c",
                     "command -v bash >/dev/null 2>&1",
@@ -829,6 +867,14 @@ impl ExecEnv for DockerEnv {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
         // The pgid file lives on the bind mount, so the container writes it and the
         // host reads it.
+        //
+        // Deliberately the opposite placement from the host executor, which
+        // keeps its `groups/` records *beside* the workspace so a step cannot
+        // rewrite them: inside a container the step owns the whole filesystem
+        // anyway, so a step forging its own pgid or status file can only
+        // mislead the host about its own container — the blast radius it
+        // already controls — and the workspace bind mount is the one shared
+        // channel the host can read at all.
         let token = format!("{}-{}", process::id(), next_token());
         let pgid_dir = self.workspace.join(".ci").join("pg");
         fs::create_dir_all(&pgid_dir)
@@ -856,7 +902,7 @@ impl ExecEnv for DockerEnv {
             argv.push("-e".into());
             argv.push(format!("{key}={value}"));
         }
-        argv.push(self.container.clone());
+        argv.push(self.container.to_string());
         let wrapper_shell = self.wrapper_shell().await;
         argv.extend([
             // The keeper: the process `docker exec` attaches to. runc hands it a
@@ -990,7 +1036,7 @@ impl ExecEnv for DockerEnv {
 }
 
 struct DockerProcess {
-    container:   String,
+    container:   ContainerName,
     child:       Child,
     pgid_file:   PathBuf,
     status_file: PathBuf,
@@ -1116,7 +1162,15 @@ impl ProcessHandle for DockerProcess {
         let signal = format!("-{}", sig.number());
         // An error means the group is already gone, which is what we wanted
         // anyway.
-        let _ = run_docker(&["exec", &self.container, "kill", &signal, "--", &target]).await;
+        let _ = run_docker(&[
+            "exec",
+            self.container.as_str(),
+            "kill",
+            &signal,
+            "--",
+            &target,
+        ])
+        .await;
         Ok(())
     }
 }
@@ -1133,9 +1187,9 @@ impl ProcessHandle for DockerProcess {
 /// It also goes through `sh -c` rather than as a bare `docker exec … kill`, so
 /// this is the shell builtin rather than whichever `kill` binary the image
 /// happens to carry.
-async fn signal_group(container: &str, pgid: i32, signal: &str) -> Result<(), EnvError> {
+async fn signal_group(container: &ContainerName, pgid: i32, signal: &str) -> Result<(), EnvError> {
     let script = format!("kill -{signal} -{pgid}");
-    run_docker(&["exec", container, "sh", "-c", &script])
+    run_docker(&["exec", container.as_str(), "sh", "-c", &script])
         .await
         .map(|_| ())
 }

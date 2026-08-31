@@ -9,15 +9,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 
 use ir::{
-    Attempt, CancelScopeId, Control, EvalEnv, Exhaustion, ExpandTarget, Expansion, FailureInfo,
-    FiringId, Generation, Guard, JoinPolicy, Node, NodeId, Outcome, Status, Token, Value, eval,
-    eval_bool,
+    Attempt, CancelScopeId, Control, EvalEnv, Exhaustion, ExpandTarget, Expansion, FailureClass,
+    FailureInfo, FiringId, Generation, Guard, JoinPolicy, Node, NodeId, Outcome, Status, Token,
+    Value, eval, eval_bool,
 };
 
 /// The failure class of a record whose firing environment could not be built —
 /// a scope-env or binding expression errored before the step could exist. The
 /// record's message carries the cause; the engine's error list carries it too.
-pub const FIRING_ENV_CLASS: &str = "firing_env";
+pub const FIRING_ENV_CLASS: FailureClass = FailureClass::new_static("firing_env");
 use smol_str::SmolStr;
 
 use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};

@@ -17,13 +17,14 @@ use std::convert::Infallible;
 
 use executor::{ExecEnv, ProcessSpec};
 use frontend_gha::exprs::{has_hashfiles_sentinel, hashfiles_calls, replace_hashfiles_sentinels};
+use ir::FailureClass;
 use smol_str::SmolStr;
 use steps::StepFailure;
 
 use crate::session::ResolvedProcess;
 
 /// The step could not compute a `hashFiles` value.
-const HASHFILES_CLASS: &str = "hashfiles";
+const HASHFILES_CLASS: FailureClass = FailureClass::new_static("hashfiles");
 
 /// The line the helper prints its result on.
 const MARKER: &str = "petri-hashfiles=";

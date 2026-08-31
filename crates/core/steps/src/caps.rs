@@ -18,12 +18,15 @@ use std::any::{self, Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ir::FailureClass;
+
 use crate::ctx::StepFailure;
 
 /// The failure class when a step requires a capability its host never
 /// registered. Routable, like `secret_unavailable`: a step missing its host
 /// service fails its node, never the run machinery.
-pub const CAPABILITY_UNAVAILABLE_CLASS: &str = "capability_unavailable";
+pub const CAPABILITY_UNAVAILABLE_CLASS: FailureClass =
+    FailureClass::new_static("capability_unavailable");
 
 /// Host services a step may use. Opaque to the core; keyed by type.
 #[derive(Clone, Default)]

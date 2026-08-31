@@ -71,7 +71,10 @@ impl ServiceSpec {
 #[derive(Clone)]
 pub struct ScopeSpec {
     pub id:        ScopeId,
-    /// Instance name, which is also the workspace directory name.
+    /// Instance name, which is also the workspace directory name. The driver
+    /// is the single producer and always writes `scope-<u32>`
+    /// (`driver::run`'s acquisition builds it from the scope id), so the name
+    /// is safe as-is for directory names and container names alike.
     pub instance:  SmolStr,
     /// The scope's env, already resolved. Secrets are not here — they are
     /// fetched at spawn time and never written down.

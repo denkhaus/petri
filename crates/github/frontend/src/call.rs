@@ -122,8 +122,11 @@ fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, CallTarget
             // A remote callee's `./` call names a file of its own repository,
             // at the same pin.
             CalleeSource::Remote { pinned } => {
-                let mut reference = pinned.reference.clone();
-                reference.path = Some(rest.into());
+                let reference = pinned
+                    .reference()
+                    .clone()
+                    .with_path(rest)
+                    .map_err(RefError::from)?;
                 CallTarget::Remote { reference }
             }
         });
@@ -136,8 +139,7 @@ fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, CallTarget
                   error for a failed fetch"
     )]
     if !reference
-        .path
-        .as_deref()
+        .path()
         .is_some_and(|p| p.ends_with(".yml") || p.ends_with(".yaml"))
     {
         return Err(CallTargetError::NotWorkflowFile);

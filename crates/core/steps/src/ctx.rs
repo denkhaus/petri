@@ -16,7 +16,10 @@ use executor::{CONTAINER_RUNTIME_CLASS, ContainerRunner, ExecEnv, SecretProvider
 // keeps reading it from here.
 pub use ir::StepFailure;
 use ir::placeholder::contains_placeholder;
-use ir::{Attempt, Control, FiringId, Outcome, StepEvent, StepKind, StepKindId, StepKinds, Value};
+use ir::{
+    Attempt, Control, FailureClass, FiringId, Outcome, StepEvent, StepKind, StepKindId, StepKinds,
+    Value,
+};
 use serde::de::DeserializeOwned;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
@@ -24,7 +27,7 @@ use tokio::sync::mpsc;
 use crate::caps::Capabilities;
 
 /// The step's config did not deserialize.
-pub(crate) const BAD_CONFIG_CLASS: &str = "bad_config";
+pub(crate) const BAD_CONFIG_CLASS: FailureClass = FailureClass::new_static("bad_config");
 
 /// Everything a step needs to run one attempt.
 pub struct StepCtx {

@@ -32,8 +32,8 @@ pub use expr::{
     BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, is_truthy,
 };
 pub use flow::{
-    Control, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext, RunStatus, Status,
-    StatusKind, StepEvent, Token,
+    Control, FailureClass, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext,
+    RunStatus, Status, StatusKind, StepEvent, Token,
 };
 pub use graph::{
     Backoff, Budget, Completion, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue,

@@ -129,7 +129,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let mut target = Map::new();
         target.insert("uses".into(), json!(call.uses.0));
         if let CalleeSource::Remote { pinned } = &self.frames[callee].source {
-            target.insert("sha".into(), json!(pinned.sha.as_str()));
+            target.insert("sha".into(), json!(pinned.sha()));
         }
         self.b.set_meta(start, json!({ "call": target }));
         self.spans.insert(start, job.span.clone());

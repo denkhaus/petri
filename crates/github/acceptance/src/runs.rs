@@ -838,7 +838,7 @@ fn docker_identity(config: &Value) -> StepIdentity {
 
 /// `owner/repo[/path]` without the `@ref`.
 fn bare_reference(pinned: &PinnedAction) -> String {
-    let full = pinned.reference.to_string();
+    let full = pinned.reference().to_string();
     full.split('@').next().unwrap_or(&full).to_string()
 }
 
@@ -1423,10 +1423,8 @@ mod tests {
 
     impl ActionSource for StubActions {
         fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError> {
-            Ok(PinnedAction {
-                reference: reference.clone(),
-                sha:       "0123456789012345678901234567890123456789".into(),
-            })
+            let sha = "0123456789012345678901234567890123456789";
+            Ok(PinnedAction::try_new(reference.clone(), sha).expect("a full commit id"))
         }
 
         fn manifest(&self, _pinned: &PinnedAction) -> Result<String, ActionSourceError> {
@@ -1868,10 +1866,9 @@ mod tests {
     }
 
     fn pinned(reference: &str) -> ActionLocation {
-        ActionLocation::Pinned(PinnedAction {
-            reference: ActionRef::parse(reference).expect("a valid reference"),
-            sha:       "0123456789012345678901234567890123456789".into(),
-        })
+        let reference = ActionRef::parse(reference).expect("a valid reference");
+        let sha = "0123456789012345678901234567890123456789";
+        ActionLocation::Pinned(PinnedAction::try_new(reference, sha).expect("a full commit id"))
     }
 
     #[test]

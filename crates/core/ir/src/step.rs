@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_str::SmolStr;
 
-use crate::flow::{FailureInfo, Outcome, Status};
+use crate::flow::{FailureClass, FailureInfo, Outcome, Status};
 use crate::ids::StepKindId;
 
 /// A step that failed before it could run, in the few bytes needed to say so.
@@ -20,7 +20,7 @@ use crate::ids::StepKindId;
 /// class and the message, and becomes an `Outcome` once, at the boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepFailure {
-    pub class:   &'static str,
+    pub class:   FailureClass,
     pub message: String,
 }
 

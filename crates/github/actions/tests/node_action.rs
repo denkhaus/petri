@@ -356,7 +356,7 @@ fn a_moving_reference_is_resolved_again_for_a_later_load() {
     ]);
 
     let second = github_actions::ActionSource::resolve(&source, &reference).unwrap();
-    assert_ne!(first.sha, second.sha);
+    assert_ne!(first.sha(), second.sha());
 }
 
 /// `actions/checkout@v4` then `actions/setup-node@v4`, from GitHub, for real.

@@ -15,7 +15,7 @@ use serde_json::Value;
 use smol_str::SmolStr;
 
 use crate::expr::ExprTable;
-use crate::flow::{Status, StatusKind};
+use crate::flow::{FailureClass, Status, StatusKind};
 use crate::ids::{Attempt, EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 use crate::splice::SplicePolicy;
 
@@ -384,7 +384,7 @@ impl Default for Backoff {
 pub struct RetryOn {
     pub statuses:        Vec<StatusKind>,
     /// Matched against [`FailureInfo::class`](crate::FailureInfo::class).
-    pub failure_classes: Vec<SmolStr>,
+    pub failure_classes: Vec<FailureClass>,
 }
 
 impl Default for RetryOn {
@@ -404,16 +404,16 @@ impl RetryOn {
         }
     }
 
-    pub fn classes(classes: &[&str]) -> Self {
+    pub fn classes<C: Clone + Into<FailureClass>>(classes: &[C]) -> Self {
         Self {
             statuses:        Vec::new(),
-            failure_classes: classes.iter().map(|c| SmolStr::new(*c)).collect(),
+            failure_classes: classes.iter().cloned().map(Into::into).collect(),
         }
     }
 
     #[must_use]
-    pub fn with_classes(mut self, classes: &[&str]) -> Self {
-        self.failure_classes = classes.iter().map(|c| SmolStr::new(*c)).collect();
+    pub fn with_classes<C: Clone + Into<FailureClass>>(mut self, classes: &[C]) -> Self {
+        self.failure_classes = classes.iter().cloned().map(Into::into).collect();
         self
     }
 }

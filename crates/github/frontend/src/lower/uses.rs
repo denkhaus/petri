@@ -14,9 +14,9 @@ use super::{
     ActionContext, ActionPlan, Lowering, PlanInput, PlanKind, scalar_text, scalar_text_opt,
 };
 use crate::action::{
-    ACTION_KIND, ActionLocation, ActionPathError, ActionRef, ActionSourceError, CHECKOUT_KIND,
-    DOCKER_ACTION_KIND, Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RefError,
-    STATE_OUTPUT_KEY, render_chain, unavailable_hint,
+    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DOCKER_ACTION_KIND,
+    Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RefError, STATE_OUTPUT_KEY,
+    render_chain, unavailable_hint,
 };
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
 use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
@@ -43,8 +43,6 @@ pub(super) enum ResolveError {
     #[error(transparent)]
     Reference(#[from] RefError),
     #[error(transparent)]
-    Pin(#[from] ActionPathError),
-    #[error(transparent)]
     Source(#[from] ActionSourceError),
 }
 
@@ -64,9 +62,6 @@ impl<'a> Lowering<'_, 'a> {
                 .map_err(|e| ResolveFailure::Failed(e.into()))
                 .and_then(|reference| source.resolve(&reference).map_err(source_failure))
                 .and_then(|pinned| {
-                    pinned
-                        .validate()
-                        .map_err(|e| ResolveFailure::Failed(e.into()))?;
                     source
                         .manifest(&pinned)
                         .map(|text| (pinned, text))
@@ -101,7 +96,7 @@ impl<'a> Lowering<'_, 'a> {
             Uses::Docker(_) => None,
             Uses::Remote(name) => match self.resolve_remote(&name) {
                 Ok((pinned, text)) => Document::parse(
-                    &format!("{}/action.yml", pinned.reference),
+                    &format!("{}/action.yml", pinned.reference()),
                     &text,
                     &mut self.diags,
                 ),

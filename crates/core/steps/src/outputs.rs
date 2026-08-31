@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+use ir::FailureClass;
 use serde_json::{Map, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -30,7 +31,7 @@ pub enum OutputError {
 }
 
 /// The failure class recorded when the outputs file cannot be read.
-pub const BAD_OUTPUT_CLASS: &str = "bad_output_file";
+pub const BAD_OUTPUT_CLASS: FailureClass = FailureClass::new_static("bad_output_file");
 
 /// Parse an outputs file into a flat object.
 pub fn parse(text: &str) -> Result<Map<String, Value>, OutputError> {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use frontend_gha::action::{ActionSourceError, PinnedAction};
-use ir::{Outcome, Value};
+use ir::{FailureClass, Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
@@ -22,9 +22,9 @@ use crate::session::{
 };
 
 /// The action could not be fetched.
-pub(crate) const FETCH_CLASS: &str = "action_fetch";
+pub(crate) const FETCH_CLASS: FailureClass = FailureClass::new_static("action_fetch");
 /// The action's files could not be put into the job environment.
-pub(crate) const STAGE_CLASS: &str = "action_stage";
+pub(crate) const STAGE_CLASS: FailureClass = FailureClass::new_static("action_stage");
 
 /// The runtime half of an action source. Manifest-only sources used by the
 /// frontend do not need to invent a host tree.
@@ -76,18 +76,18 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     let (action_dir, repository, git_ref) = match &config.action {
         ActionLocation::Pinned(pinned) => {
             let span = Span::current();
-            span.record("action", display(&pinned.reference));
-            span.record("action_sha", pinned.sha.as_str());
+            span.record("action", display(pinned.reference()));
+            span.record("action_sha", pinned.sha());
             let source = ctx.require_capability::<ActionSourceCap>()?;
             let root = stage(&ctx, &source.0, pinned).await?;
-            let staged = match &pinned.reference.path {
-                Some(path) => root.join(path.as_str()),
+            let staged = match pinned.reference().path() {
+                Some(path) => root.join(path),
                 None => root,
             };
             (
                 format!("{}/{}", session.workspace(), staged.display()),
-                pinned.reference.repository(),
-                pinned.reference.git_ref.to_string(),
+                pinned.reference().repository(),
+                pinned.reference().git_ref().to_string(),
             )
         }
         ActionLocation::Local { local } => {
@@ -172,9 +172,9 @@ pub(crate) fn input_variable(name: &str) -> String {
     level = "debug",
     skip_all,
     fields(
-        owner = %pinned.reference.owner,
-        repo = %pinned.reference.repo,
-        sha = %pinned.sha,
+        owner = %pinned.reference().owner(),
+        repo = %pinned.reference().repo(),
+        sha = %pinned.sha(),
         cached = Empty,
     )
 )]
@@ -183,16 +183,16 @@ pub(crate) async fn stage(
     source: &Arc<dyn ActionTreeSource>,
     pinned: &PinnedAction,
 ) -> Result<PathBuf, StepFailure> {
-    let reference = &pinned.reference;
+    let reference = pinned.reference();
     // The whole repository stages once per commit — a subpath action's entry
     // may reach beside its directory (`../lib/…`), exactly as on GitHub's
     // runners — and callers join what they need below the returned root: the
     // action's own directory, or a Dockerfile's parent.
     let root = PathBuf::from(RUNNER_DIR)
         .join("actions")
-        .join(reference.owner.as_str())
-        .join(reference.repo.as_str())
-        .join(pinned.sha.as_str());
+        .join(reference.owner())
+        .join(reference.repo())
+        .join(pinned.sha());
     let marker = root.join(".petri-staged");
     let already = ctx.env.read_file(&marker).await.map_err(|e| StepFailure {
         class:   STAGE_CLASS,
@@ -244,9 +244,9 @@ pub(crate) async fn stage(
     drop(tarball);
     unpack(ctx, &tar_rel, pinned).await?;
     tracing::info!(
-        owner = %pinned.reference.owner,
-        repo = %pinned.reference.repo,
-        sha = %pinned.sha,
+        owner = %pinned.reference().owner(),
+        repo = %pinned.reference().repo(),
+        sha = %pinned.sha(),
         archive_bytes,
         "action tree staged"
     );

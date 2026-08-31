@@ -290,7 +290,7 @@ fn an_unavailable_reference_is_unsupported_and_the_hint_says_why() {
             Err(self.decline(reference.to_string()))
         }
         fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
-            Err(self.decline(pinned.reference.to_string()))
+            Err(self.decline(pinned.reference().to_string()))
         }
     }
 

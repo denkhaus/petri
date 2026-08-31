@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs, io, process};
 
-use ir::{LogStream, Outcome, Value};
+use ir::{FailureClass, LogStream, Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
 use steps::{Ending, Step, StepCtx, StepFailure, ending_outcome, ladder};
@@ -40,7 +40,7 @@ use crate::session::{self, REPO_DIR};
 
 /// The failure class for everything checkout-shaped: a missing source, a git
 /// that cannot snapshot, an extraction that failed.
-pub(crate) const CHECKOUT_CLASS: &str = "checkout";
+pub(crate) const CHECKOUT_CLASS: FailureClass = FailureClass::new_static("checkout");
 
 /// The step kind. `NAME` must match what the frontend emits.
 pub struct CheckoutStep;

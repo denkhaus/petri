@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use executor::{ExitStatus, LogLine, ProcessSpec, Sig};
 use ir::placeholder::SECRET_REF_KEY;
-use ir::{Control, FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
+use ir::{Control, FailureClass, FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::Map;
 use smol_str::SmolStr;
@@ -27,16 +27,16 @@ pub const PROCESS_KIND: StepKindId = StepKindId::new_static("process");
 pub(crate) const OUTPUT_ENV: &str = "CI_OUTPUT";
 
 /// A `$secret` reference turned up somewhere it is not allowed.
-pub const SECRET_MISPLACED_CLASS: &str = "secret_misplaced";
+pub const SECRET_MISPLACED_CLASS: FailureClass = FailureClass::new_static("secret_misplaced");
 
 /// A named secret is not configured for this run.
-pub const SECRET_UNAVAILABLE_CLASS: &str = "secret_unavailable";
+pub const SECRET_UNAVAILABLE_CLASS: FailureClass = FailureClass::new_static("secret_unavailable");
 
 /// The workspace could not be prepared for the step.
-pub const WORKSPACE_CLASS: &str = "workspace_setup";
+pub const WORKSPACE_CLASS: FailureClass = FailureClass::new_static("workspace_setup");
 
 /// The process could not be started at all.
-pub(crate) const SPAWN_CLASS: &str = "spawn_failed";
+pub(crate) const SPAWN_CLASS: FailureClass = FailureClass::new_static("spawn_failed");
 
 /// How long to keep draining log output after the process has gone.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
@@ -382,7 +382,7 @@ pub(crate) fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output:
         return Outcome::new(
             Status::Failure(
                 FailureInfo::new(format!("step was killed by signal {signal}"))
-                    .with_class(&format!("signal:{signal}")),
+                    .with_class(FailureClass::signal(signal)),
             ),
             output,
         );
@@ -438,7 +438,7 @@ pub fn stringify(value: &Value) -> String {
     }
 }
 
-fn fail(class: &'static str, message: impl Into<String>) -> StepFailure {
+fn fail(class: FailureClass, message: impl Into<String>) -> StepFailure {
     StepFailure {
         class,
         message: message.into(),

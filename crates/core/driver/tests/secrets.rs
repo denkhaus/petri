@@ -179,7 +179,7 @@ async fn a_misplaced_secret_reference_fails_the_step() {
             .status
             .failure_info()
             .map(|f| f.class.as_str()),
-        Some(steps::SECRET_MISPLACED_CLASS)
+        Some(steps::SECRET_MISPLACED_CLASS.as_str())
     );
 }
 
@@ -224,7 +224,7 @@ async fn an_unknown_secret_fails_the_step() {
             .status
             .failure_info()
             .map(|f| f.class.as_str()),
-        Some(steps::SECRET_UNAVAILABLE_CLASS)
+        Some(steps::SECRET_UNAVAILABLE_CLASS.as_str())
     );
 }
 

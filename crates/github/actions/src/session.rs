@@ -38,7 +38,7 @@ use frontend_gha::exprs::{
     replace_runner_tool_cache_sentinels, replace_secret_sentinels, replace_workspace_sentinels,
     secret_sentinel, unescape_sentinel_text,
 };
-use ir::{LogStream, Outcome, StepEvent, Value};
+use ir::{FailureClass, LogStream, Outcome, StepEvent, Value};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, json};
 use smol_str::SmolStr;
@@ -57,7 +57,7 @@ pub(crate) const RUNNER_DIR: &str = ".ci/github";
 /// `GITHUB_WORKSPACE`, relative to the workspace root.
 pub(crate) const REPO_DIR: &str = "repo";
 /// The step could not set up or read back its runner files.
-pub(crate) const RUNNER_FILES_CLASS: &str = "runner_files";
+pub(crate) const RUNNER_FILES_CLASS: FailureClass = FailureClass::new_static("runner_files");
 
 const JOB_ENV_FILE: &str = ".ci/github/job-env.json";
 const JOB_PATH_FILE: &str = ".ci/github/job-path.json";
@@ -689,7 +689,7 @@ impl Session {
             }
             Err(failure) => {
                 tracing::warn!(
-                    failure_class = failure.class,
+                    failure_class = %failure.class,
                     "runner files could not be read back"
                 );
                 let _ = logs
@@ -967,7 +967,7 @@ pub(crate) fn fold_into_outcome(
 
 /// A step whose process succeeded but whose command stream carried a refused
 /// `set-env`/`add-path`.
-pub(crate) const COMMAND_REFUSED_CLASS: &str = "command_refused";
+pub(crate) const COMMAND_REFUSED_CLASS: FailureClass = FailureClass::new_static("command_refused");
 
 /// Whether unsecure `::set-env`/`::add-path` commands are allowed, by the
 /// runner's rule: `ACTIONS_ALLOW_UNSECURE_COMMANDS` parses as `true`
