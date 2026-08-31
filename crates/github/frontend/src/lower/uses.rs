@@ -19,9 +19,7 @@ use crate::action::{
     render_chain, unavailable_hint,
 };
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
-use crate::exprs::{
-    ExprSite, LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel,
-};
+use crate::exprs::{ExprSite, LoweredScalar, SEP, Sentinel, Site, config_value, lower_scalar};
 use crate::gate::{self, GateOp};
 use crate::model::{Defaults, Job, Step};
 
@@ -559,7 +557,7 @@ impl<'a> Lowering<'_, 'a> {
             LoweredScalar::Literal(v) => Some(self.b.exprs().lit(v)),
             LoweredScalar::Expr(id) => Some(id),
             LoweredScalar::Secret(name) => {
-                let sentinel = secret_sentinel(&name);
+                let sentinel = Sentinel::secret(&name);
                 Some(self.b.exprs().lit(sentinel))
             }
         }
@@ -579,7 +577,7 @@ impl<'a> Lowering<'_, 'a> {
             &mut self.diags,
         )?;
         Some(match lowered {
-            LoweredScalar::Secret(name) => Value::String(secret_sentinel(&name)),
+            LoweredScalar::Secret(name) => Value::String(Sentinel::secret(&name)),
             other => config_value(other),
         })
     }
@@ -919,7 +917,7 @@ impl<'a> Lowering<'_, 'a> {
                         Some(LoweredScalar::Secret(name)) => {
                             // Into the inner steps' expressions it goes as its
                             // sentinel; the step that receives it resolves it at spawn.
-                            let id = self.b.exprs().lit(secret_sentinel(&name));
+                            let id = self.b.exprs().lit(Sentinel::secret(&name));
                             inputs.insert(input.name.clone(), id);
                         }
                         None => {}

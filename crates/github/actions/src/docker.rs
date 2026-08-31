@@ -14,12 +14,7 @@ use std::path::PathBuf;
 
 use executor::{ContainerImage, OneShotContainer};
 use frontend_gha::action::resolve_manifest_path;
-use frontend_gha::exprs::{
-    escape_sentinel_text, has_env_sentinel, has_hashfiles_sentinel, has_runner_temp_sentinel,
-    has_runner_tool_cache_sentinel, has_workspace_sentinel, replace_env_sentinels,
-    replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
-    replace_workspace_sentinels, secret_sentinel,
-};
+use frontend_gha::exprs::{Sentinel, escape_sentinel_text};
 use ir::{FailureClass, Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
@@ -104,14 +99,15 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     // own env is out of reach here, so an unbound name renders empty.
     for value in config.env.values_mut() {
         if let ValueOrSecretRef::Literal(Value::String(text)) = value
-            && has_env_sentinel(text)
+            && Sentinel::Env.present_in(text)
         {
-            *text = replace_env_sentinels(text, |name| -> Result<String, Infallible> {
-                Ok(ci_get(session.job_env(), name)
-                    .map(|v| escape_sentinel_text(v))
-                    .unwrap_or_default())
-            })
-            .expect("the env-file lookup is infallible");
+            *text = Sentinel::Env
+                .resolve_in(text, |name| -> Result<String, Infallible> {
+                    Ok(ci_get(session.job_env(), name)
+                        .map(|v| escape_sentinel_text(v))
+                        .unwrap_or_default())
+                })
+                .expect("the env-file lookup is infallible");
         }
     }
 
@@ -459,7 +455,7 @@ impl TextResolver {
             }))
             .collect();
         let workspace = github_workspace_path(&*ctx.env);
-        let hashes = if texts.iter().any(|t| has_hashfiles_sentinel(t)) {
+        let hashes = if texts.iter().any(|t| Sentinel::HashFiles.present_in(t)) {
             hashfiles::resolved_calls(texts.iter().map(String::as_str), &*ctx.env, &workspace)
                 .await?
         } else {
@@ -476,37 +472,32 @@ impl TextResolver {
     }
 
     fn resolve(&self, text: &str, ctx: &StepCtx) -> Result<String, StepFailure> {
-        let text = if has_hashfiles_sentinel(text) {
+        let mut text = if Sentinel::HashFiles.present_in(text) {
             hashfiles::splice(text, &self.hashes)
         } else {
             text.to_string()
         };
-        let text = if has_workspace_sentinel(&text) {
-            replace_workspace_sentinels(&text, &self.container_workspace)
-        } else {
-            text
-        };
-        let text = if has_runner_temp_sentinel(&text) {
-            replace_runner_temp_sentinels(&text, &self.container_runner_temp)
-        } else {
-            text
-        };
-        let text = if has_runner_tool_cache_sentinel(&text) {
-            replace_runner_tool_cache_sentinels(&text, &self.container_tool_cache)
-        } else {
-            text
-        };
-        let text = if has_env_sentinel(&text) {
-            replace_env_sentinels(&text, |name| -> Result<String, Infallible> {
-                Ok(match ci_get(&self.env_config, name) {
-                    Some(ValueOrSecretRef::Literal(v)) => stringify(v),
-                    Some(ValueOrSecretRef::Secret { name }) => secret_sentinel(name),
-                    None => ci_get(&self.job_env, name)
-                        .map(|v| escape_sentinel_text(v))
-                        .unwrap_or_default(),
+        for (kind, value) in [
+            (Sentinel::Workspace, &self.container_workspace),
+            (Sentinel::RunnerTemp, &self.container_runner_temp),
+            (Sentinel::RunnerToolCache, &self.container_tool_cache),
+        ] {
+            if let Some(replaced) = kind.replace_in(&text, value) {
+                text = replaced;
+            }
+        }
+        let text = if Sentinel::Env.present_in(&text) {
+            Sentinel::Env
+                .resolve_in(&text, |name| -> Result<String, Infallible> {
+                    Ok(match ci_get(&self.env_config, name) {
+                        Some(ValueOrSecretRef::Literal(v)) => stringify(v),
+                        Some(ValueOrSecretRef::Secret { name }) => Sentinel::secret(name),
+                        None => ci_get(&self.job_env, name)
+                            .map(|v| escape_sentinel_text(v))
+                            .unwrap_or_default(),
+                    })
                 })
-            })
-            .expect("the env lookup is infallible")
+                .expect("the env lookup is infallible")
         } else {
             text
         };

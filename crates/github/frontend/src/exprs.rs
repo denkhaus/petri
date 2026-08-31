@@ -8,6 +8,7 @@
 //! construction.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use frontend::diag::{Diagnostics, Span};
 use frontend::expr::lower::{LowerError, Roots, builtin};
@@ -376,25 +377,13 @@ impl Site {
 
 /// How the lowering resolves GitHub's contexts.
 pub(crate) struct GhaRoots<'s> {
-    pub site:                  &'s Site,
-    pub at:                    ExprSite,
-    pub diags:                 &'s mut Diagnostics,
-    pub span:                  Span,
-    /// Set when a `secrets.*` reference was seen; the caller decides whether
-    /// the position allowed it.
-    pub saw_secret:            bool,
-    /// Set when a `hashFiles(...)` call lowered to its sentinel; the caller
-    /// decides whether the position allowed it.
-    pub saw_hashfiles:         bool,
-    /// Set when `github.workspace` lowered to its sentinel; the caller decides
-    /// whether the position allowed it.
-    pub saw_workspace:         bool,
-    /// Set when `runner.temp` lowered to its sentinel; the caller decides
-    /// whether the position allowed it.
-    pub saw_runner_temp:       bool,
-    /// Set when `runner.tool_cache` lowered to its sentinel; the caller
-    /// decides whether the position allowed it.
-    pub saw_runner_tool_cache: bool,
+    pub site:  &'s Site,
+    pub at:    ExprSite,
+    pub diags: &'s mut Diagnostics,
+    pub span:  Span,
+    /// The sentinel kinds this lowering produced; the caller decides which of
+    /// them the position allows.
+    pub saw:   SentinelSet,
 }
 
 /// Contexts that come from the run's parameters, looked up case-insensitively.
@@ -414,7 +403,7 @@ impl Roots for GhaRoots<'_> {
                 }
             }
             "secrets" => {
-                self.saw_secret = true;
+                self.saw.insert(Sentinel::Secret);
                 // Lowered to a marker the caller checks for; it never evaluates.
                 Some(table.lit(Value::Null))
             }
@@ -636,10 +625,10 @@ impl Roots for GhaRoots<'_> {
             // position may carry one at all. Inside a called workflow the name
             // maps through the call's `secrets:` first — a pure rename.
             "secrets" => {
-                self.saw_secret = true;
+                self.saw.insert(Sentinel::Secret);
                 Some(match path {
                     [name] => match self.site.secrets.resolve(name) {
-                        Ok(Some(provider)) => table.lit(secret_sentinel(&provider)),
+                        Ok(Some(provider)) => table.lit(Sentinel::secret(&provider)),
                         // Declared but not provided: the value is empty, as on GitHub.
                         Ok(None) => table.lit(""),
                         Err(UndeclaredSecret) => {
@@ -653,47 +642,47 @@ impl Roots for GhaRoots<'_> {
             // `github.workspace` is runner-side truth: only the step's
             // environment knows the path, so in step positions it lowers to a
             // sentinel the step kinds substitute at spawn
-            // ([`WORKSPACE_SENTINEL`]). A scope position (a job-level `env:`)
+            // ([`Sentinel::WORKSPACE_MARKER`]). A scope position (a job-level `env:`)
             // is resolved at acquire, where nothing could substitute — the
             // reference stays a parameter read there (null, rendered empty).
             "github"
                 if self.at == ExprSite::Step
                     && matches!(path, [key] if key.eq_ignore_ascii_case("workspace")) =>
             {
-                self.saw_workspace = true;
-                Some(table.lit(WORKSPACE_SENTINEL))
+                self.saw.insert(Sentinel::Workspace);
+                Some(table.lit(Sentinel::WORKSPACE_MARKER))
             }
             // `runner.temp` is runner-side truth the same way: `RUNNER_TEMP`
             // is set by the step's environment (a host path, or a container
             // mount), so in step positions it lowers to a sentinel the step
-            // kinds substitute at spawn ([`RUNNER_TEMP_SENTINEL`]). A scope
+            // kinds substitute at spawn ([`Sentinel::RUNNER_TEMP_MARKER`]). A scope
             // position stays a parameter read — null, rendered empty — as
             // `github.workspace` does. `runner.os/arch/name` stay parameters.
             "runner"
                 if self.at == ExprSite::Step
                     && matches!(path, [key] if key.eq_ignore_ascii_case("temp")) =>
             {
-                self.saw_runner_temp = true;
-                Some(table.lit(RUNNER_TEMP_SENTINEL))
+                self.saw.insert(Sentinel::RunnerTemp);
+                Some(table.lit(Sentinel::RUNNER_TEMP_MARKER))
             }
             // `runner.tool_cache` follows: the step computes the one resolved
             // value (its own env wins, else the environment's ambient
             // `RUNNER_TOOL_CACHE`, else the host store where this filesystem
             // has it, else the workspace directory) and substitutes the
             // sentinel with exactly what it exports as the variable
-            // ([`RUNNER_TOOL_CACHE_SENTINEL`]). `runner.os/arch/name` stay
+            // ([`Sentinel::RUNNER_TOOL_CACHE_MARKER`]). `runner.os/arch/name` stay
             // parameters.
             "runner"
                 if self.at == ExprSite::Step
                     && matches!(path, [key] if key.eq_ignore_ascii_case("tool_cache")) =>
             {
-                self.saw_runner_tool_cache = true;
-                Some(table.lit(RUNNER_TOOL_CACHE_SENTINEL))
+                self.saw.insert(Sentinel::RunnerToolCache);
+                Some(table.lit(Sentinel::RUNNER_TOOL_CACHE_MARKER))
             }
             // `github.token` is a secret, not a parameter: the same rule as `secrets.*`.
             "github" if matches!(path, [token] if token.eq_ignore_ascii_case("token")) => {
-                self.saw_secret = true;
-                Some(table.lit(secret_sentinel(GITHUB_TOKEN_SECRET)))
+                self.saw.insert(Sentinel::Secret);
+                Some(table.lit(Sentinel::secret(GITHUB_TOKEN_SECRET)))
             }
             _ => None,
         }
@@ -723,8 +712,8 @@ impl Roots for GhaRoots<'_> {
                 // position may carry one (`run:`, `env:`, `with:`) at all.
                 match literal_hashfiles_patterns(args, &self.span, self.diags) {
                     Some(patterns) => {
-                        self.saw_hashfiles = true;
-                        Some(Ok(table.lit(hashfiles_sentinel(&patterns))))
+                        self.saw.insert(Sentinel::HashFiles);
+                        Some(Ok(table.lit(Sentinel::hashfiles(&patterns))))
                     }
                     None => Some(Err(LowerError::Custom("hashFiles is not supported".into()))),
                 }
@@ -816,15 +805,11 @@ pub(crate) fn literal_hashfiles_patterns(
     Some(patterns)
 }
 
-/// One parsed expression lowered through the GHA roots, with the flags a caller
-/// needs for its position-specific rules.
+/// One parsed expression lowered through the GHA roots, with the sentinel
+/// kinds a caller needs for its position-specific rules.
 pub(crate) struct LoweredExpr {
-    pub id:                    ExprId,
-    pub saw_secret:            bool,
-    pub saw_hashfiles:         bool,
-    pub saw_workspace:         bool,
-    pub saw_runner_temp:       bool,
-    pub saw_runner_tool_cache: bool,
+    pub id:  ExprId,
+    pub saw: SentinelSet,
 }
 
 /// Lower one parsed expression through [`GhaRoots`], mapping lowering failures
@@ -842,11 +827,7 @@ pub(crate) fn lower_expr(
         at,
         diags,
         span: span.clone(),
-        saw_secret: false,
-        saw_hashfiles: false,
-        saw_workspace: false,
-        saw_runner_temp: false,
-        saw_runner_tool_cache: false,
+        saw: SentinelSet::default(),
     };
     let id = match gha(ast, table, &mut roots) {
         Ok(id) => id,
@@ -864,14 +845,7 @@ pub(crate) fn lower_expr(
             return None;
         }
     };
-    Some(LoweredExpr {
-        id,
-        saw_secret: roots.saw_secret,
-        saw_hashfiles: roots.saw_hashfiles,
-        saw_workspace: roots.saw_workspace,
-        saw_runner_temp: roots.saw_runner_temp,
-        saw_runner_tool_cache: roots.saw_runner_tool_cache,
-    })
+    Some(LoweredExpr { id, saw: roots.saw })
 }
 
 /// The one shape a GHA string template takes as an expression: a lone
@@ -1015,10 +989,10 @@ pub(crate) fn lower_scalar(
                 && at == ExprSite::Step
                 && let Some(name) = bare_env_name(&ast)
             {
-                return Ok(table.lit(env_sentinel(&name)));
+                return Ok(table.lit(Sentinel::env(&name)));
             }
             let lowered = lower_expr(&ast, site, at, &span, table, diags).ok_or(())?;
-            if lowered.saw_secret && !env_shaped {
+            if lowered.saw.contains(Sentinel::Secret) && !env_shaped {
                 diags.unsupported(
                     "secrets.expression",
                     span.clone(),
@@ -1029,7 +1003,7 @@ pub(crate) fn lower_scalar(
                 );
                 return Err(());
             }
-            if lowered.saw_hashfiles && !env_shaped {
+            if lowered.saw.contains(Sentinel::HashFiles) && !env_shaped {
                 diags.unsupported(
                     "expression.hashFiles",
                     span.clone(),
@@ -1100,14 +1074,282 @@ fn secret_name(root: &str, path: &[&str]) -> Option<String> {
 /// The secret name `github.token` resolves to.
 pub const GITHUB_TOKEN_SECRET: &str = "GITHUB_TOKEN";
 
-const SENTINEL_OPEN: &str = "\u{E000}petri-secret:";
-const HASHFILES_OPEN: &str = "\u{E000}petri-hashfiles:";
 const SENTINEL_CLOSE: &str = "\u{E001}";
 const SENTINEL_ESCAPE: char = '\u{E002}';
 
+/// One kind of sentinel: a stand-in the lowering writes into a string where
+/// GitHub renders a value only the step can know. The graph, the resolved
+/// config and the event log carry the marker in the value's place; the step
+/// kinds that run GitHub steps substitute the value at spawn, so the
+/// expression and the environment cannot diverge. Private-use characters
+/// bracket every marker, and literal workflow text escapes those characters
+/// first ([`escape_sentinel_text`]), so user text cannot forge one.
+///
+/// Three kinds carry a payload between the brackets — a name, or a pattern
+/// list — and three are constant markers for runner-side paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sentinel {
+    /// `secrets.NAME` (and `github.token`): the marker carries the provider's
+    /// secret name ([`Self::secret`]). The expression evaluates over the
+    /// marker, never the value.
+    Secret,
+    /// A bare `${{ env.NAME }}` in step config (`run:`, `env:`, `with:`),
+    /// carrying the variable name as [`Self::Secret`] carries its. The
+    /// engine's `env` binding is the scope env, frozen at firing, so it can
+    /// never see what an earlier step appended through `GITHUB_ENV`; the step
+    /// substitutes this marker at spawn from the environment its process
+    /// receives — the gate's `$env` leaf, in flat-text form. Only a bare
+    /// reference standing alone in its template segment lowers this way
+    /// ([`lower_scalar`]): under an operator or function the engine would
+    /// evaluate over the marker, so those keep the engine's scope-env
+    /// meaning, exactly as they do in a condition.
+    Env,
+    /// `hashFiles(patterns…)`: the marker carries the pattern list
+    /// ([`Self::hashfiles`]). The step kinds replace it with the hash at
+    /// spawn ([`Self::resolve_hashfiles`]), computed against the workspace.
+    HashFiles,
+    /// `github.workspace`: the constant marker [`Self::WORKSPACE_MARKER`].
+    /// GitHub renders the context to the runner-side workspace path, which
+    /// only the step's environment knows — a host path, or the container's
+    /// mount point — so the step kinds substitute their own
+    /// `GITHUB_WORKSPACE` at spawn.
+    Workspace,
+    /// `runner.temp`: the constant marker [`Self::RUNNER_TEMP_MARKER`], for
+    /// the same reason as [`Self::Workspace`] — only the step's environment
+    /// knows the path `RUNNER_TEMP` carries, so the step kinds substitute
+    /// exactly that value at spawn, and the two cannot diverge.
+    RunnerTemp,
+    /// `runner.tool_cache`: the constant marker
+    /// [`Self::RUNNER_TOOL_CACHE_MARKER`]. The value is not a static path —
+    /// an image's own populated cache wins, else the host store where this
+    /// filesystem has it, else the workspace directory — and the step kinds
+    /// substitute exactly the value they export as `RUNNER_TOOL_CACHE`, so
+    /// the expression and the environment cannot diverge.
+    RunnerToolCache,
+}
+
+impl Sentinel {
+    /// Every kind, in the order the gate diagnostics report them.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Secret,
+        Self::Env,
+        Self::HashFiles,
+        Self::Workspace,
+        Self::RunnerTemp,
+        Self::RunnerToolCache,
+    ];
+    /// The whole marker for `runner.temp`.
+    pub const RUNNER_TEMP_MARKER: &'static str = "\u{E000}petri-runner-temp\u{E001}";
+    /// The whole marker for `runner.tool_cache`.
+    pub const RUNNER_TOOL_CACHE_MARKER: &'static str = "\u{E000}petri-runner-tool-cache\u{E001}";
+    /// The whole marker for `github.workspace`.
+    pub const WORKSPACE_MARKER: &'static str = "\u{E000}petri-workspace\u{E001}";
+
+    /// The text every marker of this kind starts with.
+    const fn open(self) -> &'static str {
+        match self {
+            Self::Secret => "\u{E000}petri-secret:",
+            Self::Env => "\u{E000}petri-env:",
+            Self::HashFiles => "\u{E000}petri-hashfiles:",
+            Self::Workspace => "\u{E000}petri-workspace",
+            Self::RunnerTemp => "\u{E000}petri-runner-temp",
+            Self::RunnerToolCache => "\u{E000}petri-runner-tool-cache",
+        }
+    }
+
+    /// What [`Self::present_in`] scans for: the open prefix of a payload
+    /// kind, the whole marker of a constant kind. The distinction is
+    /// load-bearing: a hashFiles payload is workflow-author text that may
+    /// spell out another kind's open prefix, but the close character can
+    /// never appear inside a payload ([`Self::hashfiles`] escapes it away),
+    /// so a whole marker cannot be forged.
+    const fn needle(self) -> &'static str {
+        match self {
+            Self::Secret | Self::Env | Self::HashFiles => self.open(),
+            Self::Workspace => Self::WORKSPACE_MARKER,
+            Self::RunnerTemp => Self::RUNNER_TEMP_MARKER,
+            Self::RunnerToolCache => Self::RUNNER_TOOL_CACHE_MARKER,
+        }
+    }
+
+    /// The marker for secret `name`: what a lowered string carries in the
+    /// value's place until a step kind resolves it at spawn
+    /// ([`Self::resolve_in`]).
+    pub fn secret(name: &str) -> String {
+        format!("{}{name}{SENTINEL_CLOSE}", Self::Secret.open())
+    }
+
+    /// The marker for a bare `env.NAME` reference in step config.
+    pub fn env(name: &str) -> String {
+        format!("{}{name}{SENTINEL_CLOSE}", Self::Env.open())
+    }
+
+    /// The marker for `hashFiles(patterns…)`, carrying the pattern list as
+    /// JSON with the close character escaped out of the payload.
+    pub fn hashfiles(patterns: &[String]) -> String {
+        let payload = serde_json::to_string(patterns)
+            .expect("strings encode")
+            .replace(SENTINEL_CLOSE, "\\uE001");
+        format!("{}{payload}{SENTINEL_CLOSE}", Self::HashFiles.open())
+    }
+
+    /// Whether `text` carries a marker of this kind.
+    pub fn present_in(self, text: &str) -> bool {
+        text.contains(self.needle())
+    }
+
+    /// Every marker of this kind replaced by `value` — the consuming side of
+    /// the constant kinds, whose one runner-side value the caller has
+    /// resolved. `None` means no marker is present and `text` stands as it
+    /// is, the shape the config-rewriting passes expect. The payload kinds
+    /// resolve per payload instead ([`Self::resolve_in`],
+    /// [`Self::resolve_hashfiles`]).
+    pub fn replace_in(self, text: &str, value: &str) -> Option<String> {
+        if !self.present_in(text) {
+            return None;
+        }
+        match self {
+            Self::Workspace | Self::RunnerTemp | Self::RunnerToolCache => {
+                Some(text.replace(self.needle(), value))
+            }
+            Self::Secret | Self::Env | Self::HashFiles => {
+                let replaced: Result<String, Infallible> =
+                    self.resolve_in(text, |_| Ok(value.to_owned()));
+                Some(replaced.expect("the resolver is infallible"))
+            }
+        }
+    }
+
+    /// Replace every marker of a name-carrying kind — [`Self::Secret`] or
+    /// [`Self::Env`] — with what `resolve` returns for its name.
+    pub fn resolve_in<E>(
+        self,
+        text: &str,
+        mut resolve: impl FnMut(&str) -> Result<String, E>,
+    ) -> Result<String, E> {
+        replace_marked(text, self.open(), &mut resolve)
+    }
+
+    /// Every pattern list named by a hashFiles marker in `text`, in order of
+    /// appearance. A run-time caller computes each hash asynchronously, then
+    /// splices the results in with [`Self::resolve_hashfiles`].
+    pub fn hashfiles_calls(text: &str) -> Vec<Vec<String>> {
+        let open = Self::HashFiles.open();
+        if !Self::HashFiles.present_in(text) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find(open) {
+            let after = &rest[start + open.len()..];
+            match after.find(SENTINEL_CLOSE) {
+                Some(end) => {
+                    let payload = &after[..end];
+                    if let Ok(patterns) = serde_json::from_str::<Vec<String>>(payload) {
+                        out.push(patterns);
+                    }
+                    rest = &after[end + SENTINEL_CLOSE.len()..];
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Replace every hashFiles marker in `text` with what `resolve` returns
+    /// for its pattern list.
+    pub fn resolve_hashfiles<E>(
+        text: &str,
+        mut resolve: impl FnMut(&[String]) -> Result<String, E>,
+    ) -> Result<String, E> {
+        let open = Self::HashFiles.open();
+        replace_marked(text, open, &mut |payload| {
+            match serde_json::from_str::<Vec<String>>(payload) {
+                Ok(patterns) => resolve(&patterns),
+                // Not a payload this crate wrote; keep it as text.
+                Err(_) => Ok(format!("{open}{payload}{SENTINEL_CLOSE}")),
+            }
+        })
+    }
+
+    /// The rule and wording for a kind that may not appear in a gate
+    /// condition where the engine would evaluate over the raw marker; `None`
+    /// for [`Self::Env`], which conditions carry as `$env` leaves.
+    pub(crate) fn gate_diagnostic(self) -> Option<GateDiagnostic> {
+        match self {
+            Self::Secret => Some(GateDiagnostic {
+                code:    "secrets.expression",
+                subject: "a `secrets.*` or `github.token` reference in a condition",
+                hint:    "secrets are absent from the expression environment by construction, so they never reach the \
+                          event log; pass the secret through an environment variable and test it in the step \
+                          (`env.NAME`), but a condition cannot read the secret itself",
+            }),
+            Self::Env => None,
+            Self::HashFiles => Some(GateDiagnostic {
+                code:    "expression.hashFiles",
+                subject: "a `hashFiles()` call under a function the engine evaluates",
+                hint:    "in a condition, `hashFiles(...)` may stand alone or under the comparison and boolean \
+                          operators, where the step resolves it; under other functions the engine would \
+                          evaluate over the unresolved sentinel",
+            }),
+            Self::Workspace => Some(GateDiagnostic {
+                code:    "expression.workspace",
+                subject: "`github.workspace` under a function the engine evaluates",
+                hint:    "the workspace path is known only to the step's environment; in a condition, \
+                          `github.workspace` may stand alone or under the comparison and boolean operators, \
+                          where the step resolves it — or read `GITHUB_WORKSPACE` in the step itself",
+            }),
+            Self::RunnerTemp => Some(GateDiagnostic {
+                code:    "expression.runner_temp",
+                subject: "`runner.temp` under a function the engine evaluates",
+                hint:    "the temp path is known only to the step's environment; in a condition, \
+                          `runner.temp` may stand alone or under the comparison and boolean operators, \
+                          where the step resolves it — or read `RUNNER_TEMP` in the step itself",
+            }),
+            Self::RunnerToolCache => Some(GateDiagnostic {
+                code:    "expression.runner_tool_cache",
+                subject: "`runner.tool_cache` under a function the engine evaluates",
+                hint:    "the tool cache path is known only to the step's environment; in a condition, \
+                          `runner.tool_cache` may stand alone or under the comparison and boolean operators, \
+                          where the step resolves it — or read `RUNNER_TOOL_CACHE` in the step itself",
+            }),
+        }
+    }
+}
+
+/// The diagnostic for a sentinel kind a gate condition may not carry under a
+/// function the engine evaluates: its `unsupported` code, the subject phrase,
+/// and the hint.
+#[derive(Clone, Copy)]
+pub(crate) struct GateDiagnostic {
+    pub code:    &'static str,
+    pub subject: &'static str,
+    pub hint:    &'static str,
+}
+
+/// The sentinel kinds one lowering produced, for the caller's
+/// position-specific rules: a position that cannot carry a kind turns its
+/// presence into a diagnostic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SentinelSet(u8);
+
+impl SentinelSet {
+    pub(crate) fn insert(&mut self, kind: Sentinel) {
+        self.0 |= Self::bit(kind);
+    }
+
+    pub(crate) fn contains(self, kind: Sentinel) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    const fn bit(kind: Sentinel) -> u8 {
+        1 << kind as u8
+    }
+}
+
 /// Escape private-use marker characters in literal workflow text. Generated
 /// placeholders are added after this step, so literal text cannot impersonate
-/// one.
+/// one — the forgery invariant every [`Sentinel`] kind rests on.
 pub fn escape_sentinel_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -1148,162 +1390,6 @@ pub fn unescape_sentinel_text(text: &str) -> String {
         }
     }
     out
-}
-
-/// The stand-in for secret `name` inside a lowered string: what the graph, the
-/// resolved config and the event log carry in its place. The step kinds that
-/// run GitHub steps replace it with the value at spawn
-/// ([`replace_secret_sentinels`]). Private-use characters bracket it. Literal
-/// workflow text escapes those characters before generated placeholders are
-/// added.
-pub fn secret_sentinel(name: &str) -> String {
-    format!("{SENTINEL_OPEN}{name}{SENTINEL_CLOSE}")
-}
-
-/// Whether `text` carries a secret sentinel.
-pub fn has_secret_sentinel(text: &str) -> bool {
-    text.contains(SENTINEL_OPEN)
-}
-
-/// The stand-in for `github.workspace` inside a lowered string. GitHub renders
-/// the context to the runner-side workspace path, which only the step's
-/// environment knows — a host path, or the container's mount point — so the
-/// lowering emits this marker and the step kinds substitute their own
-/// `GITHUB_WORKSPACE` at spawn, the same shape as [`secret_sentinel`] and
-/// [`hashfiles_sentinel`]. User text cannot forge it: [`escape_sentinel_text`]
-/// escapes the private-use characters.
-pub(crate) const WORKSPACE_SENTINEL: &str = "\u{E000}petri-workspace\u{E001}";
-
-pub fn has_workspace_sentinel(text: &str) -> bool {
-    text.contains(WORKSPACE_SENTINEL)
-}
-
-pub fn replace_workspace_sentinels(text: &str, workspace: &str) -> String {
-    text.replace(WORKSPACE_SENTINEL, workspace)
-}
-
-/// The stand-in for `runner.temp` inside a lowered string: the same shape as
-/// [`WORKSPACE_SENTINEL`], for the same reason — only the step's environment
-/// knows the path `RUNNER_TEMP` carries, so the step kinds substitute exactly
-/// that value at spawn, and the two cannot diverge.
-pub const RUNNER_TEMP_SENTINEL: &str = "\u{E000}petri-runner-temp\u{E001}";
-
-pub fn has_runner_temp_sentinel(text: &str) -> bool {
-    text.contains(RUNNER_TEMP_SENTINEL)
-}
-
-pub fn replace_runner_temp_sentinels(text: &str, temp: &str) -> String {
-    text.replace(RUNNER_TEMP_SENTINEL, temp)
-}
-
-/// The stand-in for `runner.tool_cache`: the same shape again, though the
-/// value is not a static path — an image's own populated cache wins, else the
-/// host store where this filesystem has it, else the workspace directory. The
-/// step kinds substitute exactly the value they export as
-/// `RUNNER_TOOL_CACHE`, so the expression and the environment cannot diverge.
-pub const RUNNER_TOOL_CACHE_SENTINEL: &str = "\u{E000}petri-runner-tool-cache\u{E001}";
-
-pub fn has_runner_tool_cache_sentinel(text: &str) -> bool {
-    text.contains(RUNNER_TOOL_CACHE_SENTINEL)
-}
-
-pub fn replace_runner_tool_cache_sentinels(text: &str, tool_cache: &str) -> String {
-    text.replace(RUNNER_TOOL_CACHE_SENTINEL, tool_cache)
-}
-
-/// The stand-in for a bare `env.NAME` reference in step config (`run:`, `env:`,
-/// `with:`), carrying the name as [`secret_sentinel`] carries its. The engine's
-/// `env` binding is the scope env, frozen at firing, so it can never see what
-/// an earlier step appended through `GITHUB_ENV`; the step substitutes this
-/// marker at spawn from the environment its process receives, so the expression
-/// and the variable cannot diverge — the gate's `$env` leaf, in flat-text form.
-/// Only a bare reference standing alone in its template segment lowers this way
-/// ([`lower_scalar`]): under an operator or function the engine would evaluate
-/// over the marker, so those keep the engine's scope-env meaning, exactly as
-/// they do in a condition.
-const ENV_OPEN: &str = "\u{E000}petri-env:";
-
-pub fn env_sentinel(name: &str) -> String {
-    format!("{ENV_OPEN}{name}{SENTINEL_CLOSE}")
-}
-
-/// Whether `text` carries an env sentinel.
-pub fn has_env_sentinel(text: &str) -> bool {
-    text.contains(ENV_OPEN)
-}
-
-/// Replace every env sentinel in `text` with what `resolve` returns for its
-/// name.
-pub fn replace_env_sentinels<E>(
-    text: &str,
-    mut resolve: impl FnMut(&str) -> Result<String, E>,
-) -> Result<String, E> {
-    replace_marked(text, ENV_OPEN, &mut resolve)
-}
-
-/// Replace every secret sentinel in `text` with what `resolve` returns for its
-/// name.
-pub fn replace_secret_sentinels<E>(
-    text: &str,
-    mut resolve: impl FnMut(&str) -> Result<String, E>,
-) -> Result<String, E> {
-    replace_marked(text, SENTINEL_OPEN, &mut resolve)
-}
-
-/// The stand-in for `hashFiles(patterns…)` inside a lowered string, like
-/// [`secret_sentinel`]: the step kinds that run GitHub steps replace it with the
-/// hash at spawn ([`replace_hashfiles_sentinels`]), computed against the
-/// workspace.
-pub(crate) fn hashfiles_sentinel(patterns: &[String]) -> String {
-    let payload = serde_json::to_string(patterns)
-        .expect("strings encode")
-        .replace(SENTINEL_CLOSE, "\\uE001");
-    format!("{HASHFILES_OPEN}{payload}{SENTINEL_CLOSE}")
-}
-
-/// Whether `text` carries a hashFiles sentinel.
-pub fn has_hashfiles_sentinel(text: &str) -> bool {
-    text.contains(HASHFILES_OPEN)
-}
-
-/// Every pattern list named by a hashFiles sentinel in `text`, in order of
-/// appearance. A run-time caller computes each hash asynchronously, then
-/// splices the results in with [`replace_hashfiles_sentinels`].
-pub fn hashfiles_calls(text: &str) -> Vec<Vec<String>> {
-    if !has_hashfiles_sentinel(text) {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(HASHFILES_OPEN) {
-        let after = &rest[start + HASHFILES_OPEN.len()..];
-        match after.find(SENTINEL_CLOSE) {
-            Some(end) => {
-                let payload = &after[..end];
-                if let Ok(patterns) = serde_json::from_str::<Vec<String>>(payload) {
-                    out.push(patterns);
-                }
-                rest = &after[end + SENTINEL_CLOSE.len()..];
-            }
-            None => break,
-        }
-    }
-    out
-}
-
-/// Replace every hashFiles sentinel in `text` with what `resolve` returns for
-/// its pattern list.
-pub fn replace_hashfiles_sentinels<E>(
-    text: &str,
-    mut resolve: impl FnMut(&[String]) -> Result<String, E>,
-) -> Result<String, E> {
-    replace_marked(text, HASHFILES_OPEN, &mut |payload| {
-        match serde_json::from_str::<Vec<String>>(payload) {
-            Ok(patterns) => resolve(&patterns),
-            // Not a payload this crate wrote; keep it as text.
-            Err(_) => Ok(format!("{HASHFILES_OPEN}{payload}{SENTINEL_CLOSE}")),
-        }
-    })
 }
 
 /// Replace every `<open>payload\u{E001}` marker in `text` with what `resolve`
@@ -1349,52 +1435,74 @@ mod sentinel_tests {
     fn sentinels_round_trip_through_replacement() {
         let text = format!(
             "token {} and {}!",
-            secret_sentinel("GITHUB_TOKEN"),
-            secret_sentinel("OTHER")
+            Sentinel::secret("GITHUB_TOKEN"),
+            Sentinel::secret("OTHER")
         );
-        assert!(has_secret_sentinel(&text));
-        let out = replace_secret_sentinels(&text, |name| -> Result<String, ()> {
-            Ok(format!("<{name}>"))
-        })
-        .unwrap();
+        assert!(Sentinel::Secret.present_in(&text));
+        let out = Sentinel::Secret
+            .resolve_in(&text, |name| -> Result<String, ()> {
+                Ok(format!("<{name}>"))
+            })
+            .unwrap();
         assert_eq!(out, "token <GITHUB_TOKEN> and <OTHER>!");
-        assert!(!has_secret_sentinel("plain"));
+        assert!(!Sentinel::Secret.present_in("plain"));
         assert_eq!(
-            replace_secret_sentinels("plain", |_| -> Result<String, ()> { unreachable!() })
+            Sentinel::Secret
+                .resolve_in("plain", |_| -> Result<String, ()> { unreachable!() })
                 .unwrap(),
             "plain"
         );
         let failed: Result<String, &str> =
-            replace_secret_sentinels(&secret_sentinel("X"), |_| Err("missing"));
+            Sentinel::Secret.resolve_in(&Sentinel::secret("X"), |_| Err("missing"));
         assert_eq!(failed, Err("missing"));
 
-        let literal = format!("{SENTINEL_OPEN}X{SENTINEL_CLOSE}{SENTINEL_ESCAPE}");
+        let literal = format!(
+            "{}X{SENTINEL_CLOSE}{SENTINEL_ESCAPE}",
+            Sentinel::Secret.open()
+        );
         let escaped = escape_sentinel_text(&literal);
-        assert!(!has_secret_sentinel(&escaped));
+        assert!(!Sentinel::Secret.present_in(&escaped));
         assert_eq!(unescape_sentinel_text(&escaped), literal);
+    }
+
+    #[test]
+    fn constant_markers_replace_only_when_present() {
+        let text = format!("cd {}/sub", Sentinel::WORKSPACE_MARKER);
+        assert!(Sentinel::Workspace.present_in(&text));
+        assert_eq!(
+            Sentinel::Workspace.replace_in(&text, "/w/repo"),
+            Some("cd /w/repo/sub".to_string())
+        );
+        assert_eq!(Sentinel::Workspace.replace_in("plain", "/w/repo"), None);
+        assert!(!Sentinel::RunnerTemp.present_in(&text));
     }
 
     #[test]
     fn hashfiles_sentinels_carry_their_patterns() {
         let patterns = vec!["**/Cargo.lock".to_string(), "rust-toolchain*".to_string()];
-        let text = format!("key-{}-v1", hashfiles_sentinel(&patterns));
-        assert!(has_hashfiles_sentinel(&text));
-        assert!(!has_secret_sentinel(&text));
-        assert_eq!(hashfiles_calls(&text), vec![patterns.clone()]);
-        let out = replace_hashfiles_sentinels(&text, |p| -> Result<String, ()> {
+        let text = format!("key-{}-v1", Sentinel::hashfiles(&patterns));
+        assert!(Sentinel::HashFiles.present_in(&text));
+        assert!(!Sentinel::Secret.present_in(&text));
+        assert_eq!(Sentinel::hashfiles_calls(&text), vec![patterns.clone()]);
+        let out = Sentinel::resolve_hashfiles(&text, |p| -> Result<String, ()> {
             assert_eq!(p, patterns.as_slice());
             Ok("abc123".into())
         })
         .unwrap();
         assert_eq!(out, "key-abc123-v1");
         // The two sentinel kinds pass each other by.
-        let mixed = format!("{} {}", secret_sentinel("T"), hashfiles_sentinel(&patterns));
-        let out =
-            replace_secret_sentinels(&mixed, |_| -> Result<String, ()> { Ok("s".into()) }).unwrap();
-        assert!(has_hashfiles_sentinel(&out));
+        let mixed = format!(
+            "{} {}",
+            Sentinel::secret("T"),
+            Sentinel::hashfiles(&patterns)
+        );
+        let out = Sentinel::Secret
+            .resolve_in(&mixed, |_| -> Result<String, ()> { Ok("s".into()) })
+            .unwrap();
+        assert!(Sentinel::HashFiles.present_in(&out));
 
         let patterns = vec![format!("a{SENTINEL_CLOSE}b")];
-        let marker = hashfiles_sentinel(&patterns);
-        assert_eq!(hashfiles_calls(&marker), vec![patterns]);
+        let marker = Sentinel::hashfiles(&patterns);
+        assert_eq!(Sentinel::hashfiles_calls(&marker), vec![patterns]);
     }
 }

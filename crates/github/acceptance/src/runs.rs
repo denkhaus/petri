@@ -30,7 +30,7 @@ use std::env::consts::ARCH;
 use std::fmt::Write as _;
 
 use frontend_gha::action::{ActionLocation, PinnedAction};
-use frontend_gha::exprs::{has_env_sentinel, replace_env_sentinels};
+use frontend_gha::exprs::Sentinel;
 use frontend_gha::{ACTION_KIND, DOCKER_ACTION_KIND, RUN_KIND};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, ExpandTarget, Expansion, Expr, ExprId, Graph, NodeId, RuntimeTarget, Value};
@@ -622,11 +622,11 @@ fn scope_env_reads_empty_input(
 /// The names of every env sentinel in `text` — a bare `${{ env.NAME }}` in
 /// step config, left for the step to substitute at spawn.
 fn env_sentinel_names(text: &str) -> Vec<String> {
-    if !has_env_sentinel(text) {
+    if !Sentinel::Env.present_in(text) {
         return Vec::new();
     }
     let mut names = Vec::new();
-    let _ = replace_env_sentinels(text, |name| -> Result<String, Infallible> {
+    let _ = Sentinel::Env.resolve_in(text, |name| -> Result<String, Infallible> {
         names.push(name.to_string());
         Ok(String::new())
     });

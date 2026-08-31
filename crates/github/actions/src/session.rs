@@ -32,11 +32,7 @@ use std::{borrow, fmt, iter, mem};
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
-    escape_sentinel_text, has_env_sentinel, has_runner_temp_sentinel,
-    has_runner_tool_cache_sentinel, has_secret_sentinel, has_sentinel_escape,
-    has_workspace_sentinel, replace_env_sentinels, replace_runner_temp_sentinels,
-    replace_runner_tool_cache_sentinels, replace_secret_sentinels, replace_workspace_sentinels,
-    secret_sentinel, unescape_sentinel_text,
+    Sentinel, escape_sentinel_text, has_sentinel_escape, unescape_sentinel_text,
 };
 use ir::{FailureClass, LogStream, Outcome, StepEvent, Value};
 use serde::de::DeserializeOwned;
@@ -265,11 +261,13 @@ pub(crate) fn resolved_tool_cache(
     // known here and falls through.
     let resolved = |text: &str| {
         let mut text = text.to_string();
-        if has_workspace_sentinel(&text) {
-            text = replace_workspace_sentinels(&text, &format!("{root}/{REPO_DIR}"));
-        }
-        if has_runner_temp_sentinel(&text) {
-            text = replace_runner_temp_sentinels(&text, &runner_temp_path(root));
+        for (kind, value) in [
+            (Sentinel::Workspace, format!("{root}/{REPO_DIR}")),
+            (Sentinel::RunnerTemp, runner_temp_path(root)),
+        ] {
+            if let Some(replaced) = kind.replace_in(&text, &value) {
+                text = replaced;
+            }
         }
         (!text.is_empty() && !text.contains('\u{E000}')).then_some(text)
     };
@@ -451,21 +449,22 @@ impl Session {
         };
         for value in process.env.values_mut() {
             if let ValueOrSecretRef::Literal(Value::String(text)) = value
-                && has_env_sentinel(text)
+                && Sentinel::Env.present_in(text)
             {
-                *text = replace_env_sentinels(text, |name| -> Result<String, Infallible> {
-                    Ok(runtime(name))
-                })
-                .expect("the runtime lookup is infallible");
+                *text = Sentinel::Env
+                    .resolve_in(text, |name| -> Result<String, Infallible> {
+                        Ok(runtime(name))
+                    })
+                    .expect("the runtime lookup is infallible");
             }
         }
-        if has_env_sentinel(&process.run) {
+        if Sentinel::Env.present_in(&process.run) {
             let env = &process.env;
-            process.run =
-                replace_env_sentinels(&process.run, |name| -> Result<String, Infallible> {
+            process.run = Sentinel::Env
+                .resolve_in(&process.run, |name| -> Result<String, Infallible> {
                     Ok(match ci_get(env, name) {
                         Some(ValueOrSecretRef::Literal(v)) => stringify(v),
-                        Some(ValueOrSecretRef::Secret { name }) => secret_sentinel(name),
+                        Some(ValueOrSecretRef::Secret { name }) => Sentinel::secret(name),
                         None => self
                             .env
                             .ambient_env(name)
@@ -818,12 +817,12 @@ pub(crate) fn resolve_sentinel_text(
     text: &str,
     secrets: &dyn SecretProvider,
 ) -> Result<Option<String>, StepFailure> {
-    let has_secret = has_secret_sentinel(text);
+    let has_secret = Sentinel::Secret.present_in(text);
     if !has_secret && !has_sentinel_escape(text) {
         return Ok(None);
     }
     let resolved = if has_secret {
-        replace_secret_sentinels(text, |name| {
+        Sentinel::Secret.resolve_in(text, |name| {
             secrets
                 .resolve(name)
                 .map(|secret| escape_sentinel_text(&secret.expose()))
@@ -849,23 +848,17 @@ fn resolve_workspace_sentinels(
     tool_cache: &str,
 ) -> ResolvedProcess {
     let resolved: Result<ResolvedProcess, Infallible> = process.try_map_texts(|text| {
-        let ws = has_workspace_sentinel(text);
-        let temp = has_runner_temp_sentinel(text);
-        let tool = has_runner_tool_cache_sentinel(text);
-        if !ws && !temp && !tool {
-            return Ok(None);
+        let mut out: Option<String> = None;
+        for (kind, value) in [
+            (Sentinel::Workspace, workspace),
+            (Sentinel::RunnerTemp, runner_temp),
+            (Sentinel::RunnerToolCache, tool_cache),
+        ] {
+            if let Some(replaced) = kind.replace_in(out.as_deref().unwrap_or(text), value) {
+                out = Some(replaced);
+            }
         }
-        let mut out = text.to_string();
-        if ws {
-            out = replace_workspace_sentinels(&out, workspace);
-        }
-        if temp {
-            out = replace_runner_temp_sentinels(&out, runner_temp);
-        }
-        if tool {
-            out = replace_runner_tool_cache_sentinels(&out, tool_cache);
-        }
-        Ok(Some(out))
+        Ok(out)
     });
     resolved.expect("the resolver is infallible")
 }
@@ -1072,8 +1065,6 @@ mod tests {
 
     #[test]
     fn the_tool_cache_resolution_orders_its_defaults() {
-        use frontend_gha::exprs::RUNNER_TEMP_SENTINEL;
-
         let store = Path::new("/store/toolcache");
         let none: BTreeMap<SmolStr, ValueOrSecretRef> = BTreeMap::new();
         let no_job: BTreeMap<String, String> = BTreeMap::new();
@@ -1100,7 +1091,10 @@ mod tests {
         assert_eq!(cache(&none, &job, Some("/opt/tc"), None), "/job/tc");
         let config: BTreeMap<SmolStr, ValueOrSecretRef> = [(
             SmolStr::new("RUNNER_TOOL_CACHE"),
-            ValueOrSecretRef::Literal(Value::String(format!("{RUNNER_TEMP_SENTINEL}/tc"))),
+            ValueOrSecretRef::Literal(Value::String(format!(
+                "{}/tc",
+                Sentinel::RUNNER_TEMP_MARKER
+            ))),
         )]
         .into();
         assert_eq!(
@@ -1111,15 +1105,13 @@ mod tests {
 
     #[test]
     fn literal_markers_do_not_resolve_and_secret_values_round_trip() {
-        use frontend_gha::exprs::{escape_sentinel_text, secret_sentinel};
-
         let literal = "\u{E000}petri-secret:NOT_A_SECRET\u{E001}";
         let secret_value = "value-\u{E002}-\u{E000}-\u{E001}";
         let process = ResolvedProcess {
             run:                format!(
                 "{} {}",
                 escape_sentinel_text(literal),
-                secret_sentinel("REAL")
+                Sentinel::secret("REAL")
             ),
             shell:              Shell::Sh,
             env:                BTreeMap::new(),

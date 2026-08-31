@@ -5,7 +5,7 @@
 mod support;
 
 use frontend::Severity;
-use frontend_gha::exprs::{self, RUNNER_TEMP_SENTINEL, RUNNER_TOOL_CACHE_SENTINEL};
+use frontend_gha::exprs::Sentinel;
 use serde_json::json;
 use support::*;
 
@@ -1036,7 +1036,7 @@ jobs:
     let cmp = hashy["args"].as_array().unwrap().last().unwrap();
     assert_eq!(cmp["op"], json!("!="));
     let sentinel = cmp["args"][0]["lit"].as_str().unwrap();
-    assert!(exprs::has_hashfiles_sentinel(sentinel), "{sentinel:?}");
+    assert!(Sentinel::HashFiles.present_in(sentinel), "{sentinel:?}");
     // The steps' `cancelled` bit is the engine's scope_cancelled static.
     let bare = graph.nodes.iter().find(|n| n.name == "j/bare").unwrap();
     assert!(bare.step.config["cancelled"].get("$expr").is_some());
@@ -1147,7 +1147,7 @@ jobs:
     let graph = lower_ok(text);
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(
-        encoded.contains(RUNNER_TEMP_SENTINEL),
+        encoded.contains(Sentinel::RUNNER_TEMP_MARKER),
         "step config carries the sentinel: {encoded}"
     );
     let diags = diagnostics(text);
@@ -1160,7 +1160,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
-        !encoded.contains(RUNNER_TEMP_SENTINEL),
+        !encoded.contains(Sentinel::RUNNER_TEMP_MARKER),
         "a job-level env stays a parameter read: {encoded}"
     );
 }
@@ -1185,7 +1185,7 @@ jobs:
     let graph = lower_ok(text);
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(
-        encoded.contains(RUNNER_TOOL_CACHE_SENTINEL),
+        encoded.contains(Sentinel::RUNNER_TOOL_CACHE_MARKER),
         "step config carries the sentinel: {encoded}"
     );
     let diags = diagnostics(text);
@@ -1196,7 +1196,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
-        !encoded.contains(RUNNER_TOOL_CACHE_SENTINEL),
+        !encoded.contains(Sentinel::RUNNER_TOOL_CACHE_MARKER),
         "a job-level env stays a parameter read: {encoded}"
     );
 }
@@ -1223,7 +1223,7 @@ jobs:
     let graph = lower_ok(text);
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(
-        encoded.contains(&exprs::env_sentinel("PROBE")),
+        encoded.contains(&Sentinel::env("PROBE")),
         "step config carries the sentinel: {encoded}"
     );
     let diags = diagnostics(text);
@@ -1236,7 +1236,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&complex).unwrap();
     assert!(
-        !encoded.contains(&exprs::env_sentinel("PROBE")),
+        !encoded.contains(&Sentinel::env("PROBE")),
         "an env reference under a function stays engine-side: {encoded}"
     );
 
@@ -1246,7 +1246,7 @@ jobs:
     );
     let encoded = serde_json::to_string(&scope_only).unwrap();
     assert!(
-        !encoded.contains(&exprs::env_sentinel("PROBE")),
+        !encoded.contains(&Sentinel::env("PROBE")),
         "a job-level env stays an engine read: {encoded}"
     );
 }

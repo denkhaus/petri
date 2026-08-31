@@ -44,10 +44,7 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{ExprTable, Value};
 use serde_json::json;
 
-use crate::exprs::{
-    ExprSite, RUNNER_TEMP_SENTINEL, RUNNER_TOOL_CACHE_SENTINEL, Site, WORKSPACE_SENTINEL,
-    hashfiles_sentinel, literal_hashfiles_patterns, lower_expr,
-};
+use crate::exprs::{ExprSite, Sentinel, Site, literal_hashfiles_patterns, lower_expr};
 
 /// Config key for an interior node's operator.
 pub(crate) const OP_KEY: &str = "op";
@@ -426,18 +423,22 @@ pub(crate) fn condition_tree(
         // A string leaf the step rewrites to its own workspace path before
         // evaluation; comparisons decompose around it (`needs_lazy`), so the
         // engine never evaluates over the marker.
-        return Some(Gate::Lit(Value::String(WORKSPACE_SENTINEL.to_string())));
+        return Some(Gate::Lit(Value::String(
+            Sentinel::WORKSPACE_MARKER.to_string(),
+        )));
     }
     if is_runner_temp_leaf(ast) {
         // The same shape for `runner.temp`: the step rewrites the marker to
         // its own `RUNNER_TEMP` before evaluation.
-        return Some(Gate::Lit(Value::String(RUNNER_TEMP_SENTINEL.to_string())));
+        return Some(Gate::Lit(Value::String(
+            Sentinel::RUNNER_TEMP_MARKER.to_string(),
+        )));
     }
     if is_runner_tool_cache_leaf(ast) {
         // And for `runner.tool_cache`: the step rewrites the marker to the
         // tool cache it resolved for its environment before evaluation.
         return Some(Gate::Lit(Value::String(
-            RUNNER_TOOL_CACHE_SENTINEL.to_string(),
+            Sentinel::RUNNER_TOOL_CACHE_MARKER.to_string(),
         )));
     }
     match ast {
@@ -459,7 +460,7 @@ pub(crate) fn condition_tree(
         }
         Expr::Call(name, args) if name.eq_ignore_ascii_case("hashfiles") => {
             let patterns = literal_hashfiles_patterns(args, span, diags)?;
-            Some(Gate::Lit(Value::String(hashfiles_sentinel(&patterns))))
+            Some(Gate::Lit(Value::String(Sentinel::hashfiles(&patterns))))
         }
         // Something lazy sits under a non-operator (`contains(env.X, 'y')`,
         // `format('{0}', hashFiles(...))`). The engine-leaf path decides: `env`
@@ -492,58 +493,18 @@ fn engine_leaf(
     diags: &mut Diagnostics,
 ) -> Option<Gate> {
     let lowered = lower_expr(ast, site, ExprSite::Step, span, table, diags)?;
-    if lowered.saw_secret {
+    for kind in Sentinel::ALL {
+        let Some(diagnostic) = kind.gate_diagnostic() else {
+            continue;
+        };
+        if !lowered.saw.contains(kind) {
+            continue;
+        }
         diags.unsupported(
-            "secrets.expression",
+            diagnostic.code,
             span.clone(),
-            "a `secrets.*` or `github.token` reference in a condition",
-            "secrets are absent from the expression environment by construction, so they never reach the \
-             event log; pass the secret through an environment variable and test it in the step \
-             (`env.NAME`), but a condition cannot read the secret itself",
-        );
-        return None;
-    }
-    if lowered.saw_hashfiles {
-        diags.unsupported(
-            "expression.hashFiles",
-            span.clone(),
-            "a `hashFiles()` call under a function the engine evaluates",
-            "in a condition, `hashFiles(...)` may stand alone or under the comparison and boolean \
-             operators, where the step resolves it; under other functions the engine would \
-             evaluate over the unresolved sentinel",
-        );
-        return None;
-    }
-    if lowered.saw_workspace {
-        diags.unsupported(
-            "expression.workspace",
-            span.clone(),
-            "`github.workspace` under a function the engine evaluates",
-            "the workspace path is known only to the step's environment; in a condition, \
-             `github.workspace` may stand alone or under the comparison and boolean operators, \
-             where the step resolves it — or read `GITHUB_WORKSPACE` in the step itself",
-        );
-        return None;
-    }
-    if lowered.saw_runner_temp {
-        diags.unsupported(
-            "expression.runner_temp",
-            span.clone(),
-            "`runner.temp` under a function the engine evaluates",
-            "the temp path is known only to the step's environment; in a condition, \
-             `runner.temp` may stand alone or under the comparison and boolean operators, \
-             where the step resolves it — or read `RUNNER_TEMP` in the step itself",
-        );
-        return None;
-    }
-    if lowered.saw_runner_tool_cache {
-        diags.unsupported(
-            "expression.runner_tool_cache",
-            span.clone(),
-            "`runner.tool_cache` under a function the engine evaluates",
-            "the tool cache path is known only to the step's environment; in a condition, \
-             `runner.tool_cache` may stand alone or under the comparison and boolean operators, \
-             where the step resolves it — or read `RUNNER_TOOL_CACHE` in the step itself",
+            diagnostic.subject,
+            diagnostic.hint,
         );
         return None;
     }

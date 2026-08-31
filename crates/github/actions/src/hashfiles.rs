@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 
 use executor::{ExecEnv, ProcessSpec};
-use frontend_gha::exprs::{has_hashfiles_sentinel, hashfiles_calls, replace_hashfiles_sentinels};
+use frontend_gha::exprs::Sentinel;
 use ir::FailureClass;
 use smol_str::SmolStr;
 use steps::StepFailure;
@@ -108,7 +108,7 @@ pub(crate) async fn resolve_hashfiles(
     }
     let process = process
         .try_map_texts(|text| {
-            if has_hashfiles_sentinel(text) {
+            if Sentinel::HashFiles.present_in(text) {
                 Ok::<_, Infallible>(Some(splice(text, &calls)))
             } else {
                 Ok(None)
@@ -128,7 +128,7 @@ pub(crate) async fn resolved_calls<'a>(
 ) -> Result<BTreeMap<Vec<String>, String>, StepFailure> {
     let mut calls: BTreeMap<Vec<String>, String> = BTreeMap::new();
     for text in texts {
-        for patterns in hashfiles_calls(text) {
+        for patterns in Sentinel::hashfiles_calls(text) {
             calls.entry(patterns).or_default();
         }
     }
@@ -146,7 +146,7 @@ pub(crate) async fn resolved_calls<'a>(
 /// One text with its sentinels replaced by the resolved hashes; a call the map
 /// does not hold reads as the empty string, GitHub's "nothing matched".
 pub(crate) fn splice(text: &str, calls: &BTreeMap<Vec<String>, String>) -> String {
-    replace_hashfiles_sentinels(text, |patterns| -> Result<String, Infallible> {
+    Sentinel::resolve_hashfiles(text, |patterns| -> Result<String, Infallible> {
         Ok(calls.get(patterns).cloned().unwrap_or_default())
     })
     .expect("the resolver is infallible")

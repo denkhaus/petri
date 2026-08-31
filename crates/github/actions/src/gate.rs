@@ -21,12 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use frontend_gha::exprs::{
-    has_env_sentinel, has_hashfiles_sentinel, has_runner_temp_sentinel,
-    has_runner_tool_cache_sentinel, has_workspace_sentinel, replace_env_sentinels,
-    replace_runner_temp_sentinels, replace_runner_tool_cache_sentinels,
-    replace_workspace_sentinels,
-};
+use frontend_gha::exprs::Sentinel;
 use frontend_gha::gate::{Gate, GateOp, eval};
 use ir::expr::builtins::loose;
 use ir::{FailureClass, Outcome, Value};
@@ -88,8 +83,14 @@ async fn admitted(
     // The job env file is control input the gate may not even need — but a
     // `runner.tool_cache` leaf does, resolution's second rung being a mid-job
     // `GITHUB_ENV` export, and so does an env sentinel in a string literal.
-    let wants_tool_cache = gate.texts().into_iter().any(has_runner_tool_cache_sentinel);
-    let wants_env = gate.texts().into_iter().any(has_env_sentinel);
+    let wants_tool_cache = gate
+        .texts()
+        .into_iter()
+        .any(|text| Sentinel::RunnerToolCache.present_in(text));
+    let wants_env = gate
+        .texts()
+        .into_iter()
+        .any(|text| Sentinel::Env.present_in(text));
     let job_env = if gate.reads_env() || wants_tool_cache || wants_env {
         read_job_env(&*ctx.env).await?
     } else {
@@ -103,10 +104,7 @@ async fn admitted(
             env_config,
             &job_env,
         );
-        gate.map_texts(&mut |text| {
-            has_runner_tool_cache_sentinel(text)
-                .then(|| replace_runner_tool_cache_sentinels(text, &tool_cache))
-        });
+        gate.map_texts(&mut |text| Sentinel::RunnerToolCache.replace_in(text, &tool_cache));
     }
 
     // An env sentinel in a gate literal — a caller's `with:` value woven into
@@ -115,10 +113,10 @@ async fn admitted(
     if wants_env {
         let mut failed = None;
         gate.map_texts(&mut |text| {
-            if !has_env_sentinel(text) || failed.is_some() {
+            if !Sentinel::Env.present_in(text) || failed.is_some() {
                 return None;
             }
-            match replace_env_sentinels(text, |name| {
+            match Sentinel::Env.resolve_in(text, |name| {
                 env_value(name, env_config, &job_env, ctx).map(|value| match value {
                     Some(Value::String(s)) => s,
                     Some(other) => stringify(&other),
@@ -195,19 +193,17 @@ async fn resolve_hashfiles(gate: &mut Gate, ctx: &StepCtx) -> Result<(), StepFai
     let workspace = github_workspace_path(&*ctx.env);
     // `github.workspace` and `runner.temp` first: literals this environment
     // can answer outright.
-    gate.map_texts(&mut |text| {
-        has_workspace_sentinel(text).then(|| replace_workspace_sentinels(text, &workspace))
-    });
+    gate.map_texts(&mut |text| Sentinel::Workspace.replace_in(text, &workspace));
     let runner_temp = runner_temp_path(ctx.env.workspace_path());
-    gate.map_texts(&mut |text| {
-        has_runner_temp_sentinel(text).then(|| replace_runner_temp_sentinels(text, &runner_temp))
-    });
+    gate.map_texts(&mut |text| Sentinel::RunnerTemp.replace_in(text, &runner_temp));
     let calls = hashfiles::resolved_calls(gate.texts().into_iter(), &*ctx.env, &workspace).await?;
     if calls.is_empty() {
         return Ok(());
     }
     gate.map_texts(&mut |text| {
-        has_hashfiles_sentinel(text).then(|| hashfiles::splice(text, &calls))
+        Sentinel::HashFiles
+            .present_in(text)
+            .then(|| hashfiles::splice(text, &calls))
     });
     Ok(())
 }
