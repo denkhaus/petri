@@ -20,7 +20,7 @@ use crate::{PullPolicy, prepare_image, run_docker, sweep_containers};
 
 /// The backstop for a health check that never leaves `starting`: Docker's own
 /// retry budget bounds the common case, this bounds a misconfigured one.
-pub const SERVICE_HEALTH_WAIT: Duration = Duration::from_secs(300);
+pub(crate) const SERVICE_HEALTH_WAIT: Duration = Duration::from_secs(300);
 
 const HEALTH_POLL: Duration = Duration::from_millis(250);
 

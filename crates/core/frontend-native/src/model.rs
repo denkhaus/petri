@@ -3,7 +3,7 @@
 /// The engine bindings an expression may name. Anything else is a diagnostic,
 /// with this list in the hint, because a typo that evaluates to `null` is
 /// exactly the silent failure the format exists to prevent.
-pub const KNOWN_BINDINGS: &[&str] = &[
+pub(crate) const KNOWN_BINDINGS: &[&str] = &[
     "token",
     "input",
     "inputs",

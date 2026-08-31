@@ -3,12 +3,16 @@
 //! The frontend writes these as JSON with `$expr` placeholders; by the time a
 //! step deserializes one they are resolved, and the only non-literal left is a
 //! `{"$secret": NAME}` reference in an env-shaped position.
+//!
+//! The module is private, but the config types stay `pub`: each is the
+//! `Config` associated type of a public [`steps::Step`] impl, so `pub(crate)`
+//! would leak a crate-private type through that public interface.
 
 use std::collections::BTreeMap;
 use std::iter;
 use std::path::PathBuf;
 
-pub use frontend_gha::action::ActionLocation;
+pub(crate) use frontend_gha::action::ActionLocation;
 use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path};
 use ir::Value;
 use serde::{Deserialize, Deserializer, de};

@@ -33,16 +33,9 @@ pub struct LoopExprs {
     pub result: ExprId,
 }
 
-/// Build the loop-state expressions once; reuse the ids across the loop's
-/// edges. The items are the source node's whole `output`.
-pub fn loop_exprs(t: &mut ExprTable) -> LoopExprs {
-    let output = t.var("output");
-    loop_exprs_over(t, output)
-}
-
 /// Build the loop-state expressions with `items` as the array to iterate,
 /// evaluated in the source node's outcome context.
-pub fn loop_exprs_over(t: &mut ExprTable, items_expr: ExprId) -> LoopExprs {
+pub(crate) fn loop_exprs_over(t: &mut ExprTable, items_expr: ExprId) -> LoopExprs {
     let output = t.var("output");
     let zero = t.lit(0);
     let empty = t.array(vec![]);

@@ -8,14 +8,13 @@
 //! lowering onto the loose builtins in its own crate. No lowering evaluates
 //! anything. Evaluation happens once, in the engine.
 
-pub mod ast;
-pub mod lexer;
+mod ast;
+mod lexer;
 pub mod lower;
-pub mod parser;
-pub mod print;
+mod parser;
+mod print;
 
 pub use ast::{BinaryOp, Expr, Literal, UnaryOp};
-pub use lexer::{Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use print::print;
 
@@ -57,9 +56,4 @@ pub fn split_template(text: &str) -> Result<Vec<Segment>, usize> {
         segments.push(Segment::Text(rest.to_string()));
     }
     Ok(segments)
-}
-
-/// Whether a scalar contains any `${{`.
-pub fn has_template(text: &str) -> bool {
-    text.contains("${{")
 }

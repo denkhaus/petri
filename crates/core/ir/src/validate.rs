@@ -355,7 +355,10 @@ pub fn check<S>(graph: &Graph<S>) -> ValidationReport<S> {
 
 /// Validate a graph against a step registry and return both errors and
 /// warnings.
-pub fn check_with<S>(graph: &Graph<S>, registry: Option<&dyn StepKinds>) -> ValidationReport<S> {
+pub(crate) fn check_with<S>(
+    graph: &Graph<S>,
+    registry: Option<&dyn StepKinds>,
+) -> ValidationReport<S> {
     let mut warnings = Vec::new();
     check_scope_reentry(&graph.body, &mut warnings);
     check_run_on_cancel(&graph.body, &mut warnings);

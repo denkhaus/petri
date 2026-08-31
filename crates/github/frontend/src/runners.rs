@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 /// What a label's own text says about it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LabelClass {
+pub(crate) enum LabelClass {
     /// Names an Ubuntu or Linux environment: the local executor places it.
     Linux,
     /// Names a Windows runner.
@@ -36,7 +36,7 @@ pub enum LabelClass {
 /// `codspeed-macro` does not read as a Mac and `depot-ubuntu-24.04-16` reads
 /// as the Ubuntu pool it is. Windows and macOS win over a stray Linux token:
 /// a contradiction is rejected, not mapped.
-pub fn classify(label: &str) -> LabelClass {
+pub(crate) fn classify(label: &str) -> LabelClass {
     let mut class = LabelClass::Opaque;
     for token in label.to_lowercase().split(['-', '_', '.']) {
         match token {

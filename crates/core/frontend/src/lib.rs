@@ -9,8 +9,8 @@
 
 pub mod diag;
 pub mod expr;
-pub mod files;
-pub mod format;
+mod files;
+mod format;
 pub mod print;
 pub mod yaml;
 

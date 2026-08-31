@@ -351,7 +351,7 @@ pub fn validate_fragment(fragment: &GraphFragment) -> Result<(), Vec<FragmentVal
 
 /// [`validate_fragment`], resolving every step kind against `registry` — the
 /// host half of the two-stage contract, runnable before any run exists.
-pub fn validate_fragment_with(
+pub(crate) fn validate_fragment_with(
     fragment: &GraphFragment,
     registry: Option<&dyn StepKinds>,
 ) -> Result<(), Vec<FragmentValidationError>> {
@@ -413,7 +413,7 @@ pub fn validate_request(request: &SpliceRequest) -> Result<(), Vec<FragmentValid
 
 /// [`validate_request`] with a step registry, mirroring
 /// [`validate_fragment_with`].
-pub fn validate_request_with(
+pub(crate) fn validate_request_with(
     request: &SpliceRequest,
     registry: Option<&dyn StepKinds>,
 ) -> Result<(), Vec<FragmentValidationError>> {

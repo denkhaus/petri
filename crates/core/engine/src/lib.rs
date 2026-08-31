@@ -15,13 +15,13 @@
 //! # let _ = (state, commands);
 //! ```
 
-pub mod apply;
-pub mod context;
-pub mod event;
-pub mod log;
-pub mod replay;
+mod apply;
+mod context;
+mod event;
+mod log;
+mod replay;
 mod splice;
-pub mod state;
+mod state;
 
 pub use apply::{FIRING_ENV_CLASS, apply};
 pub use event::{

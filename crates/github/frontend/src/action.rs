@@ -46,7 +46,7 @@ pub const STATE_OUTPUT_KEY: &str = "github.state";
 /// Which of an action's entry points a `github/action` node runs. Defined here
 /// so the lowering and the step agree on one wire value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Phase {
+pub(crate) enum Phase {
     Pre,
     Main,
     Post,

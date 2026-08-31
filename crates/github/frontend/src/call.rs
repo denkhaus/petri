@@ -25,43 +25,43 @@ use crate::model::{self, Workflow};
 
 /// GitHub's nesting limit: a top-level workflow and up to three levels of
 /// reusable workflows below it.
-pub const MAX_DEPTH: usize = 3;
+pub(crate) const MAX_DEPTH: usize = 3;
 
 /// Where one workflow's text came from — and so, where its own `./` calls
 /// resolve against.
 #[derive(Clone)]
-pub enum CalleeSource {
+pub(crate) enum CalleeSource {
     /// The root file itself.
     Root,
     /// A repository-relative path in the root's repository.
-    Local { path: String },
+    Local,
     /// A file of another repository at a pinned commit.
     Remote { pinned: PinnedAction },
 }
 
 /// One resolved callee: where it came from and its parsed document.
-pub struct Callee {
+pub(crate) struct Callee {
     pub source: CalleeSource,
     pub doc:    Document,
 }
 
 /// Every called workflow the root reaches, by identity.
 #[derive(Default)]
-pub struct CallGraph {
+pub(crate) struct CallGraph {
     resolved: BTreeMap<String, Callee>,
 }
 
 impl CallGraph {
     /// The callee a `uses:` names, resolved relative to the calling workflow's
     /// own source. `None` when resolution failed (already a diagnostic).
-    pub fn callee(&self, caller: &CalleeSource, uses: &str) -> Option<(String, &Callee)> {
+    pub(crate) fn callee(&self, caller: &CalleeSource, uses: &str) -> Option<(String, &Callee)> {
         let identity = target_of(caller, uses).ok()?.identity();
         self.resolved.get(&identity).map(|c| (identity, c))
     }
 
     /// The callee models, re-read from the owned documents with throwaway
     /// diagnostics — resolution already reported every reader finding.
-    pub fn models(&self) -> BTreeMap<String, (CalleeSource, Workflow<'_>)> {
+    pub(crate) fn models(&self) -> BTreeMap<String, (CalleeSource, Workflow<'_>)> {
         let mut out = BTreeMap::new();
         for (identity, callee) in &self.resolved {
             let mut scratch = Diagnostics::new();
@@ -101,7 +101,7 @@ impl CallTarget {
 fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
     if let Some(rest) = same_repo(uses) {
         return Ok(match caller {
-            CalleeSource::Root | CalleeSource::Local { .. } => CallTarget::Local {
+            CalleeSource::Root | CalleeSource::Local => CallTarget::Local {
                 path: rest.to_string(),
             },
             // A remote callee's `./` call names a file of its own repository,
@@ -136,7 +136,7 @@ fn target_of(caller: &CalleeSource, uses: &str) -> Result<CallTarget, String> {
 /// file, a cycle, a nest past [`MAX_DEPTH`], a callee that is not reusable —
 /// are diagnostics; resolution continues past them so one pass reports
 /// everything it can.
-pub fn resolve(
+pub(crate) fn resolve(
     root: &Workflow<'_>,
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,
@@ -261,7 +261,7 @@ fn fetch(
     match target {
         CallTarget::Local { path } => {
             if let Some(text) = files.read(path) {
-                Some((CalleeSource::Local { path: path.clone() }, text))
+                Some((CalleeSource::Local, text))
             } else {
                 diags.error(
                     "gha.bad_call",

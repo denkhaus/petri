@@ -12,21 +12,21 @@
 //! This crate is data and pure functions only. Coordination lives in the
 //! `engine` crate; side effects live behind traits in the host.
 
-pub mod builder;
-pub mod desugar;
+mod builder;
+mod desugar;
 pub mod expr;
-pub mod flow;
-pub mod graph;
-pub mod ids;
+mod flow;
+mod graph;
+mod ids;
 pub mod placeholder;
-pub mod splice;
-pub mod step;
+mod splice;
+mod step;
 pub mod validate;
 
 pub use builder::{Arm, GraphBuilder};
 pub use desugar::{
-    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, loop_exprs, loop_exprs_over,
-    normalize_loop_heads, parallel_for_each, sequential_for_each, sequential_for_each_over,
+    CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, normalize_loop_heads,
+    parallel_for_each, sequential_for_each, sequential_for_each_over,
 };
 pub use expr::{
     BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, is_truthy,
@@ -47,13 +47,12 @@ pub use ids::{
 };
 pub use splice::{
     Attachment, ExistingNodeRef, FragmentErrorKind, FragmentValidationError, GraphFragment,
-    ReplaceScope, SpliceMode, SplicePolicy, SpliceRequest, validate_fragment,
-    validate_fragment_with, validate_request, validate_request_with,
+    ReplaceScope, SpliceMode, SplicePolicy, SpliceRequest, validate_fragment, validate_request,
 };
 pub use step::{Digest, StepKind, StepKinds};
 pub use validate::{
-    ValidationError, ValidationLocation, ValidationReport, ValidationWarning, check, check_with,
-    validate, validate_plan, validate_with,
+    ValidationError, ValidationLocation, ValidationReport, ValidationWarning, check, validate,
+    validate_plan, validate_with,
 };
 
 /// The value type carried by tokens, outcomes and step configuration.

@@ -16,22 +16,22 @@
 
 mod action;
 mod checkout;
-pub mod commands;
-pub mod config;
+mod commands;
+mod config;
 mod docker;
-pub mod gate;
-pub mod hashfiles;
+mod gate;
+mod hashfiles;
 mod results;
 mod run;
-pub mod session;
-pub mod source;
+mod session;
+mod source;
 
 pub use action::{ActionSourceCap, ActionStep, ActionTreeSource};
 pub use checkout::CheckoutStep;
 pub use docker::DockerActionStep;
-pub use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
+pub use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 pub use frontend_gha::{
-    ACTION_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionSource, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
 };
 pub use results::{ResultsServiceCap, ToolCacheCap};
 pub use run::RunStep;

@@ -39,7 +39,7 @@ use crate::session::{
 };
 
 /// The step's gate could not be read or evaluated.
-pub const GATE_CLASS: &str = "gate";
+const GATE_CLASS: &str = "gate";
 
 /// Evaluate a step's gate and decide what a refused step records instead of
 /// running: `None` means run; a false gate is `Cancelled` when the scope was

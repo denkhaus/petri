@@ -8,8 +8,7 @@
 mod support;
 
 use frontend::print;
-use ir::expr::{EvalEnv, StaticCtx, eval};
-use ir::flow::{NodeRecord, RunContext, Status};
+use ir::{EvalEnv, NodeRecord, RunContext, StaticCtx, Status, eval};
 use serde_json::{Value, json};
 use smol_str::SmolStr;
 use support::*;

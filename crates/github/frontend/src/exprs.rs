@@ -20,11 +20,11 @@ use crate::expr_lower::gha;
 
 /// The node-name separator between a job and its steps, and between a composite
 /// caller and its inner steps. Node names are `job/step`, `job/caller/inner`.
-pub const SEP: char = '/';
+pub(crate) const SEP: char = '/';
 
 /// A GitHub status tag as the engine records it, mapped to how GitHub reports
 /// it. The engine has `partial_success` and `timed_out`; GitHub has neither.
-pub fn outcome_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
+pub(crate) fn outcome_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
     // outcome: the result before continue-on-error — partial_success reads as
     // failure.
     remap_status(table, status, &[
@@ -33,7 +33,7 @@ pub fn outcome_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
     ])
 }
 
-pub fn conclusion_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
+pub(crate) fn conclusion_tag(table: &mut ExprTable, status: ExprId) -> ExprId {
     // conclusion: after continue-on-error — partial_success reads as success.
     remap_status(table, status, &[
         ("partial_success", "success"),
@@ -60,7 +60,7 @@ fn remap_status(table: &mut ExprTable, status: ExprId, pairs: &[(&str, &str)]) -
 /// `secrets:` block, where a declared-but-not-provided optional secret reads as
 /// the empty string (as on GitHub) and an undeclared name is a diagnostic.
 #[derive(Clone, Default)]
-pub enum SecretMap {
+pub(crate) enum SecretMap {
     /// Names pass through unchanged.
     #[default]
     Inherit,
@@ -70,7 +70,7 @@ pub enum SecretMap {
 }
 
 /// The name is not one this workflow call granted.
-pub struct UndeclaredSecret;
+pub(crate) struct UndeclaredSecret;
 
 impl SecretMap {
     /// The provider name for a callee's `secrets.NAME`: `Ok(Some)` to
@@ -78,7 +78,7 @@ impl SecretMap {
     /// is empty), and `Err` for a name this call never granted.
     /// `GITHUB_TOKEN` is the runner's token, not a caller-granted secret:
     /// it crosses every call boundary unmapped, as on GitHub.
-    pub fn resolve(&self, name: &str) -> Result<Option<String>, UndeclaredSecret> {
+    pub(crate) fn resolve(&self, name: &str) -> Result<Option<String>, UndeclaredSecret> {
         if name.eq_ignore_ascii_case(GITHUB_TOKEN_SECRET) {
             return Ok(Some(GITHUB_TOKEN_SECRET.to_string()));
         }
@@ -94,7 +94,7 @@ impl SecretMap {
 
 /// Where an expression sits.
 #[derive(Clone)]
-pub struct Site {
+pub(crate) struct Site {
     pub job_id:            String,
     /// `job/step` names of the steps before this one in the job, in order.
     pub earlier_steps:     Vec<String>,
@@ -135,7 +135,7 @@ pub struct Site {
 }
 
 impl Site {
-    pub fn new(job_id: &str) -> Self {
+    pub(crate) fn new(job_id: &str) -> Self {
         Self {
             job_id:            job_id.to_string(),
             earlier_steps:     Vec::new(),
@@ -158,7 +158,7 @@ impl Site {
 
     /// The run-context record for a node of this job, as an expression: static
     /// for a plain job, `nodes[name + '#' + index]` inside a matrix clone.
-    pub fn node_record(&self, table: &mut ExprTable, name: &str) -> ExprId {
+    pub(crate) fn node_record(&self, table: &mut ExprTable, name: &str) -> ExprId {
         let nodes = table.var("nodes");
         if self.matrix || self.in_expansion {
             let prefix = table.lit(format!("{name}#"));
@@ -170,13 +170,13 @@ impl Site {
         }
     }
 
-    pub fn node_status(&self, table: &mut ExprTable, name: &str) -> ExprId {
+    pub(crate) fn node_status(&self, table: &mut ExprTable, name: &str) -> ExprId {
         let record = self.node_record(table, name);
         table.field(record, "status")
     }
 
     /// `nodes[...].status == 'tag'`.
-    pub fn node_has_status(&self, table: &mut ExprTable, name: &str, tag: &str) -> ExprId {
+    pub(crate) fn node_has_status(&self, table: &mut ExprTable, name: &str, tag: &str) -> ExprId {
         let status = self.node_status(table, name);
         let lit = table.lit(tag);
         table.binary(BinOp::Eq, status, lit)
@@ -191,7 +191,7 @@ impl Site {
     }
 
     /// `true` when some earlier step in this job ended in a real failure.
-    pub fn earlier_step_failed(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn earlier_step_failed(&self, table: &mut ExprTable) -> ExprId {
         let terms: Vec<ExprId> = self
             .earlier_steps
             .iter()
@@ -205,7 +205,7 @@ impl Site {
         Self::any_of(table, terms)
     }
 
-    pub fn earlier_step_cancelled(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn earlier_step_cancelled(&self, table: &mut ExprTable) -> ExprId {
         let terms: Vec<ExprId> = self
             .earlier_steps
             .iter()
@@ -217,13 +217,13 @@ impl Site {
     /// The job really started: its `start` node ran. A start skipped by the
     /// job's gate — or recorded `Cancelled` because the cancel landed before
     /// the job began — reads as not started, so the job's steps do not run.
-    pub fn job_started(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn job_started(&self, table: &mut ExprTable) -> ExprId {
         self.node_has_status(table, &self.start_node, "success")
     }
 
     /// The job's `start` was cancelled before it could run, for the summary to
     /// report `cancelled` rather than `skipped`.
-    pub fn start_cancelled(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn start_cancelled(&self, table: &mut ExprTable) -> ExprId {
         self.node_has_status(table, &self.start_node, "cancelled")
     }
 
@@ -264,7 +264,7 @@ impl Site {
     /// its expansion region, so they read statically even when the job's own
     /// nodes take a `#index` suffix; inside an expanded call, sibling jobs are
     /// cloned together, so a needed done is suffixed like everything else.
-    pub fn need_record(&self, table: &mut ExprTable, done_node: &str) -> ExprId {
+    pub(crate) fn need_record(&self, table: &mut ExprTable, done_node: &str) -> ExprId {
         if self.in_expansion {
             self.node_record(table, done_node)
         } else {
@@ -274,7 +274,7 @@ impl Site {
     }
 
     /// A needed job's result: `nodes["N/done"].output.result`.
-    pub fn need_result(&self, table: &mut ExprTable, done_node: &str) -> ExprId {
+    pub(crate) fn need_result(&self, table: &mut ExprTable, done_node: &str) -> ExprId {
         let record = self.need_record(table, done_node);
         let output = table.field(record, "output");
         table.field(output, "result")
@@ -287,7 +287,7 @@ impl Site {
     }
 
     /// Job-level `success()`: every needed job succeeded.
-    pub fn needs_succeeded(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn needs_succeeded(&self, table: &mut ExprTable) -> ExprId {
         let mut acc = table.lit(true);
         for done in self.needs.values() {
             let ok = self.need_has_result(table, done, "success");
@@ -296,7 +296,7 @@ impl Site {
         acc
     }
 
-    pub fn needs_failed(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn needs_failed(&self, table: &mut ExprTable) -> ExprId {
         let terms: Vec<ExprId> = self
             .needs
             .values()
@@ -305,7 +305,7 @@ impl Site {
         Self::any_of(table, terms)
     }
 
-    pub fn needs_cancelled(&self, table: &mut ExprTable) -> ExprId {
+    pub(crate) fn needs_cancelled(&self, table: &mut ExprTable) -> ExprId {
         let terms: Vec<ExprId> = self
             .needs
             .values()
@@ -326,7 +326,12 @@ impl Site {
     /// admitted as cleanup after the cancel ([`Self::cancel_interrupt`]); a
     /// job's, always — which is how a plain step or job stops when the run
     /// is cancelled without any admission flag sniffing condition text.
-    pub fn status_function(&self, table: &mut ExprTable, name: &str, at_step: bool) -> ExprId {
+    pub(crate) fn status_function(
+        &self,
+        table: &mut ExprTable,
+        name: &str,
+        at_step: bool,
+    ) -> ExprId {
         match (name, at_step) {
             ("always", _) => table.lit(true),
             ("success", true) => {
@@ -360,7 +365,7 @@ impl Site {
 }
 
 /// How the lowering resolves GitHub's contexts.
-pub struct GhaRoots<'s> {
+pub(crate) struct GhaRoots<'s> {
     pub site:                  &'s Site,
     pub at_step:               bool,
     pub diags:                 &'s mut Diagnostics,
@@ -864,7 +869,7 @@ pub(crate) fn lower_expr(
 /// literal piece becomes text (`text_value`), how one expression source lowers
 /// (`lower_one`), and what a builtin failure maps to (`bad`) — the fold itself
 /// is written once, so template semantics cannot drift between positions.
-pub fn fold_template<E>(
+pub(crate) fn fold_template<E>(
     segments: &[Segment],
     table: &mut ExprTable,
     mut text_value: impl FnMut(&str) -> String,
@@ -897,7 +902,7 @@ pub fn fold_template<E>(
 /// What [`lower_scalar`] made of one workflow scalar. `Secret` appears only at
 /// `env_shaped` sites — a step's `run:`, `env:` or `with:`; anywhere else a
 /// whole-value secret is a diagnostic instead.
-pub enum LoweredScalar {
+pub(crate) enum LoweredScalar {
     /// A plain value, no expression in it.
     Literal(Value),
     /// An expression.
@@ -916,7 +921,7 @@ pub enum LoweredScalar {
 /// text. Anywhere else — an `if:`, a job output, a matrix — a secret is
 /// rejected: the engine would be evaluating over the sentinel and calling it
 /// the value.
-pub fn lower_scalar(
+pub(crate) fn lower_scalar(
     text: &str,
     span: Span,
     site: &Site,
@@ -1035,7 +1040,7 @@ pub fn lower_scalar(
 /// The secret `text` names when it is exactly one `${{ secrets.X }}` (or
 /// `${{ github.token }}`) reference and nothing else. For the positions that
 /// drop such a value with a warning — a job output — rather than rejecting it.
-pub fn whole_value_secret(text: &str) -> Option<String> {
+pub(crate) fn whole_value_secret(text: &str) -> Option<String> {
     match split_template(text).ok()?.as_slice() {
         [Segment::Expr { source, .. }] => secret_expr_name(source),
         _ => None,
@@ -1156,7 +1161,7 @@ pub fn has_secret_sentinel(text: &str) -> bool {
 /// `GITHUB_WORKSPACE` at spawn, the same shape as [`secret_sentinel`] and
 /// [`hashfiles_sentinel`]. User text cannot forge it: [`escape_sentinel_text`]
 /// escapes the private-use characters.
-pub const WORKSPACE_SENTINEL: &str = "\u{E000}petri-workspace\u{E001}";
+pub(crate) const WORKSPACE_SENTINEL: &str = "\u{E000}petri-workspace\u{E001}";
 
 pub fn has_workspace_sentinel(text: &str) -> bool {
     text.contains(WORKSPACE_SENTINEL)
@@ -1238,7 +1243,7 @@ pub fn replace_secret_sentinels<E>(
 /// [`secret_sentinel`]: the step kinds that run GitHub steps replace it with the
 /// hash at spawn ([`replace_hashfiles_sentinels`]), computed against the
 /// workspace.
-pub fn hashfiles_sentinel(patterns: &[String]) -> String {
+pub(crate) fn hashfiles_sentinel(patterns: &[String]) -> String {
     let payload = serde_json::to_string(patterns)
         .expect("strings encode")
         .replace(SENTINEL_CLOSE, "\\uE001");
@@ -1317,7 +1322,7 @@ fn replace_marked<E>(
 
 /// A config value from a lowered scalar: literal, `{"$expr": id}`, or
 /// `{"$secret": name}`.
-pub fn config_value(lowered: LoweredScalar) -> Value {
+pub(crate) fn config_value(lowered: LoweredScalar) -> Value {
     match lowered {
         LoweredScalar::Literal(v) => v,
         LoweredScalar::Expr(id) => json!({ EXPR_PLACEHOLDER_KEY: id.raw() }),

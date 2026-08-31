@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use frontend::{Diagnostic, DirFiles, Frontend as _, Severity};
-use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
-use frontend_gha::{GitHubActions, RunnerMap};
+use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
+use frontend_gha::{ActionSource, GitHubActions, RunnerMap};
 use smol_str::SmolStr;
 
 pub mod runs;

@@ -17,9 +17,7 @@ use frontend::diag::Span;
 use frontend::expr::lower::{LowerError, Roots};
 use frontend::expr::{parse, split_template};
 use frontend::yaml::Node;
-use ir::expr::{EvalEnv, StaticCtx, eval};
-use ir::flow::RunContext;
-use ir::{ExprId, ExprTable, Value};
+use ir::{EvalEnv, ExprId, ExprTable, RunContext, StaticCtx, Value, eval};
 
 use crate::{expr_lower, exprs};
 
@@ -29,7 +27,7 @@ use crate::{expr_lower, exprs};
 /// `inputs` and the checkout's `github` identity — so a matrix axis guarded on
 /// the repository is as static as a literal one. `None` when a value stays
 /// unknown before the run: the legs are then dynamic.
-pub fn static_legs(matrix: Node<'_>, inputs: &Value, github: &Value) -> Option<Vec<Value>> {
+pub(crate) fn static_legs(matrix: Node<'_>, inputs: &Value, github: &Value) -> Option<Vec<Value>> {
     let mut table = ExprTable::new();
     let value = static_value(matrix, &mut table, inputs, github)?;
     let m = table.lit(value);
@@ -96,7 +94,7 @@ fn carries_mark(value: &Value) -> bool {
 /// written, where it sits, and whether it was the whole scalar value — a whole
 /// value may evaluate to a list of labels, an element of a written list may
 /// not.
-pub struct RawLabel {
+pub(crate) struct RawLabel {
     pub text:  String,
     pub span:  Span,
     pub whole: bool,
@@ -104,7 +102,7 @@ pub struct RawLabel {
 
 impl RawLabel {
     /// The label at one node, when the node is a scalar.
-    pub fn from_node(node: Node<'_>, whole: bool) -> Option<Self> {
+    pub(crate) fn from_node(node: Node<'_>, whole: bool) -> Option<Self> {
         node.as_str().map(|s| Self {
             text: s.to_string(),
             span: node.span(),
@@ -115,7 +113,7 @@ impl RawLabel {
 
 /// Why a `runs-on` cannot resolve at lowering. Every case lands in one
 /// `runs_on.expression` rejection whose message carries the specifics.
-pub enum Failure {
+pub(crate) enum Failure {
     /// The expression reads a context that has no value before the run.
     RunTimeContext { name: String, span: Span },
     /// The expression reads an input whose value the call site computes at run
@@ -130,12 +128,12 @@ pub enum Failure {
 /// The marker a dynamic input's placeholder value carries, so a resolved label
 /// that absorbed one is caught — and named — rather than placed. Never a
 /// character a real label contains.
-pub const DYNAMIC_MARK: char = '\u{1}';
+pub(crate) const DYNAMIC_MARK: char = '\u{1}';
 
 /// A run-time input's placeholder value: the mark, then the input's name.
 /// [`dynamic_input`] is the decoder; the pair lives together so the format has
 /// one home.
-pub fn dynamic_placeholder(name: &str) -> String {
+pub(crate) fn dynamic_placeholder(name: &str) -> String {
     format!("{DYNAMIC_MARK}{name}")
 }
 
@@ -169,7 +167,7 @@ fn eval_static(
 
 /// A compiled `runs-on`: each label position lowered once, evaluated once per
 /// leg. The table is private — nothing of this resolution enters the graph.
-pub struct Compiled {
+pub(crate) struct Compiled {
     table:   ExprTable,
     entries: Vec<Entry>,
 }
@@ -208,7 +206,7 @@ impl Roots for ScopeContexts {
 /// image, a registry username). `matrix` is deliberately out of reach, and a
 /// run-time input's placeholder fails as [`Failure::DynamicInput`] rather than
 /// leaking into the value.
-pub fn static_scalar(
+pub(crate) fn static_scalar(
     text: &str,
     span: &Span,
     inputs: &Value,
@@ -234,7 +232,7 @@ pub fn static_scalar(
 
 /// Lower every label position. Fails on the first expression that reads past
 /// `matrix` — that verdict is per job, not per leg.
-pub fn compile(raw: &[RawLabel]) -> Result<Compiled, Failure> {
+pub(crate) fn compile(raw: &[RawLabel]) -> Result<Compiled, Failure> {
     let mut table = ExprTable::new();
     let mut entries = Vec::with_capacity(raw.len());
     for label in raw {
@@ -295,7 +293,7 @@ impl Compiled {
     /// [`DYNAMIC_MARK`] placeholders standing in for run-time ones — a label
     /// that absorbed a placeholder names its input instead of placing — and
     /// `github` is the checkout's declared identity.
-    pub fn labels_for(
+    pub(crate) fn labels_for(
         &self,
         leg: &Value,
         inputs: &Value,

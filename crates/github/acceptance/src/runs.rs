@@ -29,10 +29,9 @@ use std::convert::Infallible;
 use std::env::consts::ARCH;
 use std::fmt::Write as _;
 
-use frontend_gha::action::{
-    ACTION_KIND, ActionLocation, DOCKER_ACTION_KIND, PinnedAction, RUN_KIND,
-};
+use frontend_gha::action::{ActionLocation, PinnedAction};
 use frontend_gha::exprs::{has_env_sentinel, replace_env_sentinels};
+use frontend_gha::{ACTION_KIND, DOCKER_ACTION_KIND, RUN_KIND};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, ExpandTarget, Expansion, Expr, ExprId, Graph, NodeId, RuntimeTarget, Value};
 use smol_str::SmolStr;
@@ -1407,8 +1406,8 @@ fn sanitize_cell(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError};
-    use frontend_gha::load;
+    use frontend_gha::action::{ActionRef, ActionSourceError};
+    use frontend_gha::{ActionSource, load};
     use ir::Expr;
 
     use super::*;

@@ -1,7 +1,7 @@
 //! Tokens of the `${{ }}` grammar.
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum TokenKind {
+pub(crate) enum TokenKind {
     Null,
     True,
     False,
@@ -30,7 +30,7 @@ pub enum TokenKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Token {
+pub(crate) struct Token {
     pub kind:   TokenKind,
     /// Byte offset of the token's first character.
     pub offset: usize,
@@ -67,7 +67,7 @@ fn is_ident_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
+pub(crate) fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
     let mut i = 0;

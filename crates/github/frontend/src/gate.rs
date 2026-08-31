@@ -48,17 +48,17 @@ use crate::exprs::{
 };
 
 /// Config key for an interior node's operator.
-pub const OP_KEY: &str = "op";
+pub(crate) const OP_KEY: &str = "op";
 /// Config key for an interior node's operands.
-pub const ARGS_KEY: &str = "args";
+pub(crate) const ARGS_KEY: &str = "args";
 /// Config key wrapping a literal leaf (or an `{"$expr": id}` the engine
 /// resolves into one).
-pub const LIT_KEY: &str = "lit";
+pub(crate) const LIT_KEY: &str = "lit";
 /// Config key for an env leaf: the variable name the step resolves.
-pub const ENV_KEY: &str = "$env";
+pub(crate) const ENV_KEY: &str = "$env";
 /// Config key for an env leaf's fallback, used when the step's environment does
 /// not bind the name.
-pub const ENV_OR_KEY: &str = "or";
+pub(crate) const ENV_OR_KEY: &str = "or";
 
 /// A gate operator: exactly the operators GitHub's condition grammar has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,7 +320,7 @@ pub fn eval<E>(
 /// Whether the subtree holds something only the step can resolve: an `env.NAME`
 /// reference, a `hashFiles(...)` call, `github.workspace`, `runner.temp`, or
 /// `runner.tool_cache`.
-pub fn needs_lazy(expr: &Expr) -> bool {
+pub(crate) fn needs_lazy(expr: &Expr) -> bool {
     if env_leaf(expr).is_some()
         || is_workspace_leaf(expr)
         || is_runner_temp_leaf(expr)
@@ -385,7 +385,7 @@ fn env_leaf(expr: &Expr) -> Option<String> {
 /// their step leaves. Something lazy under a non-operator falls to the
 /// engine-leaf path, which keeps `env` at its engine meaning (the scope env)
 /// and rejects `hashFiles` there. `None` means a diagnostic was reported.
-pub fn condition_tree(
+pub(crate) fn condition_tree(
     ast: &Expr,
     site: &Site,
     span: &Span,

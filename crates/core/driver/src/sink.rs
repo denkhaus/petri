@@ -12,14 +12,14 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt as _;
 
 /// Writes step output to the run directory, and optionally echoes it.
-pub struct LogSink {
+pub(crate) struct LogSink {
     dir:    PathBuf,
     masker: Masker,
     echo:   bool,
 }
 
 impl LogSink {
-    pub fn new(run_dir: &Path, masker: Masker) -> Self {
+    pub(crate) fn new(run_dir: &Path, masker: Masker) -> Self {
         Self {
             dir: run_dir.join("logs"),
             masker,
@@ -29,12 +29,12 @@ impl LogSink {
 
     /// Also write lines to this process's stdout.
     #[must_use]
-    pub fn echoing(mut self, echo: bool) -> Self {
+    pub(crate) fn echoing(mut self, echo: bool) -> Self {
         self.echo = echo;
         self
     }
 
-    pub fn masker(&self) -> &Masker {
+    pub(crate) fn masker(&self) -> &Masker {
         &self.masker
     }
 
@@ -45,7 +45,13 @@ impl LogSink {
         reason = "echoing step output to the user's terminal is the whole point of the \
                   `echo` option, and the driver has no other stdout path"
     )]
-    pub async fn record(&self, node: &str, firing: u64, stream: LogStream, line: &str) -> String {
+    pub(crate) async fn record(
+        &self,
+        node: &str,
+        firing: u64,
+        stream: LogStream,
+        line: &str,
+    ) -> String {
         let masked = self.masker.mask(line);
         let path = self.dir.join(format!("{}-{firing}.log", sanitize(node)));
         if let Err(err) = self.append(&path, stream, &masked).await {
@@ -83,7 +89,7 @@ impl LogSink {
 
     /// Mask every string in an outcome's data before the finish record is
     /// appended.
-    pub fn mask_value(&self, value: &Value) -> Value {
+    pub(crate) fn mask_value(&self, value: &Value) -> Value {
         self.masker.mask_value(value)
     }
 }

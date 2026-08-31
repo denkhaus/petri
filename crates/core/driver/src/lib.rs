@@ -9,10 +9,10 @@
 //! byte-identical over real processes whose completion order is a wall-clock
 //! accident.
 
-pub mod jitter;
-pub mod observe;
-pub mod run;
-pub mod sink;
+mod jitter;
+mod observe;
+mod run;
+mod sink;
 
 pub use observe::{EventObserver, ObserveError};
 pub use run::{
@@ -20,4 +20,3 @@ pub use run::{
     DeliverDisposition, Driver, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo, RunConfig,
     RunHandle, RunReport,
 };
-pub use sink::LogSink;

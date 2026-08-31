@@ -90,13 +90,13 @@ use tracing::field::Empty;
 pub const LIVENESS_POLL: Duration = Duration::from_millis(25);
 
 /// How long release watches a killed group before reporting it as leaked.
-pub const OBSERVE_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const OBSERVE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How long `acquire`'s fence waits for a discovered live group to drain after
 /// the marker is down, before failing with [`EnvError::FenceLeaked`]. Must
 /// comfortably exceed the sentinel watcher's poll interval (0.25s in the
 /// script).
-pub const FENCE_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const FENCE_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Directory beside the workspace holding one generation dir per acquisition.
 const GROUPS_DIR: &str = "groups";

@@ -5,11 +5,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
-use ir::validate::{ValidationError, ValidationLocation, ValidationWarning};
 use ir::{
     Arm, Budget, Completion, Edge, ExpandTarget, Expansion, ExprId, ExprTable, Graph, GraphBuilder,
     Guard, JoinPolicy, Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef,
-    Value, validate, validate_plan,
+    ValidationError, ValidationLocation, ValidationWarning, Value, validate, validate_plan,
 };
 use serde_json::json;
 

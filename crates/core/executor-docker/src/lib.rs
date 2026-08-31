@@ -61,7 +61,6 @@ use executor::{
     LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
 };
 use ir::RuntimeTarget;
-pub use services::SERVICE_HEALTH_WAIT;
 use smol_str::SmolStr;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -81,7 +80,7 @@ pub const CONTAINER_WORKSPACE: &str = "/workspace";
 /// daemon it exists because every create passes
 /// `--add-host=host.docker.internal:host-gateway` — the executor guarantees
 /// the name, so `host_address` can promise it.
-pub const HOST_ALIAS: &str = "host.docker.internal";
+pub(crate) const HOST_ALIAS: &str = "host.docker.internal";
 
 /// The `--add-host` argument that backs [`HOST_ALIAS`] on every daemon.
 pub(crate) const ADD_HOST_GATEWAY: &str = "--add-host=host.docker.internal:host-gateway";
@@ -108,7 +107,7 @@ pub const LIVENESS_POLL: Duration = Duration::from_millis(50);
 
 /// How long to wait for the step to record its pgid before giving up on
 /// signalling the group. A cancel can arrive before the step has written it.
-pub const PGID_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const PGID_WAIT: Duration = Duration::from_secs(2);
 
 /// When to pull an image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -53,11 +53,11 @@ use crate::config::{ShellScript, try_map_process_texts};
 use crate::hashfiles;
 
 /// The runner's own directory, relative to the workspace root.
-pub const RUNNER_DIR: &str = ".ci/github";
+pub(crate) const RUNNER_DIR: &str = ".ci/github";
 /// `GITHUB_WORKSPACE`, relative to the workspace root.
-pub const REPO_DIR: &str = "repo";
+pub(crate) const REPO_DIR: &str = "repo";
 /// The step could not set up or read back its runner files.
-pub const RUNNER_FILES_CLASS: &str = "runner_files";
+pub(crate) const RUNNER_FILES_CLASS: &str = "runner_files";
 
 const JOB_ENV_FILE: &str = ".ci/github/job-env.json";
 const JOB_PATH_FILE: &str = ".ci/github/job-path.json";
@@ -81,7 +81,7 @@ struct StepFiles {
     summary: PathBuf,
 }
 
-pub struct Session {
+pub(crate) struct Session {
     env:        Arc<dyn ExecEnv>,
     /// The workspace root as the process sees it.
     workspace:  String,
@@ -96,7 +96,7 @@ pub struct Session {
 
 /// What the step left behind, for the step kind to fold into its outcome.
 #[derive(Debug, Default)]
-pub struct Effects {
+pub(crate) struct Effects {
     /// `::set-output::` values, for the record's output.
     pub outputs: Map<String, Value>,
     /// `GITHUB_STATE` plus `::save-state::`.
@@ -227,7 +227,7 @@ pub(crate) fn runner_temp_path(root: &str) -> String {
 
 impl Session {
     /// Create the step's files and read what the job has accumulated so far.
-    pub async fn begin(ctx: &StepCtx, event: &Value) -> Result<Self, StepFailure> {
+    pub(crate) async fn begin(ctx: &StepCtx, event: &Value) -> Result<Self, StepFailure> {
         let env = ctx.env.clone();
         let workspace = env.workspace_path().to_string();
         let dir = PathBuf::from(RUNNER_DIR)
@@ -275,13 +275,13 @@ impl Session {
     }
 
     /// The workspace root as the process sees it.
-    pub fn workspace(&self) -> &str {
+    pub(crate) fn workspace(&self) -> &str {
         &self.workspace
     }
 
     /// The checkout root — `GITHUB_WORKSPACE`, which is [`Self::workspace`]
     /// plus the repository directory, not the workspace root itself.
-    pub fn github_workspace(&self) -> String {
+    pub(crate) fn github_workspace(&self) -> String {
         github_workspace_path(&*self.env)
     }
 
@@ -289,7 +289,7 @@ impl Session {
     /// `root`: the explicit export overrides the action image's own env and
     /// no host path reaches inside, so neither ambient env nor the store
     /// applies — the chain is the step's `env:`, the job's, the workspace.
-    pub fn container_tool_cache(
+    pub(crate) fn container_tool_cache(
         &self,
         env_config: &BTreeMap<SmolStr, ValueOrSecretRef>,
         root: &str,
@@ -305,14 +305,14 @@ impl Session {
     /// the step's own `env:` config ([`resolved_tool_cache`]), so
     /// [`Session::run`] exports it once the config is assembled, and a
     /// one-shot action container gets [`Session::container_tool_cache`].
-    pub fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
+    pub(crate) fn env(&self, node: &str) -> BTreeMap<SmolStr, SmolStr> {
         self.env_rooted(node, &self.workspace)
     }
 
     /// [`Session::env`], with every path under `root` instead of this
     /// environment's workspace path: what a process sees when the workspace is
     /// mounted somewhere else — a one-shot action container's mount point.
-    pub fn env_rooted(&self, node: &str, root: &str) -> BTreeMap<SmolStr, SmolStr> {
+    pub(crate) fn env_rooted(&self, node: &str, root: &str) -> BTreeMap<SmolStr, SmolStr> {
         let mut out: BTreeMap<SmolStr, SmolStr> = self
             .job_env
             .iter()
@@ -401,7 +401,7 @@ impl Session {
     /// Rust ([`resolved_tool_cache`]) and exported by [`Session::run`] with
     /// the rest of the environment, where the `runner.tool_cache` sentinel
     /// substitution and the gate evaluator share it.
-    pub fn prologue(&self) -> String {
+    pub(crate) fn prologue(&self) -> String {
         let mut out = String::new();
         if !self.job_path.is_empty() {
             let joined = self
@@ -473,7 +473,7 @@ impl Session {
     /// the sentinels resolve it is written to the step's `script` file, and the
     /// process becomes `sh` running the prologue plus the template with `{0}`
     /// substituted by the script's path — as GitHub invokes custom shells.
-    pub async fn run(
+    pub(crate) async fn run(
         mut self,
         process: ProcessConfig,
         shell_command: Option<String>,
@@ -847,7 +847,7 @@ fn runner_files_failure(
 
 /// Fold what a step left into its outcome: `set-output` values that the outputs
 /// file did not already provide, and the state for the action's later phases.
-pub fn fold_into_outcome(
+pub(crate) fn fold_into_outcome(
     mut outcome: Outcome,
     effects: Effects,
     state: Map<String, Value>,
@@ -883,7 +883,7 @@ pub fn fold_into_outcome(
 
 /// A step whose process succeeded but whose command stream carried a refused
 /// `set-env`/`add-path`.
-pub const COMMAND_REFUSED_CLASS: &str = "command_refused";
+pub(crate) const COMMAND_REFUSED_CLASS: &str = "command_refused";
 
 /// Whether unsecure `::set-env`/`::add-path` commands are allowed, by the
 /// runner's rule: `ACTIONS_ALLOW_UNSECURE_COMMANDS` parses as `true`
@@ -891,7 +891,7 @@ pub const COMMAND_REFUSED_CLASS: &str = "command_refused";
 /// the step's resolved env or in the environment the process inherits — the
 /// job's `env:`, or the runner's own environment — which is the runner's
 /// `Environment.GetEnvironmentVariable(...) || env context` check.
-pub fn can_use_unsecure_commands(
+pub(crate) fn can_use_unsecure_commands(
     env: &BTreeMap<SmolStr, ValueOrSecretRef>,
     exec: &dyn ExecEnv,
 ) -> bool {
@@ -914,23 +914,12 @@ pub(crate) fn unsecure_flag(step_value: Option<&str>, exec: &dyn ExecEnv) -> boo
 
 pub(crate) const UNSECURE_COMMANDS_KEY: &str = "ACTIONS_ALLOW_UNSECURE_COMMANDS";
 
-/// Whether the resolved env sets a variable to a GitHub-truthy value.
-pub fn is_env_truthy(env: &BTreeMap<SmolStr, ValueOrSecretRef>, key: &str) -> bool {
-    match env.get(key) {
-        Some(ValueOrSecretRef::Literal(value)) => {
-            let s = stringify(value);
-            !s.is_empty() && s != "false" && s != "0"
-        }
-        _ => false,
-    }
-}
-
 /// A JSON value as the string a process sees — the process step's own rule,
 /// re-exported so the two can never drift again (they once did, on null).
-pub use steps::stringify;
+pub(crate) use steps::stringify;
 
 /// Single-quote `s` for `sh`.
-pub fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -982,21 +971,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quoting_and_truthiness() {
+    fn quoting() {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
-        let mut env = BTreeMap::new();
-        env.insert(
-            SmolStr::new("A"),
-            ValueOrSecretRef::Literal(Value::String("true".into())),
-        );
-        env.insert(
-            SmolStr::new("B"),
-            ValueOrSecretRef::Literal(Value::String("false".into())),
-        );
-        assert!(is_env_truthy(&env, "A"));
-        assert!(!is_env_truthy(&env, "B"));
-        assert!(!is_env_truthy(&env, "C"));
     }
 
     #[test]

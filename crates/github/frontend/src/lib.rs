@@ -63,17 +63,17 @@
 //! per job, which remains a spec finding for that day.
 
 pub mod action;
-pub mod call;
-pub mod composite;
+mod call;
+mod composite;
 pub mod expr_lower;
 pub mod exprs;
 pub mod gate;
 pub mod identity;
-pub mod inputs;
-pub mod lower;
-pub mod model;
-pub mod runners;
-pub mod runs_on;
+mod inputs;
+mod lower;
+mod model;
+mod runners;
+mod runs_on;
 
 use std::env::consts;
 use std::path::{Component, Path, PathBuf};

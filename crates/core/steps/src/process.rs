@@ -24,7 +24,7 @@ use crate::outputs::{BAD_OUTPUT_CLASS, parse};
 pub const PROCESS_KIND: StepKindId = StepKindId::new_static("process");
 
 /// The environment variable naming the outputs file.
-pub const OUTPUT_ENV: &str = "CI_OUTPUT";
+pub(crate) const OUTPUT_ENV: &str = "CI_OUTPUT";
 
 /// A `$secret` reference turned up somewhere it is not allowed.
 pub const SECRET_MISPLACED_CLASS: &str = "secret_misplaced";
@@ -36,7 +36,7 @@ pub const SECRET_UNAVAILABLE_CLASS: &str = "secret_unavailable";
 pub const WORKSPACE_CLASS: &str = "workspace_setup";
 
 /// The process could not be started at all.
-pub const SPAWN_CLASS: &str = "spawn_failed";
+pub(crate) const SPAWN_CLASS: &str = "spawn_failed";
 
 /// How long to keep draining log output after the process has gone.
 const DRAIN_LIMIT: Duration = Duration::from_secs(5);
@@ -328,7 +328,7 @@ pub async fn ladder(
 /// The outcome of a process that ended on its own: exit 0 is success, a foreign
 /// signal is a `signal:N` failure, and a non-zero exit is a failure unless
 /// `soft_fail` claims the code.
-pub fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output: Value) -> Outcome {
+pub(crate) fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output: Value) -> Outcome {
     if status.is_success() {
         return Outcome::new(Status::Success, output);
     }

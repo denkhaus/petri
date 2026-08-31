@@ -25,12 +25,12 @@ use serde_json::{Value, json};
 /// The `owner/repo` slug the checkout's `origin` remote names, from
 /// `.git/config`. `None` when there is no checkout, no origin, or no
 /// recognizable URL.
-pub fn repository_slug(files: &dyn FileSource) -> Option<String> {
+pub(crate) fn repository_slug(files: &dyn FileSource) -> Option<String> {
     slug_from_config(&files.read(".git/config")?)
 }
 
 /// The slug out of a git config's `[remote "origin"]` url.
-pub fn slug_from_config(config: &str) -> Option<String> {
+pub(crate) fn slug_from_config(config: &str) -> Option<String> {
     let mut in_origin = false;
     for line in config.lines() {
         let line = line.trim();
@@ -69,7 +69,7 @@ fn slug_from_url(url: &str) -> Option<String> {
 
 /// What the checkout's HEAD names, for run identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HeadIdentity {
+pub(crate) struct HeadIdentity {
     /// The commit HEAD resolves to, 40 hex characters.
     pub sha:       String,
     /// The branch HEAD is on (`refs/heads/<name>`); a detached HEAD has none.
@@ -83,7 +83,7 @@ pub struct HeadIdentity {
 ///
 /// Direct file reads, like the slug from `.git/config` above: run parameters
 /// are host business, outside the [`FileSource`] the lowering sees.
-pub fn head_identity(repo: &Path) -> Option<HeadIdentity> {
+pub(crate) fn head_identity(repo: &Path) -> Option<HeadIdentity> {
     let (git_dir, common_dir) = git_dirs(repo)?;
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();

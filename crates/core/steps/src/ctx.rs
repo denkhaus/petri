@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::caps::Capabilities;
 
 /// The step's config did not deserialize.
-pub const BAD_CONFIG_CLASS: &str = "bad_config";
+pub(crate) const BAD_CONFIG_CLASS: &str = "bad_config";
 
 /// Everything a step needs to run one attempt.
 pub struct StepCtx {

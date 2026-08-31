@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::session::set_env_blocked;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkflowCommand {
+pub(crate) struct WorkflowCommand {
     pub name:       String,
     pub properties: BTreeMap<String, String>,
     pub message:    String,
@@ -27,7 +27,7 @@ pub struct WorkflowCommand {
 
 /// Parse one output line. `None` when it is not a command. Leading whitespace
 /// is ignored, as the runner's `TryParseV2` trims it before looking for `::`.
-pub fn parse(line: &str) -> Option<WorkflowCommand> {
+pub(crate) fn parse(line: &str) -> Option<WorkflowCommand> {
     let rest = line.trim_start().strip_prefix("::")?;
     let (head, message) = rest.split_once("::")?;
     let (name, props) = match head.split_once(' ') {
@@ -75,7 +75,7 @@ fn unescape_property(s: &str) -> String {
 
 /// What the commands asked for, collected while the process ran.
 #[derive(Debug, Default)]
-pub struct CommandEffects {
+pub(crate) struct CommandEffects {
     /// `::set-output name=X::value` (deprecated; still emitted by older
     /// actions).
     pub outputs: Map<String, Value>,
@@ -93,7 +93,7 @@ pub struct CommandEffects {
 }
 
 /// The sink one step's log events pass through.
-pub struct CommandSink {
+pub(crate) struct CommandSink {
     out:            mpsc::Sender<StepEvent>,
     masker:         Masker,
     /// `ACTIONS_ALLOW_UNSECURE_COMMANDS`: whether `set-env` and `add-path`
@@ -107,7 +107,7 @@ pub struct CommandSink {
 }
 
 impl CommandSink {
-    pub fn new(out: mpsc::Sender<StepEvent>, masker: Masker, allow_unsecure: bool) -> Self {
+    pub(crate) fn new(out: mpsc::Sender<StepEvent>, masker: Masker, allow_unsecure: bool) -> Self {
         Self {
             out,
             masker,
@@ -121,12 +121,12 @@ impl CommandSink {
     /// The effects so far, shared: readable even if the process left a
     /// straggler holding stdout open and the sink never sees the end of the
     /// stream.
-    pub fn effects(&self) -> Arc<Mutex<CommandEffects>> {
+    pub(crate) fn effects(&self) -> Arc<Mutex<CommandEffects>> {
         self.effects.clone()
     }
 
     /// Consume events until the sender side is gone.
-    pub async fn run(mut self, mut rx: mpsc::Receiver<StepEvent>) {
+    pub(crate) async fn run(mut self, mut rx: mpsc::Receiver<StepEvent>) {
         while let Some(event) = rx.recv().await {
             match event {
                 StepEvent::Log { stream, line } => self.on_line(stream, line).await,

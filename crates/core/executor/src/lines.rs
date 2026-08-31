@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::env::LogLine;
 
 /// Lines longer than this are cut, with a marker.
-pub const LINE_CAP: usize = 64 * 1024;
+pub(crate) const LINE_CAP: usize = 64 * 1024;
 
 const TRUNCATION_MARKER: &str = " …[line truncated]";
 

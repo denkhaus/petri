@@ -19,9 +19,9 @@ use smol_str::SmolStr;
 
 /// Values shorter than this are not masked: masking `1` or `true` would
 /// turn every log into asterisks.
-pub const MIN_MASK_LENGTH: usize = 6;
+pub(crate) const MIN_MASK_LENGTH: usize = 6;
 
-pub const MASK: &str = "***";
+pub(crate) const MASK: &str = "***";
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SecretError {

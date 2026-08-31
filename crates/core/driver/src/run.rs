@@ -52,7 +52,7 @@ pub const KILLED_BEFORE_RESUME: &str = "killed_before_resume";
 ///
 /// `validate_with(graph, Some(&registry))` reports this at load; the guard here
 /// is the backstop for a caller that skipped validation.
-pub const NO_RUNNER: &str = "no_runner";
+pub(crate) const NO_RUNNER: &str = "no_runner";
 
 /// After the first root cancel, how long admitted cleanup gets before the
 /// driver feeds back `KillRequested` (§10, resolved decision 3).

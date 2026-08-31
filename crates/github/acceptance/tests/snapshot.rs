@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use acceptance::{SnapshotEntry, SnapshotSource, check_one, has_corpus, workflows};
-use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
+use frontend_gha::ActionSource;
+use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 use github_actions::GitActionSource;
 
 fn corpus_root() -> PathBuf {

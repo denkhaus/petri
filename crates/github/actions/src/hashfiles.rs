@@ -23,7 +23,7 @@ use steps::{ProcessConfig, StepFailure};
 use crate::config::{process_texts, try_map_process_texts};
 
 /// The step could not compute a `hashFiles` value.
-pub const HASHFILES_CLASS: &str = "hashfiles";
+const HASHFILES_CLASS: &str = "hashfiles";
 
 /// The line the helper prints its result on.
 const MARKER: &str = "petri-hashfiles=";

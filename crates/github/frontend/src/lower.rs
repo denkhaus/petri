@@ -44,7 +44,7 @@ struct JobNodes {
     matrix: bool,
 }
 
-pub struct Lowering<'w, 'a> {
+pub(crate) struct Lowering<'w, 'a> {
     b:                   GraphBuilder,
     diags:               Diagnostics,
     wf:                  &'w Workflow<'a>,
@@ -207,7 +207,7 @@ struct ActionContext<'s, 'job, 'step> {
     job_secret_env: &'s [(String, String)],
 }
 
-pub fn lower(
+pub(crate) fn lower(
     wf: &Workflow<'_>,
     files: &dyn FileSource,
     actions: Option<&dyn ActionSource>,

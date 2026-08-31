@@ -15,16 +15,15 @@ use crate::model::{self, Step};
 
 /// How deep composites may nest before the lowering reports rather than
 /// recurses.
-pub const MAX_DEPTH: usize = 10;
+pub(crate) const MAX_DEPTH: usize = 10;
 
 /// What `action.yml` declares.
-pub struct Manifest<'a> {
+pub(crate) struct Manifest<'a> {
     pub inputs: Vec<Input<'a>>,
     pub runs:   Runs<'a>,
-    pub span:   Span,
 }
 
-pub enum Runs<'a> {
+pub(crate) enum Runs<'a> {
     Composite(Action<'a>),
     Node(NodeAction),
     Docker(DockerAction),
@@ -34,7 +33,7 @@ pub enum Runs<'a> {
 /// which lower where the step is. Owned, so the pre and post nodes can be
 /// placed away from the main one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DockerAction {
+pub(crate) struct DockerAction {
     /// `docker://image`, or a Dockerfile path relative to the action.
     pub image:           String,
     pub entrypoint:      Option<String>,
@@ -49,17 +48,16 @@ pub struct DockerAction {
 }
 
 /// A composite action's steps and outputs.
-pub struct Action<'a> {
+pub(crate) struct Action<'a> {
     pub inputs:  Vec<Input<'a>>,
     pub outputs: Vec<(String, Node<'a>)>,
     pub steps:   Vec<Step<'a>>,
-    pub span:    Span,
 }
 
 /// A JavaScript action's entry points. Owned, so it outlives the document it
 /// came from: the pre and post nodes are placed away from the main one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeAction {
+pub(crate) struct NodeAction {
     pub main:    String,
     pub pre:     Option<String>,
     pub pre_if:  Option<String>,
@@ -67,14 +65,14 @@ pub struct NodeAction {
     pub post_if: Option<String>,
 }
 
-pub struct Input<'a> {
+pub(crate) struct Input<'a> {
     pub name:     String,
     pub default:  Option<Node<'a>>,
     pub required: bool,
 }
 
 /// Classify a `uses:` reference.
-pub enum Uses {
+pub(crate) enum Uses {
     /// `./path` — a composite in this repository.
     Local(String),
     /// `docker://image` or a local action whose `runs.using` is `docker`.
@@ -83,7 +81,7 @@ pub enum Uses {
     Remote(String),
 }
 
-pub fn classify(reference: &str) -> Uses {
+pub(crate) fn classify(reference: &str) -> Uses {
     if let Some(rest) = reference.strip_prefix("docker://") {
         Uses::Docker(rest.to_string())
     } else if reference.starts_with("./") {
@@ -100,7 +98,7 @@ pub fn classify(reference: &str) -> Uses {
 
 /// Read `action.yml` (or `.yaml`) under `path`. Returns the parsed document so
 /// the caller can hold it while lowering.
-pub fn read_document(
+pub(crate) fn read_document(
     files: &dyn FileSource,
     path: &str,
     span: &Span,
@@ -139,7 +137,10 @@ pub fn read_document(
 }
 
 /// Read an action document: its inputs and what `runs:` says it is.
-pub fn read_manifest<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Manifest<'a>> {
+pub(crate) fn read_manifest<'a>(
+    doc: &'a Document,
+    diags: &mut Diagnostics,
+) -> Option<Manifest<'a>> {
     let root = doc.root();
     let m = root.expect_mapping(diags, "an action")?;
     let Some(runs) = m.get("runs").and_then(|r| r.as_mapping()) else {
@@ -218,11 +219,7 @@ pub fn read_manifest<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<M
             return None;
         }
     };
-    Some(Manifest {
-        inputs,
-        runs,
-        span: root.span(),
-    })
+    Some(Manifest { inputs, runs })
 }
 
 fn read_inputs<'a>(node: Option<Node<'a>>, diags: &mut Diagnostics) -> Vec<Input<'a>> {
@@ -304,7 +301,6 @@ fn read_composite<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Acti
         inputs,
         outputs,
         steps,
-        span: root.span(),
     })
 }
 

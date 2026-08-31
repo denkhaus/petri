@@ -14,7 +14,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, Weak};
 use std::{env, fs};
 
-use frontend_gha::action::{ActionRef, ActionSource, ActionSourceError, PinnedAction};
+use frontend_gha::ActionSource;
+use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 use smol_str::SmolStr;
 use tracing::Span;
 use tracing::field::Empty;

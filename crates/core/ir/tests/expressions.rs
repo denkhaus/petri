@@ -2,8 +2,9 @@
 
 use std::slice;
 
-use ir::expr::{EvalError, eval, eval_bool};
-use ir::{BinOp, EvalEnv, ExprTable, RunContext, StaticCtx, UnOp, is_truthy};
+use ir::{
+    BinOp, EvalEnv, EvalError, ExprTable, RunContext, StaticCtx, UnOp, eval, eval_bool, is_truthy,
+};
 use serde_json::{Value, json};
 
 /// A static-only environment: no token, no run context.

@@ -24,7 +24,7 @@ use crate::model::{InputDecl, InputType};
 /// values and declared defaults — which the per-leg `runs-on` resolver may
 /// read.
 #[derive(Default)]
-pub struct BoundInputs {
+pub(crate) struct BoundInputs {
     pub exprs:   BTreeMap<String, ExprId>,
     pub statics: BTreeMap<String, Value>,
 }
@@ -32,7 +32,7 @@ pub struct BoundInputs {
 /// Bind a call's inputs: the caller's `with:` against the callee's
 /// declarations. `what` names the callee for diagnostics; `span` is the call
 /// site. Unknown `with:` keys are errors, as on GitHub.
-pub fn bind_call_inputs(
+pub(crate) fn bind_call_inputs(
     decls: &[InputDecl<'_>],
     with: &[(String, Node<'_>)],
     caller_site: &Site,
@@ -82,7 +82,7 @@ pub fn bind_call_inputs(
 /// reusable file run on its own — from the run's parameters: each becomes
 /// `github.event.inputs.<name>`, typed, with the declared default when the
 /// parameter is absent.
-pub fn bind_param_inputs(
+pub(crate) fn bind_param_inputs(
     decls: &[&InputDecl<'_>],
     table: &mut ExprTable,
     diags: &mut Diagnostics,

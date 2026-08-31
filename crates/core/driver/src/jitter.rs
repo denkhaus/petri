@@ -14,9 +14,9 @@ use std::time::Duration;
 use ir::{Attempt, FiringId};
 
 /// How far either side of `base_delay` the spread reaches.
-pub const SPREAD_PERCENT: u64 = 25;
+pub(crate) const SPREAD_PERCENT: u64 = 25;
 
-pub fn jittered(base: Duration, firing: FiringId, attempt: Attempt) -> Duration {
+pub(crate) fn jittered(base: Duration, firing: FiringId, attempt: Attempt) -> Duration {
     if base.is_zero() {
         return base;
     }

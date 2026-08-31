@@ -8,7 +8,7 @@
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::{Document, Mapping, Node};
 
-pub struct Workflow<'a> {
+pub(crate) struct Workflow<'a> {
     pub name:            Option<String>,
     pub env:             Vec<(String, Node<'a>)>,
     pub defaults:        Defaults<'a>,
@@ -21,7 +21,7 @@ pub struct Workflow<'a> {
 }
 
 /// What `on.workflow_call` declares: the contract a caller binds against.
-pub struct CallInterface<'a> {
+pub(crate) struct CallInterface<'a> {
     pub inputs:  Vec<InputDecl<'a>>,
     /// Output name → its `value` expression, over the `jobs.*` context.
     pub outputs: Vec<(String, Node<'a>)>,
@@ -31,16 +31,15 @@ pub struct CallInterface<'a> {
 
 /// One typed input — the same declaration for `workflow_call` and
 /// `workflow_dispatch`, so both feed one validation path.
-pub struct InputDecl<'a> {
+pub(crate) struct InputDecl<'a> {
     pub name:     String,
     pub ty:       InputType,
     pub required: bool,
     pub default:  Option<Node<'a>>,
-    pub span:     Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InputType {
+pub(crate) enum InputType {
     String,
     Boolean,
     Number,
@@ -53,14 +52,14 @@ pub enum InputType {
 /// The caller's half of a reusable-workflow call: a job that is `uses:` plus
 /// `with:` plus `secrets:`.
 #[derive(Clone)]
-pub struct WorkflowCall<'a> {
+pub(crate) struct WorkflowCall<'a> {
     pub uses:    (String, Span),
     pub with:    Vec<(String, Node<'a>)>,
     pub secrets: SecretsArg<'a>,
 }
 
 #[derive(Clone, Default)]
-pub enum SecretsArg<'a> {
+pub(crate) enum SecretsArg<'a> {
     /// No `secrets:` at all: only declared-optional secrets exist, empty.
     #[default]
     None,
@@ -71,16 +70,15 @@ pub enum SecretsArg<'a> {
 }
 
 #[derive(Default, Clone, Copy)]
-pub struct Defaults<'a> {
+pub(crate) struct Defaults<'a> {
     pub shell:             Option<Node<'a>>,
     pub working_directory: Option<Node<'a>>,
 }
 
 #[derive(Clone)]
-pub struct Job<'a> {
+pub(crate) struct Job<'a> {
     pub id:                String,
     pub span:              Span,
-    pub name:              Option<Node<'a>>,
     pub needs:             Vec<(String, Span)>,
     pub condition:         Option<Node<'a>>,
     pub runs_on:           Option<Node<'a>>,
@@ -105,14 +103,14 @@ pub struct Job<'a> {
 /// deployed to. Any value may be an expression, which stays as written: an
 /// ignored field is never evaluated.
 #[derive(Clone, Copy)]
-pub struct Environment<'a> {
+pub(crate) struct Environment<'a> {
     pub name:       Node<'a>,
     pub url:        Option<Node<'a>>,
     pub deployment: Option<Node<'a>>,
 }
 
 #[derive(Clone, Copy)]
-pub struct Strategy<'a> {
+pub(crate) struct Strategy<'a> {
     /// Absent when `strategy:` only sets `fail-fast` or `max-parallel`, which
     /// is legal.
     pub matrix:       Option<Node<'a>>,
@@ -121,12 +119,11 @@ pub struct Strategy<'a> {
 }
 
 #[derive(Clone)]
-pub struct Step<'a> {
+pub(crate) struct Step<'a> {
     /// Position in the job, 0-based. Steps without an `id` are named from it.
     pub index:             usize,
     pub id:                Option<String>,
     pub span:              Span,
-    pub name:              Option<Node<'a>>,
     pub condition:         Option<Node<'a>>,
     pub run:               Option<Node<'a>>,
     pub uses:              Option<(String, Span)>,
@@ -140,7 +137,7 @@ pub struct Step<'a> {
 
 impl Step<'_> {
     /// The name this step's node carries: its `id`, or a positional one.
-    pub fn node_name(&self) -> String {
+    pub(crate) fn node_name(&self) -> String {
         match &self.id {
             Some(id) => id.clone(),
             None => format!("step-{}", self.index + 1),
@@ -199,7 +196,7 @@ const STEP_KEYS: &[&str] = &[
 /// Read a workflow. Returns `None` only when the document is not a workflow at
 /// all; individual rejections are diagnostics and reading continues past them
 /// so one pass reports everything.
-pub fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'a>> {
+pub(crate) fn read<'a>(doc: &'a Document, diags: &mut Diagnostics) -> Option<Workflow<'a>> {
     let root = doc.root();
     let top = root.expect_mapping(diags, "a workflow")?;
     top.reject_unknown_keys(TOP_KEYS, diags, "the workflow");
@@ -371,7 +368,6 @@ fn read_input_decl<'a>(name: &str, spec: Node<'a>, diags: &mut Diagnostics) -> I
         ty,
         required: required_flag(spec),
         default: sm.as_ref().and_then(|sm| sm.get("default")),
-        span: spec.span(),
     }
 }
 
@@ -451,7 +447,6 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
     Some(Job {
         id: id.to_string(),
         span: node.span(),
-        name: m.get("name"),
         needs,
         condition: m.get("if"),
         runs_on: m.get("runs-on"),
@@ -597,7 +592,7 @@ fn read_environment<'a>(
     environment
 }
 
-pub fn read_step<'a>(
+pub(crate) fn read_step<'a>(
     job: &str,
     index: usize,
     node: Node<'a>,
@@ -675,7 +670,6 @@ pub fn read_step<'a>(
         index,
         id: m.get("id").and_then(|n| n.as_str()).map(str::to_string),
         span: node.span(),
-        name: m.get("name"),
         condition: m.get("if"),
         run,
         uses,
@@ -739,9 +733,4 @@ fn warn_concurrency(node: Node<'_>, diags: &mut Diagnostics) {
         node.span(),
         "`concurrency` is ignored: cross-run mutual exclusion does not apply to a single local run",
     );
-}
-
-/// Convenience: is this mapping key present as any kind of node?
-pub fn has(m: &Mapping<'_>, key: &str) -> bool {
-    m.contains_key(key)
 }

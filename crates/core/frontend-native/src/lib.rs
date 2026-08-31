@@ -22,7 +22,6 @@ use std::path::Path;
 use frontend::yaml::Document;
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 pub use lower::lower;
-pub use model::KNOWN_BINDINGS;
 
 /// Parse and lower a native-format document. Pure: text in, graph and
 /// diagnostics out.
