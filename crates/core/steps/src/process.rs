@@ -84,8 +84,10 @@ impl SoftFail {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum ValueOrSecretRef {
-    /// `{"$secret": "NAME"}` — resolved at spawn, straight into the child's
-    /// environment, never written to the log.
+    /// `{"$secret": "NAME"}` — resolved by [`resolve_env_refs`] at spawn,
+    /// straight into the child's environment, never written to the log. The
+    /// reference stays a reference until then: nothing rewrites it to its
+    /// plaintext in place.
     Secret {
         #[serde(rename = "$secret")]
         name: SmolStr,
@@ -93,6 +95,14 @@ pub enum ValueOrSecretRef {
     Literal(Value),
 }
 
+/// The process step's config, as authored.
+///
+/// It stays as authored: nothing rewrites its texts with resolved secret
+/// plaintext, which is why its `Debug` may stay derived. `env` may hold
+/// `{"$secret": …}` references, resolved at spawn by [`resolve_env_refs`]. A
+/// frontend whose configs carry placeholder sentinels of their own (the GitHub
+/// session) resolves them on its own redacting carrier and hands the resolved
+/// parts to [`run_resolved`] — a `ProcessConfig` never holds that plaintext.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessConfig {
@@ -138,21 +148,56 @@ impl Step for ProcessStep {
     }
 }
 
-async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
-    // Secrets are resolved here, into the child's environment, and nowhere else.
-    let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
-    for (key, value) in &config.env {
-        let resolved = match value {
-            ValueOrSecretRef::Secret { name } => ctx
-                .secrets
+async fn execute(config: ProcessConfig, ctx: StepCtx) -> Result<Outcome, StepFailure> {
+    let env = resolve_env_refs(&config.env, ctx.secrets.as_ref())?;
+    run_resolved(
+        &config.run,
+        config.shell,
+        env,
+        config.working_dir,
+        &config.soft_fail,
+        &config.output_env_aliases,
+        ctx,
+    )
+    .await
+}
+
+/// Resolve an env map's `{"$secret": …}` references into the values a child
+/// process receives. Secrets are resolved here, at spawn time, and nowhere
+/// else; the resolved map goes straight into a [`ProcessSpec`] and is never
+/// written down.
+pub fn resolve_env_refs(
+    env: &BTreeMap<SmolStr, ValueOrSecretRef>,
+    secrets: &dyn executor::SecretProvider,
+) -> Result<BTreeMap<SmolStr, SmolStr>, StepFailure> {
+    let mut resolved = BTreeMap::new();
+    for (key, value) in env {
+        let value = match value {
+            ValueOrSecretRef::Secret { name } => secrets
                 .resolve(name)
                 .map_err(|e| fail(SECRET_UNAVAILABLE_CLASS, e.to_string()))?
                 .expose(),
             ValueOrSecretRef::Literal(literal) => SmolStr::new(stringify(literal)),
         };
-        env.insert(key.clone(), resolved);
+        resolved.insert(key.clone(), value);
     }
+    Ok(resolved)
+}
 
+/// The process step's machinery once every reference is resolved: the outputs
+/// file, the spawn, output capture, the cancel ladder, and the fold into an
+/// outcome. Shared with step kinds that resolve their configs themselves —
+/// the GitHub session hands its resolved carrier here — so the contract lives
+/// once.
+pub async fn run_resolved(
+    run: &str,
+    shell: Shell,
+    mut env: BTreeMap<SmolStr, SmolStr>,
+    working_dir: Option<PathBuf>,
+    soft_fail: &SoftFail,
+    output_env_aliases: &[SmolStr],
+    mut ctx: StepCtx,
+) -> Result<Outcome, StepFailure> {
     // The outputs file lives in the workspace, reached through the environment: the
     // step kind never assumes the workspace is on this machine.
     let output_rel = format!(".ci/out/{}.env", ctx.firing.raw());
@@ -168,18 +213,18 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         })?;
     let output_path = SmolStr::new(format!("{}/{output_rel}", ctx.env.workspace_path()));
     env.insert(SmolStr::new(OUTPUT_ENV), output_path.clone());
-    for alias in &config.output_env_aliases {
+    for alias in output_env_aliases {
         env.insert(alias.clone(), output_path.clone());
     }
 
-    let (program, mut args) = config.shell.invocation();
+    let (program, mut args) = shell.invocation();
     let mut argv: Vec<SmolStr> = args.drain(..).map(SmolStr::new).collect();
-    argv.push(SmolStr::new(&config.run));
+    argv.push(SmolStr::new(run));
     let spec = ProcessSpec {
         program: SmolStr::new(program),
         args: argv,
         env,
-        cwd: config.working_dir.clone(),
+        cwd: working_dir,
     };
 
     let mut handle = ctx
@@ -207,7 +252,7 @@ async fn execute(config: ProcessConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         Err(message) => return Err(fail(BAD_OUTPUT_CLASS, message)),
     };
 
-    Ok(ending_outcome(&ending, &config.soft_fail, output))
+    Ok(ending_outcome(&ending, soft_fail, output))
 }
 
 /// Fold an [`Ending`] into the step's outcome: the exit status into the output

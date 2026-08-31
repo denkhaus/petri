@@ -328,6 +328,106 @@ async fn an_artifact_carrying_a_registered_value_is_masked() {
     );
 }
 
+/// A step kind whose failure message embeds a resolved secret — the shape a
+/// message takes when it quotes raw stderr or an unparseable output line. The
+/// config picks the status: a hard failure, or a soft one that keeps the
+/// failure in `underlying`.
+struct FailLeakyStep;
+
+const FAIL_LEAKY_KIND: ir::StepKindId = ir::StepKindId::new_static("fail-leaky");
+
+impl ir::StepKind for FailLeakyStep {
+    fn id(&self) -> ir::StepKindId {
+        FAIL_LEAKY_KIND
+    }
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "the trait fixes this signature; an impl cannot widen the returned lifetime"
+    )]
+    fn name(&self) -> &str {
+        "fail-leaky"
+    }
+}
+
+#[async_trait::async_trait]
+impl steps::StepRunner for FailLeakyStep {
+    async fn run(&self, ctx: steps::StepCtx) -> ir::Outcome {
+        let token = ctx
+            .secrets
+            .resolve("DEPLOY_TOKEN")
+            .expect("configured")
+            .expose();
+        let info = ir::FailureInfo::new(format!("upload refused: token {token} rejected"))
+            .with_class("upload_refused");
+        let status = if ctx.config.as_str() == Some("partial") {
+            ir::Status::partial(info)
+        } else {
+            ir::Status::Failure(info)
+        };
+        ir::Outcome::new(status, ir::Value::Null)
+    }
+}
+
+/// Failure messages are masked at `finish` like the output is: a step that
+/// quotes a resolved secret in its failure — or in the `underlying` failure a
+/// soft fail keeps — persists `***`, and the event log never holds the value.
+/// The class is untouched: routing matches on it.
+#[tokio::test]
+async fn a_failure_message_carrying_a_secret_is_masked() {
+    let dir = RunDir::new("failure-secret");
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_node("hard", scope, StepRef::new(FAIL_LEAKY_KIND, json!("fail")));
+    b.add_node(
+        "soft",
+        scope,
+        StepRef::new(FAIL_LEAKY_KIND, json!("partial")),
+    );
+    let graph = b.build();
+
+    let mut registry = runners();
+    registry.register_runner(Arc::new(FailLeakyStep));
+    let report = host_driver_full(
+        graph,
+        &dir,
+        MapSecrets::from_pairs(&[("DEPLOY_TOKEN", SECRET)]),
+        RunConfig::new(dir.path()).with_retention(Retention::Never),
+        registry,
+    )
+    .await_run()
+    .await;
+    assert_eq!(report.status, RunStatus::Failed);
+
+    let info_of = |name: &str| {
+        report
+            .state
+            .history()
+            .iter()
+            .find(|r| r.name == name)
+            .expect("the node recorded")
+            .outcome
+            .status
+            .failure_info()
+            .cloned()
+            .expect("the failure is on the record")
+    };
+    let hard = info_of("hard");
+    assert_eq!(hard.message, "upload refused: token *** rejected");
+    assert_eq!(hard.class, "upload_refused", "the class is never masked");
+    let soft = info_of("soft");
+    assert_eq!(
+        soft.message, "upload refused: token *** rejected",
+        "the underlying failure of a soft fail is masked too"
+    );
+
+    let log_bytes = serde_json::to_string(&report.state.log).expect("encode");
+    assert!(
+        !log_bytes.contains(SECRET),
+        "the secret value leaked into the event log"
+    );
+    assert!(log_bytes.contains("***"), "the mask is what was persisted");
+}
+
 /// A multi-line secret is masked line by line, because the log is
 /// line-buffered.
 #[tokio::test]

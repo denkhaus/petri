@@ -1238,6 +1238,18 @@ impl Driver {
             .iter()
             .map(|(k, v)| (k.clone(), self.sink.mask_value(v)))
             .collect();
+        // Failure messages quote raw text — step stderr, unparseable
+        // `$GITHUB_ENV` lines — so they are masked like the output is. The
+        // class stays: routing matches on it, and classes carry no free text.
+        outcome.status = outcome
+            .status
+            .map_messages(|message| self.sink.masker().mask(&message));
+        outcome.metrics.custom = outcome
+            .metrics
+            .custom
+            .iter()
+            .map(|(k, v)| (k.clone(), self.sink.mask_value(v)))
+            .collect();
 
         tracing::debug!(
             parent: &span,

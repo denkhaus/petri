@@ -22,7 +22,7 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 /// A sidecar container the scope needs, with its env already resolved.
 /// Credentials stay a secret *name*; the executor resolves it inside acquire,
 /// at the point of use.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServiceSpec {
     /// The alias other processes in the scope reach it by.
     pub name:        SmolStr,
@@ -33,6 +33,23 @@ pub struct ServiceSpec {
     /// Raw engine flags, passed through (health checks ride here).
     pub options:     Vec<SmolStr>,
     pub credentials: Option<RegistryCredentials>,
+}
+
+/// Hand-written for the same reason [`crate::ProcessSpec`]'s is: `env` is a
+/// resolved environment map, so the shape prints and the values do not. Today
+/// nothing secret lands in it — secret-valued service env is refused at
+/// lowering — but the type must stay safe to print when that changes.
+impl fmt::Debug for ServiceSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceSpec")
+            .field("name", &self.name)
+            .field("image", &self.image)
+            .field("env", &self.env.keys())
+            .field("ports", &self.ports)
+            .field("options", &self.options)
+            .field("credentials", &self.credentials)
+            .finish()
+    }
 }
 
 impl ServiceSpec {
@@ -51,7 +68,7 @@ impl ServiceSpec {
 /// What one scope instance needs in order to exist — the complete declarative
 /// request: environment, runtime, sidecar services. [`Executor::acquire`]
 /// realizes all of it; [`Executor::release`] tears all of it down.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ScopeSpec {
     pub id:        ScopeId,
     /// Instance name, which is also the workspace directory name.
@@ -65,6 +82,22 @@ pub struct ScopeSpec {
     /// returns.
     pub services:  Vec<ServiceSpec>,
     pub grace:     Duration,
+}
+
+/// Hand-written for the same reason [`crate::ProcessSpec`]'s is: `env` is a
+/// resolved environment map, so the shape prints and the values do not.
+impl fmt::Debug for ScopeSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopeSpec")
+            .field("id", &self.id)
+            .field("instance", &self.instance)
+            .field("env", &self.env.keys())
+            .field("runtime", &self.runtime)
+            .field("workspace", &self.workspace)
+            .field("services", &self.services)
+            .field("grace", &self.grace)
+            .finish()
+    }
 }
 
 impl ScopeSpec {

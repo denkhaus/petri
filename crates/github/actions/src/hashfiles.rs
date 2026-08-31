@@ -18,9 +18,9 @@ use std::convert::Infallible;
 use executor::{ExecEnv, ProcessSpec};
 use frontend_gha::exprs::{has_hashfiles_sentinel, hashfiles_calls, replace_hashfiles_sentinels};
 use smol_str::SmolStr;
-use steps::{ProcessConfig, StepFailure};
+use steps::StepFailure;
 
-use crate::config::{process_texts, try_map_process_texts};
+use crate::session::ResolvedProcess;
 
 /// The step could not compute a `hashFiles` value.
 const HASHFILES_CLASS: &str = "hashfiles";
@@ -97,22 +97,23 @@ console.log('petri-hashfiles='+JSON.stringify(
 /// the hash of the matched workspace files, computed in the job environment. A
 /// config with no sentinel passes through untouched.
 pub(crate) async fn resolve_hashfiles(
-    mut process: ProcessConfig,
+    process: ResolvedProcess,
     env: &dyn ExecEnv,
     github_workspace: &str,
-) -> Result<ProcessConfig, StepFailure> {
-    let calls = resolved_calls(process_texts(&process), env, github_workspace).await?;
+) -> Result<ResolvedProcess, StepFailure> {
+    let calls = resolved_calls(process.texts(), env, github_workspace).await?;
     if calls.is_empty() {
         return Ok(process);
     }
-    try_map_process_texts(&mut process, |text| {
-        if has_hashfiles_sentinel(text) {
-            Ok::<_, Infallible>(Some(splice(text, &calls)))
-        } else {
-            Ok(None)
-        }
-    })
-    .expect("the resolver is infallible");
+    let process = process
+        .try_map_texts(|text| {
+            if has_hashfiles_sentinel(text) {
+                Ok::<_, Infallible>(Some(splice(text, &calls)))
+            } else {
+                Ok(None)
+            }
+        })
+        .expect("the resolver is infallible");
     Ok(process)
 }
 

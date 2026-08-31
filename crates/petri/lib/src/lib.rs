@@ -81,6 +81,10 @@ pub mod github {
 /// `Runtime::standard()` for core alone, `Runtime::bare()` for nothing — and
 /// registers what it wants.
 pub fn runtime() -> Runtime {
+    let secrets = GithubSecrets::new();
+    // The provisioner registers the results token with this run's mask set, so
+    // it is built ahead of the closure that captures its masker.
+    let masker = executor::SecretProvider::masker(&secrets);
     let actions = Arc::new(github::GitActionSource::new(github::default_cache_dir()));
     let manifests: Arc<dyn github::ActionSource> = actions.clone();
     let trees: Arc<dyn github::ActionTreeSource> = actions;
@@ -120,6 +124,13 @@ pub fn runtime() -> Runtime {
             let cache = github_objects::cache_dir(&store);
             match github_objects::ObjectService::start(run_dir.join("artifacts"), cache) {
                 Ok(service) => {
+                    // `ACTIONS_RUNTIME_TOKEN` is a bearer credential for a
+                    // beyond-loopback listener, injected into every action's
+                    // env; registering it here is what makes the deny-list
+                    // claim in `.ai/decisions/observability-tracing.md`
+                    // ("object service tokens" are never loggable in the
+                    // clear) hold for the step logs and the event log too.
+                    masker.register(service.token());
                     let cap = github::ResultsServiceCap {
                         port:  service.port(),
                         token: service.token().into(),
@@ -132,7 +143,7 @@ pub fn runtime() -> Runtime {
                 }
             }
         })
-        .secrets(GithubSecrets::new())
+        .secrets(secrets)
 }
 
 /// A runtime-registerable secret map plus a lazily loaded `GITHUB_TOKEN`.

@@ -4,8 +4,8 @@
 //! `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY` — and
 //! applies them when the step ends: outputs to the step's record, env and path
 //! to every later step of the job, state to the action's later phases. A
-//! [`Session`] creates the files before the step, hands the process step a
-//! config pointing at them, and reads them back afterwards.
+//! [`Session`] creates the files before the step, points the step's
+//! [`ResolvedProcess`] at them, and reads them back afterwards.
 //!
 //! Everything lives in the workspace, reached through `ExecEnv`, so this works
 //! the same whether the job runs on this machine or in a container:
@@ -28,7 +28,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::{borrow, mem};
+use std::{borrow, fmt, iter, mem};
 
 use executor::{ExecEnv, SecretProvider};
 use frontend_gha::exprs::{
@@ -42,14 +42,14 @@ use ir::{LogStream, Outcome, StepEvent, Value};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, json};
 use smol_str::SmolStr;
-use steps::{ProcessConfig, ProcessStep, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
+use steps::{Shell, SoftFail, StepCtx, StepFailure, ValueOrSecretRef};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{Instrument as _, Span};
 
 use crate::commands::{CommandEffects, CommandSink};
-use crate::config::{ShellScript, try_map_process_texts};
+use crate::config::ShellScript;
 use crate::hashfiles;
 
 /// The runner's own directory, relative to the workspace root.
@@ -79,6 +79,91 @@ struct StepFiles {
     path:    PathBuf,
     state:   PathBuf,
     summary: PathBuf,
+}
+
+/// The session's process, carried through the resolution passes.
+///
+/// The passes over a step's config — hashFiles, runner paths, `env.NAME`,
+/// secrets, script staging — each consume this and produce it back, instead of
+/// rewriting a `ProcessConfig` in place. After the secret pass, `run` and the
+/// literal `env` values hold resolved secret plaintext, so `Debug` is
+/// hand-written for the same reason [`executor::ProcessSpec`]'s is: the script
+/// prints as a byte count, the env as its keys, and the values do not print.
+pub(crate) struct ResolvedProcess {
+    /// The script text — after staging, the wrapper line that execs it.
+    pub(crate) run:                String,
+    pub(crate) shell:              Shell,
+    pub(crate) env:                BTreeMap<SmolStr, ValueOrSecretRef>,
+    /// Relative to the workspace root.
+    pub(crate) working_dir:        Option<PathBuf>,
+    pub(crate) soft_fail:          SoftFail,
+    pub(crate) output_env_aliases: Vec<SmolStr>,
+}
+
+impl fmt::Debug for ResolvedProcess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedProcess")
+            .field("run", &self.run.len())
+            .field("shell", &self.shell)
+            .field("env", &self.env.keys())
+            .field("working_dir", &self.working_dir)
+            .field("soft_fail", &self.soft_fail)
+            .field("output_env_aliases", &self.output_env_aliases)
+            .finish()
+    }
+}
+
+impl ResolvedProcess {
+    /// Every configured text that can carry a lowered GitHub placeholder.
+    pub(crate) fn texts(&self) -> impl Iterator<Item = &str> {
+        iter::once(self.run.as_str()).chain(self.env.values().filter_map(|value| match value {
+            ValueOrSecretRef::Literal(Value::String(text)) => Some(text.as_str()),
+            _ => None,
+        }))
+    }
+
+    /// Replace the text-bearing fields without duplicating the field walk in
+    /// each placeholder resolver. `None` means the field is unchanged.
+    pub(crate) fn try_map_texts<E>(
+        mut self,
+        mut map: impl FnMut(&str) -> Result<Option<String>, E>,
+    ) -> Result<Self, E> {
+        if let Some(text) = map(&self.run)? {
+            self.run = text;
+        }
+        for value in self.env.values_mut() {
+            if let ValueOrSecretRef::Literal(Value::String(text)) = value
+                && let Some(replacement) = map(text)?
+            {
+                *text = replacement;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Resolve the env references and hand the resolved parts to the shared
+    /// process-step machinery ([`steps::run_resolved`]): outputs file, spawn,
+    /// output capture, cancel ladder, and the fold into an outcome.
+    pub(crate) async fn run_under(self, ctx: StepCtx) -> Outcome {
+        let env = match steps::resolve_env_refs(&self.env, ctx.secrets.as_ref()) {
+            Ok(env) => env,
+            Err(failure) => return failure.into(),
+        };
+        match steps::run_resolved(
+            &self.run,
+            self.shell,
+            env,
+            self.working_dir,
+            &self.soft_fail,
+            &self.output_env_aliases,
+            ctx,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(failure) => failure.into(),
+        }
+    }
 }
 
 pub(crate) struct Session {
@@ -356,7 +441,7 @@ impl Session {
     /// to resolve (and register for masking); runtime text — the env file, the
     /// ambient env — splices escaped, so nothing a step exported can
     /// impersonate a marker.
-    fn resolve_env_sentinels(&self, mut process: ProcessConfig) -> ProcessConfig {
+    fn resolve_env_sentinels(&self, mut process: ResolvedProcess) -> ResolvedProcess {
         let runtime = |name: &str| {
             ci_get(&self.job_env, name)
                 .cloned()
@@ -430,10 +515,10 @@ impl Session {
     /// create that directory as a uid that the host process cannot write as.
     async fn stage_script(
         &self,
-        mut process: ProcessConfig,
+        mut process: ResolvedProcess,
         template: &str,
         shell_script: ShellScript,
-    ) -> Result<ProcessConfig, StepFailure> {
+    ) -> Result<ResolvedProcess, StepFailure> {
         let (script_name, contents) = match shell_script {
             ShellScript::Plain => ("script", process.run),
             ShellScript::PowerShell => (
@@ -466,8 +551,9 @@ impl Session {
         Ok(process)
     }
 
-    /// Run `process` under this session: the process step does the work, the
-    /// command sink watches its output, and the files are applied afterwards.
+    /// Run `process` under this session: the resolution passes fill the
+    /// carrier, the shared process-step machinery does the work, the command
+    /// sink watches its output, and the files are applied afterwards.
     ///
     /// With a `shell_command` template, `process.run` is the bare script: after
     /// the sentinels resolve it is written to the step's `script` file, and the
@@ -475,7 +561,7 @@ impl Session {
     /// substituted by the script's path — as GitHub invokes custom shells.
     pub(crate) async fn run(
         mut self,
-        process: ProcessConfig,
+        process: ResolvedProcess,
         shell_command: Option<String>,
         shell_script: ShellScript,
         ctx: StepCtx,
@@ -563,7 +649,7 @@ impl Session {
             control,
         };
         let soft_fail = process.soft_fail.clone();
-        let outcome = Step::run(&ProcessStep, process, delegate).await;
+        let outcome = process.run_under(delegate).await;
         let commands = settle_sink(sink_task, &collected).await;
         self.conclude(outcome, &soft_fail, commands, &logs).await
     }
@@ -757,12 +843,12 @@ pub(crate) fn resolve_sentinel_text(
 /// runner-side truth the lowering could not know (host paths here; a one-shot
 /// container resolves against its mount).
 fn resolve_workspace_sentinels(
-    mut process: ProcessConfig,
+    process: ResolvedProcess,
     workspace: &str,
     runner_temp: &str,
     tool_cache: &str,
-) -> ProcessConfig {
-    let infallible: Result<(), Infallible> = try_map_process_texts(&mut process, |text| {
+) -> ResolvedProcess {
+    let resolved: Result<ResolvedProcess, Infallible> = process.try_map_texts(|text| {
         let ws = has_workspace_sentinel(text);
         let temp = has_runner_temp_sentinel(text);
         let tool = has_runner_tool_cache_sentinel(text);
@@ -781,8 +867,7 @@ fn resolve_workspace_sentinels(
         }
         Ok(Some(out))
     });
-    let _ = infallible;
-    process
+    resolved.expect("the resolver is infallible")
 }
 
 /// One name from an env-shaped map, exact then case-insensitive on a miss, as
@@ -801,14 +886,13 @@ where
 }
 
 /// Replace the secret sentinels the frontend lowered into the script and the
-/// env with their values. A whole-value `$secret` reference is left for the
-/// process step, which resolves it the same way.
+/// env with their values. A whole-value `$secret` reference is left as a
+/// reference; `steps::resolve_env_refs` resolves it at spawn the same way.
 fn resolve_secret_sentinels(
-    mut process: ProcessConfig,
+    process: ResolvedProcess,
     secrets: &dyn SecretProvider,
-) -> Result<ProcessConfig, StepFailure> {
-    try_map_process_texts(&mut process, |text| resolve_sentinel_text(text, secrets))?;
-    Ok(process)
+) -> Result<ResolvedProcess, StepFailure> {
+    process.try_map_texts(|text| resolve_sentinel_text(text, secrets))
 }
 
 /// `key=value` lines and `key<<DELIM … DELIM` blocks: the format shared by
@@ -1031,7 +1115,7 @@ mod tests {
 
         let literal = "\u{E000}petri-secret:NOT_A_SECRET\u{E001}";
         let secret_value = "value-\u{E002}-\u{E000}-\u{E001}";
-        let process = ProcessConfig {
+        let process = ResolvedProcess {
             run:                format!(
                 "{} {}",
                 escape_sentinel_text(literal),
@@ -1040,7 +1124,7 @@ mod tests {
             shell:              Shell::Sh,
             env:                BTreeMap::new(),
             working_dir:        None,
-            soft_fail:          steps::SoftFail::default(),
+            soft_fail:          SoftFail::default(),
             output_env_aliases: Vec::new(),
         };
         let secrets = executor::MapSecrets::from_pairs(&[("REAL", secret_value)]);

@@ -17,8 +17,9 @@ use std::sync::{Arc, RwLock};
 pub use ir::placeholder::SECRET_REF_KEY;
 use smol_str::SmolStr;
 
-/// Values shorter than this are not masked: masking `1` or `true` would
-/// turn every log into asterisks.
+/// Provider-resolved values shorter than this are not masked: masking `1` or
+/// `true` would turn every log into asterisks. An explicit
+/// [`Masker::register_explicit`] assertion bypasses the floor.
 pub(crate) const MIN_MASK_LENGTH: usize = 6;
 
 pub(crate) const MASK: &str = "***";
@@ -98,13 +99,27 @@ impl Masker {
         Self::default()
     }
 
-    /// Register a value. Short values are ignored, and multi-line secrets are
-    /// registered line by line as well as whole, so a secret that spans lines
-    /// is still masked in line-buffered output.
+    /// Register a provider-resolved value. Values shorter than
+    /// [`MIN_MASK_LENGTH`] are ignored — a provider can hold trivia like `1`
+    /// or `true`, and masking those would turn every log into asterisks.
+    /// Multi-line secrets are registered line by line as well as whole, so a
+    /// secret that spans lines is still masked in line-buffered output.
     pub fn register(&self, value: &str) {
+        self.register_with_floor(value, MIN_MASK_LENGTH);
+    }
+
+    /// Register a value a step explicitly asserted is sensitive
+    /// (`::add-mask::`). GitHub masks such a value at any length, so the
+    /// [`MIN_MASK_LENGTH`] floor does not apply here — the step vouched for
+    /// it. Only the empty string is still ignored.
+    pub fn register_explicit(&self, value: &str) {
+        self.register_with_floor(value, 1);
+    }
+
+    fn register_with_floor(&self, value: &str, floor: usize) {
         let mut values = self.values.write().expect("mask set is not poisoned");
         let mut add = |candidate: &str| {
-            if candidate.len() >= MIN_MASK_LENGTH && !values.iter().any(|v| v == candidate) {
+            if candidate.len() >= floor && !values.iter().any(|v| v == candidate) {
                 values.push(candidate.to_string());
             }
         };
@@ -234,6 +249,17 @@ impl SecretProvider for MapSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_registration_masks_below_the_provider_floor() {
+        let masker = Masker::new();
+        masker.register("id");
+        assert_eq!(masker.mask("id is id"), "id is id", "the floor holds");
+        masker.register_explicit("id");
+        assert_eq!(masker.mask("id is id"), "*** is ***", "asserted, so masked");
+        masker.register_explicit("");
+        assert_eq!(masker.mask("still readable"), "still readable");
+    }
 
     #[test]
     fn secret_debug_redacts_and_expose_reveals() {

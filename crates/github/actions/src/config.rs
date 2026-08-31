@@ -9,7 +9,6 @@
 //! would leak a crate-private type through that public interface.
 
 use std::collections::BTreeMap;
-use std::iter;
 use std::path::PathBuf;
 
 pub(crate) use frontend_gha::action::ActionLocation;
@@ -17,7 +16,7 @@ use frontend_gha::action::{resolve_manifest_path, validate_relative_action_path}
 use ir::Value;
 use serde::{Deserialize, Deserializer, de};
 use smol_str::SmolStr;
-use steps::{ProcessConfig, Shell, SoftFail, ValueOrSecretRef};
+use steps::{Shell, SoftFail, ValueOrSecretRef};
 
 /// Preparation required before a shell template runs its script file.
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -242,34 +241,6 @@ pub struct DockerfileImage {
     pub action: ActionLocation,
     /// The Dockerfile, relative to the action (`runs.image` as written).
     pub file:   String,
-}
-
-/// Every string in a process config that can carry a lowered GitHub
-/// placeholder.
-pub(crate) fn process_texts(process: &ProcessConfig) -> impl Iterator<Item = &str> {
-    iter::once(process.run.as_str()).chain(process.env.values().filter_map(|value| match value {
-        ValueOrSecretRef::Literal(Value::String(text)) => Some(text.as_str()),
-        _ => None,
-    }))
-}
-
-/// Replace selected text-bearing fields without duplicating the field walk in
-/// each placeholder resolver. `None` means the field is unchanged.
-pub(crate) fn try_map_process_texts<E>(
-    process: &mut ProcessConfig,
-    mut map: impl FnMut(&str) -> Result<Option<String>, E>,
-) -> Result<(), E> {
-    if let Some(text) = map(&process.run)? {
-        process.run = text;
-    }
-    for value in process.env.values_mut() {
-        if let ValueOrSecretRef::Literal(Value::String(text)) = value
-            && let Some(replacement) = map(text)?
-        {
-            *text = replacement;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

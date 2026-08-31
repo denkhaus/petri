@@ -151,6 +151,26 @@ impl Status {
         Self::Failure(FailureInfo::new(message))
     }
 
+    /// Rebuild this status with every failure message passed through `f` — the
+    /// driver's masking hook before a finish record is appended. `class` is
+    /// untouched: routing (`retry_on`) matches on it, and classes are static
+    /// tags or `exit_status:{n}`, never free text. The match is exhaustive on
+    /// purpose, so a variant that grows a message cannot dodge the mapping.
+    #[must_use]
+    pub fn map_messages(self, f: impl Fn(String) -> String) -> Self {
+        let map_info = |info: FailureInfo| FailureInfo {
+            message: f(info.message),
+            class:   info.class,
+        };
+        match self {
+            Self::Failure(info) => Self::Failure(map_info(info)),
+            Self::PartialSuccess { underlying } => Self::PartialSuccess {
+                underlying: underlying.map(map_info),
+            },
+            status @ (Self::Success | Self::Skipped | Self::Cancelled | Self::TimedOut) => status,
+        }
+    }
+
     /// A soft failure that keeps the real failure on the record.
     pub fn partial(underlying: FailureInfo) -> Self {
         Self::PartialSuccess {

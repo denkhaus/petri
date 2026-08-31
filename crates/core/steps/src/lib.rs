@@ -17,5 +17,5 @@ pub use outputs::{BAD_OUTPUT_CLASS, OutputError, parse as parse_outputs};
 pub use process::{
     Ending, PROCESS_KIND, ProcessConfig, ProcessStep, SECRET_MISPLACED_CLASS,
     SECRET_UNAVAILABLE_CLASS, Shell, SoftFail, ValueOrSecretRef, WORKSPACE_CLASS,
-    check_misplaced_secret, ending_outcome, ladder, stringify,
+    check_misplaced_secret, ending_outcome, ladder, resolve_env_refs, run_resolved, stringify,
 };

@@ -5,8 +5,9 @@
 //! [`RunStep`] runs the script with the `GITHUB_*` files in place and applies
 //! what the script wrote to them; an [`ActionStep`] stages a fetched JavaScript
 //! action and runs its entry point with `INPUT_*` set. Neither knows where the
-//! process runs: they build a `ProcessConfig` and hand it to the process step,
-//! swapping the log sender so `::` workflow commands are seen on the way past.
+//! process runs: they build the session's `ResolvedProcess` carrier and hand
+//! its resolved parts to the shared process-step machinery, swapping the log
+//! sender so `::` workflow commands are seen on the way past.
 //!
 //! The frontend (`frontend_gha`) lowers steps to these kinds and resolves
 //! actions to commits at load time through an [`ActionSource`];

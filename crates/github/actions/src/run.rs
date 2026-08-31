@@ -5,11 +5,13 @@ use std::path::{Component, PathBuf};
 use ir::{Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
-use steps::{ProcessConfig, Step, StepCtx, StepFailure, ValueOrSecretRef};
+use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef};
 
 use crate::config::RunConfig;
 use crate::gate;
-use crate::session::{REPO_DIR, Session, can_use_unsecure_commands, fold_into_outcome};
+use crate::session::{
+    REPO_DIR, ResolvedProcess, Session, can_use_unsecure_commands, fold_into_outcome,
+};
 
 /// The process step, with the `GITHUB_*` files around it.
 pub struct RunStep;
@@ -61,7 +63,7 @@ impl Step for RunStep {
             Some(_) => config.run,
             None => format!("{}{}", session.prologue(), config.run),
         };
-        let process = ProcessConfig {
+        let process = ResolvedProcess {
             run,
             shell: config.shell,
             env,

@@ -9,7 +9,7 @@ use frontend_gha::action::{ActionSourceError, PinnedAction};
 use ir::{Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
-use steps::{ProcessConfig, Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
+use steps::{Shell, Step, StepCtx, StepFailure, ValueOrSecretRef};
 use tokio::task;
 use tracing::Span;
 use tracing::field::{Empty, display};
@@ -17,8 +17,8 @@ use tracing::field::{Empty, display};
 use crate::config::{ActionConfig, ActionLocation, ShellScript};
 use crate::gate;
 use crate::session::{
-    REPO_DIR, RUNNER_DIR, Session, can_use_unsecure_commands, fold_into_outcome, shell_quote,
-    stringify,
+    REPO_DIR, RUNNER_DIR, ResolvedProcess, Session, can_use_unsecure_commands, fold_into_outcome,
+    shell_quote, stringify,
 };
 
 /// The action could not be fetched.
@@ -134,7 +134,7 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     let allow_unsecure = can_use_unsecure_commands(&env, &*ctx.env);
 
     let entry = format!("{action_dir}/{}", config.entry.trim_start_matches("./"));
-    let process = ProcessConfig {
+    let process = ResolvedProcess {
         run: format!("{}exec node {}\n", session.prologue(), shell_quote(&entry)),
         // Bash, not sh: GitHub execs `node` directly with the full env, and a
         // dash/busybox `sh` would drop the hyphenated `INPUT_*` names the

@@ -172,8 +172,10 @@ impl CommandSink {
         let forward: Vec<String> = {
             let mut effects = self.effects.lock().expect("effects are not poisoned");
             match cmd.name.as_str() {
+                // An explicit assertion masks at any length, as GitHub does;
+                // the short-value floor is for provider-resolved secrets.
                 "add-mask" => {
-                    self.masker.register(&cmd.message);
+                    self.masker.register_explicit(&cmd.message);
                     tracing::debug!(
                         mask_count = self.masker.len(),
                         "workflow command masked a value"
@@ -360,6 +362,14 @@ mod tests {
             (LogStream::Stdout, "::tok::".to_string()),
             (LogStream::Stdout, "Error: live".to_string()),
         ]);
+    }
+
+    /// `::add-mask::` is an explicit assertion, so even a value below the
+    /// provider floor is masked, as GitHub masks it.
+    #[tokio::test]
+    async fn add_mask_masks_short_values() {
+        let (_, _, masker) = drive(false, &[(LogStream::Stdout, "::add-mask::id7")]).await;
+        assert_eq!(masker.mask("token id7 leaked"), "token *** leaked");
     }
 
     /// Even with the unsecure opt-in, the runner's block list refuses
