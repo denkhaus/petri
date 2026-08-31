@@ -609,6 +609,7 @@ dependencies = [
  "clap",
  "petri-runtime",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

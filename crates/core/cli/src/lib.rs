@@ -20,9 +20,10 @@ use std::process::{self, ExitCode};
 use std::{env, fs};
 
 use clap::{Args, Parser, Subcommand};
+use runtime::driver::RunHandle;
 use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, Lowered};
-use runtime::ir::{Graph, RunStatus};
+use runtime::ir::{CancelScopeId, Graph, RunStatus};
 use runtime::{RunOptions, Runtime};
 use tracing::field::{Empty, display};
 
@@ -233,7 +234,18 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
     default_params(rt, target, &mut graph);
 
     eprintln!("run dir: {}", run_dir.display());
-    let report = match rt.run(graph).await {
+    let mut ctrl_c = None;
+    let outcome = rt
+        .run_verified(graph, |graph| {
+            let driver = rt.driver(graph);
+            ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(driver.handle())));
+            Ok::<_, engine::ReplayMismatch>(driver)
+        })
+        .await;
+    if let Some(task) = ctrl_c {
+        task.abort();
+    }
+    let report = match outcome {
         Ok(report) => report,
         Err(mismatch) => {
             eprintln!("error: {mismatch}");
@@ -263,6 +275,30 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Map Ctrl-C onto the driver's two-tier stop: the first cancels the run —
+/// cleanup steps and release still happen — and any further Ctrl-C feeds the
+/// kill tier. The task holds no cleanup-sensitive state; the run aborts it
+/// once the report is in.
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI tells the user what each Ctrl-C did on stderr"
+)]
+async fn cancel_on_ctrl_c(handle: RunHandle) {
+    let mut cancelled = false;
+    loop {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        if cancelled {
+            eprintln!("killing the run");
+        } else {
+            eprintln!("cancelling the run; Ctrl-C again to kill");
+            cancelled = true;
+        }
+        handle.cancel(CancelScopeId::ROOT).await;
     }
 }
 

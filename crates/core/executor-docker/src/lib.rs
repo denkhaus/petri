@@ -1198,24 +1198,44 @@ pub(crate) fn next_token() -> u64 {
     fields(operation = args.first().copied().unwrap_or("docker"))
 )]
 pub(crate) async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
-    let output = Command::new("docker")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| EnvError::Backend {
-            backend:   SmolStr::new("docker"),
-            operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
-            message:   e.to_string(),
-        })?;
+    let operation = args.first().copied().unwrap_or("docker");
+    let backend_error = |message: String| EnvError::Backend {
+        backend: SmolStr::new("docker"),
+        operation: SmolStr::new(operation),
+        message,
+    };
+    let wait = docker_wait(operation);
+    let output = time::timeout(
+        wait,
+        Command::new("docker")
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| backend_error(format!("timed out after {}s", wait.as_secs())))?
+    .map_err(|e| backend_error(e.to_string()))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
-    Err(EnvError::Backend {
-        backend:   SmolStr::new("docker"),
-        operation: SmolStr::new(args.first().copied().unwrap_or("docker")),
-        message:   String::from_utf8_lossy(&output.stderr).trim().to_string(),
-    })
+    Err(backend_error(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
+/// A wedged daemon fails the operation instead of hanging the run — release
+/// included, which the run report awaits. Image transfer and builds are
+/// legitimately slow on cold caches; everything else is control-plane work.
+const DOCKER_CLI_WAIT: Duration = Duration::from_secs(300);
+const DOCKER_IMAGE_WAIT: Duration = Duration::from_secs(1800);
+
+/// The bound for one `docker` CLI invocation, by its leading operation.
+fn docker_wait(operation: &str) -> Duration {
+    match operation {
+        "pull" | "build" => DOCKER_IMAGE_WAIT,
+        _ => DOCKER_CLI_WAIT,
+    }
 }
 
 /// [`run_docker`], with `input` written to the child's stdin — how a login's
@@ -1237,23 +1257,29 @@ async fn run_docker_stdin(
         operation: operation.clone(),
         message,
     };
-    let mut child = Command::new("docker")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| backend_error(e.to_string()))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input)
-            .await
+    let exchange = async {
+        let mut child = Command::new("docker")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|e| backend_error(e.to_string()))?;
-    }
-    let output = child
-        .wait_with_output()
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(input)
+                .await
+                .map_err(|e| backend_error(e.to_string()))?;
+        }
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| backend_error(e.to_string()))
+    };
+    let output = time::timeout(DOCKER_CLI_WAIT, exchange)
         .await
-        .map_err(|e| backend_error(e.to_string()))?;
+        .map_err(|_| backend_error(format!("timed out after {}s", DOCKER_CLI_WAIT.as_secs())))??;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }

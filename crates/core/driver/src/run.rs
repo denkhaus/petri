@@ -475,16 +475,19 @@ impl Driver {
         // report back before the environments are actually gone.
         let mut releases = Vec::new();
         for handle in mem::take(&mut self.releases) {
-            if let Ok(report) = handle.await {
-                if !report.is_clean() {
-                    tracing::warn!(
-                        problem_count = report.problems.len(),
-                        released_count = report.released.len(),
-                        kept_count = report.kept.len(),
-                        "environment release reported problems"
-                    );
+            match handle.await {
+                Ok(report) => {
+                    if !report.is_clean() {
+                        tracing::warn!(
+                            problem_count = report.problems.len(),
+                            released_count = report.released.len(),
+                            kept_count = report.kept.len(),
+                            "environment release reported problems"
+                        );
+                    }
+                    releases.push(report);
                 }
-                releases.push(report);
+                Err(error) => tracing::warn!(error = ?error, "environment release task panicked"),
             }
         }
 

@@ -812,10 +812,16 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
 
 /// Wait for process groups to drain without signalling any of them: the groups
 /// still alive at `deadline`, empty when all are gone. Members a KILL reached
-/// are zombies at worst (init reaps them); only live members count.
+/// are zombies at worst (init reaps them); only live members count. Each probe
+/// walks the whole process table, so it runs off the async workers.
 async fn await_drain(mut pgids: Vec<i32>, deadline: async_time::Instant) -> Vec<i32> {
     loop {
-        pgids.retain(|&pgid| live_group_members(pgid) > 0);
+        pgids = tokio::task::spawn_blocking(move || {
+            pgids.retain(|&pgid| live_group_members(pgid) > 0);
+            pgids
+        })
+        .await
+        .expect("the liveness probe closure only reads the process table");
         if pgids.is_empty() || async_time::Instant::now() >= deadline {
             return pgids;
         }
