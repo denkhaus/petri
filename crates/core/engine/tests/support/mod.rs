@@ -154,7 +154,7 @@ impl Harness {
                 };
                 let name = self
                     .state
-                    .graph
+                    .graph()
                     .node(resolved.node())
                     .map(|n| n.name.to_string())
                     .unwrap_or_default();
@@ -249,7 +249,7 @@ impl Harness {
                 Command::StartStep(resolved) => Some((
                     resolved.id(),
                     self.state
-                        .graph
+                        .graph()
                         .node(resolved.node())
                         .map(|n| n.name.to_string())
                         .unwrap_or_default(),

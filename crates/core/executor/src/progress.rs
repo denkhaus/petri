@@ -30,6 +30,10 @@ pub enum Progress {
 /// [`AcquireContext`]: crate::AcquireContext
 /// [`ContainerRunner`]: crate::ContainerRunner
 pub trait ProgressSink: Send + Sync {
+    /// Report one live event. The only in-tree implementor is the no-op
+    /// [`NoProgress`], so no test exercises what a real sink may assume about
+    /// ordering or blocking — implementors should treat this documented
+    /// contract as the authority, not any observed behavior.
     fn progress(&self, scope: ScopeId, event: Progress);
 }
 

@@ -12,7 +12,7 @@ use serde_json::{Map, json};
 
 use super::{ActionPlan, EnvValue, Lowering, if_expr_source, names_status_function};
 use crate::action::RUN_KIND;
-use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar};
+use crate::exprs::{ExprSite, LoweredScalar, SEP, Site, config_value, lower_scalar};
 use crate::gate::{self, Gate, GateOp};
 use crate::model::{Defaults, Job, Step};
 
@@ -72,7 +72,7 @@ impl<'a> Lowering<'_, 'a> {
             run_text,
             run.span(),
             &step_site,
-            true,
+            ExprSite::Step,
             true,
             self.b.exprs(),
             &mut self.diags,
@@ -129,7 +129,7 @@ impl<'a> Lowering<'_, 'a> {
                 text,
                 wd.span(),
                 &step_site,
-                true,
+                ExprSite::Step,
                 false,
                 self.b.exprs(),
                 &mut self.diags,
@@ -188,7 +188,15 @@ impl<'a> Lowering<'_, 'a> {
         let mut scratch = Diagnostics::new();
         let lowered = {
             let diags = if quiet { &mut scratch } else { &mut self.diags };
-            lower_scalar(text, coe.span(), site, true, false, self.b.exprs(), diags)?
+            lower_scalar(
+                text,
+                coe.span(),
+                site,
+                ExprSite::Step,
+                false,
+                self.b.exprs(),
+                diags,
+            )?
         };
         match lowered {
             LoweredScalar::Expr(id) => {
@@ -239,7 +247,7 @@ impl<'a> Lowering<'_, 'a> {
             env_config.insert(key.clone(), json!({ SECRET_REF_KEY: name }));
         }
         for (key, node) in &step.env {
-            match self.env_value(node, step_site, true) {
+            match self.env_value(node, step_site, ExprSite::Step) {
                 Some(EnvValue::Plain(v)) => {
                     step_site.step_env.insert(key.clone(), v.clone());
                     env_config.insert(key.clone(), match v {
@@ -295,7 +303,7 @@ impl<'a> Lowering<'_, 'a> {
         {
             return self.step_gate_text(&source, site, span, prereqs);
         }
-        let cond = self.condition(node, site, true, span);
+        let cond = self.condition(node, site, ExprSite::Step, span);
         self.collapse_gate(prereqs, cond)
     }
 
@@ -312,7 +320,7 @@ impl<'a> Lowering<'_, 'a> {
         {
             return self.lazy_gate(&ast, site, &span, prereqs);
         }
-        let cond = self.condition_text(source, site, true, span);
+        let cond = self.condition_text(source, site, ExprSite::Step, span);
         self.collapse_gate(prereqs, cond)
     }
 
@@ -338,7 +346,7 @@ impl<'a> Lowering<'_, 'a> {
     fn lazy_gate(&mut self, ast: &Expr, site: &Site, span: &Span, prereqs: &[ExprId]) -> Value {
         let mut terms: Vec<Gate> = prereqs.iter().map(|id| Gate::expr(*id)).collect();
         if !names_status_function(ast) {
-            let success = site.status_function(self.b.exprs(), "success", true);
+            let success = site.status_function(self.b.exprs(), "success", ExprSite::Step);
             terms.push(Gate::expr(success));
         }
         if let Some(tree) = gate::condition_tree(ast, site, span, self.b.exprs(), &mut self.diags) {

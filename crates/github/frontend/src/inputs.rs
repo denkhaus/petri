@@ -16,7 +16,7 @@ use frontend::expr::lower::builtin;
 use frontend::yaml::Node;
 use ir::{ExprId, ExprTable, Value};
 
-use crate::exprs::{LoweredScalar, Site, escape_sentinel_text, lower_scalar};
+use crate::exprs::{ExprSite, LoweredScalar, Site, escape_sentinel_text, lower_scalar};
 use crate::model::{InputDecl, InputType};
 
 /// One frame's bound inputs: the expressions the `inputs` context resolves to,
@@ -135,7 +135,15 @@ fn bind_value(
     }
     // Secrets are rejected here (`env_shaped: false`): a call passes secrets
     // through `secrets:`, never `with:`, exactly as GitHub requires.
-    match lower_scalar(text, node.span(), caller_site, false, false, table, diags)? {
+    match lower_scalar(
+        text,
+        node.span(),
+        caller_site,
+        ExprSite::Job,
+        false,
+        table,
+        diags,
+    )? {
         LoweredScalar::Literal(Value::String(s)) => {
             let value = Value::String(escape_sentinel_text(&s));
             Some((table.lit(value.clone()), Some(value)))

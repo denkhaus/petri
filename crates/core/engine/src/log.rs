@@ -167,7 +167,7 @@ impl EventLog {
         Ok(Self { version, records })
     }
 
-    pub fn append(&mut self, source: EventSource, event: Event) -> u64 {
+    pub(crate) fn append(&mut self, source: EventSource, event: Event) -> u64 {
         let seq = self.records.len() as u64;
         self.records.push(EventRecord { seq, source, event });
         seq

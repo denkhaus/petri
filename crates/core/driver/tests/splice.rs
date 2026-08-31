@@ -166,7 +166,7 @@ async fn a_secret_bearing_request_fails_the_firing_and_stays_out_of_the_log() {
     let info = record.outcome.status.failure_info().expect("a failure");
     assert_eq!(info.class, INVALID_SPLICE_CLASS);
     assert_eq!(
-        report.state.graph.nodes.len(),
+        report.state.graph().nodes.len(),
         before,
         "no fragment applied"
     );

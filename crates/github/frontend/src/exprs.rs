@@ -92,6 +92,17 @@ impl SecretMap {
     }
 }
 
+/// Which site an expression lowers at: a step's position (`if:`, `run:`,
+/// `env:`, `with:`) or a job's (`if:`, `env:`, outputs). Step positions see
+/// the job's earlier steps and the runner-side sentinels; job positions see
+/// the needed jobs. [`Site`] carries the surroundings; this says which of the
+/// two readings of them applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExprSite {
+    Step,
+    Job,
+}
+
 /// Where an expression sits.
 #[derive(Clone)]
 pub(crate) struct Site {
@@ -330,11 +341,11 @@ impl Site {
         &self,
         table: &mut ExprTable,
         name: &str,
-        at_step: bool,
+        at: ExprSite,
     ) -> ExprId {
-        match (name, at_step) {
+        match (name, at) {
             ("always", _) => table.lit(true),
-            ("success", true) => {
+            ("success", ExprSite::Step) => {
                 let failed = self.earlier_step_failed(table);
                 let cancelled = self.earlier_step_cancelled(table);
                 let bad = table.binary(BinOp::Or, failed, cancelled);
@@ -342,19 +353,18 @@ impl Site {
                 let bad = table.binary(BinOp::Or, bad, interrupted);
                 table.unary(UnOp::Not, bad)
             }
-            ("failure", true) => self.earlier_step_failed(table),
-            ("success", false) => {
+            ("failure", ExprSite::Step) => self.earlier_step_failed(table),
+            ("success", ExprSite::Job) => {
                 let ok = self.needs_succeeded(table);
                 let scoped = table.var("scope_cancelled");
                 let not_cancelled = table.unary(UnOp::Not, scoped);
                 table.binary(BinOp::And, ok, not_cancelled)
             }
-            ("failure", false) => self.needs_failed(table),
+            ("failure", ExprSite::Job) => self.needs_failed(table),
             ("cancelled", _) => {
-                let base = if at_step {
-                    self.earlier_step_cancelled(table)
-                } else {
-                    self.needs_cancelled(table)
+                let base = match at {
+                    ExprSite::Step => self.earlier_step_cancelled(table),
+                    ExprSite::Job => self.needs_cancelled(table),
                 };
                 let scoped = table.var("scope_cancelled");
                 table.binary(BinOp::Or, base, scoped)
@@ -367,7 +377,7 @@ impl Site {
 /// How the lowering resolves GitHub's contexts.
 pub(crate) struct GhaRoots<'s> {
     pub site:                  &'s Site,
-    pub at_step:               bool,
+    pub at:                    ExprSite,
     pub diags:                 &'s mut Diagnostics,
     pub span:                  Span,
     /// Set when a `secrets.*` reference was seen; the caller decides whether
@@ -647,7 +657,7 @@ impl Roots for GhaRoots<'_> {
             // is resolved at acquire, where nothing could substitute — the
             // reference stays a parameter read there (null, rendered empty).
             "github"
-                if self.at_step
+                if self.at == ExprSite::Step
                     && matches!(path, [key] if key.eq_ignore_ascii_case("workspace")) =>
             {
                 self.saw_workspace = true;
@@ -660,7 +670,8 @@ impl Roots for GhaRoots<'_> {
             // position stays a parameter read — null, rendered empty — as
             // `github.workspace` does. `runner.os/arch/name` stay parameters.
             "runner"
-                if self.at_step && matches!(path, [key] if key.eq_ignore_ascii_case("temp")) =>
+                if self.at == ExprSite::Step
+                    && matches!(path, [key] if key.eq_ignore_ascii_case("temp")) =>
             {
                 self.saw_runner_temp = true;
                 Some(table.lit(RUNNER_TEMP_SENTINEL))
@@ -673,7 +684,7 @@ impl Roots for GhaRoots<'_> {
             // ([`RUNNER_TOOL_CACHE_SENTINEL`]). `runner.os/arch/name` stay
             // parameters.
             "runner"
-                if self.at_step
+                if self.at == ExprSite::Step
                     && matches!(path, [key] if key.eq_ignore_ascii_case("tool_cache")) =>
             {
                 self.saw_runner_tool_cache = true;
@@ -703,7 +714,7 @@ impl Roots for GhaRoots<'_> {
                         got:      args.len(),
                     }));
                 }
-                Some(Ok(self.site.status_function(table, n, self.at_step)))
+                Some(Ok(self.site.status_function(table, n, self.at)))
             }
             "hashfiles" => {
                 // Literal patterns lower to a sentinel the step resolves against
@@ -821,14 +832,14 @@ pub(crate) struct LoweredExpr {
 pub(crate) fn lower_expr(
     ast: &Expr,
     site: &Site,
-    at_step: bool,
+    at: ExprSite,
     span: &Span,
     table: &mut ExprTable,
     diags: &mut Diagnostics,
 ) -> Option<LoweredExpr> {
     let mut roots = GhaRoots {
         site,
-        at_step,
+        at,
         diags,
         span: span.clone(),
         saw_secret: false,
@@ -925,7 +936,7 @@ pub(crate) fn lower_scalar(
     text: &str,
     span: Span,
     site: &Site,
-    at_step: bool,
+    at: ExprSite,
     env_shaped: bool,
     table: &mut ExprTable,
     diags: &mut Diagnostics,
@@ -1001,12 +1012,12 @@ pub(crate) fn lower_scalar(
             // operator or function the engine would evaluate over the marker,
             // so those fall through and read the scope env, as conditions do.
             if env_shaped
-                && at_step
+                && at == ExprSite::Step
                 && let Some(name) = bare_env_name(&ast)
             {
                 return Ok(table.lit(env_sentinel(&name)));
             }
-            let lowered = lower_expr(&ast, site, at_step, &span, table, diags).ok_or(())?;
+            let lowered = lower_expr(&ast, site, at, &span, table, diags).ok_or(())?;
             if lowered.saw_secret && !env_shaped {
                 diags.unsupported(
                     "secrets.expression",

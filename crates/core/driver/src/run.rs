@@ -120,7 +120,7 @@ impl RunConfig {
     }
 
     #[must_use]
-    pub fn echoing(mut self, echo: bool) -> Self {
+    pub fn with_echo(mut self, echo: bool) -> Self {
         self.echo_logs = echo;
         self
     }
@@ -467,7 +467,7 @@ impl Driver {
         fields(
             run_dir = %self.config.run_dir.display(),
             resumed = self.resume.is_some(),
-            node_count = self.engine.graph.nodes.len(),
+            node_count = self.engine.graph().nodes.len(),
         )
     )]
     pub async fn run(mut self) -> RunReport {
@@ -848,14 +848,14 @@ impl Driver {
     fn scope_spec(&self, scope: ScopeId) -> ScopeSpec {
         let mut spec =
             ScopeSpec::new(scope, &format!("scope-{}", scope.raw())).with_grace(self.config.grace);
-        let Some(definition) = self.engine.graph.scope(scope) else {
+        let Some(definition) = self.engine.graph().scope(scope) else {
             return spec;
         };
         // Scope env is resolved once, against the run parameters and nothing else:
         // it cannot depend on a firing.
         let empty_run = RunContext::new();
         let mut params_only = StaticCtx::new();
-        for (key, value) in &self.engine.graph.params {
+        for (key, value) in &self.engine.graph().params {
             params_only.set(key, value.clone());
         }
         let env_context = EvalEnv::new(&Value::Null, &empty_run, &params_only);
@@ -865,7 +865,7 @@ impl Driver {
                 let resolved = match value {
                     ExprOrValue::Value(v) => value_to_string(v),
                     ExprOrValue::Expr(id) => {
-                        match eval(&self.engine.graph.exprs, *id, &env_context) {
+                        match eval(&self.engine.graph().exprs, *id, &env_context) {
                             Ok(v) => value_to_string(&v),
                             Err(_) => continue,
                         }
@@ -941,7 +941,7 @@ impl Driver {
         };
         // One lookup for both: a firing whose node left the graph has no runner
         // either, and fails here rather than carrying a nameless step forward.
-        let Some((name, kind, runner)) = self.engine.graph.node(node).and_then(|n| {
+        let Some((name, kind, runner)) = self.engine.graph().node(node).and_then(|n| {
             let runner = self.runners.get(&n.step.kind)?;
             Some((n.name.clone(), n.step.kind.clone(), runner))
         }) else {
@@ -1027,7 +1027,7 @@ impl Driver {
 
         // The per-attempt timeout. `Budget.timeout` is per attempt, not per firing.
         let mut timeout = None;
-        if let Some(limit) = self.engine.graph.node(node).map(|n| n.budget.timeout)
+        if let Some(limit) = self.engine.graph().node(node).map(|n| n.budget.timeout)
             && !limit.is_zero()
         {
             let tx = self.tx.clone();

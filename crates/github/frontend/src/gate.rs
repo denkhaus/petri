@@ -45,8 +45,8 @@ use ir::{ExprTable, Value};
 use serde_json::json;
 
 use crate::exprs::{
-    RUNNER_TEMP_SENTINEL, RUNNER_TOOL_CACHE_SENTINEL, Site, WORKSPACE_SENTINEL, hashfiles_sentinel,
-    literal_hashfiles_patterns, lower_expr,
+    ExprSite, RUNNER_TEMP_SENTINEL, RUNNER_TOOL_CACHE_SENTINEL, Site, WORKSPACE_SENTINEL,
+    hashfiles_sentinel, literal_hashfiles_patterns, lower_expr,
 };
 
 /// Config key for an interior node's operator.
@@ -491,7 +491,7 @@ fn engine_leaf(
     table: &mut ExprTable,
     diags: &mut Diagnostics,
 ) -> Option<Gate> {
-    let lowered = lower_expr(ast, site, true, span, table, diags)?;
+    let lowered = lower_expr(ast, site, ExprSite::Step, span, table, diags)?;
     if lowered.saw_secret {
         diags.unsupported(
             "secrets.expression",

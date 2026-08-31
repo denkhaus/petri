@@ -397,7 +397,7 @@ impl Runtime {
             .with_grace(self.options.grace)
             .with_cleanup_grace(self.options.cleanup_grace)
             .with_retention(self.options.retention)
-            .echoing(self.options.echo);
+            .with_echo(self.options.echo);
         config.hard_deadline_slack = self.options.hard_deadline_slack;
         config
     }

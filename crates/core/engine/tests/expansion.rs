@@ -74,7 +74,7 @@ fn for_each_clones_the_node_and_the_collector_waits_for_all_of_them() {
     // A splice clones the node wholesale, so a clone carries the template's `meta`.
     let clone = h
         .state
-        .graph
+        .graph()
         .nodes
         .iter()
         .find(|n| n.name == "deploy#1")
@@ -200,6 +200,7 @@ fn fail_fast_cancels_the_sibling_clones() {
 fn a_tolerated_clone_failure_does_not_trigger_fail_fast() {
     let mut graph = matrix_graph(None, true);
     graph
+        .body
         .nodes
         .iter_mut()
         .find(|n| n.name == "deploy")
@@ -232,6 +233,7 @@ fn a_tolerated_clone_failure_does_not_trigger_fail_fast() {
 fn fail_fast_still_fires_a_marked_collector() {
     let mut graph = matrix_graph(None, true);
     graph
+        .body
         .nodes
         .iter_mut()
         .find(|n| n.name == "collect")
@@ -343,7 +345,7 @@ fn superseded_template_edges_do_not_deadlock_the_collector() {
     // The template edge is still in the graph — superseding is not deletion, so the
     // log and the graph still describe what was there.
     assert!(
-        h.state.graph.edge(template_edge).is_some(),
+        h.state.graph().edge(template_edge).is_some(),
         "the template edge is kept, only discounted"
     );
     assert!(h.state.is_quiescent());
@@ -410,7 +412,7 @@ fn two_expansions_in_one_cascade_get_distinct_ids() {
     assert_eq!(h.run(), RunStatus::Success);
     assert_eq!(h.start_count("a"), 2);
     assert_eq!(h.start_count("z"), 3);
-    for (index, node) in h.state.graph.nodes.iter().enumerate() {
+    for (index, node) in h.state.graph().nodes.iter().enumerate() {
         assert_eq!(
             node.id.index(),
             index,

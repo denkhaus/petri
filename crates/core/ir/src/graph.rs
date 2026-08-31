@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -872,17 +872,13 @@ pub struct Graph<S = Live> {
     pub completion: Completion<S>,
 }
 
+/// Deliberately read-only forwarding: reads go through `Deref`, while every
+/// topology mutation names `.body` explicitly. There is no `DerefMut`.
 impl<S> Deref for Graph<S> {
     type Target = GraphBody<S>;
 
     fn deref(&self) -> &Self::Target {
         &self.body
-    }
-}
-
-impl<S> DerefMut for Graph<S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.body
     }
 }
 

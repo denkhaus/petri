@@ -74,7 +74,7 @@ fn a_failed_uploader_applies_the_fragment_but_starts_none_of_it() {
     )]));
     assert_eq!(h.run(), RunStatus::Failed);
     assert_eq!(h.start_count("a"), 0);
-    assert!(h.state.graph.nodes.iter().any(|n| n.name == "a"));
+    assert!(h.state.graph().nodes.iter().any(|n| n.name == "a"));
     h.verify_replay();
 }
 
@@ -97,7 +97,7 @@ fn the_deny_default_rejects_and_routes_invalid_splice() {
     let info = record.outcome.status.failure_info().expect("a failure");
     assert_eq!(info.class, INVALID_SPLICE_CLASS);
     assert!(info.message.contains("request 0"), "{}", info.message);
-    assert_eq!(h.state.graph.nodes.len(), before, "no fragment applied");
+    assert_eq!(h.state.graph().nodes.len(), before, "no fragment applied");
     assert_eq!(h.start_count("down"), 1);
     h.verify_replay();
 }
@@ -107,7 +107,7 @@ fn the_cap_blocks_minting_and_equal_authority_chaining_works() {
     // Minting: a fragment node declaring more authority than its uploader.
     let graph = uploader_graph(SplicePolicy::Append);
     let mut minted = fragment(&["a"]);
-    minted.nodes[0].splice_policy = SplicePolicy::Replace {
+    minted.body.nodes[0].splice_policy = SplicePolicy::Replace {
         scope: ReplaceScope::AllPending,
     };
     let mut h = Harness::new(graph.clone()).results(BTreeMap::from([(
@@ -126,7 +126,7 @@ fn the_cap_blocks_minting_and_equal_authority_chaining_works() {
     // Chaining: equal authority delegates, and the delegated node uploads too.
     let graph = uploader_graph(SplicePolicy::Append);
     let mut chained = fragment(&["a"]);
-    chained.nodes[0].splice_policy = SplicePolicy::Append;
+    chained.body.nodes[0].splice_policy = SplicePolicy::Append;
     let mut h = Harness::new(graph.clone()).results(BTreeMap::from([
         (
             "up",
@@ -158,7 +158,11 @@ fn a_failing_second_request_leaves_no_fragment_and_no_context_updates() {
     let mut h = Harness::new(graph.clone()).results(BTreeMap::from([("up", outcome)]));
     assert_eq!(h.run(), RunStatus::Failed);
 
-    assert_eq!(h.state.graph.nodes.len(), before, "nothing partial commits");
+    assert_eq!(
+        h.state.graph().nodes.len(),
+        before,
+        "nothing partial commits"
+    );
     assert!(
         h.state.run_context().get("left_behind").is_none(),
         "a rejected splice drops the outcome's context updates"
@@ -202,7 +206,7 @@ fn a_later_request_may_reference_an_earlier_ones_node_but_not_the_reverse() {
         splice_outcome(vec![depends, SpliceRequest::append(fragment(&["x"]))]),
     )]));
     assert_eq!(h.run(), RunStatus::Failed);
-    assert_eq!(h.state.graph.nodes.len(), before);
+    assert_eq!(h.state.graph().nodes.len(), before);
     h.verify_replay();
 }
 
@@ -211,7 +215,7 @@ fn a_later_request_may_reference_an_earlier_ones_node_but_not_the_reverse() {
 #[test]
 fn invalid_splice_is_an_ordinary_retry_class_and_a_later_attempt_can_succeed() {
     let mut graph = uploader_graph(SplicePolicy::Append);
-    graph.nodes[0].retry =
+    graph.body.nodes[0].retry =
         ir::RetryPolicy::attempts(2).with_retry_on(ir::RetryOn::classes(&[INVALID_SPLICE_CLASS]));
     let before = graph.nodes.len();
 
@@ -234,7 +238,7 @@ fn invalid_splice_is_an_ordinary_retry_class_and_a_later_attempt_can_succeed() {
     assert_eq!(h.start_count("up"), 2);
     assert_eq!(h.start_count("a"), 1);
     assert_eq!(
-        h.state.graph.nodes.len(),
+        h.state.graph().nodes.len(),
         before + 1,
         "only the final attempt's fragment applied"
     );
@@ -252,7 +256,7 @@ fn invalid_splice_is_an_ordinary_retry_class_and_a_later_attempt_can_succeed() {
 #[test]
 fn a_matching_retry_leaves_graph_and_context_unchanged() {
     let mut graph = uploader_graph(SplicePolicy::Append);
-    graph.nodes[0].retry =
+    graph.body.nodes[0].retry =
         ir::RetryPolicy::attempts(2).with_retry_on(ir::RetryOn::classes(&[INVALID_SPLICE_CLASS]));
     let before = graph.nodes.len();
 
@@ -266,7 +270,7 @@ fn a_matching_retry_leaves_graph_and_context_unchanged() {
     h.finish(*firing, bad);
 
     // Mid-backoff: nothing recorded, nothing merged, nothing spliced.
-    assert_eq!(h.state.graph.nodes.len(), before);
+    assert_eq!(h.state.graph().nodes.len(), before);
     assert!(h.state.run_context().get("poison").is_none());
     assert!(h.state.history().is_empty());
     assert_eq!(h.state.live_firings().count(), 1, "the firing stays live");
@@ -539,7 +543,7 @@ fn own_batches_retracts_the_same_uploaders_earlier_batch_across_generations() {
     let wb = h
         .state
         .live_firings()
-        .find(|f| h.state.graph.node(f.node).is_some_and(|n| n.name == "wb"))
+        .find(|f| h.state.graph().node(f.node).is_some_and(|n| n.name == "wb"))
         .map(|f| f.id)
         .expect("wb is live");
     h.finish(wb, Outcome::success(Value::Null));
@@ -588,7 +592,7 @@ fn a_retracted_admission_readmits_in_a_future_generation() {
         ir::Arm::when(head, first_lap).with_back(),
     ]]);
     b.link(b2, x);
-    b.graph_mut().entry = vec![head, up];
+    b.graph_mut().body.entry = vec![head, up];
     let graph = b.build();
 
     let mut h = Harness::new(graph);
@@ -643,7 +647,7 @@ fn a_reference_to_a_key_retracted_by_the_same_transaction_rejects() {
     b.node_mut(up).splice_policy = SplicePolicy::Replace {
         scope: ReplaceScope::AllPending,
     };
-    b.graph_mut().entry = vec![early, slow, up];
+    b.graph_mut().body.entry = vec![early, slow, up];
     let graph = b.build();
     let before = graph.nodes.len();
 
@@ -667,7 +671,7 @@ fn a_reference_to_a_key_retracted_by_the_same_transaction_rejects() {
         ]),
     );
     // Atomic: no fragment, no retraction, and the canonical class.
-    assert_eq!(h.state.graph.nodes.len(), before);
+    assert_eq!(h.state.graph().nodes.len(), before);
     let info = h
         .state
         .history()
@@ -706,7 +710,7 @@ fn a_request_from_a_cancelled_scope_is_a_logged_no_op() {
         *firing,
         splice_outcome(vec![SpliceRequest::append(fragment(&["a"]))]),
     );
-    assert_eq!(h.state.graph.nodes.len(), before, "no fragment applied");
+    assert_eq!(h.state.graph().nodes.len(), before, "no fragment applied");
     assert!(h.state.errors().is_empty());
     let record = h
         .state

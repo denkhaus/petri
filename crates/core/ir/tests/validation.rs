@@ -225,7 +225,7 @@ fn edge_ids_must_be_unique() {
     let mut graph = b.build();
     // Force a collision.
     let clashing = graph.nodes[a.index()].routing.groups[0].arms[0].id;
-    graph.nodes[a.index()].routing.groups[1].arms[0].id = clashing;
+    graph.body.nodes[a.index()].routing.groups[1].arms[0].id = clashing;
     assert!(
         errors(&graph)
             .iter()
@@ -367,7 +367,7 @@ fn structural_problems_are_reported() {
     let scope = ScopeId::new(0);
     let a = b.add_step("a", scope, NOOP);
     let mut graph = b.build();
-    graph.nodes[a.index()].routing =
+    graph.body.nodes[a.index()].routing =
         Routing::next(Edge::always(ir::EdgeId::new(0), NodeId::new(9)));
     assert!(
         errors(&graph)

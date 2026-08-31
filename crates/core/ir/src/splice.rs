@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -110,17 +110,13 @@ pub struct GraphFragment {
     pub exits: Vec<NodeId<Local>>,
 }
 
+/// Deliberately read-only forwarding: reads go through `Deref`, while every
+/// topology mutation names `.body` explicitly. There is no `DerefMut`.
 impl Deref for GraphFragment {
     type Target = GraphBody<Local>;
 
     fn deref(&self) -> &Self::Target {
         &self.body
-    }
-}
-
-impl DerefMut for GraphFragment {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.body
     }
 }
 

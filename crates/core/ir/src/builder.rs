@@ -97,7 +97,7 @@ impl<S> GraphBuilder<S> {
     }
 
     pub fn exprs(&mut self) -> &mut ExprTable<S> {
-        &mut self.graph.exprs
+        &mut self.graph.body.exprs
     }
 
     pub fn graph(&self) -> &Graph<S> {
@@ -114,7 +114,7 @@ impl<S> GraphBuilder<S> {
         );
         let mut scope = scope;
         scope.id = id;
-        self.graph.scopes.push(scope);
+        self.graph.body.scopes.push(scope);
         id
     }
 
@@ -123,7 +123,7 @@ impl<S> GraphBuilder<S> {
         let id = NodeId::new(
             u32::try_from(self.graph.nodes.len()).expect("a graph never exceeds u32::MAX nodes"),
         );
-        self.graph.nodes.push(Node::new(id, name, scope, step));
+        self.graph.body.nodes.push(Node::new(id, name, scope, step));
         id
     }
 
@@ -137,8 +137,13 @@ impl<S> GraphBuilder<S> {
         self.add_node(name, scope, StepRef::new(kind, Value::Null))
     }
 
+    /// # Panics
+    ///
+    /// Panics when `id` did not come from this builder: the builder only hands
+    /// out ids for nodes it holds.
     pub fn node_mut(&mut self, id: NodeId<S>) -> &mut Node<S> {
         self.graph
+            .body
             .node_mut(id)
             .expect("builder handed out a valid node id")
     }
@@ -165,7 +170,7 @@ impl<S> GraphBuilder<S> {
     }
 
     pub fn mark_entry(&mut self, node: NodeId<S>) {
-        self.graph.entry.push(node);
+        self.graph.body.entry.push(node);
     }
 
     pub fn next_edge_id(&mut self) -> EdgeId<S> {
@@ -259,7 +264,7 @@ impl<S> GraphBuilder<S> {
                 .map(|n| n.id)
                 .filter(|id| self.graph.in_degree(*id) == 0)
                 .collect();
-            self.graph.entry = entries;
+            self.graph.body.entry = entries;
         }
     }
 }

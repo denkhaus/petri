@@ -108,7 +108,7 @@ fn seed_edges_stay_out_of_the_graph() {
     );
 
     // The live graph grew clone edges, and none of them is a seed edge.
-    let live: BTreeSet<EdgeId> = h.state.graph.edges().map(|e| e.id).collect();
+    let live: BTreeSet<EdgeId> = h.state.graph().edges().map(|e| e.id).collect();
     assert!(
         seeds.is_disjoint(&live),
         "a seed edge appeared in a routing group"
@@ -159,7 +159,7 @@ fn clone_entries_are_seeded_the_same_way() {
     let seeded_nodes: Vec<String> = h
         .state
         .seed_edges()
-        .filter_map(|(_, node)| h.state.graph.node(node))
+        .filter_map(|(_, node)| h.state.graph().node(node))
         .map(|n| n.name.to_string())
         .collect();
     assert!(seeded_nodes.contains(&"setup#0".to_string()));

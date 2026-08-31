@@ -190,7 +190,7 @@ pub fn normalize_loop_heads(graph: &mut Graph) -> usize {
         .collect();
     let mut changed = 0;
     for head in heads {
-        if let Some(node) = graph.node_mut(head)
+        if let Some(node) = graph.body.node_mut(head)
             && node.join == (JoinPolicy::Quorum { n: 1 })
         {
             node.join = JoinPolicy::Any;

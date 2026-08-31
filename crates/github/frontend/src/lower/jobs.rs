@@ -13,7 +13,9 @@ use serde_json::{Map, json};
 use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
 use crate::action::Phase;
 use crate::call::CalleeSource;
-use crate::exprs::{LoweredScalar, SEP, Site, lower_scalar, result_priority, whole_value_secret};
+use crate::exprs::{
+    ExprSite, LoweredScalar, SEP, Site, lower_scalar, result_priority, whole_value_secret,
+};
 use crate::model::{Defaults, Job};
 use crate::{expr_lower, runs_on};
 
@@ -171,7 +173,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         };
         let mut site = self.base_site(job);
         let items = self.apply_strategy(job, &mut site);
-        let gate = self.condition(job.condition, &site, false, job.span.clone());
+        let gate = self.condition(job.condition, &site, ExprSite::Job, job.span.clone());
         let gate = self.wrap_call_admission(gate, &site);
         if let Some(gate) = gate {
             self.b.set_precondition(start, gate);
@@ -221,7 +223,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // Declared outputs, lowered over the `jobs.*` context.
         let outputs = match &callee_wf.call {
-            Some(interface) => self.lower_outputs(&interface.outputs, &exit_site, false),
+            Some(interface) => self.lower_outputs(&interface.outputs, &exit_site, ExprSite::Job),
             None => Vec::new(),
         };
         let expanded = exit_site.in_expansion;
@@ -330,7 +332,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             // diagnostics (if any) were reported then.
             let mut scratch = Diagnostics::new();
             let saved = mem::replace(&mut self.diags, scratch);
-            let value = self.env_value(&node, &site, false);
+            let value = self.env_value(&node, &site, ExprSite::Job);
             scratch = mem::replace(&mut self.diags, saved);
             let _ = scratch;
             if let Some(EnvValue::Secret(name)) = value {
@@ -344,7 +346,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         // The gate: needs + the job's own if — and, inside a called workflow,
         // the call's own admission.
-        let gate = self.condition(job.condition, &site, false, job.span.clone());
+        let gate = self.condition(job.condition, &site, ExprSite::Job, job.span.clone());
         let gate = self.wrap_call_admission(gate, &site);
         if let Some(gate) = gate {
             self.b.set_precondition(start, gate);
@@ -637,7 +639,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
             kept.push((name.clone(), *node));
         }
-        let outputs = self.lower_outputs(&kept, site, true);
+        let outputs = self.lower_outputs(&kept, site, ExprSite::Step);
         self.summary_object(result, &outputs, site.matrix)
     }
 
@@ -648,7 +650,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         &mut self,
         entries: &[(String, Node<'_>)],
         site: &Site,
-        at_step: bool,
+        at: ExprSite,
     ) -> Vec<(String, ExprId)> {
         let mut outputs = Vec::new();
         for (name, node) in entries {
@@ -657,7 +659,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 text,
                 node.span(),
                 site,
-                at_step,
+                at,
                 false,
                 self.b.exprs(),
                 &mut self.diags,
@@ -753,7 +755,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 text,
                 node.span(),
                 site,
-                false,
+                ExprSite::Job,
                 false,
                 self.b.exprs(),
                 &mut self.diags,

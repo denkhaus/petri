@@ -30,7 +30,7 @@ use self::uses::ResolveFailure;
 use crate::action::{ActionLocation, ActionSource, Phase, PinnedAction};
 use crate::call::{self, CalleeSource};
 use crate::composite::{DockerAction, NodeAction};
-use crate::exprs::{LoweredScalar, SEP, SecretMap, Site, lower_scalar};
+use crate::exprs::{ExprSite, LoweredScalar, SEP, SecretMap, Site, lower_scalar};
 use crate::model::{Job, Step, Workflow};
 use crate::runners::RunnerMap;
 use crate::{identity, runs_on};
@@ -363,11 +363,11 @@ impl<'a> Lowering<'_, 'a> {
         &mut self,
         node: Option<Node<'_>>,
         site: &Site,
-        at_step: bool,
+        at: ExprSite,
         span: Span,
     ) -> Option<ExprId> {
         let Some(node) = node else {
-            return Some(site.status_function(self.b.exprs(), "success", at_step));
+            return Some(site.status_function(self.b.exprs(), "success", at));
         };
         let Some(scalar) = node.as_scalar() else {
             self.diags.error(
@@ -379,7 +379,7 @@ impl<'a> Lowering<'_, 'a> {
         };
         if let Some(b) = scalar.as_bool() {
             let lit = self.b.exprs().lit(b);
-            let success = site.status_function(self.b.exprs(), "success", at_step);
+            let success = site.status_function(self.b.exprs(), "success", at);
             return Some(self.b.exprs().binary(BinOp::And, success, lit));
         }
         let source = match if_expr_source(scalar.as_str()) {
@@ -398,7 +398,7 @@ impl<'a> Lowering<'_, 'a> {
                 return None;
             }
         };
-        self.condition_text(&source, site, at_step, span)
+        self.condition_text(&source, site, at, span)
     }
 
     /// One condition's expression text (the body of an `if:`, a `pre-if`, a
@@ -408,7 +408,7 @@ impl<'a> Lowering<'_, 'a> {
         &mut self,
         source: &str,
         site: &Site,
-        at_step: bool,
+        at: ExprSite,
         span: Span,
     ) -> Option<ExprId> {
         let uses_status_function = parse(source).is_ok_and(|ast| names_status_function(&ast));
@@ -416,7 +416,7 @@ impl<'a> Lowering<'_, 'a> {
             &format!("${{{{ {source} }}}}"),
             span,
             site,
-            at_step,
+            at,
             false,
             self.b.exprs(),
             &mut self.diags,
@@ -430,12 +430,12 @@ impl<'a> Lowering<'_, 'a> {
         if uses_status_function {
             Some(truthy)
         } else {
-            let success = site.status_function(self.b.exprs(), "success", at_step);
+            let success = site.status_function(self.b.exprs(), "success", at);
             Some(self.b.exprs().binary(BinOp::And, success, truthy))
         }
     }
 
-    fn env_value(&mut self, node: &Node<'_>, site: &Site, at_step: bool) -> Option<EnvValue> {
+    fn env_value(&mut self, node: &Node<'_>, site: &Site, at: ExprSite) -> Option<EnvValue> {
         let text = match node.as_str() {
             Some(t) => t.to_string(),
             None => {
@@ -449,7 +449,7 @@ impl<'a> Lowering<'_, 'a> {
             &text,
             node.span(),
             site,
-            at_step,
+            at,
             true,
             self.b.exprs(),
             &mut self.diags,

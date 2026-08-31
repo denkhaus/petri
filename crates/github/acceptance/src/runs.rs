@@ -118,7 +118,7 @@ pub const STUBBED_SCRIPT_META: &str = "petri.stubbed_script";
 /// because a real script would have created it — both would fail a step whose
 /// work is now `true`.
 pub fn stub_run_scripts(graph: &mut Graph) {
-    for node in &mut graph.nodes {
+    for node in &mut graph.body.nodes {
         if node.step.kind.as_ref() != RUN_KIND {
             continue;
         }
@@ -661,7 +661,7 @@ pub fn containerize(
     platform: Option<&str>,
     image_for: impl Fn(&[SmolStr]) -> String,
 ) {
-    for scope in &mut graph.scopes {
+    for scope in &mut graph.body.scopes {
         if !matches!(scope.runtime.target, RuntimeTarget::HostProcess) {
             continue;
         }
@@ -695,7 +695,7 @@ pub fn needs_docker(graph: &Graph) -> bool {
 /// runner's Docker engine cannot start without it. A separate pass after
 /// [`containerize`] so the flag rides exactly the scopes that got that image.
 pub fn privilege(graph: &mut Graph, image: &str) {
-    for scope in &mut graph.scopes {
+    for scope in &mut graph.body.scopes {
         if let RuntimeTarget::Container {
             image: scope_image,
             options,
@@ -716,10 +716,10 @@ pub fn cap_expansions(graph: &mut Graph) {
             continue;
         };
         let items = *items;
-        let zero = graph.exprs.lit(0);
-        let first = graph.exprs.index(items, zero);
-        let capped = graph.exprs.array(vec![first]);
-        if let Some(Expansion::ForEach { items, .. }) = &mut graph.nodes[index].expand {
+        let zero = graph.body.exprs.lit(0);
+        let first = graph.body.exprs.index(items, zero);
+        let capped = graph.body.exprs.array(vec![first]);
+        if let Some(Expansion::ForEach { items, .. }) = &mut graph.body.nodes[index].expand {
             *items = capped;
         }
     }
@@ -1824,6 +1824,7 @@ mod tests {
         );
         assert!(!needs_docker(&graph), "a stubbed script drives nothing");
         let node = graph
+            .body
             .nodes
             .iter_mut()
             .find(|n| n.step.kind.as_ref() == RUN_KIND)

@@ -75,7 +75,7 @@ fn prepare(mut graph: Graph, bin: &Path, stub_log: &Path, github: serde_json::Va
         bin.display(),
         env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
-    for scope in &mut graph.scopes {
+    for scope in &mut graph.body.scopes {
         scope
             .env
             .insert("PATH".into(), ir::ExprOrValue::Value(json!(path)));

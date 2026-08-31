@@ -82,7 +82,7 @@ fn fragment_validation_reuses_the_shared_invariant_engine() {
     // A dangling edge target is the graph validator's `UnknownTarget`; the
     // fragment path must report it too, not through a second validator.
     let mut fragment = one_node_fragment();
-    fragment.nodes[0].routing = Routing::next(Edge::always(EdgeId::new(0), NodeId::new(9)));
+    fragment.body.nodes[0].routing = Routing::next(Edge::always(EdgeId::new(0), NodeId::new(9)));
     let errors = validate_fragment(&fragment).unwrap_err();
     assert!(
         errors.iter().any(|e| matches!(
@@ -96,7 +96,7 @@ fn fragment_validation_reuses_the_shared_invariant_engine() {
 #[test]
 fn a_nonempty_fragment_needs_entries() {
     let mut fragment = one_node_fragment();
-    fragment.entry.clear();
+    fragment.body.entry.clear();
     let errors = validate_fragment(&fragment).unwrap_err();
     assert!(
         errors.iter().any(|e| matches!(
@@ -133,7 +133,7 @@ fn exits_must_resolve_and_not_repeat() {
 #[test]
 fn a_fragment_is_executable_ir_never_hir() {
     let mut fragment = one_node_fragment();
-    fragment.nodes[0].expand = Some(ir::Expansion::ForEach {
+    fragment.body.nodes[0].expand = Some(ir::Expansion::ForEach {
         items:        ir::ExprId::new(0),
         target:       ir::ExpandTarget::Node,
         max_parallel: None,

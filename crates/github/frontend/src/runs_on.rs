@@ -102,7 +102,7 @@ pub(crate) struct RawLabel {
 
 impl RawLabel {
     /// The label at one node, when the node is a scalar.
-    pub(crate) fn from_node(node: Node<'_>, whole: bool) -> Option<Self> {
+    pub(crate) fn try_from_node(node: Node<'_>, whole: bool) -> Option<Self> {
         node.as_str().map(|s| Self {
             text: s.to_string(),
             span: node.span(),

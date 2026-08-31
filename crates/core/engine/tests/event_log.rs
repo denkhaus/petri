@@ -292,8 +292,8 @@ fn replay_reproduces_an_expansion() {
 
     let replayed = engine::verify_replay(graph, &h.state.log).expect("byte-identical");
     assert_eq!(
-        replayed.graph.nodes.len(),
-        h.state.graph.nodes.len(),
+        replayed.graph().nodes.len(),
+        h.state.graph().nodes.len(),
         "the clones are re-derived, not copied"
     );
 }

@@ -38,7 +38,7 @@ impl EventObserver for Recording {
         if let engine::Event::StepFinished { firing, .. } = &record.event {
             let resolved = state
                 .firing_node(*firing)
-                .and_then(|node| state.graph.node(node))
+                .and_then(|node| state.graph().node(node))
                 .map(|n| (n.name.to_string(), n.meta.clone()));
             self.finishes
                 .lock()

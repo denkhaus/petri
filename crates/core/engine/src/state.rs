@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use ir::{
-    Attempt, CancelScopeId, Completion, EdgeId, EvalError, FiringId, Generation, Graph, NodeId,
-    NodeRecord, Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
+    Attempt, CancelScopeId, Completion, EdgeId, EvalError, FiringId, Generation, Graph, Node,
+    NodeId, NodeRecord, Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -35,6 +35,17 @@ pub struct Firing {
     pub awaiting_retry: bool,
     /// A `Control::Cancel` has been delivered; the outcome will not be routed.
     pub cancelling:     bool,
+}
+
+impl Firing {
+    /// Park this firing for a retry backoff: it stays live — which holds its
+    /// scope and keeps the run non-quiescent — but its step is no longer
+    /// running, and the firing waits for `RetryElapsed`. The two flags move
+    /// together; this is the one place that writes the pair.
+    pub(crate) fn park_for_retry(&mut self) {
+        self.awaiting_retry = true;
+        self.started = false;
+    }
 }
 
 /// What a firing produced, kept for status folding and for the `outputs`
@@ -241,10 +252,11 @@ pub enum RunError {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EngineState {
     /// The live graph. Expansions splice clones into it, so it grows during a
-    /// run.
-    pub graph: Graph,
+    /// run — and only through [`Self::push_spliced_node`], which keeps it
+    /// aligned with `node_runtime`.
+    pub(crate) graph: Graph,
     /// Every event applied so far, in order.
-    pub log:   EventLog,
+    pub log:          EventLog,
 
     /// Tokens waiting on a join: node, then generation, then edge. Nested
     /// rather than keyed by a `(node, generation)` tuple so the whole state
@@ -356,6 +368,13 @@ impl EngineState {
     }
 
     // ── Read-only views ────────────────────────────────────────────────────
+
+    /// The live graph. Read-only: splices grow it only through the engine's
+    /// own paired push, which keeps it aligned with the per-node runtime
+    /// facts.
+    pub fn graph(&self) -> &Graph {
+        &self.graph
+    }
 
     pub fn is_started(&self) -> bool {
         self.started
@@ -848,14 +867,23 @@ impl EngineState {
         SpliceBatchId(self.splices.len() as u32)
     }
 
-    pub(crate) fn register_spliced_node(
+    /// Append a spliced node to the live graph and record its runtime facts in
+    /// one motion, so `graph.nodes` and `node_runtime` can never grow
+    /// independently.
+    ///
+    /// The id check stays a `debug_assert`: preparation allocated the id
+    /// against this exact graph length, and this method being the only
+    /// growth path is what makes the two vectors impossible to desync.
+    pub(crate) fn push_spliced_node(
         &mut self,
-        node: NodeId,
+        node: Node,
         cancel_scope: CancelScopeId,
         batch: SpliceBatchId,
         clone_bindings: Option<BTreeMap<SmolStr, Value>>,
     ) {
-        debug_assert_eq!(node.index(), self.node_runtime.len());
+        debug_assert_eq!(node.id.index(), self.graph.nodes.len());
+        debug_assert_eq!(self.graph.nodes.len(), self.node_runtime.len());
+        self.graph.body.nodes.push(node);
         self.node_runtime.push(NodeRuntime {
             cancel_scope,
             batch: Some(batch),

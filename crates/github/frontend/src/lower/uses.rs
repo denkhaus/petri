@@ -19,7 +19,9 @@ use crate::action::{
     render_chain, unavailable_hint,
 };
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
-use crate::exprs::{LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel};
+use crate::exprs::{
+    ExprSite, LoweredScalar, SEP, Site, config_value, lower_scalar, secret_sentinel,
+};
 use crate::gate::{self, GateOp};
 use crate::model::{Defaults, Job, Step};
 
@@ -460,7 +462,7 @@ impl<'a> Lowering<'_, 'a> {
                 text,
                 span.clone(),
                 &manifest_site,
-                true,
+                ExprSite::Step,
                 true,
                 self.b.exprs(),
                 &mut self.diags,
@@ -549,7 +551,7 @@ impl<'a> Lowering<'_, 'a> {
             text,
             span,
             site,
-            true,
+            ExprSite::Step,
             true,
             self.b.exprs(),
             &mut self.diags,
@@ -571,7 +573,7 @@ impl<'a> Lowering<'_, 'a> {
             text,
             span,
             site,
-            true,
+            ExprSite::Step,
             true,
             self.b.exprs(),
             &mut self.diags,
@@ -752,7 +754,7 @@ impl<'a> Lowering<'_, 'a> {
             text,
             span,
             site,
-            true,
+            ExprSite::Step,
             true,
             self.b.exprs(),
             &mut self.diags,
@@ -902,7 +904,7 @@ impl<'a> Lowering<'_, 'a> {
                         text,
                         n.span(),
                         &caller_site,
-                        true,
+                        ExprSite::Step,
                         true,
                         self.b.exprs(),
                         &mut self.diags,
@@ -1006,7 +1008,7 @@ impl<'a> Lowering<'_, 'a> {
                 text,
                 value.span(),
                 &inner_site,
-                true,
+                ExprSite::Step,
                 false,
                 self.b.exprs(),
                 &mut self.diags,

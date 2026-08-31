@@ -108,7 +108,7 @@ impl<'a> Lowering<'_, 'a> {
         // to go but the process), so they are pushed down into every step's env
         // instead; `job_body` reads them back from `site`.
         for (key, node) in scope_env(self.wf, job) {
-            match self.env_value(&node, &site, false) {
+            match self.env_value(&node, &site, exprs::ExprSite::Job) {
                 Some(EnvValue::Plain(v)) => {
                     scope.env.insert(SmolStr::new(&key), v);
                 }
@@ -135,22 +135,22 @@ impl<'a> Lowering<'_, 'a> {
             }
             Some(node) => {
                 let raw: Vec<runs_on::RawLabel> =
-                    if let Some(label) = runs_on::RawLabel::from_node(node, true) {
+                    if let Some(label) = runs_on::RawLabel::try_from_node(node, true) {
                         vec![label]
                     } else if let Some(seq) = node.as_sequence() {
                         seq.iter()
-                            .filter_map(|n| runs_on::RawLabel::from_node(n, false))
+                            .filter_map(|n| runs_on::RawLabel::try_from_node(n, false))
                             .collect()
                     } else if let Some(m) = node.as_mapping() {
                         // `runs-on: { group: …, labels: … }`
                         let mut out = Vec::new();
                         if let Some(labels) = m.get("labels") {
-                            if let Some(one) = runs_on::RawLabel::from_node(labels, false) {
+                            if let Some(one) = runs_on::RawLabel::try_from_node(labels, false) {
                                 out.push(one);
                             } else if let Some(seq) = labels.as_sequence() {
                                 out.extend(
                                     seq.iter()
-                                        .filter_map(|n| runs_on::RawLabel::from_node(n, false)),
+                                        .filter_map(|n| runs_on::RawLabel::try_from_node(n, false)),
                                 );
                             }
                         }
@@ -393,7 +393,7 @@ impl<'a> Lowering<'_, 'a> {
                     .iter()
                     .flat_map(Mapping::iter)
                 {
-                    match self.env_value(&value, &site, false) {
+                    match self.env_value(&value, &site, exprs::ExprSite::Job) {
                         Some(EnvValue::Plain(v)) => {
                             service.env.insert(SmolStr::new(key), v);
                         }

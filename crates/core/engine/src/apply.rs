@@ -603,8 +603,7 @@ fn schedule_retry(
     attempt: Attempt,
 ) {
     if let Some(f) = state.firing_mut(firing_id) {
-        f.awaiting_retry = true;
-        f.started = false;
+        f.park_for_retry();
     }
     cmds.push(Command::ScheduleRetry {
         firing:       firing_id,

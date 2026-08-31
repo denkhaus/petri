@@ -627,30 +627,26 @@ pub(crate) fn apply_prepared_splice(
     queue: &mut VecDeque<Event>,
 ) {
     for expr in prepared.exprs {
-        state.graph.exprs.push(expr);
+        state.graph.body.exprs.push(expr);
     }
     for scope in prepared.scopes {
         debug_assert_eq!(scope.id.index(), state.graph.scopes.len());
-        state.graph.scopes.push(scope);
+        state.graph.body.scopes.push(scope);
     }
 
     let batch = state.next_splice_batch();
     let mut batch_nodes = BTreeSet::new();
     let mut bindings = prepared.bindings;
     for node in prepared.nodes {
-        // Ids were allocated against this exact length, so a mismatch means the
-        // splice was built against a different graph.
-        debug_assert_eq!(node.id.index(), state.graph.nodes.len());
         let id = node.id;
-        state.graph.nodes.push(node);
-        state.register_spliced_node(id, prepared.cancel_scope, batch, bindings.remove(&id));
+        state.push_spliced_node(node, prepared.cancel_scope, batch, bindings.remove(&id));
         batch_nodes.insert(id);
     }
     for seed in &prepared.seeds {
         state.register_seed_edge(seed.edge, seed.entry);
     }
     for (target, group) in prepared.routing_extensions {
-        if let Some(node) = state.graph.node_mut(target) {
+        if let Some(node) = state.graph.body.node_mut(target) {
             node.routing.groups.push(group);
         }
     }
