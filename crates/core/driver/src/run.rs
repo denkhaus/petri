@@ -22,6 +22,7 @@ use ir::{
 };
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
+use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -255,6 +256,51 @@ enum Signal {
         firing:  FiringId,
         attempt: Attempt,
     },
+    AcquireFinished {
+        scope:  ScopeId,
+        id:     u64,
+        result: Result<AcquiredScope, String>,
+    },
+}
+
+/// An acquired environment that has not reached the driver yet.
+///
+/// If the acquire task or its channel send is abandoned after the executor
+/// returned, dropping this value still releases the environment. This closes
+/// the narrow gap between `Executor::acquire` completing and the driver taking
+/// ownership of its result.
+struct AcquiredScope {
+    executor: Arc<dyn Executor>,
+    handle:   Option<EnvHandle>,
+}
+
+impl AcquiredScope {
+    fn new(executor: Arc<dyn Executor>, handle: EnvHandle) -> Self {
+        Self {
+            executor,
+            handle: Some(handle),
+        }
+    }
+
+    fn into_handle(mut self) -> EnvHandle {
+        self.handle
+            .take()
+            .expect("an acquired scope transfers its environment once")
+    }
+}
+
+impl Drop for AcquiredScope {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let executor = self.executor.clone();
+        if let Ok(runtime) = Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = executor.release(handle, ScopeOutcome::Succeeded).await;
+            });
+        }
+    }
 }
 
 /// One control send, queued on a firing's forwarder.
@@ -299,6 +345,11 @@ pub trait RunGuard: Send + Sync {
     async fn teardown(self: Box<Self>) {}
 }
 
+struct ScopeAcquire {
+    id:   u64,
+    join: JoinHandle<()>,
+}
+
 pub struct Driver {
     engine:           EngineState,
     executor:         Arc<dyn Executor>,
@@ -308,7 +359,13 @@ pub struct Driver {
     sink:             Arc<LogSink>,
     config:           RunConfig,
     envs:             HashMap<ScopeId, EnvHandle>,
+    acquires:         HashMap<ScopeId, ScopeAcquire>,
+    acquire_drains:   Vec<JoinHandle<()>>,
+    next_acquire_id:  u64,
     acquire_failures: HashMap<ScopeId, String>,
+    pending_starts:   HashMap<ScopeId, Vec<ResolvedFiring>>,
+    pending_forwards: HashMap<FiringId, Vec<Forward>>,
+    pending_failures: HashMap<FiringId, (Attempt, String)>,
     scope_failed:     HashSet<ScopeId>,
     tasks:            HashMap<FiringId, Task>,
     caps:             Capabilities,
@@ -413,7 +470,13 @@ impl Driver {
             sink,
             config,
             envs: HashMap::new(),
+            acquires: HashMap::new(),
+            acquire_drains: Vec::new(),
+            next_acquire_id: 0,
             acquire_failures: HashMap::new(),
+            pending_starts: HashMap::new(),
+            pending_forwards: HashMap::new(),
+            pending_failures: HashMap::new(),
             scope_failed: HashSet::new(),
             tasks: HashMap::new(),
             caps: Capabilities::default(),
@@ -472,7 +535,7 @@ impl Driver {
     )]
     pub async fn run(mut self) -> RunReport {
         match self.resume.take() {
-            None => self.feed(Event::RunStarted).await,
+            None => self.feed(Event::RunStarted),
             Some(resume) => {
                 // Observers see the regenerated suffix first — the records past
                 // the loaded prefix, which the crash kept off disk — before any
@@ -480,7 +543,7 @@ impl Driver {
                 // starts from a converged view.
                 self.notify_observers(resume.suffix_from);
                 for command in resume.commands {
-                    self.dispatch(command).await;
+                    self.dispatch(command);
                 }
             }
         }
@@ -494,6 +557,8 @@ impl Driver {
         if let Some(timer) = self.cleanup_timer.take() {
             timer.abort();
         }
+
+        self.finish_acquires().await;
 
         // Release is best effort and never fails the run, but the run should not
         // report back before the environments are actually gone.
@@ -568,22 +633,22 @@ impl Driver {
             Signal::Inject(Event::CancelRequested { scope })
                 if scope == ir::CancelScopeId::ROOT =>
             {
-                self.on_root_cancel().await;
+                self.on_root_cancel();
             }
             Signal::Inject(Event::KillRequested { scope }) if scope == ir::CancelScopeId::ROOT => {
-                self.kill_root().await;
+                self.kill_root();
             }
-            Signal::Inject(event) => self.feed(event).await,
+            Signal::Inject(event) => self.feed(event),
             Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack),
             Signal::Progress { firing, event } => {
                 let event = self.mask_progress(firing, event).await;
-                self.feed(Event::StepProgress { firing, ev: event }).await;
+                self.feed(Event::StepProgress { firing, ev: event });
             }
             Signal::Finished {
                 firing,
                 attempt,
                 outcome,
-            } => self.finish(firing, attempt, outcome).await,
+            } => self.finish(firing, attempt, outcome),
             Signal::Timeout { firing, attempt } => self.on_timeout(firing, attempt),
             Signal::RetryDue {
                 firing,
@@ -592,11 +657,13 @@ impl Driver {
                 self.feed(Event::RetryElapsed {
                     firing,
                     next_attempt,
-                })
-                .await;
+                });
             }
             Signal::HardDeadline { firing, attempt } => {
                 self.on_hard_deadline(firing, attempt).await;
+            }
+            Signal::AcquireFinished { scope, id, result } => {
+                self.on_acquire_finished(scope, id, result);
             }
         }
     }
@@ -608,15 +675,14 @@ impl Driver {
     /// replay reproduces it. The engine's own state says which tier this is —
     /// `is_cancelled` is set by exactly the root cancel and the root kill — so
     /// the driver keeps no count of its own.
-    async fn on_root_cancel(&mut self) {
+    fn on_root_cancel(&mut self) {
         if self.engine.is_cancelled() {
-            self.kill_root().await;
+            self.kill_root();
             return;
         }
         self.feed(Event::CancelRequested {
             scope: ir::CancelScopeId::ROOT,
-        })
-        .await;
+        });
         let grace = self.config.cleanup_grace;
         tracing::info!(
             live_firing_count = self.tasks.len(),
@@ -634,24 +700,23 @@ impl Driver {
         }));
     }
 
-    async fn kill_root(&mut self) {
+    fn kill_root(&mut self) {
         if let Some(timer) = self.cleanup_timer.take() {
             timer.abort();
         }
         tracing::warn!(live_firing_count = self.tasks.len(), "run kill requested");
         self.feed(Event::KillRequested {
             scope: ir::CancelScopeId::ROOT,
-        })
-        .await;
+        });
     }
 
     /// Append-then-apply, then dispatch whatever the core asked for.
     ///
     /// The append happens inside `apply`, which records this event as
     /// `External` and everything it derives as `Core`.
-    async fn feed(&mut self, event: Event) {
+    fn feed(&mut self, event: Event) {
         for command in self.apply_event(event) {
-            self.dispatch(command).await;
+            self.dispatch(command);
         }
     }
 
@@ -716,39 +781,17 @@ impl Driver {
         }
     }
 
-    async fn dispatch(&mut self, command: Command) {
+    fn dispatch(&mut self, command: Command) {
         match command {
-            Command::AcquireScope { scope } => self.acquire(scope).await,
+            Command::AcquireScope { scope } => self.acquire(scope),
             Command::ReleaseScope { scope } => self.release(scope),
             Command::StartStep(resolved) => {
-                let (firing, attempt) = (resolved.id(), resolved.attempt());
-                let live = self.engine.firing(firing);
-                // A firing the stop tiers marked cancelling reaches dispatch
-                // only on resume, and is never re-spawned: it finishes directly
-                // with the same `Cancelled` outcome the live run would have fed
-                // once the stop landed, tagged with the tier from the replayed
-                // state (§10).
-                if let Some(node) = live
-                    .filter(|state| state.cancelling)
-                    .map(|state| state.node)
-                {
-                    self.finish_instead_of_resuming(firing, attempt, node);
+                let scope = resolved.scope();
+                if self.acquires.contains_key(&scope) {
+                    self.pending_starts.entry(scope).or_default().push(resolved);
                     return;
                 }
-                // A started firing is already acknowledged in the loaded log; a
-                // second `StepStarted` would be a replay divergence.
-                let started = live.is_some_and(|state| state.started);
-                if !started {
-                    // The acknowledgement that the attempt was dispatched. It is
-                    // applied here, before `start` can spawn the runner, so the
-                    // log places it ahead of anything the runner sends back: an
-                    // instant runner's `Finished` riding the signal channel can
-                    // otherwise land first, and the late `StepStarted` then
-                    // reports the finalized firing as unknown.
-                    let commands = self.apply_event(Event::StepStarted { firing, attempt });
-                    debug_assert!(commands.is_empty(), "StepStarted derives no commands");
-                }
-                self.start(&resolved);
+                self.dispatch_start(&resolved);
             }
             Command::DeliverControl { firing, ctl } => match ctl {
                 // A delivered value only forwards: no deadline, no reason — it never
@@ -785,6 +828,43 @@ impl Driver {
         }
     }
 
+    fn dispatch_start(&mut self, resolved: &ResolvedFiring) {
+        let (firing, attempt) = (resolved.id(), resolved.attempt());
+        let live = self.engine.firing(firing);
+        // A firing the stop tiers marked cancelling reaches dispatch only on
+        // resume, and is never re-spawned: it finishes directly with the same
+        // `Cancelled` outcome the live run would have fed once the stop landed,
+        // tagged with the tier from the replayed state (§10).
+        if let Some(node) = live
+            .filter(|state| state.cancelling)
+            .map(|state| state.node)
+        {
+            self.reject_pending_forwards(firing);
+            self.pending_failures.remove(&firing);
+            self.finish_instead_of_resuming(firing, attempt, node);
+            return;
+        }
+        // A started firing is already acknowledged in the loaded log; a second
+        // `StepStarted` would be a replay divergence.
+        let started = live.is_some_and(|state| state.started);
+        if !started {
+            // The acknowledgement that the attempt was dispatched. It is applied
+            // here, before `start` can spawn the runner, so the log places it
+            // ahead of anything the runner sends back: an instant runner's
+            // `Finished` riding the signal channel can otherwise land first, and
+            // the late `StepStarted` then reports the finalized firing as unknown.
+            let commands = self.apply_event(Event::StepStarted { firing, attempt });
+            debug_assert!(commands.is_empty(), "StepStarted derives no commands");
+        }
+        if let Some((attempt, message)) = self.pending_failures.remove(&firing) {
+            self.reject_pending_forwards(firing);
+            self.fail_now(firing, attempt, &message, steps::SECRET_UNAVAILABLE_CLASS);
+            return;
+        }
+        self.start(resolved);
+        self.flush_pending_forwards(firing);
+    }
+
     /// Finish a cancelling firing that resume would otherwise re-spawn: one
     /// code path for both tiers, the tier read from the replayed state. The
     /// finish rides the signal channel like every step result, so its place in
@@ -810,30 +890,75 @@ impl Driver {
 
     // ── Scopes ─────────────────────────────────────────────────────────────
 
-    async fn acquire(&mut self, scope: ScopeId) {
-        if self.envs.contains_key(&scope) {
+    fn acquire(&mut self, scope: ScopeId) {
+        if self.envs.contains_key(&scope) || self.acquires.contains_key(&scope) {
             return;
         }
         let spec = self.scope_spec(scope);
         let ctx = AcquireContext::new(self.secrets.clone(), self.progress.clone());
-        match self.executor.acquire(&spec, &ctx).await {
-            Ok(handle) => {
-                self.envs.insert(scope, handle);
+        let executor = self.executor.clone();
+        let tx = self.tx.clone();
+        let id = self.next_acquire_id;
+        self.next_acquire_id = self
+            .next_acquire_id
+            .checked_add(1)
+            .expect("a run cannot start 2^64 scope acquisitions");
+        let join = tokio::spawn(async move {
+            let result = executor
+                .acquire(&spec, &ctx)
+                .await
+                .map(|handle| AcquiredScope::new(executor, handle))
+                // The deliberate render point: the failure becomes
+                // `FailureInfo.message`, a rendered projection, so the whole
+                // source chain is flattened into it here.
+                .map_err(|error| render_chain(&error));
+            let _ = tx.send(Signal::AcquireFinished { scope, id, result }).await;
+        });
+        self.acquires.insert(scope, ScopeAcquire { id, join });
+    }
+
+    fn on_acquire_finished(
+        &mut self,
+        scope: ScopeId,
+        id: u64,
+        result: Result<AcquiredScope, String>,
+    ) {
+        let current = self
+            .acquires
+            .get(&scope)
+            .is_some_and(|acquire| acquire.id == id);
+        if !current {
+            return;
+        }
+        self.acquires.remove(&scope);
+        match result {
+            Ok(acquired) => {
+                self.envs.insert(scope, acquired.into_handle());
             }
             Err(error) => {
                 // Not a run abort: every firing in this scope fails, routably.
-                // This is the deliberate render point — the failure becomes
-                // `FailureInfo.message`, a rendered projection — so the whole
-                // source chain is flattened into it here.
-                self.acquire_failures.insert(scope, render_chain(&error));
+                // The message arrives already rendered, chain and all, from
+                // the acquire task's render point.
+                self.acquire_failures.insert(scope, error);
             }
+        }
+
+        for resolved in self.pending_starts.remove(&scope).unwrap_or_default() {
+            self.dispatch_start(&resolved);
         }
     }
 
     fn release(&mut self, scope: ScopeId) {
-        let Some(handle) = self.envs.remove(&scope) else {
-            return;
-        };
+        if let Some(acquire) = self.acquires.remove(&scope) {
+            acquire.join.abort();
+            self.acquire_drains.push(acquire.join);
+        }
+        if let Some(handle) = self.envs.remove(&scope) {
+            self.release_handle(scope, handle);
+        }
+    }
+
+    fn release_handle(&mut self, scope: ScopeId, handle: EnvHandle) {
         let outcome = if self.scope_failed.contains(&scope) {
             ScopeOutcome::Failed
         } else {
@@ -843,6 +968,30 @@ impl Driver {
         self.releases.push(tokio::spawn(async move {
             executor.release(handle, outcome).await
         }));
+    }
+
+    /// Stop unfinished acquires, then collect any successful result that raced
+    /// with scope release. Waiting for the aborted tasks guarantees no acquire
+    /// can send another result after the channel is drained.
+    async fn finish_acquires(&mut self) {
+        let mut drains = mem::take(&mut self.acquire_drains);
+        for (_, acquire) in mem::take(&mut self.acquires) {
+            acquire.join.abort();
+            drains.push(acquire.join);
+        }
+        for drain in drains {
+            let _ = drain.await;
+        }
+        while let Ok(signal) = self.rx.try_recv() {
+            if let Signal::AcquireFinished {
+                scope,
+                result: Ok(acquired),
+                ..
+            } = signal
+            {
+                self.release_handle(scope, acquired.into_handle());
+            }
+        }
     }
 
     fn scope_spec(&self, scope: ScopeId) -> ScopeSpec {
@@ -1081,6 +1230,7 @@ impl Driver {
     /// send lands: the deadline is what guarantees progress.
     fn stop_step(&mut self, firing: FiringId, ctl: Control, reason: CancelReason) {
         let Some(task) = self.tasks.get_mut(&firing) else {
+            self.finish_pending_start(firing, &ctl);
             return;
         };
         // First reason wins: a timeout that beat a cancel makes this `TimedOut`.
@@ -1120,6 +1270,51 @@ impl Driver {
         }
     }
 
+    /// Settle a firing whose runner is still parked behind scope acquisition.
+    /// The acquire stays alive until the core either admits cleanup in the same
+    /// scope or releases the scope because nothing else needs it.
+    fn finish_pending_start(&mut self, firing: FiringId, ctl: &Control) {
+        let Some(scope) = self.engine.firing(firing).map(|state| state.scope) else {
+            return;
+        };
+        let Some(pending) = self.pending_starts.get_mut(&scope) else {
+            return;
+        };
+        let Some(index) = pending.iter().position(|resolved| resolved.id() == firing) else {
+            return;
+        };
+        let resolved = pending.remove(index);
+        if pending.is_empty() {
+            self.pending_starts.remove(&scope);
+        }
+        self.reject_pending_forwards(firing);
+        self.pending_failures.remove(&firing);
+
+        tracing::debug!(
+            firing = firing.raw(),
+            attempt = resolved.attempt().raw(),
+            scope = scope.raw(),
+            control = if matches!(ctl, Control::Kill) {
+                "kill"
+            } else {
+                "cancel"
+            },
+            "step cancelled while scope acquisition was pending"
+        );
+        let attempt = resolved.attempt();
+        let outcome = Outcome::new(Status::Cancelled, Value::Null);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Signal::Finished {
+                    firing,
+                    attempt,
+                    outcome,
+                })
+                .await;
+        });
+    }
+
     /// Queue a `Deliver` on the firing's forwarder: no deadline, no reason.
     ///
     /// `$secret` references in the payload resolve here, at command-dispatch
@@ -1139,6 +1334,15 @@ impl Driver {
                         &format!("secret `{missing}` is not available for delivery"),
                         steps::SECRET_UNAVAILABLE_CLASS,
                     );
+                } else if self.is_pending_start(firing)
+                    && let Some(attempt) = self.engine.firing(firing).map(|state| state.attempt)
+                {
+                    self.pending_failures.entry(firing).or_insert_with(|| {
+                        (
+                            attempt,
+                            format!("secret `{missing}` is not available for delivery"),
+                        )
+                    });
                 }
                 if let Some(ack) = ack {
                     let _ = ack.send(DeliverDisposition::NotLive);
@@ -1146,18 +1350,66 @@ impl Driver {
                 return;
             }
         };
+        let forward = Forward {
+            ctl: Control::Deliver(payload),
+            ack,
+        };
         let Some(task) = self.tasks.get(&firing) else {
-            if let Some(ack) = ack {
+            if self.is_pending_start(firing) {
+                self.pending_forwards
+                    .entry(firing)
+                    .or_default()
+                    .push(forward);
+                return;
+            }
+            if let Some(ack) = forward.ack {
                 let _ = ack.send(DeliverDisposition::NotLive);
             }
             return;
         };
-        if let Err(rejected) = task.forwards.send(Forward {
-            ctl: Control::Deliver(payload),
-            ack,
-        }) && let Some(ack) = rejected.0.ack
+        if let Err(rejected) = task.forwards.send(forward)
+            && let Some(ack) = rejected.0.ack
         {
             let _ = ack.send(DeliverDisposition::NotLive);
+        }
+    }
+
+    fn is_pending_start(&self, firing: FiringId) -> bool {
+        self.pending_starts
+            .values()
+            .flatten()
+            .any(|resolved| resolved.id() == firing)
+    }
+
+    fn flush_pending_forwards(&mut self, firing: FiringId) {
+        let Some(forwards) = self.pending_forwards.remove(&firing) else {
+            return;
+        };
+        let Some(task) = self.tasks.get(&firing) else {
+            for forward in forwards {
+                if let Some(ack) = forward.ack {
+                    let _ = ack.send(DeliverDisposition::NotLive);
+                }
+            }
+            return;
+        };
+        for forward in forwards {
+            if let Err(rejected) = task.forwards.send(forward)
+                && let Some(ack) = rejected.0.ack
+            {
+                let _ = ack.send(DeliverDisposition::NotLive);
+            }
+        }
+    }
+
+    fn reject_pending_forwards(&mut self, firing: FiringId) {
+        let Some(forwards) = self.pending_forwards.remove(&firing) else {
+            return;
+        };
+        for forward in forwards {
+            if let Some(ack) = forward.ack {
+                let _ = ack.send(DeliverDisposition::NotLive);
+            }
         }
     }
 
@@ -1204,11 +1456,10 @@ impl Driver {
                 "the step did not return after Control::Cancel; the driver stopped waiting",
             )
             .await;
-        self.finish(firing, attempt, escalation_outcome(status, &CANCEL_FORCED))
-            .await;
+        self.finish(firing, attempt, escalation_outcome(status, &CANCEL_FORCED));
     }
 
-    async fn finish(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
+    fn finish(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
         // A firing finished from `fail_now` or from resume's direct finish has no
         // task, and so no step span: those events belong to the run instead.
         let (reason, span) = match self.tasks.remove(&firing) {
@@ -1300,8 +1551,7 @@ impl Driver {
             firing,
             attempt,
             outcome,
-        })
-        .await;
+        });
     }
 
     async fn mask_progress(&self, firing: FiringId, event: StepEvent) -> StepEvent {

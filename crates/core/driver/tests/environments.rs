@@ -2,14 +2,178 @@
 
 mod support;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use driver::RunConfig;
-use executor::{MapSecrets, Retention};
-use ir::{GraphBuilder, RunStatus, ScopeId, StepRef, validate};
+use driver::{Driver, RunConfig};
+use executor::{Executor, MapSecrets, Retention};
+use executor_host::HostExecutor;
+use ir::{CancelScopeId, Graph, GraphBuilder, RunStatus, ScopeId, StepRef, validate};
 use serde_json::json;
-use steps::PROCESS_KIND;
+use steps::{NOOP_KIND, NoopStep, PROCESS_KIND, Registry};
 use support::*;
+use tokio::sync::{Semaphore, mpsc};
+use tokio::time;
+
+/// An executor that reports each acquire, then waits for a test permit before
+/// delegating to the host executor.
+struct DelayedExecutor {
+    inner:   HostExecutor,
+    started: mpsc::UnboundedSender<ScopeId>,
+    gate:    Arc<Semaphore>,
+    active:  Arc<AtomicUsize>,
+    maximum: Arc<AtomicUsize>,
+}
+
+struct ActiveAcquire(Arc<AtomicUsize>);
+
+impl Drop for ActiveAcquire {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl Executor for DelayedExecutor {
+    async fn acquire(
+        &self,
+        scope: &executor::ScopeSpec,
+        ctx: &executor::AcquireContext,
+    ) -> Result<executor::EnvHandle, executor::EnvError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum.fetch_max(active, Ordering::SeqCst);
+        let _active = ActiveAcquire(self.active.clone());
+        let _ = self.started.send(scope.id);
+        let permit = self
+            .gate
+            .acquire()
+            .await
+            .expect("the test keeps the acquire gate open");
+        permit.forget();
+        self.inner.acquire(scope, ctx).await
+    }
+
+    async fn release(
+        &self,
+        env: executor::EnvHandle,
+        outcome: executor::ScopeOutcome,
+    ) -> executor::ReleaseReport {
+        self.inner.release(env, outcome).await
+    }
+}
+
+fn delayed_driver(
+    graph: Graph,
+    dir: &RunDir,
+    config: RunConfig,
+) -> (
+    Driver,
+    mpsc::UnboundedReceiver<ScopeId>,
+    Arc<Semaphore>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let (started, starts) = mpsc::unbounded_channel();
+    let gate = Arc::new(Semaphore::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    let executor: Arc<dyn Executor> = Arc::new(DelayedExecutor {
+        inner: HostExecutor::new(dir.path()).with_retention(config.keep_workspaces),
+        started,
+        gate: gate.clone(),
+        active: active.clone(),
+        maximum: maximum.clone(),
+    });
+    let mut registry = Registry::new();
+    registry.register(NoopStep);
+    let driver = Driver::new(
+        graph,
+        executor,
+        registry,
+        Arc::new(MapSecrets::empty()),
+        config,
+    );
+    (driver, starts, gate, active, maximum)
+}
+
+#[tokio::test]
+async fn cancel_lands_while_scope_acquisition_is_blocked() {
+    let dir = RunDir::new("cancel-during-acquire");
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    b.add_step("waiting", scope, NOOP_KIND);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let config = RunConfig::new(dir.path())
+        .with_cleanup_grace(Duration::from_secs(5))
+        .with_retention(Retention::Never);
+    let (driver, mut starts, gate, active, _) = delayed_driver(graph.clone(), &dir, config);
+    let handle = driver.handle();
+    let mut run = tokio::spawn(driver.run());
+
+    assert_eq!(
+        time::timeout(Duration::from_secs(1), starts.recv())
+            .await
+            .expect("scope acquisition started"),
+        Some(scope)
+    );
+    handle.cancel(CancelScopeId::ROOT).await;
+    let Ok(report) = time::timeout(Duration::from_secs(1), &mut run).await else {
+        gate.add_permits(1);
+        run.abort();
+        panic!("the blocked acquire kept the driver from processing cancel");
+    };
+    let report = report.expect("the run task finished");
+
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert!(
+        started(&report).is_empty(),
+        "the step never reached its runner"
+    );
+    assert_eq!(active.load(Ordering::SeqCst), 0, "the acquire was stopped");
+    assert_replay_identical(&graph, &report);
+}
+
+#[tokio::test]
+async fn independent_scopes_acquire_concurrently() {
+    let dir = RunDir::new("concurrent-acquires");
+    let mut b = GraphBuilder::bare();
+    let first = b.add_scope(ir::Scope::new(ScopeId::new(0)));
+    let second = b.add_scope(ir::Scope::new(ScopeId::new(0)));
+    b.add_step("first", first, NOOP_KIND);
+    b.add_step("second", second, NOOP_KIND);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let config = RunConfig::new(dir.path()).with_retention(Retention::Never);
+    let (driver, mut starts, gate, active, maximum) = delayed_driver(graph.clone(), &dir, config);
+    let mut run = tokio::spawn(driver.run());
+
+    let first_started = time::timeout(Duration::from_secs(1), starts.recv())
+        .await
+        .expect("the first acquire started")
+        .expect("the acquire sender remains live");
+    let Ok(Some(second_started)) = time::timeout(Duration::from_secs(1), starts.recv()).await
+    else {
+        gate.add_permits(2);
+        run.abort();
+        panic!("the second acquire did not start while the first was blocked");
+    };
+    assert_ne!(first_started, second_started);
+    assert_eq!(maximum.load(Ordering::SeqCst), 2);
+
+    gate.add_permits(2);
+    let Ok(report) = time::timeout(Duration::from_secs(5), &mut run).await else {
+        run.abort();
+        panic!("the run did not finish after both acquires were released");
+    };
+    let report = report.expect("the run task finished");
+    assert_eq!(report.status, RunStatus::Success);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_replay_identical(&graph, &report);
+}
 
 /// §7 test 7. An environment that cannot be acquired fails every firing in its
 /// scope with `env_acquire` — routable like any other failure, never a run
