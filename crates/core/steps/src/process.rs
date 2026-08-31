@@ -57,6 +57,16 @@ impl Shell {
             Self::Sh => ("sh", vec!["-e", "-c"]),
         }
     }
+
+    /// [`Self::invocation`] as one command line running a script file instead
+    /// of `-c` text: the same shell, the same failure semantics. For callers
+    /// that stage a script and spawn a wrapper over it.
+    pub fn file_invocation(self) -> &'static str {
+        match self {
+            Self::Bash => "bash -eo pipefail",
+            Self::Sh => "sh -e",
+        }
+    }
 }
 
 /// Which non-zero exits are soft failures.

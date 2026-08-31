@@ -1346,3 +1346,81 @@ jobs:
         assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
     }
 }
+
+/// Every `run:` step stages its resolved script — which can hold resolved
+/// secret plaintext — and scrubs it once the process ends, so a workspace
+/// retained after the run keeps no resolved secret on disk. The whole run dir
+/// is swept for the plaintext, so a new write-down would fail here by name.
+#[tokio::test]
+async fn staged_scripts_are_scrubbed_and_no_secret_survives_on_disk() {
+    use std::time::Duration;
+    use std::{env, fs, process};
+
+    use runtime::executor::{MapSecrets, Retention};
+    use runtime::{RunOptions, Runtime};
+
+    const SECRET: &[u8] = b"s3same-scrub-canary";
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deploying with ${{ secrets.DEPLOY_KEY }}"
+      - run: echo done
+        shell: bash -e {0}
+"#;
+    let graph = with_params(lower_ok(text));
+    let dir = env::temp_dir()
+        .join("petri-gha")
+        .join(format!("script-scrub-{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let mut options = RunOptions::new(&dir);
+    options.grace = Duration::from_secs(1);
+    options.retention = Retention::Always;
+    let report = Runtime::standard()
+        .options(options)
+        .step(github_actions::RunStep)
+        .secrets(MapSecrets::from_pairs(&[
+            ("GITHUB_TOKEN", ""),
+            ("DEPLOY_KEY", "s3same-scrub-canary"),
+        ]))
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    assert_eq!(report.status, RunStatus::Success);
+
+    // Walk the retained run dir: the staged scripts exist and are empty, and
+    // no file anywhere holds the plaintext.
+    let mut scripts = Vec::new();
+    let mut leaked = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let bytes = fs::read(&path).unwrap_or_default();
+            if path.file_name().is_some_and(|n| n == "script")
+                && path.to_string_lossy().contains("/.ci/github/steps/")
+            {
+                scripts.push((path.clone(), bytes.len()));
+            }
+            if bytes.windows(SECRET.len()).any(|w| w == SECRET) {
+                leaked.push(path);
+            }
+        }
+    }
+    assert_eq!(scripts.len(), 2, "both steps staged a script: {scripts:?}");
+    assert!(
+        scripts.iter().all(|(_, len)| *len == 0),
+        "every staged script is scrubbed: {scripts:?}"
+    );
+    assert!(leaked.is_empty(), "resolved secret found in {leaked:?}");
+    let _ = fs::remove_dir_all(&dir);
+}

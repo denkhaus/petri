@@ -27,7 +27,7 @@ use tracing::field::Empty;
 
 use crate::{
     CONTAINER_WORKSPACE, ContainerName, ContainerPrefix, next_token, prepare_registry_image,
-    run_docker,
+    run_docker, split_env, write_env_file,
 };
 
 /// Runs one-shot containers in one scope's world.
@@ -37,6 +37,9 @@ pub(crate) struct OneShotRunner {
     prefix:    ContainerPrefix,
     /// The scope's workspace on the host, mounted at [`CONTAINER_WORKSPACE`].
     workspace: PathBuf,
+    /// The scope's per-spawn env files
+    /// ([`crate::DockerExecutor::exec_env_dir`]).
+    env_files: PathBuf,
     /// The scope's resolved env: one-shots live in the scope's world, so they
     /// see what every process of the scope sees. A spec's own env wins.
     env:       BTreeMap<SmolStr, SmolStr>,
@@ -61,6 +64,7 @@ impl OneShotRunner {
     pub(crate) fn new(
         prefix: ContainerPrefix,
         workspace: PathBuf,
+        env_files: PathBuf,
         marker: PathBuf,
         scope: &ScopeSpec,
         network: Option<String>,
@@ -69,6 +73,7 @@ impl OneShotRunner {
         Self {
             prefix,
             workspace,
+            env_files,
             env: scope.env.clone(),
             network,
             scope: scope.id,
@@ -177,9 +182,8 @@ impl ContainerRunner for OneShotRunner {
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         self.mark().await?;
         let image = self.prepare(&spec.image).await?;
-        let name = self
-            .prefix
-            .join(&format!("{}-{}", process::id(), next_token()));
+        let token = format!("{}-{}", process::id(), next_token());
+        let name = self.prefix.join(&token);
         let span = tracing::Span::current();
         span.record("image", image.as_str());
         span.record("container", name.as_str());
@@ -223,14 +227,28 @@ impl ContainerRunner for OneShotRunner {
             argv.push("--entrypoint".into());
             argv.push(entrypoint.to_string());
         }
-        // The scope's env first, the spec's own on top.
-        for (key, value) in self.env.iter().filter(|(k, _)| !spec.env.contains_key(*k)) {
+        // The scope's env first, the spec's own on top — as a 0600 env file
+        // plus the client's own process environment ([`crate::split_env`]):
+        // the spec's env can hold resolved secrets (a docker action's
+        // `INPUT_*`), and `-e KEY=VALUE` argv shows them to every local user.
+        let merged = self
+            .env
+            .iter()
+            .filter(|(k, _)| !spec.env.contains_key(*k))
+            .chain(spec.env.iter());
+        let split = split_env(merged);
+        fs::create_dir_all(&self.env_files)
+            .await
+            .map_err(|e| EnvError::workspace("create", self.env_files.display(), e))?;
+        let env_file = self.env_files.join(format!("{token}.env"));
+        write_env_file(&env_file, &split.file)
+            .await
+            .map_err(|e| EnvError::workspace("write", env_file.display(), e))?;
+        argv.push("--env-file".into());
+        argv.push(env_file.display().to_string());
+        for (key, _) in &split.inherit {
             argv.push("-e".into());
-            argv.push(format!("{key}={value}"));
-        }
-        for (key, value) in &spec.env {
-            argv.push("-e".into());
-            argv.push(format!("{key}={value}"));
+            argv.push(key.to_string());
         }
         argv.push(image.to_string());
         argv.extend(spec.args.iter().map(ToString::to_string));
@@ -242,11 +260,20 @@ impl ContainerRunner for OneShotRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for (key, value) in &split.inherit {
+            command.env(key.as_str(), value.as_str());
+        }
 
-        let mut child = command.spawn().map_err(|e| EnvError::Spawn {
-            program: SmolStr::new("docker run"),
-            source:  e,
-        })?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = fs::remove_file(&env_file).await;
+                return Err(EnvError::Spawn {
+                    program: SmolStr::new("docker run"),
+                    source:  e,
+                });
+            }
+        };
 
         let (tx, rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
         if let Some(stdout) = child.stdout.take() {
@@ -260,15 +287,20 @@ impl ContainerRunner for OneShotRunner {
         Ok(Box::new(OneShotProcess {
             name,
             child,
+            env_file,
             lines: Some(rx),
         }))
     }
 }
 
 struct OneShotProcess {
-    name:  ContainerName,
-    child: Child,
-    lines: Option<LineStream>,
+    name:     ContainerName,
+    child:    Child,
+    /// This spawn's env file. The client read it before creating the
+    /// container; removing it any earlier would race that read, so `wait`
+    /// removes it.
+    env_file: PathBuf,
+    lines:    Option<LineStream>,
 }
 
 #[async_trait]
@@ -280,7 +312,9 @@ impl ProcessHandle for OneShotProcess {
     async fn wait(&mut self) -> Result<ExitStatus, EnvError> {
         // `docker run` forwards the container's exit code; the entrypoint is
         // PID 1, so there is no forked wrapper whose early return could lie.
-        let status = self.child.wait().await.map_err(EnvError::Wait)?;
+        let status = self.child.wait().await;
+        let _ = fs::remove_file(&self.env_file).await;
+        let status = status.map_err(EnvError::Wait)?;
         Ok(ExitStatus::from(status))
     }
 

@@ -222,6 +222,44 @@ jobs:
     assert!(lines.iter().any(|l| l == "service-resolved"), "{lines:?}");
 }
 
+/// A containerized step's env arrives byte for byte through the executor's
+/// env-file spawn path — multiline values included, which the env-file format
+/// cannot carry and the docker client's own environment must — and a resolved
+/// secret value arrives without ever riding the `docker exec` argv.
+#[tokio::test]
+async fn containerized_step_env_round_trips_multiline_and_secret_values() {
+    if !is_docker_ready().await {
+        return;
+    }
+    let text = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    steps:
+      - shell: sh
+        env:
+          MULTI: "first line\nsecond line"
+          TOKEN: ${{ secrets.T }}
+        run: |
+          [ "$MULTI" = "$(printf 'first line\nsecond line')" ] && echo multi-intact
+          [ "$TOKEN" = "s3same-value" ] && echo secret-arrived
+"#;
+    let graph = lower_ok(text);
+    let report = run_host_with_secrets(graph, "docker-env-file", &[("T", "s3same-value")]).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}\n{:?}",
+        errors(&report),
+        log_lines(&report)
+    );
+    let lines = log_lines(&report);
+    assert!(lines.iter().any(|l| l == "multi-intact"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "secret-arrived"), "{lines:?}");
+}
+
 fn errors(report: &RunReportPlus) -> Vec<String> {
     report
         .state

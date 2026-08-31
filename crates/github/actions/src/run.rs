@@ -57,8 +57,9 @@ impl Step for RunStep {
             .components()
             .filter(|c| !matches!(c, Component::CurDir))
             .collect();
-        // With a custom shell the script rides in a file and the prologue joins
-        // the wrapper line instead; the session assembles both.
+        // The script always rides in a file. With a custom shell the prologue
+        // joins the session's wrapper line; on the default path it stays part
+        // of the script text. The session assembles both.
         let run = match &config.shell_command {
             Some(_) => config.run,
             None => format!("{}{}", session.prologue(), config.run),

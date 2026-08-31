@@ -221,6 +221,14 @@ impl DockerExecutor {
         self.run_dir.join("scopes").join(instance).join("work")
     }
 
+    /// Where a scope instance's per-spawn env files live: beside the
+    /// workspace, never on the bind mount — each file is the docker client's
+    /// host-side input, and the workspace can be retained after failure while
+    /// these can hold resolved secrets.
+    fn exec_env_dir(&self, instance: &str) -> PathBuf {
+        self.run_dir.join("scopes").join(instance).join("exec-env")
+    }
+
     /// The container-name prefix of a scope instance's one-shot containers, for
     /// fencing and leak checks.
     pub async fn one_shot_prefix(&self, instance: &str) -> Result<String, EnvError> {
@@ -285,6 +293,7 @@ impl DockerExecutor {
         Ok(Arc::new(OneShotRunner::new(
             self.one_shot_prefix_for(&scope.instance).await?,
             self.workspace_for(&scope.instance),
+            self.exec_env_dir(&scope.instance),
             self.one_shot_marker(&scope.instance),
             scope,
             network,
@@ -515,6 +524,8 @@ impl Drop for AbandonGuard {
 struct DockerTeardown {
     container: ContainerName,
     path:      PathBuf,
+    /// The scope's per-spawn env files ([`DockerExecutor::exec_env_dir`]).
+    env_files: PathBuf,
     retention: Retention,
     grace:     Duration,
     /// The scope has a service world (containers and a network) to tear down.
@@ -684,9 +695,11 @@ impl DockerExecutor {
         // One-shot containers in this scope's world share the job container's
         // network namespace, so a service reachable from the job is reachable
         // from them under the same names.
+        let env_files = self.exec_env_dir(&scope.instance);
         let runner = OneShotRunner::new(
             one_shot_prefix_of(&name),
             workspace.clone(),
+            env_files.clone(),
             self.one_shot_marker(&scope.instance),
             scope,
             Some(format!("container:{name}")),
@@ -700,16 +713,18 @@ impl DockerExecutor {
             Arc::new(DockerEnv {
                 container: name.clone(),
                 workspace: workspace.clone(),
+                env_files: env_files.clone(),
                 ambient,
                 grace: scope.grace,
                 wrapper_shell: OnceCell::new(),
             }),
             DockerTeardown {
                 container: name,
-                path:      workspace,
+                path: workspace,
+                env_files,
                 retention: self.retention,
-                grace:     scope.grace,
-                services:  network.is_some(),
+                grace: scope.grace,
+                services: network.is_some(),
             },
         )
         .with_runner(Arc::new(runner)))
@@ -761,6 +776,7 @@ impl Executor for DockerExecutor {
         let Some(DockerTeardown {
             container,
             path,
+            env_files,
             retention,
             grace,
             services,
@@ -799,6 +815,11 @@ impl Executor for DockerExecutor {
             report = report.released(format!("services of {container}"));
         }
 
+        // The per-spawn env files can hold resolved secrets and are never
+        // retained, whatever the workspace policy: each was removed at wait,
+        // so this catches only what an abandoned spawn left behind.
+        let _ = fs::remove_dir_all(env_files).await;
+
         let workspace = format!("workspace {}", path.display());
         if retention.keeps(outcome) {
             return report.kept(workspace);
@@ -820,6 +841,8 @@ impl Executor for DockerExecutor {
 struct DockerEnv {
     container:     ContainerName,
     workspace:     PathBuf,
+    /// The scope's per-spawn env files ([`DockerExecutor::exec_env_dir`]).
+    env_files:     PathBuf,
     /// The container's effective env, snapshotted at create.
     ambient:       BTreeMap<String, String>,
     grace:         Duration,
@@ -897,10 +920,28 @@ impl ExecEnv for DockerEnv {
             None => CONTAINER_WORKSPACE.to_string(),
         };
 
-        let mut argv: Vec<String> = vec!["exec".into(), "-w".into(), workdir];
-        for (key, value) in &spec.env {
+        // The resolved env travels as a 0600 env file plus the client's own
+        // process environment ([`split_env`]) — never as `-e KEY=VALUE`
+        // arguments, which `ps` shows to every local user.
+        let split = split_env(&spec.env);
+        fs::create_dir_all(&self.env_files)
+            .await
+            .map_err(|e| EnvError::workspace("create", self.env_files.display(), e))?;
+        let env_file = self.env_files.join(format!("{token}.env"));
+        write_env_file(&env_file, &split.file)
+            .await
+            .map_err(|e| EnvError::workspace("write", env_file.display(), e))?;
+
+        let mut argv: Vec<String> = vec![
+            "exec".into(),
+            "-w".into(),
+            workdir,
+            "--env-file".into(),
+            env_file.display().to_string(),
+        ];
+        for (key, _) in &split.inherit {
             argv.push("-e".into());
-            argv.push(format!("{key}={value}"));
+            argv.push(key.to_string());
         }
         argv.push(self.container.to_string());
         let wrapper_shell = self.wrapper_shell().await;
@@ -940,11 +981,20 @@ impl ExecEnv for DockerEnv {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for (key, value) in &split.inherit {
+            command.env(key.as_str(), value.as_str());
+        }
 
-        let mut child = command.spawn().map_err(|e| EnvError::Spawn {
-            program: SmolStr::new("docker exec"),
-            source:  e,
-        })?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = fs::remove_file(&env_file).await;
+                return Err(EnvError::Spawn {
+                    program: SmolStr::new("docker exec"),
+                    source:  e,
+                });
+            }
+        };
 
         let (tx, rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
         if let Some(stdout) = child.stdout.take() {
@@ -960,6 +1010,7 @@ impl ExecEnv for DockerEnv {
             child,
             status_file: pgid_host.with_extension("status"),
             pgid_file: pgid_host,
+            env_file,
             pgid: None,
             lines: Some(rx),
         }))
@@ -1040,6 +1091,10 @@ struct DockerProcess {
     child:       Child,
     pgid_file:   PathBuf,
     status_file: PathBuf,
+    /// This spawn's env file. The client read it before creating the exec;
+    /// removing it any earlier would race that read, so `wait` — which the
+    /// cancel ladder always reaches — removes it.
+    env_file:    PathBuf,
     pgid:        Option<i32>,
     lines:       Option<LineStream>,
 }
@@ -1128,6 +1183,7 @@ impl ProcessHandle for DockerProcess {
 
         let _ = fs::remove_file(&self.pgid_file).await;
         let _ = fs::remove_file(&self.status_file).await;
+        let _ = fs::remove_file(&self.env_file).await;
         let status = status.unwrap_or_else(|| ExitStatus::from(client));
         // Which of the three answered is the subtlety the status itself never
         // carries: the wrapper's file, that file read after the group went away,
@@ -1227,6 +1283,64 @@ fn parse_env_list(json: &str) -> Result<BTreeMap<String, String>, EnvError> {
 pub(crate) fn next_token() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One spawn's resolved env, split for the docker CLI so no value ever
+/// becomes an argument of the host-side client process: argv is
+/// world-readable (`ps`) for the client's lifetime, and a resolved env can
+/// hold secret plaintext.
+///
+/// `file` holds `KEY=VALUE` lines for `--env-file`. The env-file format
+/// cannot carry every value — a newline ends the line, docker strips a
+/// carriage return before one, a leading `#` makes the line a comment and
+/// leading key whitespace is trimmed — so entries the file would mangle
+/// (`GITHUB_ENV` multiline values are the live case) go to `inherit`
+/// instead: the key rides as a value-less `-e KEY` argument and the value
+/// travels in the docker client's own process environment, which the CLI
+/// reads it back from. Keys in argv are fine; values are not — the redacting
+/// `Debug` impls draw the same line.
+pub(crate) struct SplitEnv {
+    pub(crate) file:    String,
+    pub(crate) inherit: Vec<(SmolStr, SmolStr)>,
+}
+
+pub(crate) fn split_env<'a>(env: impl IntoIterator<Item = (&'a SmolStr, &'a SmolStr)>) -> SplitEnv {
+    let mut split = SplitEnv {
+        file:    String::new(),
+        inherit: Vec::new(),
+    };
+    for (key, value) in env {
+        if env_file_representable(key, value) {
+            split.file.push_str(key);
+            split.file.push('=');
+            split.file.push_str(value);
+            split.file.push('\n');
+        } else {
+            split.inherit.push((key.clone(), value.clone()));
+        }
+    }
+    split
+}
+
+/// Whether docker's `--env-file` reader reproduces this pair byte for byte.
+fn env_file_representable(key: &str, value: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with('#')
+        && !key.starts_with(char::is_whitespace)
+        && !key.contains(['\n', '\r'])
+        && !value.contains(['\n', '\r'])
+}
+
+/// Write one spawn's env file: created fresh and readable by this user alone
+/// — it can hold resolved secrets, and the run dir is not otherwise
+/// secret-tight. The caller removes it once the client no longer needs it.
+pub(crate) async fn write_env_file(path: &Path, contents: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    file.write_all(contents.as_bytes()).await
 }
 
 #[tracing::instrument(
@@ -1388,6 +1502,45 @@ pub async fn list_containers(prefix: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod split_env_tests {
+    use super::*;
+
+    #[test]
+    fn values_stay_out_of_argv_material_and_multiline_goes_to_the_client_env() {
+        let env: BTreeMap<SmolStr, SmolStr> = [
+            ("PLAIN", "a-resolved-secret"),
+            ("EQ", "a=b=c"),
+            ("EMPTY", ""),
+            ("HASH_VALUE", "a#b"),
+            ("MULTI", "line one\nline two"),
+            ("TRAILING_CR", "ends\r"),
+            ("#WEIRD", "x"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (SmolStr::new(k), SmolStr::new(v)))
+        .collect();
+        let split = split_env(&env);
+
+        // What the file carries, it carries verbatim.
+        assert!(split.file.contains("PLAIN=a-resolved-secret\n"));
+        assert!(split.file.contains("EQ=a=b=c\n"));
+        assert!(split.file.contains("EMPTY=\n"));
+        assert!(split.file.contains("HASH_VALUE=a#b\n"));
+
+        // What the file format would mangle inherits through the client's
+        // environment instead; only the keys ever reach argv.
+        let inherit: Vec<&str> = split.inherit.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(inherit, ["#WEIRD", "MULTI", "TRAILING_CR"]);
+        for needle in ["line one", "ends"] {
+            assert!(
+                !split.file.contains(needle),
+                "{needle} leaked into the file"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

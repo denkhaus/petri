@@ -508,6 +508,15 @@ impl Session {
         out
     }
 
+    /// The step's own directory of runner files, relative to the workspace
+    /// root.
+    fn step_dir(&self) -> &Path {
+        self.files
+            .env
+            .parent()
+            .expect("step files have a firing directory")
+    }
+
     /// Write the resolved script to the step's runner-owned directory and turn
     /// the process into `sh` running the shell template over it. The script
     /// cannot live below `working-directory`: a preceding container step can
@@ -517,7 +526,7 @@ impl Session {
         mut process: ResolvedProcess,
         template: &str,
         shell_script: ShellScript,
-    ) -> Result<ResolvedProcess, StepFailure> {
+    ) -> Result<(ResolvedProcess, PathBuf), StepFailure> {
         let (script_name, contents) = match shell_script {
             ShellScript::Plain => ("script", process.run),
             ShellScript::PowerShell => (
@@ -529,12 +538,7 @@ impl Session {
                 ),
             ),
         };
-        let script = self
-            .files
-            .env
-            .parent()
-            .expect("step files have a firing directory")
-            .join(script_name);
+        let script = self.step_dir().join(script_name);
         write(&*self.env, &script, contents.as_bytes()).await?;
         let script_path = format!("{}/{}", self.workspace, script.display());
         process.env.insert(
@@ -547,17 +551,51 @@ impl Session {
             template.replace("{0}", &format!("\"${SCRIPT_PATH_ENV}\""))
         );
         process.shell = Shell::Sh;
-        Ok(process)
+        Ok((process, script))
+    }
+
+    /// [`Session::stage_script`] for the built-in shells: the resolved script —
+    /// which may hold resolved secrets — moves into the step's runner-owned
+    /// directory, and `run` becomes a secret-free wrapper that execs the same
+    /// shell over the file, as GitHub's runner always writes a script file.
+    /// Without this, the resolved text becomes a process argument, world-
+    /// readable in `ps` for the step's lifetime.
+    ///
+    /// Unlike the custom-shell path, the wrapper runs under the step's own
+    /// shell and the prologue stays inside the script (the callers already
+    /// prepend it): nothing between the executor and the script changes, and
+    /// in particular no POSIX `sh` sits in front of a `bash` step to drop the
+    /// invalid-identifier names GitHub's contract carries
+    /// (`INPUT_NODE-VERSION`).
+    async fn stage_default(
+        &self,
+        mut process: ResolvedProcess,
+    ) -> Result<(ResolvedProcess, PathBuf), StepFailure> {
+        let script = self.step_dir().join("script");
+        write(&*self.env, &script, process.run.as_bytes()).await?;
+        let script_path = format!("{}/{}", self.workspace, script.display());
+        process.env.insert(
+            SmolStr::new(SCRIPT_PATH_ENV),
+            ValueOrSecretRef::Literal(Value::String(script_path)),
+        );
+        process.run = format!(
+            "exec {} \"${SCRIPT_PATH_ENV}\"\n",
+            process.shell.file_invocation()
+        );
+        Ok((process, script))
     }
 
     /// Run `process` under this session: the resolution passes fill the
     /// carrier, the shared process-step machinery does the work, the command
     /// sink watches its output, and the files are applied afterwards.
     ///
-    /// With a `shell_command` template, `process.run` is the bare script: after
-    /// the sentinels resolve it is written to the step's `script` file, and the
-    /// process becomes `sh` running the prologue plus the template with `{0}`
-    /// substituted by the script's path — as GitHub invokes custom shells.
+    /// After the sentinels resolve, the script is always written to the step's
+    /// `script` file and the process spawns a secret-free wrapper over it —
+    /// never the resolved text as an argument. With a `shell_command`
+    /// template, the wrapper is `sh` running the prologue plus the template
+    /// with `{0}` substituted by the script's path, as GitHub invokes custom
+    /// shells; a built-in shell wraps itself ([`Session::stage_default`]).
+    /// The script is scrubbed once the process ends.
     pub(crate) async fn run(
         mut self,
         process: ResolvedProcess,
@@ -624,12 +662,15 @@ impl Session {
             Ok(process) => process,
             Err(failure) => return (failure.into(), Effects::default()),
         };
-        let process = match shell_command {
-            Some(template) => match self.stage_script(process, &template, shell_script).await {
-                Ok(process) => process,
-                Err(failure) => return (failure.into(), Effects::default()),
-            },
-            None => process,
+        // Every path stages: the resolved script may hold resolved secret
+        // plaintext, and staging keeps it out of the process argv.
+        let staged = match shell_command {
+            Some(template) => self.stage_script(process, &template, shell_script).await,
+            None => self.stage_default(process).await,
+        };
+        let (process, script) = match staged {
+            Ok(staged) => staged,
+            Err(failure) => return (failure.into(), Effects::default()),
         };
         let (tx, rx) = mpsc::channel(COMMAND_SINK_CAPACITY);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
@@ -649,6 +690,12 @@ impl Session {
         };
         let soft_fail = process.soft_fail.clone();
         let outcome = process.run_under(delegate).await;
+        // The staged script holds the resolved text, secrets included, and a
+        // workspace retained after failure keeps its files — so overwrite it
+        // now that the process is done, success or not. Best effort: a
+        // workspace that cannot be written any more changes nothing about the
+        // step's outcome.
+        let _ = write(&*self.env, &script, b"").await;
         let commands = settle_sink(sink_task, &collected).await;
         self.conclude(outcome, &soft_fail, commands, &logs).await
     }
