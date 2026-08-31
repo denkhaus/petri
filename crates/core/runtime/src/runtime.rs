@@ -323,14 +323,9 @@ impl Runtime {
                 Err(errors) => {
                     let span = Span::file(file.to_string_lossy().as_ref());
                     for error in errors {
-                        let code = match &error {
-                            ir::ValidationError::UnknownStepKind { .. } => "step.unknown_kind",
-                            ir::ValidationError::BadStepConfig { .. } => "step.bad_config",
-                            _ => "validate",
-                        };
                         lowered
                             .diagnostics
-                            .error(code, span.clone(), error.to_string());
+                            .error(error.code(), span.clone(), error.to_string());
                     }
                 }
             }

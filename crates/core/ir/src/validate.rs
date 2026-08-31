@@ -18,77 +18,77 @@ use crate::step::StepKinds;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationError<S = Live> {
     // ── Structure ──────────────────────────────────────────────────────────
-    #[error("node at index {index} declares id {declared:?}; node ids must equal their index")]
+    #[error("node at index {index} declares id {declared}; node ids must equal their index")]
     NodeIdMismatch {
         index:    usize,
         declared: NodeId<S>,
     },
-    #[error("scope at index {index} declares id {declared:?}; scope ids must equal their index")]
+    #[error("scope at index {index} declares id {declared}; scope ids must equal their index")]
     ScopeIdMismatch {
         index:    usize,
         declared: ScopeId<S>,
     },
-    #[error("node {node:?} refers to unknown scope {scope:?}")]
+    #[error("node {node} refers to unknown scope {scope}")]
     UnknownScope { node: NodeId<S>, scope: ScopeId<S> },
-    #[error("edge {edge:?} on node {from:?} points at unknown node {to:?}")]
+    #[error("edge {edge} on node {from} points at unknown node {to}")]
     UnknownTarget {
         from: NodeId<S>,
         edge: EdgeId<S>,
         to:   NodeId<S>,
     },
-    #[error("node {node:?} uses step kind `{kind}` which is not registered")]
+    #[error("node {node} uses step kind `{kind}` which is not registered")]
     UnknownStepKind { node: NodeId<S>, kind: StepKindId },
-    #[error("node {node:?} has an invalid step config: {message}")]
+    #[error("node {node} has an invalid step config: {message}")]
     BadStepConfig { node: NodeId<S>, message: String },
     #[error("the graph has no entry nodes")]
     NoEntry,
-    #[error("entry list refers to unknown node {0:?}")]
+    #[error("entry list refers to unknown node {0}")]
     UnknownEntry(NodeId<S>),
-    #[error("entry node {0:?} is listed twice")]
+    #[error("entry node {0} is listed twice")]
     DuplicateEntry(NodeId<S>),
     #[error(
-        "entry node {0:?} has an incoming forward edge; entry nodes are seeded, and only \
+        "entry node {0} has an incoming forward edge; entry nodes are seeded, and only \
          a back edge may point at one"
     )]
     EntryHasIncoming(NodeId<S>),
-    #[error("the completion policy names unknown node {0:?}")]
+    #[error("the completion policy names unknown node {0}")]
     CompletionUnknownNode(NodeId<S>),
 
     // ── Invariant 1 ────────────────────────────────────────────────────────
-    #[error("cycle through {0:?} contains no back edge")]
+    #[error("cycle through nodes {} contains no back edge", fmt_ids(.0))]
     CycleWithoutBackEdge(Vec<NodeId<S>>),
 
     // ── Invariant 2 ────────────────────────────────────────────────────────
-    #[error("node {node:?}: Guard::Always on arm {arm} is not the final arm of its group")]
+    #[error("node {node}: Guard::Always on arm {arm} is not the final arm of its group")]
     AlwaysNotLast { node: NodeId<S>, arm: usize },
 
     // ── Invariant 3 ────────────────────────────────────────────────────────
-    #[error("node {node:?}: select group {group} has no arms")]
+    #[error("node {node}: select group {group} has no arms")]
     EmptyGroup { node: NodeId<S>, group: usize },
 
     // ── Invariant 4 ────────────────────────────────────────────────────────
-    #[error("node {0:?}: Budget.max_firings must be >= 1")]
+    #[error("node {0}: Budget.max_firings must be >= 1")]
     ZeroBudget(NodeId<S>),
-    #[error("node {0:?} is reachable through a back edge, so it needs a finite firing budget")]
+    #[error("node {0} is reachable through a back edge, so it needs a finite firing budget")]
     UnboundedLoopBudget(NodeId<S>),
 
     // ── Invariant 5 ────────────────────────────────────────────────────────
-    #[error("edge id {0:?} is used more than once")]
+    #[error("edge id {0} is used more than once")]
     DuplicateEdgeId(EdgeId<S>),
-    #[error("edge id {0:?} is reserved for seed tokens")]
+    #[error("edge id {0} is reserved for seed tokens")]
     ReservedEdgeId(EdgeId<S>),
 
     // ── Invariant 6 ────────────────────────────────────────────────────────
-    #[error("{site} refers to expression {expr:?}, which is not in the table")]
+    #[error("{site} refers to expression {expr}, which is not in the table")]
     UnknownExpr { site: SmolStr, expr: ExprId<S> },
-    #[error("node {0:?} still carries an `expand`; executable plans are fully lowered")]
+    #[error("node {0} still carries an `expand`; executable plans are fully lowered")]
     HirFieldInPlan(NodeId<S>),
-    #[error("node {node:?} still carries an unresolved config placeholder at `{path}`")]
+    #[error("node {node} still carries an unresolved config placeholder at `{path}`")]
     HirConfigInPlan { node: NodeId<S>, path: String },
 
     // ── Invariant 8 ────────────────────────────────────────────────────────
     #[error(
-        "node {0:?} has an incoming back edge, so it is a loop head: use `JoinPolicy::Any`. \
+        "node {0} has an incoming back edge, so it is a loop head: use `JoinPolicy::Any`. \
          A forward edge into the head carries only generation 0 and a back edge only \
          generations 1 and up, so no generation ever holds a token on both and any other \
          policy is unsatisfiable forever"
@@ -96,15 +96,15 @@ pub enum ValidationError<S = Live> {
     LoopHeadMustJoinAny(NodeId<S>),
 
     // ── Invariant 7 ────────────────────────────────────────────────────────
-    #[error("node {node:?}: expansion subgraph entry {entry:?} does not reach exit {exit:?}")]
+    #[error("node {node}: expansion subgraph entry {entry} does not reach exit {exit}")]
     ExitUnreachable {
         node:  NodeId<S>,
         entry: NodeId<S>,
         exit:  NodeId<S>,
     },
     #[error(
-        "node {node:?}: expansion subgraph exit {exit:?} does not postdominate entry {entry:?}; \
-         {offender:?} can complete the region without reaching the exit"
+        "node {node}: expansion subgraph exit {exit} does not postdominate entry {entry}; \
+         node {offender} can complete the region without reaching the exit"
     )]
     ExitNotPostdominator {
         node:     NodeId<S>,
@@ -113,10 +113,23 @@ pub enum ValidationError<S = Live> {
         offender: NodeId<S>,
     },
     #[error(
-        "node {node:?}: edge {edge:?} crosses the expansion subgraph boundary; \
+        "node {node}: edge {edge} crosses the expansion subgraph boundary; \
          only edges into the entry and out of the exit may cross"
     )]
     BoundaryCrossing { node: NodeId<S>, edge: EdgeId<S> },
+}
+
+/// Node ids joined for a message: a cycle is a list, and `Vec` has no
+/// `Display`.
+fn fmt_ids<S>(ids: &[NodeId<S>]) -> String {
+    let mut out = String::new();
+    for (index, id) in ids.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&id.raw().to_string());
+    }
+    out
 }
 
 /// The structural location a validation error describes. Callers can format it
@@ -136,6 +149,16 @@ impl<S> ValidationError<S> {
     /// The diagnostic code a frontend reports this error under.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::NodeIdMismatch { .. } => "validate.node_id_mismatch",
+            Self::ScopeIdMismatch { .. } => "validate.scope_id_mismatch",
+            Self::UnknownScope { .. } => "validate.unknown_scope",
+            Self::UnknownTarget { .. } => "validate.unknown_target",
+            Self::UnknownStepKind { .. } => "step.unknown_kind",
+            Self::BadStepConfig { .. } => "step.bad_config",
+            Self::NoEntry => "validate.no_entry",
+            Self::UnknownEntry(_) => "validate.unknown_entry",
+            Self::DuplicateEntry(_) => "validate.duplicate_entry",
+            Self::CompletionUnknownNode(_) => "validate.completion_unknown_node",
             Self::CycleWithoutBackEdge(_) => "validate.cycle_without_back_edge",
             Self::AlwaysNotLast { .. } => "validate.always_not_last",
             Self::EmptyGroup { .. } => "validate.empty_group",
@@ -149,7 +172,6 @@ impl<S> ValidationError<S> {
             | Self::ExitNotPostdominator { .. }
             | Self::BoundaryCrossing { .. } => "validate.expansion_region",
             Self::EntryHasIncoming(_) => "validate.entry_has_incoming",
-            _ => "validate.structure",
         }
     }
 
@@ -256,13 +278,13 @@ impl<S> ValidationError<S> {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationWarning<S = Live> {
     #[error(
-        "scope {scope:?} can be re-entered at {at:?}: a path leaves the scope through \
-         {via:?} and comes back. A scope is released once nothing in it can run, and \
+        "scope {scope} can be re-entered at node {at}: a path leaves the scope through \
+         node {via} and comes back. A scope is released once nothing in it can run, and \
          release is irreversible, so re-entry acquires a fresh runtime and workspace and \
          anything the earlier firings left behind is gone. Either restructure so the \
          returning path joins on an edge from inside the scope, or accept \
-         fresh-environment semantics at {at:?}. What remains after suppression is still a \
-         static over-approximation: it cannot tell whether a given run reaches the \
+         fresh-environment semantics at node {at}. What remains after suppression is still \
+         a static over-approximation: it cannot tell whether a given run reaches the \
          releasing state."
     )]
     ScopeReentry {
@@ -273,7 +295,7 @@ pub enum ValidationWarning<S = Live> {
         via:   NodeId<S>,
     },
     #[error(
-        "node {node:?} sets `run_on_cancel` on an expansion node; a cancelled scope \
+        "node {node} sets `run_on_cancel` on an expansion node; a cancelled scope \
          never splices, so the flag is ignored (v1). Flag the template nodes inside \
          the region instead — clones inherit it"
     )]

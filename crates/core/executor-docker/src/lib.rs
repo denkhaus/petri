@@ -634,8 +634,8 @@ impl DockerExecutor {
                 message:   join.to_string(),
             }),
         };
-        let ambient = match created {
-            Ok(env_json) => parse_env_list(&env_json),
+        let ambient = match created.and_then(|env_json| parse_env_list(&env_json)) {
+            Ok(ambient) => ambient,
             Err(error) => {
                 // A failed acquire leaks nothing: the services came up for a job
                 // container that will never exist.
@@ -1173,8 +1173,23 @@ async fn signal_group(container: &str, pgid: i32, signal: &str) -> Result<(), En
 /// `docker inspect`'s `.Config.Env` — a JSON array of `KEY=VALUE` strings —
 /// as a map. Docker appends `-e` flags after the image's entries, so on a
 /// duplicate the later, stronger value wins.
-fn parse_env_list(json: &str) -> BTreeMap<String, String> {
-    serde_json::from_str::<Vec<String>>(json)
+///
+/// Anything else is an error, not an empty map: the ambient env feeds `if:`
+/// conditions, and a silently empty env could flip one. Entries without `=`
+/// stay tolerated — docker itself accepts them — and are dropped.
+fn parse_env_list(json: &str) -> Result<BTreeMap<String, String>, EnvError> {
+    // Go's `{{json .Config.Env}}` renders a nil env as `null`, and a container
+    // genuinely can have no `Config.Env`, so `null` deliberately means empty.
+    let entries: Option<Vec<String>> =
+        serde_json::from_str(json).map_err(|error| EnvError::Backend {
+            backend:   SmolStr::new("docker"),
+            operation: SmolStr::new("inspect"),
+            message:   format!(
+                "`.Config.Env` output was not a JSON string array ({} bytes): {error}",
+                json.len()
+            ),
+        })?;
+    Ok(entries
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| {
@@ -1182,7 +1197,7 @@ fn parse_env_list(json: &str) -> BTreeMap<String, String> {
                 .split_once('=')
                 .map(|(key, value)| (key.to_string(), value.to_string()))
         })
-        .collect()
+        .collect())
 }
 
 pub(crate) fn next_token() -> u64 {
@@ -1357,12 +1372,20 @@ mod tests {
 
     #[test]
     fn env_lists_parse_with_the_later_duplicate_winning() {
-        let parsed = parse_env_list(r#"["PATH=/usr/bin","A=first","A=second","EMPTY=","BARE"]"#);
+        let parsed = parse_env_list(r#"["PATH=/usr/bin","A=first","A=second","EMPTY=","BARE"]"#)
+            .expect("a string array parses");
         assert_eq!(parsed.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(parsed.get("A").map(String::as_str), Some("second"));
         assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
         assert_eq!(parsed.get("BARE"), None);
-        assert!(parse_env_list("not json").is_empty());
+    }
+
+    #[test]
+    fn a_nil_env_is_empty_and_anything_else_unparseable_is_an_error() {
+        let parsed = parse_env_list("null").expect("a nil `Config.Env` renders as `null`");
+        assert!(parsed.is_empty());
+        assert!(parse_env_list("not json").is_err());
+        assert!(parse_env_list("{}").is_err());
     }
 
     #[test]

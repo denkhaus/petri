@@ -332,13 +332,13 @@ pub enum FragmentErrorKind {
     Structure(ValidationError<Local>),
     #[error("an empty fragment is valid only under Replace; an empty Append has nothing to add")]
     EmptyAppend,
-    #[error("exit list refers to unknown node {0:?}")]
+    #[error("exit list refers to unknown node {0}")]
     UnknownExit(NodeId<Local>),
-    #[error("exit node {0:?} is listed twice")]
+    #[error("exit node {0} is listed twice")]
     DuplicateExit(NodeId<Local>),
-    #[error("node {0:?} carries an `expand`; a fragment is executable IR, never HIR")]
+    #[error("node {0} carries an `expand`; a fragment is executable IR, never HIR")]
     ExpansionInFragment(NodeId<Local>),
-    #[error("attachment names unknown fragment node {0:?}")]
+    #[error("attachment names unknown fragment node {0}")]
     AttachmentUnknownNode(NodeId<Local>),
 }
 

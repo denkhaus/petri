@@ -1,14 +1,15 @@
 //! §7: the invariants checked at load. Every check runs, so one call reports
 //! every problem rather than stopping at the first.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
-    Arm, Budget, Completion, Edge, ExpandTarget, Expansion, ExprId, ExprTable, Graph, GraphBuilder,
-    Guard, JoinPolicy, Node, NodeId, Routing, Scope, ScopeId, SelectGroup, StepKindId, StepRef,
-    ValidationError, ValidationLocation, ValidationWarning, Value, validate, validate_plan,
+    Arm, Budget, Completion, Edge, EdgeId, ExpandTarget, Expansion, ExprId, ExprTable, Graph,
+    GraphBuilder, Guard, JoinPolicy, Node, NodeId, Routing, Scope, ScopeId, SelectGroup,
+    StepKindId, StepRef, ValidationError, ValidationLocation, ValidationWarning, Value, validate,
+    validate_plan,
 };
 use serde_json::json;
 
@@ -41,6 +42,73 @@ fn validation_diagnostics_own_their_shared_metadata() {
     let warning: ValidationWarning = ValidationWarning::RunOnCancelExpansion { node };
     assert_eq!(warning.code(), "lint.run_on_cancel_expansion");
     assert_eq!(warning.primary_node(), node);
+}
+
+/// Every structural error reports its own code, so the same error never shows
+/// a different code depending on which caller formatted it.
+#[test]
+fn structural_errors_have_distinct_codes() {
+    let node = NodeId::new(1);
+    let cases: Vec<(ValidationError, &str)> = vec![
+        (
+            ValidationError::NodeIdMismatch {
+                index:    0,
+                declared: node,
+            },
+            "validate.node_id_mismatch",
+        ),
+        (
+            ValidationError::ScopeIdMismatch {
+                index:    0,
+                declared: ScopeId::new(1),
+            },
+            "validate.scope_id_mismatch",
+        ),
+        (
+            ValidationError::UnknownScope {
+                node,
+                scope: ScopeId::new(9),
+            },
+            "validate.unknown_scope",
+        ),
+        (
+            ValidationError::UnknownTarget {
+                from: node,
+                edge: EdgeId::new(0),
+                to:   NodeId::new(9),
+            },
+            "validate.unknown_target",
+        ),
+        (
+            ValidationError::UnknownStepKind { node, kind: NOOP },
+            "step.unknown_kind",
+        ),
+        (
+            ValidationError::BadStepConfig {
+                node,
+                message: "bad".to_string(),
+            },
+            "step.bad_config",
+        ),
+        (ValidationError::NoEntry, "validate.no_entry"),
+        (
+            ValidationError::UnknownEntry(node),
+            "validate.unknown_entry",
+        ),
+        (
+            ValidationError::DuplicateEntry(node),
+            "validate.duplicate_entry",
+        ),
+        (
+            ValidationError::CompletionUnknownNode(node),
+            "validate.completion_unknown_node",
+        ),
+    ];
+    for (error, expected) in &cases {
+        assert_eq!(error.code(), *expected, "{error}");
+    }
+    let codes: BTreeSet<&str> = cases.iter().map(|(_, code)| *code).collect();
+    assert_eq!(codes.len(), cases.len(), "no two variants share a code");
 }
 
 /// Invariant 1: every cycle contains at least one back edge.

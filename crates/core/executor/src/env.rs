@@ -135,13 +135,17 @@ impl ExitStatus {
 
 /// The mapping every executor needs when the process it waited on was a real
 /// child of this one: an exit code when there is one, otherwise the signal that
-/// killed it.
+/// killed it. When the OS reports neither, the mapping says so rather than
+/// fabricating a code.
 impl From<process::ExitStatus> for ExitStatus {
     fn from(status: process::ExitStatus) -> Self {
         match (status.code(), status.signal()) {
             (Some(code), _) => Self::code(code),
             (None, Some(signal)) => Self::signalled(signal),
-            (None, None) => Self::code(-1),
+            (None, None) => Self {
+                code:   None,
+                signal: None,
+            },
         }
     }
 }

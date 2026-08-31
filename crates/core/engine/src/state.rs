@@ -198,38 +198,38 @@ pub enum SpliceEffect {
 /// Anything that makes a run fail without a step failing.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum RunError {
-    #[error("node {node:?}: evaluating {site} failed: {error}")]
+    #[error("node {node}: evaluating {site} failed: {error}")]
     Eval {
         node:  NodeId,
         site:  SmolStr,
         error: EvalError,
     },
-    #[error("node {node:?} exceeded its firing budget of {max_firings}")]
+    #[error("node {node} exceeded its firing budget of {max_firings}")]
     BudgetExceeded {
         node:        NodeId,
         max_firings: u32,
     },
-    #[error("node {node:?}: select group {group} matched no arm and requires one")]
+    #[error("node {node}: select group {group} matched no arm and requires one")]
     NoArmMatched { node: NodeId, group: usize },
-    #[error("node {node:?}: `for_each` items evaluated to {got}, not an array")]
+    #[error("node {node}: `for_each` items evaluated to {got}, not an array")]
     ItemsNotArray { node: NodeId, got: SmolStr },
-    #[error("node {node:?}: step config still holds an unresolved expression at `{path}`")]
+    #[error("node {node}: step config still holds an unresolved expression at `{path}`")]
     UnresolvedConfig { node: NodeId, path: String },
-    #[error("firing {firing:?} is not waiting for a retry")]
+    #[error("firing {firing} is not waiting for a retry")]
     UnexpectedRetry { firing: FiringId },
-    #[error("firing {firing:?} reported attempt {reported:?} while running {running:?}")]
+    #[error("firing {firing} reported attempt {reported} while running attempt {running}")]
     AttemptMismatch {
         firing:   FiringId,
         reported: Attempt,
         running:  Attempt,
     },
-    #[error("node {node:?}: expansion subgraph entry must be the expanding node")]
+    #[error("node {node}: expansion subgraph entry must be the expanding node")]
     ExpansionEntryMismatch { node: NodeId },
-    #[error("token refers to unknown edge {0:?}")]
+    #[error("token refers to unknown edge {0}")]
     UnknownEdge(EdgeId),
-    #[error("unknown node {0:?}")]
+    #[error("unknown node {0}")]
     UnknownNode(NodeId),
-    #[error("unknown firing {0:?}")]
+    #[error("unknown firing {0}")]
     UnknownFiring(FiringId),
     #[error("event arrived before RunStarted")]
     NotStarted,

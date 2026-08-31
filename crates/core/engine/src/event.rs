@@ -201,7 +201,7 @@ impl fmt::Display for BoundaryViolation {
 
 /// A config reached the executor boundary in a state it may not cross in.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
-#[error("step config for node {node:?} holds {reason} at `{path}`")]
+#[error("step config for node {node} holds {reason} at `{path}`")]
 pub struct UnresolvedConfig {
     pub node:   NodeId,
     pub path:   String,
