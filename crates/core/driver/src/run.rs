@@ -459,7 +459,7 @@ impl Driver {
         config: RunConfig,
     ) -> Self {
         let sink =
-            Arc::new(LogSink::new(&config.run_dir, secrets.masker()).echoing(config.echo_logs));
+            Arc::new(LogSink::new(&config.run_dir, secrets.masker()).with_echo(config.echo_logs));
         let (tx, rx) = mpsc::channel(SIGNAL_CHANNEL_CAPACITY);
         Self {
             engine,

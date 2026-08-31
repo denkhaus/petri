@@ -26,6 +26,7 @@ use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, Lowered};
 use runtime::ir::{CancelScopeId, Graph, RunStatus};
 use runtime::{LoadError, RunOptions, Runtime};
+use tokio::signal;
 use tracing::field::{Empty, display};
 
 #[derive(Parser)]
@@ -303,7 +304,7 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
 async fn cancel_on_ctrl_c(handle: RunHandle) {
     let mut cancelled = false;
     loop {
-        if tokio::signal::ctrl_c().await.is_err() {
+        if signal::ctrl_c().await.is_err() {
             return;
         }
         if cancelled {

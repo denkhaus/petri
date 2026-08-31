@@ -83,6 +83,7 @@ use smol_str::SmolStr;
 use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+use tokio::task::spawn_blocking;
 use tokio::{fs as async_fs, time as async_time};
 use tracing::field::Empty;
 
@@ -791,7 +792,7 @@ async fn fence_prior_generations(groups_root: &Path, drain: Duration) -> Result<
 /// walks the whole process table, so it runs off the async workers.
 async fn await_drain(mut pgids: Vec<i32>, deadline: async_time::Instant) -> Vec<i32> {
     loop {
-        pgids = tokio::task::spawn_blocking(move || {
+        pgids = spawn_blocking(move || {
             pgids.retain(|&pgid| live_group_members(pgid) > 0);
             pgids
         })

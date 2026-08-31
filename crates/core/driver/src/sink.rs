@@ -29,7 +29,7 @@ impl LogSink {
 
     /// Also write lines to this process's stdout.
     #[must_use]
-    pub(crate) fn echoing(mut self, echo: bool) -> Self {
+    pub(crate) fn with_echo(mut self, echo: bool) -> Self {
         self.echo = echo;
         self
     }
