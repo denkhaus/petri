@@ -349,6 +349,14 @@ fn lower_internal(
 }
 
 impl<'a> Lowering<'_, 'a> {
+    /// The one step the run-time planner expands eagerly — the root action of
+    /// a deferred plan. `false` everywhere in a static lowering.
+    fn is_eager_root(&self, job_id: &str, step_id: &str) -> bool {
+        self.eager_action
+            .as_ref()
+            .is_some_and(|(job, step)| job == job_id && step == step_id)
+    }
+
     /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs`
     /// known, matrix-ness known, the frame's inputs and secret map in scope, no
     /// steps yet. The `needs.*` context keys are the names as written — the

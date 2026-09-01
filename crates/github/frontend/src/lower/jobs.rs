@@ -12,13 +12,14 @@ use serde_json::{Map, json};
 
 use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
 use crate::action::{
-    ACTION_KIND, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND, BACKGROUND_START_KIND,
-    BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DEFERRED_ACTION_KIND, DOCKER_ACTION_KIND, Phase, RUN_KIND,
+    self, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND, BACKGROUND_START_KIND,
+    BACKGROUND_WAIT_KIND, Phase,
 };
 use crate::call::CalleeSource;
+use crate::composite::{self, Uses};
 use crate::exprs::{
-    ExprSite, LoweredScalar, SEP, Site, config_value, lower_scalar, result_priority,
-    whole_value_secret,
+    ExprSite, LoweredScalar, SEP, Site, any_status, config_value, lower_scalar, result_priority,
+    status_fold, whole_value_secret,
 };
 use crate::model::{Defaults, Job, Step};
 use crate::{expr_lower, runs_on};
@@ -395,7 +396,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 if self.substitutable_checkout(step).is_some() {
                     return None;
                 }
-                self.action_plan(step)
+                self.action_plan(&job.id, step)
             })
             .collect();
 
@@ -563,16 +564,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
 
         for (step, plan) in job.steps.iter().zip(&plans).rev() {
-            let eager = self
-                .eager_action
-                .as_ref()
-                .is_some_and(|(job_id, step_id)| job_id == &job.id && step_id == &step.node_name());
+            let eager = self.is_eager_root(&job.id, &step.node_name());
             let deferred = !eager
                 && plan.is_none()
-                && step
-                    .uses
-                    .as_ref()
-                    .is_some_and(|(reference, _)| !reference.starts_with("docker://"));
+                && step.uses.as_ref().is_some_and(|(reference, _)| {
+                    !matches!(composite::classify(reference), Uses::Docker(_))
+                });
             if deferred
                 && let Some(id) = self.deferred_action_post_node(ActionContext {
                     job,
@@ -745,10 +742,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
     fn configure_job_environment(&mut self, id: NodeId, channel: Option<&Value>) {
         let Some(channel) = channel else { return };
         let node = self.b.node_mut(id);
-        if matches!(
-            node.step.kind.as_ref(),
-            RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND | DEFERRED_ACTION_KIND
-        ) && let Value::Object(config) = &mut node.step.config
+        if action::channel_bearing(node.step.kind.as_ref())
+            && let Value::Object(config) = &mut node.step.config
         {
             config.insert("job_environment".into(), channel.clone());
         }
@@ -795,10 +790,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
             if node.name == public_name {
                 node.name = format!("{public_name}{SEP}background").into();
             }
-            if matches!(
-                node.step.kind.as_ref(),
-                RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND | DEFERRED_ACTION_KIND
-            ) && let Value::Object(config) = &mut node.step.config
+            if action::channel_bearing(node.step.kind.as_ref())
+                && let Value::Object(config) = &mut node.step.config
             {
                 config.insert("background".into(), channel.clone());
             }
@@ -814,7 +807,12 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .filter_map(|id| self.b.graph().node(*id).map(|node| node.name.to_string()))
             .collect();
         let worker_status = self.background_status(site, &node_names);
-        let start_failed = self.any_status(site, &[start_name], &["failure", "timed_out"]);
+        let start_failed = any_status(
+            self.b.exprs(),
+            &[start_name],
+            &["failure", "timed_out"],
+            site.expanded(),
+        );
         let failure = self.b.exprs().lit("failure");
         let status = self.b.exprs().cond(start_failed, failure, worker_status);
         let output = if let Some(outputs) = site.composite_outputs.remove(&step.node_name()) {
@@ -871,37 +869,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         if let [name] = names {
             return site.node_status(self.b.exprs(), name);
         }
-        let failed = self.any_status(site, names, &["failure", "timed_out"]);
-        let cancelled = self.any_status(site, names, &["cancelled"]);
-        let partial = self.any_status(site, names, &["partial_success"]);
-        let succeeded = self.any_status(site, names, &["success"]);
-        let t = self.b.exprs();
-        let skipped = t.lit("skipped");
-        let success = t.lit("success");
-        let partial_success = t.lit("partial_success");
-        let cancelled_tag = t.lit("cancelled");
-        let failure = t.lit("failure");
-        let status = t.cond(succeeded, success, skipped);
-        let status = t.cond(partial, partial_success, status);
-        let status = t.cond(cancelled, cancelled_tag, status);
-        t.cond(failed, failure, status)
-    }
-
-    fn any_status(&mut self, site: &Site, names: &[String], tags: &[&str]) -> ExprId {
-        let mut terms = Vec::new();
-        for name in names {
-            for tag in tags {
-                terms.push(site.node_has_status(self.b.exprs(), name, tag));
-            }
-        }
-        let mut terms = terms.into_iter();
-        let Some(mut value) = terms.next() else {
-            return self.b.exprs().lit(false);
-        };
-        for term in terms {
-            value = self.b.exprs().binary(BinOp::Or, value, term);
-        }
-        value
+        status_fold(self.b.exprs(), names, site.expanded())
     }
 
     fn background_display(&mut self, step: &Step<'a>, site: &Site) -> Value {

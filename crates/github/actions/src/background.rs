@@ -166,18 +166,13 @@ impl Step for BackgroundWaitStep {
 }
 
 fn status_from_tag(tag: &str) -> Status {
-    match tag {
-        "success" => Status::Success,
-        "partial_success" => Status::PartialSuccess { underlying: None },
-        "failure" => Status::Failure(
-            FailureInfo::new("the background step failed").with_class(BACKGROUND_CLASS),
-        ),
-        "skipped" => Status::Skipped,
-        "cancelled" => Status::Cancelled,
-        "timed_out" => Status::TimedOut,
-        other => Status::Failure(
-            FailureInfo::new(format!("unknown background status `{other}`"))
+    Status::from_tag(tag, || {
+        FailureInfo::new("the background step failed").with_class(BACKGROUND_CLASS)
+    })
+    .unwrap_or_else(|| {
+        Status::Failure(
+            FailureInfo::new(format!("unknown background status `{tag}`"))
                 .with_class(BACKGROUND_CLASS),
-        ),
-    }
+        )
+    })
 }

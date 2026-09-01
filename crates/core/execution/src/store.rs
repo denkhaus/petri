@@ -176,7 +176,7 @@ impl CoordinatorStore {
             file.sync_data()
                 .map_err(|source| io_error("sync", &log_path, source))?;
         }
-        verify_graph_registry(&root, &state)?;
+        let graphs = verify_graph_registry(&root, &state)?;
         let log = OpenOptions::new()
             .append(true)
             .open(&log_path)
@@ -189,7 +189,7 @@ impl CoordinatorStore {
                 log,
                 state,
                 next_seq,
-                graphs: BTreeMap::new(),
+                graphs,
             },
             decoded.torn,
         ))
@@ -201,10 +201,6 @@ impl CoordinatorStore {
 
     pub fn state(&self) -> &CoordinatorState {
         &self.state
-    }
-
-    pub(crate) fn next_seq(&self) -> u64 {
-        self.next_seq
     }
 
     pub fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, StoreError> {
@@ -228,7 +224,12 @@ impl CoordinatorStore {
         Ok(record)
     }
 
-    pub fn register_graph(&mut self, graph: &Graph) -> Result<GraphDigest, StoreError> {
+    /// Persist and register a graph. The record is the `GraphRegistered`
+    /// append when the graph was new, `None` when it was already registered.
+    pub fn register_graph(
+        &mut self,
+        graph: &Graph,
+    ) -> Result<(GraphDigest, Option<CoordinatorRecord>), StoreError> {
         let bytes = serde_json::to_vec(graph).map_err(StoreError::Encode)?;
         let digest = digest_bytes(&bytes);
         if self.state.graphs.contains(&digest) {
@@ -239,13 +240,13 @@ impl CoordinatorStore {
                     found:    digest_bytes(&existing),
                 });
             }
-            return Ok(digest);
+            return Ok((digest, None));
         }
 
         let path = self.graph_path(digest);
         write_once_atomically(&path, &bytes)?;
-        self.append(CoordinatorEvent::GraphRegistered { digest })?;
-        Ok(digest)
+        let record = self.append(CoordinatorEvent::GraphRegistered { digest })?;
+        Ok((digest, Some(record)))
     }
 
     pub fn load_graph(&mut self, digest: GraphDigest) -> Result<Arc<Graph>, StoreError> {
@@ -320,7 +321,9 @@ impl CoordinatorStore {
         create_dir(&directory.join("executions"))?;
         let path = directory.join("invocation.json");
         let bytes = serde_json::to_vec_pretty(state).map_err(StoreError::Encode)?;
-        write_atomically(&path, &bytes)
+        // A rebuildable mirror of the log — published atomically for readers,
+        // but not fsynced: the coordinator log is the durable source of truth.
+        write_atomically_relaxed(&path, &bytes)
     }
 }
 
@@ -346,7 +349,13 @@ pub fn decode_coordinator_log(
     })
 }
 
-fn verify_graph_registry(root: &Path, state: &CoordinatorState) -> Result<(), StoreError> {
+/// Verify every registered graph and keep the decoded results, seeding the
+/// store's cache so the first `load_graph` does not repeat the work.
+fn verify_graph_registry(
+    root: &Path,
+    state: &CoordinatorState,
+) -> Result<BTreeMap<GraphDigest, Arc<Graph>>, StoreError> {
+    let mut graphs = BTreeMap::new();
     for digest in &state.graphs {
         let path = root.join(GRAPHS_DIR).join(format!("{digest}.json"));
         let bytes = fs::read(&path).map_err(|source| {
@@ -357,9 +366,9 @@ fn verify_graph_registry(root: &Path, state: &CoordinatorState) -> Result<(), St
             }
         })?;
         // `decode_graph` digests, decodes, and validates in one pass.
-        let _ = decode_graph(*digest, &bytes)?;
+        graphs.insert(*digest, Arc::new(decode_graph(*digest, &bytes)?));
     }
-    Ok(())
+    Ok(graphs)
 }
 
 fn decode_graph(digest: GraphDigest, bytes: &[u8]) -> Result<Graph, StoreError> {
@@ -428,6 +437,14 @@ fn write_once_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     write_atomically_with(path, bytes, io_error)
+}
+
+/// Publish `bytes` at `path` via temp write and rename, without any fsync.
+/// Only for rebuildable mirrors whose loss a crash may ignore.
+fn write_atomically_relaxed(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, bytes).map_err(|source| io_error("write", &temporary, source))?;
+    fs::rename(&temporary, path).map_err(|source| io_error("rename", path, source))
 }
 
 /// Atomically publish `bytes` at `path` — temp write with fsync, rename, and a

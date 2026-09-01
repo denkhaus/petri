@@ -271,14 +271,8 @@ impl Coordinator {
 
     pub fn register_graph(&mut self, graph: &Graph) -> Result<GraphDigest, CoordinatorError> {
         self.refuse_secret(graph)?;
-        let sequence = self.store.next_seq();
-        let before = self.store.state().graphs.len();
-        let digest = self.store.register_graph(graph)?;
-        if self.store.state().graphs.len() != before {
-            let record = CoordinatorRecord {
-                seq:   sequence,
-                event: CoordinatorEvent::GraphRegistered { digest },
-            };
+        let (digest, record) = self.store.register_graph(graph)?;
+        if let Some(record) = record {
             for observer in &self.observers {
                 observer.on_lifecycle(&record);
             }
@@ -467,7 +461,6 @@ impl Coordinator {
             },
             middleware_state: initial_middleware_state(&self.middleware),
         })?;
-        self.store.create_execution_dir(invocation, execution)?;
         Ok(execution)
     }
 
@@ -498,7 +491,6 @@ impl Coordinator {
             },
             middleware_state,
         })?;
-        self.store.create_execution_dir(invocation, execution)?;
         Ok(execution)
     }
 

@@ -53,6 +53,70 @@ fn remap_status(table: &mut ExprTable, status: ExprId, pairs: &[(&str, &str)]) -
     acc
 }
 
+/// The run-context record for a node, as an expression: `nodes.name` for a
+/// static node, `nodes[name + '#' + index]` for an expansion clone. Generic
+/// over the id space so the run-time planner shares the one spelling.
+pub(crate) fn node_record<S>(table: &mut ExprTable<S>, name: &str, expanded: bool) -> ExprId<S> {
+    let nodes = table.var("nodes");
+    if expanded {
+        let prefix = table.lit(format!("{name}#"));
+        let index = table.var("index");
+        let key = table.binary(BinOp::Add, prefix, index);
+        table.index(nodes, key)
+    } else {
+        table.field(nodes, name)
+    }
+}
+
+/// `true` when any of `names` ended with one of `tags`.
+pub(crate) fn any_status<S>(
+    table: &mut ExprTable<S>,
+    names: &[String],
+    tags: &[&str],
+    expanded: bool,
+) -> ExprId<S> {
+    let mut terms = Vec::new();
+    for name in names {
+        let record = node_record(table, name, expanded);
+        let status = table.field(record, "status");
+        for tag in tags {
+            let expected = table.lit(*tag);
+            terms.push(table.binary(BinOp::Eq, status, expected));
+        }
+    }
+    any_of(table, terms)
+}
+
+/// GitHub's status fold over a set of nodes: failure beats cancelled beats
+/// partial success beats success; none of those at all reads as skipped.
+pub(crate) fn status_fold<S>(
+    table: &mut ExprTable<S>,
+    names: &[String],
+    expanded: bool,
+) -> ExprId<S> {
+    let failed = any_status(table, names, &["failure", "timed_out"], expanded);
+    let cancelled = any_status(table, names, &["cancelled"], expanded);
+    let partial = any_status(table, names, &["partial_success"], expanded);
+    let succeeded = any_status(table, names, &["success"], expanded);
+    let skipped = table.lit("skipped");
+    let success = table.lit("success");
+    let partial_success = table.lit("partial_success");
+    let cancelled_tag = table.lit("cancelled");
+    let failure = table.lit("failure");
+    let status = table.cond(succeeded, success, skipped);
+    let status = table.cond(partial, partial_success, status);
+    let status = table.cond(cancelled, cancelled_tag, status);
+    table.cond(failed, failure, status)
+}
+
+fn any_of<S>(table: &mut ExprTable<S>, terms: Vec<ExprId<S>>) -> ExprId<S> {
+    let mut iter = terms.into_iter();
+    let Some(first) = iter.next() else {
+        return table.lit(false);
+    };
+    iter.fold(first, |acc, t| table.binary(BinOp::Or, acc, t))
+}
+
 /// How `secrets.NAME` maps to the provider's names at this site.
 ///
 /// The map is a pure rename decided at lowering: no secret value — or even a
@@ -168,18 +232,15 @@ impl Site {
         }
     }
 
+    /// The site's node names take the `#index` clone suffix.
+    pub(crate) fn expanded(&self) -> bool {
+        self.matrix || self.in_expansion
+    }
+
     /// The run-context record for a node of this job, as an expression: static
     /// for a plain job, `nodes[name + '#' + index]` inside a matrix clone.
     pub(crate) fn node_record(&self, table: &mut ExprTable, name: &str) -> ExprId {
-        let nodes = table.var("nodes");
-        if self.matrix || self.in_expansion {
-            let prefix = table.lit(format!("{name}#"));
-            let index = table.var("index");
-            let key = table.binary(BinOp::Add, prefix, index);
-            table.index(nodes, key)
-        } else {
-            table.field(nodes, name)
-        }
+        node_record(table, name, self.expanded())
     }
 
     pub(crate) fn node_status(&self, table: &mut ExprTable, name: &str) -> ExprId {
@@ -195,11 +256,7 @@ impl Site {
     }
 
     fn any_of(table: &mut ExprTable, terms: Vec<ExprId>) -> ExprId {
-        let mut iter = terms.into_iter();
-        let Some(first) = iter.next() else {
-            return table.lit(false);
-        };
-        iter.fold(first, |acc, t| table.binary(BinOp::Or, acc, t))
+        any_of(table, terms)
     }
 
     /// `true` when some earlier step in this job ended in a real failure.

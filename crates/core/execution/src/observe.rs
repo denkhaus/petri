@@ -146,7 +146,11 @@ struct Writer {
     failure: Option<String>,
 }
 
-/// Durable writer for one execution's independent engine log.
+/// Writer for one execution's independent engine log. The durability bar is
+/// flush per record and one fsync at `finish`: the driver calls `on_record`
+/// synchronously on its event loop, resume treats a lost suffix as a shorter
+/// clean prefix, and torn tails truncate on load — so a per-record fsync
+/// would buy nothing but per-event disk stalls.
 pub struct JsonlEngineLog {
     path:       PathBuf,
     high_water: u64,
@@ -208,7 +212,6 @@ impl EventObserver for JsonlEngineLog {
                     .file
                     .write_all(&line)
                     .and_then(|()| writer.file.flush())
-                    .and_then(|()| writer.file.sync_data())
                     .map_err(|error| error.to_string())
             });
         if let Err(message) = result {

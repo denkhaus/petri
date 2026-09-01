@@ -32,7 +32,6 @@ pub struct InvocationState {
 pub struct ExecutionDeclaration {
     pub id:               ExecutionId,
     pub invocation:       InvocationId,
-    pub predecessor:      Option<ExecutionId>,
     pub start:            EngineStart,
     pub middleware_state: BTreeMap<MiddlewareKey, (u32, Value)>,
 }
@@ -271,7 +270,6 @@ impl CoordinatorState {
                     declaration: ExecutionDeclaration {
                         id:               *execution,
                         invocation:       *invocation,
-                        predecessor:      *predecessor,
                         start:            start.clone(),
                         middleware_state: middleware_state.clone(),
                     },

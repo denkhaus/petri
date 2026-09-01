@@ -48,6 +48,15 @@ pub const DEFERRED_ACTION_RESULT_KIND: &str = "github/deferred_action_result";
 /// through to the real action.
 pub const CHECKOUT_KIND: &str = "github/checkout";
 
+/// Step kinds whose config accepts the `job_environment` and `background`
+/// runtime channels.
+pub(crate) fn channel_bearing(kind: &str) -> bool {
+    matches!(
+        kind,
+        RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND | DEFERRED_ACTION_KIND
+    )
+}
+
 /// The private terminal that captures one background branch's result.
 pub const BACKGROUND_COMPLETE_KIND: &str = "github/background_complete";
 /// The launch-point step that snapshots the foreground environment.

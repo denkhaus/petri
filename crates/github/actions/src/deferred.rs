@@ -64,6 +64,10 @@ pub struct DeferredConfig {
     matrix:            bool,
     #[serde(default)]
     in_expansion:      bool,
+    /// The materialized expansion index, bound by the frontend from the same
+    /// `index` binding the publisher reads; absent outside an expansion.
+    #[serde(default)]
+    index:             Option<u32>,
     #[serde(default)]
     needs:             BTreeMap<String, String>,
     #[serde(default)]
@@ -76,15 +80,16 @@ impl Step for DeferredActionStep {
     type Config = DeferredConfig;
 
     async fn run(&self, config: Self::Config, ctx: StepCtx) -> Outcome {
+        let index = config.index;
+        let result_name = config.result_name.clone();
+        let fail = |message: String| resolved_failure(&result_name, index, message);
         let gate_env: BTreeMap<SmolStr, ValueOrSecretRef> =
             match serde_json::from_value(Value::Object(config.env.clone())) {
                 Ok(env) => env,
                 Err(error) => {
-                    return resolved_failure(
-                        &config.result_name,
-                        materialized_index(&ctx.node),
-                        format!("the deferred action environment is invalid: {error}"),
-                    );
+                    return fail(format!(
+                        "the deferred action environment is invalid: {error}"
+                    ));
                 }
             };
         match gate::refusal(
@@ -99,41 +104,24 @@ impl Step for DeferredActionStep {
         {
             Ok(Some(refusal)) => {
                 return resolved_result(
-                    &config.result_name,
-                    materialized_index(&ctx.node),
+                    &result_name,
+                    index,
                     refusal.status.tag(),
                     refusal.output,
                     None,
                 );
             }
-            Err(failure) => {
-                return resolved_failure(
-                    &config.result_name,
-                    materialized_index(&ctx.node),
-                    failure.message,
-                );
-            }
+            Err(failure) => return fail(failure.message),
             Ok(None) => {}
         }
 
         if config.depth >= 10 {
-            return resolved_failure(
-                &config.result_name,
-                materialized_index(&ctx.node),
-                "composite actions nest more than 10 deep".to_string(),
-            );
+            return fail("composite actions nest more than 10 deep".to_string());
         }
         let files = match manifest_files(&config.action, &ctx).await {
             Ok(files) => files,
-            Err(failure) => {
-                return resolved_failure(
-                    &config.result_name,
-                    materialized_index(&ctx.node),
-                    failure.message,
-                );
-            }
+            Err(failure) => return fail(failure.message),
         };
-        let index = materialized_index(&ctx.node);
         let request = DeferredActionPlan {
             action: config.action,
             job_id: config.job_id,
@@ -154,7 +142,6 @@ impl Step for DeferredActionStep {
             depth: config.depth,
             index,
         };
-        let result_name = request.result_name.clone();
         let source = ctx.capability::<ActionManifestSourceCap>();
         let planned = match task::spawn_blocking(move || {
             plan_deferred_action(
@@ -166,11 +153,7 @@ impl Step for DeferredActionStep {
         .await
         {
             Err(error) => {
-                return resolved_failure(
-                    &result_name,
-                    index,
-                    format!("the deferred action planner task failed: {error}"),
-                );
+                return fail(format!("the deferred action planner task failed: {error}"));
             }
             Ok(Ok(planned)) => planned,
             Ok(Err(diagnostics)) => {
@@ -179,7 +162,7 @@ impl Step for DeferredActionStep {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join("\n");
-                return resolved_failure(&result_name, index, message);
+                return fail(message);
             }
         };
         for diagnostic in &planned.diagnostics {
@@ -239,11 +222,6 @@ async fn manifest_files(action: &ActionLocation, ctx: &StepCtx) -> Result<MapFil
             "no `action.yml` or `action.yaml` under `{directory}` in the job workspace"
         ),
     })
-}
-
-fn materialized_index(node: &str) -> Option<u32> {
-    node.rsplit_once('#')
-        .and_then(|(_, index)| index.parse().ok())
 }
 
 fn resolved_failure(result_name: &str, index: Option<u32>, message: String) -> Outcome {
@@ -326,21 +304,23 @@ impl Step for DeferredActionPublishStep {
             .message
             .unwrap_or_else(|| "the deferred action failed".to_string());
         let failure = || FailureInfo::new(message.clone()).with_class(DEFERRED_CLASS);
-        let status = match config.result.status.as_str() {
-            "success" => Status::Success,
-            "partial_success" => Status::PartialSuccess { underlying: None },
-            "failure" if config.soft_fail => Status::PartialSuccess {
-                underlying: Some(failure()),
-            },
-            "failure" => Status::Failure(failure()),
-            "skipped" => Status::Skipped,
-            "cancelled" => Status::Cancelled,
-            "timed_out" => Status::TimedOut,
-            other => Status::Failure(
-                FailureInfo::new(format!("unknown deferred action status `{other}`"))
+        let status = Status::from_tag(&config.result.status, failure).map_or_else(
+            || {
+                Status::Failure(
+                    FailureInfo::new(format!(
+                        "unknown deferred action status `{}`",
+                        config.result.status
+                    ))
                     .with_class(DEFERRED_CLASS),
-            ),
-        };
+                )
+            },
+            |status| match status {
+                Status::Failure(underlying) if config.soft_fail => Status::PartialSuccess {
+                    underlying: Some(underlying),
+                },
+                other => other,
+            },
+        );
         Outcome::new(status, config.result.output)
     }
 }

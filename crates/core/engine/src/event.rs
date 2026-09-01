@@ -94,10 +94,6 @@ pub enum DecisionId {
 }
 
 impl DecisionId {
-    pub const fn execution_start() -> Self {
-        Self::ExecutionStart
-    }
-
     pub const fn attempt_start(firing: FiringId, attempt: Attempt) -> Self {
         Self::AttemptStart { firing, attempt }
     }

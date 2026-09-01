@@ -98,38 +98,8 @@ impl<'a> Lowering<'_, 'a> {
                         None
                     }
                 }
-                Err(ResolveFailure::NoSource) => {
-                    self.diags.unsupported(
-                        "action.remote",
-                        span.clone(),
-                        name.clone(),
-                        "no action source is configured, so actions from other repositories cannot be fetched",
-                    );
-                    None
-                }
-                // A recorded upstream refusal — the repository is private or
-                // removed — is its own class: the workflow is broken on GitHub
-                // itself, and no refresh will change that. A reference the
-                // source merely does not cover stays `action.remote`.
-                Err(ResolveFailure::Unavailable(reason)) => {
-                    let code = match reason {
-                        Some(_) => "action.upstream_gone",
-                        None => "action.remote",
-                    };
-                    self.diags.unsupported(
-                        code,
-                        span.clone(),
-                        name.clone(),
-                        &unavailable_hint(reason),
-                    );
-                    None
-                }
-                Err(ResolveFailure::Failed(error)) => {
-                    self.diags.error(
-                        "action.unresolved",
-                        span.clone(),
-                        format!("`uses: {name}`: {}", render_chain(&error)),
-                    );
+                Err(failure) => {
+                    self.report_resolve_failure(&name, span, failure);
                     None
                 }
             },
@@ -139,12 +109,9 @@ impl<'a> Lowering<'_, 'a> {
     /// The plan for a `uses:` step that contributes standalone nodes — a
     /// JavaScript or Docker action; `None` for anything else, quietly — the
     /// main pass reports problems.
-    pub(super) fn action_plan(&mut self, step: &Step<'_>) -> Option<ActionPlan> {
+    pub(super) fn action_plan(&mut self, job_id: &str, step: &Step<'_>) -> Option<ActionPlan> {
         let (reference, span) = step.uses.as_ref()?;
-        let eager = self
-            .eager_action
-            .as_ref()
-            .is_some_and(|(_, id)| id == &step.node_name());
+        let eager = self.is_eager_root(job_id, &step.node_name());
         if !eager && !matches!(composite::classify(reference), Uses::Docker(_)) {
             return None;
         }
@@ -805,9 +772,7 @@ impl<'a> Lowering<'_, 'a> {
                 path,
             );
         }
-        let eager = self.eager_action.as_ref().is_some_and(|(job_id, step_id)| {
-            job_id == &site.job_id && step_id == &step.node_name()
-        });
+        let eager = self.is_eager_root(&site.job_id, &step.node_name());
         if !eager && !matches!(composite::classify(reference), Uses::Docker(_)) {
             return self.deferred_action_nodes(
                 ActionContext {
@@ -1079,7 +1044,7 @@ impl<'a> Lowering<'_, 'a> {
             Uses::Remote(name) => match self.resolve_remote(&name) {
                 Ok(pinned) => ActionLocation::Pinned(pinned),
                 Err(failure) => {
-                    self.report_deferred_resolve_failure(&name, span, failure);
+                    self.report_resolve_failure(&name, span, failure);
                     return Vec::new();
                 }
             },
@@ -1113,6 +1078,12 @@ impl<'a> Lowering<'_, 'a> {
         config.insert("event".into(), self.event_config());
         config.insert("matrix".into(), json!(site.matrix));
         config.insert("in_expansion".into(), json!(site.in_expansion));
+        if site.matrix || site.in_expansion {
+            // The same `index` binding the publisher's `node_record` reads;
+            // the step needs it to name its materialized result node.
+            let index = self.b.exprs().var("index");
+            config.insert("index".into(), json!({ EXPR_PLACEHOLDER_KEY: index.raw() }));
+        }
         config.insert("needs".into(), json!(site.needs));
         let base_depth = self.runtime_site.as_ref().map_or(0, |site| site.depth);
         config.insert("depth".into(), json!(base_depth + depth));
@@ -1161,12 +1132,7 @@ impl<'a> Lowering<'_, 'a> {
         vec![resolver, publisher]
     }
 
-    fn report_deferred_resolve_failure(
-        &mut self,
-        name: &str,
-        span: &Span,
-        failure: ResolveFailure,
-    ) {
+    fn report_resolve_failure(&mut self, name: &str, span: &Span, failure: ResolveFailure) {
         match failure {
             ResolveFailure::NoSource => self.diags.unsupported(
                 "action.remote",
@@ -1174,6 +1140,10 @@ impl<'a> Lowering<'_, 'a> {
                 name,
                 "no action source is configured, so actions from other repositories cannot be fetched",
             ),
+            // A recorded upstream refusal — the repository is private or
+            // removed — is its own class: the workflow is broken on GitHub
+            // itself, and no refresh will change that. A reference the
+            // source merely does not cover stays `action.remote`.
             ResolveFailure::Unavailable(reason) => {
                 let code = if reason.is_some() {
                     "action.upstream_gone"

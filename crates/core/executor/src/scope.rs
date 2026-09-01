@@ -157,11 +157,6 @@ impl ScopeSpec {
         }
     }
 
-    /// Compatibility spelling for the environment identity.
-    pub fn instance(&self) -> &str {
-        self.environment.as_str()
-    }
-
     #[must_use]
     pub fn with_environment_id(mut self, environment: EnvironmentId) -> Self {
         self.environment = environment;

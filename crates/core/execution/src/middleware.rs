@@ -103,32 +103,31 @@ impl MiddlewareError {
     }
 }
 
-type AdmitFuture = Pin<Box<dyn Future<Output = Result<Admission, MiddlewareError>> + Send>>;
-type RouteFuture = Pin<Box<dyn Future<Output = Result<RouteDecision, MiddlewareError>> + Send>>;
+type DecisionFuture<D> = Pin<Box<dyn Future<Output = Result<D, MiddlewareError>> + Send>>;
 type LayerFuture<D, T> =
     Pin<Box<dyn Future<Output = Result<Resolved<D, T>, MiddlewareError>> + Send>>;
 
-#[derive(Clone)]
-pub struct AdmitNext {
-    call: Arc<dyn Fn() -> AdmitFuture + Send + Sync>,
+/// The rest of the chain below one layer, as the layer calls it.
+pub struct Next<D> {
+    call: Arc<dyn Fn() -> DecisionFuture<D> + Send + Sync>,
 }
 
-impl AdmitNext {
-    pub async fn run(&self) -> Result<Admission, MiddlewareError> {
+impl<D> Clone for Next<D> {
+    fn clone(&self) -> Self {
+        Self {
+            call: self.call.clone(),
+        }
+    }
+}
+
+impl<D> Next<D> {
+    pub async fn run(&self) -> Result<D, MiddlewareError> {
         (self.call)().await
     }
 }
 
-#[derive(Clone)]
-pub struct RouteNext {
-    call: Arc<dyn Fn() -> RouteFuture + Send + Sync>,
-}
-
-impl RouteNext {
-    pub async fn run(&self) -> Result<RouteDecision, MiddlewareError> {
-        (self.call)().await
-    }
-}
+pub type AdmitNext = Next<Admission>;
+pub type RouteNext = Next<RouteDecision>;
 
 #[async_trait::async_trait]
 pub trait Middleware: Send + Sync {
@@ -255,14 +254,7 @@ impl MiddlewarePipeline {
 
     pub fn fold(&self, event: &FoldEvent<'_>) -> Result<(), MiddlewareError> {
         let mut states = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        for middleware in self.chain.iter() {
-            let key = middleware.key();
-            let (_, value) = states.get_mut(&key).ok_or_else(|| {
-                MiddlewareError::new(format!("middleware state for `{key}` is missing"))
-            })?;
-            middleware.fold(value, event)?;
-        }
-        Ok(())
+        fold_states(&self.chain, &mut states, event)
     }
 
     fn address(&self, decision: DecisionId) -> DecisionAddress {
@@ -278,7 +270,6 @@ impl MiddlewarePipeline {
 impl DecisionResolver for MiddlewarePipeline {
     async fn admit(&self, request: AdmitRequest) -> Result<AdmissionResolution, DecisionError> {
         let resolved = admit_at(
-            0,
             self.chain.clone(),
             self.state.clone(),
             self.address(request.decision_id),
@@ -302,7 +293,6 @@ impl DecisionResolver for MiddlewarePipeline {
             let baseline = default_group_decision(&proposal, request.restart_allowed)?;
             let proposal = Arc::new(proposal);
             let resolved = route_at(
-                0,
                 self.chain.clone(),
                 self.state.clone(),
                 self.address(request.decision_id),
@@ -348,57 +338,31 @@ impl DecisionResolver for MiddlewarePipeline {
     }
 }
 
+/// One layer's call: build the typed call payload and invoke the layer's
+/// trait method with the rest of the chain behind `next`.
+type Invoke<D> = dyn Fn(Arc<dyn Middleware>, Value, Next<D>) -> DecisionFuture<D> + Send + Sync;
+
+/// How a layer's decision renders into the trace.
+type TraceEntry<D, T> = dyn Fn(MiddlewareKey, &D) -> T + Send + Sync;
+
 fn admit_at(
-    index: usize,
     chain: Arc<[Arc<dyn Middleware>]>,
     state: Arc<RwLock<MiddlewareState>>,
     address: DecisionAddress,
 ) -> LayerFuture<Admission, MiddlewareKey> {
-    Box::pin(async move {
-        let Some(middleware) = chain.get(index).cloned() else {
-            return Ok(Resolved {
-                decision: Admission::Admit,
-                trace:    Vec::new(),
-            });
-        };
-        let captured = Arc::new(Mutex::new(None));
-        let next_captured = captured.clone();
-        let next_chain = chain.clone();
-        let next_state = state.clone();
-        let next = AdmitNext {
-            call: Arc::new(move || {
-                let chain = next_chain.clone();
-                let state = next_state.clone();
-                let captured = next_captured.clone();
-                Box::pin(async move {
-                    let resolved = admit_at(index + 1, chain, state, address).await?;
-                    let decision = resolved.decision.clone();
-                    *captured.lock().unwrap_or_else(PoisonError::into_inner) = Some(resolved);
-                    Ok(decision)
-                })
-            }),
-        };
-        let key = middleware.key();
-        let middleware_state = read_state(&state, &key)?;
-        let decision = middleware
-            .admit(
-                AdmitCall {
-                    address,
-                    state: middleware_state,
-                },
-                next,
-            )
-            .await?;
-        let downstream = captured
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        Ok(resolve_layer(downstream, decision, |_| key))
-    })
+    layer_at(
+        0,
+        chain,
+        state,
+        Admission::Admit,
+        Arc::new(move |middleware, state, next| {
+            Box::pin(async move { middleware.admit(AdmitCall { address, state }, next).await })
+        }),
+        Arc::new(|key, _| key),
+    )
 }
 
 fn route_at(
-    index: usize,
     chain: Arc<[Arc<dyn Middleware>]>,
     state: Arc<RwLock<MiddlewareState>>,
     address: DecisionAddress,
@@ -406,55 +370,88 @@ fn route_at(
     proposal: Arc<RoutingProposal>,
     baseline: RouteDecision,
 ) -> LayerFuture<RouteDecision, Intervention> {
+    layer_at(
+        0,
+        chain,
+        state,
+        baseline,
+        Arc::new(move |middleware, state, next| {
+            let proposal = proposal.clone();
+            Box::pin(async move {
+                middleware
+                    .route(
+                        RouteCall {
+                            address,
+                            firing,
+                            proposal,
+                            state,
+                        },
+                        next,
+                    )
+                    .await
+            })
+        }),
+        Arc::new(intervention),
+    )
+}
+
+/// The chain recursion both decision kinds share: resolve the layer at
+/// `index`, giving it the rest of the chain as `next` and capturing what the
+/// downstream layers resolved so the trace composes.
+fn layer_at<D, T>(
+    index: usize,
+    chain: Arc<[Arc<dyn Middleware>]>,
+    state: Arc<RwLock<MiddlewareState>>,
+    default: D,
+    invoke: Arc<Invoke<D>>,
+    entry: Arc<TraceEntry<D, T>>,
+) -> LayerFuture<D, T>
+where
+    D: Clone + PartialEq + Send + Sync + 'static,
+    T: Send + 'static,
+{
     Box::pin(async move {
         let Some(middleware) = chain.get(index).cloned() else {
             return Ok(Resolved {
-                decision: baseline,
+                decision: default,
                 trace:    Vec::new(),
             });
         };
         let captured = Arc::new(Mutex::new(None));
-        let next_captured = captured.clone();
-        let next_chain = chain.clone();
-        let next_state = state.clone();
-        let next_proposal = proposal.clone();
-        let next_baseline = baseline.clone();
-        let next = RouteNext {
-            call: Arc::new(move || {
-                let chain = next_chain.clone();
-                let state = next_state.clone();
-                let captured = next_captured.clone();
-                let proposal = next_proposal.clone();
-                let baseline = next_baseline.clone();
-                Box::pin(async move {
-                    let resolved =
-                        route_at(index + 1, chain, state, address, firing, proposal, baseline)
-                            .await?;
-                    let decision = resolved.decision.clone();
-                    *captured.lock().unwrap_or_else(PoisonError::into_inner) = Some(resolved);
-                    Ok(decision)
-                })
+        let next = Next {
+            call: Arc::new({
+                let chain = chain.clone();
+                let state = state.clone();
+                let captured = captured.clone();
+                let default = default.clone();
+                let invoke = invoke.clone();
+                let entry = entry.clone();
+                move || {
+                    let chain = chain.clone();
+                    let state = state.clone();
+                    let captured = captured.clone();
+                    let default = default.clone();
+                    let invoke = invoke.clone();
+                    let entry = entry.clone();
+                    Box::pin(async move {
+                        let resolved =
+                            layer_at(index + 1, chain, state, default, invoke, entry).await?;
+                        let decision = resolved.decision.clone();
+                        *captured.lock().unwrap_or_else(PoisonError::into_inner) = Some(resolved);
+                        Ok(decision)
+                    })
+                }
             }),
         };
         let key = middleware.key();
         let middleware_state = read_state(&state, &key)?;
-        let decision = middleware
-            .route(
-                RouteCall {
-                    address,
-                    firing,
-                    proposal: proposal.clone(),
-                    state: middleware_state,
-                },
-                next,
-            )
-            .await?;
+        let decision = invoke(middleware, middleware_state, next).await?;
         let downstream = captured
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         Ok(resolve_layer(downstream, decision, |decision| {
-            intervention(key, decision)
+            entry(key, decision)
         }))
     })
 }
@@ -542,18 +539,25 @@ impl driver::EventObserver for MiddlewareFoldObserver {
 impl MiddlewareFoldObserver {
     fn apply_fold(&self, event: &FoldEvent<'_>) {
         let mut states = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        for middleware in self.chain.iter() {
-            let key = middleware.key();
-            let Some((_, value)) = states.get_mut(&key) else {
-                *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(
-                    MiddlewareError::new(format!("middleware state for `{key}` is missing")),
-                );
-                return;
-            };
-            if let Err(error) = middleware.fold(value, event) {
-                *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
-                return;
-            }
+        if let Err(error) = fold_states(&self.chain, &mut states, event) {
+            *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
         }
     }
+}
+
+/// Fold one event into every layer's state, in chain order. The one loop both
+/// the pipeline's direct fold and the live observer share.
+fn fold_states(
+    chain: &[Arc<dyn Middleware>],
+    states: &mut MiddlewareState,
+    event: &FoldEvent<'_>,
+) -> Result<(), MiddlewareError> {
+    for middleware in chain {
+        let key = middleware.key();
+        let (_, value) = states.get_mut(&key).ok_or_else(|| {
+            MiddlewareError::new(format!("middleware state for `{key}` is missing"))
+        })?;
+        middleware.fold(value, event)?;
+    }
+    Ok(())
 }

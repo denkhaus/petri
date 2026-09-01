@@ -7,8 +7,8 @@ use frontend::yaml::Document;
 use frontend::{FileSource, Lowered};
 use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{
-    BinOp, Edge, EdgeId, Expr, ExprId, ExprTable, Graph, GraphBody, GraphFragment, Guard, Local,
-    Node, NodeId, Routing, Scope, ScopeId, SelectGroup, SelectionPolicy, StepRef, Value,
+    Edge, EdgeId, Expr, ExprId, ExprTable, Graph, GraphBody, GraphFragment, Local, Node, NodeId,
+    Routing, Scope, ScopeId, SelectGroup, SelectionPolicy, StepRef, Value,
 };
 use serde_json::{Map, json};
 use smol_str::SmolStr;
@@ -19,6 +19,7 @@ use crate::action::{
     DOCKER_ACTION_KIND, PinnedAction, RUN_KIND,
 };
 use crate::composite::{self, Runs};
+use crate::exprs::{node_record, status_fold};
 use crate::model;
 use crate::runners::RunnerMap;
 
@@ -319,38 +320,35 @@ fn extract_fragments(
     }
 
     let mut exprs = retag_exprs(&graph.exprs);
+    let post_exprs = (!post_ids.is_empty()).then(|| exprs.clone());
+    let expanded = request.matrix || request.in_expansion;
     let result_names: Vec<String> = graph
         .nodes
         .iter()
         .filter(|node| main_ids.contains(&node.id))
         .filter_map(|node| name_map.get(node.name.as_str()).cloned())
         .collect();
-    let status = result_status(
-        &mut exprs,
-        &result_names,
-        request.matrix || request.in_expansion,
-    );
+    let status = status_fold(&mut exprs, &result_names, expanded);
     let output = if let Some(main) = graph.nodes.iter().find(|node| node.name == public) {
         let name = name_map
             .get(main.name.as_str())
             .expect("the main action node has a runtime name");
-        let record = node_record(&mut exprs, name, request.matrix || request.in_expansion);
+        let record = node_record(&mut exprs, name, expanded);
         exprs.field(record, "output")
     } else {
         composite_output.map_or_else(|| exprs.object(Vec::new()), |id| ExprId::new(id.raw()))
     };
 
     let main = make_main_fragment(&graph, &main_ids, &name_map, exprs, request, status, output)?;
-    let post = if post_ids.is_empty() {
-        None
-    } else {
-        Some(make_fragment(
+    let post = match post_exprs {
+        None => None,
+        Some(exprs) => Some(make_fragment(
             &graph,
             &post_ids,
             &name_map,
-            retag_exprs(&graph.exprs),
+            exprs,
             request.index,
-        )?)
+        )?),
     };
     Ok((main, post))
 }
@@ -451,17 +449,9 @@ fn make_fragment(
                 next_edge += 1;
                 edge_ids.insert(arm.id, edge_id);
                 arms.push(Edge {
-                    id:         edge_id,
-                    to:         NodeId::new(target.raw()),
-                    guard:      match arm.guard {
-                        Guard::Always => Guard::Always,
-                        Guard::Expr(id) => Guard::Expr(ExprId::new(id.raw())),
-                    },
-                    map:        arm.map.map(|id| ExprId::new(id.raw())),
-                    back:       arm.back,
-                    weight:     arm.weight,
-                    label:      arm.label.clone(),
-                    transition: arm.transition,
+                    id: edge_id,
+                    to: NodeId::new(target.raw()),
+                    ..arm.clone()
                 });
             }
             if arms.is_empty() {
@@ -479,11 +469,7 @@ fn make_fragment(
                                 .filter_map(|candidate| {
                                     edge_ids.get(&candidate.edge).map(|edge| ir::Candidate {
                                         edge: *edge,
-                                        when: match candidate.when {
-                                            Guard::Always => Guard::Always,
-                                            Guard::Expr(id) => Guard::Expr(ExprId::new(id.raw())),
-                                        },
-                                        rank: candidate.rank.map(|id| ExprId::new(id.raw())),
+                                        ..*candidate
                                     })
                                 })
                                 .collect(),
@@ -577,53 +563,6 @@ fn summary_outputs(table: &ExprTable, summary: ExprId) -> Option<ExprId> {
         .iter()
         .find(|(name, _)| name == "outputs")
         .map(|(_, id)| *id)
-}
-
-fn node_record(table: &mut ExprTable<Local>, name: &str, expanded: bool) -> ExprId<Local> {
-    let nodes = table.var("nodes");
-    if expanded {
-        let prefix = table.lit(format!("{name}#"));
-        let index = table.var("index");
-        let key = table.binary(BinOp::Add, prefix, index);
-        table.index(nodes, key)
-    } else {
-        table.field(nodes, name)
-    }
-}
-
-fn result_status(table: &mut ExprTable<Local>, names: &[String], expanded: bool) -> ExprId<Local> {
-    let has = |table: &mut ExprTable<Local>, tags: &[&str]| {
-        let mut terms = Vec::new();
-        for name in names {
-            let record = node_record(table, name, expanded);
-            let status = table.field(record, "status");
-            for tag in tags {
-                let expected = table.lit(*tag);
-                terms.push(table.binary(BinOp::Eq, status, expected));
-            }
-        }
-        let mut terms = terms.into_iter();
-        let Some(mut value) = terms.next() else {
-            return table.lit(false);
-        };
-        for term in terms {
-            value = table.binary(BinOp::Or, value, term);
-        }
-        value
-    };
-    let failed = has(table, &["failure", "timed_out"]);
-    let cancelled = has(table, &["cancelled"]);
-    let partial = has(table, &["partial_success"]);
-    let succeeded = has(table, &["success"]);
-    let skipped = table.lit("skipped");
-    let success = table.lit("success");
-    let partial_success = table.lit("partial_success");
-    let cancelled_tag = table.lit("cancelled");
-    let failure = table.lit("failure");
-    let status = table.cond(succeeded, success, skipped);
-    let status = table.cond(partial, partial_success, status);
-    let status = table.cond(cancelled, cancelled_tag, status);
-    table.cond(failed, failure, status)
 }
 
 fn planner_error(message: &str) -> Vec<Diagnostic> {

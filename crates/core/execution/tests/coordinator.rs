@@ -75,7 +75,7 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
 
     let digest = {
         let mut store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
-        let digest = store.register_graph(&graph).expect("graph registers");
+        let (digest, _) = store.register_graph(&graph).expect("graph registers");
         store
             .append(CoordinatorEvent::InvocationDeclared {
                 invocation:      InvocationId::ROOT,

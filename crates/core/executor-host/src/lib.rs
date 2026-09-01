@@ -281,7 +281,7 @@ impl HostExecutor {
         let groups = Arc::new(Mutex::new(Vec::new()));
         Ok(EnvHandle::new(
             scope.id,
-            SmolStr::new(scope.instance()),
+            SmolStr::new(scope.environment.as_str()),
             Arc::new(HostEnv {
                 workspace: workspace.clone(),
                 workspace_str: workspace.display().to_string(),
@@ -307,7 +307,7 @@ impl Executor for HostExecutor {
         skip_all,
         fields(
             scope = scope.id.raw(),
-            instance = %scope.instance(),
+            instance = %scope.environment.as_str(),
             generation = Empty,
         )
     )]

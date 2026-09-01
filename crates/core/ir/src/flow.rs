@@ -115,6 +115,20 @@ impl Status {
         }
     }
 
+    /// The inverse of [`Status::tag`]. `failure` supplies the payload when
+    /// the tag names a failure; an unknown tag returns `None`.
+    pub fn from_tag(tag: &str, failure: impl FnOnce() -> FailureInfo) -> Option<Self> {
+        Some(match tag {
+            "success" => Self::Success,
+            "partial_success" => Self::PartialSuccess { underlying: None },
+            "failure" => Self::Failure(failure()),
+            "skipped" => Self::Skipped,
+            "cancelled" => Self::Cancelled,
+            "timed_out" => Self::TimedOut,
+            _ => return None,
+        })
+    }
+
     /// The variant, without its payload. See [`From<&Status> for StatusKind`],
     /// which holds the only copy of this mapping.
     pub fn kind(&self) -> StatusKind {
