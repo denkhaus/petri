@@ -302,13 +302,15 @@ pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
 /// `verify_replay` on (the default), the log is replayed afterwards and any
 /// divergence is the error.
 pub async fn run(rt: &Runtime, graph: Graph) -> Result<RunReport, HostError> {
-    let encoded = encode_graph_checked(&graph, &rt.masker())?;
     let run_dir = rt.run_options().run_dir.clone();
     let run_runtime = rt.prepare_run(&run_dir);
     let mut coordinator =
         Coordinator::create(run_runtime, Vec::new(), CoordinatorOptions::default())?;
-    let digest = coordinator.register_graph(&graph)?;
-    finish_root(rt, &run_dir, coordinator, digest, graph, &encoded).await
+    let digest = match coordinator.register_graph(&graph) {
+        Err(CoordinatorError::SecretInDurableData) => return Err(HostError::SecretInGraph),
+        result => result?,
+    };
+    finish_root(rt, &run_dir, coordinator, digest, graph).await
 }
 
 fn read_graph(rt: &Runtime) -> Result<Graph, HostError> {
@@ -411,8 +413,7 @@ pub async fn resume(rt: &Runtime) -> Result<RunReport, HostError> {
         .declaration
         .graph;
     let graph = (*coordinator.load_graph(digest)?).clone();
-    let encoded = coordinator.store().graph_bytes(digest)?;
-    finish_root(rt, &run_dir, coordinator, digest, graph, &encoded).await
+    finish_root(rt, &run_dir, coordinator, digest, graph).await
 }
 
 /// The shared tail of [`run`] and [`resume`]: run the root invocation to its
@@ -424,7 +425,6 @@ async fn finish_root(
     mut coordinator: Coordinator,
     digest: GraphDigest,
     graph: Graph,
-    encoded: &[u8],
 ) -> Result<RunReport, HostError> {
     coordinator.run_root(digest, BTreeMap::default()).await?;
     let report = coordinator
@@ -433,7 +433,7 @@ async fn finish_root(
     if rt.run_options().verify_replay {
         engine::verify_replay(graph, &report.state.log)?;
     }
-    mirror_legacy_files(run_dir, encoded, &coordinator)?;
+    mirror_legacy_files(run_dir, digest, &coordinator)?;
     coordinator.finish().await;
     Ok(report)
 }
@@ -443,10 +443,13 @@ async fn finish_root(
 /// resume never reads it back.
 fn mirror_legacy_files(
     run_dir: &Path,
-    graph: &[u8],
+    graph: GraphDigest,
     coordinator: &Coordinator,
 ) -> Result<(), HostError> {
-    write_file(&run_dir.join(GRAPH_FILE), graph)?;
+    write_file(
+        &run_dir.join(GRAPH_FILE),
+        &coordinator.store().graph_bytes(graph)?,
+    )?;
     let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
     let execution = *root
         .executions

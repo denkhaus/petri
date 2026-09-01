@@ -154,10 +154,7 @@ fn on_execution_started(state: &mut EngineState, start: EngineStart, cmds: &mut 
     }
     state.mark_started(start);
     let decision_id = DecisionId::ExecutionStart;
-    state.insert_pending_admission(PendingAdmission {
-        decision_id,
-        resolved: None,
-    });
+    state.insert_pending_admission(decision_id, PendingAdmission { resolved: None });
     cmds.push(Command::Admit { decision_id });
 }
 
@@ -238,9 +235,6 @@ fn apply_attempt_admission(
     };
     let outcome = match decision {
         Admission::Admit => {
-            if let Some(firing) = state.firing_mut(firing_id) {
-                firing.awaiting_admission = false;
-            }
             if state.acquire_scope(node.scope) {
                 cmds.push(Command::AcquireScope { scope: node.scope });
             }
@@ -531,12 +525,10 @@ fn try_fire(
         started: false,
         cancelling: false,
         awaiting_retry: false,
-        awaiting_admission: true,
     };
     state.insert_firing(firing);
     let decision_id = DecisionId::attempt_start(firing_id, Attempt::FIRST);
-    state.insert_pending_admission(PendingAdmission {
-        decision_id,
+    state.insert_pending_admission(decision_id, PendingAdmission {
         resolved: Some(resolved),
     });
     cmds.push(Command::Admit { decision_id });
@@ -873,11 +865,9 @@ fn on_retry_elapsed(
     if let Some(f) = state.firing_mut(firing_id) {
         f.attempt = next_attempt;
         f.awaiting_retry = false;
-        f.awaiting_admission = true;
     }
     let decision_id = DecisionId::attempt_start(firing_id, next_attempt);
-    state.insert_pending_admission(PendingAdmission {
-        decision_id,
+    state.insert_pending_admission(decision_id, PendingAdmission {
         resolved: Some(resolved),
     });
     cmds.push(Command::Admit { decision_id });
@@ -962,12 +952,13 @@ fn route(
                 )
             }
             SelectionPolicy::Tiered(tiers) => {
+                let arms_by_id: BTreeMap<_, _> =
+                    group.arms.iter().map(|arm| (arm.id, arm)).collect();
                 let mut active = (None, None, Vec::new());
                 for (tier_index, tier) in tiers.iter().enumerate() {
                     let mut eligible = Vec::new();
                     for candidate in &tier.candidates {
-                        let Some(arm) = group.arms.iter().find(|arm| arm.id == candidate.edge)
-                        else {
+                        let Some(arm) = arms_by_id.get(&candidate.edge).copied() else {
                             continue;
                         };
                         if !guard_passes(
@@ -1047,7 +1038,6 @@ fn route(
         .is_some_and(|start| start.execution_index.saturating_add(1) < start.max_executions);
     state.insert_pending_routing(PendingRouting {
         firing,
-        decision_id,
         node: node.clone(),
         generation,
         attempt,
@@ -1119,7 +1109,7 @@ fn on_routing_resolved(
         state.push_error(RunError::UnknownDecision(decision_id));
         return;
     };
-    if pending.decision_id != decision_id {
+    if DecisionId::route(pending.firing, pending.attempt) != decision_id {
         state.push_error(RunError::DecisionMismatch {
             decision: decision_id,
         });
@@ -1171,6 +1161,7 @@ fn validate_and_prepare_routes(
         ));
     }
     let mut prepared = VecDeque::new();
+    let mut eval_context = None;
     for (index, (proposal, resolved)) in pending.groups.iter().zip(decisions).enumerate() {
         let group_index = u32::try_from(index).expect("a graph has at most u32 routing groups");
         if proposal.group != group_index || resolved.group != group_index {
@@ -1203,22 +1194,29 @@ fn validate_and_prepare_routes(
                         "a restart edge was emitted after the execution limit",
                     ));
                 }
-                let base = firing_statics(
-                    state,
-                    pending.node.id,
-                    &pending.inputs,
-                    pending.generation,
-                    pending.attempt,
-                )
-                .map_err(|error| SmolStr::new(error.to_string()))?;
-                let statics = with_outcome(&base, &pending.outcome);
-                let token = primary_token(&pending.inputs);
+                if eval_context.is_none() {
+                    let base = firing_statics(
+                        state,
+                        pending.node.id,
+                        &pending.inputs,
+                        pending.generation,
+                        pending.attempt,
+                    )
+                    .map_err(|error| SmolStr::new(error.to_string()))?;
+                    eval_context = Some((
+                        with_outcome(&base, &pending.outcome),
+                        primary_token(&pending.inputs),
+                    ));
+                }
+                let (statics, token) = eval_context
+                    .as_ref()
+                    .expect("an emitted route has an evaluation context");
                 let payload = match arm.map {
                     None => pending.outcome.output.clone(),
                     Some(map) => match eval(
                         &state.graph.exprs,
                         map,
-                        &EvalEnv::new(&token, &pending.run, &statics),
+                        &EvalEnv::new(token, &pending.run, statics),
                     ) {
                         Ok(value) => value,
                         Err(error) => {
@@ -1740,7 +1738,8 @@ fn on_control_requested(
     }
     let deliverable = state
         .firing(firing)
-        .is_some_and(|f| !f.cancelling && !f.awaiting_retry && !f.awaiting_admission);
+        .is_some_and(|f| !f.cancelling && !f.awaiting_retry)
+        && !state.is_awaiting_admission(firing);
     if deliverable {
         cmds.push(Command::DeliverControl { firing, ctl });
     }
@@ -1811,7 +1810,7 @@ fn stop_scope(
         .cloned()
         .collect();
     for firing in doomed {
-        if firing.awaiting_admission {
+        if state.is_awaiting_admission(firing.id) {
             settle_awaiting_admission(state, &firing, !kill, cmds);
             continue;
         }

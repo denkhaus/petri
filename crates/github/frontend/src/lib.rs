@@ -92,6 +92,7 @@ pub use action::{
     DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND, DEFERRED_ACTION_RESULT_KIND,
     DOCKER_ACTION_KIND, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
 };
+pub use composite::MAX_DEPTH as COMPOSITE_MAX_DEPTH;
 use frontend::yaml::Document;
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
 pub use lower::{DeferredActionPlan, PlannedDeferredAction, plan_deferred_action};

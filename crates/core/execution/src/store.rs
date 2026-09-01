@@ -231,7 +231,14 @@ impl CoordinatorStore {
         graph: &Graph,
     ) -> Result<(GraphDigest, Option<CoordinatorRecord>), StoreError> {
         let bytes = serde_json::to_vec(graph).map_err(StoreError::Encode)?;
-        let digest = digest_bytes(&bytes);
+        self.register_graph_bytes(&bytes)
+    }
+
+    pub(crate) fn register_graph_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(GraphDigest, Option<CoordinatorRecord>), StoreError> {
+        let digest = digest_bytes(bytes);
         if self.state.graphs.contains(&digest) {
             let existing = self.graph_bytes(digest)?;
             if existing != bytes {
@@ -244,7 +251,7 @@ impl CoordinatorStore {
         }
 
         let path = self.graph_path(digest);
-        write_once_atomically(&path, &bytes)?;
+        write_once_atomically(&path, bytes)?;
         let record = self.append(CoordinatorEvent::GraphRegistered { digest })?;
         Ok((digest, Some(record)))
     }

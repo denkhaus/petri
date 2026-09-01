@@ -764,25 +764,20 @@ impl StepIdentity {
 pub fn step_identities(graph: &Graph) -> BTreeMap<String, StepIdentity> {
     let mut out = BTreeMap::new();
     for node in &graph.nodes {
-        let identity = match node.step.kind.as_ref() {
-            ACTION_KIND | DEFERRED_ACTION_KIND => action_identity(&node.step.config),
-            DOCKER_ACTION_KIND => docker_identity(&node.step.config),
-            RUN_KIND => StepIdentity::Run,
-            other => StepIdentity::Other(other.to_string()),
+        let (identity, public) = match node.step.kind.as_ref() {
+            ACTION_KIND => (action_identity(&node.step.config), None),
+            DEFERRED_ACTION_KIND => (
+                action_identity(&node.step.config),
+                node.name.strip_suffix("/resolve"),
+            ),
+            DOCKER_ACTION_KIND => (docker_identity(&node.step.config), None),
+            RUN_KIND => (StepIdentity::Run, None),
+            other => (StepIdentity::Other(other.to_string()), None),
         };
-        out.insert(node.name.to_string(), identity);
-    }
-    // The public publisher and every node appended below `/runtime` belong to
-    // the resolver's action. Keep that identity under the public step name;
-    // `identity_of` handles the appended descendants.
-    for node in &graph.nodes {
-        if node.step.kind.as_ref() != DEFERRED_ACTION_KIND {
-            continue;
+        if let Some(public) = public {
+            out.insert(public.to_string(), identity.clone());
         }
-        let Some(public) = node.name.strip_suffix("/resolve") else {
-            continue;
-        };
-        out.insert(public.to_string(), action_identity(&node.step.config));
+        out.entry(node.name.to_string()).or_insert(identity);
     }
     out
 }

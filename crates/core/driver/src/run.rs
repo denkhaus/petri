@@ -753,11 +753,7 @@ impl Driver {
                 // A stop tier can clear a pending decision after its resolver
                 // was asked; the moot answer is dropped, exactly as an aborted
                 // resolver task's answer never arrives.
-                if !self
-                    .engine
-                    .pending_admissions()
-                    .any(|pending| pending.decision_id == decision_id)
-                {
+                if !self.engine.has_pending_admission(decision_id) {
                     return;
                 }
                 self.feed(Event::Admitted {
@@ -771,11 +767,7 @@ impl Driver {
                 resolution,
             } => {
                 self.decision_tasks.remove(&decision_id);
-                if !self
-                    .engine
-                    .pending_routings()
-                    .any(|pending| pending.decision_id == decision_id)
-                {
+                if !self.engine.has_pending_routing(decision_id) {
                     return;
                 }
                 self.feed(Event::RoutingResolved {
@@ -907,8 +899,7 @@ impl Driver {
     fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
         if self
             .engine
-            .pending_admissions()
-            .any(|pending| matches!(pending.decision_id, DecisionId::ExecutionStart))
+            .has_pending_admission(DecisionId::ExecutionStart)
         {
             self.early_deliveries
                 .entry(firing)

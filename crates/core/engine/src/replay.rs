@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use ir::{FiringId, Graph};
 
 use crate::apply::apply;
-use crate::event::Command;
+use crate::event::{Command, DecisionId};
 use crate::log::EventLog;
 use crate::state::EngineState;
 
@@ -118,21 +118,23 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
         .held_scopes()
         .map(|scope| Command::AcquireScope { scope })
         .collect();
-    pending.extend(state.pending_admissions().map(|admission| Command::Admit {
-        decision_id: admission.decision_id,
-    }));
+    pending.extend(
+        state
+            .pending_admissions()
+            .map(|(decision_id, _)| Command::Admit { decision_id }),
+    );
     pending.extend(
         state
             .pending_routings()
             .map(|routing| Command::ResolveRouting {
-                decision_id:     routing.decision_id,
+                decision_id:     DecisionId::route(routing.firing, routing.attempt),
                 restart_allowed: routing.restart_allowed,
                 groups:          routing.groups.clone(),
             }),
     );
     let mut redispatched = Vec::new();
     for firing in state.live_firings() {
-        if firing.awaiting_admission {
+        if state.is_awaiting_admission(firing.id) {
             continue;
         }
         if firing.awaiting_retry {

@@ -1,11 +1,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 use driver::{EventObserver, ObserveError};
 use engine::{EngineState, EventLog, EventRecord, InvalidRecords, LOG_VERSION};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 use crate::jsonl::clean_lines;
 use crate::{CoordinatorRecord, ExecutionId};
@@ -141,20 +144,20 @@ pub fn read_engine_log(path: &Path) -> Result<DecodedEngineLog, EngineLogError> 
     })
 }
 
-struct Writer {
-    file:    File,
-    failure: Option<String>,
+enum WriterMessage {
+    Record(Box<EventRecord>),
+    Finish(oneshot::Sender<Result<(), ObserveError>>),
 }
 
 /// Writer for one execution's independent engine log. The durability bar is
-/// flush per record and one fsync at `finish`: the driver calls `on_record`
-/// synchronously on its event loop, resume treats a lost suffix as a shorter
-/// clean prefix, and torn tails truncate on load — so a per-record fsync
-/// would buy nothing but per-event disk stalls.
+/// flush per record and one fsync at `finish`. A dedicated thread owns the
+/// file, so serialization and filesystem latency do not block the driver event
+/// loop. The channel is unbounded because the observer contract is lossless;
+/// its queue cannot exceed the execution's finite event log.
 pub struct JsonlEngineLog {
     path:       PathBuf,
     high_water: u64,
-    writer:     Mutex<Writer>,
+    tx:         Sender<WriterMessage>,
 }
 
 impl JsonlEngineLog {
@@ -183,13 +186,53 @@ impl JsonlEngineLog {
     }
 
     fn over(path: PathBuf, file: File, high_water: u64) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let writer_path = path.clone();
+        thread::spawn(move || write_engine_records(file, &writer_path, &rx));
         Self {
             path,
             high_water,
-            writer: Mutex::new(Writer {
-                file,
-                failure: None,
-            }),
+            tx,
+        }
+    }
+}
+
+fn write_engine_records(mut file: File, path: &Path, rx: &Receiver<WriterMessage>) {
+    let mut failure: Option<String> = None;
+    while let Ok(message) = rx.recv() {
+        match message {
+            WriterMessage::Record(record) => {
+                if failure.is_some() {
+                    continue;
+                }
+                let result = serde_json::to_vec(&record)
+                    .map_err(|error| error.to_string())
+                    .and_then(|mut line| {
+                        line.push(b'\n');
+                        file.write_all(&line)
+                            .and_then(|()| file.flush())
+                            .map_err(|error| error.to_string())
+                    });
+                if let Err(message) = result {
+                    failure = Some(message);
+                }
+            }
+            WriterMessage::Finish(reply) => {
+                let result = match &failure {
+                    Some(message) => Err(ObserveError::new("execution events", message.clone())),
+                    None => file
+                        .flush()
+                        .and_then(|()| file.sync_data())
+                        .map_err(|source| {
+                            ObserveError::new(
+                                "execution events",
+                                format!("could not sync `{}`", path.display()),
+                            )
+                            .with_source(source)
+                        }),
+                };
+                let _ = reply.send(result);
+            }
         }
     }
 }
@@ -200,41 +243,23 @@ impl EventObserver for JsonlEngineLog {
         if record.seq < self.high_water {
             return;
         }
-        let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        if writer.failure.is_some() {
-            return;
-        }
-        let result = serde_json::to_vec(record)
-            .map_err(|error| error.to_string())
-            .and_then(|mut line| {
-                line.push(b'\n');
-                writer
-                    .file
-                    .write_all(&line)
-                    .and_then(|()| writer.file.flush())
-                    .map_err(|error| error.to_string())
-            });
-        if let Err(message) = result {
-            writer.failure = Some(message);
-        }
+        let _ = self
+            .tx
+            .send(WriterMessage::Record(Box::new(record.clone())));
     }
 
     async fn finish(&self) -> Result<(), ObserveError> {
-        let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(message) = &writer.failure {
-            return Err(ObserveError::new("execution events", message.clone()));
-        }
-        writer
-            .file
-            .flush()
-            .and_then(|()| writer.file.sync_data())
-            .map_err(|source| {
-                ObserveError::new(
-                    "execution events",
-                    format!("could not sync `{}`", self.path.display()),
-                )
-                .with_source(source)
-            })
+        let (reply, done) = oneshot::channel();
+        let dead = || {
+            ObserveError::new(
+                "execution events",
+                format!("the writer for `{}` stopped", self.path.display()),
+            )
+        };
+        self.tx
+            .send(WriterMessage::Finish(reply))
+            .map_err(|_| dead())?;
+        done.await.unwrap_or_else(|_| Err(dead()))
     }
 }
 

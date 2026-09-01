@@ -13,7 +13,7 @@ use crate::model::{self, Step};
 
 /// How deep composites may nest before the lowering reports rather than
 /// recurses.
-pub(crate) const MAX_DEPTH: usize = 10;
+pub const MAX_DEPTH: usize = 10;
 
 /// What `action.yml` declares.
 pub(crate) struct Manifest<'a> {

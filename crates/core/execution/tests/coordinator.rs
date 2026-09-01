@@ -331,7 +331,7 @@ impl Middleware for RequireFoldBeforeRoute {
     async fn route(
         &self,
         call: RouteCall,
-        next: RouteNext,
+        next: RouteNext<'_>,
     ) -> Result<RouteDecision, MiddlewareError> {
         if call.state == serde_json::json!(1) {
             next.run().await

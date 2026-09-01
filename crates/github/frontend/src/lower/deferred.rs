@@ -7,16 +7,16 @@ use frontend::yaml::Document;
 use frontend::{FileSource, Lowered};
 use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{
-    Edge, EdgeId, Expr, ExprId, ExprTable, Graph, GraphBody, GraphFragment, Local, Node, NodeId,
-    Routing, Scope, ScopeId, SelectGroup, SelectionPolicy, StepRef, Value,
+    Edge, EdgeId, Expr, ExprId, ExprTable, Graph, GraphBody, GraphFragment, Guard, Local, Node,
+    NodeId, Routing, Scope, ScopeId, SelectGroup, SelectionPolicy, StepRef, Value,
 };
 use serde_json::{Map, json};
 use smol_str::SmolStr;
 
-use super::{RuntimeSite, lower_internal};
+use super::{LoweringMode, RuntimeSite, lower_internal};
 use crate::action::{
     ACTION_KIND, ActionLocation, ActionSource, DEFERRED_ACTION_KIND, DEFERRED_ACTION_RESULT_KIND,
-    DOCKER_ACTION_KIND, PinnedAction, RUN_KIND,
+    DOCKER_ACTION_KIND, PinnedAction, channel_bearing,
 };
 use crate::composite::{self, Runs};
 use crate::exprs::{node_record, status_fold};
@@ -24,25 +24,40 @@ use crate::model;
 use crate::runners::RunnerMap;
 
 /// The resolved caller values needed to plan one action at run time.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeferredActionPlan {
     pub action:            ActionLocation,
     pub job_id:            String,
     pub start_node:        String,
     pub step_id:           String,
     pub result_name:       String,
+    #[serde(default)]
     pub with:              Map<String, Value>,
+    #[serde(default)]
     pub env:               Map<String, Value>,
+    #[serde(default)]
     pub event:             Value,
+    #[serde(default)]
     pub soft_fail:         bool,
+    #[serde(default)]
     pub tolerates_failure: bool,
+    #[serde(default)]
     pub timeout_minutes:   Option<String>,
+    #[serde(default)]
     pub job_environment:   Option<String>,
+    #[serde(default)]
     pub background:        Option<String>,
+    #[serde(default)]
     pub matrix:            bool,
+    #[serde(default)]
     pub in_expansion:      bool,
+    #[serde(default)]
     pub needs:             BTreeMap<String, String>,
+    #[serde(default)]
     pub depth:             usize,
     /// The materialized expansion suffix, without `#`.
+    #[serde(default)]
     pub index:             Option<u32>,
 }
 
@@ -107,8 +122,10 @@ pub fn plan_deferred_action(
         &RunnerMap::builtin(),
         false,
         parse_diags,
-        Some((request.job_id.clone(), request.step_id.clone())),
-        Some(runtime_site),
+        LoweringMode::Runtime {
+            eager_action: (request.job_id.clone(), request.step_id.clone()),
+            site:         runtime_site,
+        },
     );
     let Some(mut graph) = graph else {
         return Err(diagnostics.into_vec());
@@ -208,10 +225,7 @@ fn configure_runtime_channels(graph: &mut Graph, request: &DeferredActionPlan) {
         let Value::Object(config) = &mut node.step.config else {
             continue;
         };
-        if matches!(
-            node.step.kind.as_ref(),
-            RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | DEFERRED_ACTION_KIND
-        ) {
+        if channel_bearing(node.step.kind.as_ref()) {
             if let Some(channel) = &request.job_environment {
                 config.insert("job_environment".into(), json!(channel));
             }
@@ -426,17 +440,22 @@ fn make_fragment(
     let mut next_edge = 0u32;
     for old in ids {
         let source = &graph.nodes[old.index()];
-        let mut live = source.clone();
-        live.id = NodeId::new(remap[old].raw());
-        live.name = SmolStr::new(materialized_name(
+        let name = materialized_name(
             names
                 .get(source.name.as_str())
                 .ok_or_else(|| planner_error("an action node has no runtime name"))?,
             index,
-        ));
-        live.scope = ScopeId::new(0);
-        live.expand = None;
-        let mut groups = Vec::new();
+        );
+        let mut local = Node::new(remap[old], &name, ScopeId::new(0), source.step.clone());
+        local.join = source.join;
+        local.precondition = source.precondition.map(|id| ExprId::new(id.raw()));
+        local.budget = source.budget;
+        local.retry.clone_from(&source.retry);
+        local.run_on_cancel = source.run_on_cancel;
+        local.tolerates_failure = source.tolerates_failure;
+        local.splice_policy = source.splice_policy;
+        local.meta.clone_from(&source.meta);
+        let mut groups: Vec<SelectGroup<Local>> = Vec::new();
         for group in &source.routing.groups {
             let mut edge_ids = BTreeMap::new();
             let mut arms = Vec::new();
@@ -449,9 +468,17 @@ fn make_fragment(
                 next_edge += 1;
                 edge_ids.insert(arm.id, edge_id);
                 arms.push(Edge {
-                    id: edge_id,
-                    to: NodeId::new(target.raw()),
-                    ..arm.clone()
+                    id:         edge_id,
+                    to:         target,
+                    guard:      match arm.guard {
+                        Guard::Always => Guard::Always,
+                        Guard::Expr(id) => Guard::Expr(ExprId::new(id.raw())),
+                    },
+                    map:        arm.map.map(|id| ExprId::new(id.raw())),
+                    back:       arm.back,
+                    weight:     arm.weight,
+                    label:      arm.label.clone(),
+                    transition: arm.transition,
                 });
             }
             if arms.is_empty() {
@@ -469,7 +496,11 @@ fn make_fragment(
                                 .filter_map(|candidate| {
                                     edge_ids.get(&candidate.edge).map(|edge| ir::Candidate {
                                         edge: *edge,
-                                        ..*candidate
+                                        when: match candidate.when {
+                                            Guard::Always => Guard::Always,
+                                            Guard::Expr(id) => Guard::Expr(ExprId::new(id.raw())),
+                                        },
+                                        rank: candidate.rank.map(|id| ExprId::new(id.raw())),
                                     })
                                 })
                                 .collect(),
@@ -484,10 +515,7 @@ fn make_fragment(
                 fallthrough: group.fallthrough,
             });
         }
-        live.routing = Routing { groups };
-        let local: Node<Local> =
-            serde_json::from_value(serde_json::to_value(live).expect("an action node serializes"))
-                .expect("id-space markers do not change the node wire format");
+        local.routing = Routing { groups };
         nodes.push(local);
     }
     let entries = remap
@@ -531,8 +559,40 @@ fn retag_exprs_to_live(source: &ExprTable, names: &BTreeMap<String, String>) -> 
 }
 
 fn retag_exprs(source: &ExprTable) -> ExprTable<Local> {
-    serde_json::from_value(serde_json::to_value(source).expect("expressions serialize"))
-        .expect("id-space markers do not change the expression wire format")
+    let mut out = ExprTable::new();
+    for (_, expr) in source.iter() {
+        out.push(retag_expr(expr));
+    }
+    out
+}
+
+fn retag_expr(expr: &Expr) -> Expr<Local> {
+    let id = |id: ExprId| ExprId::new(id.raw());
+    match expr {
+        Expr::Lit(value) => Expr::Lit(value.clone()),
+        Expr::Var(name) => Expr::Var(name.clone()),
+        Expr::Field(base, field) => Expr::Field(id(*base), field.clone()),
+        Expr::Index(base, index) => Expr::Index(id(*base), id(*index)),
+        Expr::Unary(op, value) => Expr::Unary(*op, id(*value)),
+        Expr::Binary(op, left, right) => Expr::Binary(*op, id(*left), id(*right)),
+        Expr::Cond {
+            cond,
+            then,
+            otherwise,
+        } => Expr::Cond {
+            cond:      id(*cond),
+            then:      id(*then),
+            otherwise: id(*otherwise),
+        },
+        Expr::Array(values) => Expr::Array(values.iter().copied().map(id).collect()),
+        Expr::Object(fields) => Expr::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), id(*value)))
+                .collect(),
+        ),
+        Expr::Call(name, args) => Expr::Call(name.clone(), args.iter().copied().map(id).collect()),
+    }
 }
 
 fn rewrite_expr(expr: &Expr, names: &BTreeMap<String, String>) -> Expr {

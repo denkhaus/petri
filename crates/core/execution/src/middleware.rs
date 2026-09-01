@@ -4,8 +4,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use driver::{
-    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, RoutingRequest,
-    RoutingResolution, default_group_decision,
+    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
+    RoutingRequest, RoutingResolution, default_group_decision,
 };
 use engine::{
     Admission, DecisionId, Event, EventRecord, GroupDecision, Intervention, MiddlewareKey,
@@ -13,6 +13,7 @@ use engine::{
 };
 use ir::{Attempt, FiringId, NodeId, Outcome, Value};
 use smol_str::SmolStr;
+use tokio::task::JoinSet;
 
 use crate::{ExecutionId, InvocationId};
 
@@ -103,31 +104,23 @@ impl MiddlewareError {
     }
 }
 
-type DecisionFuture<D> = Pin<Box<dyn Future<Output = Result<D, MiddlewareError>> + Send>>;
+type DecisionFuture<'a, D> = Pin<Box<dyn Future<Output = Result<D, MiddlewareError>> + Send + 'a>>;
 type LayerFuture<D, T> =
     Pin<Box<dyn Future<Output = Result<Resolved<D, T>, MiddlewareError>> + Send>>;
 
 /// The rest of the chain below one layer, as the layer calls it.
-pub struct Next<D> {
-    call: Arc<dyn Fn() -> DecisionFuture<D> + Send + Sync>,
+pub struct Next<'a, D> {
+    call: Box<dyn Fn() -> DecisionFuture<'a, D> + Send + Sync + 'a>,
 }
 
-impl<D> Clone for Next<D> {
-    fn clone(&self) -> Self {
-        Self {
-            call: self.call.clone(),
-        }
-    }
-}
-
-impl<D> Next<D> {
+impl<D> Next<'_, D> {
     pub async fn run(&self) -> Result<D, MiddlewareError> {
         (self.call)().await
     }
 }
 
-pub type AdmitNext = Next<Admission>;
-pub type RouteNext = Next<RouteDecision>;
+pub type AdmitNext<'a> = Next<'a, Admission>;
+pub type RouteNext<'a> = Next<'a, RouteDecision>;
 
 #[async_trait::async_trait]
 pub trait Middleware: Send + Sync {
@@ -137,14 +130,18 @@ pub trait Middleware: Send + Sync {
 
     fn fold(&self, state: &mut Value, event: &FoldEvent<'_>) -> Result<(), MiddlewareError>;
 
-    async fn admit(&self, _call: AdmitCall, next: AdmitNext) -> Result<Admission, MiddlewareError> {
+    async fn admit(
+        &self,
+        _call: AdmitCall,
+        next: AdmitNext<'_>,
+    ) -> Result<Admission, MiddlewareError> {
         next.run().await
     }
 
     async fn route(
         &self,
         _call: RouteCall,
-        next: RouteNext,
+        next: RouteNext<'_>,
     ) -> Result<RouteDecision, MiddlewareError> {
         next.run().await
     }
@@ -244,6 +241,10 @@ impl MiddlewarePipeline {
             .clone()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chain.is_empty()
+    }
+
     pub fn fold_observer(&self) -> MiddlewareFoldObserver {
         MiddlewareFoldObserver {
             chain:   self.chain.clone(),
@@ -288,59 +289,73 @@ impl DecisionResolver for MiddlewarePipeline {
                 "a routing request must carry a route decision id",
             ));
         };
-        let mut groups = Vec::with_capacity(request.groups.len());
-        for proposal in request.groups {
-            let baseline = default_group_decision(&proposal, request.restart_allowed)?;
+        let decision_id = request.decision_id;
+        let restart_allowed = request.restart_allowed;
+        let group_count = request.groups.len();
+        let mut tasks = JoinSet::new();
+        for (index, proposal) in request.groups.into_iter().enumerate() {
+            let baseline = default_group_decision(&proposal, restart_allowed)?;
             let proposal = Arc::new(proposal);
-            let resolved = route_at(
-                self.chain.clone(),
-                self.state.clone(),
-                self.address(request.decision_id),
-                firing,
-                proposal.clone(),
-                baseline.decision,
-            )
-            .await
-            .map_err(|error| DecisionError::new(error.message()))?;
-            let decision = engine::enforce_restart_limit(
-                request.restart_allowed,
-                &proposal,
-                resolved.decision,
-            );
-            groups.push(GroupDecision {
-                group: proposal.group,
-                draw: baseline.draw,
-                trace: resolved.trace,
-                decision,
+            let chain = self.chain.clone();
+            let state = self.state.clone();
+            let address = self.address(decision_id);
+            tasks.spawn(async move {
+                let resolved = route_at(
+                    chain,
+                    state,
+                    address,
+                    firing,
+                    proposal.clone(),
+                    baseline.decision,
+                )
+                .await?;
+                let decision =
+                    engine::enforce_restart_limit(restart_allowed, &proposal, resolved.decision);
+                Ok::<_, MiddlewareError>((index, GroupDecision {
+                    group: proposal.group,
+                    draw: baseline.draw,
+                    trace: resolved.trace,
+                    decision,
+                }))
             });
         }
+        let mut groups: Vec<Option<GroupDecision>> = (0..group_count).map(|_| None).collect();
+        while let Some(result) = tasks.join_next().await {
+            let (index, group) = result
+                .map_err(|error| {
+                    DecisionError::new(format!("routing middleware task failed: {error}"))
+                })?
+                .map_err(|error| DecisionError::new(error.message()))?;
+            groups[index] = Some(group);
+        }
+        let groups = groups
+            .into_iter()
+            .map(|group| group.expect("every routing task returns one group"))
+            .collect();
         Ok(RoutingResolution { groups })
     }
 
-    fn admit_now(&self, _request: &AdmitRequest) -> Option<AdmissionResolution> {
-        self.chain.is_empty().then(|| AdmissionResolution {
-            decision: Admission::Admit,
-            trace:    Vec::new(),
-        })
+    fn admit_now(&self, request: &AdmitRequest) -> Option<AdmissionResolution> {
+        if self.chain.is_empty() {
+            DefaultDecisionResolver.admit_now(request)
+        } else {
+            None
+        }
     }
 
     fn route_now(&self, request: &RoutingRequest) -> Option<RoutingResolution> {
-        if !self.chain.is_empty() {
-            return None;
+        if self.chain.is_empty() {
+            DefaultDecisionResolver.route_now(request)
+        } else {
+            None
         }
-        let groups = request
-            .groups
-            .iter()
-            .map(|proposal| default_group_decision(proposal, request.restart_allowed))
-            .collect::<Result<_, _>>()
-            .ok()?;
-        Some(RoutingResolution { groups })
     }
 }
 
 /// One layer's call: build the typed call payload and invoke the layer's
 /// trait method with the rest of the chain behind `next`.
-type Invoke<D> = dyn Fn(Arc<dyn Middleware>, Value, Next<D>) -> DecisionFuture<D> + Send + Sync;
+type Invoke<D> =
+    dyn for<'a> Fn(Arc<dyn Middleware>, Value, Next<'a, D>) -> DecisionFuture<'a, D> + Send + Sync;
 
 /// How a layer's decision renders into the trace.
 type TraceEntry<D, T> = dyn Fn(MiddlewareKey, &D) -> T + Send + Sync;
@@ -419,7 +434,7 @@ where
         };
         let captured = Arc::new(Mutex::new(None));
         let next = Next {
-            call: Arc::new({
+            call: Box::new({
                 let chain = chain.clone();
                 let state = state.clone();
                 let captured = captured.clone();

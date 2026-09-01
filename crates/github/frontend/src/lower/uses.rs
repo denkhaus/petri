@@ -834,11 +834,7 @@ impl<'a> Lowering<'_, 'a> {
                     kind,
                     inputs: plan_inputs(&manifest.inputs),
                 };
-                let nested = depth > 0
-                    || self
-                        .runtime_site
-                        .as_ref()
-                        .is_some_and(|site| site.depth > 0);
+                let nested = depth > 0 || self.runtime_site().is_some_and(|site| site.depth > 0);
                 if nested && plan.has_post() {
                     self.diags.warning(
                         "action.nested_lifecycle",
@@ -1085,7 +1081,7 @@ impl<'a> Lowering<'_, 'a> {
             config.insert("index".into(), json!({ EXPR_PLACEHOLDER_KEY: index.raw() }));
         }
         config.insert("needs".into(), json!(site.needs));
-        let base_depth = self.runtime_site.as_ref().map_or(0, |site| site.depth);
+        let base_depth = self.runtime_site().map_or(0, |site| site.depth);
         config.insert("depth".into(), json!(base_depth + depth));
         if let Some(value) = self.soft_fail_value(step.continue_on_error, &step_site, false) {
             config.insert("soft_fail".into(), value);

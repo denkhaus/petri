@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -270,8 +270,9 @@ impl Coordinator {
     }
 
     pub fn register_graph(&mut self, graph: &Graph) -> Result<GraphDigest, CoordinatorError> {
-        self.refuse_secret(graph)?;
-        let (digest, record) = self.store.register_graph(graph)?;
+        let encoded = serde_json::to_string(graph).map_err(CoordinatorError::EncodeDurableData)?;
+        self.refuse_secret_bytes(&encoded)?;
+        let (digest, record) = self.store.register_graph_bytes(encoded.as_bytes())?;
         if let Some(record) = record {
             for observer in &self.observers {
                 observer.on_lifecycle(&record);
@@ -502,12 +503,7 @@ impl Coordinator {
         middleware_state: MiddlewareState,
         graph: Arc<Graph>,
     ) -> Result<(driver::ExecutionReport, MiddlewareState), CoordinatorError> {
-        let directory = self.store.execution_dir(invocation, execution);
-        fs::create_dir_all(&directory).map_err(|source| CoordinatorError::Io {
-            action: "create",
-            path: directory.clone(),
-            source,
-        })?;
+        let directory = self.store.create_execution_dir(invocation, execution)?;
         let events = directory.join("events.jsonl");
         let secrets = self.invocation_secrets(invocation);
         let workspace_override = self.prepare_sandbox(invocation, &graph)?;
@@ -551,12 +547,14 @@ impl Coordinator {
                         source,
                     })?;
             }
-            rebuild_middleware(&pipeline, &graph, &decoded.log).map_err(|error| {
-                CoordinatorError::EventWriter {
-                    execution,
-                    message: error.to_string(),
-                }
-            })?;
+            if !pipeline.is_empty() {
+                rebuild_middleware(&pipeline, &graph, &decoded.log).map_err(|error| {
+                    CoordinatorError::EventWriter {
+                        execution,
+                        message: error.to_string(),
+                    }
+                })?;
+            }
             let high_water = decoded.log.len() as u64;
             let (driver, _) = self.runtime.resume_driver(
                 (*graph).clone(),
@@ -976,8 +974,12 @@ impl Coordinator {
     }
 
     fn refuse_secret<T: serde::Serialize>(&self, value: &T) -> Result<(), CoordinatorError> {
-        let bytes = serde_json::to_string(value).map_err(CoordinatorError::EncodeDurableData)?;
-        if self.runtime.masker().contains_secret(&bytes) {
+        let encoded = serde_json::to_string(value).map_err(CoordinatorError::EncodeDurableData)?;
+        self.refuse_secret_bytes(&encoded)
+    }
+
+    fn refuse_secret_bytes(&self, encoded: &str) -> Result<(), CoordinatorError> {
+        if self.runtime.masker().contains_secret(encoded) {
             return Err(CoordinatorError::SecretInDurableData);
         }
         Ok(())

@@ -17,36 +17,32 @@ use crate::log::EventLog;
 /// A node execution attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Firing {
-    pub id:                 FiringId,
-    pub node:               NodeId,
-    pub generation:         Generation,
+    pub id:             FiringId,
+    pub node:           NodeId,
+    pub generation:     Generation,
     /// Which try is running, 1-based. A retry advances this and never touches
     /// `generation`.
-    pub attempt:            Attempt,
+    pub attempt:        Attempt,
     /// Resource scope: where the step runs.
-    pub scope:              ScopeId,
+    pub scope:          ScopeId,
     /// Innermost cancel scope the firing belongs to.
-    pub cancel_scope:       CancelScopeId,
-    pub inputs:             Vec<Token>,
+    pub cancel_scope:   CancelScopeId,
+    pub inputs:         Vec<Token>,
     /// The host reported `StepStarted`.
-    pub started:            bool,
+    pub started:        bool,
     /// A `ScheduleRetry` is out; the firing stays live until `RetryElapsed`
     /// arrives, which is what keeps its scope held and the run
     /// non-quiescent.
-    pub awaiting_retry:     bool,
-    /// The firing exists, but the host has not admitted this attempt yet.
-    #[serde(default)]
-    pub awaiting_admission: bool,
+    pub awaiting_retry: bool,
     /// A `Control::Cancel` has been delivered; the outcome will not be routed.
-    pub cancelling:         bool,
+    pub cancelling:     bool,
 }
 
 /// One unresolved durable admission command.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingAdmission {
-    pub decision_id: DecisionId,
     /// Present for `AttemptStart`; execution admission has no firing payload.
-    pub resolved:    Option<ResolvedFiring>,
+    pub resolved: Option<ResolvedFiring>,
 }
 
 /// One unresolved durable routing command and the outcome-time snapshot used
@@ -54,7 +50,6 @@ pub struct PendingAdmission {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingRouting {
     pub firing:          FiringId,
-    pub decision_id:     DecisionId,
     pub node:            Node,
     pub generation:      Generation,
     pub attempt:         Attempt,
@@ -692,16 +687,28 @@ impl EngineState {
         self.cancelled = true;
     }
 
-    pub(crate) fn insert_pending_admission(&mut self, pending: PendingAdmission) {
-        self.pending_admissions.insert(pending.decision_id, pending);
+    pub(crate) fn insert_pending_admission(&mut self, id: DecisionId, pending: PendingAdmission) {
+        self.pending_admissions.insert(id, pending);
     }
 
     pub(crate) fn take_pending_admission(&mut self, id: DecisionId) -> Option<PendingAdmission> {
         self.pending_admissions.remove(&id)
     }
 
-    pub fn pending_admissions(&self) -> impl Iterator<Item = &PendingAdmission> {
-        self.pending_admissions.values()
+    pub fn pending_admissions(&self) -> impl Iterator<Item = (DecisionId, &PendingAdmission)> {
+        self.pending_admissions
+            .iter()
+            .map(|(id, pending)| (*id, pending))
+    }
+
+    pub fn has_pending_admission(&self, id: DecisionId) -> bool {
+        self.pending_admissions.contains_key(&id)
+    }
+
+    pub fn is_awaiting_admission(&self, firing: FiringId) -> bool {
+        self.live.get(&firing).is_some_and(|firing| {
+            self.has_pending_admission(DecisionId::attempt_start(firing.id, firing.attempt))
+        })
     }
 
     pub(crate) fn remove_admission_for_firing(&mut self, firing: FiringId) {
@@ -730,6 +737,15 @@ impl EngineState {
 
     pub fn pending_routings(&self) -> impl Iterator<Item = &PendingRouting> {
         self.pending_routing.values()
+    }
+
+    pub fn has_pending_routing(&self, id: DecisionId) -> bool {
+        let DecisionId::Route { firing, attempt } = id else {
+            return false;
+        };
+        self.pending_routing
+            .get(&firing)
+            .is_some_and(|pending| pending.attempt == attempt)
     }
 
     pub(crate) fn set_prepared_routes(

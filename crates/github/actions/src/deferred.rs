@@ -11,7 +11,8 @@ use ir::{
     FailureClass, FailureInfo, GraphFragment, LogStream, Outcome, ScopeId, SpliceRequest, Status,
     StepRef, Value,
 };
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef};
@@ -32,46 +33,38 @@ pub struct ActionManifestSourceCap(pub Arc<dyn ActionSource>);
 /// main fragment.
 pub struct DeferredActionStep;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct DeferredConfig {
-    action:            ActionLocation,
-    job_id:            String,
-    start_node:        String,
-    step_id:           String,
-    result_name:       String,
-    #[serde(default)]
-    with:              Map<String, Value>,
-    #[serde(default)]
-    env:               Map<String, Value>,
-    #[serde(default)]
-    event:             Value,
-    #[serde(default)]
-    gate:              Option<Value>,
-    #[serde(default)]
-    cancelled:         bool,
-    #[serde(default)]
-    soft_fail:         bool,
-    #[serde(default)]
-    tolerates_failure: bool,
-    #[serde(default)]
-    timeout_minutes:   Option<String>,
-    #[serde(default)]
-    job_environment:   Option<String>,
-    #[serde(default)]
-    background:        Option<String>,
-    #[serde(default)]
-    matrix:            bool,
-    #[serde(default)]
-    in_expansion:      bool,
-    /// The materialized expansion index, bound by the frontend from the same
-    /// `index` binding the publisher reads; absent outside an expansion.
-    #[serde(default)]
-    index:             Option<u32>,
-    #[serde(default)]
-    needs:             BTreeMap<String, String>,
-    #[serde(default)]
-    depth:             usize,
+    plan:      DeferredActionPlan,
+    gate:      Option<Value>,
+    cancelled: bool,
+}
+
+impl<'de> Deserialize<'de> for DeferredConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let gate = fields
+            .remove("gate")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?
+            .flatten();
+        let cancelled = fields
+            .remove("cancelled")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?
+            .unwrap_or(false);
+        let plan = serde_json::from_value(Value::Object(fields)).map_err(D::Error::custom)?;
+        Ok(Self {
+            plan,
+            gate,
+            cancelled,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -80,6 +73,11 @@ impl Step for DeferredActionStep {
     type Config = DeferredConfig;
 
     async fn run(&self, config: Self::Config, ctx: StepCtx) -> Outcome {
+        let DeferredConfig {
+            plan: config,
+            gate,
+            cancelled,
+        } = config;
         let index = config.index;
         let result_name = config.result_name.clone();
         let fail = |message: String| resolved_failure(&result_name, index, message);
@@ -93,8 +91,8 @@ impl Step for DeferredActionStep {
                 }
             };
         match gate::refusal(
-            config.gate.as_ref(),
-            config.cancelled,
+            gate.as_ref(),
+            cancelled,
             &gate_env,
             config.job_environment.as_deref(),
             config.background.as_deref(),
@@ -115,37 +113,20 @@ impl Step for DeferredActionStep {
             Ok(None) => {}
         }
 
-        if config.depth >= 10 {
-            return fail("composite actions nest more than 10 deep".to_string());
+        if config.depth >= frontend_gha::COMPOSITE_MAX_DEPTH {
+            return fail(format!(
+                "composite actions nest more than {} deep",
+                frontend_gha::COMPOSITE_MAX_DEPTH
+            ));
         }
         let files = match manifest_files(&config.action, &ctx).await {
             Ok(files) => files,
             Err(failure) => return fail(failure.message),
         };
-        let request = DeferredActionPlan {
-            action: config.action,
-            job_id: config.job_id,
-            start_node: config.start_node,
-            step_id: config.step_id,
-            result_name: config.result_name.clone(),
-            with: config.with,
-            env: config.env,
-            event: config.event,
-            soft_fail: config.soft_fail,
-            tolerates_failure: config.tolerates_failure,
-            timeout_minutes: config.timeout_minutes,
-            job_environment: config.job_environment,
-            background: config.background,
-            matrix: config.matrix,
-            in_expansion: config.in_expansion,
-            needs: config.needs,
-            depth: config.depth,
-            index,
-        };
         let source = ctx.capability::<ActionManifestSourceCap>();
         let planned = match task::spawn_blocking(move || {
             plan_deferred_action(
-                &request,
+                &config,
                 &files,
                 source.as_deref().map(|source| source.0.as_ref()),
             )

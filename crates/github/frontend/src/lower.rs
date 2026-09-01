@@ -79,12 +79,7 @@ pub(crate) struct Lowering<'w, 'a> {
     frame_ctx:           Vec<FrameCtx>,
     /// The frame whose workflow `self.wf` currently is ([`Lowering::enter`]).
     current:             usize,
-    /// Normal workflow lowering defers every manifest-backed action. The
-    /// runtime action planner turns this off for the one root action it is
-    /// expanding; actions discovered inside it remain deferred.
-    eager_action:        Option<(String, String)>,
-    /// Caller context restored while the runtime planner expands one action.
-    runtime_site:        Option<RuntimeSite>,
+    mode:                LoweringMode,
 }
 
 #[derive(Clone, Default)]
@@ -95,6 +90,17 @@ struct RuntimeSite {
     in_expansion: bool,
     needs:        BTreeMap<String, String>,
     depth:        usize,
+}
+
+enum LoweringMode {
+    Deferred,
+    Runtime {
+        /// The one root action expanded eagerly. Actions found inside it remain
+        /// deferred.
+        eager_action: (String, String),
+        /// Caller context restored while the runtime planner expands the root.
+        site:         RuntimeSite,
+    },
 }
 
 /// One workflow being lowered: the root, or a callee inlined under a call job.
@@ -236,15 +242,10 @@ pub(crate) fn lower(
         runners,
         substitute_checkout,
         diags,
-        None,
-        None,
+        LoweringMode::Deferred,
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the internal entry adds only the two runtime-action planning controls to the public lowering inputs"
-)]
 fn lower_internal(
     wf: &Workflow<'_>,
     files: &dyn FileSource,
@@ -252,8 +253,7 @@ fn lower_internal(
     runners: &RunnerMap,
     substitute_checkout: bool,
     mut diags: Diagnostics,
-    eager_action: Option<(String, String)>,
-    runtime_site: Option<RuntimeSite>,
+    mode: LoweringMode,
 ) -> Lowered {
     // Reusable workflows first: every callee fetched, parsed and cycle-checked
     // before a single node exists, so the passes below never fetch a workflow.
@@ -286,8 +286,7 @@ fn lower_internal(
         leg_runs_on: None,
         github_identity: identity::github_context(identity::repository_slug(files).as_deref()),
         current: 0,
-        eager_action,
-        runtime_site,
+        mode,
     };
 
     // Frame contexts top-down: a caller's inputs bind before its callee reads
@@ -352,9 +351,20 @@ impl<'a> Lowering<'_, 'a> {
     /// The one step the run-time planner expands eagerly — the root action of
     /// a deferred plan. `false` everywhere in a static lowering.
     fn is_eager_root(&self, job_id: &str, step_id: &str) -> bool {
-        self.eager_action
-            .as_ref()
-            .is_some_and(|(job, step)| job == job_id && step == step_id)
+        matches!(
+            &self.mode,
+            LoweringMode::Runtime {
+                eager_action: (job, step),
+                ..
+            } if job == job_id && step == step_id
+        )
+    }
+
+    fn runtime_site(&self) -> Option<&RuntimeSite> {
+        match &self.mode {
+            LoweringMode::Deferred => None,
+            LoweringMode::Runtime { site, .. } => Some(site),
+        }
     }
 
     /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs`
@@ -370,7 +380,7 @@ impl<'a> Lowering<'_, 'a> {
         site.workflow_inputs.clone_from(&ctx.inputs);
         site.secrets = ctx.secrets.clone();
         site.in_expansion = frame.in_expansion;
-        if let Some(runtime) = &self.runtime_site
+        if let Some(runtime) = self.runtime_site()
             && runtime.job_id == job.id
         {
             site.matrix = runtime.matrix;

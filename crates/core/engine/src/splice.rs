@@ -878,21 +878,26 @@ fn remap_node(
     node.splice_policy = *splice_policy;
     node.meta = meta.clone();
     for group in &routing.groups {
+        let mut edge_map = BTreeMap::new();
         let arms: Vec<Edge> = group
             .arms
             .iter()
-            .map(|arm| Edge {
-                id:         alloc.take_edge(),
-                to:         NodeId::new(node_base + arm.to.raw()),
-                guard:      match arm.guard {
-                    Guard::Always => Guard::Always,
-                    Guard::Expr(id) => Guard::Expr(shift(id)),
-                },
-                map:        arm.map.map(shift),
-                back:       arm.back,
-                weight:     arm.weight,
-                label:      arm.label.clone(),
-                transition: arm.transition,
+            .map(|arm| {
+                let id = alloc.take_edge();
+                edge_map.insert(arm.id, id);
+                Edge {
+                    id,
+                    to: NodeId::new(node_base + arm.to.raw()),
+                    guard: match arm.guard {
+                        Guard::Always => Guard::Always,
+                        Guard::Expr(id) => Guard::Expr(shift(id)),
+                    },
+                    map: arm.map.map(shift),
+                    back: arm.back,
+                    weight: arm.weight,
+                    label: arm.label.clone(),
+                    transition: arm.transition,
+                }
             })
             .collect();
         node.routing.groups.push(SelectGroup {
@@ -906,14 +911,10 @@ fn remap_node(
                                 .candidates
                                 .iter()
                                 .map(|candidate| ir::Candidate {
-                                    edge: EdgeId::new(
-                                        group
-                                            .arms
-                                            .iter()
-                                            .position(|arm| arm.id == candidate.edge)
-                                            .and_then(|index| arms.get(index))
-                                            .map_or(candidate.edge.raw(), |edge| edge.id.raw()),
-                                    ),
+                                    edge: edge_map
+                                        .get(&candidate.edge)
+                                        .copied()
+                                        .unwrap_or_else(|| EdgeId::new(candidate.edge.raw())),
                                     when: match candidate.when {
                                         Guard::Always => Guard::Always,
                                         Guard::Expr(id) => Guard::Expr(shift(id)),
