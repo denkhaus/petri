@@ -100,6 +100,10 @@ async fn run(graph: Graph, dir: &Path) -> RunReport {
     let rt = Runtime::standard()
         .step(github_actions::RunStep)
         .step(github_actions::ActionStep)
+        .step(github_actions::DeferredActionStep)
+        .step(github_actions::DeferredActionResultStep)
+        .step(github_actions::DeferredActionPublishStep)
+        .step(github_actions::DeferredActionPostStep)
         .secrets(MapSecrets::from_pairs(&[(
             "GITHUB_TOKEN",
             "ghs_dummy_token_for_the_stub_0000",

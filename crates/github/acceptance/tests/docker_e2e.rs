@@ -91,19 +91,6 @@ async fn a_local_dockerfile_action_builds_and_runs() {
     if !is_docker_ready().await {
         return;
     }
-    let files = files(&[(
-        ".github/actions/box/action.yml",
-        r"
-inputs:
-  greeting:
-    default: built
-runs:
-  using: docker
-  image: Dockerfile
-  args:
-    - ${{ inputs.greeting }}
-",
-    )]);
     let text = r#"
 on: push
 jobs:
@@ -112,12 +99,23 @@ jobs:
     steps:
       - run: |
           mkdir -p .github/actions/box
+          d='$'
+          cat > .github/actions/box/action.yml <<ACTION
+          inputs:
+            greeting:
+              default: built
+          runs:
+            using: docker
+            image: Dockerfile
+            args:
+              - ${d}{{ inputs.greeting }}
+          ACTION
           printf 'FROM alpine:3.20\nENTRYPOINT ["/bin/echo", "dockerfile-action-ran:"]\n' > .github/actions/box/Dockerfile
       - uses: ./.github/actions/box
         with:
           greeting: and-spoke
 "#;
-    let graph = lower_ok_with(text, &files);
+    let graph = lower_ok(text);
     let report = run_host(graph, "docker-local-action").await;
     assert_eq!(report.status, RunStatus::Success, "{:?}", errors(&report));
     let lines = log_lines(&report);

@@ -16,8 +16,9 @@ use std::{env, fs};
 use frontend::NoFiles;
 use frontend_gha::load_with;
 use github_actions::{
-    ActionRef, ActionSourceCap, ActionStep, ActionTreeSource, BackgroundCompleteStep,
-    BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep, GitActionSource, RunStep,
+    ActionManifestSourceCap, ActionRef, ActionSourceCap, ActionStep, ActionTreeSource,
+    BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep,
+    GitActionSource, RunStep,
 };
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{Graph, RunStatus};
@@ -36,8 +37,13 @@ inputs:
     default: 'false'
 runs:
   using: node20
+  pre: dist/pre.js
   main: dist/index.js
   post: dist/post.js
+";
+
+const PRE_JS: &str = r"
+console.log('pre ran');
 ";
 
 const INDEX_JS: &str = r"
@@ -114,6 +120,7 @@ fn fixture_action(base: &Path) {
     let dir = base.join("acme").join("hello");
     fs::create_dir_all(dir.join("dist")).expect("the fixture tree is writable");
     fs::write(dir.join("action.yml"), ACTION_YML).expect("action.yml is written");
+    fs::write(dir.join("dist/pre.js"), PRE_JS).expect("pre.js is written");
     fs::write(dir.join("dist/index.js"), INDEX_JS).expect("index.js is written");
     fs::write(dir.join("dist/post.js"), POST_JS).expect("post.js is written");
     // An executable the action ships and spawns: its mode must survive the
@@ -144,6 +151,103 @@ fn fixture_action(base: &Path) {
     git(&dir, &["tag", "v1"]);
 }
 
+/// `<base>/acme/wrapper`, a remote composite that calls `./inner`.
+fn fixture_nested_composite(base: &Path) {
+    let dir = base.join("acme").join("wrapper");
+    fs::create_dir_all(dir.join("inner")).expect("the fixture tree is writable");
+    fs::write(
+        dir.join("action.yml"),
+        r"
+name: Wrapper
+outputs:
+  message:
+    value: ${{ steps.inner.outputs.message }}
+runs:
+  using: composite
+  steps:
+    - id: inner
+      uses: ./inner
+",
+    )
+    .expect("the wrapper manifest is written");
+    fs::write(
+        dir.join("inner/action.yml"),
+        r#"
+name: Inner
+outputs:
+  message:
+    value: ${{ steps.say.outputs.message }}
+runs:
+  using: composite
+  steps:
+    - id: say
+      shell: bash
+      run: echo "message=remote-nested-local" >> "$GITHUB_OUTPUT"
+"#,
+    )
+    .expect("the inner manifest is written");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &[
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "the nested action",
+    ]);
+    git(&dir, &["tag", "v1"]);
+}
+
+/// `<base>/acme/reusable`, a remote called workflow with a local action.
+fn fixture_reusable_workflow(base: &Path) {
+    let dir = base.join("acme").join("reusable");
+    fs::create_dir_all(dir.join(".github/workflows"))
+        .expect("the fixture workflow directory is writable");
+    fs::create_dir_all(dir.join(".github/actions/inner"))
+        .expect("the fixture action directory is writable");
+    fs::write(
+        dir.join(".github/workflows/called.yml"),
+        r"
+on:
+  workflow_call:
+jobs:
+  inner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/inner
+",
+    )
+    .expect("the called workflow is written");
+    fs::write(
+        dir.join(".github/actions/inner/action.yml"),
+        r"
+name: Inner
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo remote-workflow-local-action
+",
+    )
+    .expect("the local action is written");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &[
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "the reusable workflow",
+    ]);
+    git(&dir, &["tag", "v1"]);
+}
+
 fn with_params(mut graph: Graph) -> Graph {
     graph.params.insert(
         "github".into(),
@@ -167,15 +271,21 @@ fn runtime(dir: &Path, source: &Arc<GitActionSource>) -> Runtime {
     options.grace = Duration::from_secs(1);
     options.retention = Retention::Never;
     let trees: Arc<dyn ActionTreeSource> = source.clone();
+    let manifests: Arc<dyn github_actions::ActionSource> = source.clone();
     Runtime::standard()
         .options(options)
         .step(RunStep)
         .step(ActionStep)
+        .step(github_actions::DeferredActionStep)
+        .step(github_actions::DeferredActionResultStep)
+        .step(github_actions::DeferredActionPublishStep)
+        .step(github_actions::DeferredActionPostStep)
         .step(BackgroundStartStep)
         .step(BackgroundCompleteStep)
         .step(BackgroundPublishStep)
         .step(BackgroundWaitStep)
         .capability(ActionSourceCap(trees))
+        .capability(ActionManifestSourceCap(manifests))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", FIXTURE_TOKEN)]))
 }
 
@@ -213,8 +323,8 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
     let hello = graph
         .nodes
         .iter()
-        .find(|n| n.name == "j/hello")
-        .expect("the action node");
+        .find(|n| n.name == "j/hello/resolve")
+        .expect("the action resolver");
     let sha = hello.step.config["action"]["sha"]
         .as_str()
         .expect("a pinned sha")
@@ -232,7 +342,7 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         report.state.errors()
     );
 
-    // Order: main, the two run steps, then post at the end.
+    // Order: pre, main, the two run steps, then post at the end.
     let started = testkit::started(&report);
     let position = |name: &str| {
         started
@@ -240,8 +350,9 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
             .position(|n| n == name)
             .unwrap_or_else(|| panic!("{name} never started: {started:?}"))
     };
+    assert!(position("j/hello/runtime/pre") < position("j/hello"));
     assert!(position("j/hello") < position("j/step-2"));
-    assert!(position("j/step-3") < position("j/hello/post"));
+    assert!(position("j/step-3") < position("j/hello/runtime/post"));
 
     let lines = testkit::log_lines(&report);
     let has = |want: &str| {
@@ -251,6 +362,7 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         );
     };
     // Inputs in, outputs out, and `steps.<id>.outputs` reads them.
+    has("pre ran");
     has("greeting=Hello, World");
     // The shipped executable ran: staging preserved its mode bits.
     has("tool=exec-bit-survived");
@@ -392,6 +504,112 @@ jobs:
     assert!(
         lines.contains(&"post saw abc123 yes".to_string()),
         "{lines:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the skip note and diagnostics"
+)]
+async fn a_remote_composite_resolves_its_local_nested_action() {
+    if !have("git") {
+        eprintln!("skipping: git is needed");
+        return;
+    }
+    let run_dir = testkit::RunDir::new("gha-remote-nested-action");
+    let dir = run_dir.path();
+    let remotes = dir.join("remotes");
+    fixture_nested_composite(&remotes);
+    let source = Arc::new(
+        GitActionSource::new(dir.join("cache"))
+            .with_remote_base(format!("file://{}", remotes.display())),
+    );
+    let workflow = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: wrapper
+        uses: acme/wrapper@v1
+      - run: echo "message=${{ steps.wrapper.outputs.message }}"
+"#;
+    let lowered = load_with(
+        ".github/workflows/nested.yml",
+        workflow,
+        &NoFiles,
+        Some(source.as_ref()),
+    );
+    for diagnostic in lowered.diagnostics.iter() {
+        eprintln!("{diagnostic}");
+    }
+    let graph = with_params(lowered.graph.expect("the workflow lowers"));
+    let report = runtime(dir, &source)
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    let lines = testkit::log_lines(&report);
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}\n{lines:#?}",
+        report.state.errors()
+    );
+    assert!(
+        lines.contains(&"message=remote-nested-local".to_string()),
+        "{lines:#?}"
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a test binary has no log sink; stderr carries the skip note and diagnostics"
+)]
+async fn a_remote_called_workflow_resolves_its_local_action() {
+    if !have("git") {
+        eprintln!("skipping: git is needed");
+        return;
+    }
+    let run_dir = testkit::RunDir::new("gha-remote-workflow-local-action");
+    let dir = run_dir.path();
+    let remotes = dir.join("remotes");
+    fixture_reusable_workflow(&remotes);
+    let source = Arc::new(
+        GitActionSource::new(dir.join("cache"))
+            .with_remote_base(format!("file://{}", remotes.display())),
+    );
+    let workflow = r"
+on: push
+jobs:
+  call:
+    uses: acme/reusable/.github/workflows/called.yml@v1
+";
+    let lowered = load_with(
+        ".github/workflows/reusable.yml",
+        workflow,
+        &NoFiles,
+        Some(source.as_ref()),
+    );
+    for diagnostic in lowered.diagnostics.iter() {
+        eprintln!("{diagnostic}");
+    }
+    let graph = with_params(lowered.graph.expect("the workflow lowers"));
+    let report = runtime(dir, &source)
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    let lines = testkit::log_lines(&report);
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}\n{lines:#?}",
+        report.state.errors()
+    );
+    assert!(
+        lines.contains(&"remote-workflow-local-action".to_string()),
+        "{lines:#?}"
     );
 }
 

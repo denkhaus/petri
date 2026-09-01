@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use ir::{
     BinOp, CancelScopeId, Edge, EdgeId, Expr, ExprId, ExprOrValue, FailureClass, FailureInfo,
     Generation, Guard, JoinPolicy, Local, Node, NodeId, Outcome, Scope, ScopeId, SelectGroup,
-    SpliceMode, SplicePolicy, SpliceRequest, Status, StepRef, Token, Value, placeholder, validate,
-    validate_request,
+    SpliceContext, SpliceMode, SplicePolicy, SpliceRequest, Status, StepRef, Token, Value,
+    placeholder, validate, validate_request,
 };
 use smol_str::SmolStr;
 
@@ -210,12 +210,12 @@ struct SpliceTransaction<'a> {
 struct BatchDraft {
     node_base:          u32,
     expr_base:          u32,
-    scope_base:         u32,
     nodes:              Vec<Node>,
     exprs:              Vec<Expr>,
     scopes:             Vec<Scope>,
     routing_extensions: Vec<(NodeId, SelectGroup)>,
     retracted:          Vec<AdmissionKey>,
+    inherit_bindings:   bool,
 }
 
 impl<'a> SpliceTransaction<'a> {
@@ -354,11 +354,27 @@ impl<'a> SpliceTransaction<'a> {
         let fragment = &request.fragment;
         let node_base = self.allocators.reserve_nodes(fragment.nodes.len());
         let expr_base = self.expr_cursor;
-        let scope_base = self.scope_cursor;
+        let inherited = match request.context {
+            SpliceContext::Isolated => None,
+            SpliceContext::InheritUploader(scope) => Some(scope),
+        };
+        let mut next_scope = self.scope_cursor;
+        let scope_map: Vec<ScopeId> = fragment
+            .scopes
+            .iter()
+            .map(|scope| {
+                if Some(scope.id) == inherited {
+                    self.uploader.scope
+                } else {
+                    let id = ScopeId::new(next_scope);
+                    next_scope += 1;
+                    id
+                }
+            })
+            .collect();
         BatchDraft {
             node_base,
             expr_base,
-            scope_base,
             exprs: fragment
                 .exprs
                 .iter()
@@ -367,17 +383,19 @@ impl<'a> SpliceTransaction<'a> {
             scopes: fragment
                 .scopes
                 .iter()
-                .map(|scope| remap_scope(scope, scope_base, expr_base))
+                .filter(|scope| Some(scope.id) != inherited)
+                .map(|scope| remap_scope(scope, scope_map[scope.id.index()], expr_base))
                 .collect(),
             nodes: fragment
                 .nodes
                 .iter()
                 .map(|node| {
-                    remap_node(node, node_base, scope_base, expr_base, &mut self.allocators)
+                    remap_node(node, node_base, &scope_map, expr_base, &mut self.allocators)
                 })
                 .collect(),
             routing_extensions: Vec::new(),
             retracted,
+            inherit_bindings: inherited.is_some(),
         }
     }
 
@@ -569,16 +587,29 @@ impl<'a> SpliceTransaction<'a> {
     fn push_batch(&mut self, draft: BatchDraft) {
         let BatchDraft {
             expr_base,
-            scope_base,
             nodes,
             exprs,
             scopes,
             routing_extensions,
             retracted,
+            inherit_bindings,
             ..
         } = draft;
         self.expr_cursor = expr_base + exprs.len() as u32;
-        self.scope_cursor = scope_base + scopes.len() as u32;
+        self.scope_cursor += scopes.len() as u32;
+        let bindings = if inherit_bindings {
+            self.state
+                .clone_bindings_for(self.uploader.id)
+                .map(|bindings| {
+                    nodes
+                        .iter()
+                        .map(|node| (node.id, bindings.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
         self.batches.push(PreparedSplice {
             owner: self.uploader.id,
             cancel_scope: self.allocators.take_cancel_scope(),
@@ -586,7 +617,7 @@ impl<'a> SpliceTransaction<'a> {
             nodes,
             exprs,
             scopes,
-            bindings: BTreeMap::new(),
+            bindings,
             seeds: Vec::new(),
             routing_extensions,
             origin: SpliceOrigin::Outcome,
@@ -755,7 +786,7 @@ fn shift_expr(expr: &Expr<Local>, offset: u32) -> Expr {
     }
 }
 
-fn remap_scope(scope: &Scope<Local>, scope_base: u32, expr_base: u32) -> Scope {
+fn remap_scope(scope: &Scope<Local>, live_id: ScopeId, expr_base: u32) -> Scope {
     let shift_env = |env: &BTreeMap<SmolStr, ExprOrValue<Local>>| {
         env.iter()
             .map(|(key, value)| {
@@ -770,13 +801,13 @@ fn remap_scope(scope: &Scope<Local>, scope_base: u32, expr_base: u32) -> Scope {
     // Exhaustive destructuring: a new `Scope` or `ServiceSpec` field fails to
     // compile here instead of silently taking its default in every spliced scope.
     let Scope {
-        id,
+        id: _,
         env,
         runtime,
         workspace,
         services,
     } = scope;
-    let mut out = Scope::new(ScopeId::new(scope_base + id.raw()));
+    let mut out = Scope::new(live_id);
     out.env = shift_env(env);
     out.runtime = runtime.clone();
     out.workspace = *workspace;
@@ -805,7 +836,7 @@ fn remap_scope(scope: &Scope<Local>, scope_base: u32, expr_base: u32) -> Scope {
 fn remap_node(
     source: &Node<Local>,
     node_base: u32,
-    scope_base: u32,
+    scope_map: &[ScopeId],
     expr_base: u32,
     alloc: &mut Allocators,
 ) -> Node {
@@ -832,7 +863,7 @@ fn remap_node(
     let mut node = Node::new(
         NodeId::new(node_base + id.raw()),
         name,
-        ScopeId::new(scope_base + scope.raw()),
+        scope_map[scope.index()],
         StepRef::new(
             step.kind.clone(),
             placeholder::map_expr_ids(&step.config, &|id| id + u64::from(expr_base)),

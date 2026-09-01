@@ -1,5 +1,6 @@
-//! `uses:` steps: remote references resolved and pinned, JavaScript and Docker
-//! actions planned and placed (`pre`, main, `post`), composites inlined.
+//! `uses:` steps: remote references pin statically. Every manifest-backed
+//! action is planned when its resolver runs. `docker://` needs no manifest and
+//! stays a direct node.
 
 use std::collections::{BTreeMap, HashSet};
 use std::mem;
@@ -7,17 +8,19 @@ use std::mem;
 use frontend::diag::{Diagnostics, Span};
 use frontend::yaml::{Document, Node};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
-use ir::{BinOp, ExprId, NodeId, ScopeId, StepRef, UnOp, Value};
+use ir::{BinOp, ExprId, NodeId, ScopeId, SplicePolicy, StepRef, UnOp, Value};
 use serde_json::{Map, json};
 
 use super::{
     ActionContext, ActionPlan, Lowering, PlanInput, PlanKind, scalar_text, scalar_text_opt,
 };
 use crate::action::{
-    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DOCKER_ACTION_KIND,
-    Phase, PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RefError, STATE_OUTPUT_KEY,
-    render_chain, unavailable_hint,
+    ACTION_KIND, ActionLocation, ActionRef, ActionSourceError, CHECKOUT_KIND, DEFERRED_ACTION_KIND,
+    DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND, DOCKER_ACTION_KIND, Phase,
+    PinnedAction, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RefError, STATE_OUTPUT_KEY, render_chain,
+    unavailable_hint, validate_relative_action_path,
 };
+use crate::call::CalleeSource;
 use crate::composite::{self, DockerAction, NodeAction, Runs, Uses};
 use crate::exprs::{ExprSite, LoweredScalar, SEP, Sentinel, Site, config_value, lower_scalar};
 use crate::gate::{self, GateOp};
@@ -47,8 +50,9 @@ pub(super) enum ResolveError {
 }
 
 impl<'a> Lowering<'_, 'a> {
-    /// Resolve `owner/repo@ref` to its commit and manifest, once per reference.
-    fn resolve_remote(&mut self, name: &str) -> Result<(PinnedAction, String), ResolveFailure> {
+    /// Resolve `owner/repo@ref` to its commit, once per reference. The
+    /// manifest stays a run-time lookup.
+    fn resolve_remote(&mut self, name: &str) -> Result<PinnedAction, ResolveFailure> {
         if let Some(cached) = self.resolved.get(name) {
             return cached.clone();
         }
@@ -60,13 +64,7 @@ impl<'a> Lowering<'_, 'a> {
             None => Err(ResolveFailure::NoSource),
             Some(source) => ActionRef::parse(name)
                 .map_err(|e| ResolveFailure::Failed(e.into()))
-                .and_then(|reference| source.resolve(&reference).map_err(source_failure))
-                .and_then(|pinned| {
-                    source
-                        .manifest(&pinned)
-                        .map(|text| (pinned, text))
-                        .map_err(source_failure)
-                }),
+                .and_then(|reference| source.resolve(&reference).map_err(source_failure)),
         };
         self.resolved.insert(name.to_string(), result.clone());
         result
@@ -76,30 +74,30 @@ impl<'a> Lowering<'_, 'a> {
     /// saying why there is none.
     fn action_document(&mut self, reference: &str, span: &Span) -> Option<Document> {
         match composite::classify(reference) {
-            Uses::Local(path) => {
-                // Inside a workflow fetched from another repository, `./` names a
-                // file of that repository — which the lowering does not stage.
-                if self.frame_ctx[self.current].remote {
-                    self.diags.unsupported(
-                        "action.nested_local",
-                        span.clone(),
-                        format!("`uses: ./{path}` inside a remote called workflow"),
-                        "a relative action inside a fetched workflow resolves against that \
-                         repository, which the lowering does not stage",
-                    );
-                    return None;
-                }
-                composite::read_document(self.files, &path, span, &mut self.diags)
-            }
+            Uses::Local(path) => composite::read_document(self.files, &path, span, &mut self.diags),
             // `docker://` names an image, not files; the plan path handles it
             // before any document is asked for.
             Uses::Docker(_) => None,
             Uses::Remote(name) => match self.resolve_remote(&name) {
-                Ok((pinned, text)) => Document::parse(
-                    &format!("{}/action.yml", pinned.reference()),
-                    &text,
-                    &mut self.diags,
-                ),
+                Ok(pinned) => {
+                    if let Some(text) = self
+                        .actions
+                        .and_then(|source| source.manifest(&pinned).ok())
+                    {
+                        Document::parse(
+                            &format!("{}/action.yml", pinned.reference()),
+                            &text,
+                            &mut self.diags,
+                        )
+                    } else {
+                        self.diags.error(
+                            "action.unresolved",
+                            span.clone(),
+                            format!("`uses: {name}` has no readable action manifest"),
+                        );
+                        None
+                    }
+                }
                 Err(ResolveFailure::NoSource) => {
                     self.diags.unsupported(
                         "action.remote",
@@ -143,6 +141,13 @@ impl<'a> Lowering<'_, 'a> {
     /// main pass reports problems.
     pub(super) fn action_plan(&mut self, step: &Step<'_>) -> Option<ActionPlan> {
         let (reference, span) = step.uses.as_ref()?;
+        let eager = self
+            .eager_action
+            .as_ref()
+            .is_some_and(|(_, id)| id == &step.node_name());
+        if !eager && !matches!(composite::classify(reference), Uses::Docker(_)) {
+            return None;
+        }
         let saved = mem::replace(&mut self.diags, Diagnostics::new());
         let plan = self.action_plan_inner(reference, span);
         let plan_diags = mem::replace(&mut self.diags, saved);
@@ -177,7 +182,7 @@ impl<'a> Lowering<'_, 'a> {
         match composite::classify(reference) {
             Uses::Local(path) => Some(ActionLocation::Local { local: path }),
             Uses::Docker(_) => None,
-            Uses::Remote(name) => Some(ActionLocation::Pinned(self.resolve_remote(&name).ok()?.0)),
+            Uses::Remote(name) => Some(ActionLocation::Pinned(self.resolve_remote(&name).ok()?)),
         }
     }
 
@@ -760,8 +765,9 @@ impl<'a> Lowering<'_, 'a> {
         .map(config_value)
     }
 
-    /// `uses:` — a composite (local or remote) is inlined; a JavaScript action
-    /// becomes a `github/action` node; a Docker action is rejected.
+    /// Lower one `uses:` step. Normal workflow lowering emits a deferred
+    /// resolver. The run-time planner eagerly expands only the reached root
+    /// action; nested actions become deferred resolvers of their own.
     pub(super) fn uses_step(
         &mut self,
         job: &Job<'a>,
@@ -797,6 +803,24 @@ impl<'a> Lowering<'_, 'a> {
                 },
                 earlier,
                 path,
+            );
+        }
+        let eager = self.eager_action.as_ref().is_some_and(|(job_id, step_id)| {
+            job_id == &site.job_id && step_id == &step.node_name()
+        });
+        if !eager && !matches!(composite::classify(reference), Uses::Docker(_)) {
+            return self.deferred_action_nodes(
+                ActionContext {
+                    job,
+                    step,
+                    scope,
+                    site,
+                    job_secret_env,
+                },
+                reference,
+                span,
+                earlier,
+                depth,
             );
         }
         // Inside a composite, plans are not precomputed: a `docker://` step
@@ -845,12 +869,17 @@ impl<'a> Lowering<'_, 'a> {
                     kind,
                     inputs: plan_inputs(&manifest.inputs),
                 };
-                if depth > 0 && (plan.has_pre() || plan.has_post()) {
+                let nested = depth > 0
+                    || self
+                        .runtime_site
+                        .as_ref()
+                        .is_some_and(|site| site.depth > 0);
+                if nested && plan.has_post() {
                     self.diags.warning(
                         "action.nested_lifecycle",
                         span.clone(),
                         format!(
-                            "`{reference}` has `pre` or `post` steps, which do not run inside a composite action here; its main step does"
+                            "`{reference}` has a `post` step, which does not run inside a composite action here; its `pre` and `main` steps do"
                         ),
                     );
                 }
@@ -867,21 +896,6 @@ impl<'a> Lowering<'_, 'a> {
                 );
             }
         };
-        if matches!(composite::classify(reference), Uses::Remote(_))
-            && action
-                .steps
-                .iter()
-                .any(|s| matches!(&s.uses, Some((u, _)) if u.starts_with('.')))
-        {
-            self.diags.unsupported(
-                "action.nested_local",
-                span.clone(),
-                format!("`{reference}` uses a `./` action inside a remote composite"),
-                "a relative action inside a fetched composite resolves against that repository, which the lowering does not stage",
-            );
-            return Vec::new();
-        }
-
         // Inputs: the caller's `with`, lowered in the caller's site, else the default.
         let caller_site = {
             let mut s = site.clone();
@@ -1021,6 +1035,199 @@ impl<'a> Lowering<'_, 'a> {
         }
         site.composite_outputs.insert(caller, outputs);
         ids
+    }
+
+    /// A manifest-backed action stays one resolver plus one public publisher
+    /// in the static graph. The resolver reads and plans the action when this
+    /// step is reached. Its appended fragment ends at a private result, which
+    /// makes the publisher wait and then reproduce the real outcome.
+    fn deferred_action_nodes(
+        &mut self,
+        context: ActionContext<'_, 'a, '_>,
+        reference: &str,
+        span: &Span,
+        earlier: &[String],
+        depth: usize,
+    ) -> Vec<NodeId> {
+        let ActionContext {
+            job,
+            step,
+            scope,
+            site,
+            job_secret_env,
+        } = context;
+        let action = match composite::classify(reference) {
+            Uses::Local(local) => {
+                let result = match &self.frames[self.current].source {
+                    CalleeSource::Remote { pinned } => pinned
+                        .at_repository_path(&local)
+                        .map(ActionLocation::Pinned),
+                    CalleeSource::Root | CalleeSource::Local => {
+                        validate_relative_action_path(&local, true)
+                            .map(|()| ActionLocation::Local { local })
+                    }
+                };
+                match result {
+                    Ok(action) => action,
+                    Err(error) => {
+                        self.diags
+                            .error("gha.bad_action_path", span.clone(), error.to_string());
+                        return Vec::new();
+                    }
+                }
+            }
+            Uses::Remote(name) => match self.resolve_remote(&name) {
+                Ok(pinned) => ActionLocation::Pinned(pinned),
+                Err(failure) => {
+                    self.report_deferred_resolve_failure(&name, span, failure);
+                    return Vec::new();
+                }
+            },
+            Uses::Docker(_) => unreachable!("docker image actions are planned eagerly"),
+        };
+
+        let mut step_site = site.clone();
+        step_site.earlier_steps = earlier.to_vec();
+        let env = self.step_env_config(step, &mut step_site, job_secret_env);
+        let mut with = Map::new();
+        for (name, node) in &step.with {
+            if let Some(value) = self.with_value(*node, &step_site) {
+                with.insert(name.clone(), value);
+            }
+        }
+
+        let public_name = format!("{}{SEP}{}", site.job_id, step.node_name());
+        let resolver_name = format!("{public_name}{SEP}resolve");
+        let result_name = format!("{public_name}{SEP}runtime-result");
+        let mut config = Map::new();
+        config.insert(
+            "action".into(),
+            serde_json::to_value(action).expect("an action location serializes"),
+        );
+        config.insert("job_id".into(), json!(site.job_id));
+        config.insert("start_node".into(), json!(site.start_node));
+        config.insert("step_id".into(), json!(step.node_name()));
+        config.insert("result_name".into(), json!(result_name));
+        config.insert("with".into(), Value::Object(with));
+        config.insert("env".into(), Value::Object(env));
+        config.insert("event".into(), self.event_config());
+        config.insert("matrix".into(), json!(site.matrix));
+        config.insert("in_expansion".into(), json!(site.in_expansion));
+        config.insert("needs".into(), json!(site.needs));
+        let base_depth = self.runtime_site.as_ref().map_or(0, |site| site.depth);
+        config.insert("depth".into(), json!(base_depth + depth));
+        if let Some(value) = self.soft_fail_value(step.continue_on_error, &step_site, false) {
+            config.insert("soft_fail".into(), value);
+        }
+        let tolerates_failure = job
+            .continue_on_error
+            .and_then(|node| node.as_scalar())
+            .and_then(|scalar| scalar.as_bool())
+            .unwrap_or(false);
+        config.insert("tolerates_failure".into(), json!(tolerates_failure));
+        if let Some(timeout) = step.timeout_minutes.or(job.timeout_minutes) {
+            config.insert("timeout_minutes".into(), json!(scalar_text(timeout)));
+        }
+
+        let resolver = self.b.add_node(
+            &resolver_name,
+            scope,
+            StepRef::new(DEFERRED_ACTION_KIND, Value::Object(config)),
+        );
+        self.b.node_mut(resolver).splice_policy = SplicePolicy::Append;
+        self.spans.insert(resolver, step.span.clone());
+        self.set_step_budget(resolver, job, step);
+        let started = step_site.job_started(self.b.exprs());
+        let gate = self.step_gate(step.condition, &step_site, span.clone(), &[started]);
+        self.attach_gate(resolver, gate);
+
+        let result = {
+            let t = self.b.exprs();
+            let record = site.node_record(t, &result_name);
+            let output = t.field(record, "output");
+            json!({ EXPR_PLACEHOLDER_KEY: output.raw() })
+        };
+        let mut publish_config = Map::new();
+        publish_config.insert("result".into(), result);
+        if let Some(value) = self.soft_fail_value(step.continue_on_error, &step_site, true) {
+            publish_config.insert("soft_fail".into(), value);
+        }
+        let publisher = self.b.add_node(
+            &public_name,
+            scope,
+            StepRef::new(DEFERRED_ACTION_PUBLISH_KIND, Value::Object(publish_config)),
+        );
+        self.spans.insert(publisher, step.span.clone());
+        vec![resolver, publisher]
+    }
+
+    fn report_deferred_resolve_failure(
+        &mut self,
+        name: &str,
+        span: &Span,
+        failure: ResolveFailure,
+    ) {
+        match failure {
+            ResolveFailure::NoSource => self.diags.unsupported(
+                "action.remote",
+                span.clone(),
+                name,
+                "no action source is configured, so actions from other repositories cannot be fetched",
+            ),
+            ResolveFailure::Unavailable(reason) => {
+                let code = if reason.is_some() {
+                    "action.upstream_gone"
+                } else {
+                    "action.remote"
+                };
+                self.diags.unsupported(code, span.clone(), name, &unavailable_hint(reason));
+            }
+            ResolveFailure::Failed(error) => self.diags.error(
+                "action.unresolved",
+                span.clone(),
+                format!("`uses: {name}`: {}", render_chain(&error)),
+            ),
+        }
+    }
+
+    /// The cleanup dispatcher for a deferred action. It is always present
+    /// because the manifest is not known yet. A manifest with no post phase
+    /// gives it no request, so it finishes as a no-op.
+    pub(super) fn deferred_action_post_node(
+        &mut self,
+        context: ActionContext<'_, 'a, '_>,
+    ) -> Option<NodeId> {
+        let ActionContext {
+            job,
+            step,
+            scope,
+            site,
+            ..
+        } = context;
+        let (reference, _) = step.uses.as_ref()?;
+        if matches!(composite::classify(reference), Uses::Docker(_))
+            || self.substitutable_checkout(step).is_some()
+        {
+            return None;
+        }
+        let public_name = format!("{}{SEP}{}", site.job_id, step.node_name());
+        let resolver_name = format!("{public_name}{SEP}resolve");
+        let request = {
+            let t = self.b.exprs();
+            let record = site.node_record(t, &resolver_name);
+            let output = t.field(record, "output");
+            let post = t.field(output, "post");
+            json!({ EXPR_PLACEHOLDER_KEY: post.raw() })
+        };
+        let id = self.b.add_node(
+            &format!("{public_name}{SEP}post-resolve"),
+            scope,
+            StepRef::new(DEFERRED_ACTION_POST_KIND, json!({ "request": request })),
+        );
+        self.b.node_mut(id).splice_policy = SplicePolicy::Append;
+        self.spans.insert(id, step.span.clone());
+        self.set_step_budget(id, job, step);
+        Some(id)
     }
 
     /// AND a composite caller's gate in front of an inlined node's own.

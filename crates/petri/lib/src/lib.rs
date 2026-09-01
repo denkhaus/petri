@@ -112,19 +112,24 @@ pub fn runtime() -> Runtime {
     }
     Runtime::standard()
         .frontend(
-            frontend_gha::GitHubActions::with_actions(manifests)
+            frontend_gha::GitHubActions::with_actions(manifests.clone())
                 .with_runners(runners)
                 .with_checkout_substitution(substitute_checkout),
         )
         .step(github::RunStep)
         .step(github::ActionStep)
         .step(github::DockerActionStep)
+        .step(github::DeferredActionStep)
+        .step(github::DeferredActionResultStep)
+        .step(github::DeferredActionPublishStep)
+        .step(github::DeferredActionPostStep)
         .step(github::CheckoutStep)
         .step(github::BackgroundStartStep)
         .step(github::BackgroundCompleteStep)
         .step(github::BackgroundPublishStep)
         .step(github::BackgroundWaitStep)
         .capability(github::ActionSourceCap(trees))
+        .capability(github::ActionManifestSourceCap(manifests))
         .capability(github::ToolCacheCap(tool_cache))
         .run_services(move |run_dir, caps| {
             let cache = github_objects::cache_dir(&store);

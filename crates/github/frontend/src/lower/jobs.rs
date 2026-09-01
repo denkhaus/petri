@@ -13,7 +13,7 @@ use serde_json::{Map, json};
 use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
 use crate::action::{
     ACTION_KIND, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND, BACKGROUND_START_KIND,
-    BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, Phase, RUN_KIND,
+    BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DEFERRED_ACTION_KIND, DOCKER_ACTION_KIND, Phase, RUN_KIND,
 };
 use crate::call::CalleeSource;
 use crate::exprs::{
@@ -563,7 +563,34 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
 
         for (step, plan) in job.steps.iter().zip(&plans).rev() {
-            if let Some(plan) = plan
+            let eager = self
+                .eager_action
+                .as_ref()
+                .is_some_and(|(job_id, step_id)| job_id == &job.id && step_id == &step.node_name());
+            let deferred = !eager
+                && plan.is_none()
+                && step
+                    .uses
+                    .as_ref()
+                    .is_some_and(|(reference, _)| !reference.starts_with("docker://"));
+            if deferred
+                && let Some(id) = self.deferred_action_post_node(ActionContext {
+                    job,
+                    step,
+                    scope,
+                    site: &site,
+                    job_secret_env: &job_secret_env,
+                })
+            {
+                self.chain_node(
+                    &mut routes,
+                    &mut previous,
+                    &mut chain,
+                    &mut names_so_far,
+                    &mut site,
+                    id,
+                );
+            } else if let Some(plan) = plan
                 && plan.has_post()
                 && let Some(id) = self.lifecycle_node(
                     ActionContext {
@@ -720,7 +747,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let node = self.b.node_mut(id);
         if matches!(
             node.step.kind.as_ref(),
-            RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND
+            RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND | DEFERRED_ACTION_KIND
         ) && let Value::Object(config) = &mut node.step.config
         {
             config.insert("job_environment".into(), channel.clone());
@@ -770,7 +797,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
             if matches!(
                 node.step.kind.as_ref(),
-                RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND
+                RUN_KIND | ACTION_KIND | DOCKER_ACTION_KIND | CHECKOUT_KIND | DEFERRED_ACTION_KIND
             ) && let Value::Object(config) = &mut node.step.config
             {
                 config.insert("background".into(), channel.clone());

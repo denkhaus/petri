@@ -263,28 +263,30 @@ jobs:
 /// composite's inlined steps record `Cancelled`.
 #[tokio::test]
 async fn composite_cleanup_runs_after_a_cancel() {
-    let sweeper = r"
-runs:
-  using: composite
-  steps:
-    - shell: bash
-      run: echo sweeping-1
-    - shell: bash
-      run: echo sweeping-2
-";
-    let echoer = r"
-runs:
-  using: composite
-  steps:
-    - shell: bash
-      run: echo plain-ran
-";
     let text = r"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - run: |
+          mkdir -p .github/actions/sweeper .github/actions/echoer
+          cat > .github/actions/sweeper/action.yml <<'ACTION'
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: echo sweeping-1
+              - shell: bash
+                run: echo sweeping-2
+          ACTION
+          cat > .github/actions/echoer/action.yml <<'ACTION'
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: echo plain-ran
+          ACTION
       - id: slow
         run: echo ready && sleep 30
       - id: plain
@@ -296,29 +298,28 @@ jobs:
         if: cancelled()
         uses: ./.github/actions/echoer
 ";
-    let files = files(&[
-        (".github/actions/sweeper/action.yml", sweeper),
-        (".github/actions/echoer/action.yml", echoer),
-    ]);
-    let graph = lower_ok_with(text, &files);
+    let graph = lower_ok(text);
     let (report, ()) = run_host_then_cancel(graph, "composite-cleanup", "j/slow").await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
     let lines = log_lines(&report);
-    assert!(lines.contains(&"sweeping-1".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"sweeping-1".to_string()),
+        "lines={lines:?} history={:?}",
+        report.state.history()
+    );
     assert!(lines.contains(&"sweeping-2".to_string()), "{lines:?}");
     assert!(
         lines.contains(&"plain-ran".to_string()),
         "the cancelled() composite's steps ran too: {lines:?}"
     );
     assert!(
-        !started(&report).iter().any(|n| n == "j/plain/step-1"),
+        !started(&report)
+            .iter()
+            .any(|name| name.starts_with("j/plain/runtime/")),
         "the un-gated composite never starts"
     );
-    assert_eq!(
-        status_of(&report, "j/plain/step-1").as_deref(),
-        Some("cancelled")
-    );
+    assert_eq!(status_of(&report, "j/plain").as_deref(), Some("cancelled"));
 }
 
 /// `fail_fast` plus `max-parallel`: a leg still deferred when the splice scope
@@ -904,79 +905,174 @@ jobs:
 // ── §7 test 5: composite actions ──────────────────────────────────────────
 
 #[tokio::test]
-async fn composite_actions_inline_with_inputs_and_outputs() {
-    let action = r#"
-name: greet
-inputs:
-  who:
-    required: true
-  greeting:
-    default: hello
-outputs:
-  message:
-    value: ${{ steps.say.outputs.msg }}
-runs:
-  using: composite
-  steps:
-    - id: say
-      shell: bash
-      run: |
-        echo "${{ inputs.greeting }}, ${{ inputs.who }}"
-        echo "msg=${{ inputs.greeting }}-${{ inputs.who }}" >> "$GITHUB_OUTPUT"
-    - uses: ./.github/actions/inner
-      with:
-        depth: two
-"#;
-    let inner = r#"
-runs:
-  using: composite
-  steps:
-    - shell: bash
-      run: echo "inner at ${{ inputs.depth }}"
-inputs:
-  depth:
-    default: one
-"#;
+async fn deferred_composite_actions_use_runtime_inputs_and_outputs() {
     let text = r#"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - id: prepare
+        run: |
+          mkdir -p .github/actions/greet .github/actions/inner
+          d='$'
+          cat > .github/actions/greet/action.yml <<ACTION
+          name: greet
+          inputs:
+            who:
+              required: true
+            greeting:
+              default: hello
+          outputs:
+            message:
+              value: ${d}{{ steps.say.outputs.msg }}
+          runs:
+            using: composite
+            steps:
+              - id: say
+                shell: bash
+                run: |
+                  echo "${d}{{ inputs.greeting }}, ${d}{{ inputs.who }}"
+                  echo "msg=${d}{{ inputs.greeting }}-${d}{{ inputs.who }}" >> "${d}GITHUB_OUTPUT"
+              - uses: ./.github/actions/inner
+                with:
+                  depth: two
+          ACTION
+          cat > .github/actions/inner/action.yml <<ACTION
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: echo "inner at ${d}{{ inputs.depth }}"
+          inputs:
+            depth:
+              default: one
+          ACTION
       - id: g
         uses: ./.github/actions/greet
         with:
           who: world
       - run: echo "got ${{ steps.g.outputs.message }}"
 "#;
-    let files = files(&[
-        (".github/actions/greet/action.yml", action),
-        (".github/actions/inner/action.yml", inner),
-    ]);
-    let graph = lower_ok_with(text, &files);
+    let graph = lower_ok(text);
     let names: Vec<&str> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
     assert!(
-        names.contains(&"j/g/say"),
-        "inlined under the caller: {names:?}"
-    );
-    assert!(
-        names.contains(&"j/g/step-2/step-1"),
-        "nested composite inlined: {names:?}"
+        names.contains(&"j/g/resolve") && !names.contains(&"j/g/say"),
+        "the action stays deferred in the static graph: {names:?}"
     );
 
     let report = run_host(graph, "composite").await;
     assert_eq!(
         report.status,
         RunStatus::Success,
-        "{:?}",
-        report.state.errors()
+        "errors={:?} history={:?} logs={:?}",
+        report.state.errors(),
+        report.state.history(),
+        log_lines(&report)
     );
     let lines = log_lines(&report);
     assert!(lines.contains(&"hello, world".to_string()), "{lines:?}");
-    assert!(lines.contains(&"inner at two".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"inner at two".to_string()),
+        "lines={lines:?} history={:?}",
+        report.state.history()
+    );
     assert!(
         lines.contains(&"got hello-world".to_string()),
         "composite outputs reach the caller: {lines:?}"
+    );
+    let started = started(&report);
+    assert!(
+        started.iter().any(|name| name == "j/g/runtime/say"),
+        "the action was planned from the run-time workspace: {started:?}"
+    );
+}
+
+#[tokio::test]
+async fn deferred_actions_inherit_matrix_bindings_and_workspace() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [one, two]
+    steps:
+      - run: |
+          mkdir -p .github/actions/show
+          d='$'
+          cat > .github/actions/show/action.yml <<ACTION
+          inputs:
+            value:
+              required: true
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: echo "matrix=${d}{{ inputs.value }}"
+          ACTION
+      - id: show
+        uses: ./.github/actions/show
+        with:
+          value: ${{ matrix.n }}
+"#,
+    );
+    let report = run_host(graph, "deferred-action-matrix").await;
+    assert_eq!(report.status, RunStatus::Success);
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"matrix=one".to_string()), "{lines:?}");
+    assert!(lines.contains(&"matrix=two".to_string()), "{lines:?}");
+    let started = started(&report);
+    assert!(
+        started.iter().any(|name| name == "j/show/runtime/step-1#0"),
+        "{started:?}"
+    );
+    assert!(
+        started.iter().any(|name| name == "j/show/runtime/step-1#1"),
+        "{started:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_action_inherits_job_failure_tolerance() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  experimental:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: |
+          mkdir -p .github/actions/fail
+          cat > .github/actions/fail/action.yml <<'ACTION'
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: exit 7
+          ACTION
+      - uses: ./.github/actions/fail
+  stable:
+    needs: experimental
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "result=${{ needs.experimental.result }}"
+"#,
+    );
+    let report = run_host(graph, "deferred-action-job-tolerance").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(
+        log_lines(&report).contains(&"result=success".to_string()),
+        "{:?}",
+        log_lines(&report)
     );
 }
 
@@ -1381,29 +1477,32 @@ jobs:
 
 #[tokio::test]
 async fn a_background_composite_stays_sequential_and_private_until_the_wait() {
-    let action = r#"
-name: Background composite
-outputs:
-  value:
-    value: ${{ steps.second.outputs.value }}
-runs:
-  using: composite
-  steps:
-    - id: first
-      shell: bash
-      run: echo "INNER_VALUE=from-first" >> "$GITHUB_ENV"
-    - id: second
-      shell: bash
-      run: |
-        echo "inner=$INNER_VALUE"
-        echo "value=$INNER_VALUE" >> "$GITHUB_OUTPUT"
-"#;
     let workflow = r#"
 on: push
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - run: |
+          mkdir -p .github/actions/background
+          d='$'
+          cat > .github/actions/background/action.yml <<ACTION
+          name: Background composite
+          outputs:
+            value:
+              value: ${d}{{ steps.second.outputs.value }}
+          runs:
+            using: composite
+            steps:
+              - id: first
+                shell: bash
+                run: echo "INNER_VALUE=from-first" >> "${d}GITHUB_ENV"
+              - id: second
+                shell: bash
+                run: |
+                  echo "inner=${d}INNER_VALUE"
+                  echo "value=${d}INNER_VALUE" >> "${d}GITHUB_OUTPUT"
+          ACTION
       - id: composite
         background: true
         uses: ./.github/actions/background
@@ -1411,8 +1510,7 @@ jobs:
       - wait: composite
       - run: echo "after=[$INNER_VALUE][${{ steps.composite.outputs.value }}]"
 "#;
-    let files = files(&[(".github/actions/background/action.yml", action)]);
-    let report = run_host(lower_ok_with(workflow, &files), "background-composite").await;
+    let report = run_host(lower_ok(workflow), "background-composite").await;
     assert_eq!(report.status, RunStatus::Success);
     let lines = log_lines(&report);
     assert!(lines.contains(&"before=[][]".to_string()), "{lines:?}");

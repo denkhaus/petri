@@ -3,8 +3,8 @@
 
 use ir::{
     Attachment, Edge, EdgeId, ExistingNodeRef, FragmentErrorKind, GraphFragment, Local, NodeId,
-    Outcome, ReplaceScope, Routing, SpliceMode, SplicePolicy, SpliceRequest, StepRef,
-    ValidationError, validate_fragment, validate_request,
+    Outcome, ReplaceScope, Routing, ScopeId, SpliceContext, SpliceMode, SplicePolicy,
+    SpliceRequest, StepRef, ValidationError, validate_fragment, validate_request,
 };
 use serde_json::json;
 
@@ -182,6 +182,19 @@ fn an_attachment_must_name_a_fragment_node() {
     );
 }
 
+#[test]
+fn an_inherited_scope_must_name_a_fragment_scope() {
+    let request =
+        SpliceRequest::append(one_node_fragment()).inherit_uploader_context(ScopeId::new(7));
+    let errors = validate_request(&request).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(&e.kind, FragmentErrorKind::InheritedUnknownScope(_))),
+        "{errors:?}"
+    );
+}
+
 // ── Serialized shapes ─────────────────────────────────────────────────────
 
 #[test]
@@ -235,12 +248,17 @@ fn splice_policy_and_splices_default_on_deserialization() {
 
 #[test]
 fn a_request_round_trips_through_serde() {
-    let request =
-        SpliceRequest::append(one_node_fragment()).with_attachment(Attachment::DependsOn {
+    let request = SpliceRequest::append(one_node_fragment())
+        .with_attachment(Attachment::DependsOn {
             node: NodeId::new(0),
             on:   ExistingNodeRef::new("build#2"),
-        });
+        })
+        .inherit_uploader_context(ScopeId::new(0));
     let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        json["context"],
+        serde_json::to_value(SpliceContext::InheritUploader(ScopeId::new(0))).unwrap()
+    );
     let back: SpliceRequest = serde_json::from_value(json).unwrap();
     assert_eq!(back, request);
 }

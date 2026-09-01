@@ -46,10 +46,16 @@ workflow directly; `github.event` comes from the run's parameters. `name:` and
 metadata too. Nodes are named by their ids. A background wait also uses the
 target step's display name in its verdict log.
 
-**Steps.** `run:` steps; `uses:` for JavaScript actions (fetched from their
-repositories, resolved to a pinned commit at load time, `pre`/`main`/`post`
-placed as GitHub orders them, state flowing between phases), for composite
-actions (local and remote, inlined), and for Docker container actions —
+**Steps.** `run:` steps; `uses:` for JavaScript, composite, and Docker
+container actions. Remote references pin to a commit at load time. Every
+manifest-backed action reads its manifest and tree only when the step is
+reached. Local actions therefore resolve against the checked-out workspace,
+including directories created by an earlier step. A `./` action inside a
+remote composite or called workflow resolves in that remote repository at the
+same pinned commit. The resolver appends the action's executable fragment to
+the live graph. JavaScript `pre` runs before `main`; `post` runs at the reverse
+cleanup barrier, with state flowing between phases. Composite actions expand
+recursively through the same resolver path. Docker actions include
 `uses: docker://image`, and fetched or local actions whose manifest says
 `runs.using: docker` with a registry image or a Dockerfile (built once per
 pinned commit and cached; a local action's rebuilds once per job). One
@@ -262,7 +268,7 @@ the real commit at run time — placement never reads HEAD by design.
 | `ignored.environment` | `environment:` names a deployment target whose enforcement — approvals, protection rules, wait timers, environment-scoped secrets and variables — lives on GitHub's servers. The name, URL and `deployment` flag (expressions stay as written) are preserved on the job's `start` node; nothing pretends protection rules ran, and environment-scoped secrets stay unavailable. |
 | `ignored.permissions` | `permissions:` configures the GitHub-hosted token; it grants nothing locally. |
 | `ignored.secret_output` | A job output that would carry a secret is dropped, as GitHub drops it (with its "skip output" warning). |
-| `action.nested_lifecycle` | A nested action's `pre`/`post` inside a composite does not run (its `main` does), as a warning on the composite. |
+| `action.nested_lifecycle` | A nested action's `post` inside a composite does not run. Its `pre` and `main` do run. |
 
 ## Planned
 
@@ -276,11 +282,9 @@ workflow counts in brackets rank the pressure.
 | `container.expression` | A container or service value the static contexts cannot resolve [0] | `inputs` and the checkout's `github` identity resolve at lowering (above); what remains reads `matrix` (per-scope values cannot vary per leg), a run-time context, or a dynamic input. |
 | `container.credentials` | A registry password that is not a `${{ secrets.* }}` reference [0] | Only a secret name may cross into the graph; a computed password would need a resolution seam inside acquire. |
 | `container.ports`, `container.volumes`, `services.secret_env`, `services.volumes` | Container and service corners [0] | Job-container port mappings and volumes name runner-machine resources to map; secret-valued service env needs a resolution point inside acquire. |
-| `action.local_missing` | `uses: ./x` that exists only after checkout [4] | Defer the manifest read to run time. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [0] | Evaluate at lowering where the value is static, reject the rest. Step-level `continue-on-error` expressions resolve at firing now; the code remains for the job level and degenerate values. |
 | `step.cancel` | Cancel one or more background steps [0] | The engine needs a targeted control path or a scope for each background branch. |
 | `step.wait_composite` | A background wait inside a composite action [0] | Composite actions cannot start background steps. A composite wait would need to address background state owned by its calling job. Put the wait in the calling job. |
-| `action.nested_local` | `./` actions inside a fetched composite or called workflow [2] | Stage the fetched repository so relative references resolve. |
 | `job_context` | `job.container` / `job.services` in an expression [0] | Service containers run (above), but their ids, networks and host port mappings are run-time facts the expression environment does not carry yet. Reach a service by its name and declared ports. |
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |
 

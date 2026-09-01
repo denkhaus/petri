@@ -292,13 +292,19 @@ The engine's one mutation applicator takes a producer-neutral prepared input;
 `ForEach` and step-initiated uploads are its two producers. Three
 representations, one direction of travel:
 
-- `SpliceRequest { mode, fragment, attachments }` is fragment-local, serialized
+- `SpliceRequest { mode, fragment, context, attachments }` is fragment-local, serialized
   in `StepFinished` via `Outcome.splices: Vec<SpliceRequest>` (ordered, empty by
   default), and untrusted. `GraphFragment` is an executable-plan type — local
   nodes, edges, resource scopes, an `ExprTable`, explicit entries and exits, in
   the `Local` id space — with no run `params`, root entries, or `completion`.
-  V1 fragments declare their own resource scopes only. Fragment validation is
-  the one §8 invariant engine over a fragment-local view (`validate_fragment`,
+  Fragment scopes are isolated by default. `context: InheritUploader(scope)`
+  maps one declared local scope to the uploader's live resource scope instead
+  and copies the uploader clone's `matrix`, `item`, and `index` bindings to all
+  fragment nodes. This gives a run-time planner the uploader's workspace,
+  runtime, services, and expansion context without copying frontend-specific
+  data into the core. The named local scope must exist; its own scope settings
+  do not replace the live scope. Fragment validation is the one §8 invariant
+  engine over a fragment-local view (`validate_fragment`,
   with a registry-aware variant mirroring `validate_with` for the host half of
   the two-stage contract) plus fragment-only rules: exits resolve, no HIR
   `expand`, and an empty fragment is valid only under `Replace`.
@@ -355,10 +361,13 @@ requests are recorded in its `StepFinished` and change nothing. For a
 candidate-final result, in order:
 
 1. **Cancelled-scope check first.** If the firing's scope is cancelled (killed
-   included), the splice list is dropped wholesale — no policy check, no
-   validation, no `invalid_splice` — and the rest of the outcome records,
-   merges, and routes under the normal cancel semantics. Cancellation must not
-   admit new work.
+   included), the splice list is normally dropped wholesale — no policy check,
+   no validation, no `invalid_splice` — and the rest of the outcome records,
+   merges, and routes under the normal cancel semantics. One narrow cleanup
+   case remains eligible for normal preparation: the uploader is marked
+   `run_on_cancel`, every request is `Append`, and every fragment node is also
+   marked `run_on_cancel`. A mixed or destructive list is dropped atomically.
+   Cancellation can therefore admit explicit cleanup, but not ordinary work.
 2. **Prepare** every request in order inside one transaction plan owning the
    allocation cursors, the name index, planned edges, and planned retractions.
    Preparation never touches canonical `EngineState`, so a rejected

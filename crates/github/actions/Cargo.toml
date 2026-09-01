@@ -19,6 +19,7 @@ ir = { workspace = true }
 executor = { workspace = true }
 steps = { workspace = true }
 frontend-gha = { workspace = true }
+frontend = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,5 +31,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 runtime = { workspace = true }
-frontend = { workspace = true }
 testkit = { workspace = true }

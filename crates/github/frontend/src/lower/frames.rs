@@ -114,7 +114,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
             return;
         };
         let frame_wf = self.frames[i].wf;
-        let frame_remote = matches!(self.frames[i].source, CalleeSource::Remote { .. });
         let call_job = &entries[entry].job;
         let call = call_job
             .call
@@ -142,7 +141,6 @@ impl<'w, 'a> Lowering<'w, 'a> {
             secrets,
             call_start: Some(format!("{}{SEP}start", call_job.id)),
             exit: None,
-            remote: frame_remote || self.frame_ctx[caller].remote,
         };
     }
 

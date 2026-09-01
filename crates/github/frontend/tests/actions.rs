@@ -1,11 +1,13 @@
-//! `uses: owner/repo@ref` lowering: a JavaScript action becomes `github/action`
-//! nodes — main where the step is, `pre` before every step, `post` after the
-//! last in reverse — pinned to the commit the source resolved, with inputs and
-//! `github.token` lowered where the step is.
+//! Manifest-backed actions pin remote references and stay deferred until their
+//! step is reached. The static graph carries a resolver, public publisher, and
+//! cleanup dispatcher.
 
 use frontend::NoFiles;
 use frontend_gha::action::MapActionSource;
-use frontend_gha::{ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY, load, load_with};
+use frontend_gha::{
+    DEFERRED_ACTION_KIND, DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND, RUN_KIND, load,
+    load_with,
+};
 use serde_json::json;
 
 const CHECKOUT: &str = r"
@@ -61,7 +63,7 @@ fn chain(graph: &ir::Graph) -> Vec<&str> {
 }
 
 #[test]
-fn a_node_action_lowers_to_a_main_node_and_a_trailing_post_node() {
+fn a_node_action_lowers_to_a_resolver_publisher_and_cleanup_dispatcher() {
     let source = MapActionSource::new().with("octo/tool@v4", TEST_SHA, CHECKOUT);
     let text = r"
 on: push
@@ -76,45 +78,45 @@ jobs:
 ";
     let graph = lower(text, &source).graph.expect("lowers");
     assert_eq!(chain(&graph), vec![
+        "build/step-1/resolve",
         "build/step-1",
         "build/step-2",
-        "build/step-1/post"
+        "build/step-1/post-resolve"
     ]);
 
-    let main = graph
+    let resolver = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "build/step-1/resolve")
+        .unwrap();
+    assert_eq!(resolver.step.kind.to_string(), DEFERRED_ACTION_KIND);
+    let config = &resolver.step.config;
+    assert_eq!(config["action"]["sha"], TEST_SHA);
+    assert_eq!(config["action"]["reference"]["owner"], "octo");
+    assert_eq!(config["action"]["reference"]["ref"], "v4");
+    assert_eq!(config["with"]["fetch-depth"], "0");
+    assert!(
+        config.get("entry").is_none(),
+        "the manifest has not been read"
+    );
+
+    let publisher = graph
         .nodes
         .iter()
         .find(|n| n.name == "build/step-1")
         .unwrap();
-    assert_eq!(main.step.kind.to_string(), ACTION_KIND);
-    let config = &main.step.config;
-    assert_eq!(config["entry"], "dist/index.js");
-    assert_eq!(config["action"]["sha"], TEST_SHA);
-    assert_eq!(config["action"]["reference"]["owner"], "octo");
-    assert_eq!(config["action"]["reference"]["ref"], "v4");
-    // The caller's value wins over the default; a number is passed as text.
-    assert_eq!(config["inputs"]["fetch-depth"], "0");
-    // `github.token` is a secret reference, never a value.
     assert_eq!(
-        config["inputs"]["token"],
-        json!({ "$secret": "GITHUB_TOKEN" })
+        publisher.step.kind.to_string(),
+        DEFERRED_ACTION_PUBLISH_KIND
     );
-    // `github.repository` is an expression over the run parameters.
-    assert!(config["inputs"]["repository"].get("$expr").is_some());
-    assert!(config.get("state").is_none(), "main has no earlier phase");
 
     let post = graph
         .nodes
         .iter()
-        .find(|n| n.name == "build/step-1/post")
+        .find(|n| n.name == "build/step-1/post-resolve")
         .unwrap();
-    assert_eq!(post.step.kind.to_string(), ACTION_KIND);
-    assert_eq!(post.step.config["entry"], "dist/cleanup.js");
-    assert!(
-        post.step.config["state"].get("$expr").is_some(),
-        "post reads main's saved state"
-    );
-    assert!(post.run_on_cancel, "a default `post-if` is `always()`");
+    assert_eq!(post.step.kind.to_string(), DEFERRED_ACTION_POST_KIND);
+    assert!(post.run_on_cancel);
 
     let run = graph
         .nodes
@@ -124,7 +126,6 @@ jobs:
     assert_eq!(run.step.kind.to_string(), RUN_KIND);
     assert!(run.step.config.get("output_env_aliases").is_none());
     assert!(run.step.config["event"].get("$expr").is_some());
-    let _ = STATE_OUTPUT_KEY;
 }
 
 #[test]
@@ -146,21 +147,26 @@ jobs:
 ";
     let graph = lower(text, &source).graph.expect("lowers");
     assert_eq!(chain(&graph), vec![
-        "j/a/pre", "j/step-1", "j/a", "j/b", "j/b/post", "j/a/post"
+        "j/step-1",
+        "j/a/resolve",
+        "j/a",
+        "j/b/resolve",
+        "j/b",
+        "j/b/post-resolve",
+        "j/a/post-resolve"
     ]);
-    let a = graph.nodes.iter().find(|n| n.name == "j/a").unwrap();
-    assert!(
-        a.step.config["state"].get("$expr").is_some(),
-        "main reads pre's saved state"
-    );
-    let a_post = graph.nodes.iter().find(|n| n.name == "j/a/post").unwrap();
+    let a_post = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "j/a/post-resolve")
+        .unwrap();
     assert!(
         a_post.run_on_cancel && a_post.precondition.is_none(),
-        "a post node fires after a cancel and its gate decides; `post-if: success()` then reads false"
+        "the cleanup dispatcher stays available after cancellation"
     );
     assert!(
-        a_post.step.config.get("gate").is_some(),
-        "the post-if is a config gate, not a precondition"
+        a_post.step.config["request"].get("$expr").is_some(),
+        "the dispatcher reads the plan saved by the resolver"
     );
 }
 
@@ -180,12 +186,11 @@ jobs:
       - uses: acme/needs@v1
 ";
     let lowered = lower(text, &source);
-    // GitHub's runner warns about a missing required action input and runs
-    // anyway; real workflows rely on that. (A workflow_call input stays an
-    // error — GitHub fails those.)
+    // The required declaration is in the manifest, so the run-time planner
+    // owns the warning.
     assert!(lowered.graph.is_some());
     assert!(
-        lowered
+        !lowered
             .diagnostics
             .iter()
             .any(|d| d.code == "gha.missing_input"),
@@ -210,9 +215,13 @@ jobs:
       - uses: acme/needy@v1
 ";
     let lowered = lower(text, &source);
-    let graph = lowered.graph.expect("an empty default satisfies the input");
-    let node = graph.nodes.iter().find(|n| n.name == "j/step-1").unwrap();
-    assert_eq!(node.step.config["inputs"]["github_token"], "");
+    let graph = lowered.graph.expect("the deferred action lowers");
+    let node = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "j/step-1/resolve")
+        .unwrap();
+    assert!(node.step.config["with"].as_object().unwrap().is_empty());
 }
 
 #[test]
@@ -231,11 +240,10 @@ jobs:
       - uses: acme/nully@v1
 ";
     let lowered = lower(text, &source);
-    // A null default does not satisfy the input; the runner-faithful warning
-    // still names it.
+    // The run-time planner distinguishes a null default from an empty one.
     assert!(lowered.graph.is_some());
     assert!(
-        lowered
+        !lowered
             .diagnostics
             .iter()
             .any(|d| d.code == "gha.missing_input"),

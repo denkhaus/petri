@@ -6,7 +6,7 @@
 
 use frontend::{MapFiles, NoFiles};
 use frontend_gha::action::MapActionSource;
-use frontend_gha::{DOCKER_ACTION_KIND, load, load_with};
+use frontend_gha::{DEFERRED_ACTION_KIND, DOCKER_ACTION_KIND, load, load_with};
 use serde_json::json;
 
 const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -88,7 +88,7 @@ jobs:
 }
 
 #[test]
-fn a_manifest_docker_action_places_pre_and_post_and_binds_inputs() {
+fn a_manifest_docker_action_stays_deferred_with_its_caller_inputs() {
     let source = MapActionSource::new().with("acme/publish@v1", TEST_SHA, DOCKER_MANIFEST);
     let text = r"
 on: push
@@ -110,35 +110,22 @@ jobs:
         .filter(|n| !n.ends_with("/start") && !n.ends_with("/done"))
         .collect();
     assert_eq!(names, vec![
-        "build/step-1/pre",
+        "build/step-1/resolve",
         "build/step-1",
         "build/step-2",
-        "build/step-1/post",
+        "build/step-1/post-resolve",
     ]);
 
-    let main = node(&graph, "build/step-1");
-    assert_eq!(main.step.kind.to_string(), DOCKER_ACTION_KIND);
-    let config = &main.step.config;
-    assert_eq!(config["image"]["dockerfile"]["file"], "Dockerfile");
-    assert_eq!(config["image"]["dockerfile"]["action"]["sha"], TEST_SHA);
-    assert_eq!(config["entrypoint"], "/entry.sh");
-    // The manifest's args, the first bound to the caller's input.
-    let args = config["args"].as_array().expect("args");
-    assert_eq!(args.len(), 2);
-    assert!(args[0].get("$expr").is_some());
-    assert_eq!(args[1], "literal");
-    // The manifest's own env, bound the same way.
-    assert!(config["env"]["GREETING"].get("$expr").is_some());
-    // Main's state comes from pre, as a JavaScript action's would.
-    assert!(config.get("state").is_some());
-
-    let pre = node(&graph, "build/step-1/pre");
-    assert_eq!(pre.step.config["entrypoint"], "/pre.sh");
-    assert!(pre.step.config.get("args").is_none(), "pre runs no args");
-
-    let post = node(&graph, "build/step-1/post");
-    assert_eq!(post.step.config["entrypoint"], "/post.sh");
-    assert!(post.step.config.get("state").is_some());
+    let resolver = node(&graph, "build/step-1/resolve");
+    assert_eq!(resolver.step.kind.to_string(), DEFERRED_ACTION_KIND);
+    let config = &resolver.step.config;
+    assert_eq!(config["action"]["sha"], TEST_SHA);
+    assert_eq!(config["with"]["message"], "from-caller");
+    assert_eq!(
+        config["with"]["token"],
+        json!({ "$secret": "PUBLISH_TOKEN" })
+    );
+    assert!(config.get("image").is_none(), "the manifest is still lazy");
 }
 
 #[test]
@@ -168,10 +155,10 @@ jobs:
         eprintln!("{d}");
     }
     let graph = lowered.graph.expect("lowers");
-    let step = node(&graph, "build/step-1");
-    assert_eq!(step.step.kind.to_string(), DOCKER_ACTION_KIND);
+    let step = node(&graph, "build/step-1/resolve");
+    assert_eq!(step.step.kind.to_string(), DEFERRED_ACTION_KIND);
     assert_eq!(
-        step.step.config["image"]["dockerfile"]["action"],
+        step.step.config["action"],
         json!({ "local": ".github/actions/box" })
     );
 }
@@ -188,20 +175,19 @@ jobs:
       - uses: acme/publish@v1
 ";
     let lowered = lower(text, &source);
-    // GitHub's runner warns about a missing required input and runs anyway;
-    // real workflows rely on that.
+    // The declaration is in the lazy manifest, so the run-time planner warns.
     assert!(lowered.graph.is_some());
     assert!(
-        lowered
+        !lowered
             .diagnostics
             .iter()
             .any(|d| d.code == "gha.missing_input"),
-        "the missing required input is reported"
+        "the static frontend has not read the input declarations"
     );
 }
 
 #[test]
-fn a_docker_step_inside_a_composite_lowers_its_main_phase() {
+fn a_docker_step_inside_a_composite_is_discovered_at_run_time() {
     let composite = r"
 runs:
   using: composite
@@ -220,10 +206,13 @@ jobs:
       - uses: acme/wrap@v1
 ";
     let graph = lower(text, &source).graph.expect("lowers");
-    let inner = node(&graph, "build/step-1/step-1");
-    assert_eq!(inner.step.kind.to_string(), DOCKER_ACTION_KIND);
-    assert_eq!(
-        inner.step.config["image"],
-        json!({ "registry": "alpine:3.21" })
+    let resolver = node(&graph, "build/step-1/resolve");
+    assert_eq!(resolver.step.kind.to_string(), DEFERRED_ACTION_KIND);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| node.name != "build/step-1/step-1"),
+        "the composite manifest has not been expanded"
     );
 }

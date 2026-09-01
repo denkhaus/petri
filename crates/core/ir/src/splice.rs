@@ -100,7 +100,8 @@ impl SpliceMode {
 /// rather than a parallel mirror family; the type system refuses a mixed-space
 /// id, and only the engine's preparation remapper converts. A fragment owns no
 /// run `params`, no root entries and no `completion` — those belong to the run.
-/// V1 fragments declare their own resource scopes only.
+/// Its resource scopes are isolated unless the request maps one declared scope
+/// to the uploader's scope through [`SpliceContext`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphFragment {
     pub body:  GraphBody<Local>,
@@ -277,14 +278,41 @@ pub enum Attachment {
     },
 }
 
+/// How a fragment inherits execution context from its uploader.
+///
+/// Isolated context remains the default. A runtime planner can instead place
+/// the nodes in one declared local scope into the uploader's existing resource
+/// scope and copy the uploader's expansion bindings to every fragment node.
+/// This keeps dynamically planned work in the same workspace, with the same
+/// services, `matrix`, `item`, and `index` values. Other declared resource
+/// scopes remain fresh.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpliceContext {
+    #[default]
+    Isolated,
+    InheritUploader(ScopeId<Local>),
+}
+
 /// One ordered entry in `Outcome::splices`. All requests in one final outcome
 /// prepare successfully or none apply.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpliceRequest {
     pub mode:        SpliceMode,
     pub fragment:    GraphFragment,
+    #[serde(default, skip_serializing_if = "SpliceContext::is_isolated")]
+    pub context:     SpliceContext,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+}
+
+impl SpliceContext {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if callback receives a shared reference"
+    )]
+    fn is_isolated(&self) -> bool {
+        matches!(self, Self::Isolated)
+    }
 }
 
 impl SpliceRequest {
@@ -292,6 +320,7 @@ impl SpliceRequest {
         Self {
             mode: SpliceMode::Append,
             fragment,
+            context: SpliceContext::Isolated,
             attachments: Vec::new(),
         }
     }
@@ -300,8 +329,17 @@ impl SpliceRequest {
         Self {
             mode: SpliceMode::Replace { scope },
             fragment,
+            context: SpliceContext::Isolated,
             attachments: Vec::new(),
         }
+    }
+
+    /// Map one fragment-local resource scope to the uploader's resource scope
+    /// and copy the uploader's expansion bindings to every fragment node.
+    #[must_use]
+    pub fn inherit_uploader_context(mut self, scope: ScopeId<Local>) -> Self {
+        self.context = SpliceContext::InheritUploader(scope);
+        self
     }
 
     #[must_use]
@@ -341,6 +379,8 @@ pub enum FragmentErrorKind {
     ExpansionInFragment(NodeId<Local>),
     #[error("attachment names unknown fragment node {0}")]
     AttachmentUnknownNode(NodeId<Local>),
+    #[error("inherited uploader scope names unknown fragment scope {0}")]
+    InheritedUnknownScope(ScopeId<Local>),
 }
 
 /// Validate one fragment: the §8 invariant engine over a fragment-local view —
@@ -438,6 +478,20 @@ pub(crate) fn validate_request_with(
                 kind:     FragmentErrorKind::AttachmentUnknownNode(*node),
             });
         }
+    }
+
+    let SpliceContext::InheritUploader(scope) = request.context else {
+        return if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        };
+    };
+    if scope.index() >= request.fragment.scopes.len() {
+        errors.push(FragmentValidationError {
+            location: SmolStr::new("scope"),
+            kind:     FragmentErrorKind::InheritedUnknownScope(scope),
+        });
     }
 
     if errors.is_empty() {

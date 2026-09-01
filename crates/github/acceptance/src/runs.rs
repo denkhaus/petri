@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 
 use frontend_gha::action::{ActionLocation, PinnedAction};
 use frontend_gha::exprs::Sentinel;
-use frontend_gha::{ACTION_KIND, DOCKER_ACTION_KIND, RUN_KIND};
+use frontend_gha::{ACTION_KIND, DEFERRED_ACTION_KIND, DOCKER_ACTION_KIND, RUN_KIND};
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, ExpandTarget, Expansion, Expr, ExprId, Graph, NodeId, RuntimeTarget, Value};
 use smol_str::SmolStr;
@@ -374,7 +374,7 @@ pub fn stubbed_output_consumers(graph: &Graph) -> BTreeSet<String> {
 pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for node in &graph.nodes {
-        if node.step.kind.as_ref() != ACTION_KIND {
+        if !matches!(node.step.kind.as_ref(), ACTION_KIND | DEFERRED_ACTION_KIND) {
             continue;
         }
         let StepIdentity::Action { bare, .. } = action_identity(&node.step.config) else {
@@ -383,7 +383,7 @@ pub fn dispatch_ref_checkouts(graph: &Graph) -> BTreeSet<String> {
         if bare != "actions/checkout" {
             continue;
         }
-        let Some(reference) = node.step.config.get("inputs").and_then(|i| i.get("ref")) else {
+        let Some(reference) = action_inputs(&node.step.config).and_then(|i| i.get("ref")) else {
             continue;
         };
         let mut seen = BTreeSet::new();
@@ -765,12 +765,24 @@ pub fn step_identities(graph: &Graph) -> BTreeMap<String, StepIdentity> {
     let mut out = BTreeMap::new();
     for node in &graph.nodes {
         let identity = match node.step.kind.as_ref() {
-            ACTION_KIND => action_identity(&node.step.config),
+            ACTION_KIND | DEFERRED_ACTION_KIND => action_identity(&node.step.config),
             DOCKER_ACTION_KIND => docker_identity(&node.step.config),
             RUN_KIND => StepIdentity::Run,
             other => StepIdentity::Other(other.to_string()),
         };
         out.insert(node.name.to_string(), identity);
+    }
+    // The public publisher and every node appended below `/runtime` belong to
+    // the resolver's action. Keep that identity under the public step name;
+    // `identity_of` handles the appended descendants.
+    for node in &graph.nodes {
+        if node.step.kind.as_ref() != DEFERRED_ACTION_KIND {
+            continue;
+        }
+        let Some(public) = node.name.strip_suffix("/resolve") else {
+            continue;
+        };
+        out.insert(public.to_string(), action_identity(&node.step.config));
     }
     out
 }
@@ -784,7 +796,12 @@ pub fn identity_of<'a>(
     if let Some(found) = identities.get(record_name) {
         return Some(found);
     }
-    identities.get(&clone_base(record_name))
+    let base = clone_base(record_name);
+    if let Some(found) = identities.get(&base) {
+        return Some(found);
+    }
+    let (public, _) = base.split_once("/runtime")?;
+    identities.get(public)
 }
 
 /// The template name behind a firing-record name: the splice's `#index` clone
@@ -823,6 +840,14 @@ fn action_identity(config: &Value) -> StepIdentity {
     }
 }
 
+/// The caller inputs on an eager action node or its lazy resolver.
+fn action_inputs(config: &Value) -> Option<&serde_json::Map<String, Value>> {
+    config
+        .get("inputs")
+        .or_else(|| config.get("with"))
+        .and_then(Value::as_object)
+}
+
 fn docker_identity(config: &Value) -> StepIdentity {
     match config.get("image") {
         Some(image) => {
@@ -849,10 +874,7 @@ fn reads_another_run(pinned: &PinnedAction, config: &Value) -> bool {
     if !bare_reference(pinned).ends_with("download-artifact") {
         return false;
     }
-    config
-        .get("inputs")
-        .and_then(Value::as_object)
-        .is_some_and(|inputs| inputs.contains_key("run-id"))
+    action_inputs(config).is_some_and(|inputs| inputs.contains_key("run-id"))
 }
 
 /// Actions whose work is inseparable from a hosted service — OIDC issuers,
@@ -2158,6 +2180,42 @@ mod tests {
         assert_eq!(
             expected_reason(&identity, "network", false),
             Some("cross-run artifact download (REST API)".to_string())
+        );
+
+        let deferred = serde_json::json!({
+            "action": serde_json::to_value(pinned("actions/download-artifact@v4")).unwrap(),
+            "with": {"run-id": "123"},
+        });
+        assert_eq!(action_identity(&deferred), identity);
+    }
+
+    #[test]
+    fn deferred_identity_covers_the_publisher_and_runtime_nodes() {
+        let graph = lower_uses(
+            "on: push\n\
+             jobs:\n\
+             \x20 j:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   steps: [{uses: actions/setup-node@v4}]\n",
+        );
+        let identities = step_identities(&graph);
+        let resolver = graph
+            .nodes
+            .iter()
+            .find(|node| node.step.kind.as_ref() == DEFERRED_ACTION_KIND)
+            .expect("a deferred resolver");
+        let public = resolver
+            .name
+            .strip_suffix("/resolve")
+            .expect("the resolver name has its role suffix");
+        let expected = StepIdentity::Action {
+            bare:      "actions/setup-node".to_string(),
+            cross_run: false,
+        };
+        assert_eq!(identity_of(&identities, public), Some(&expected));
+        assert_eq!(
+            identity_of(&identities, &format!("{public}/runtime/main#2")),
+            Some(&expected)
         );
     }
 

@@ -8,6 +8,7 @@
 //! steps see, [`steps`] lowers `run:` steps and their gates, and [`uses`]
 //! resolves and lowers `uses:` steps.
 
+mod deferred;
 mod frames;
 mod jobs;
 mod scope;
@@ -18,6 +19,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
+pub use deferred::{DeferredActionPlan, PlannedDeferredAction, plan_deferred_action};
 use frontend::FileSource;
 use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
@@ -58,10 +60,9 @@ pub(crate) struct Lowering<'w, 'a> {
     /// Whether a supportable `actions/checkout` call becomes `github/checkout`
     /// (the local-checkout substitution) instead of running the real action.
     substitute_checkout: bool,
-    /// Remote actions resolved so far, by reference as written: the pin and the
-    /// manifest text, or why not. A reference used by several steps resolves
-    /// once.
-    resolved:            HashMap<String, Result<(PinnedAction, String), ResolveFailure>>,
+    /// Remote actions resolved so far, by reference as written: the pin, or
+    /// why not. A reference used by several steps resolves once.
+    resolved:            HashMap<String, Result<PinnedAction, ResolveFailure>>,
     jobs:                HashMap<String, JobNodes>,
     spans:               HashMap<NodeId, Span>,
     /// The job in flight's per-leg `runs-on` resolutions: what each matrix leg
@@ -78,6 +79,22 @@ pub(crate) struct Lowering<'w, 'a> {
     frame_ctx:           Vec<FrameCtx>,
     /// The frame whose workflow `self.wf` currently is ([`Lowering::enter`]).
     current:             usize,
+    /// Normal workflow lowering defers every manifest-backed action. The
+    /// runtime action planner turns this off for the one root action it is
+    /// expanding; actions discovered inside it remain deferred.
+    eager_action:        Option<(String, String)>,
+    /// Caller context restored while the runtime planner expands one action.
+    runtime_site:        Option<RuntimeSite>,
+}
+
+#[derive(Clone, Default)]
+struct RuntimeSite {
+    job_id:       String,
+    start_node:   String,
+    matrix:       bool,
+    in_expansion: bool,
+    needs:        BTreeMap<String, String>,
+    depth:        usize,
 }
 
 /// One workflow being lowered: the root, or a callee inlined under a call job.
@@ -140,9 +157,6 @@ struct FrameCtx {
     call_start:    Option<String>,
     /// Inside a callee: the call's exit join, which every job's `done` feeds.
     exit:          Option<NodeId>,
-    /// The frame's workflow was fetched from another repository, so its `./`
-    /// step actions cannot resolve against this one.
-    remote:        bool,
 }
 
 /// A `uses:` step that contributes standalone nodes — a JavaScript action or a
@@ -213,7 +227,33 @@ pub(crate) fn lower(
     actions: Option<&dyn ActionSource>,
     runners: &RunnerMap,
     substitute_checkout: bool,
+    diags: Diagnostics,
+) -> Lowered {
+    lower_internal(
+        wf,
+        files,
+        actions,
+        runners,
+        substitute_checkout,
+        diags,
+        None,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the internal entry adds only the two runtime-action planning controls to the public lowering inputs"
+)]
+fn lower_internal(
+    wf: &Workflow<'_>,
+    files: &dyn FileSource,
+    actions: Option<&dyn ActionSource>,
+    runners: &RunnerMap,
+    substitute_checkout: bool,
     mut diags: Diagnostics,
+    eager_action: Option<(String, String)>,
+    runtime_site: Option<RuntimeSite>,
 ) -> Lowered {
     // Reusable workflows first: every callee fetched, parsed and cycle-checked
     // before a single node exists, so the passes below never fetch a workflow.
@@ -246,6 +286,8 @@ pub(crate) fn lower(
         leg_runs_on: None,
         github_identity: identity::github_context(identity::repository_slug(files).as_deref()),
         current: 0,
+        eager_action,
+        runtime_site,
     };
 
     // Frame contexts top-down: a caller's inputs bind before its callee reads
@@ -320,6 +362,14 @@ impl<'a> Lowering<'_, 'a> {
         site.workflow_inputs.clone_from(&ctx.inputs);
         site.secrets = ctx.secrets.clone();
         site.in_expansion = frame.in_expansion;
+        if let Some(runtime) = &self.runtime_site
+            && runtime.job_id == job.id
+        {
+            site.matrix = runtime.matrix;
+            site.in_expansion = runtime.in_expansion;
+            site.needs.clone_from(&runtime.needs);
+            site.start_node.clone_from(&runtime.start_node);
+        }
         let strip = format!("{}{SEP}", frame.prefix);
         for (need, _) in &job.needs {
             let key = if frame.prefix.is_empty() {

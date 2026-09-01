@@ -648,10 +648,12 @@ fn on_step_finished(
     // This attempt is candidate-final. Finalization is prepare-then-commit for
     // its splice requests, in this order:
     //
-    // 1. Cancelled-scope check first: a cancelled (or killed) firing's splice list
-    //    is dropped wholesale — no policy check, no validation, no `invalid_splice`
-    //    — and the rest of the outcome records, merges and routes under the normal
-    //    cancel semantics. Cancellation must not admit new work.
+    // 1. Cancelled-scope check first. A normal firing's splice list is dropped
+    //    wholesale — no policy check, no validation, no `invalid_splice`. A
+    //    `run_on_cancel` uploader may append only fragments whose every node is
+    //    also `run_on_cancel`; this is how a lazy planner admits explicit cleanup
+    //    without letting cancellation create ordinary work. Mixed or destructive
+    //    request lists are dropped atomically.
     // 2. Prepare every request in order against a scratch view. Preparation never
     //    touches canonical state, so a rejection leaks nothing.
     // 3. On rejection, convert to the canonical `Failure{class: invalid_splice}` —
@@ -666,7 +668,12 @@ fn on_step_finished(
     let mut plan = None;
     if !outcome.splices.is_empty() {
         let requests = mem::take(&mut outcome.splices);
-        if !cancelled {
+        let cleanup_append = node.run_on_cancel
+            && requests.iter().all(|request| {
+                matches!(request.mode, ir::SpliceMode::Append)
+                    && request.fragment.nodes.iter().all(|node| node.run_on_cancel)
+            });
+        if !cancelled || cleanup_append {
             match prepare_outcome_splices(
                 state,
                 &node,

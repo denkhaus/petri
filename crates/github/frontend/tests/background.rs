@@ -189,14 +189,14 @@ jobs:
     let post = graph
         .nodes
         .iter()
-        .position(|node| node.name == "build/tool/post")
-        .expect("post node");
+        .position(|node| node.name == "build/tool/post-resolve")
+        .expect("post dispatcher");
     assert!(
         wait < post,
-        "the implicit wait is created before post cleanup"
+        "the implicit wait is created before deferred post cleanup"
     );
     assert!(
-        graph.nodes[post].step.config["state"]
+        graph.nodes[post].step.config["request"]
             .get("$expr")
             .is_some()
     );
@@ -225,7 +225,7 @@ jobs:
 }
 
 #[test]
-fn composite_background_forms_are_rejected() {
+fn composite_background_forms_are_checked_when_the_action_runs() {
     let action = r"
 runs:
   using: composite
@@ -244,16 +244,19 @@ jobs:
       - uses: ./.github/actions/tool
 ";
     let source = files(&[(".github/actions/tool/action.yml", action)]);
-    let diagnostics = diagnostics_with(workflow, &source);
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "gha.bad_step"
-            && diagnostic
-                .message
-                .contains("not allowed inside a composite action")
-    }));
+    let lowered = frontend_gha::load(".github/workflows/test.yml", workflow, &source);
     assert!(
-        diagnostics
+        !lowered
+            .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "unsupported.step.wait_composite")
+            .any(|diagnostic| diagnostic.code == "unsupported.step.wait_composite"),
+        "the manifest is not read by static lowering"
+    );
+    let graph = lowered.graph.expect("the deferred action lowers");
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.name == "build/step-1/resolve")
     );
 }

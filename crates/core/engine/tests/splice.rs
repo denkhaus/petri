@@ -7,11 +7,13 @@ mod support;
 use std::collections::BTreeMap;
 
 use engine::INVALID_SPLICE_CLASS;
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{
-    Attachment, Edge, EdgeId, ExistingNodeRef, ExprTable, Graph, GraphBuilder, GraphFragment,
-    JoinPolicy, Local, Node, NodeId, Outcome, ReplaceScope, RunStatus, Scope, ScopeId,
-    SplicePolicy, SpliceRequest, StepRef, Value,
+    Attachment, Edge, EdgeId, ExistingNodeRef, ExpandTarget, ExprTable, Graph, GraphBuilder,
+    GraphFragment, JoinPolicy, Local, Node, NodeId, Outcome, ReplaceScope, RunStatus, Scope,
+    ScopeId, SplicePolicy, SpliceRequest, StepRef, Value, parallel_for_each,
 };
+use serde_json::json;
 use support::{Harness, NOOP};
 
 /// A linear fragment: `names` chained by unconditional edges, entry at the
@@ -61,6 +63,69 @@ fn an_appended_fragment_runs_and_the_dependent_waits_for_the_batch() {
     assert_eq!(batch.owner, NodeId::new(0));
     assert_eq!(batch.nodes.len(), 2);
     h.verify_replay();
+}
+
+#[test]
+fn an_appended_fragment_can_inherit_the_uploaders_resource_scope() {
+    let mut graph = uploader_graph(SplicePolicy::Append);
+    graph.body.scopes[0].workspace = ir::WorkspacePolicy::Shared;
+    let request =
+        SpliceRequest::append(fragment(&["a", "b"])).inherit_uploader_context(ScopeId::new(0));
+    let mut h =
+        Harness::new(graph).results(BTreeMap::from([("up", splice_outcome(vec![request]))]));
+    assert_eq!(h.run(), RunStatus::Success);
+
+    let up_scope = h.state.graph().nodes[0].scope;
+    let a = h
+        .state
+        .graph()
+        .nodes
+        .iter()
+        .find(|node| node.name == "a")
+        .unwrap();
+    let b = h
+        .state
+        .graph()
+        .nodes
+        .iter()
+        .find(|node| node.name == "b")
+        .unwrap();
+    assert_eq!(a.scope, up_scope);
+    assert_eq!(b.scope, up_scope);
+    assert_eq!(h.state.graph().scopes.len(), 1);
+    h.verify_replay();
+}
+
+#[test]
+fn an_inherited_fragment_can_read_the_uploaders_expansion_bindings() {
+    let mut builder = GraphBuilder::new();
+    let plan = builder.add_step("plan", ScopeId::new(0), NOOP);
+    let up = builder.add_step("up", ScopeId::new(0), NOOP);
+    let down = builder.add_step("down", ScopeId::new(0), NOOP);
+    builder.link(plan, up);
+    builder.link(up, down);
+    builder.node_mut(up).splice_policy = SplicePolicy::Append;
+    let items = builder.exprs().var("input");
+    parallel_for_each(&mut builder, up, items, ExpandTarget::Node, None, false);
+
+    let mut runtime = fragment(&["a"]);
+    let item = runtime.body.exprs.var("item");
+    runtime.body.nodes[0].step.config = json!({
+        "item": { EXPR_PLACEHOLDER_KEY: item.raw() },
+    });
+    let request = SpliceRequest::append(runtime).inherit_uploader_context(ScopeId::new(0));
+    let mut harness =
+        Harness::new(builder.build()).respond_with(move |info| match info.base.as_str() {
+            "plan" => Outcome::success(json!(["one"])),
+            "up" => splice_outcome(vec![request.clone()]),
+            "a" => {
+                assert_eq!(info.config["item"], "one");
+                Outcome::success(Value::Null)
+            }
+            _ => Outcome::success(Value::Null),
+        });
+    assert_eq!(harness.run(), RunStatus::Success);
+    harness.verify_replay();
 }
 
 #[test]
@@ -695,7 +760,8 @@ fn a_reference_to_a_key_retracted_by_the_same_transaction_rejects() {
 
 #[test]
 fn a_request_from_a_cancelled_scope_is_a_logged_no_op() {
-    let graph = uploader_graph(SplicePolicy::Append);
+    let mut graph = uploader_graph(SplicePolicy::Append);
+    graph.body.nodes[0].run_on_cancel = true;
     let before = graph.nodes.len();
     let mut h = Harness::new(graph.clone());
     h.feed(engine::Event::RunStarted);
@@ -726,5 +792,27 @@ fn a_request_from_a_cancelled_scope_is_a_logged_no_op() {
             .is_none_or(|i| i.class != INVALID_SPLICE_CLASS),
         "a cancelled-scope request is dropped, never invalid_splice"
     );
+    h.verify_replay();
+}
+
+#[test]
+fn a_run_on_cancel_uploader_can_append_only_run_on_cancel_cleanup() {
+    let mut graph = uploader_graph(SplicePolicy::Append);
+    graph.body.nodes[0].run_on_cancel = true;
+    let mut cleanup = fragment(&["cleanup"]);
+    cleanup.body.nodes[0].run_on_cancel = true;
+    let mut h = Harness::new(graph);
+    h.feed(engine::Event::RunStarted);
+    let (firing, _) = h.take_starts().first().cloned().expect("up started");
+    h.cancel(ir::CancelScopeId::ROOT);
+    h.finish(firing, splice_outcome(vec![SpliceRequest::append(cleanup)]));
+
+    let cleanup_firing = h
+        .take_starts()
+        .first()
+        .map(|(firing, _)| *firing)
+        .expect("cleanup starts in the cancelled child scope");
+    h.finish(cleanup_firing, Outcome::success(Value::Null));
+    assert_eq!(h.status_of("cleanup").as_deref(), Some("success"));
     h.verify_replay();
 }

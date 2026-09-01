@@ -520,10 +520,12 @@ in brackets.
    step. Targeted `cancel` remains rejected as `unsupported.step.cancel`
    because the engine has no per-background control path.
 
-7. **Local actions are resolved against the checked-out workspace, at run time**
-   [`unsupported.action.local_missing`]. `uses: ./localClone` and
-   `uses: ./node/.github/actions/x` name directories that exist only after a checkout
-   step. Static lowering cannot see them. 4 workflows.
+7. **Action manifests resolve when their steps run** — resolved. Remote
+   references still pin at lowering, but local and pinned manifests use one
+   run-time resolver path. `uses: ./localClone` and
+   `uses: ./node/.github/actions/x` can name directories created by an earlier
+   step. A remote composite or called workflow can also use a `./` action from
+   its own pinned repository.
 
 8. **`GITHUB_ENV` and `GITHUB_PATH`** are job-scoped mutable env across steps.
    Resolved: the `github/run` and `github/action` step kinds (`crates/github/actions`)
@@ -747,11 +749,11 @@ artifact and cache stores, remote or distributed executors, Windows, service
 containers, and cpu/memory limits. The `LogSink` writes to the run directory and
 optionally stdout; richer sinks come later.
 
-Deliberately out of scope, per the core handoff: outcome-driven splice (§3, deferred —
-`Expansion::ForEach` already ships the mechanism), cross-run concurrency groups (D2 —
-the engine carries no concurrency semantics; the GHA frontend ignores `concurrency:`
-with a warning, a single local run having nothing to race), and placement *semantics*
-for `RuntimeSpec.requirements` (D3 — the labels are carried, uninterpreted).
+Deliberately out of scope, per the core handoff: cross-run concurrency groups
+(D2 — the engine carries no concurrency semantics; the GHA frontend ignores
+`concurrency:` with a warning, a single local run having nothing to race), and
+placement *semantics* for `RuntimeSpec.requirements` (D3 — the labels are
+carried, uninterpreted).
 
 Still v2 in the design document: content caching, remote scope placement, and
 `Control::{Pause, Steer, Approve}`. The seams are in place — the log is versioned and

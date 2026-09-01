@@ -1,9 +1,10 @@
 //! GitHub Actions workflow YAML → HIR.
 //!
-//! Pure: text in, `Graph` and diagnostics out. The only IO is reading the
-//! workflow's local composite actions, and that goes through [`FileSource`] so
-//! the caller decides what "the repository" is — a directory, or a map in a
-//! test. [`GitHubActions`] is this format as a [`Frontend`].
+//! Workflow text in, `Graph` and diagnostics out. [`FileSource`] supplies local
+//! reusable workflows. Manifest-backed actions stay as resolver nodes until
+//! their steps run. Remote action references pin through [`ActionSource`] so
+//! the graph still records the exact commit. [`GitHubActions`] is this format
+//! as a [`Frontend`].
 //!
 //! # What a job becomes
 //!
@@ -87,11 +88,13 @@ use std::{fs, mem};
 
 pub use action::{
     ACTION_KIND, ActionSource, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND,
-    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND,
-    REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
+    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DEFERRED_ACTION_KIND,
+    DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND, DEFERRED_ACTION_RESULT_KIND,
+    DOCKER_ACTION_KIND, REPO_PARAM_CONTEXT, REPO_PARAM_KEY, RUN_KIND, STATE_OUTPUT_KEY,
 };
 use frontend::yaml::Document;
 use frontend::{Diagnostics, FileSource, Frontend, Lowered};
+pub use lower::{DeferredActionPlan, PlannedDeferredAction, plan_deferred_action};
 pub use runners::RunnerMap;
 use serde_json::Value;
 use smol_str::SmolStr;
@@ -102,9 +105,10 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource) -> Lowered {
     load_with(file, text, files, None)
 }
 
-/// Parse and lower a workflow file. `actions` resolves `uses: owner/repo@ref`
-/// references while lowering, so the graph pins the commit each one runs. The
-/// runner map is the built-in one; [`load_configured`] takes the host's.
+/// Parse and lower a workflow file. `actions` pins `uses: owner/repo@ref`
+/// references while lowering. The action manifest and tree stay unread until
+/// the step runs. The runner map is the built-in one; [`load_configured`]
+/// takes the host's.
 pub fn load_with(
     file: &str,
     text: &str,
@@ -147,9 +151,10 @@ pub fn load_configured(
 /// GitHub Actions, as a [`Frontend`]: it claims anything under
 /// `.github/workflows/`.
 ///
-/// Without an [`ActionSource`] it lowers `run:` steps and local composites and
-/// rejects actions from other repositories; with one, those resolve at load
-/// time. The [`RunnerMap`] starts as the built-in `ubuntu-*` labels;
+/// Without an [`ActionSource`] it lowers `run:` steps and local actions and
+/// rejects actions from other repositories; with one, remote references pin
+/// at load time. All action manifests resolve when their steps run. The
+/// [`RunnerMap`] starts as the built-in `ubuntu-*` labels;
 /// [`Self::with_runners`] installs the host's configuration.
 pub struct GitHubActions {
     actions:             Option<Arc<dyn ActionSource>>,

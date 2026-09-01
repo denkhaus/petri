@@ -10,7 +10,7 @@ use serde_json::json;
 use support::*;
 
 #[test]
-fn composite_depth_cap_is_a_diagnostic() {
+fn local_composite_depth_is_checked_when_the_action_runs() {
     let recursive = r"
 runs:
   using: composite
@@ -26,12 +26,14 @@ jobs:
       - uses: ./.github/actions/loop
 ";
     let files = files(&[(".github/actions/loop/action.yml", recursive)]);
-    let diags = diagnostics_with(text, &files);
-    let depth = diags
-        .iter()
-        .find(|d| d.code == "gha.composite_depth")
-        .expect("depth cap reported");
-    assert_eq!(depth.severity, Severity::Error);
+    let graph = lower_ok_with(text, &files);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.name == "j/step-1/resolve"),
+        "the static graph defers the manifest and its depth check"
+    );
 }
 
 #[test]
@@ -952,6 +954,17 @@ jobs:
             "{}: step nodes carry no engine precondition",
             node.name
         );
+        if matches!(
+            node.step.kind.as_ref(),
+            "github/deferred_action_publish" | "github/deferred_action_post"
+        ) {
+            assert!(
+                node.step.config.get("gate").is_none(),
+                "{}: deferred control nodes wait on graph dependencies",
+                node.name
+            );
+            continue;
+        }
         assert!(
             node.step.config.get("gate").is_some() && node.step.config.get("cancelled").is_some(),
             "{}: the condition is the config gate",

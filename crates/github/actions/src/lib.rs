@@ -9,17 +9,18 @@
 //! its resolved parts to the shared process-step machinery, swapping the log
 //! sender so `::` workflow commands are seen on the way past.
 //!
-//! The frontend (`frontend_gha`) lowers steps to these kinds and resolves
-//! actions to commits at load time through an [`ActionSource`];
-//! [`GitActionSource`] is the one that fetches from git. The step finds the
-//! same source as a capability ([`ActionSourceCap`]) to stage the tree at run
-//! time.
+//! The frontend (`frontend_gha`) pins remote actions at load time through an
+//! [`ActionSource`]. A deferred resolver reads every manifest when the action
+//! is reached, then appends its executable nodes. [`GitActionSource`] fetches
+//! from git. Action steps find the same source through [`ActionSourceCap`] to
+//! stage the pinned tree at run time.
 
 mod action;
 mod background;
 mod checkout;
 mod commands;
 mod config;
+mod deferred;
 mod docker;
 mod gate;
 mod hashfiles;
@@ -33,12 +34,17 @@ pub use background::{
     BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep,
 };
 pub use checkout::CheckoutStep;
+pub use deferred::{
+    ActionManifestSourceCap, DeferredActionPostStep, DeferredActionPublishStep,
+    DeferredActionResultStep, DeferredActionStep,
+};
 pub use docker::DockerActionStep;
 pub use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 pub use frontend_gha::{
     ACTION_KIND, ActionSource, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND,
-    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DOCKER_ACTION_KIND, RUN_KIND,
-    STATE_OUTPUT_KEY,
+    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DEFERRED_ACTION_KIND,
+    DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND, DEFERRED_ACTION_RESULT_KIND,
+    DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
 };
 pub use results::{ResultsServiceCap, ToolCacheCap};
 pub use run::RunStep;

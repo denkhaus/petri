@@ -1,10 +1,8 @@
 //! Action manifests: `action.yml`, read for a `uses:` step.
 //!
-//! A composite action is inlined into the job, so its steps are read here in
-//! full. A Node action becomes a `github/action` node, so only its entry points
-//! and inputs matter. A Docker action becomes a `github/docker_action` node:
-//! its image, entrypoints and args are read here, raw, and lowered where the
-//! step is.
+//! The run-time action planner reads the reached action in full. A composite
+//! becomes a fragment. A Node action becomes a `github/action` node. A Docker
+//! action becomes a `github/docker_action` node.
 
 use frontend::FileSource;
 use frontend::diag::{Diagnostics, Span};
@@ -123,15 +121,10 @@ pub(crate) fn read_document(
             return Document::parse(candidate, &text, diags);
         }
     }
-    // GitHub resolves `./path` against the *workspace* after checkout, so a local
-    // action can live in a directory that only exists at run time (`./localClone`,
-    // `./node/.github/actions/x`). Lowering is static and cannot see it.
-    diags.unsupported(
-        "action.local_missing",
+    diags.error(
+        "gha.action_manifest_missing",
         span.clone(),
         format!("no `action.yml` or `action.yaml` under `{path}` in the repository"),
-        "GitHub resolves `./` actions against the checked-out workspace at run time; lowering is static, so \
-         the action must exist in the repository at that path (a spec finding: run-time action resolution)",
     );
     None
 }

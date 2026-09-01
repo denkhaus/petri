@@ -3,8 +3,8 @@
 //!
 //! The frontend resolves a reference to a commit while lowering, so the graph
 //! carries what will run ([`PinnedAction`]) and the same file lowers to the
-//! same graph. It reads the action's manifest the same way. Fetching the tree
-//! is the step's business at run time, through the same [`ActionSource`].
+//! same graph. The run-time resolver reads the manifest and fetches the tree
+//! only when the action step is reached.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -26,6 +26,20 @@ pub const ACTION_KIND: &str = "github/action";
 /// The step kind a Docker container action lowers to: one container per phase
 /// invocation, run against the daemon through the scope's container runner.
 pub const DOCKER_ACTION_KIND: &str = "github/docker_action";
+
+/// Resolves one pinned or workspace action manifest when the step is reached
+/// and appends its executable nodes to the live graph.
+pub const DEFERRED_ACTION_KIND: &str = "github/deferred_action";
+
+/// Publishes a deferred action's private result under the workflow step's
+/// public node name.
+pub const DEFERRED_ACTION_PUBLISH_KIND: &str = "github/deferred_action_publish";
+
+/// Appends a deferred action's saved post phase at the job cleanup barrier.
+pub const DEFERRED_ACTION_POST_KIND: &str = "github/deferred_action_post";
+
+/// Private terminal inside a deferred action fragment.
+pub const DEFERRED_ACTION_RESULT_KIND: &str = "github/deferred_action_result";
 
 /// The step kind a supportable `actions/checkout` call substitutes to: the
 /// workspace materializes from the run's own local repository — offline,
@@ -421,6 +435,19 @@ impl PinnedAction {
         &self.reference
     }
 
+    /// The same repository, ref, and commit with a different action path.
+    /// An empty path names the repository root.
+    pub fn at_repository_path(&self, path: &str) -> Result<Self, ActionPathError> {
+        validate_relative_action_path(path, true)?;
+        let mut reference = self.reference.clone();
+        reference.path = if path.is_empty() {
+            None
+        } else {
+            Some(SmolStr::new(path))
+        };
+        Self::try_new(reference, self.sha.clone())
+    }
+
     /// The full commit id the reference resolved to.
     pub fn sha(&self) -> &str {
         &self.sha
@@ -457,10 +484,10 @@ pub enum ActionSourceError {
     /// does not cover the reference, and refreshing it may. With one, the
     /// source met a terminal answer upstream — the repository is private or
     /// removed, recorded at refresh time — and refreshing will not help.
-    /// Either way the lowering rejects the step as
+    /// Either way static lowering rejects the step as
     /// `unsupported.action.remote`, exactly as it would with no source at
-    /// all, rather than as an error; a *resolved* action whose manifest is
-    /// missing or malformed stays a load error instead.
+    /// all, rather than as an error. A pinned action whose manifest is missing
+    /// or malformed fails when the action step runs.
     #[error("`{reference}` is not available from this action source{}",
             .reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default())]
     Unavailable {
@@ -505,7 +532,8 @@ pub(crate) fn render_chain(error: &dyn Error) -> String {
 
 /// Where actions come from.
 ///
-/// Synchronous and blocking by design: `Frontend::load` is synchronous.
+/// Synchronous and blocking by design: both `Frontend::load` and run-time
+/// action planning call it from synchronous lowering code.
 pub trait ActionSource: Send + Sync {
     /// Resolve a tag, branch or commit to a commit.
     fn resolve(&self, reference: &ActionRef) -> Result<PinnedAction, ActionSourceError>;
@@ -602,6 +630,30 @@ mod tests {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         assert!(ActionRef::parse(&format!("a/b@{sha}")).unwrap().is_commit());
         assert!(!r.is_commit());
+    }
+
+    #[test]
+    fn a_pin_can_move_between_paths_in_the_same_repository() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let pin = PinnedAction::try_new(
+            ActionRef::parse("owner/repo/.github/workflows/called.yml@v1").unwrap(),
+            sha,
+        )
+        .unwrap();
+        let action = pin.at_repository_path(".github/actions/inner").unwrap();
+        assert_eq!(
+            action.reference().to_string(),
+            "owner/repo/.github/actions/inner@v1"
+        );
+        assert_eq!(action.sha(), sha);
+        assert_eq!(
+            action
+                .at_repository_path("")
+                .unwrap()
+                .reference()
+                .to_string(),
+            "owner/repo@v1"
+        );
     }
 
     #[test]

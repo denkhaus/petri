@@ -48,7 +48,8 @@ pub use ids::{
 };
 pub use splice::{
     Attachment, ExistingNodeRef, FragmentErrorKind, FragmentValidationError, GraphFragment,
-    ReplaceScope, SpliceMode, SplicePolicy, SpliceRequest, validate_fragment, validate_request,
+    ReplaceScope, SpliceContext, SpliceMode, SplicePolicy, SpliceRequest, validate_fragment,
+    validate_request,
 };
 pub use step::{Digest, StepFailure, StepKind, StepKinds};
 pub use validate::{
