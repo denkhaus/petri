@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use frontend_gha::load;
 use github_actions::GitActionSource;
-use runtime::driver::{RunGuard, RunReport};
+use runtime::driver::{ExecutionReport, RunGuard};
 use runtime::executor::{MapSecrets, Retention};
 use runtime::frontend::{FileSource, MapFiles, NoFiles};
 use runtime::ir::Graph;
@@ -365,8 +365,8 @@ pub(crate) struct RunReportPlus {
     pub commands: Vec<engine::Command>,
 }
 
-impl From<RunReport> for RunReportPlus {
-    fn from(r: RunReport) -> Self {
+impl From<ExecutionReport> for RunReportPlus {
+    fn from(r: ExecutionReport) -> Self {
         Self {
             status:   r.status,
             state:    r.state,

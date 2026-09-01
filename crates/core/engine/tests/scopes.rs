@@ -124,7 +124,9 @@ fn a_scope_stays_held_while_a_join_waits() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::RunStarted);
+    h.feed(engine::Event::ExecutionStarted(
+        engine::EngineStart::default(),
+    ));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(Value::Null));
     let branches = h.take_starts();

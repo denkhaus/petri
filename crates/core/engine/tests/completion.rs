@@ -123,7 +123,7 @@ fn a_run_error_fails_the_run_under_both_policies() {
             graph
         };
         let mut h = Harness::new(graph);
-        h.feed(Event::RunStarted);
+        h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
         let starts = h.take_starts();
         h.feed(bad_token());
         h.finish(starts[0].0, Outcome::success(Value::Null));
@@ -151,7 +151,7 @@ fn a_root_cancel_folds_to_cancelled_under_both_policies() {
             graph
         };
         let mut h = Harness::new(graph);
-        h.feed(Event::RunStarted);
+        h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
         let starts = h.take_starts();
         h.cancel(CancelScopeId::ROOT);
         h.finish(starts[0].0, Outcome::cancelled());
@@ -181,7 +181,7 @@ fn a_run_error_sets_run_failed_for_later_guards() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.feed(bad_token());
     h.finish(starts[0].0, Outcome::success(Value::Null));

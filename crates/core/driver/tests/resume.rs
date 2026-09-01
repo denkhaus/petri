@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use driver::{
-    CANCELLED_BEFORE_RESUME, Driver, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo, RunConfig,
-    RunHandle, RunReport,
+    CANCELLED_BEFORE_RESUME, Driver, ExecutionReport, KILLED_BEFORE_RESUME, ResumeError,
+    ResumeInfo, RunConfig, RunHandle,
 };
 use engine::{CANCEL_ESCALATION_KEY, Command, Event, EventLog, EventRecord, EventSource};
 use executor::SecretProvider as _;
@@ -25,7 +25,7 @@ use tokio::time;
 
 // ── Helpers over the log ──────────────────────────────────────────────────
 
-fn started_count(report: &RunReport, firing: FiringId) -> usize {
+fn started_count(report: &ExecutionReport, firing: FiringId) -> usize {
     report
         .state
         .log
@@ -35,7 +35,7 @@ fn started_count(report: &RunReport, firing: FiringId) -> usize {
         .count()
 }
 
-fn escalation_of(report: &RunReport, name: &str) -> Option<String> {
+fn escalation_of(report: &ExecutionReport, name: &str) -> Option<String> {
     report
         .state
         .history()
@@ -248,7 +248,7 @@ async fn run_chain(
     dir: &RunDir,
     first: &Arc<AtomicUsize>,
     second: &Arc<AtomicUsize>,
-) -> RunReport {
+) -> ExecutionReport {
     let report = host_driver_full(
         graph.clone(),
         dir,
@@ -488,7 +488,11 @@ async fn a_pending_retry_is_rearmed_not_restarted() {
 
 /// A run stopped mid-step. With `kill`, the step ignores the polite cancel and
 /// a second root cancel escalates to the kill tier.
-async fn stopped_run(dir: &RunDir, kill: bool, runs: &Arc<AtomicUsize>) -> (Graph, RunReport) {
+async fn stopped_run(
+    dir: &RunDir,
+    kill: bool,
+    runs: &Arc<AtomicUsize>,
+) -> (Graph, ExecutionReport) {
     let marker = dir.path().join("marker");
     let mut b = GraphBuilder::new();
     b.add_node(

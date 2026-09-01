@@ -72,7 +72,9 @@ fn quorum_fires_at_n_distinct_edges() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::RunStarted);
+    h.feed(engine::Event::ExecutionStarted(
+        engine::EngineStart::default(),
+    ));
     let starts = h.take_starts();
     assert_eq!(starts.len(), 1);
     h.finish(starts[0].0, Outcome::success(Value::Null));

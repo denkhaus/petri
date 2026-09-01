@@ -161,7 +161,10 @@ fn the_payload_identifies_the_firing() {
     b.add_step("only", scope, NOOP);
     let graph = b.build();
 
-    let (state, commands) = apply(EngineState::new(graph), Event::RunStarted);
+    let (state, commands) = apply(
+        EngineState::new(graph),
+        Event::ExecutionStarted(engine::EngineStart::default()),
+    );
     let decision_id = commands
         .iter()
         .find_map(|command| match command {

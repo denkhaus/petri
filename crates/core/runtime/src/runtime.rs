@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fs, io, mem, process};
 
-use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunGuard, RunReport};
+use driver::{
+    Driver, EventObserver, ExecutionReport, ResumeError, ResumeInfo, RunConfig, RunGuard,
+};
 use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
@@ -449,7 +451,7 @@ impl Runtime {
 
     /// Run a graph to completion. With `verify_replay` on (the default), the
     /// log is replayed afterwards and any divergence is the error.
-    pub async fn run(&self, graph: Graph) -> Result<RunReport, ReplayMismatch> {
+    pub async fn run(&self, graph: Graph) -> Result<ExecutionReport, ReplayMismatch> {
         self.run_verified(graph, |graph| Ok(self.driver(graph)))
             .await
     }
@@ -463,7 +465,7 @@ impl Runtime {
         &self,
         graph: Graph,
         build: impl FnOnce(Graph) -> Result<Driver, E>,
-    ) -> Result<RunReport, E> {
+    ) -> Result<ExecutionReport, E> {
         let original = self.options.verify_replay.then(|| graph.clone());
         let report = build(graph)?.run().await;
         if let Some(graph) = original {

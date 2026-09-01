@@ -87,7 +87,7 @@ fn the_log_round_trips_through_serde() {
 #[test]
 fn engine_state_round_trips_through_serde() {
     let mut h = Harness::new(diamond());
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(json!({"ok": true})));
 
@@ -135,7 +135,10 @@ fn out_of_order_events_are_errors_not_panics() {
     assert!(commands.is_empty());
     assert_eq!(state.errors(), &[engine::RunError::NotStarted]);
 
-    let (state, _) = apply(state, Event::RunStarted);
+    let (state, _) = apply(
+        state,
+        Event::ExecutionStarted(engine::EngineStart::default()),
+    );
     let (state, _) = apply(state, Event::StepFinished {
         firing:  ir::FiringId::new(99),
         attempt: ir::Attempt::FIRST,
@@ -204,7 +207,7 @@ fn fingerprint_defaults_to_none() {
 #[test]
 fn step_progress_changes_nothing() {
     let mut h = Harness::new(diamond());
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     let before = h.state.pending_count();
     h.commands.clear();

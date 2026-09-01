@@ -51,7 +51,7 @@ use acceptance::runs::{
 use acceptance::{Class, has_corpus, lower_one, workflows};
 use frontend_gha::identity;
 use github_actions::{ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource};
-use runtime::driver::RunReport;
+use runtime::driver::ExecutionReport;
 use runtime::engine::{Event, FIRING_ENV_CLASS};
 use runtime::executor::docker::RUN_ID_FILE;
 use runtime::executor::{MapSecrets, Retention};
@@ -463,14 +463,14 @@ async fn run_one(
 }
 
 enum Finished {
-    Ran(Box<RunReport>),
+    Ran(Box<ExecutionReport>),
     TimedOut,
     Wedged,
 }
 
 /// The run's first failing record, read against the graph's step identities.
 fn first_failure(
-    report: &RunReport,
+    report: &ExecutionReport,
     identities: &BTreeMap<String, StepIdentity>,
     caller_coupled: bool,
     stub_consumers: &BTreeSet<String>,
@@ -565,7 +565,7 @@ fn first_failure(
     clippy::print_stderr,
     reason = "`PETRI_SWEEP_LOG` asks for the failing step's log on stderr; a test binary has no other sink"
 )]
-fn step_log(report: &RunReport, firing: ir::FiringId) -> Vec<String> {
+fn step_log(report: &ExecutionReport, firing: ir::FiringId) -> Vec<String> {
     let lines: Vec<String> = report
         .state
         .log

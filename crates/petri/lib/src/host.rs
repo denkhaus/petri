@@ -39,7 +39,9 @@ use std::thread;
 
 use execution::{Coordinator, CoordinatorError, CoordinatorOptions, GraphDigest, InvocationId};
 use runtime::Runtime;
-use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
+use runtime::driver::{
+    Driver, EventObserver, ExecutionReport, ObserveError, ResumeError, ResumeInfo,
+};
 use runtime::engine::{self, EngineState, EventLog, EventRecord};
 use runtime::executor::Masker;
 use runtime::ir::{self, Graph};
@@ -298,10 +300,10 @@ pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
 
 /// Run a graph with the durable run dir, to completion. The battery's `finish`
 /// is awaited inside the run, so both files are complete when this returns;
-/// write failures are in `RunReport::observer_errors`. With the runtime's
+/// write failures are in `ExecutionReport::observer_errors`. With the runtime's
 /// `verify_replay` on (the default), the log is replayed afterwards and any
 /// divergence is the error.
-pub async fn run(rt: &Runtime, graph: Graph) -> Result<RunReport, HostError> {
+pub async fn run(rt: &Runtime, graph: Graph) -> Result<ExecutionReport, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
     let run_runtime = rt.prepare_run(&run_dir);
     let mut coordinator =
@@ -392,7 +394,7 @@ fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostE
 
 /// Continue the run in the runtime's run dir, to completion — the crash side of
 /// [`run`]. Same file guarantees, same replay verification.
-pub async fn resume(rt: &Runtime) -> Result<RunReport, HostError> {
+pub async fn resume(rt: &Runtime) -> Result<ExecutionReport, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
     if !run_dir.join(execution::RUN_FILE).exists() {
         let graph = read_graph(rt)?;
@@ -425,7 +427,7 @@ async fn finish_root(
     mut coordinator: Coordinator,
     digest: GraphDigest,
     graph: Graph,
-) -> Result<RunReport, HostError> {
+) -> Result<ExecutionReport, HostError> {
     coordinator.run_root(digest, BTreeMap::default()).await?;
     let report = coordinator
         .take_root_report()

@@ -215,8 +215,6 @@ impl RouteApplied {
 /// Something that happened. Every event is appended to the log before `apply`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
-    /// Compatibility start spelling. New hosts use [`Event::ExecutionStarted`].
-    RunStarted,
     ExecutionStarted(EngineStart),
     /// A token was placed on an edge. The core emits these for its own routing
     /// and seeding; a host may also inject one.

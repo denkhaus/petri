@@ -34,9 +34,9 @@ pub trait EventObserver: Send + Sync {
 
     /// Awaited by `Driver::run` after the last record, before the report: drain
     /// queues, flush files, report what failed. Failures land in
-    /// `RunReport::observer_errors` and never change the run status — a host
-    /// with fatal-sink semantics watches its own observer and cancels via
-    /// `RunHandle`.
+    /// `ExecutionReport::observer_errors` and never change the run status — a
+    /// host with fatal-sink semantics watches its own observer and cancels
+    /// via `RunHandle`.
     async fn finish(&self) -> Result<(), ObserveError> {
         Ok(())
     }

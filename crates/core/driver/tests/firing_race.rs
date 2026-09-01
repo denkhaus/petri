@@ -39,7 +39,10 @@ fn finished_before_started_is_unknown_firing() {
     validate(&graph).expect("valid");
 
     let state = EngineState::new(graph);
-    let (state, commands) = apply(state, Event::RunStarted);
+    let (state, commands) = apply(
+        state,
+        Event::ExecutionStarted(engine::EngineStart::default()),
+    );
     let decision_id = commands
         .iter()
         .find_map(|command| match command {

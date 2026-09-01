@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use driver::{Driver, RunConfig, RunReport};
+use driver::{Driver, ExecutionReport, RunConfig};
 use engine::{Event, EventLog, EventRecord};
 use executor::{Executor, MapSecrets, Retention};
 use executor_docker::DockerExecutor;
@@ -42,7 +42,7 @@ pub(crate) fn finish_seq(log: &EventLog, firing: FiringId) -> usize {
 }
 
 /// The firing recorded for the named node.
-pub(crate) fn firing_of(report: &RunReport, name: &str) -> FiringId {
+pub(crate) fn firing_of(report: &ExecutionReport, name: &str) -> FiringId {
     report
         .state
         .history()
@@ -193,17 +193,17 @@ pub(crate) fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Dr
 }
 
 /// Run a graph on the host executor and return the report.
-pub(crate) async fn run_host(graph: Graph, dir: &RunDir) -> RunReport {
+pub(crate) async fn run_host(graph: Graph, dir: &RunDir) -> ExecutionReport {
     host_driver(graph, dir).await_run().await
 }
 
 /// Convenience so tests read as `driver.await_run()`.
 pub(crate) trait DriverExt {
-    fn await_run(self) -> Pin<Box<dyn Future<Output = RunReport> + Send>>;
+    fn await_run(self) -> Pin<Box<dyn Future<Output = ExecutionReport> + Send>>;
 }
 
 impl DriverExt for Driver {
-    fn await_run(self) -> Pin<Box<dyn Future<Output = RunReport> + Send>> {
+    fn await_run(self) -> Pin<Box<dyn Future<Output = ExecutionReport> + Send>> {
         Box::pin(self.run())
     }
 }

@@ -44,12 +44,6 @@ const ADMISSION_BLOCKED_CLASS: FailureClass = FailureClass::new_static("admissio
 /// splices, cascading cancellations). Those are drained inside this call, so
 /// the caller only ever feeds in events that came from outside.
 pub fn apply(mut state: EngineState, ev: Event) -> (EngineState, Vec<Command>) {
-    // The compatibility start spelling normalizes before the append, so a log
-    // only ever records `ExecutionStarted` and consumers match one spelling.
-    let ev = match ev {
-        Event::RunStarted => Event::ExecutionStarted(EngineStart::default()),
-        ev => ev,
-    };
     let mut commands = Vec::new();
     let mut queue: VecDeque<Event> = VecDeque::from([ev]);
     // The first event came from outside; everything the drain adds is the core's
@@ -95,9 +89,6 @@ fn step(
     }
 
     match event {
-        // Normalized to `ExecutionStarted` in `apply` before the append; this arm
-        // only keeps the match exhaustive.
-        Event::RunStarted => on_execution_started(state, EngineStart::default(), cmds),
         Event::ExecutionStarted(start) => on_execution_started(state, start, cmds),
         Event::TokenEmitted(token) => on_token(state, token, cmds, queue),
         Event::StepStarted { firing, attempt } => match state.firing_mut(firing) {

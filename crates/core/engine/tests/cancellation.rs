@@ -37,7 +37,7 @@ fn cancelling_the_root_scope_stops_the_run() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(Value::Null));
 
@@ -81,7 +81,7 @@ fn a_cancelled_outcome_routes_but_does_not_restart_unmarked_work() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -113,7 +113,7 @@ fn cancelling_the_root_reaches_into_splice_scopes() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(json!(["a", "b", "c"])));
 
@@ -155,7 +155,7 @@ fn cancelling_a_splice_scope_spares_the_rest_of_the_run() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(json!(["a", "b"])));
 
@@ -207,7 +207,7 @@ fn run_on_cancel_admits_cleanup_and_unmarked_work_is_never_evaluated() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -251,7 +251,7 @@ fn a_marked_nodes_broken_precondition_is_still_an_error() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -292,7 +292,7 @@ fn upstream_cancelled_folds_to_cancelled_and_a_false_gate_records_cancelled() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -334,7 +334,7 @@ fn a_cancelled_expansion_never_splices() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::success(json!(["a", "b", "c"])));
@@ -375,7 +375,7 @@ fn a_back_edge_through_a_cancelled_region_stops_at_its_budget() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -424,7 +424,7 @@ fn a_parked_token_does_not_hold_its_scope_past_the_finish() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(Value::Null));
     let branches = h.take_starts();
@@ -494,7 +494,7 @@ fn retry_then_cleanup_graph() -> ir::Graph {
 #[test]
 fn cancel_settles_an_awaiting_retry_firing_at_once() {
     let mut h = Harness::new(retry_then_cleanup_graph());
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     let (a, _) = starts[0];
     h.finish(a, Outcome::failure("flaky"));
@@ -550,7 +550,7 @@ fn cancel_settles_an_awaiting_retry_firing_at_once() {
 #[test]
 fn kill_settles_an_awaiting_retry_firing_without_routing() {
     let mut h = Harness::new(retry_then_cleanup_graph());
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     let (a, _) = starts[0];
     h.finish(a, Outcome::failure("flaky"));
@@ -589,7 +589,7 @@ fn kill_stops_everything_and_still_releases_the_scopes() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(Value::Null));
     let branches = h.take_starts();
@@ -643,7 +643,7 @@ fn kill_reaches_a_firing_already_politely_cancelling() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.feed(Event::KillRequested {
@@ -686,7 +686,7 @@ fn kill_during_cleanup_stops_the_cleanup() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -737,7 +737,7 @@ fn killing_a_splice_scope_spares_the_rest_of_the_run() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(json!(["a", "b"])));
     let running = h.take_starts();
@@ -803,7 +803,7 @@ fn scope_cancelled_and_run_cancelled_read_correctly() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::cancelled());
@@ -900,7 +900,7 @@ fn a_cancelled_runs_log_replays_byte_identically() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.finish(
@@ -924,7 +924,7 @@ fn cancelling_twice_delivers_one_signal() {
     let _ = a;
 
     let mut h = Harness::new(graph);
-    h.feed(Event::RunStarted);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = h.take_starts();
     h.cancel(CancelScopeId::ROOT);
     h.cancel(CancelScopeId::ROOT);

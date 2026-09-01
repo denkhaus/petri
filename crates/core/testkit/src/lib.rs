@@ -1,8 +1,8 @@
 //! Shared test scaffolding.
 //!
 //! What every end-to-end harness needs and none should copy: a run directory
-//! that cleans itself up, readers over a [`RunReport`], the replay canary as an
-//! assertion, a step that ignores cancellation, and a step that needs a
+//! that cleans itself up, readers over a [`ExecutionReport`], the replay canary
+//! as an assertion, a step that ignores cancellation, and a step that needs a
 //! capability. Dev-dependency only; never published.
 
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, process};
 
-use driver::RunReport;
+use driver::ExecutionReport;
 use executor::Retention;
 use executor_docker::DockerExecutor;
 use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
@@ -213,7 +213,7 @@ pub fn file_len(path: &Path) -> u64 {
 }
 
 /// Every log line the run recorded, in order.
-pub fn log_lines(report: &RunReport) -> Vec<String> {
+pub fn log_lines(report: &ExecutionReport) -> Vec<String> {
     report
         .state
         .log
@@ -229,7 +229,7 @@ pub fn log_lines(report: &RunReport) -> Vec<String> {
 }
 
 /// The status a node ended with.
-pub fn status_of(report: &RunReport, name: &str) -> Option<String> {
+pub fn status_of(report: &ExecutionReport, name: &str) -> Option<String> {
     report
         .state
         .history()
@@ -238,7 +238,7 @@ pub fn status_of(report: &RunReport, name: &str) -> Option<String> {
         .map(|r| r.outcome.status.tag().to_string())
 }
 
-pub fn output_of(report: &RunReport, name: &str) -> Value {
+pub fn output_of(report: &ExecutionReport, name: &str) -> Value {
     report
         .state
         .history()
@@ -248,7 +248,7 @@ pub fn output_of(report: &RunReport, name: &str) -> Value {
 }
 
 /// Names of the nodes that actually started, in order.
-pub fn started(report: &RunReport) -> Vec<String> {
+pub fn started(report: &ExecutionReport) -> Vec<String> {
     report
         .state
         .log
@@ -270,7 +270,7 @@ pub fn started(report: &RunReport) -> Vec<String> {
 }
 
 /// Replay the run's log and assert it comes back byte-identical.
-pub fn assert_replay_identical(graph: &Graph, report: &RunReport) {
+pub fn assert_replay_identical(graph: &Graph, report: &ExecutionReport) {
     if let Err(mismatch) = engine::verify_replay(graph.clone(), &report.state.log) {
         panic!("replay was not byte-identical: {mismatch}");
     }
@@ -278,7 +278,7 @@ pub fn assert_replay_identical(graph: &Graph, report: &RunReport) {
 
 /// Exactly one terminal `StepFinished` per firing, however many cancels, kills,
 /// timeouts, or step returns raced to produce one.
-pub fn assert_one_terminal_per_firing(report: &RunReport) {
+pub fn assert_one_terminal_per_firing(report: &ExecutionReport) {
     let mut finishes: BTreeMap<u64, usize> = BTreeMap::new();
     for event in report.state.log.events() {
         if let engine::Event::StepFinished { firing, .. } = event {

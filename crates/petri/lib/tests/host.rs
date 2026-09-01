@@ -103,7 +103,11 @@ fn a_header_version_mismatch_is_rejected() {
 #[test]
 fn out_of_sequence_records_are_rejected() {
     let mut bytes = host::encode_events(&engine::EventLog::new());
-    bytes.extend(b"{\"seq\":3,\"source\":\"External\",\"event\":\"RunStarted\"}\n");
+    let event = serde_json::to_string(&engine::Event::ExecutionStarted(
+        engine::EngineStart::default(),
+    ))
+    .expect("an event serializes");
+    bytes.extend(format!("{{\"seq\":3,\"source\":\"External\",\"event\":{event}}}\n").as_bytes());
     match host::decode_events(&bytes) {
         Err(EventsDecodeError::Invalid(InvalidRecords::SeqMismatch { index, found })) => {
             assert_eq!((index, found), (0, 3));

@@ -311,7 +311,7 @@ pub enum RunError {
         decision: DecisionId,
         reason:   SmolStr,
     },
-    #[error("event arrived before RunStarted")]
+    #[error("event arrived before ExecutionStarted")]
     NotStarted,
     #[error("event arrived after the run finished")]
     AlreadyFinished,
@@ -401,7 +401,7 @@ pub struct EngineState {
 }
 
 impl EngineState {
-    /// A state ready to receive `Event::RunStarted`.
+    /// A state ready to receive `Event::ExecutionStarted`.
     pub fn new(graph: Graph) -> Self {
         let next_edge = graph
             .edges()

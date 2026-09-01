@@ -19,7 +19,7 @@ fn restarting_graph() -> (ir::Graph, ir::NodeId) {
 fn a_restart_edge_finishes_the_execution_without_emitting_a_token() {
     let (graph, target) = restarting_graph();
     let mut harness = Harness::new(graph);
-    harness.feed(Event::ExecutionStarted(EngineStart::default()));
+    harness.feed(Event::ExecutionStarted(engine::EngineStart::default()));
     let starts = harness.take_starts();
     let [(firing, _)] = starts.as_slice() else {
         panic!("the entry starts");

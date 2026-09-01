@@ -134,7 +134,7 @@ impl Harness {
 
     /// Start the run and pump until the core reports it finished.
     pub(crate) fn run(&mut self) -> RunStatus {
-        self.feed(Event::RunStarted);
+        self.feed(Event::ExecutionStarted(engine::EngineStart::default()));
         // Steps are held until the whole batch is issued, so `max_concurrent`
         // reflects what the core allowed to run at once, not the order the host
         // happened to reply in.

@@ -197,9 +197,6 @@ pub struct ExecutionReport {
     pub observer_errors: Vec<ObserveError>,
 }
 
-/// Compatibility name for callers that still treat one execution as a run.
-pub type RunReport = ExecutionReport;
-
 /// Why a step was told to stop. The distinction cannot be made by the step —
 /// only the driver knows which arrived first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -607,7 +604,7 @@ impl Driver {
             node_count = self.engine.graph().nodes.len(),
         )
     )]
-    pub async fn run(mut self) -> RunReport {
+    pub async fn run(mut self) -> ExecutionReport {
         match self.resume.take() {
             None => self.feed(Event::ExecutionStarted(self.start.clone())),
             Some(resume) => {

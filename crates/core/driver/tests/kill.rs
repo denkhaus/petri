@@ -30,7 +30,7 @@ fn cleanup_graph(cleanup_script: &str) -> ir::Graph {
 
 /// The log's one `KillRequested`, which must be External, with nothing starting
 /// after it.
-fn assert_kill_in_log(report: &driver::RunReport) {
+fn assert_kill_in_log(report: &driver::ExecutionReport) {
     let kills: Vec<u64> = report
         .state
         .log

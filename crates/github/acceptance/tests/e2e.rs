@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::{env, fs, process};
 
 use frontend_gha::load;
-use runtime::driver::RunReport;
+use runtime::driver::ExecutionReport;
 use runtime::executor::{MapSecrets, Retention};
 use runtime::frontend::DirFiles;
 use runtime::ir::{Graph, RunStatus};
@@ -93,7 +93,7 @@ fn prepare(mut graph: Graph, bin: &Path, stub_log: &Path, github: serde_json::Va
     graph
 }
 
-async fn run(graph: Graph, dir: &Path) -> RunReport {
+async fn run(graph: Graph, dir: &Path) -> ExecutionReport {
     let mut options = RunOptions::new(dir);
     options.grace = Duration::from_secs(2);
     options.retention = Retention::Never;
