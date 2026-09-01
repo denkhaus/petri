@@ -27,7 +27,11 @@ use crate::event::Event;
 /// and `Node` — serialized inside `NodeExpanded` splices — gained
 /// `splice_policy`, for the outcome-driven splice. Standing policy, no
 /// migrator: a v5 log is rejected cleanly.
-pub const LOG_VERSION: u32 = 6;
+///
+/// v6 → v7: execution starts, admission, and resolved routing became durable
+/// command/event round trips; applied routes and execution exits joined the
+/// vocabulary. Standing policy, no migrator.
+pub const LOG_VERSION: u32 = 7;
 
 /// Where an event came from.
 ///

@@ -103,10 +103,13 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
                 // Everything else is reconciled from the final state (scopes)
                 // or deliberately not re-issued (deliveries).
                 Command::DeliverControl { .. }
+                | Command::Admit { .. }
+                | Command::ResolveRouting { .. }
                 | Command::ExpandNode { .. }
                 | Command::AcquireScope { .. }
                 | Command::ReleaseScope { .. }
-                | Command::FinishRun { .. } => {}
+                | Command::FinishRun { .. }
+                | Command::FinishExecution { .. } => {}
             }
         }
     });
@@ -116,8 +119,25 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
         .held_scopes()
         .map(|scope| Command::AcquireScope { scope })
         .collect();
+    pending.extend(state.pending_admissions().map(|admission| Command::Admit {
+        point:       admission.point,
+        decision_id: admission.decision_id,
+    }));
+    pending.extend(
+        state
+            .pending_routings()
+            .map(|routing| Command::ResolveRouting {
+                firing:          routing.firing,
+                decision_id:     routing.decision_id,
+                restart_allowed: routing.restart_allowed,
+                groups:          routing.groups.clone(),
+            }),
+    );
     let mut redispatched = Vec::new();
     for firing in state.live_firings() {
+        if firing.awaiting_admission {
+            continue;
+        }
         if firing.awaiting_retry {
             let retry = last_retry
                 .get(&firing.id)

@@ -847,21 +847,54 @@ fn remap_node(
     node.splice_policy = *splice_policy;
     node.meta = meta.clone();
     for group in &routing.groups {
-        let arms = group
+        let arms: Vec<Edge> = group
             .arms
             .iter()
             .map(|arm| Edge {
-                id:    alloc.take_edge(),
-                to:    NodeId::new(node_base + arm.to.raw()),
-                guard: match arm.guard {
+                id:         alloc.take_edge(),
+                to:         NodeId::new(node_base + arm.to.raw()),
+                guard:      match arm.guard {
                     Guard::Always => Guard::Always,
                     Guard::Expr(id) => Guard::Expr(shift(id)),
                 },
-                map:   arm.map.map(shift),
-                back:  arm.back,
+                map:        arm.map.map(shift),
+                back:       arm.back,
+                weight:     arm.weight,
+                label:      arm.label.clone(),
+                transition: arm.transition,
             })
             .collect();
         node.routing.groups.push(SelectGroup {
+            policy: match &group.policy {
+                ir::SelectionPolicy::FirstMatch => ir::SelectionPolicy::FirstMatch,
+                ir::SelectionPolicy::Tiered(tiers) => ir::SelectionPolicy::Tiered(
+                    tiers
+                        .iter()
+                        .map(|tier| ir::Tier {
+                            candidates: tier
+                                .candidates
+                                .iter()
+                                .map(|candidate| ir::Candidate {
+                                    edge: EdgeId::new(
+                                        group
+                                            .arms
+                                            .iter()
+                                            .position(|arm| arm.id == candidate.edge)
+                                            .and_then(|index| arms.get(index))
+                                            .map_or(candidate.edge.raw(), |edge| edge.id.raw()),
+                                    ),
+                                    when: match candidate.when {
+                                        Guard::Always => Guard::Always,
+                                        Guard::Expr(id) => Guard::Expr(shift(id)),
+                                    },
+                                    rank: candidate.rank.map(shift),
+                                })
+                                .collect(),
+                            pick:       tier.pick,
+                        })
+                        .collect(),
+                ),
+            },
             arms,
             fallthrough: group.fallthrough,
         });

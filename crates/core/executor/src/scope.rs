@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ir::{RegistryCredentials, RuntimeSpec, ScopeId, WorkspacePolicy};
+use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::container::ContainerRunner;
@@ -15,6 +16,33 @@ use crate::env::ExecEnv;
 use crate::error::{EnvError, ReleaseReport};
 use crate::progress::{NoProgress, ProgressSink};
 use crate::secrets::{MapSecrets, SecretProvider};
+
+macro_rules! scope_identity {
+    ($name:ident) => {
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(SmolStr);
+
+        impl $name {
+            pub fn new(value: impl Into<SmolStr>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
+scope_identity!(EnvironmentId);
+scope_identity!(WorkspaceId);
 
 /// The default time a step gets between `SIGTERM` and `SIGKILL`.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
@@ -70,21 +98,22 @@ impl ServiceSpec {
 /// realizes all of it; [`Executor::release`] tears all of it down.
 #[derive(Clone)]
 pub struct ScopeSpec {
-    pub id:        ScopeId,
-    /// Instance name, which is also the workspace directory name. The driver
-    /// is the single producer and always writes `scope-<u32>`
-    /// (`driver::run`'s acquisition builds it from the scope id), so the name
-    /// is safe as-is for directory names and container names alike.
-    pub instance:  SmolStr,
+    pub id:           ScopeId,
+    /// Compatibility spelling for the environment identity.
+    pub instance:     SmolStr,
+    /// Process, container, and service fence identity.
+    pub environment:  EnvironmentId,
+    /// Persistent filesystem identity. It can outlive an environment.
+    pub workspace_id: WorkspaceId,
     /// The scope's env, already resolved. Secrets are not here — they are
     /// fetched at spawn time and never written down.
-    pub env:       BTreeMap<SmolStr, SmolStr>,
-    pub runtime:   RuntimeSpec,
-    pub workspace: WorkspacePolicy,
+    pub env:          BTreeMap<SmolStr, SmolStr>,
+    pub runtime:      RuntimeSpec,
+    pub workspace:    WorkspacePolicy,
     /// Sidecar containers with this scope's lifetime, healthy before acquire
     /// returns.
-    pub services:  Vec<ServiceSpec>,
-    pub grace:     Duration,
+    pub services:     Vec<ServiceSpec>,
+    pub grace:        Duration,
 }
 
 /// Hand-written for the same reason [`crate::ProcessSpec`]'s is: `env` is a
@@ -94,6 +123,8 @@ impl fmt::Debug for ScopeSpec {
         f.debug_struct("ScopeSpec")
             .field("id", &self.id)
             .field("instance", &self.instance)
+            .field("environment", &self.environment)
+            .field("workspace_id", &self.workspace_id)
             .field("env", &self.env.keys())
             .field("runtime", &self.runtime)
             .field("workspace", &self.workspace)
@@ -105,15 +136,31 @@ impl fmt::Debug for ScopeSpec {
 
 impl ScopeSpec {
     pub fn new(id: ScopeId, instance: &str) -> Self {
+        let instance = SmolStr::new(instance);
         Self {
             id,
-            instance: SmolStr::new(instance),
+            instance: instance.clone(),
+            environment: EnvironmentId::new(instance.clone()),
+            workspace_id: WorkspaceId::new(instance),
             env: BTreeMap::new(),
             runtime: RuntimeSpec::host_process(),
             workspace: WorkspacePolicy::Shared,
             services: Vec::new(),
             grace: DEFAULT_GRACE,
         }
+    }
+
+    #[must_use]
+    pub fn with_environment_id(mut self, environment: EnvironmentId) -> Self {
+        self.instance = SmolStr::new(environment.as_str());
+        self.environment = environment;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_id(mut self, workspace: WorkspaceId) -> Self {
+        self.workspace_id = workspace;
+        self
     }
 
     #[must_use]

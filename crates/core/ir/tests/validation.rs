@@ -354,6 +354,7 @@ fn structural_problems_are_reported() {
         },
         params:     BTreeMap::default(),
         completion: Completion::default(),
+        result:     ir::ResultProjection::None,
     };
     let found = errors(&graph);
     assert!(

@@ -363,11 +363,17 @@ async fn observers_see_the_regenerated_suffix_first() {
     let report = run_chain(&graph, &dir, &first, &second).await;
 
     let a = firing_of(&report, "first");
-    let cut = finish_seq(&report.state.log, a) + 1;
+    let routing = seq_of(&report.state.log, |record| {
+        matches!(
+            &record.event,
+            Event::RoutingResolved { firing, .. } if *firing == a
+        )
+    });
+    let cut = routing + 1;
     assert_eq!(
         report.state.log.records()[cut].source,
         EventSource::Core,
-        "the cut lands mid-derivation: the routed token was never flushed"
+        "the cut lands after the resolved decision but before its applied route"
     );
     let prefix = report.state.log.prefix(cut);
 

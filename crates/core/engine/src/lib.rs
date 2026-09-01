@@ -25,8 +25,10 @@ mod state;
 
 pub use apply::{FIRING_ENV_CLASS, apply};
 pub use event::{
-    BoundaryViolation, Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice,
-    UnresolvedConfig,
+    Admission, AdmitPoint, BoundaryViolation, Command, DEFAULT_MAX_EXECUTIONS, DecisionId,
+    DecisionPoint, EngineExit, EngineStart, EntryPoint, Event, GroupDecision, Intervention,
+    MiddlewareKey, ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate, RoutingProposal,
+    SpliceClone, SubgraphSplice, UnresolvedConfig, WeightedDraw,
 };
 pub use log::{
     CANCEL_ESCALATION_KEY, EventLog, EventRecord, EventSource, InvalidRecords, LOG_VERSION,
@@ -36,5 +38,5 @@ pub use replay::{ReplayMismatch, ResumePoint, replay, resume, verify_replay};
 pub use splice::{INVALID_SPLICE_CLASS, reject_splices};
 pub use state::{
     AdmissionKey, AppliedSplice, BatchPolicy, CancelScope, EngineState, Firing, FiringRecord,
-    RunError, SpliceBatchId, SpliceEffect, SpliceOrigin,
+    PendingAdmission, PendingRouting, RunError, SpliceBatchId, SpliceEffect, SpliceOrigin,
 };

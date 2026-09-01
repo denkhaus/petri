@@ -79,6 +79,15 @@ start:
 Edges carry payloads. `map:` on an arm sets the token's payload; without it, the
 source's `output` flows on.
 
+The core IR also carries stable `weight`, `label`, and `transition` metadata and a
+`SelectionPolicy::Tiered` policy. These fields support compiled adapters such as
+Fabro. The current native YAML surface continues to lower to `FirstMatch` and
+`EdgeTransition::Continue`.
+
+An invocable compiled graph can set `Graph.result` to `NodeOutput(node)`. The
+native YAML surface does not declare this contract yet. Its default is
+`ResultProjection::None`, which returns JSON null to an invocation caller.
+
 ## Joins
 
 ```yaml

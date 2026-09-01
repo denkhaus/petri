@@ -617,6 +617,22 @@ fn run(name: &str, args: &[Value]) -> Value {
     eval(&t, id, &empty().env()).unwrap_or_else(|e| panic!("{name}{args:?}: {e}"))
 }
 
+#[test]
+fn invocation_routing_helpers_are_total_and_stable() {
+    assert_eq!(
+        run("index_of", &[json!(["a", "b", "a"]), json!("a")]),
+        json!(0)
+    );
+    assert_eq!(
+        run("index_of", &[json!(["a", "b"]), json!("missing")]),
+        Value::Null
+    );
+    assert_eq!(
+        run("normalize_label", &[json!("  Deploy: US-East / Prod! ")]),
+        json!("deploy_us_east_prod")
+    );
+}
+
 /// The loose number coercion table.
 #[test]
 fn loose_number_coercion_table() {

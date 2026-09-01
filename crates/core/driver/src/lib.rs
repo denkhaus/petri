@@ -9,14 +9,19 @@
 //! byte-identical over real processes whose completion order is a wall-clock
 //! accident.
 
+mod decision;
 mod jitter;
 mod observe;
 mod run;
 mod sink;
 
+pub use decision::{
+    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
+    RoutingRequest, RoutingResolution,
+};
 pub use observe::{EventObserver, ObserveError};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,
-    DeliverDisposition, Driver, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo, RunConfig, RunGuard,
-    RunHandle, RunReport,
+    DeliverDisposition, Driver, ExecutionReport, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo,
+    RunConfig, RunGuard, RunHandle, RunReport,
 };

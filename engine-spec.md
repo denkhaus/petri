@@ -32,9 +32,10 @@ effects live behind traits (`Executor`, `StepKind`, `LogSink`,
 
 ## 2. Routing: AND-of-XOR normal form
 
-A node's routing is a list of **select groups**. Each group independently emits
-**at most one** token: arms in order, first passing guard wins. N groups may
-emit N tokens concurrently.
+A node's routing is a list of **routing groups**. Each group independently emits
+**at most one** token. `FirstMatch` tries arms in order. `Tiered` selects the first
+tier with eligible candidates, then applies that tier's persisted pick policy.
+N groups may emit N tokens concurrently.
 
 | Pattern | Representation |
 |---|---|
@@ -52,7 +53,7 @@ Fan-out requires writing multiple groups; it can never occur implicitly.
 // Identifiers: NodeId, EdgeId, ScopeId, ExprId (u32 newtypes over an id-space
 // marker parameter, default `Live`; a GraphFragment reuses the same node/edge/
 // scope/expression types over `Local` ids, and the type system refuses a mixed-
-// space id); CancelScopeId (u32); FiringId (u64, unique per run);
+// space id); CancelScopeId (u32); FiringId (u64, unique per execution);
 // Generation(u32); Attempt(u32, 1-based). Firing key: (NodeId, Generation, Attempt).
 
 pub enum Guard { Always, Expr(ExprId) }
@@ -61,11 +62,18 @@ pub struct Edge {
     pub id: EdgeId, pub to: NodeId, pub guard: Guard,
     pub map: Option<ExprId>,      // token payload; default = source outcome.output
     pub back: bool,               // traversal increments Generation
+    pub weight: u32,              // default 1
+    pub label: Option<SmolStr>,
+    pub transition: EdgeTransition, // Continue | Restart
 }
 
-pub struct SelectGroup { pub arms: Vec<Edge>, pub fallthrough: Fallthrough }
+pub struct RoutingGroup {
+    pub policy: SelectionPolicy,
+    pub arms: Vec<Edge>,
+    pub fallthrough: Fallthrough,
+}
 pub enum Fallthrough { NoEmit, Error }
-pub struct Routing { pub groups: Vec<SelectGroup> }
+pub struct Routing { pub groups: Vec<RoutingGroup> }
 
 pub enum JoinPolicy { All, Any, Quorum { n: u32 } }   // matched per (node, generation)
 
@@ -262,8 +270,8 @@ subsumes `run.cancelled` for gating). The upstream status fold has a
 
 **Terminal scope release:** when the run finishes, the core emits
 `ReleaseScope` for every still-held scope and removes them from `held_scopes`
-in the same transition, before `FinishRun` — a finished serialized state claims
-no resources. Nothing can need an environment after `FinishRun`. (This also
+in the same transition, before `FinishExecution` — a finished serialized state
+claims no resources. Nothing can need an environment after `FinishExecution`. (This also
 covers the parked-token leak that exists independently of cancellation: a token
 parked at an unsatisfiable join no longer holds its environment past the end of
 the run.)
@@ -275,8 +283,8 @@ grace is ended by feeding back `KillRequested`.
 `Control::Deliver` is not a stop signal: it never starts the cancellation
 ladder or the kill tier, and delivering one touches no cancel-scope state.
 
-A hierarchical `SubgraphStep` (nested scheduler) remains rejected: loops and
-matrices always flatten into the one graph.
+The engine does not gain a hierarchical step. A step can receive an
+`InvocationClient` capability from the coordinator and call a pre-registered graph.
 
 ### 5.1 Outcome-driven splice: the boundary
 
@@ -395,12 +403,23 @@ offending request never reaches the log.
 
 ## 6. Engine interface, event log, ResolvedFiring
 
-Events: `RunStarted`, `TokenEmitted`, `StepStarted{firing, attempt}`,
+Events: `ExecutionStarted(EngineStart)`, `Admitted`, `RoutingResolved`,
+`RouteApplied`, `TokenEmitted`, `StepStarted{firing, attempt}`,
 `StepProgress`, `StepFinished{firing, attempt, outcome}`, `RetryElapsed`,
 `NodeExpanded`, `CancelRequested{scope}`, `KillRequested{scope}`,
 `ControlRequested{firing, ctl}`. Commands: `StartStep(ResolvedFiring)`,
 `DeliverControl`, `ScheduleRetry`, `ExpandNode` (reserved), `AcquireScope`,
-`ReleaseScope`, `FinishRun`.
+`ReleaseScope`, `Admit`, `ResolveRouting`, `FinishExecution`.
+
+Every execution start and attempt start uses `Admit` → `Admitted`. Every final
+firing outcome, including a terminal node with no groups, uses one
+`ResolveRouting` → `RoutingResolved` round trip. The core computes candidates and
+validates the recorded decision before it applies `RouteApplied`. Replay uses a
+recorded decision and reissues only an unresolved command.
+
+`EngineExit::Terminal` ends an invocation unless it is already cancelled by its
+coordinator. `EngineExit::Restart` ends one reset-free engine and names the edge,
+target, and source firing for a successor execution in the same invocation.
 
 **`ControlRequested`** is the host delivering a value into a live firing — a
 human gate's answer, a supervisor's steering — through the engine, so question
@@ -434,8 +453,9 @@ store ingest must never lose a record.
 serde plus `EventLog::try_from_records(version, records)` (version checked
 under the standing no-migrator policy; seqs contiguous from 0). How records
 are framed and stored is the host's business; the stock run-dir file
-convention (`events.jsonl` + `graph.json`) is the standalone petri host's own
-and is documented with it, not here.
+convention is one `coordinator.jsonl`, content-addressed `graphs/`, durable
+`resources/`, and one `events.jsonl` per execution. It is the standalone petri
+host's own and is documented with it, not here.
 
 **Resume.** `engine::resume(graph, &log)` rebuilds a crashed run by replay and
 reconciles what is still owed. The loaded log must be a **byte-prefix** of the
@@ -605,8 +625,8 @@ reliable primitive.
 
 **Resume rules.** `Driver::resume(graph, log, …)` is the primary API — the
 host hands in the graph and log however it stored them — and returns
-`ResumeInfo` beside the driver so execution identities are installed before
-`run()`. On the resume path `run()` skips `RunStarted`, notifies every
+`ResumeInfo` beside the driver so effect identities are installed before
+`run()`. On the resume path `run()` skips `ExecutionStarted`, notifies every
 observer of the regenerated suffix **before** dispatching any pending command,
 then enters the normal loop. Dispatch differences: a firing whose `started`
 flag is set gets no second `StepStarted` ack (it is already in the log); a

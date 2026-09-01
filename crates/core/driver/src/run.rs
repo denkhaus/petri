@@ -8,12 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::{
-    CANCEL_ESCALATION_KEY, Command, EngineState, Event, EventLog, ReplayMismatch, ResolvedFiring,
+    Admission, AdmitPoint, CANCEL_ESCALATION_KEY, Command, DecisionId, EngineExit, EngineStart,
+    EngineState, Event, EventLog, GroupDecision, ReplayMismatch, ResolvedFiring, RouteDecision,
     apply,
 };
 use executor::{
-    AcquireContext, EnvError, EnvHandle, Executor, NoProgress, ProgressSink, ReleaseReport,
-    Retention, ScopeOutcome, ScopeSpec, SecretProvider,
+    AcquireContext, EnvError, EnvHandle, EnvironmentId, Executor, NoProgress, ProgressSink,
+    ReleaseReport, Retention, ScopeOutcome, ScopeSpec, SecretProvider, WorkspaceId,
 };
 use ir::placeholder::SECRET_REF_KEY;
 use ir::{
@@ -31,6 +32,10 @@ use tracing::Instrument as _;
 use crate::jitter::jittered;
 use crate::observe::{EventObserver, ObserveError};
 use crate::sink::LogSink;
+use crate::{
+    AdmissionResolution, AdmitRequest, DecisionResolver, DefaultDecisionResolver, RoutingRequest,
+    RoutingResolution,
+};
 
 /// The failure class recorded when the driver had to abort a step that ignored
 /// `Control::Cancel`.
@@ -88,6 +93,12 @@ pub struct RunConfig {
     pub keep_workspaces:     Retention,
     /// Echo step output to this process's stdout.
     pub echo_logs:           bool,
+    /// Prefix for process and container fences. An execution supplies its ID.
+    pub environment_prefix:  Option<SmolStr>,
+    /// Prefix for persistent workspaces. An invocation supplies its ID.
+    pub workspace_prefix:    Option<SmolStr>,
+    /// Exact inherited workspace for every scope in this execution.
+    pub workspace_override:  Option<WorkspaceId>,
 }
 
 impl RunConfig {
@@ -99,6 +110,9 @@ impl RunConfig {
             cleanup_grace:       DEFAULT_CLEANUP_GRACE,
             keep_workspaces:     Retention::default(),
             echo_logs:           false,
+            environment_prefix:  None,
+            workspace_prefix:    None,
+            workspace_override:  None,
         }
     }
 
@@ -123,6 +137,23 @@ impl RunConfig {
     #[must_use]
     pub fn with_echo(mut self, echo: bool) -> Self {
         self.echo_logs = echo;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope_identities(
+        mut self,
+        environment_prefix: impl Into<SmolStr>,
+        workspace_prefix: impl Into<SmolStr>,
+    ) -> Self {
+        self.environment_prefix = Some(environment_prefix.into());
+        self.workspace_prefix = Some(workspace_prefix.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_override(mut self, workspace: WorkspaceId) -> Self {
+        self.workspace_override = Some(workspace);
         self
     }
 }
@@ -157,7 +188,8 @@ struct PendingResume {
 }
 
 /// How a run ended, and what it left behind.
-pub struct RunReport {
+pub struct ExecutionReport {
+    pub exit:            EngineExit,
     pub status:          RunStatus,
     pub state:           EngineState,
     pub releases:        Vec<ReleaseReport>,
@@ -165,6 +197,9 @@ pub struct RunReport {
     /// a host with fatal-sink semantics watches its own observer and cancels.
     pub observer_errors: Vec<ObserveError>,
 }
+
+/// Compatibility name for callers that still treat one execution as a run.
+pub type RunReport = ExecutionReport;
 
 /// Why a step was told to stop. The distinction cannot be made by the step —
 /// only the driver knows which arrived first.
@@ -251,6 +286,16 @@ enum Signal {
     RetryDue {
         firing:       FiringId,
         next_attempt: Attempt,
+    },
+    Admitted {
+        point:       AdmitPoint,
+        decision_id: DecisionId,
+        resolution:  AdmissionResolution,
+    },
+    RoutingResolved {
+        firing:      FiringId,
+        decision_id: DecisionId,
+        resolution:  RoutingResolution,
     },
     HardDeadline {
         firing:  FiringId,
@@ -356,6 +401,7 @@ pub struct Driver {
     runners:          Arc<Registry>,
     secrets:          Arc<dyn SecretProvider>,
     progress:         Arc<dyn ProgressSink>,
+    decisions:        Arc<dyn DecisionResolver>,
     sink:             Arc<LogSink>,
     config:           RunConfig,
     envs:             HashMap<ScopeId, EnvHandle>,
@@ -364,6 +410,7 @@ pub struct Driver {
     next_acquire_id:  u64,
     acquire_failures: HashMap<ScopeId, String>,
     pending_starts:   HashMap<ScopeId, Vec<ResolvedFiring>>,
+    early_deliveries: HashMap<FiringId, Vec<Forward>>,
     pending_forwards: HashMap<FiringId, Vec<Forward>>,
     pending_failures: HashMap<FiringId, (Attempt, String)>,
     scope_failed:     HashSet<ScopeId>,
@@ -376,6 +423,8 @@ pub struct Driver {
     releases:         Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer:    Option<JoinHandle<()>>,
+    decision_tasks:   HashMap<DecisionId, JoinHandle<()>>,
+    start:            EngineStart,
     /// Set by [`Driver::resume`]; consumed at the top of [`Driver::run`].
     resume:           Option<PendingResume>,
     tx:               mpsc::Sender<Signal>,
@@ -458,6 +507,7 @@ impl Driver {
         secrets: Arc<dyn SecretProvider>,
         config: RunConfig,
     ) -> Self {
+        let start = engine.start().cloned().unwrap_or_default();
         let sink =
             Arc::new(LogSink::new(&config.run_dir, secrets.masker()).with_echo(config.echo_logs));
         let (tx, rx) = mpsc::channel(SIGNAL_CHANNEL_CAPACITY);
@@ -467,6 +517,7 @@ impl Driver {
             runners: Arc::new(runners),
             secrets,
             progress: Arc::new(NoProgress),
+            decisions: Arc::new(DefaultDecisionResolver),
             sink,
             config,
             envs: HashMap::new(),
@@ -475,6 +526,7 @@ impl Driver {
             next_acquire_id: 0,
             acquire_failures: HashMap::new(),
             pending_starts: HashMap::new(),
+            early_deliveries: HashMap::new(),
             pending_forwards: HashMap::new(),
             pending_failures: HashMap::new(),
             scope_failed: HashSet::new(),
@@ -484,6 +536,8 @@ impl Driver {
             run_guards: Vec::new(),
             releases: Vec::new(),
             cleanup_timer: None,
+            decision_tasks: HashMap::new(),
+            start,
             resume: None,
             tx,
             rx,
@@ -505,6 +559,13 @@ impl Driver {
         self
     }
 
+    /// Add one capability that is specific to this execution.
+    #[must_use]
+    pub fn with_capability<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.caps = self.caps.with(value);
+        self
+    }
+
     /// Hold a per-run host service for this run's lifetime. The driver never
     /// looks inside; when the run ends it awaits the guard's
     /// [`RunGuard::teardown`], and a driver dropped mid-run drops the guard
@@ -523,6 +584,20 @@ impl Driver {
         self
     }
 
+    /// Set the complete start specification for a fresh execution.
+    #[must_use]
+    pub fn with_engine_start(mut self, start: EngineStart) -> Self {
+        self.start = start;
+        self
+    }
+
+    /// Install the host admission and routing pipeline.
+    #[must_use]
+    pub fn with_decision_resolver(mut self, resolver: Arc<dyn DecisionResolver>) -> Self {
+        self.decisions = resolver;
+        self
+    }
+
     /// Run to completion.
     #[tracing::instrument(
         name = "driver.run",
@@ -535,7 +610,7 @@ impl Driver {
     )]
     pub async fn run(mut self) -> RunReport {
         match self.resume.take() {
-            None => self.feed(Event::RunStarted),
+            None => self.feed(Event::ExecutionStarted(self.start.clone())),
             Some(resume) => {
                 // Observers see the regenerated suffix first — the records past
                 // the loaded prefix, which the crash kept off disk — before any
@@ -554,6 +629,14 @@ impl Driver {
             };
             self.on_signal(signal).await;
         }
+        for (_, forwards) in self.early_deliveries.drain() {
+            for forward in forwards {
+                if let Some(ack) = forward.ack {
+                    let _ = ack.send(DeliverDisposition::NotLive);
+                }
+            }
+        }
+        self.abort_decisions();
         if let Some(timer) = self.cleanup_timer.take() {
             timer.abort();
         }
@@ -613,7 +696,13 @@ impl Driver {
             "run finished"
         );
 
-        RunReport {
+        let exit = self
+            .engine
+            .exit()
+            .cloned()
+            .unwrap_or(EngineExit::Terminal { status });
+        ExecutionReport {
+            exit,
             status,
             state: self.engine,
             releases,
@@ -657,6 +746,31 @@ impl Driver {
                 self.feed(Event::RetryElapsed {
                     firing,
                     next_attempt,
+                });
+            }
+            Signal::Admitted {
+                point,
+                decision_id,
+                resolution,
+            } => {
+                self.decision_tasks.remove(&decision_id);
+                self.feed(Event::Admitted {
+                    point,
+                    decision_id,
+                    decision: resolution.decision,
+                    trace: resolution.trace,
+                });
+            }
+            Signal::RoutingResolved {
+                firing,
+                decision_id,
+                resolution,
+            } => {
+                self.decision_tasks.remove(&decision_id);
+                self.feed(Event::RoutingResolved {
+                    firing,
+                    decision_id,
+                    groups: resolution.groups,
                 });
             }
             Signal::HardDeadline { firing, attempt } => {
@@ -704,10 +818,17 @@ impl Driver {
         if let Some(timer) = self.cleanup_timer.take() {
             timer.abort();
         }
+        self.abort_decisions();
         tracing::warn!(live_firing_count = self.tasks.len(), "run kill requested");
         self.feed(Event::KillRequested {
             scope: ir::CancelScopeId::ROOT,
         });
+    }
+
+    fn abort_decisions(&mut self) {
+        for (_, task) in self.decision_tasks.drain() {
+            task.abort();
+        }
     }
 
     /// Append-then-apply, then dispatch whatever the core asked for.
@@ -756,6 +877,20 @@ impl Driver {
     /// awaiting a retry — the event is in the log regardless (the audit
     /// trail) and the host hears `NotLive`.
     fn on_deliver(&mut self, firing: FiringId, ctl: Control, ack: DeliverAck) {
+        if self
+            .engine
+            .pending_admissions()
+            .any(|pending| matches!(pending.point, AdmitPoint::ExecutionStart))
+        {
+            self.early_deliveries
+                .entry(firing)
+                .or_default()
+                .push(Forward {
+                    ctl,
+                    ack: Some(ack),
+                });
+            return;
+        }
         let commands = self.apply_event(Event::ControlRequested { firing, ctl });
         let command = commands.into_iter().next();
         let accepted = matches!(
@@ -783,6 +918,74 @@ impl Driver {
 
     fn dispatch(&mut self, command: Command) {
         match command {
+            Command::Admit { point, decision_id } => {
+                let resolver = self.decisions.clone();
+                let tx = self.tx.clone();
+                let task = tokio::spawn(async move {
+                    let resolution = resolver
+                        .admit(AdmitRequest { point, decision_id })
+                        .await
+                        .unwrap_or_else(|error| AdmissionResolution {
+                            decision: Admission::Block {
+                                reason: SmolStr::new(error.message()),
+                            },
+                            trace:    Vec::new(),
+                        });
+                    let _ = tx
+                        .send(Signal::Admitted {
+                            point,
+                            decision_id,
+                            resolution,
+                        })
+                        .await;
+                });
+                if let Some(previous) = self.decision_tasks.insert(decision_id, task) {
+                    previous.abort();
+                }
+            }
+            Command::ResolveRouting {
+                firing,
+                decision_id,
+                restart_allowed,
+                groups,
+            } => {
+                let resolver = self.decisions.clone();
+                let tx = self.tx.clone();
+                let task = tokio::spawn(async move {
+                    let group_ids: Vec<u32> = groups.iter().map(|group| group.group).collect();
+                    let resolution = resolver
+                        .route(RoutingRequest {
+                            firing,
+                            decision_id,
+                            restart_allowed,
+                            groups,
+                        })
+                        .await
+                        .unwrap_or_else(|error| RoutingResolution {
+                            groups: group_ids
+                                .into_iter()
+                                .map(|group| GroupDecision {
+                                    group,
+                                    draw: None,
+                                    trace: Vec::new(),
+                                    decision: RouteDecision::Block {
+                                        reason: SmolStr::new(error.message()),
+                                    },
+                                })
+                                .collect(),
+                        });
+                    let _ = tx
+                        .send(Signal::RoutingResolved {
+                            firing,
+                            decision_id,
+                            resolution,
+                        })
+                        .await;
+                });
+                if let Some(previous) = self.decision_tasks.insert(decision_id, task) {
+                    previous.abort();
+                }
+            }
             Command::AcquireScope { scope } => self.acquire(scope),
             Command::ReleaseScope { scope } => self.release(scope),
             Command::StartStep(resolved) => {
@@ -824,7 +1027,9 @@ impl Driver {
             }
             // The core resolves expansion itself, and the run ends when the loop
             // sees the state finished.
-            Command::ExpandNode { .. } | Command::FinishRun { .. } => {}
+            Command::ExpandNode { .. }
+            | Command::FinishRun { .. }
+            | Command::FinishExecution { .. } => {}
         }
     }
 
@@ -862,6 +1067,7 @@ impl Driver {
             return;
         }
         self.start(resolved);
+        self.flush_early_deliveries(firing);
         self.flush_pending_forwards(firing);
     }
 
@@ -995,8 +1201,21 @@ impl Driver {
     }
 
     fn scope_spec(&self, scope: ScopeId) -> ScopeSpec {
-        let mut spec =
-            ScopeSpec::new(scope, &format!("scope-{}", scope.raw())).with_grace(self.config.grace);
+        let scope_name = format!("scope-{}", scope.raw());
+        let environment = self.config.environment_prefix.as_ref().map_or_else(
+            || scope_name.clone(),
+            |prefix| format!("{prefix}-{scope_name}"),
+        );
+        let workspace = self.config.workspace_override.clone().unwrap_or_else(|| {
+            WorkspaceId::new(self.config.workspace_prefix.as_ref().map_or_else(
+                || scope_name.clone(),
+                |prefix| format!("{prefix}-{scope_name}"),
+            ))
+        });
+        let mut spec = ScopeSpec::new(scope, &scope_name)
+            .with_environment_id(EnvironmentId::new(environment))
+            .with_workspace_id(workspace)
+            .with_grace(self.config.grace);
         let Some(definition) = self.engine.graph().scope(scope) else {
             return spec;
         };
@@ -1398,6 +1617,17 @@ impl Driver {
                 && let Some(ack) = rejected.0.ack
             {
                 let _ = ack.send(DeliverDisposition::NotLive);
+            }
+        }
+    }
+
+    fn flush_early_deliveries(&mut self, firing: FiringId) {
+        let Some(deliveries) = self.early_deliveries.remove(&firing) else {
+            return;
+        };
+        for delivery in deliveries {
+            if let Some(ack) = delivery.ack {
+                self.on_deliver(firing, delivery.ctl, ack);
             }
         }
     }

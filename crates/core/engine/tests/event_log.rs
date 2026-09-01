@@ -304,14 +304,15 @@ fn an_old_log_version_is_rejected() {
     let mut h = Harness::new(diamond());
     h.run();
     let encoded = serde_json::to_string(&h.state.log).expect("encode");
-    assert!(encoded.contains("\"version\":6"));
+    assert!(encoded.contains("\"version\":7"));
 
     // Each bump changed the record shape or its replay semantics (v3: cancelled
     // outcomes route; v4: `Node.meta` inside splices; v5: `ControlRequested`;
-    // v6: `Outcome.splices` and `Node.splice_policy`), so an old log is rejected
+    // v6: `Outcome.splices` and `Node.splice_policy`; v7: durable admission and
+    // routing decisions), so an old log is rejected
     // cleanly rather than replayed under rules it was not written for.
-    for old in [1, 2, 3, 4, 5] {
-        let downgraded = encoded.replacen("\"version\":6", &format!("\"version\":{old}"), 1);
+    for old in [1, 2, 3, 4, 5, 6] {
+        let downgraded = encoded.replacen("\"version\":7", &format!("\"version\":{old}"), 1);
         let error = serde_json::from_str::<engine::EventLog>(&downgraded)
             .expect_err("an old log must not deserialize");
         assert!(

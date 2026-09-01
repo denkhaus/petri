@@ -33,15 +33,38 @@ pub enum Guard<S = Live> {
 /// One arm of a select group: where a token goes, and when.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge<S = Live> {
-    pub id:    EdgeId<S>,
-    pub to:    NodeId<S>,
-    pub guard: Guard<S>,
+    pub id:         EdgeId<S>,
+    pub to:         NodeId<S>,
+    pub guard:      Guard<S>,
     /// Payload for the emitted token; `None` means the source outcome's
     /// `output`.
-    pub map:   Option<ExprId<S>>,
+    pub map:        Option<ExprId<S>>,
     /// Back edge: traversal increments the token's `Generation`.
     /// Every cycle must contain at least one (invariant 1).
-    pub back:  bool,
+    pub back:       bool,
+    /// Relative weight used by weighted selection policies.
+    #[serde(default = "default_edge_weight")]
+    pub weight:     u32,
+    /// Stable name that lowering and routing middleware can address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label:      Option<SmolStr>,
+    /// What selecting this edge does to the current engine instance.
+    #[serde(default)]
+    pub transition: EdgeTransition,
+}
+
+const fn default_edge_weight() -> u32 {
+    1
+}
+
+/// What selecting an edge does after routing is resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EdgeTransition {
+    /// Emit an ordinary token into this execution.
+    #[default]
+    Continue,
+    /// Finish this execution and request a successor at the edge target.
+    Restart,
 }
 
 impl<S> Edge<S> {
@@ -53,6 +76,9 @@ impl<S> Edge<S> {
             guard: Guard::Always,
             map: None,
             back: false,
+            weight: 1,
+            label: None,
+            transition: EdgeTransition::Continue,
         }
     }
 
@@ -64,6 +90,9 @@ impl<S> Edge<S> {
             guard: Guard::Expr(guard),
             map: None,
             back: false,
+            weight: 1,
+            label: None,
+            transition: EdgeTransition::Continue,
         }
     }
 
@@ -79,23 +108,88 @@ impl<S> Edge<S> {
         self.back = true;
         self
     }
+
+    #[must_use]
+    pub fn with_weight(mut self, weight: u32) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<SmolStr>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_transition(mut self, transition: EdgeTransition) -> Self {
+        self.transition = transition;
+        self
+    }
 }
 
 // ── Routing: AND of XORs ──────────────────────────────────────────────────
 
-/// One XOR-select: arms are tried in order and **at most one** token is
-/// emitted.
+/// How one routing group chooses an eligible edge.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum SelectionPolicy<S = Live> {
+    /// Arms are tried in order and the first passing arm wins.
+    #[default]
+    FirstMatch,
+    /// The first tier with an eligible candidate wins.
+    Tiered(Vec<Tier<S>>),
+}
+
+/// One priority tier in a [`SelectionPolicy::Tiered`] policy.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SelectGroup<S = Live> {
-    /// Ordered; the first arm whose guard passes wins.
+pub struct Tier<S = Live> {
+    pub candidates: Vec<Candidate<S>>,
+    pub pick:       PickPolicy,
+}
+
+/// One edge's eligibility inside a priority tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Candidate<S = Live> {
+    pub edge: EdgeId<S>,
+    pub when: Guard<S>,
+    /// Used only by [`PickPolicy::LowestRankThenArmOrder`]. A null result
+    /// excludes this candidate from the tier.
+    pub rank: Option<ExprId<S>>,
+}
+
+/// How an active tier chooses from its eligible candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickPolicy {
+    /// Candidate order.
+    #[default]
+    First,
+    /// Highest edge weight, then lexical target-node name.
+    HighestWeightThenLexical,
+    /// Weighted random choice. The host records the draw.
+    WeightedRandom,
+    /// Lowest evaluated numeric rank, then candidate order.
+    LowestRankThenArmOrder,
+}
+
+/// One XOR-select: **at most one** token is emitted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingGroup<S = Live> {
+    #[serde(default = "default_selection_policy")]
+    pub policy:      SelectionPolicy<S>,
+    /// Declared edges. Policies may refer only to these ids.
     pub arms:        Vec<Edge<S>>,
     pub fallthrough: Fallthrough,
 }
 
-impl<S> SelectGroup<S> {
+fn default_selection_policy<S>() -> SelectionPolicy<S> {
+    SelectionPolicy::FirstMatch
+}
+
+impl<S> RoutingGroup<S> {
     /// A group that emits nothing when no arm matches (OR-split, loop exit).
     pub fn new(arms: Vec<Edge<S>>) -> Self {
         Self {
+            policy: SelectionPolicy::FirstMatch,
             arms,
             fallthrough: Fallthrough::NoEmit,
         }
@@ -104,11 +198,21 @@ impl<S> SelectGroup<S> {
     /// A group that must match: used by frontends requiring totality.
     pub fn total(arms: Vec<Edge<S>>) -> Self {
         Self {
+            policy: SelectionPolicy::FirstMatch,
             arms,
             fallthrough: Fallthrough::Error,
         }
     }
+
+    #[must_use]
+    pub fn with_policy(mut self, policy: SelectionPolicy<S>) -> Self {
+        self.policy = policy;
+        self
+    }
 }
+
+/// Compatibility name for the original routing-group API.
+pub type SelectGroup<S = Live> = RoutingGroup<S>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fallthrough {
@@ -126,7 +230,7 @@ pub enum Fallthrough {
 /// it takes writing more than one group.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Routing<S = Live> {
-    pub groups: Vec<SelectGroup<S>>,
+    pub groups: Vec<RoutingGroup<S>>,
 }
 
 impl<S> Routing<S> {
@@ -154,12 +258,12 @@ impl<S> Routing<S> {
         Self {
             groups: edges
                 .into_iter()
-                .map(|e| SelectGroup::new(vec![e]))
+                .map(|e| RoutingGroup::new(vec![e]))
                 .collect(),
         }
     }
 
-    pub fn groups(groups: Vec<SelectGroup<S>>) -> Self {
+    pub fn groups(groups: Vec<RoutingGroup<S>>) -> Self {
         Self { groups }
     }
 
@@ -777,6 +881,16 @@ pub enum Completion<S = Live> {
     TerminalNode(NodeId<S>),
 }
 
+/// The value an invocation returns after its final execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResultProjection<S = Live> {
+    /// Return JSON null.
+    #[default]
+    None,
+    /// Return the final record's `Outcome.output` for this node.
+    NodeOutput(NodeId<S>),
+}
+
 fn is_default_completion<S>(completion: &Completion<S>) -> bool {
     matches!(completion, Completion::AnyFailure)
 }
@@ -870,6 +984,13 @@ pub struct Graph<S = Live> {
     /// How the run's status folds from node outcomes (§1).
     #[serde(default, skip_serializing_if = "is_default_completion")]
     pub completion: Completion<S>,
+    /// Optional invocation result contract.
+    #[serde(default, skip_serializing_if = "is_default_result_projection")]
+    pub result:     ResultProjection<S>,
+}
+
+fn is_default_result_projection<S>(projection: &ResultProjection<S>) -> bool {
+    matches!(projection, ResultProjection::None)
 }
 
 /// Deliberately read-only forwarding: reads go through `Deref`, while every

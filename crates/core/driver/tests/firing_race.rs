@@ -16,7 +16,7 @@ mod support;
 use std::sync::Arc;
 
 use driver::{Driver, RunConfig};
-use engine::{Command, EngineState, Event, apply};
+use engine::{Admission, Command, EngineState, Event, apply};
 use executor::{Executor, MapSecrets};
 use executor_host::HostExecutor;
 use ir::{GraphBuilder, Outcome, RunStatus, ScopeId, validate};
@@ -40,6 +40,32 @@ fn finished_before_started_is_unknown_firing() {
 
     let state = EngineState::new(graph);
     let (state, commands) = apply(state, Event::RunStarted);
+    let (point, decision_id) = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Admit { point, decision_id } => Some((*point, *decision_id)),
+            _ => None,
+        })
+        .expect("execution start asks for admission");
+    let (state, commands) = apply(state, Event::Admitted {
+        point,
+        decision_id,
+        decision: Admission::Admit,
+        trace: Vec::new(),
+    });
+    let (point, decision_id) = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Admit { point, decision_id } => Some((*point, *decision_id)),
+            _ => None,
+        })
+        .expect("the first attempt asks for admission");
+    let (state, commands) = apply(state, Event::Admitted {
+        point,
+        decision_id,
+        decision: Admission::Admit,
+        trace: Vec::new(),
+    });
     let (firing, attempt) = commands
         .iter()
         .find_map(|c| match c {

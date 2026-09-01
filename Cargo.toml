@@ -8,6 +8,7 @@ members = [
     "crates/core/executor-docker",
     "crates/core/steps",
     "crates/core/driver",
+    "crates/core/execution",
     "crates/core/frontend",
     "crates/core/frontend-native",
     "crates/core/runtime",
@@ -71,6 +72,7 @@ executor-host = { package = "petri-executor-host", path = "crates/core/executor-
 executor-docker = { package = "petri-executor-docker", path = "crates/core/executor-docker" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
+execution = { package = "petri-execution", path = "crates/core/execution" }
 frontend = { package = "petri-frontend", path = "crates/core/frontend" }
 frontend-gha = { package = "petri-frontend-gha", path = "crates/github/frontend" }
 github-actions = { package = "petri-github-actions", path = "crates/github/actions" }

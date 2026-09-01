@@ -5,36 +5,96 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use ir::{
-    Attempt, CancelScopeId, Completion, EdgeId, EvalError, FiringId, Generation, Graph, Node,
-    NodeId, NodeRecord, Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
+    Attempt, CancelScopeId, Completion, EdgeId, EdgeTransition, EvalError, FiringId, Generation,
+    Graph, Node, NodeId, NodeRecord, Outcome, RunContext, RunStatus, ScopeId, Status, Token, Value,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::event::{
+    AdmitPoint, DecisionId, EngineExit, EngineStart, ResolvedFiring, RoutingProposal,
+};
 use crate::log::EventLog;
 
 /// A node execution attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Firing {
-    pub id:             FiringId,
-    pub node:           NodeId,
-    pub generation:     Generation,
+    pub id:                 FiringId,
+    pub node:               NodeId,
+    pub generation:         Generation,
     /// Which try is running, 1-based. A retry advances this and never touches
     /// `generation`.
-    pub attempt:        Attempt,
+    pub attempt:            Attempt,
     /// Resource scope: where the step runs.
-    pub scope:          ScopeId,
+    pub scope:              ScopeId,
     /// Innermost cancel scope the firing belongs to.
-    pub cancel_scope:   CancelScopeId,
-    pub inputs:         Vec<Token>,
+    pub cancel_scope:       CancelScopeId,
+    pub inputs:             Vec<Token>,
     /// The host reported `StepStarted`.
-    pub started:        bool,
+    pub started:            bool,
     /// A `ScheduleRetry` is out; the firing stays live until `RetryElapsed`
     /// arrives, which is what keeps its scope held and the run
     /// non-quiescent.
-    pub awaiting_retry: bool,
+    pub awaiting_retry:     bool,
+    /// The firing exists, but the host has not admitted this attempt yet.
+    #[serde(default)]
+    pub awaiting_admission: bool,
     /// A `Control::Cancel` has been delivered; the outcome will not be routed.
-    pub cancelling:     bool,
+    pub cancelling:         bool,
+}
+
+/// One unresolved durable admission command.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingAdmission {
+    pub point:       AdmitPoint,
+    pub decision_id: DecisionId,
+    /// Present for `AttemptStart`; execution admission has no firing payload.
+    pub resolved:    Option<ResolvedFiring>,
+}
+
+/// One unresolved durable routing command and the outcome-time snapshot used
+/// to validate and apply its eventual result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingRouting {
+    pub firing:          FiringId,
+    pub decision_id:     DecisionId,
+    pub node:            Node,
+    pub generation:      Generation,
+    pub attempt:         Attempt,
+    pub inputs:          Vec<Token>,
+    pub outcome:         Outcome,
+    pub run:             RunContext,
+    pub restart_allowed: bool,
+    pub groups:          Vec<RoutingProposal>,
+}
+
+/// An edge application prepared by `RoutingResolved` and consumed by the
+/// matching core `RouteApplied` record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum PreparedRoute {
+    Edge {
+        group:      u32,
+        edge:       EdgeId,
+        target:     NodeId,
+        generation: Generation,
+        payload:    Value,
+        transition: EdgeTransition,
+    },
+    Jump {
+        target:     NodeId,
+        generation: Generation,
+    },
+    None {
+        group: u32,
+    },
+}
+
+/// The immutable restart request chosen by routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RestartIntent {
+    pub edge:   EdgeId,
+    pub target: NodeId,
+    pub source: FiringId,
 }
 
 impl Firing {
@@ -242,6 +302,20 @@ pub enum RunError {
     UnknownNode(NodeId),
     #[error("unknown firing {0}")]
     UnknownFiring(FiringId),
+    #[error("execution start has max_executions 0")]
+    ZeroExecutionLimit,
+    #[error("execution start refers to unknown entry node {0}")]
+    UnknownEntryNode(NodeId),
+    #[error("decision {0:?} is not pending")]
+    UnknownDecision(DecisionId),
+    #[error("decision {decision:?} does not match its pending point")]
+    DecisionMismatch { decision: DecisionId },
+    #[error("routing result for firing {firing} is invalid: {reason}")]
+    InvalidRouting { firing: FiringId, reason: SmolStr },
+    #[error("routing for firing {firing} was blocked: {reason}")]
+    RoutingBlocked { firing: FiringId, reason: SmolStr },
+    #[error("admission at {point:?} was blocked: {reason}")]
+    AdmissionBlocked { point: AdmitPoint, reason: SmolStr },
     #[error("event arrived before RunStarted")]
     NotStarted,
     #[error("event arrived after the run finished")]
@@ -261,12 +335,15 @@ pub struct EngineState {
     /// Tokens waiting on a join: node, then generation, then edge. Nested
     /// rather than keyed by a `(node, generation)` tuple so the whole state
     /// serializes to JSON, where a map key has to be a primitive.
-    pending:  BTreeMap<NodeId, BTreeMap<Generation, BTreeMap<EdgeId, Token>>>,
+    pending:        BTreeMap<NodeId, BTreeMap<Generation, BTreeMap<EdgeId, Token>>>,
     /// `(node, generation)` pairs that already fired. Later tokens for them are
     /// dropped, which is what makes `JoinPolicy::Any` fire exactly once.
-    fired:    BTreeSet<(NodeId, Generation)>,
+    fired:          BTreeSet<(NodeId, Generation)>,
+    /// Synthetic forced entries bypass their node's ordinary join once.
+    #[serde(default)]
+    forced_entries: BTreeSet<(NodeId, Generation)>,
     /// Joins that are satisfied but held back by `max_parallel`.
-    deferred: VecDeque<(NodeId, Generation)>,
+    deferred:       VecDeque<(NodeId, Generation)>,
 
     live:               BTreeMap<FiringId, Firing>,
     firing_counts:      BTreeMap<NodeId, u32>,
@@ -300,6 +377,16 @@ pub struct EngineState {
     #[serde(default)]
     retry_tombstones:     BTreeSet<FiringId>,
 
+    /// External decision commands that keep an execution non-quiescent.
+    #[serde(default)]
+    pending_admissions: BTreeMap<DecisionId, PendingAdmission>,
+    #[serde(default)]
+    pending_routing:    BTreeMap<FiringId, PendingRouting>,
+    /// Core route records prepared by one resolved command. A vector rather
+    /// than tuple map keys keeps the state JSON-compatible.
+    #[serde(default)]
+    prepared_routes:    BTreeMap<FiringId, VecDeque<PreparedRoute>>,
+
     /// Synthetic incoming edges for entry nodes and clone entries.
     seed_edges:  BTreeMap<EdgeId, NodeId>,
     /// Resource scopes currently held. A scope is held from the moment one of
@@ -311,10 +398,11 @@ pub struct EngineState {
     #[serde(flatten)]
     allocators:  Allocators,
 
-    started:   bool,
-    finished:  bool,
-    cancelled: bool,
-    errors:    Vec<RunError>,
+    start:          Option<EngineStart>,
+    exit:           Option<EngineExit>,
+    restart_intent: Option<RestartIntent>,
+    cancelled:      bool,
+    errors:         Vec<RunError>,
 }
 
 impl EngineState {
@@ -341,6 +429,7 @@ impl EngineState {
             log: EventLog::new(),
             pending: BTreeMap::new(),
             fired: BTreeSet::new(),
+            forced_entries: BTreeSet::new(),
             deferred: VecDeque::new(),
             live: BTreeMap::new(),
             firing_counts: BTreeMap::new(),
@@ -352,6 +441,9 @@ impl EngineState {
             splices: Vec::new(),
             retracted_admissions: BTreeSet::new(),
             retry_tombstones: BTreeSet::new(),
+            pending_admissions: BTreeMap::new(),
+            pending_routing: BTreeMap::new(),
+            prepared_routes: BTreeMap::new(),
             seed_edges: BTreeMap::new(),
             held_scopes: BTreeSet::new(),
             next_firing: 1,
@@ -360,8 +452,9 @@ impl EngineState {
                 next_edge,
                 next_cancel_scope: 1,
             },
-            started: false,
-            finished: false,
+            start: None,
+            exit: None,
+            restart_intent: None,
             cancelled: false,
             errors: Vec::new(),
         }
@@ -377,11 +470,19 @@ impl EngineState {
     }
 
     pub fn is_started(&self) -> bool {
-        self.started
+        self.start.is_some()
     }
 
     pub fn is_finished(&self) -> bool {
-        self.finished
+        self.exit.is_some()
+    }
+
+    pub fn start(&self) -> Option<&EngineStart> {
+        self.start.as_ref()
+    }
+
+    pub fn exit(&self) -> Option<&EngineExit> {
+        self.exit.as_ref()
     }
 
     /// The root scope was cancelled.
@@ -436,6 +537,15 @@ impl EngineState {
         self.firing_counts.get(&node).copied().unwrap_or(0)
     }
 
+    /// Declared-node firing budgets carried into a restart successor.
+    pub fn prior_firings(&self) -> BTreeMap<NodeId, u32> {
+        self.firing_counts
+            .iter()
+            .filter(|(node, _)| self.graph.node(**node).is_some())
+            .map(|(node, count)| (*node, *count))
+            .collect()
+    }
+
     /// Tokens still waiting on a join, with the `(node, generation)` they wait
     /// at.
     pub fn pending_tokens(&self) -> impl Iterator<Item = ((NodeId, Generation), &Token)> {
@@ -488,7 +598,11 @@ impl EngineState {
     /// waiting out a retry backoff is still live, so a run mid-backoff is not
     /// quiescent.
     pub fn is_quiescent(&self) -> bool {
-        self.live.is_empty() && self.deferred.is_empty()
+        self.live.is_empty()
+            && self.deferred.is_empty()
+            && self.pending_admissions.is_empty()
+            && self.pending_routing.is_empty()
+            && self.prepared_routes.is_empty()
     }
 
     /// Firings waiting out a retry backoff.
@@ -552,16 +666,123 @@ impl EngineState {
 
     // ── Mutation used by `apply` ───────────────────────────────────────────
 
-    pub(crate) fn mark_started(&mut self) {
-        self.started = true;
+    pub(crate) fn mark_started(&mut self, start: EngineStart) {
+        self.run.merge(&start.context);
+        self.firing_counts.clone_from(&start.prior_firings);
+        self.start = Some(start);
     }
 
-    pub(crate) fn mark_finished(&mut self) {
-        self.finished = true;
+    pub(crate) fn mark_finished(&mut self, exit: EngineExit) {
+        self.exit = Some(exit);
+    }
+
+    pub(crate) fn force_entry(&mut self, node: NodeId, generation: Generation) {
+        self.forced_entries.insert((node, generation));
+    }
+
+    pub(crate) fn is_forced_entry(&self, key: (NodeId, Generation)) -> bool {
+        self.forced_entries.contains(&key)
+    }
+
+    pub(crate) fn take_forced_entry(&mut self, key: (NodeId, Generation)) {
+        self.forced_entries.remove(&key);
     }
 
     pub(crate) fn mark_cancelled(&mut self) {
         self.cancelled = true;
+    }
+
+    pub(crate) fn insert_pending_admission(&mut self, pending: PendingAdmission) {
+        self.pending_admissions.insert(pending.decision_id, pending);
+    }
+
+    pub(crate) fn take_pending_admission(&mut self, id: DecisionId) -> Option<PendingAdmission> {
+        self.pending_admissions.remove(&id)
+    }
+
+    pub fn pending_admissions(&self) -> impl Iterator<Item = &PendingAdmission> {
+        self.pending_admissions.values()
+    }
+
+    pub(crate) fn remove_admission_for_firing(&mut self, firing: FiringId) {
+        self.pending_admissions.retain(|_, pending| {
+            !matches!(pending.point, AdmitPoint::AttemptStart { firing: id, .. } if id == firing)
+        });
+    }
+
+    pub(crate) fn insert_pending_routing(&mut self, pending: PendingRouting) {
+        let node = pending.node.id;
+        let previous = self.pending_routing.insert(pending.firing, pending);
+        debug_assert!(previous.is_none());
+        if previous.is_none() {
+            // A routing decision is still part of the firing's admission slot.
+            // This closes the asynchronous host-decision gap between one clone
+            // node finishing and its successor starting.
+            self.adjust_batch_live(node, 1);
+        }
+    }
+
+    pub(crate) fn take_pending_routing(&mut self, firing: FiringId) -> Option<PendingRouting> {
+        let pending = self.pending_routing.remove(&firing)?;
+        self.adjust_batch_live(pending.node.id, -1);
+        Some(pending)
+    }
+
+    pub fn pending_routings(&self) -> impl Iterator<Item = &PendingRouting> {
+        self.pending_routing.values()
+    }
+
+    pub(crate) fn set_prepared_routes(
+        &mut self,
+        firing: FiringId,
+        routes: VecDeque<PreparedRoute>,
+    ) {
+        if routes.is_empty() {
+            self.prepared_routes.remove(&firing);
+        } else {
+            self.prepared_routes.insert(firing, routes);
+        }
+    }
+
+    pub(crate) fn prepared_route(&self, firing: FiringId) -> Option<&PreparedRoute> {
+        self.prepared_routes.get(&firing).and_then(VecDeque::front)
+    }
+
+    pub(crate) fn take_prepared_route(&mut self, firing: FiringId) -> Option<PreparedRoute> {
+        let routes = self.prepared_routes.get_mut(&firing)?;
+        let route = routes.pop_front();
+        if routes.is_empty() {
+            self.prepared_routes.remove(&firing);
+        }
+        route
+    }
+
+    pub(crate) fn clear_pending_decisions(&mut self) {
+        self.pending_admissions.clear();
+        let nodes: Vec<_> = self
+            .pending_routing
+            .values()
+            .map(|pending| pending.node.id)
+            .collect();
+        self.pending_routing.clear();
+        for node in nodes {
+            self.adjust_batch_live(node, -1);
+        }
+        self.prepared_routes.clear();
+    }
+
+    pub(crate) fn begin_restart(&mut self, intent: RestartIntent) {
+        if self.restart_intent.is_none() {
+            self.restart_intent = Some(intent);
+        }
+    }
+
+    pub(crate) fn restart_intent(&self) -> Option<RestartIntent> {
+        self.restart_intent
+    }
+
+    pub(crate) fn clear_restart(&mut self) {
+        self.restart_intent = None;
     }
 
     pub(crate) fn push_error(&mut self, error: RunError) {
@@ -1043,6 +1264,11 @@ impl EngineState {
     /// them.
     fn needed_scopes(&self) -> BTreeSet<ScopeId> {
         let mut needed: BTreeSet<ScopeId> = self.live.values().map(|f| f.scope).collect();
+        needed.extend(
+            self.pending_routing
+                .values()
+                .map(|pending| pending.node.scope),
+        );
         let waiting = self
             .pending
             .iter()

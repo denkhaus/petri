@@ -1,36 +1,33 @@
 [package]
-name = "petri-driver"
+name = "petri-execution"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The IO loop between the pure core and real processes."
+description = "Invocation and execution coordination for Petri."
 publish = false
 
 [lints]
 workspace = true
 
 [lib]
-# The package is `petri-driver`; the crate is `driver`, so code reads `driver::…`.
-name = "driver"
-
-[dev-dependencies]
-engine = { workspace = true }
-testkit = { workspace = true }
-executor-host = { workspace = true }
-executor-docker = { workspace = true }
-async-trait = { workspace = true }
+name = "execution"
 
 [dependencies]
 ir = { workspace = true }
 engine = { workspace = true }
+driver = { workspace = true }
+runtime = { workspace = true }
 executor = { workspace = true }
 steps = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-getrandom = { workspace = true }
+
+[dev-dependencies]
+testkit = { workspace = true }

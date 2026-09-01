@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 runtime = { workspace = true }
+execution = { workspace = true }
 frontend-gha = { workspace = true }
 github-actions = { workspace = true }
 github-objects = { workspace = true }

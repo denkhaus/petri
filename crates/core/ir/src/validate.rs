@@ -10,7 +10,8 @@ use smol_str::SmolStr;
 use crate::expr::Expr;
 use crate::flow::FailureClass;
 use crate::graph::{
-    Completion, ExpandTarget, Expansion, ExprOrValue, Graph, GraphBody, Guard, JoinPolicy,
+    Completion, EdgeTransition, ExpandTarget, Expansion, ExprOrValue, Graph, GraphBody, Guard,
+    JoinPolicy, ResultProjection, SelectionPolicy,
 };
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 use crate::step::StepKinds;
@@ -59,6 +60,8 @@ pub enum ValidationError<S = Live> {
     EntryHasIncoming(NodeId<S>),
     #[error("the completion policy names unknown node {0}")]
     CompletionUnknownNode(NodeId<S>),
+    #[error("the result projection names unknown node {0}")]
+    ResultUnknownNode(NodeId<S>),
 
     // ── Invariant 1 ────────────────────────────────────────────────────────
     #[error("cycle through nodes {} contains no back edge", fmt_ids(.0))]
@@ -71,6 +74,15 @@ pub enum ValidationError<S = Live> {
     // ── Invariant 3 ────────────────────────────────────────────────────────
     #[error("node {node}: select group {group} has no arms")]
     EmptyGroup { node: NodeId<S>, group: usize },
+    #[error("node {node}: restart edges require exactly one routing group")]
+    RestartWithMultipleGroups { node: NodeId<S> },
+    #[error("node {node}: tier {tier} names edge {edge}, which is not an arm of group {group}")]
+    UnknownTierEdge {
+        node:  NodeId<S>,
+        group: usize,
+        tier:  usize,
+        edge:  EdgeId<S>,
+    },
 
     // ── Invariant 4 ────────────────────────────────────────────────────────
     #[error("node {0}: Budget.max_firings must be >= 1")]
@@ -164,9 +176,12 @@ impl<S> ValidationError<S> {
             Self::UnknownEntry(_) => "validate.unknown_entry",
             Self::DuplicateEntry(_) => "validate.duplicate_entry",
             Self::CompletionUnknownNode(_) => "validate.completion_unknown_node",
+            Self::ResultUnknownNode(_) => "validate.result_unknown_node",
             Self::CycleWithoutBackEdge(_) => "validate.cycle_without_back_edge",
             Self::AlwaysNotLast { .. } => "validate.always_not_last",
             Self::EmptyGroup { .. } => "validate.empty_group",
+            Self::RestartWithMultipleGroups { .. } => "validate.restart_multiple_groups",
+            Self::UnknownTierEdge { .. } => "validate.unknown_tier_edge",
             Self::ZeroBudget(_) => "validate.zero_budget",
             Self::UnboundedLoopBudget(_) => "validate.unbounded_loop_budget",
             Self::LoopHeadMustJoinAny(_) => "validate.loop_head_must_join_any",
@@ -197,6 +212,8 @@ impl<S> ValidationError<S> {
             | Self::BadStepConfig { node, .. }
             | Self::AlwaysNotLast { node, .. }
             | Self::EmptyGroup { node, .. }
+            | Self::RestartWithMultipleGroups { node }
+            | Self::UnknownTierEdge { node, .. }
             | Self::ExitUnreachable { node, .. }
             | Self::ExitNotPostdominator { node, .. }
             | Self::BoundaryCrossing { node, .. }
@@ -206,7 +223,9 @@ impl<S> ValidationError<S> {
             Self::UnknownTarget { edge, .. }
             | Self::DuplicateEdgeId(edge)
             | Self::ReservedEdgeId(edge) => ValidationLocation::Edge(*edge),
-            Self::NoEntry | Self::CompletionUnknownNode(_) => ValidationLocation::Graph,
+            Self::NoEntry | Self::CompletionUnknownNode(_) | Self::ResultUnknownNode(_) => {
+                ValidationLocation::Graph
+            }
             Self::UnknownEntry(node)
             | Self::DuplicateEntry(node)
             | Self::EntryHasIncoming(node) => ValidationLocation::Entry(*node),
@@ -234,6 +253,8 @@ impl<S> ValidationError<S> {
             | Self::BadStepConfig { node, .. }
             | Self::AlwaysNotLast { node, .. }
             | Self::EmptyGroup { node, .. }
+            | Self::RestartWithMultipleGroups { node }
+            | Self::UnknownTierEdge { node, .. }
             | Self::ExitUnreachable { node, .. }
             | Self::ExitNotPostdominator { node, .. }
             | Self::BoundaryCrossing { node, .. }
@@ -248,6 +269,7 @@ impl<S> ValidationError<S> {
             Self::ScopeIdMismatch { .. }
             | Self::NoEntry
             | Self::CompletionUnknownNode(_)
+            | Self::ResultUnknownNode(_)
             | Self::DuplicateEdgeId(_)
             | Self::ReservedEdgeId(_)
             | Self::UnknownExpr { .. } => None,
@@ -550,6 +572,11 @@ fn check_completion<S>(graph: &Graph<S>, errors: &mut Vec<ValidationError<S>>) {
     {
         errors.push(ValidationError::CompletionUnknownNode(node));
     }
+    if let ResultProjection::NodeOutput(node) = graph.result
+        && graph.node(node).is_none()
+    {
+        errors.push(ValidationError::ResultUnknownNode(node));
+    }
 }
 
 /// Invariant 5: edge ids are unique across the whole graph, and none reuses the
@@ -570,6 +597,14 @@ fn check_edge_ids<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>)
 /// Invariants 2 and 3.
 fn check_routing_shape<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
+        if node.routing.groups.len() != 1
+            && node
+                .routing
+                .edges()
+                .any(|edge| edge.transition == EdgeTransition::Restart)
+        {
+            errors.push(ValidationError::RestartWithMultipleGroups { node: node.id });
+        }
         for (group_index, group) in node.routing.groups.iter().enumerate() {
             if group.arms.is_empty() {
                 errors.push(ValidationError::EmptyGroup {
@@ -585,6 +620,21 @@ fn check_routing_shape<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError
                         node: node.id,
                         arm:  arm_index,
                     });
+                }
+            }
+            if let SelectionPolicy::Tiered(tiers) = &group.policy {
+                let arms: HashSet<_> = group.arms.iter().map(|arm| arm.id).collect();
+                for (tier_index, tier) in tiers.iter().enumerate() {
+                    for candidate in &tier.candidates {
+                        if !arms.contains(&candidate.edge) {
+                            errors.push(ValidationError::UnknownTierEdge {
+                                node:  node.id,
+                                group: group_index,
+                                tier:  tier_index,
+                                edge:  candidate.edge,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -632,6 +682,34 @@ fn check_exprs_resolve<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError
             }
             if let Some(map) = edge.map {
                 check(format!("edge {} map", edge.id), map, errors);
+            }
+        }
+        for (group_index, group) in node.routing.groups.iter().enumerate() {
+            if let SelectionPolicy::Tiered(tiers) = &group.policy {
+                for (tier_index, tier) in tiers.iter().enumerate() {
+                    for (candidate_index, candidate) in tier.candidates.iter().enumerate() {
+                        if let Guard::Expr(id) = candidate.when {
+                            check(
+                                format!(
+                                    "node {} group {group_index} tier {tier_index} candidate {candidate_index} guard",
+                                    node.id
+                                ),
+                                id,
+                                errors,
+                            );
+                        }
+                        if let Some(id) = candidate.rank {
+                            check(
+                                format!(
+                                    "node {} group {group_index} tier {tier_index} candidate {candidate_index} rank",
+                                    node.id
+                                ),
+                                id,
+                                errors,
+                            );
+                        }
+                    }
+                }
             }
         }
     }

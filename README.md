@@ -9,6 +9,7 @@ crates/core/engine     the sans-IO state machine: apply(state, event) -> (state,
 crates/core/executor   the environment interface; executor-host and executor-docker implement it
 crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
 crates/core/driver     the IO loop between the pure core and real processes
+crates/core/execution  run, invocation, and execution coordination; durable local store
 crates/core/frontend   what every format shares; frontend-native is core's own format
 crates/core/runtime    core assembled: the `Runtime` builder components register onto
 crates/core/cli        the command line, format-agnostic; the shipped binary hands it a runtime
@@ -33,10 +34,10 @@ each select group emits at most one token, and groups emit concurrently. The def
 is selection, so fan-out is never implicit — it takes writing more than one group.
 
 ```rust
-use engine::{EngineState, Event, apply};
+use engine::{EngineStart, EngineState, Event, apply};
 
 let mut state = EngineState::new(graph);
-let (state, commands) = apply(state, Event::RunStarted);
+let (state, commands) = apply(state, Event::ExecutionStarted(EngineStart::default()));
 // run the commands, feed the results back as events
 ```
 
@@ -44,14 +45,14 @@ let (state, commands) = apply(state, Event::RunStarted);
 
 | Design section | Code |
 |---|---|
-| §2 routing, AND-of-XOR | `ir::graph::{Routing, SelectGroup, Guard, Fallthrough}` |
+| §2 routing, AND-of-XOR | `ir::graph::{Routing, RoutingGroup, SelectionPolicy, Guard, Fallthrough}` |
 | §3 core types | `ir::graph`, `ir::ids` |
 | §3 expressions | `ir::expr` — `Expr`, `ExprTable`, `Context`, `eval` |
 | §4 runtime types | `ir::flow` — `Token`, `Outcome`, `Status`, `Metrics` |
 | §4 firing rule | `engine::apply::try_fire` |
 | §4 quiescence | `EngineState::is_quiescent`, `apply::finish_if_quiescent` |
 | §5 engine interface | `engine::event` — `Event`, `Command`; `engine::apply::apply` |
-| §5 event log | `engine::log` — v2, with per-record provenance |
+| §5 event log | `engine::log` — v7, with durable admission and routing decisions |
 | §5 replay | `engine::replay` — `verify_replay` is the determinism canary |
 | §4 retries | `ir::RetryPolicy`, `engine::apply::on_retry_elapsed` |
 | §4 run context | `ir::RunContext`, `engine::state::EngineState::record_outcome` |
@@ -62,6 +63,8 @@ let (state, commands) = apply(state, Event::RunStarted);
 | exec §4 cancellation | `steps::process::ladder`, `driver::Driver::on_hard_deadline` |
 | exec §5 environments | `executor::scope` (the interface), `executor_host::HostExecutor`, `executor_docker::DockerExecutor` |
 | exec §6 secrets | `executor::secrets`, `driver::LogSink` |
+| execution hierarchy | `execution::{Coordinator, InvocationId, ExecutionId, InvocationClient}` |
+| standalone persistence | `execution::{CoordinatorStore, ResourceStore}`, one engine log per execution |
 | §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel`, `apply::on_kill` |
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
@@ -750,8 +753,30 @@ the engine carries no concurrency semantics; the GHA frontend ignores `concurren
 with a warning, a single local run having nothing to race), and placement *semantics*
 for `RuntimeSpec.requirements` (D3 — the labels are carried, uninterpreted).
 
-Still v2 in the design document: resume, content caching, remote scope placement, and
+Still v2 in the design document: content caching, remote scope placement, and
 `Control::{Pause, Steer, Approve}`. The seams are in place — the log is versioned and
 rejects old versions cleanly, `EngineState` serializes whole, `StepKind::fingerprint`
 defaults to `None`, and `Control` is `#[non_exhaustive]` (`Kill` was its first
 addition). Replay has landed; `engine::verify_replay` is the determinism canary.
+
+## Local run layout
+
+The standalone host stores one root run as `Run → Invocation → Execution → Firing`.
+`coordinator.jsonl` records graph registrations, invocation calls, execution
+successors, and final results. Each execution keeps an independent v7 engine log.
+
+```text
+<run-dir>/
+  run.json
+  coordinator.jsonl
+  graphs/<sha256>.json
+  resources/
+  invocations/<invocation-id>/
+    invocation.json
+    executions/<execution-id>/events.jsonl
+```
+
+A restart creates a successor execution in the same invocation. It starts at the
+selected target with empty context and carried firing budgets. Nested workflow calls
+create invocations, not separately managed runs. The coordinator holds an exclusive
+lease on `run.json` while it creates or resumes the run.

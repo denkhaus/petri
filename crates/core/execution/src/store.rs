@@ -1,0 +1,464 @@
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+
+use ir::Graph;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+
+use crate::{
+    COORDINATOR_FORMAT_VERSION, CoordinatorEvent, CoordinatorRecord, CoordinatorState, ExecutionId,
+    GraphDigest, InvocationId, StateError,
+};
+
+pub const RUN_FILE: &str = "run.json";
+pub const COORDINATOR_FILE: &str = "coordinator.jsonl";
+pub const GRAPHS_DIR: &str = "graphs";
+pub const RESOURCES_DIR: &str = "resources";
+pub const INVOCATIONS_DIR: &str = "invocations";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunMetadata {
+    pub format_version: u32,
+    pub root:           InvocationId,
+}
+
+#[derive(Debug)]
+pub struct DecodedCoordinatorLog {
+    pub records:   Vec<CoordinatorRecord>,
+    pub clean_len: usize,
+    pub torn:      bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("could not {action} `{path}`: {source}")]
+    Io {
+        action: &'static str,
+        path:   PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("run directory `{0}` is already in use")]
+    Leased(PathBuf),
+    #[error("`{path}` contains an invalid coordinator record on line {line}")]
+    BadRecord {
+        path:   PathBuf,
+        line:   usize,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("`{path}` contains invalid JSON: {source}")]
+    BadJson {
+        path:   PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("run format {found} is unsupported; expected {expected}")]
+    UnsupportedFormat { found: u32, expected: u32 },
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error("could not encode durable state: {0}")]
+    Encode(#[source] serde_json::Error),
+    #[error("registered graph {0} is missing")]
+    MissingGraph(GraphDigest),
+    #[error("registered graph {expected} hashes to {found}")]
+    GraphDigest {
+        expected: GraphDigest,
+        found:    GraphDigest,
+    },
+    #[error("registered graph {digest} is not a graph: {source}")]
+    BadGraph {
+        digest: GraphDigest,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("registered graph {digest} failed validation: {message}")]
+    InvalidGraph {
+        digest:  GraphDigest,
+        message: String,
+    },
+}
+
+/// A leased, durable coordinator log and graph registry.
+pub struct CoordinatorStore {
+    root:     PathBuf,
+    _lease:   File,
+    log:      File,
+    state:    CoordinatorState,
+    next_seq: u64,
+}
+
+impl CoordinatorStore {
+    pub fn create(
+        root: impl Into<PathBuf>,
+        middleware_chain: Vec<engine::MiddlewareKey>,
+    ) -> Result<Self, StoreError> {
+        let root = root.into();
+        create_dir(&root)?;
+        create_dir(&root.join(GRAPHS_DIR))?;
+        create_dir(&root.join(RESOURCES_DIR))?;
+        create_dir(&root.join(INVOCATIONS_DIR))?;
+
+        let metadata_path = root.join(RUN_FILE);
+        let mut lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&metadata_path)
+            .map_err(|source| io_error("create", &metadata_path, source))?;
+        acquire_lease(&lease, &root)?;
+        let metadata = RunMetadata {
+            format_version: COORDINATOR_FORMAT_VERSION,
+            root:           InvocationId::ROOT,
+        };
+        write_json(&mut lease, &metadata, &metadata_path)?;
+
+        let log_path = root.join(COORDINATOR_FILE);
+        let log = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|source| io_error("create", &log_path, source))?;
+        let mut store = Self {
+            root,
+            _lease: lease,
+            log,
+            state: CoordinatorState::default(),
+            next_seq: 0,
+        };
+        store.append(CoordinatorEvent::RunStarted {
+            format_version: COORDINATOR_FORMAT_VERSION,
+            root: InvocationId::ROOT,
+            middleware_chain,
+        })?;
+        Ok(store)
+    }
+
+    pub fn resume(root: impl Into<PathBuf>) -> Result<(Self, bool), StoreError> {
+        let root = root.into();
+        let metadata_path = root.join(RUN_FILE);
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&metadata_path)
+            .map_err(|source| io_error("open", &metadata_path, source))?;
+        acquire_lease(&lease, &root)?;
+        let metadata: RunMetadata = read_json(&metadata_path)?;
+        if metadata.format_version != COORDINATOR_FORMAT_VERSION {
+            return Err(StoreError::UnsupportedFormat {
+                found:    metadata.format_version,
+                expected: COORDINATOR_FORMAT_VERSION,
+            });
+        }
+        if metadata.root != InvocationId::ROOT {
+            return Err(StateError::InvalidRootInvocation.into());
+        }
+
+        let log_path = root.join(COORDINATOR_FILE);
+        let bytes = fs::read(&log_path).map_err(|source| io_error("read", &log_path, source))?;
+        let decoded = decode_coordinator_log(&log_path, &bytes)?;
+        let state = CoordinatorState::replay(&decoded.records)?;
+        if decoded.torn {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(&log_path)
+                .map_err(|source| io_error("open", &log_path, source))?;
+            file.set_len(decoded.clean_len as u64)
+                .map_err(|source| io_error("truncate", &log_path, source))?;
+            file.sync_data()
+                .map_err(|source| io_error("sync", &log_path, source))?;
+        }
+        verify_graph_registry(&root, &state)?;
+        let log = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .map_err(|source| io_error("open", &log_path, source))?;
+        let next_seq = decoded.records.len() as u64;
+        Ok((
+            Self {
+                root,
+                _lease: lease,
+                log,
+                state,
+                next_seq,
+            },
+            decoded.torn,
+        ))
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn state(&self) -> &CoordinatorState {
+        &self.state
+    }
+
+    pub(crate) fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    pub(crate) fn state_mut_allocate_invocation(&mut self) -> InvocationId {
+        self.state.allocate_invocation()
+    }
+
+    pub(crate) fn state_mut_allocate_execution(&mut self) -> ExecutionId {
+        self.state.allocate_execution()
+    }
+
+    pub fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, StoreError> {
+        let mut next_state = self.state.clone();
+        next_state.apply(&event)?;
+        let record = CoordinatorRecord {
+            seq: self.next_seq,
+            event,
+        };
+        let mut encoded = serde_json::to_vec(&record).map_err(StoreError::Encode)?;
+        encoded.push(b'\n');
+        let path = self.root.join(COORDINATOR_FILE);
+        self.log
+            .write_all(&encoded)
+            .and_then(|()| self.log.flush())
+            .and_then(|()| self.log.sync_data())
+            .map_err(|source| io_error("append", &path, source))?;
+        self.state = next_state;
+        self.next_seq += 1;
+        self.write_invocation_projection(&record.event)?;
+        Ok(record)
+    }
+
+    pub fn register_graph(&mut self, graph: &Graph) -> Result<GraphDigest, StoreError> {
+        let bytes = serde_json::to_vec(graph).map_err(StoreError::Encode)?;
+        let digest = digest_bytes(&bytes);
+        if self.state.graphs.contains(&digest) {
+            let existing = self.graph_bytes(digest)?;
+            if existing != bytes {
+                return Err(StoreError::GraphDigest {
+                    expected: digest,
+                    found:    digest_bytes(&existing),
+                });
+            }
+            return Ok(digest);
+        }
+
+        let path = self.graph_path(digest);
+        write_once_atomically(&path, &bytes)?;
+        self.append(CoordinatorEvent::GraphRegistered { digest })?;
+        Ok(digest)
+    }
+
+    pub fn load_graph(&self, digest: GraphDigest) -> Result<Graph, StoreError> {
+        if !self.state.graphs.contains(&digest) {
+            return Err(StoreError::MissingGraph(digest));
+        }
+        decode_graph(digest, &self.graph_bytes(digest)?)
+    }
+
+    pub fn graph_bytes(&self, digest: GraphDigest) -> Result<Vec<u8>, StoreError> {
+        let path = self.graph_path(digest);
+        fs::read(&path).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                StoreError::MissingGraph(digest)
+            } else {
+                io_error("read", &path, source)
+            }
+        })
+    }
+
+    pub fn graph_path(&self, digest: GraphDigest) -> PathBuf {
+        self.root.join(GRAPHS_DIR).join(format!("{digest}.json"))
+    }
+
+    pub fn invocation_dir(&self, invocation: InvocationId) -> PathBuf {
+        self.root
+            .join(INVOCATIONS_DIR)
+            .join(format!("{:016x}", invocation.raw()))
+    }
+
+    pub fn execution_dir(&self, invocation: InvocationId, execution: ExecutionId) -> PathBuf {
+        self.invocation_dir(invocation)
+            .join("executions")
+            .join(format!("{:016x}", execution.raw()))
+    }
+
+    pub fn create_execution_dir(
+        &self,
+        invocation: InvocationId,
+        execution: ExecutionId,
+    ) -> Result<PathBuf, StoreError> {
+        let path = self.execution_dir(invocation, execution);
+        create_dir(&path)?;
+        Ok(path)
+    }
+
+    fn write_invocation_projection(&self, event: &CoordinatorEvent) -> Result<(), StoreError> {
+        let invocation = match event {
+            CoordinatorEvent::InvocationDeclared { invocation, .. }
+            | CoordinatorEvent::InvocationFinished { invocation, .. }
+            | CoordinatorEvent::InvocationCancelRequested { invocation }
+            | CoordinatorEvent::ExecutionDeclared { invocation, .. } => Some(*invocation),
+            CoordinatorEvent::ExecutionFinished { execution, .. } => self
+                .state
+                .executions
+                .get(execution)
+                .map(|state| state.declaration.invocation),
+            _ => None,
+        };
+        let Some(invocation) = invocation else {
+            return Ok(());
+        };
+        let Some(state) = self.state.invocations.get(&invocation) else {
+            return Ok(());
+        };
+        let directory = self.invocation_dir(invocation);
+        create_dir(&directory.join("executions"))?;
+        let path = directory.join("invocation.json");
+        let bytes = serde_json::to_vec_pretty(state).map_err(StoreError::Encode)?;
+        write_atomically(&path, &bytes)
+    }
+}
+
+pub fn decode_coordinator_log(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<DecodedCoordinatorLog, StoreError> {
+    let clean_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |last| last + 1);
+    let mut records = Vec::new();
+    for (index, line) in bytes[..clean_len]
+        .split_inclusive(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        let record = serde_json::from_slice(&line[..line.len() - 1]).map_err(|source| {
+            StoreError::BadRecord {
+                path: path.to_path_buf(),
+                line: index + 1,
+                source,
+            }
+        })?;
+        records.push(record);
+    }
+    Ok(DecodedCoordinatorLog {
+        records,
+        clean_len,
+        torn: clean_len < bytes.len(),
+    })
+}
+
+fn verify_graph_registry(root: &Path, state: &CoordinatorState) -> Result<(), StoreError> {
+    for digest in &state.graphs {
+        let path = root.join(GRAPHS_DIR).join(format!("{digest}.json"));
+        let bytes = fs::read(&path).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                StoreError::MissingGraph(*digest)
+            } else {
+                io_error("read", &path, source)
+            }
+        })?;
+        let found = digest_bytes(&bytes);
+        if found != *digest {
+            return Err(StoreError::GraphDigest {
+                expected: *digest,
+                found,
+            });
+        }
+        let _ = decode_graph(*digest, &bytes)?;
+    }
+    Ok(())
+}
+
+fn decode_graph(digest: GraphDigest, bytes: &[u8]) -> Result<Graph, StoreError> {
+    let found = digest_bytes(bytes);
+    if found != digest {
+        return Err(StoreError::GraphDigest {
+            expected: digest,
+            found,
+        });
+    }
+    let graph: Graph =
+        serde_json::from_slice(bytes).map_err(|source| StoreError::BadGraph { digest, source })?;
+    if let Err(errors) = ir::validate(&graph) {
+        return Err(StoreError::InvalidGraph {
+            digest,
+            message: errors[0].to_string(),
+        });
+    }
+    Ok(graph)
+}
+
+fn digest_bytes(bytes: &[u8]) -> GraphDigest {
+    GraphDigest::from_bytes(Sha256::digest(bytes).into())
+}
+
+fn acquire_lease(file: &File, root: &Path) -> Result<(), StoreError> {
+    file.try_lock().map_err(|source| match source {
+        fs::TryLockError::WouldBlock => StoreError::Leased(root.to_path_buf()),
+        fs::TryLockError::Error(source) => io_error("lock", &root.join(RUN_FILE), source),
+    })
+}
+
+fn create_dir(path: &Path) -> Result<(), StoreError> {
+    fs::create_dir_all(path).map_err(|source| io_error("create", path, source))
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, StoreError> {
+    let bytes = fs::read(path).map_err(|source| io_error("read", path, source))?;
+    serde_json::from_slice(&bytes).map_err(|source| StoreError::BadJson {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_json<T: Serialize>(file: &mut File, value: &T, path: &Path) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(StoreError::Encode)?;
+    file.write_all(&bytes)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_data())
+        .map_err(|source| io_error("write", path, source))
+}
+
+fn write_once_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    if path.exists() {
+        let existing = fs::read(path).map_err(|source| io_error("read", path, source))?;
+        if existing == bytes {
+            return Ok(());
+        }
+        return Err(StoreError::GraphDigest {
+            expected: digest_bytes(bytes),
+            found:    digest_bytes(&existing),
+        });
+    }
+    write_atomically(path, bytes)
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let temporary = path.with_extension("tmp");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|source| io_error("create", &temporary, source))?;
+    file.write_all(bytes)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_data())
+        .map_err(|source| io_error("write", &temporary, source))?;
+    fs::rename(&temporary, path).map_err(|source| io_error("rename", path, source))?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)
+            .and_then(|directory| directory.sync_data())
+            .map_err(|source| io_error("sync", parent, source))?;
+    }
+    Ok(())
+}
+
+fn io_error(action: &'static str, path: &Path, source: io::Error) -> StoreError {
+    StoreError::Io {
+        action,
+        path: path.to_path_buf(),
+        source,
+    }
+}

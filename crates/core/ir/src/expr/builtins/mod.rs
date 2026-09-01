@@ -130,6 +130,16 @@ pub const BUILTINS: &[Builtin] = &[
         arity:   2,
         summary: "membership in an array, object keys, or a substring",
     },
+    Builtin {
+        name:    "index_of",
+        arity:   2,
+        summary: "the first array index of a value, or null when absent",
+    },
+    Builtin {
+        name:    "normalize_label",
+        arity:   1,
+        summary: "lowercase a label and normalize punctuation to underscores",
+    },
     // Full `regex` semantics, unanchored search, compiled per evaluation: a frontend
     // that validates patterns at parse time must never have the core reject one at
     // runtime, which is why this is `regex` and not `regex-lite`.
@@ -349,6 +359,36 @@ pub(super) fn eval_call(
                 Value::String(s) => needle.as_str().is_some_and(|n| s.contains(n)),
                 other => return Err(type_err("contains", "array, object or string", other)),
             }))
+        }
+        "index_of" => {
+            let (list, needle) = (arg(0)?, arg(1)?);
+            let Value::Array(items) = list else {
+                return Err(type_err("index_of", "an array", &list));
+            };
+            Ok(items
+                .iter()
+                .position(|item| item == &needle)
+                .map_or(Value::Null, |index| num(index as f64)))
+        }
+        "normalize_label" => {
+            let label = arg(0)?;
+            let label = label
+                .as_str()
+                .ok_or_else(|| type_err("normalize_label", "a string", &label))?;
+            let mut normalized = String::with_capacity(label.len());
+            let mut separator = false;
+            for character in label.trim().chars().flat_map(char::to_lowercase) {
+                if character.is_alphanumeric() {
+                    if separator && !normalized.is_empty() {
+                        normalized.push('_');
+                    }
+                    normalized.push(character);
+                    separator = false;
+                } else {
+                    separator = true;
+                }
+            }
+            Ok(Value::String(normalized))
         }
         "matches" => {
             let (text, pattern) = (arg(0)?, arg(1)?);

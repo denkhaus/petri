@@ -1,0 +1,126 @@
+use std::collections::BTreeMap;
+
+use ir::Value;
+use smol_str::SmolStr;
+use tokio::sync::{mpsc, oneshot, watch};
+
+use crate::{
+    CallSite, GraphDigest, InvocationId, InvocationResult, InvocationStatus, SandboxMode,
+    SecretBindings,
+};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvocationRequest {
+    pub site:    CallSite,
+    pub graph:   GraphDigest,
+    pub context: BTreeMap<SmolStr, Value>,
+    pub secrets: SecretBindings,
+    pub sandbox: SandboxMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvokeError {
+    #[error("unknown invocation graph {0}")]
+    UnknownGraph(GraphDigest),
+    #[error("the invocation limit has been reached")]
+    InvocationLimit,
+    #[error("the call site is already attached to a different invocation request")]
+    RequestMismatch,
+    #[error("the calling firing has no inheritable sandbox")]
+    NoInheritableSandbox,
+    #[error("the invocation coordinator is unavailable")]
+    CoordinatorUnavailable,
+    #[error("invocation failed before it could return a result: {0}")]
+    Coordinator(SmolStr),
+}
+
+#[async_trait::async_trait]
+pub trait InvocationClient: Send + Sync {
+    async fn start_or_attach(
+        &self,
+        request: InvocationRequest,
+    ) -> Result<InvocationHandle, InvokeError>;
+}
+
+pub struct InvocationHandle {
+    id:     InvocationId,
+    status: watch::Receiver<InvocationStatus>,
+    cancel: mpsc::UnboundedSender<InvocationId>,
+}
+
+impl InvocationHandle {
+    pub(crate) fn new(
+        id: InvocationId,
+        status: watch::Receiver<InvocationStatus>,
+        cancel: mpsc::UnboundedSender<InvocationId>,
+    ) -> Self {
+        Self { id, status, cancel }
+    }
+
+    pub fn id(&self) -> InvocationId {
+        self.id
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<InvocationStatus> {
+        self.status.clone()
+    }
+
+    pub async fn result(mut self) -> InvocationResult {
+        loop {
+            if let InvocationStatus::Finished(result) = self.status.borrow().clone() {
+                return result;
+            }
+            self.status
+                .changed()
+                .await
+                .expect("the coordinator keeps invocation status open until Finished");
+        }
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "the public handle contract keeps cancellation awaitable across implementations"
+    )]
+    pub async fn cancel(&self) {
+        let _ = self.cancel.send(self.id);
+    }
+}
+
+pub(crate) struct StartRequest {
+    pub parent:  crate::ExecutionId,
+    pub request: InvocationRequest,
+    pub reply:   oneshot::Sender<Result<InvocationHandle, InvokeError>>,
+}
+
+#[derive(Clone)]
+pub struct CoordinatorInvocationClient {
+    parent: crate::ExecutionId,
+    start:  mpsc::Sender<StartRequest>,
+}
+
+impl CoordinatorInvocationClient {
+    pub(crate) fn new(parent: crate::ExecutionId, start: mpsc::Sender<StartRequest>) -> Self {
+        Self { parent, start }
+    }
+}
+
+#[async_trait::async_trait]
+impl InvocationClient for CoordinatorInvocationClient {
+    async fn start_or_attach(
+        &self,
+        request: InvocationRequest,
+    ) -> Result<InvocationHandle, InvokeError> {
+        let (reply, result) = oneshot::channel();
+        self.start
+            .send(StartRequest {
+                parent: self.parent,
+                request,
+                reply,
+            })
+            .await
+            .map_err(|_| InvokeError::CoordinatorUnavailable)?;
+        result
+            .await
+            .map_err(|_| InvokeError::CoordinatorUnavailable)?
+    }
+}

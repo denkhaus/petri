@@ -47,6 +47,23 @@ impl Capabilities {
             .and_then(|value| value.downcast::<T>().ok())
     }
 
+    /// Return this set plus one execution-local capability.
+    ///
+    /// # Panics
+    ///
+    /// On a duplicate type, as with [`CapabilitiesBuilder::provide`].
+    #[must_use]
+    pub fn with<T: Send + Sync + 'static>(&self, value: T) -> Self {
+        let mut map = (*self.map).clone();
+        let replaced = map.insert(TypeId::of::<T>(), Arc::new(value));
+        assert!(
+            replaced.is_none(),
+            "a capability of type `{}` is already registered",
+            any::type_name::<T>()
+        );
+        Self { map: Arc::new(map) }
+    }
+
     /// The registered value, or the routable failure a step returns when its
     /// host service is missing. The message names the type.
     pub fn require<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, StepFailure> {

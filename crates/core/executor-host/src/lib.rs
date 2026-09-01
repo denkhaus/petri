@@ -256,7 +256,7 @@ impl HostExecutor {
                     .into(),
             });
         }
-        let workspace = self.workspace_for(&scope.instance);
+        let workspace = self.workspace_for(scope.workspace_id.as_str());
         async_fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::workspace("create", workspace.display(), e))?;

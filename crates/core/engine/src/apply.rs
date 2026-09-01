@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 
 use ir::{
-    Attempt, CancelScopeId, Control, EvalEnv, Exhaustion, ExpandTarget, Expansion, FailureClass,
-    FailureInfo, FiringId, Generation, Guard, JoinPolicy, Node, NodeId, Outcome, Status, Token,
-    Value, eval, eval_bool,
+    Attempt, CancelScopeId, Control, EdgeTransition, EvalEnv, Exhaustion, ExpandTarget, Expansion,
+    FailureClass, FailureInfo, FiringId, Generation, Guard, JoinPolicy, Node, NodeId, Outcome,
+    PickPolicy, SelectionPolicy, Status, Token, Value, eval, eval_bool,
 };
 
 /// The failure class of a record whose firing environment could not be built —
@@ -21,15 +21,22 @@ pub const FIRING_ENV_CLASS: FailureClass = FailureClass::new_static("firing_env"
 use smol_str::SmolStr;
 
 use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};
-use crate::event::{Command, Event, ResolvedFiring, SpliceClone, SubgraphSplice};
+use crate::event::{
+    Admission, AdmitPoint, Command, DecisionId, EngineExit, EngineStart, EntryPoint, Event,
+    GroupDecision, Intervention, ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate,
+    RoutingProposal, SpliceClone, SubgraphSplice, WeightedDraw,
+};
 use crate::log::EventSource;
 use crate::splice::{
     PreparedSeed, PreparedSplice, apply_prepared_splice, commit_splice_plan,
     prepare_outcome_splices, reject_splices,
 };
 use crate::state::{
-    BatchPolicy, EngineState, Firing, FiringRecord, RunError, SpliceEffect, SpliceOrigin, synthetic,
+    BatchPolicy, EngineState, Firing, FiringRecord, PendingAdmission, PendingRouting,
+    PreparedRoute, RestartIntent, RunError, SpliceEffect, SpliceOrigin, synthetic,
 };
+
+const ADMISSION_BLOCKED_CLASS: FailureClass = FailureClass::new_static("admission_blocked");
 
 /// Apply one event and return the commands it produced.
 ///
@@ -76,13 +83,14 @@ fn step(
         state.push_error(RunError::AlreadyFinished);
         return;
     }
-    if !state.is_started() && !matches!(event, Event::RunStarted) {
+    if !state.is_started() && !matches!(event, Event::RunStarted | Event::ExecutionStarted(_)) {
         state.push_error(RunError::NotStarted);
         return;
     }
 
     match event {
-        Event::RunStarted => on_run_started(state, queue),
+        Event::RunStarted => on_execution_started(state, EngineStart::default(), cmds),
+        Event::ExecutionStarted(start) => on_execution_started(state, start, cmds),
         Event::TokenEmitted(token) => on_token(state, token, cmds, queue),
         Event::StepStarted { firing, attempt } => match state.firing_mut(firing) {
             Some(f) if f.attempt == attempt => f.started = true,
@@ -104,24 +112,64 @@ fn step(
             attempt,
             outcome,
         } => on_step_finished(state, firing, attempt, outcome, cmds, queue),
+        Event::Admitted {
+            point,
+            decision_id,
+            decision,
+            trace: _,
+        } => on_admitted(state, point, decision_id, decision, cmds, queue),
+        Event::RoutingResolved {
+            firing,
+            decision_id,
+            groups,
+        } => on_routing_resolved(state, firing, decision_id, &groups, queue),
+        Event::RouteApplied(applied) => on_route_applied(state, applied, cmds, queue),
         Event::RetryElapsed {
             firing,
             next_attempt,
-        } => on_retry_elapsed(state, firing, next_attempt, cmds, queue),
+        } => on_retry_elapsed(state, firing, next_attempt, cmds),
         Event::NodeExpanded { node, splice } => on_node_expanded(state, node, splice, queue),
-        Event::CancelRequested { scope } => on_cancel(state, scope, cmds, queue),
-        Event::KillRequested { scope } => on_kill(state, scope, cmds, queue),
+        Event::CancelRequested { scope } => on_cancel(state, scope, cmds),
+        Event::KillRequested { scope } => on_kill(state, scope, cmds),
         Event::ControlRequested { firing, ctl } => on_control_requested(state, firing, ctl, cmds),
     }
 }
 
 // ── Run start ─────────────────────────────────────────────────────────────
 
-fn on_run_started(state: &mut EngineState, queue: &mut VecDeque<Event>) {
-    state.mark_started();
+fn on_execution_started(state: &mut EngineState, start: EngineStart, cmds: &mut Vec<Command>) {
+    if start.max_executions == 0 {
+        state.push_error(RunError::ZeroExecutionLimit);
+    }
+    if let EntryPoint::Node(node) = start.entry
+        && state.graph.node(node).is_none()
+    {
+        state.push_error(RunError::UnknownEntryNode(node));
+    }
+    state.mark_started(start);
+    let point = AdmitPoint::ExecutionStart;
+    let decision_id = DecisionId::execution_start();
+    state.insert_pending_admission(PendingAdmission {
+        point,
+        decision_id,
+        resolved: None,
+    });
+    cmds.push(Command::Admit { point, decision_id });
+}
+
+fn seed_execution(state: &mut EngineState, queue: &mut VecDeque<Event>) {
+    let Some(start) = state.start().cloned() else {
+        return;
+    };
     // Entry nodes have no incoming edges, so each gets a synthetic one. Their join
     // then works like any other node's, with no special case in the firing rule.
-    let entries = state.graph.entry.clone();
+    let entries = match start.entry {
+        EntryPoint::GraphEntries => state.graph.entry.clone(),
+        EntryPoint::Node(node) => {
+            state.force_entry(node, Generation::ZERO);
+            vec![node]
+        }
+    };
     for entry in entries {
         if state.graph.node(entry).is_none() {
             state.push_error(RunError::UnknownNode(entry));
@@ -134,6 +182,126 @@ fn on_run_started(state: &mut EngineState, queue: &mut VecDeque<Event>) {
             Generation::ZERO,
             Value::Null,
         )));
+    }
+}
+
+fn on_admitted(
+    state: &mut EngineState,
+    point: AdmitPoint,
+    decision_id: DecisionId,
+    decision: Admission,
+    cmds: &mut Vec<Command>,
+    queue: &mut VecDeque<Event>,
+) {
+    let Some(pending) = state.take_pending_admission(decision_id) else {
+        state.push_error(RunError::UnknownDecision(decision_id));
+        return;
+    };
+    if pending.point != point {
+        state.push_error(RunError::DecisionMismatch {
+            decision: decision_id,
+        });
+        return;
+    }
+    match (point, decision, pending.resolved) {
+        (AdmitPoint::ExecutionStart, Admission::Admit, None) => seed_execution(state, queue),
+        (AdmitPoint::ExecutionStart, Admission::Block { reason }, None) => {
+            state.push_error(RunError::AdmissionBlocked { point, reason });
+        }
+        (AdmitPoint::ExecutionStart, Admission::Skip { .. }, None) => {
+            state.push_error(RunError::DecisionMismatch {
+                decision: decision_id,
+            });
+        }
+        (AdmitPoint::AttemptStart { firing, attempt }, decision, Some(resolved))
+            if resolved.id() == firing && resolved.attempt() == attempt =>
+        {
+            apply_attempt_admission(state, resolved, decision, cmds);
+        }
+        _ => state.push_error(RunError::DecisionMismatch {
+            decision: decision_id,
+        }),
+    }
+}
+
+fn apply_attempt_admission(
+    state: &mut EngineState,
+    resolved: ResolvedFiring,
+    decision: Admission,
+    cmds: &mut Vec<Command>,
+) {
+    let firing_id = resolved.id();
+    let Some(firing) = state.firing(firing_id).cloned() else {
+        state.push_error(RunError::UnknownFiring(firing_id));
+        return;
+    };
+    let Some(node) = state.graph.node(firing.node).cloned() else {
+        state.push_error(RunError::UnknownNode(firing.node));
+        return;
+    };
+    match decision {
+        Admission::Admit => {
+            if let Some(firing) = state.firing_mut(firing_id) {
+                firing.awaiting_admission = false;
+            }
+            if state.acquire_scope(node.scope) {
+                cmds.push(Command::AcquireScope { scope: node.scope });
+            }
+            cmds.push(Command::StartStep(resolved));
+        }
+        Admission::Skip { outcome } => {
+            state.remove_firing(firing_id);
+            state.record_outcome(FiringRecord {
+                firing:     firing_id,
+                node:       firing.node,
+                name:       node.name.clone(),
+                generation: firing.generation,
+                attempt:    firing.attempt,
+                outcome:    outcome.clone(),
+            });
+            route(
+                state,
+                &node,
+                firing_id,
+                firing.generation,
+                firing.attempt,
+                &firing.inputs,
+                &outcome,
+                cmds,
+            );
+        }
+        Admission::Block { reason } => {
+            state.remove_firing(firing_id);
+            state.push_error(RunError::AdmissionBlocked {
+                point:  AdmitPoint::AttemptStart {
+                    firing:  firing_id,
+                    attempt: firing.attempt,
+                },
+                reason: reason.clone(),
+            });
+            let outcome = Outcome::new(
+                Status::Failure(FailureInfo::new(reason).with_class(ADMISSION_BLOCKED_CLASS)),
+                Value::Null,
+            );
+            state.record_outcome(FiringRecord {
+                firing:     firing_id,
+                node:       firing.node,
+                name:       node.name.clone(),
+                generation: firing.generation,
+                attempt:    firing.attempt,
+                outcome:    outcome.clone(),
+            });
+            route(
+                state,
+                &node,
+                firing_id,
+                firing.generation,
+                firing.attempt,
+                &firing.inputs,
+                &outcome,
+                cmds,
+            );
+        }
     }
 }
 
@@ -235,6 +403,7 @@ fn try_fire(
 
     let inputs = state.take_tokens(key);
     state.mark_fired(key);
+    state.take_forced_entry(key);
     state.bump_firing_count(node_id);
 
     if !admitted {
@@ -244,7 +413,7 @@ fn try_fire(
             generation,
             &inputs,
             &synthetic(Status::Cancelled),
-            queue,
+            cmds,
         );
         return;
     }
@@ -268,7 +437,7 @@ fn try_fire(
                 Value::Null,
             );
             state.push_error(error);
-            complete_without_running(state, &node, generation, &inputs, &outcome, queue);
+            complete_without_running(state, &node, generation, &inputs, &outcome, cmds);
             return;
         }
     };
@@ -295,7 +464,7 @@ fn try_fire(
                     generation,
                     &inputs,
                     &synthetic(status),
-                    queue,
+                    cmds,
                 );
                 return;
             }
@@ -311,7 +480,7 @@ fn try_fire(
                     generation,
                     &inputs,
                     &Outcome::failure("precondition failed to evaluate"),
-                    queue,
+                    cmds,
                 );
                 return;
             }
@@ -336,7 +505,7 @@ fn try_fire(
                 generation,
                 &inputs,
                 &Outcome::failure("step config failed to resolve"),
-                queue,
+                cmds,
             );
             return;
         }
@@ -367,7 +536,7 @@ fn try_fire(
                 generation,
                 &inputs,
                 &Outcome::failure("step config still holds an unresolved expression"),
-                queue,
+                cmds,
             );
             return;
         }
@@ -384,12 +553,20 @@ fn try_fire(
         started: false,
         cancelling: false,
         awaiting_retry: false,
+        awaiting_admission: true,
     };
-    if state.acquire_scope(node.scope) {
-        cmds.push(Command::AcquireScope { scope: node.scope });
-    }
-    cmds.push(Command::StartStep(resolved));
     state.insert_firing(firing);
+    let point = AdmitPoint::AttemptStart {
+        firing:  firing_id,
+        attempt: Attempt::FIRST,
+    };
+    let decision_id = DecisionId::attempt_start(firing_id, Attempt::FIRST);
+    state.insert_pending_admission(PendingAdmission {
+        point,
+        decision_id,
+        resolved: Some(resolved),
+    });
+    cmds.push(Command::Admit { point, decision_id });
 }
 
 /// Whether any token waiting at this join was emitted by a firing whose
@@ -403,6 +580,9 @@ fn has_cancelled_input(state: &EngineState, key: (NodeId, Generation)) -> bool {
 }
 
 fn is_join_satisfied(state: &EngineState, node: &Node, key: (NodeId, Generation)) -> bool {
+    if state.is_forced_entry(key) {
+        return true;
+    }
     let Some(tokens) = state.tokens_for(key) else {
         return false;
     };
@@ -425,7 +605,7 @@ fn complete_without_running(
     generation: Generation,
     inputs: &[Token],
     outcome: &Outcome,
-    queue: &mut VecDeque<Event>,
+    cmds: &mut Vec<Command>,
 ) {
     let firing = state.next_firing_id();
     state.record_outcome(FiringRecord {
@@ -444,7 +624,7 @@ fn complete_without_running(
         Attempt::FIRST,
         inputs,
         outcome,
-        queue,
+        cmds,
     );
 }
 
@@ -588,7 +768,7 @@ fn on_step_finished(
         attempt,
         &firing.inputs,
         &outcome,
-        queue,
+        cmds,
     );
 }
 
@@ -637,7 +817,6 @@ fn on_retry_elapsed(
     firing_id: FiringId,
     next_attempt: Attempt,
     cmds: &mut Vec<Command>,
-    queue: &mut VecDeque<Event>,
 ) {
     // A cancel or kill settled this firing while it was waiting out its backoff:
     // the driver's sleeper could not be recalled, so this arrival was expected.
@@ -670,7 +849,7 @@ fn on_retry_elapsed(
         Ok(statics) => statics,
         Err(error) => {
             state.push_error(error);
-            fail_live_firing(state, firing_id, &node, &firing, next_attempt, queue);
+            fail_live_firing(state, firing_id, &node, &firing, next_attempt, cmds);
             return;
         }
     };
@@ -687,7 +866,7 @@ fn on_retry_elapsed(
                 site: SmolStr::new("step config"),
                 error,
             });
-            fail_live_firing(state, firing_id, &node, &firing, next_attempt, queue);
+            fail_live_firing(state, firing_id, &node, &firing, next_attempt, cmds);
             return;
         }
     };
@@ -706,7 +885,7 @@ fn on_retry_elapsed(
                 node: firing.node,
                 path: unresolved.path,
             });
-            fail_live_firing(state, firing_id, &node, &firing, next_attempt, queue);
+            fail_live_firing(state, firing_id, &node, &firing, next_attempt, cmds);
             return;
         }
     };
@@ -714,8 +893,19 @@ fn on_retry_elapsed(
     if let Some(f) = state.firing_mut(firing_id) {
         f.attempt = next_attempt;
         f.awaiting_retry = false;
+        f.awaiting_admission = true;
     }
-    cmds.push(Command::StartStep(resolved));
+    let point = AdmitPoint::AttemptStart {
+        firing:  firing_id,
+        attempt: next_attempt,
+    };
+    let decision_id = DecisionId::attempt_start(firing_id, next_attempt);
+    state.insert_pending_admission(PendingAdmission {
+        point,
+        decision_id,
+        resolved: Some(resolved),
+    });
+    cmds.push(Command::Admit { point, decision_id });
 }
 
 /// End a live firing that could not be restarted, recording the failure and
@@ -726,7 +916,7 @@ fn fail_live_firing(
     node: &Node,
     firing: &Firing,
     attempt: Attempt,
-    queue: &mut VecDeque<Event>,
+    cmds: &mut Vec<Command>,
 ) {
     state.remove_firing(firing_id);
     let outcome = Outcome::failure("the retry could not be prepared");
@@ -746,14 +936,14 @@ fn fail_live_firing(
         attempt,
         &firing.inputs,
         &outcome,
-        queue,
+        cmds,
     );
 }
 
 // ── Routing ───────────────────────────────────────────────────────────────
 
-/// Evaluate a node's routing: each group emits at most one token, and groups
-/// emit concurrently.
+/// Evaluate every group once and ask the host to resolve the complete routing
+/// decision. Even terminal nodes take this round trip.
 fn route(
     state: &mut EngineState,
     node: &Node,
@@ -762,11 +952,8 @@ fn route(
     attempt: Attempt,
     inputs: &[Token],
     outcome: &Outcome,
-    queue: &mut VecDeque<Event>,
+    cmds: &mut Vec<Command>,
 ) {
-    if node.routing.groups.is_empty() {
-        return;
-    }
     let base = match firing_statics(state, node.id, inputs, generation, attempt) {
         Ok(statics) => statics,
         Err(error) => {
@@ -776,70 +963,532 @@ fn route(
     };
     let statics = with_outcome(&base, outcome);
     let token = primary_token(inputs);
-
+    let mut proposals = Vec::with_capacity(node.routing.groups.len());
     for (group_index, group) in node.routing.groups.iter().enumerate() {
-        let mut matched = false;
-        for arm in &group.arms {
-            let passes = match arm.guard {
-                Guard::Always => true,
-                Guard::Expr(id) => match eval_bool(
-                    &state.graph.exprs,
-                    id,
-                    &EvalEnv::new(&token, state.run_context(), &statics),
-                ) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        state.push_error(RunError::Eval {
-                            node: node.id,
-                            site: SmolStr::new(format!("guard on edge {}", arm.id)),
-                            error,
-                        });
-                        false
-                    }
-                },
-            };
-            if !passes {
-                continue;
+        let (tier, pick, candidates) = match &group.policy {
+            SelectionPolicy::FirstMatch => {
+                let candidate = group.arms.iter().find(|arm| {
+                    guard_passes(
+                        state,
+                        node.id,
+                        arm.guard,
+                        &format!("guard on edge {}", arm.id),
+                        &token,
+                        &statics,
+                    )
+                });
+                (
+                    None,
+                    Some(PickPolicy::First),
+                    candidate
+                        .into_iter()
+                        .map(|arm| routing_candidate(state, arm, None))
+                        .collect(),
+                )
             }
-            let payload = match arm.map {
-                None => outcome.output.clone(),
-                Some(map) => match eval(
-                    &state.graph.exprs,
-                    map,
-                    &EvalEnv::new(&token, state.run_context(), &statics),
-                ) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        state.push_error(RunError::Eval {
-                            node: node.id,
-                            site: SmolStr::new(format!("map on edge {}", arm.id)),
-                            error,
-                        });
-                        Value::Null
+            SelectionPolicy::Tiered(tiers) => {
+                let mut active = (None, None, Vec::new());
+                for (tier_index, tier) in tiers.iter().enumerate() {
+                    let mut eligible = Vec::new();
+                    for candidate in &tier.candidates {
+                        let Some(arm) = group.arms.iter().find(|arm| arm.id == candidate.edge)
+                        else {
+                            continue;
+                        };
+                        if !guard_passes(
+                            state,
+                            node.id,
+                            candidate.when,
+                            &format!(
+                                "guard in routing tier {tier_index} for edge {}",
+                                candidate.edge
+                            ),
+                            &token,
+                            &statics,
+                        ) {
+                            continue;
+                        }
+                        let rank = if tier.pick == PickPolicy::LowestRankThenArmOrder {
+                            let Some(rank) = candidate.rank else {
+                                continue;
+                            };
+                            match eval(
+                                &state.graph.exprs,
+                                rank,
+                                &EvalEnv::new(&token, state.run_context(), &statics),
+                            ) {
+                                Ok(Value::Null) => continue,
+                                Ok(Value::Number(number)) => number.as_f64(),
+                                Ok(_) => {
+                                    state.push_error(RunError::InvalidRouting {
+                                        firing,
+                                        reason: SmolStr::new(format!(
+                                            "rank for edge {} is not a number or null",
+                                            candidate.edge
+                                        )),
+                                    });
+                                    continue;
+                                }
+                                Err(error) => {
+                                    state.push_error(RunError::Eval {
+                                        node: node.id,
+                                        site: SmolStr::new(format!(
+                                            "rank in routing tier {tier_index} for edge {}",
+                                            candidate.edge
+                                        )),
+                                        error,
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        eligible.push(routing_candidate(state, arm, rank));
                     }
-                },
-            };
-            // A back edge is what advances the loop counter. Nothing else does.
-            let next_generation = if arm.back {
-                generation.next()
-            } else {
-                generation
-            };
+                    if !eligible.is_empty() {
+                        active = (
+                            Some(u32::try_from(tier_index).expect("a graph has at most u32 tiers")),
+                            Some(tier.pick),
+                            eligible,
+                        );
+                        break;
+                    }
+                }
+                active
+            }
+        };
+        proposals.push(RoutingProposal {
+            group: u32::try_from(group_index).expect("a graph has at most u32 routing groups"),
+            tier,
+            pick,
+            candidates,
+        });
+    }
+
+    let decision_id = DecisionId::route(firing, attempt);
+    let restart_allowed = state
+        .start()
+        .is_some_and(|start| start.execution_index.saturating_add(1) < start.max_executions);
+    state.insert_pending_routing(PendingRouting {
+        firing,
+        decision_id,
+        node: node.clone(),
+        generation,
+        attempt,
+        inputs: inputs.to_vec(),
+        outcome: outcome.clone(),
+        run: state.run_context().clone(),
+        restart_allowed,
+        groups: proposals.clone(),
+    });
+    cmds.push(Command::ResolveRouting {
+        firing,
+        decision_id,
+        restart_allowed,
+        groups: proposals,
+    });
+}
+
+fn guard_passes(
+    state: &mut EngineState,
+    node: NodeId,
+    guard: Guard,
+    site: &str,
+    token: &Value,
+    statics: &ir::StaticCtx,
+) -> bool {
+    match guard {
+        Guard::Always => true,
+        Guard::Expr(id) => match eval_bool(
+            &state.graph.exprs,
+            id,
+            &EvalEnv::new(token, state.run_context(), statics),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                state.push_error(RunError::Eval {
+                    node,
+                    site: SmolStr::new(site),
+                    error,
+                });
+                false
+            }
+        },
+    }
+}
+
+fn routing_candidate(state: &EngineState, arm: &ir::Edge, rank: Option<f64>) -> RoutingCandidate {
+    RoutingCandidate {
+        edge: arm.id,
+        weight: arm.weight,
+        target: state
+            .graph
+            .node(arm.to)
+            .map_or_else(|| SmolStr::new(""), |node| node.name.clone()),
+        rank,
+        transition: arm.transition,
+    }
+}
+
+fn on_routing_resolved(
+    state: &mut EngineState,
+    firing: FiringId,
+    decision_id: DecisionId,
+    groups: &[GroupDecision],
+    queue: &mut VecDeque<Event>,
+) {
+    let Some(pending) = state.take_pending_routing(firing) else {
+        state.push_error(RunError::UnknownDecision(decision_id));
+        return;
+    };
+    if pending.decision_id != decision_id {
+        state.push_error(RunError::DecisionMismatch {
+            decision: decision_id,
+        });
+        return;
+    }
+    let prepared = match validate_and_prepare_routes(state, &pending, groups) {
+        Ok(prepared) => prepared,
+        Err(reason) => {
+            state.push_error(RunError::InvalidRouting { firing, reason });
+            return;
+        }
+    };
+    state.set_prepared_routes(firing, prepared.clone());
+    if matches!(prepared.front(), Some(PreparedRoute::Jump { .. })) {
+        let Some(PreparedRoute::Jump { target, .. }) = prepared.front() else {
+            return;
+        };
+        queue.push_back(Event::RouteApplied(RouteApplied::Jump {
+            firing,
+            target: *target,
+        }));
+        return;
+    }
+    for route in prepared {
+        let applied = match route {
+            PreparedRoute::Edge { group, edge, .. } => RouteApplied::Edge {
+                firing,
+                group,
+                edge,
+            },
+            PreparedRoute::None { group } => RouteApplied::None { firing, group },
+            PreparedRoute::Jump { .. } => continue,
+        };
+        queue.push_back(Event::RouteApplied(applied));
+    }
+}
+
+fn validate_and_prepare_routes(
+    state: &mut EngineState,
+    pending: &PendingRouting,
+    decisions: &[GroupDecision],
+) -> Result<VecDeque<PreparedRoute>, SmolStr> {
+    if decisions.len() != pending.groups.len() {
+        return Err(SmolStr::new(
+            "the group decision count does not match the proposal",
+        ));
+    }
+    let mut prepared = VecDeque::new();
+    for (index, (proposal, resolved)) in pending.groups.iter().zip(decisions).enumerate() {
+        let group_index = u32::try_from(index).expect("a graph has at most u32 routing groups");
+        if proposal.group != group_index || resolved.group != group_index {
+            return Err(SmolStr::new("group decisions are not in declared order"));
+        }
+        let group = pending
+            .node
+            .routing
+            .groups
+            .get(index)
+            .ok_or_else(|| SmolStr::new("the proposal names an unknown routing group"))?;
+        validate_trace(state, pending, group, resolved)?;
+        let expected = proposed_pick(proposal, resolved.draw.as_ref())?;
+        match &resolved.decision {
+            RouteDecision::Emit(edge) => {
+                let Some(arm) = group.arms.iter().find(|arm| arm.id == *edge) else {
+                    return Err(SmolStr::new("the selected edge is not an arm of its group"));
+                };
+                let overridden = resolved
+                    .trace
+                    .iter()
+                    .any(|entry| matches!(entry, Intervention::Override { .. }));
+                if !overridden && expected != Some(*edge) {
+                    return Err(SmolStr::new(
+                        "the selected edge does not match the core proposal",
+                    ));
+                }
+                if arm.transition == EdgeTransition::Restart && !pending.restart_allowed {
+                    return Err(SmolStr::new(
+                        "a restart edge was emitted after the execution limit",
+                    ));
+                }
+                let base = firing_statics(
+                    state,
+                    pending.node.id,
+                    &pending.inputs,
+                    pending.generation,
+                    pending.attempt,
+                )
+                .map_err(|error| SmolStr::new(error.to_string()))?;
+                let statics = with_outcome(&base, &pending.outcome);
+                let token = primary_token(&pending.inputs);
+                let payload = match arm.map {
+                    None => pending.outcome.output.clone(),
+                    Some(map) => match eval(
+                        &state.graph.exprs,
+                        map,
+                        &EvalEnv::new(&token, &pending.run, &statics),
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            state.push_error(RunError::Eval {
+                                node: pending.node.id,
+                                site: SmolStr::new(format!("map on edge {}", arm.id)),
+                                error,
+                            });
+                            Value::Null
+                        }
+                    },
+                };
+                prepared.push_back(PreparedRoute::Edge {
+                    group: group_index,
+                    edge: arm.id,
+                    target: arm.to,
+                    generation: if arm.back {
+                        pending.generation.next()
+                    } else {
+                        pending.generation
+                    },
+                    payload,
+                    transition: arm.transition,
+                });
+            }
+            RouteDecision::Jump(target) => {
+                if pending.node.routing.groups.len() != 1 || state.graph.node(*target).is_none() {
+                    return Err(SmolStr::new(
+                        "the jump target or source routing shape is invalid",
+                    ));
+                }
+                prepared.clear();
+                prepared.push_back(PreparedRoute::Jump {
+                    target:     *target,
+                    generation: pending.generation,
+                });
+                break;
+            }
+            RouteDecision::None => {
+                if expected.is_some() {
+                    return Err(SmolStr::new("the host returned None for an eligible route"));
+                }
+                if matches!(group.fallthrough, ir::Fallthrough::Error) {
+                    state.push_error(RunError::NoArmMatched {
+                        node:  pending.node.id,
+                        group: index,
+                    });
+                }
+                prepared.push_back(PreparedRoute::None { group: group_index });
+            }
+            RouteDecision::Block { reason } => {
+                state.push_error(RunError::RoutingBlocked {
+                    firing: pending.firing,
+                    reason: reason.clone(),
+                });
+                prepared.push_back(PreparedRoute::None { group: group_index });
+            }
+        }
+    }
+    Ok(prepared)
+}
+
+fn validate_trace(
+    state: &EngineState,
+    pending: &PendingRouting,
+    group: &ir::RoutingGroup,
+    resolved: &GroupDecision,
+) -> Result<(), SmolStr> {
+    for intervention in &resolved.trace {
+        match intervention {
+            Intervention::Override { edge, .. } => {
+                if !group.arms.iter().any(|arm| arm.id == *edge) {
+                    return Err(SmolStr::new("an override names an undeclared group edge"));
+                }
+            }
+            Intervention::Jump { target, .. } => {
+                if pending.node.routing.groups.len() != 1 || state.graph.node(*target).is_none() {
+                    return Err(SmolStr::new(
+                        "a jump names an undeclared node or ambiguous source",
+                    ));
+                }
+            }
+            Intervention::Block { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn proposed_pick(
+    proposal: &RoutingProposal,
+    draw: Option<&WeightedDraw>,
+) -> Result<Option<ir::EdgeId>, SmolStr> {
+    if proposal.candidates.is_empty() {
+        if draw.is_some() {
+            return Err(SmolStr::new("an empty proposal cannot carry a draw"));
+        }
+        return Ok(None);
+    }
+    let pick = proposal.pick.unwrap_or(PickPolicy::First);
+    if pick != PickPolicy::WeightedRandom && draw.is_some() {
+        return Err(SmolStr::new(
+            "only weighted random routing may carry a draw",
+        ));
+    }
+    match pick {
+        PickPolicy::First => Ok(proposal.candidates.first().map(|candidate| candidate.edge)),
+        PickPolicy::HighestWeightThenLexical => {
+            let mut winner = &proposal.candidates[0];
+            for candidate in &proposal.candidates[1..] {
+                if candidate.weight > winner.weight
+                    || (candidate.weight == winner.weight && candidate.target < winner.target)
+                {
+                    winner = candidate;
+                }
+            }
+            Ok(Some(winner.edge))
+        }
+        PickPolicy::LowestRankThenArmOrder => {
+            let mut winner: Option<&RoutingCandidate> = None;
+            for candidate in &proposal.candidates {
+                let Some(rank) = candidate.rank else {
+                    continue;
+                };
+                if winner.is_none_or(|current| {
+                    rank.total_cmp(&current.rank.unwrap_or(f64::INFINITY))
+                        .is_lt()
+                }) {
+                    winner = Some(candidate);
+                }
+            }
+            Ok(winner.map(|candidate| candidate.edge))
+        }
+        PickPolicy::WeightedRandom => {
+            let draw = draw.ok_or_else(|| SmolStr::new("weighted routing requires a draw"))?;
+            if Some(draw.tier) != proposal.tier {
+                return Err(SmolStr::new("the draw names the wrong tier"));
+            }
+            let candidates: Vec<_> = proposal.candidates.iter().map(|item| item.edge).collect();
+            if draw.candidates != candidates {
+                return Err(SmolStr::new(
+                    "the draw candidate list differs from the proposal",
+                ));
+            }
+            let total: u64 = proposal
+                .candidates
+                .iter()
+                .map(|item| u64::from(item.weight))
+                .sum();
+            if total == 0 || draw.total != total || draw.roll >= total {
+                return Err(SmolStr::new(
+                    "the weighted draw has an invalid total or roll",
+                ));
+            }
+            let mut roll = draw.roll;
+            for candidate in &proposal.candidates {
+                let weight = u64::from(candidate.weight);
+                if roll < weight {
+                    return Ok(Some(candidate.edge));
+                }
+                roll -= weight;
+            }
+            Err(SmolStr::new("the weighted draw did not select a candidate"))
+        }
+    }
+}
+
+fn on_route_applied(
+    state: &mut EngineState,
+    applied: RouteApplied,
+    cmds: &mut Vec<Command>,
+    queue: &mut VecDeque<Event>,
+) {
+    let firing = match applied {
+        RouteApplied::Edge { firing, .. }
+        | RouteApplied::Jump { firing, .. }
+        | RouteApplied::None { firing, .. } => firing,
+    };
+    let Some(prepared) = state.prepared_route(firing).cloned() else {
+        state.push_error(RunError::InvalidRouting {
+            firing,
+            reason: SmolStr::new("RouteApplied has no prepared decision"),
+        });
+        return;
+    };
+    let matches = match (&applied, &prepared) {
+        (
+            RouteApplied::Edge { group, edge, .. },
+            PreparedRoute::Edge {
+                group: expected_group,
+                edge: expected_edge,
+                ..
+            },
+        ) => group == expected_group && edge == expected_edge,
+        (
+            RouteApplied::Jump { target, .. },
+            PreparedRoute::Jump {
+                target: expected, ..
+            },
+        ) => target == expected,
+        (RouteApplied::None { group, .. }, PreparedRoute::None { group: expected }) => {
+            group == expected
+        }
+        _ => false,
+    };
+    if !matches {
+        state.push_error(RunError::InvalidRouting {
+            firing,
+            reason: SmolStr::new("RouteApplied differs from the resolved decision"),
+        });
+        return;
+    }
+    let Some(prepared) = state.take_prepared_route(firing) else {
+        return;
+    };
+    match prepared {
+        PreparedRoute::Edge {
+            edge,
+            target: _,
+            generation,
+            payload,
+            transition: EdgeTransition::Continue,
+            ..
+        } => queue.push_back(Event::TokenEmitted(Token::new(
+            edge, generation, payload, firing,
+        ))),
+        PreparedRoute::Edge {
+            edge,
+            target,
+            transition: EdgeTransition::Restart,
+            ..
+        } => {
+            state.begin_restart(RestartIntent {
+                edge,
+                target,
+                source: firing,
+            });
+            begin_restart_shutdown(state, cmds);
+        }
+        PreparedRoute::Jump { target, generation } => {
+            let edge = state.next_edge_id();
+            state.register_seed_edge(edge, target);
+            state.force_entry(target, generation);
             queue.push_back(Event::TokenEmitted(Token::new(
-                arm.id,
-                next_generation,
-                payload,
+                edge,
+                generation,
+                Value::Null,
                 firing,
             )));
-            matched = true;
-            break;
         }
-        if !matched && matches!(group.fallthrough, ir::Fallthrough::Error) {
-            state.push_error(RunError::NoArmMatched {
-                node:  node.id,
-                group: group_index,
-            });
-        }
+        PreparedRoute::None { .. } => {}
     }
 }
 
@@ -1077,7 +1726,7 @@ fn on_control_requested(
     }
     let deliverable = state
         .firing(firing)
-        .is_some_and(|f| !f.cancelling && !f.awaiting_retry);
+        .is_some_and(|f| !f.cancelling && !f.awaiting_retry && !f.awaiting_admission);
     if deliverable {
         cmds.push(Command::DeliverControl { firing, ctl });
     }
@@ -1088,26 +1737,27 @@ fn on_control_requested(
 /// The polite tier. Live firings get `Control::Cancel`; pending tokens survive,
 /// so nodes in the scope complete `Cancelled` — or fire, when marked
 /// `run_on_cancel` — as their joins satisfy (§5).
-fn on_cancel(
-    state: &mut EngineState,
-    scope: CancelScopeId,
-    cmds: &mut Vec<Command>,
-    queue: &mut VecDeque<Event>,
-) {
-    stop_scope(state, scope, false, cmds, queue);
+fn on_cancel(state: &mut EngineState, scope: CancelScopeId, cmds: &mut Vec<Command>) {
+    if scope == CancelScopeId::ROOT {
+        state.clear_restart();
+    }
+    stop_scope(state, scope, false, true, cmds);
 }
 
 /// The forced tier: the pre-v3 cancel behavior, kept under its own event.
 /// Tokens drop, nothing routes, nothing is admitted — `run_on_cancel` included
 /// — and `Control::Kill` reaches every live firing, already-cancelling ones
 /// too.
-fn on_kill(
-    state: &mut EngineState,
-    scope: CancelScopeId,
-    cmds: &mut Vec<Command>,
-    queue: &mut VecDeque<Event>,
-) {
-    stop_scope(state, scope, true, cmds, queue);
+fn on_kill(state: &mut EngineState, scope: CancelScopeId, cmds: &mut Vec<Command>) {
+    if scope == CancelScopeId::ROOT {
+        state.clear_restart();
+        state.clear_pending_decisions();
+    }
+    stop_scope(state, scope, true, true, cmds);
+}
+
+fn begin_restart_shutdown(state: &mut EngineState, cmds: &mut Vec<Command>) {
+    stop_scope(state, CancelScopeId::ROOT, false, false, cmds);
 }
 
 /// Both tiers share one shape — mark the closure, doom its live firings — and
@@ -1117,8 +1767,8 @@ fn stop_scope(
     state: &mut EngineState,
     scope: CancelScopeId,
     kill: bool,
+    records_root_cancel: bool,
     cmds: &mut Vec<Command>,
-    queue: &mut VecDeque<Event>,
 ) {
     let closure = state.cancel_scope_closure(scope);
     for id in &closure {
@@ -1129,7 +1779,7 @@ fn stop_scope(
         }
     }
     let root = scope == CancelScopeId::ROOT;
-    if root {
+    if root && records_root_cancel {
         state.mark_cancelled();
     }
     if kill {
@@ -1147,11 +1797,15 @@ fn stop_scope(
         .cloned()
         .collect();
     for firing in doomed {
+        if firing.awaiting_admission {
+            settle_awaiting_admission(state, &firing, !kill, cmds);
+            continue;
+        }
         // A firing waiting out a retry backoff has no work in flight and no driver
         // task to deliver to, so the core settles it at once: recorded — and, under
         // a cancel only, routed.
         if firing.awaiting_retry {
-            settle_awaiting_retry(state, &firing, !kill, queue);
+            settle_awaiting_retry(state, &firing, !kill, cmds);
             continue;
         }
         if let Some(f) = state.firing_mut(firing.id) {
@@ -1177,7 +1831,7 @@ fn settle_awaiting_retry(
     state: &mut EngineState,
     firing: &Firing,
     routes: bool,
-    queue: &mut VecDeque<Event>,
+    cmds: &mut Vec<Command>,
 ) {
     state.remove_firing(firing.id);
     state.add_retry_tombstone(firing.id);
@@ -1203,7 +1857,42 @@ fn settle_awaiting_retry(
             firing.attempt,
             &firing.inputs,
             &outcome,
-            queue,
+            cmds,
+        );
+    }
+}
+
+fn settle_awaiting_admission(
+    state: &mut EngineState,
+    firing: &Firing,
+    routes: bool,
+    cmds: &mut Vec<Command>,
+) {
+    state.remove_admission_for_firing(firing.id);
+    state.remove_firing(firing.id);
+    let Some(node) = state.graph.node(firing.node).cloned() else {
+        state.push_error(RunError::UnknownNode(firing.node));
+        return;
+    };
+    let outcome = synthetic(Status::Cancelled);
+    state.record_outcome(FiringRecord {
+        firing:     firing.id,
+        node:       firing.node,
+        name:       node.name.clone(),
+        generation: firing.generation,
+        attempt:    firing.attempt,
+        outcome:    outcome.clone(),
+    });
+    if routes {
+        route(
+            state,
+            &node,
+            firing.id,
+            firing.generation,
+            firing.attempt,
+            &firing.inputs,
+            &outcome,
+            cmds,
         );
     }
 }
@@ -1221,16 +1910,29 @@ fn finish_if_quiescent(state: &mut EngineState, cmds: &mut Vec<Command>) {
     if !state.is_started() || state.is_finished() || !state.is_quiescent() {
         return;
     }
-    state.mark_finished();
+    let exit = match state.restart_intent() {
+        Some(intent) if !state.is_cancelled() => EngineExit::Restart {
+            edge:   intent.edge,
+            target: intent.target,
+            source: intent.source,
+        },
+        _ => EngineExit::Terminal {
+            status: state.folded_status(),
+        },
+    };
+    state.mark_finished(exit.clone());
     // Terminal release, in the same transition as the finish: a token parked at an
     // unsatisfiable join would otherwise hold its environment forever, and a
     // finished serialized state must claim no resources.
     for scope in state.release_all_scopes() {
         cmds.push(Command::ReleaseScope { scope });
     }
-    cmds.push(Command::FinishRun {
-        status: state.folded_status(),
-    });
+    if let EngineExit::Terminal { status } = &exit {
+        cmds.push(Command::FinishRun { status: *status });
+        cmds.push(Command::FinishExecution { exit: exit.clone() });
+    } else {
+        cmds.push(Command::FinishExecution { exit });
+    }
 }
 
 fn type_name(value: &Value) -> &'static str {

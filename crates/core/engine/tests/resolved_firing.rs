@@ -4,7 +4,7 @@
 
 mod support;
 
-use engine::{Command, EngineState, Event, ResolvedFiring, RunError, apply};
+use engine::{Admission, Command, EngineState, Event, ResolvedFiring, RunError, apply};
 use ir::placeholder::{EXPR_PLACEHOLDER_KEY, SECRET_REF_KEY};
 use ir::{
     Attempt, FiringId, Generation, GraphBuilder, NodeId, RunStatus, ScopeId, StepRef, Value,
@@ -162,6 +162,32 @@ fn the_payload_identifies_the_firing() {
     let graph = b.build();
 
     let (state, commands) = apply(EngineState::new(graph), Event::RunStarted);
+    let (point, decision_id) = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Admit { point, decision_id } => Some((*point, *decision_id)),
+            _ => None,
+        })
+        .expect("execution start asks for admission");
+    let (state, commands) = apply(state, Event::Admitted {
+        point,
+        decision_id,
+        decision: Admission::Admit,
+        trace: Vec::new(),
+    });
+    let (point, decision_id) = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Admit { point, decision_id } => Some((*point, *decision_id)),
+            _ => None,
+        })
+        .expect("attempt start asks for admission");
+    let (state, commands) = apply(state, Event::Admitted {
+        point,
+        decision_id,
+        decision: Admission::Admit,
+        trace: Vec::new(),
+    });
     let Some(Command::StartStep(resolved)) =
         commands.iter().find(|c| matches!(c, Command::StartStep(_)))
     else {

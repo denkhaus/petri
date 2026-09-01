@@ -232,8 +232,8 @@ async fn a_crash_between_the_finish_and_its_core_records_reconstructs_the_batch(
     )
     .expect("the prefix resumes");
     assert!(
-        !info.redispatched.is_empty(),
-        "the reconstructed batch owes work"
+        info.redispatched.is_empty(),
+        "routing must finish before the spliced step can be dispatched"
     );
     let resumed = driver.run().await;
 

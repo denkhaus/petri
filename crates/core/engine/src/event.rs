@@ -5,19 +5,228 @@
 //! blocks. A host turns commands into effects and feeds the results back as
 //! events.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
 use ir::{
     Attempt, CancelScopeId, Control, EdgeId, FiringId, Generation, Node, NodeId, Outcome,
-    RunStatus, ScopeId, StepEvent, Token, Value, placeholder,
+    PickPolicy, RunStatus, ScopeId, StepEvent, Token, Value, placeholder,
 };
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+
+/// Default execution limit for one invocation.
+pub const DEFAULT_MAX_EXECUTIONS: u32 = 32;
+
+/// The complete, replayable specification for one engine instance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EngineStart {
+    pub entry:           EntryPoint,
+    pub context:         BTreeMap<SmolStr, Value>,
+    pub prior_firings:   BTreeMap<NodeId, u32>,
+    pub execution_index: u32,
+    pub max_executions:  u32,
+}
+
+impl Default for EngineStart {
+    fn default() -> Self {
+        Self {
+            entry:           EntryPoint::GraphEntries,
+            context:         BTreeMap::new(),
+            prior_firings:   BTreeMap::new(),
+            execution_index: 0,
+            max_executions:  DEFAULT_MAX_EXECUTIONS,
+        }
+    }
+}
+
+/// How an execution receives its first synthetic seed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryPoint {
+    #[default]
+    GraphEntries,
+    Node(NodeId),
+}
+
+/// How one reset-free engine instance ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EngineExit {
+    Terminal {
+        status: RunStatus,
+    },
+    Restart {
+        edge:   EdgeId,
+        target: NodeId,
+        source: FiringId,
+    },
+}
+
+/// A stable name for one configured decision middleware.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MiddlewareKey(SmolStr);
+
+impl MiddlewareKey {
+    pub fn new(value: impl Into<SmolStr>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for MiddlewareKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// The kind of durable decision represented by a [`DecisionId`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum DecisionPoint {
+    Route,
+    AttemptStart,
+    ExecutionStart,
+}
+
+/// An engine-local decision identity, stable across crash and reissue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DecisionId {
+    pub point:   DecisionPoint,
+    pub firing:  Option<FiringId>,
+    pub attempt: Option<Attempt>,
+}
+
+impl DecisionId {
+    pub const fn execution_start() -> Self {
+        Self {
+            point:   DecisionPoint::ExecutionStart,
+            firing:  None,
+            attempt: None,
+        }
+    }
+
+    pub const fn attempt_start(firing: FiringId, attempt: Attempt) -> Self {
+        Self {
+            point:   DecisionPoint::AttemptStart,
+            firing:  Some(firing),
+            attempt: Some(attempt),
+        }
+    }
+
+    pub const fn route(firing: FiringId, attempt: Attempt) -> Self {
+        Self {
+            point:   DecisionPoint::Route,
+            firing:  Some(firing),
+            attempt: Some(attempt),
+        }
+    }
+}
+
+/// The target of an admission decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdmitPoint {
+    ExecutionStart,
+    AttemptStart { firing: FiringId, attempt: Attempt },
+}
+
+/// A recorded admission decision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Admission {
+    Admit,
+    Skip { outcome: Outcome },
+    Block { reason: SmolStr },
+}
+
+/// The eligible form of one edge sent to the host's routing pipeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingCandidate {
+    pub edge:       EdgeId,
+    pub weight:     u32,
+    pub target:     SmolStr,
+    pub rank:       Option<f64>,
+    pub transition: ir::EdgeTransition,
+}
+
+/// The core's proposal for one routing group.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingProposal {
+    pub group:      u32,
+    pub tier:       Option<u32>,
+    pub pick:       Option<PickPolicy>,
+    pub candidates: Vec<RoutingCandidate>,
+}
+
+/// The random draw recorded for a weighted tier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightedDraw {
+    pub tier:       u32,
+    pub candidates: Vec<EdgeId>,
+    pub roll:       u64,
+    pub total:      u64,
+}
+
+/// One middleware change in configured chain order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Intervention {
+    Override {
+        middleware: MiddlewareKey,
+        edge:       EdgeId,
+    },
+    Jump {
+        middleware: MiddlewareKey,
+        target:     NodeId,
+    },
+    Block {
+        middleware: MiddlewareKey,
+        reason:     SmolStr,
+    },
+}
+
+/// The final routing decision the core validates and applies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RouteDecision {
+    Emit(EdgeId),
+    Jump(NodeId),
+    None,
+    Block { reason: SmolStr },
+}
+
+/// The recorded result for one routing group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupDecision {
+    pub group:    u32,
+    pub draw:     Option<WeightedDraw>,
+    pub trace:    Vec<Intervention>,
+    pub decision: RouteDecision,
+}
+
+/// The core record that states which resolved route was applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RouteApplied {
+    Edge {
+        firing: FiringId,
+        group:  u32,
+        edge:   EdgeId,
+    },
+    Jump {
+        firing: FiringId,
+        target: NodeId,
+    },
+    None {
+        firing: FiringId,
+        group:  u32,
+    },
+}
 
 /// Something that happened. Every event is appended to the log before `apply`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
+    /// Compatibility start spelling. New hosts use [`Event::ExecutionStarted`].
     RunStarted,
+    ExecutionStarted(EngineStart),
     /// A token was placed on an edge. The core emits these for its own routing
     /// and seeding; a host may also inject one.
     TokenEmitted(Token),
@@ -36,6 +245,18 @@ pub enum Event {
         attempt: Attempt,
         outcome: Outcome,
     },
+    Admitted {
+        point:       AdmitPoint,
+        decision_id: DecisionId,
+        decision:    Admission,
+        trace:       Vec<MiddlewareKey>,
+    },
+    RoutingResolved {
+        firing:      FiringId,
+        decision_id: DecisionId,
+        groups:      Vec<GroupDecision>,
+    },
+    RouteApplied(RouteApplied),
     /// The driver waited out a retry's backoff. It applies jitter and does the
     /// sleeping; the core never sees a clock or an RNG.
     RetryElapsed {
@@ -254,6 +475,18 @@ impl TryFrom<ResolvedFiringRepr> for ResolvedFiring {
 /// Something the host must do.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
+    /// Ask the host's durable admission pipeline for one decision.
+    Admit {
+        point:       AdmitPoint,
+        decision_id: DecisionId,
+    },
+    /// Ask the host's durable routing pipeline to resolve every group once.
+    ResolveRouting {
+        firing:          FiringId,
+        decision_id:     DecisionId,
+        restart_allowed: bool,
+        groups:          Vec<RoutingProposal>,
+    },
     /// Run a step. The payload carries the config already resolved against the
     /// firing's context, so the host never reads the graph's unresolved copy.
     StartStep(ResolvedFiring),
@@ -288,6 +521,9 @@ pub enum Command {
     },
     FinishRun {
         status: RunStatus,
+    },
+    FinishExecution {
+        exit: EngineExit,
     },
 }
 

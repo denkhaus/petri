@@ -579,6 +579,7 @@ name = "petri"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "petri-execution",
  "petri-frontend-gha",
  "petri-github-actions",
  "petri-github-objects",
@@ -618,6 +619,7 @@ name = "petri-driver"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "getrandom 0.3.4",
  "petri-engine",
  "petri-executor",
  "petri-executor-docker",
@@ -645,12 +647,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "petri-execution"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "petri-driver",
+ "petri-engine",
+ "petri-executor",
+ "petri-ir",
+ "petri-runtime",
+ "petri-steps",
+ "petri-testkit",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smol_str",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "petri-executor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "libc",
  "petri-ir",
+ "serde",
  "serde_json",
  "smol_str",
  "thiserror",

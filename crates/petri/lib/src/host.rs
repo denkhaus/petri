@@ -29,6 +29,7 @@
 //! line — and resume tolerates any lost suffix as a shorter prefix. A host that
 //! needs a stronger bar owns its own sink.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+use execution::{Coordinator, CoordinatorError, CoordinatorOptions, InvocationId};
 use runtime::Runtime;
 use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
 use runtime::engine::{self, EngineState, EventLog, EventRecord, InvalidRecords};
@@ -93,6 +95,12 @@ pub enum HostError {
     Resume(#[from] ResumeError),
     #[error(transparent)]
     Replay(#[from] engine::ReplayMismatch),
+    #[error(transparent)]
+    Coordinator(#[from] CoordinatorError),
+    #[error(transparent)]
+    Store(#[from] execution::StoreError),
+    #[error("the coordinator finished the root invocation without a final execution report")]
+    MissingExecutionReport,
 }
 
 /// Why `events.jsonl` bytes could not become an [`EventLog`].
@@ -363,7 +371,20 @@ pub fn driver(rt: &Runtime, graph: Graph) -> Result<Driver, HostError> {
 /// `verify_replay` on (the default), the log is replayed afterwards and any
 /// divergence is the error.
 pub async fn run(rt: &Runtime, graph: Graph) -> Result<RunReport, HostError> {
-    rt.run_verified(graph, |graph| driver(rt, graph)).await
+    let encoded = encode_graph_checked(&graph, &rt.masker())?;
+    let run_dir = rt.run_options().run_dir.clone();
+    let run_runtime = rt.prepare_run(&run_dir);
+    let mut coordinator =
+        Coordinator::create(run_runtime, Vec::new(), CoordinatorOptions::default())?;
+    let digest = coordinator.register_graph(&graph)?;
+    coordinator.run_root(digest, BTreeMap::default()).await?;
+    let report = coordinator
+        .take_root_report()
+        .ok_or(HostError::MissingExecutionReport)?;
+    engine::verify_replay(graph, &report.state.log)?;
+    mirror_legacy_files(&run_dir, &encoded, &coordinator, digest)?;
+    coordinator.finish().await;
+    Ok(report)
 }
 
 fn read_graph(rt: &Runtime) -> Result<Graph, HostError> {
@@ -446,9 +467,97 @@ fn resume_over(rt: &Runtime, graph: Graph) -> Result<(Driver, ResumeInfo), HostE
 /// Continue the run in the runtime's run dir, to completion — the crash side of
 /// [`run`]. Same file guarantees, same replay verification.
 pub async fn resume(rt: &Runtime) -> Result<RunReport, HostError> {
-    let graph = read_graph(rt)?;
-    rt.run_verified(graph, |graph| {
-        resume_over(rt, graph).map(|(driver, _info)| driver)
-    })
-    .await
+    let run_dir = rt.run_options().run_dir.clone();
+    if !run_dir.join(execution::RUN_FILE).exists() {
+        let graph = read_graph(rt)?;
+        return rt
+            .run_verified(graph, |graph| {
+                resume_over(rt, graph).map(|(driver, _info)| driver)
+            })
+            .await;
+    }
+
+    let run_runtime = rt.prepare_run(&run_dir);
+    let (mut coordinator, torn) =
+        Coordinator::resume(run_runtime, &[], CoordinatorOptions::default())?;
+    if torn {
+        tracing::warn!("truncated an EOF-torn coordinator record before resume");
+    }
+    if restore_legacy_engine_prefix(&run_dir, &coordinator)? {
+        // Compatibility for callers that deliberately edit the legacy mirror
+        // to model a crash prefix. New coordinator-only layouts never enter
+        // this branch.
+        drop(coordinator);
+        let graph = read_graph(rt)?;
+        return rt
+            .run_verified(graph, |graph| {
+                resume_over(rt, graph).map(|(driver, _info)| driver)
+            })
+            .await;
+    }
+    let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
+    let digest = root.declaration.graph;
+    let graph = coordinator.store().load_graph(digest)?;
+    let encoded = coordinator.store().graph_bytes(digest)?;
+    coordinator.run_root(digest, BTreeMap::default()).await?;
+    let report = coordinator
+        .take_root_report()
+        .ok_or(HostError::MissingExecutionReport)?;
+    engine::verify_replay(graph, &report.state.log)?;
+    mirror_legacy_files(&run_dir, &encoded, &coordinator, digest)?;
+    coordinator.finish().await;
+    Ok(report)
+}
+
+fn mirror_legacy_files(
+    run_dir: &Path,
+    graph: &[u8],
+    coordinator: &Coordinator,
+    _digest: execution::GraphDigest,
+) -> Result<(), HostError> {
+    write_file(&run_dir.join(GRAPH_FILE), graph)?;
+    let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
+    let execution = *root
+        .executions
+        .last()
+        .ok_or(HostError::MissingExecutionReport)?;
+    let source = coordinator
+        .store()
+        .execution_dir(InvocationId::ROOT, execution)
+        .join(EVENTS_FILE);
+    let bytes = fs::read(&source).map_err(|source_error| HostError::Io {
+        action: "read",
+        path:   source,
+        source: source_error,
+    })?;
+    write_file(&run_dir.join(EVENTS_FILE), &bytes)
+}
+
+fn restore_legacy_engine_prefix(
+    run_dir: &Path,
+    coordinator: &Coordinator,
+) -> Result<bool, HostError> {
+    let legacy = run_dir.join(EVENTS_FILE);
+    if !legacy.is_file() {
+        return Ok(false);
+    }
+    let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
+    let Some(execution) = root.executions.last().copied() else {
+        return Ok(false);
+    };
+    let nested = coordinator
+        .store()
+        .execution_dir(InvocationId::ROOT, execution)
+        .join(EVENTS_FILE);
+    let legacy_bytes = fs::read(&legacy).map_err(|source| HostError::Io {
+        action: "read",
+        path: legacy.clone(),
+        source,
+    })?;
+    let nested_bytes = fs::read(&nested).unwrap_or_default();
+    if legacy_bytes != nested_bytes {
+        write_file(&nested, &legacy_bytes)?;
+        return Ok(true);
+    }
+    Ok(false)
 }

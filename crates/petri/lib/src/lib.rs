@@ -13,8 +13,9 @@
 //! and never a layer crate.
 //!
 //! The one thing here that is not wiring or re-export is [`host`]: the
-//! standalone host's durable run dir — `graph.json`, `events.jsonl`, and the
-//! run wrappers that keep a run resumable when no product store sits behind it.
+//! standalone host's durable coordinator layout — content-addressed graphs,
+//! one engine log per execution, and the run wrappers that keep it resumable
+//! when no product store sits behind it.
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
+pub use execution;
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 pub use runtime::{LocalExecutor, RunOptions, Runtime, driver, engine, ir};
 

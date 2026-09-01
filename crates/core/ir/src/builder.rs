@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::expr::ExprTable;
 use crate::graph::{
-    Budget, Completion, Edge, Expansion, Fallthrough, Graph, GraphBody, JoinPolicy, Node, Routing,
-    Scope, SelectGroup, StepRef,
+    Budget, Completion, Edge, Expansion, Fallthrough, Graph, GraphBody, JoinPolicy, Node,
+    ResultProjection, Routing, Scope, SelectGroup, SelectionPolicy, StepRef,
 };
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 
@@ -71,6 +71,7 @@ impl<S> Default for GraphBuilder<S> {
                 body:       GraphBody::default(),
                 params:     BTreeMap::default(),
                 completion: Completion::AnyFailure,
+                result:     ResultProjection::None,
             },
             next_edge: 0,
         }
@@ -199,6 +200,7 @@ impl<S> GraphBuilder<S> {
     ) -> Vec<EdgeId<S>> {
         let (edges, ids) = self.build_arms(arms);
         self.node_mut(from).routing = Routing::groups(vec![SelectGroup {
+            policy: SelectionPolicy::FirstMatch,
             arms: edges,
             fallthrough,
         }]);

@@ -265,7 +265,7 @@ impl DockerExecutor {
         scope: &ScopeSpec,
         ctx: &AcquireContext,
     ) -> Result<Option<String>, EnvError> {
-        let base = self.container_name(&scope.instance).await?;
+        let base = self.container_name(scope.environment.as_str()).await?;
         services::realize(scope, &base, true, ctx).await
     }
 
@@ -291,10 +291,10 @@ impl DockerExecutor {
         ctx: &AcquireContext,
     ) -> Result<Arc<dyn ContainerRunner>, EnvError> {
         Ok(Arc::new(OneShotRunner::new(
-            self.one_shot_prefix_for(&scope.instance).await?,
-            self.workspace_for(&scope.instance),
-            self.exec_env_dir(&scope.instance),
-            self.one_shot_marker(&scope.instance),
+            self.one_shot_prefix_for(scope.environment.as_str()).await?,
+            self.workspace_for(scope.workspace_id.as_str()),
+            self.exec_env_dir(scope.environment.as_str()),
+            self.one_shot_marker(scope.environment.as_str()),
             scope,
             network,
             ctx,
@@ -574,7 +574,7 @@ impl DockerExecutor {
             });
         };
 
-        let workspace = self.workspace_for(&scope.instance);
+        let workspace = self.workspace_for(scope.workspace_id.as_str());
         fs::create_dir_all(&workspace)
             .await
             .map_err(|e| EnvError::workspace("create", workspace.display(), e))?;
@@ -583,7 +583,7 @@ impl DockerExecutor {
         span.record("image", image.as_str());
         prepare_image(image, credentials.as_ref(), scope.id, ctx).await?;
 
-        let name = self.container_name(&scope.instance).await?;
+        let name = self.container_name(scope.environment.as_str()).await?;
         span.record("container", name.as_str());
         // The fence half of the acquire contract (§9): a previous acquisition —
         // a crashed driver's included — left containers under these
@@ -695,12 +695,12 @@ impl DockerExecutor {
         // One-shot containers in this scope's world share the job container's
         // network namespace, so a service reachable from the job is reachable
         // from them under the same names.
-        let env_files = self.exec_env_dir(&scope.instance);
+        let env_files = self.exec_env_dir(scope.environment.as_str());
         let runner = OneShotRunner::new(
             one_shot_prefix_of(&name),
             workspace.clone(),
             env_files.clone(),
-            self.one_shot_marker(&scope.instance),
+            self.one_shot_marker(scope.environment.as_str()),
             scope,
             Some(format!("container:{name}")),
             ctx,

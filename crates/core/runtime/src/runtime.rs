@@ -9,15 +9,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, fs, io, process};
+use std::{env, fs, io, mem, process};
 
 use driver::{Driver, EventObserver, ResumeError, ResumeInfo, RunConfig, RunGuard, RunReport};
-use engine::{EventLog, ReplayMismatch};
+use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
 use frontend::{DirFiles, Frontend, Lowered, Span};
-use ir::Graph;
+use ir::{Graph, RunStatus};
 use tracing::field::Empty;
 
 use crate::local::LocalExecutor;
@@ -83,7 +83,7 @@ pub enum LoadError {
 pub type RunServiceGuard = Box<dyn RunGuard>;
 
 /// A per-run service provisioner — see [`Runtime::run_services`].
-type RunProvisioner = Box<
+type RunProvisioner = Arc<
     dyn Fn(
             &Path,
             ::steps::CapabilitiesBuilder,
@@ -245,7 +245,7 @@ impl Runtime {
             + Sync
             + 'static,
     {
-        self.provisioners.push(Box::new(provision));
+        self.provisioners.push(Arc::new(provision));
         self
     }
 
@@ -372,6 +372,35 @@ impl Runtime {
         self.equip(driver)
     }
 
+    /// Prepare resources that are shared by every execution in one root run.
+    pub fn prepare_run(&self, run_dir: impl Into<PathBuf>) -> RunRuntime {
+        let run_dir = run_dir.into();
+        let executor = self
+            .executor
+            .clone()
+            .unwrap_or_else(|| self.default_executor_for(&run_dir));
+        let mut caps = self.caps.clone();
+        let mut guards = Vec::new();
+        for provision in &self.provisioners {
+            let (next, guard) = provision(&run_dir, caps);
+            caps = next;
+            if let Some(guard) = guard {
+                guards.push(guard);
+            }
+        }
+        RunRuntime {
+            run_dir,
+            options: self.options.clone(),
+            executor,
+            steps: self.steps.clone(),
+            secrets: self.secrets.clone(),
+            observers: self.observers.clone(),
+            progress: self.progress.clone(),
+            caps: caps.build(),
+            guards,
+        }
+    }
+
     /// A driver continuing a crashed run's log, however the host stored it —
     /// the mirror of [`Runtime::driver`] over `Driver::resume`. `ResumeInfo`
     /// comes back beside the driver, so a host installs its own execution
@@ -470,6 +499,221 @@ impl Runtime {
     /// the run dir, so a resumed run's executors reach the crashed run's
     /// environments.
     fn default_executor(&self) -> Arc<dyn Executor> {
-        Arc::new(LocalExecutor::new(&self.options.run_dir).with_retention(self.options.retention))
+        self.default_executor_for(&self.options.run_dir)
+    }
+
+    fn default_executor_for(&self, run_dir: &Path) -> Arc<dyn Executor> {
+        Arc::new(LocalExecutor::new(run_dir).with_retention(self.options.retention))
+    }
+}
+
+/// Shared runtime services and configuration for all executions in one run.
+pub struct RunRuntime {
+    run_dir:   PathBuf,
+    options:   RunOptions,
+    executor:  Arc<dyn Executor>,
+    steps:     ::steps::Registry,
+    secrets:   Arc<dyn SecretProvider>,
+    observers: Vec<Arc<dyn EventObserver>>,
+    progress:  Option<Arc<dyn ProgressSink>>,
+    caps:      ::steps::Capabilities,
+    guards:    Vec<RunServiceGuard>,
+}
+
+impl RunRuntime {
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    /// Build one execution driver without provisioning run services again.
+    pub fn driver(
+        &self,
+        graph: Graph,
+        start: EngineStart,
+        execution_dir: impl Into<PathBuf>,
+        environment_prefix: impl Into<smol_str::SmolStr>,
+        workspace_prefix: impl Into<smol_str::SmolStr>,
+    ) -> Driver {
+        self.driver_with_secrets(
+            graph,
+            start,
+            execution_dir,
+            environment_prefix,
+            workspace_prefix,
+            self.secrets.clone(),
+        )
+    }
+
+    pub fn driver_with_secrets(
+        &self,
+        graph: Graph,
+        start: EngineStart,
+        execution_dir: impl Into<PathBuf>,
+        environment_prefix: impl Into<smol_str::SmolStr>,
+        workspace_prefix: impl Into<smol_str::SmolStr>,
+        secrets: Arc<dyn SecretProvider>,
+    ) -> Driver {
+        self.driver_with_secrets_in_workspace(
+            graph,
+            start,
+            execution_dir,
+            environment_prefix,
+            workspace_prefix,
+            None,
+            secrets,
+        )
+    }
+
+    pub fn driver_with_secrets_in_workspace(
+        &self,
+        graph: Graph,
+        start: EngineStart,
+        execution_dir: impl Into<PathBuf>,
+        environment_prefix: impl Into<smol_str::SmolStr>,
+        workspace_prefix: impl Into<smol_str::SmolStr>,
+        workspace_override: Option<executor::WorkspaceId>,
+        secrets: Arc<dyn SecretProvider>,
+    ) -> Driver {
+        let mut driver = Driver::new(
+            graph,
+            self.executor.clone(),
+            self.steps.clone(),
+            secrets,
+            self.execution_config(
+                execution_dir.into(),
+                environment_prefix.into(),
+                workspace_prefix.into(),
+                workspace_override,
+            ),
+        )
+        .with_engine_start(start)
+        .with_capabilities(self.caps.clone());
+        for observer in &self.observers {
+            driver = driver.observe(observer.clone());
+        }
+        if let Some(progress) = &self.progress {
+            driver = driver.with_progress(progress.clone());
+        }
+        driver
+    }
+
+    pub fn resume_driver(
+        &self,
+        graph: Graph,
+        log: EventLog,
+        execution_dir: impl Into<PathBuf>,
+        environment_prefix: impl Into<smol_str::SmolStr>,
+        workspace_prefix: impl Into<smol_str::SmolStr>,
+    ) -> Result<(Driver, ResumeInfo), ResumeError> {
+        self.resume_driver_with_secrets(
+            graph,
+            log,
+            execution_dir,
+            environment_prefix,
+            workspace_prefix,
+            self.secrets.clone(),
+        )
+    }
+
+    pub fn resume_driver_with_secrets(
+        &self,
+        graph: Graph,
+        log: EventLog,
+        execution_dir: impl Into<PathBuf>,
+        environment_prefix: impl Into<smol_str::SmolStr>,
+        workspace_prefix: impl Into<smol_str::SmolStr>,
+        secrets: Arc<dyn SecretProvider>,
+    ) -> Result<(Driver, ResumeInfo), ResumeError> {
+        self.resume_driver_with_secrets_in_workspace(
+            graph,
+            log,
+            execution_dir,
+            environment_prefix,
+            workspace_prefix,
+            None,
+            secrets,
+        )
+    }
+
+    pub fn resume_driver_with_secrets_in_workspace(
+        &self,
+        graph: Graph,
+        log: EventLog,
+        execution_dir: impl Into<PathBuf>,
+        environment_prefix: impl Into<smol_str::SmolStr>,
+        workspace_prefix: impl Into<smol_str::SmolStr>,
+        workspace_override: Option<executor::WorkspaceId>,
+        secrets: Arc<dyn SecretProvider>,
+    ) -> Result<(Driver, ResumeInfo), ResumeError> {
+        let (mut driver, info) = Driver::resume(
+            graph,
+            log,
+            self.executor.clone(),
+            self.steps.clone(),
+            secrets,
+            self.execution_config(
+                execution_dir.into(),
+                environment_prefix.into(),
+                workspace_prefix.into(),
+                workspace_override,
+            ),
+        )?;
+        driver = driver.with_capabilities(self.caps.clone());
+        for observer in &self.observers {
+            driver = driver.observe(observer.clone());
+        }
+        if let Some(progress) = &self.progress {
+            driver = driver.with_progress(progress.clone());
+        }
+        Ok((driver, info))
+    }
+
+    pub fn secret_provider(&self) -> Arc<dyn SecretProvider> {
+        self.secrets.clone()
+    }
+
+    pub fn masker(&self) -> Masker {
+        self.secrets.masker()
+    }
+
+    pub async fn finish(self) {
+        self.finish_with_status(RunStatus::Success).await;
+    }
+
+    pub async fn finish_with_status(mut self, status: RunStatus) {
+        for guard in mem::take(&mut self.guards) {
+            guard.teardown().await;
+        }
+        let outcome = if status == RunStatus::Success {
+            executor::ScopeOutcome::Succeeded
+        } else {
+            executor::ScopeOutcome::Failed
+        };
+        if !self.options.retention.keeps(outcome) {
+            let _ = fs::remove_dir_all(self.run_dir.join("scopes"));
+        }
+    }
+
+    fn execution_config(
+        &self,
+        execution_dir: PathBuf,
+        environment_prefix: smol_str::SmolStr,
+        workspace_prefix: smol_str::SmolStr,
+        workspace_override: Option<executor::WorkspaceId>,
+    ) -> RunConfig {
+        let mut config = RunConfig::new(execution_dir)
+            .with_grace(self.options.grace)
+            .with_cleanup_grace(self.options.cleanup_grace)
+            // An execution ends before its invocation can restart. Workspace
+            // retention therefore belongs to `finish_with_status`, not to an
+            // individual driver release.
+            .with_retention(Retention::Always)
+            .with_echo(self.options.echo)
+            .with_scope_identities(environment_prefix, workspace_prefix);
+        config.hard_deadline_slack = self.options.hard_deadline_slack;
+        if let Some(workspace) = workspace_override {
+            config = config.with_workspace_override(workspace);
+        }
+        config
     }
 }

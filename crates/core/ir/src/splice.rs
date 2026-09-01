@@ -215,6 +215,7 @@ impl GraphBuilder<Local> {
             body,
             params,
             completion,
+            result,
         } = self.build();
         assert!(
             params.is_empty(),
@@ -223,6 +224,10 @@ impl GraphBuilder<Local> {
         assert!(
             matches!(completion, Completion::AnyFailure),
             "a graph fragment cannot carry a completion policy"
+        );
+        assert!(
+            matches!(result, crate::ResultProjection::None),
+            "a graph fragment cannot carry a result projection"
         );
         GraphFragment {
             body,

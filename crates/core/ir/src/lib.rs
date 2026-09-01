@@ -36,9 +36,10 @@ pub use flow::{
     RunStatus, Status, StatusKind, StepEvent, Token,
 };
 pub use graph::{
-    Backoff, Budget, Completion, Edge, Exhaustion, ExpandTarget, Expansion, ExprOrValue,
-    Fallthrough, Graph, GraphBody, Guard, JoinPolicy, Node, RegistryCredentials, RetryOn,
-    RetryPolicy, Routing, RuntimeSpec, RuntimeTarget, Scope, SelectGroup, ServiceSpec, StepRef,
+    Backoff, Budget, Candidate, Completion, Edge, EdgeTransition, Exhaustion, ExpandTarget,
+    Expansion, ExprOrValue, Fallthrough, Graph, GraphBody, Guard, JoinPolicy, Node, PickPolicy,
+    RegistryCredentials, ResultProjection, RetryOn, RetryPolicy, Routing, RoutingGroup,
+    RuntimeSpec, RuntimeTarget, Scope, SelectGroup, SelectionPolicy, ServiceSpec, StepRef, Tier,
     WorkspacePolicy,
 };
 pub use ids::{

@@ -49,4 +49,4 @@ mod local;
 mod runtime;
 
 pub use local::LocalExecutor;
-pub use runtime::{LoadError, RunOptions, RunServiceGuard, Runtime};
+pub use runtime::{LoadError, RunOptions, RunRuntime, RunServiceGuard, Runtime};
