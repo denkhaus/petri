@@ -12,7 +12,8 @@ use std::mem;
 use std::time::Duration;
 
 use engine::{
-    Admission, Command, EngineState, Event, GroupDecision, RouteDecision, WeightedDraw, apply,
+    Admission, Command, EngineExit, EngineState, Event, GroupDecision, RouteDecision, WeightedDraw,
+    apply,
 };
 use ir::{
     Attempt, FiringId, Generation, Graph, NodeId, Outcome, RunStatus, StepKind, StepKindId,
@@ -229,16 +230,18 @@ impl Harness {
         let (state, commands) = apply(state, event);
         self.state = state;
         for command in &commands {
-            if let Command::FinishRun { status } = command {
+            if let Command::FinishExecution {
+                exit: EngineExit::Terminal { status },
+            } = command
+            {
                 self.status = Some(*status);
             }
         }
         self.commands.extend(commands.iter().cloned());
         for command in commands {
             match &command {
-                Command::Admit { point, decision_id } => {
+                Command::Admit { decision_id } => {
                     let event = Event::Admitted {
-                        point:       *point,
                         decision_id: *decision_id,
                         decision:    Admission::Admit,
                         trace:       Vec::new(),
@@ -246,7 +249,6 @@ impl Harness {
                     self.feed(event);
                 }
                 Command::ResolveRouting {
-                    firing,
                     decision_id,
                     restart_allowed,
                     groups,
@@ -254,18 +256,9 @@ impl Harness {
                     let decisions = groups
                         .iter()
                         .map(|proposal| {
-                            let (mut decision, draw) = resolve_group(proposal);
-                            if let RouteDecision::Emit(edge) = decision
-                                && !restart_allowed
-                                && proposal.candidates.iter().any(|candidate| {
-                                    candidate.edge == edge
-                                        && candidate.transition == ir::EdgeTransition::Restart
-                                })
-                            {
-                                decision = RouteDecision::Block {
-                                    reason: "execution limit".into(),
-                                };
-                            }
+                            let (decision, draw) = resolve_group(proposal);
+                            let decision =
+                                engine::enforce_restart_limit(*restart_allowed, proposal, decision);
                             GroupDecision {
                                 group: proposal.group,
                                 draw,
@@ -275,7 +268,6 @@ impl Harness {
                         })
                         .collect();
                     let event = Event::RoutingResolved {
-                        firing:      *firing,
                         decision_id: *decision_id,
                         groups:      decisions,
                     };
@@ -375,53 +367,32 @@ impl Harness {
     }
 }
 
+/// The engine's own deterministic pick, with a fixed roll of zero for weighted
+/// tiers — the host would roll randomly; a test walks the same cursor with a
+/// known draw.
 fn resolve_group(proposal: &engine::RoutingProposal) -> (RouteDecision, Option<WeightedDraw>) {
-    let Some(pick) = proposal.pick else {
-        return (RouteDecision::None, None);
-    };
-    if proposal.candidates.is_empty() {
-        return (RouteDecision::None, None);
-    }
-    match pick {
-        ir::PickPolicy::First => (RouteDecision::Emit(proposal.candidates[0].edge), None),
-        ir::PickPolicy::HighestWeightThenLexical => {
-            let mut winner = &proposal.candidates[0];
-            for candidate in &proposal.candidates[1..] {
-                if candidate.weight > winner.weight
-                    || (candidate.weight == winner.weight && candidate.target < winner.target)
-                {
-                    winner = candidate;
-                }
-            }
-            (RouteDecision::Emit(winner.edge), None)
-        }
-        ir::PickPolicy::LowestRankThenArmOrder => proposal
+    let draw = (proposal.pick == Some(ir::PickPolicy::WeightedRandom)
+        && !proposal.candidates.is_empty())
+    .then(|| WeightedDraw {
+        tier:       proposal.tier.unwrap_or(0),
+        candidates: proposal
             .candidates
             .iter()
-            .filter_map(|candidate| candidate.rank.map(|rank| (rank, candidate.edge)))
-            .min_by(|(left, _), (right, _)| left.total_cmp(right))
-            .map_or((RouteDecision::None, None), |(_, edge)| {
-                (RouteDecision::Emit(edge), None)
-            }),
-        ir::PickPolicy::WeightedRandom => {
-            let total: u64 = proposal
-                .candidates
-                .iter()
-                .map(|candidate| u64::from(candidate.weight))
-                .sum();
-            let draw = WeightedDraw {
-                tier: proposal.tier.unwrap_or(0),
-                candidates: proposal
-                    .candidates
-                    .iter()
-                    .map(|candidate| candidate.edge)
-                    .collect(),
-                roll: 0,
-                total,
-            };
-            (RouteDecision::Emit(proposal.candidates[0].edge), Some(draw))
-        }
-    }
+            .map(|candidate| candidate.edge)
+            .collect(),
+        roll:       0,
+        total:      proposal
+            .candidates
+            .iter()
+            .map(|candidate| u64::from(candidate.weight))
+            .sum(),
+    });
+    let picked = engine::deterministic_pick(proposal, draw.as_ref())
+        .expect("the harness draw matches its proposal");
+    (
+        picked.map_or(RouteDecision::None, RouteDecision::Emit),
+        draw,
+    )
 }
 
 /// Stand-in for the process step kind's `soft_fail` handling.

@@ -454,12 +454,17 @@ fn a_parked_token_does_not_hold_its_scope_past_the_finish() {
     let commands: Vec<&Command> = h
         .commands
         .iter()
-        .filter(|c| matches!(c, Command::ReleaseScope { .. } | Command::FinishRun { .. }))
+        .filter(|c| {
+            matches!(
+                c,
+                Command::ReleaseScope { .. } | Command::FinishExecution { .. }
+            )
+        })
         .collect();
     assert!(
         matches!(
             commands.as_slice(),
-            [Command::ReleaseScope { scope }, Command::FinishRun { .. }] if scope.raw() == 0
+            [Command::ReleaseScope { scope }, Command::FinishExecution { .. }] if scope.raw() == 0
         ),
         "terminal release, then the finish: {commands:?}"
     );

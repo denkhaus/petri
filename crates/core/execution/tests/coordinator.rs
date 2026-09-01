@@ -111,7 +111,7 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
     let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
     let (mut coordinator, _) = Coordinator::resume(
         runtime.prepare_run(directory.path()),
-        &[],
+        Vec::new(),
         CoordinatorOptions::default(),
     )
     .expect("the coordinator resumes");
@@ -130,7 +130,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     let directory = RunDir::new("coordinator-pending-routing-fold");
     let middleware: Vec<Arc<dyn Middleware>> = vec![Arc::new(RequireFoldBeforeRoute)];
     let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
-    let mut coordinator = Coordinator::create_with_middleware(
+    let mut coordinator = Coordinator::create(
         runtime.prepare_run(directory.path()),
         middleware.clone(),
         CoordinatorOptions::default(),
@@ -186,7 +186,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     fs::write(&events_path, engine_prefix).expect("engine prefix");
 
     let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
-    let (mut coordinator, _) = Coordinator::resume_with_middleware(
+    let (mut coordinator, _) = Coordinator::resume(
         runtime.prepare_run(directory.path()),
         middleware,
         CoordinatorOptions::default(),

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use petri::driver::EventObserver;
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
+use petri::execution::{self, CoordinatorError};
 use petri::executor::docker::{self, RUN_ID_FILE};
 use petri::executor::{MapSecrets, Retention, SecretProvider as _};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, GRAPH_FILE, HostError};
@@ -288,10 +289,15 @@ async fn a_killed_run_leaves_complete_files() {
     );
 }
 
-/// Rewrite `events.jsonl` keeping only the first `keep` complete lines
-/// (header included), plus `extra` raw bytes — the crash simulator.
+/// Rewrite the root execution's `events.jsonl` — the log resume actually
+/// reads, under the coordinator layout — keeping only the first `keep`
+/// complete lines (header included), plus `extra` raw bytes: the crash
+/// simulator.
 fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
-    let path = dir.path().join(EVENTS_FILE);
+    let path = dir
+        .path()
+        .join("invocations/0000000000000000/executions/0000000000000000")
+        .join(EVENTS_FILE);
     let bytes = fs::read(&path).expect("reads");
     let mut end = 0;
     let mut seen = 0;
@@ -371,7 +377,9 @@ async fn an_undecodable_record_refuses_resume() {
         b"corrupted beyond recognition\n",
     );
     match host::resume(&rt).await {
-        Err(HostError::Events { source, .. }) => {
+        Err(HostError::Coordinator(CoordinatorError::EngineLog(
+            execution::EngineLogError::Decode { source, .. },
+        ))) => {
             assert!(matches!(source, EventsDecodeError::BadRecord { .. }));
         }
         Ok(_) => panic!("a corrupted file resumed"),

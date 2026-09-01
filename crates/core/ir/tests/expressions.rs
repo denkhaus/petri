@@ -1,5 +1,6 @@
 //! §3: expressions are evaluated in the pure core. Total, deterministic, no IO.
 
+use std::collections::BTreeMap;
 use std::slice;
 
 use ir::{
@@ -49,7 +50,8 @@ impl Env {
     }
 
     fn with_kv(mut self, key: &str, value: Value) -> Self {
-        self.run.kv.insert(smol_str::SmolStr::new(key), value);
+        self.run
+            .merge(&BTreeMap::from([(smol_str::SmolStr::new(key), value)]));
         self
     }
 }

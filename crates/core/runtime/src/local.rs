@@ -74,7 +74,7 @@ impl LocalExecutor {
         self.routes
             .lock()
             .expect("route table is not poisoned")
-            .insert((scope.id, scope.instance.clone()), which);
+            .insert((scope.id, SmolStr::new(scope.instance())), which);
     }
 }
 
@@ -99,13 +99,13 @@ impl Executor for LocalExecutor {
                 // nothing of ours to remove. The one-shot marker gates the
                 // sweep, so a Docker-free scope never spawns a `docker` client
                 // for a fence with nothing to look for.
-                if self.docker.has_one_shot_marker(&scope.instance).await {
-                    let prefix = self.docker.one_shot_prefix(&scope.instance).await?;
+                if self.docker.has_one_shot_marker(scope.instance()).await {
+                    let prefix = self.docker.one_shot_prefix(scope.instance()).await?;
                     executor_docker::sweep_containers(&prefix).await;
                 }
                 let services = !scope.services.is_empty();
                 if services {
-                    self.docker.sweep_scope_services(&scope.instance).await?;
+                    self.docker.sweep_scope_services(scope.instance()).await?;
                 }
 
                 // Services first — steps must find them healthy — realized by
@@ -119,7 +119,7 @@ impl Executor for LocalExecutor {
                     Err(error) => {
                         // A failed acquire leaks nothing.
                         if services {
-                            let _ = self.docker.sweep_scope_services(&scope.instance).await;
+                            let _ = self.docker.sweep_scope_services(scope.instance()).await;
                         }
                         return Err(error);
                     }

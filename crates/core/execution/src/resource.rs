@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use executor::WorkspaceId;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::store::write_atomically_with;
 use crate::{SandboxAllocationKey, SandboxLeaseId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,33 +16,6 @@ pub struct SandboxResourceRecord {
     pub provider:    SmolStr,
     pub resource_id: SmolStr,
     pub workspace:   WorkspaceId,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderSandbox {
-    pub resource_id: SmolStr,
-    pub workspace:   WorkspaceId,
-}
-
-#[async_trait::async_trait]
-pub trait SandboxAdapter: Send + Sync {
-    fn provider(&self) -> &str;
-
-    async fn ensure(
-        &self,
-        allocation: SandboxAllocationKey,
-    ) -> Result<ProviderSandbox, ResourceError>;
-
-    async fn attach(
-        &self,
-        record: &SandboxResourceRecord,
-    ) -> Result<ProviderSandbox, ResourceError>;
-
-    async fn release(
-        &self,
-        record: &SandboxResourceRecord,
-        outcome: executor::ScopeOutcome,
-    ) -> Result<(), ResourceError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,13 +48,6 @@ pub enum ResourceError {
     AllocationMismatch(SandboxAllocationKey),
     #[error("unknown sandbox lease {0}")]
     UnknownLease(SandboxLeaseId),
-    #[error("sandbox resource provider mismatch: recorded `{recorded}`, configured `{configured}`")]
-    ProviderMismatch {
-        recorded:   SmolStr,
-        configured: SmolStr,
-    },
-    #[error("sandbox provider failed: {0}")]
-    Provider(SmolStr),
 }
 
 /// Provider-neutral durable sandbox leases under one run's `resources/`.
@@ -147,57 +113,6 @@ impl ResourceStore {
             .ok_or(ResourceError::UnknownLease(lease))
     }
 
-    pub fn for_allocation(
-        &self,
-        allocation: SandboxAllocationKey,
-    ) -> Option<&SandboxResourceRecord> {
-        self.by_allocation
-            .get(&allocation)
-            .and_then(|lease| self.by_lease.get(lease))
-    }
-
-    pub async fn ensure(
-        &mut self,
-        allocation: SandboxAllocationKey,
-        adapter: &dyn SandboxAdapter,
-    ) -> Result<&SandboxResourceRecord, ResourceError> {
-        if let Some(lease) = self.by_allocation.get(&allocation).copied() {
-            let record = self
-                .by_lease
-                .get(&lease)
-                .expect("both resource indexes are written together");
-            if record.provider != adapter.provider() {
-                return Err(ResourceError::ProviderMismatch {
-                    recorded:   record.provider.clone(),
-                    configured: SmolStr::new(adapter.provider()),
-                });
-            }
-            adapter.attach(record).await?;
-            return Ok(self
-                .by_lease
-                .get(&lease)
-                .expect("the attached resource remains indexed"));
-        }
-
-        let sandbox = adapter.ensure(allocation).await?;
-        let lease = SandboxLeaseId::new(self.next_lease);
-        let record = SandboxResourceRecord {
-            lease,
-            allocation,
-            provider: SmolStr::new(adapter.provider()),
-            resource_id: sandbox.resource_id,
-            workspace: sandbox.workspace,
-        };
-        self.write(&record)?;
-        self.next_lease = self.next_lease.saturating_add(1);
-        self.by_allocation.insert(allocation, lease);
-        self.by_lease.insert(lease, record);
-        Ok(self
-            .by_lease
-            .get(&lease)
-            .expect("the new resource was inserted"))
-    }
-
     pub fn ensure_record(
         &mut self,
         allocation: SandboxAllocationKey,
@@ -240,22 +155,8 @@ impl ResourceStore {
 
     fn write(&self, record: &SandboxResourceRecord) -> Result<(), ResourceError> {
         let path = self.root.join(format!("{:016x}.json", record.lease.raw()));
-        let temporary = path.with_extension("tmp");
         let bytes = serde_json::to_vec_pretty(record).map_err(ResourceError::Encode)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temporary)
-            .map_err(|source| resource_io("create", &temporary, source))?;
-        file.write_all(&bytes)
-            .and_then(|()| file.flush())
-            .and_then(|()| file.sync_data())
-            .map_err(|source| resource_io("write", &temporary, source))?;
-        fs::rename(&temporary, &path).map_err(|source| resource_io("rename", &path, source))?;
-        File::open(&self.root)
-            .and_then(|directory| directory.sync_data())
-            .map_err(|source| resource_io("sync", &self.root, source))
+        write_atomically_with(&path, &bytes, resource_io)
     }
 }
 

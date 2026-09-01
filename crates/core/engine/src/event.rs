@@ -83,53 +83,28 @@ impl fmt::Display for MiddlewareKey {
     }
 }
 
-/// The kind of durable decision represented by a [`DecisionId`].
+/// An engine-local decision identity, stable across crash and reissue. The
+/// variant is the decision's kind; there is no separate "point" to keep in
+/// agreement with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum DecisionPoint {
-    Route,
-    AttemptStart,
+pub enum DecisionId {
     ExecutionStart,
-}
-
-/// An engine-local decision identity, stable across crash and reissue.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct DecisionId {
-    pub point:   DecisionPoint,
-    pub firing:  Option<FiringId>,
-    pub attempt: Option<Attempt>,
+    AttemptStart { firing: FiringId, attempt: Attempt },
+    Route { firing: FiringId, attempt: Attempt },
 }
 
 impl DecisionId {
     pub const fn execution_start() -> Self {
-        Self {
-            point:   DecisionPoint::ExecutionStart,
-            firing:  None,
-            attempt: None,
-        }
+        Self::ExecutionStart
     }
 
     pub const fn attempt_start(firing: FiringId, attempt: Attempt) -> Self {
-        Self {
-            point:   DecisionPoint::AttemptStart,
-            firing:  Some(firing),
-            attempt: Some(attempt),
-        }
+        Self::AttemptStart { firing, attempt }
     }
 
     pub const fn route(firing: FiringId, attempt: Attempt) -> Self {
-        Self {
-            point:   DecisionPoint::Route,
-            firing:  Some(firing),
-            attempt: Some(attempt),
-        }
+        Self::Route { firing, attempt }
     }
-}
-
-/// The target of an admission decision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AdmitPoint {
-    ExecutionStart,
-    AttemptStart { firing: FiringId, attempt: Attempt },
 }
 
 /// A recorded admission decision.
@@ -221,6 +196,26 @@ pub enum RouteApplied {
     },
 }
 
+impl RouteApplied {
+    /// The firing whose routing this record applies.
+    pub fn firing(&self) -> FiringId {
+        match self {
+            Self::Edge { firing, .. } | Self::Jump { firing, .. } | Self::None { firing, .. } => {
+                *firing
+            }
+        }
+    }
+
+    /// The applied record projected back onto the decision it came from.
+    pub fn decision(&self) -> RouteDecision {
+        match self {
+            Self::Edge { edge, .. } => RouteDecision::Emit(*edge),
+            Self::Jump { target, .. } => RouteDecision::Jump(*target),
+            Self::None { .. } => RouteDecision::None,
+        }
+    }
+}
+
 /// Something that happened. Every event is appended to the log before `apply`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
@@ -246,13 +241,11 @@ pub enum Event {
         outcome: Outcome,
     },
     Admitted {
-        point:       AdmitPoint,
         decision_id: DecisionId,
         decision:    Admission,
         trace:       Vec<MiddlewareKey>,
     },
     RoutingResolved {
-        firing:      FiringId,
         decision_id: DecisionId,
         groups:      Vec<GroupDecision>,
     },
@@ -477,12 +470,10 @@ impl TryFrom<ResolvedFiringRepr> for ResolvedFiring {
 pub enum Command {
     /// Ask the host's durable admission pipeline for one decision.
     Admit {
-        point:       AdmitPoint,
         decision_id: DecisionId,
     },
     /// Ask the host's durable routing pipeline to resolve every group once.
     ResolveRouting {
-        firing:          FiringId,
         decision_id:     DecisionId,
         restart_allowed: bool,
         groups:          Vec<RoutingProposal>,
@@ -518,9 +509,6 @@ pub enum Command {
     },
     ReleaseScope {
         scope: ScopeId,
-    },
-    FinishRun {
-        status: RunStatus,
     },
     FinishExecution {
         exit: EngineExit,

@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ir::Graph;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::jsonl::clean_lines;
 use crate::{
     COORDINATOR_FORMAT_VERSION, CoordinatorEvent, CoordinatorRecord, CoordinatorState, ExecutionId,
     GraphDigest, InvocationId, StateError,
@@ -87,6 +90,9 @@ pub struct CoordinatorStore {
     log:      File,
     state:    CoordinatorState,
     next_seq: u64,
+    /// Decoded and validated graphs by digest, so repeated loads — restarts of
+    /// one invocation, resume-time resource checks — parse and validate once.
+    graphs:   BTreeMap<GraphDigest, Arc<Graph>>,
 }
 
 impl CoordinatorStore {
@@ -126,6 +132,7 @@ impl CoordinatorStore {
             log,
             state: CoordinatorState::default(),
             next_seq: 0,
+            graphs: BTreeMap::new(),
         };
         store.append(CoordinatorEvent::RunStarted {
             format_version: COORDINATOR_FORMAT_VERSION,
@@ -182,6 +189,7 @@ impl CoordinatorStore {
                 log,
                 state,
                 next_seq,
+                graphs: BTreeMap::new(),
             },
             decoded.torn,
         ))
@@ -197,14 +205,6 @@ impl CoordinatorStore {
 
     pub(crate) fn next_seq(&self) -> u64 {
         self.next_seq
-    }
-
-    pub(crate) fn state_mut_allocate_invocation(&mut self) -> InvocationId {
-        self.state.allocate_invocation()
-    }
-
-    pub(crate) fn state_mut_allocate_execution(&mut self) -> ExecutionId {
-        self.state.allocate_execution()
     }
 
     pub fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, StoreError> {
@@ -248,11 +248,16 @@ impl CoordinatorStore {
         Ok(digest)
     }
 
-    pub fn load_graph(&self, digest: GraphDigest) -> Result<Graph, StoreError> {
+    pub fn load_graph(&mut self, digest: GraphDigest) -> Result<Arc<Graph>, StoreError> {
         if !self.state.graphs.contains(&digest) {
             return Err(StoreError::MissingGraph(digest));
         }
-        decode_graph(digest, &self.graph_bytes(digest)?)
+        if let Some(graph) = self.graphs.get(&digest) {
+            return Ok(graph.clone());
+        }
+        let graph = Arc::new(decode_graph(digest, &self.graph_bytes(digest)?)?);
+        self.graphs.insert(digest, graph.clone());
+        Ok(graph)
     }
 
     pub fn graph_bytes(&self, digest: GraphDigest) -> Result<Vec<u8>, StoreError> {
@@ -323,28 +328,21 @@ pub fn decode_coordinator_log(
     path: &Path,
     bytes: &[u8],
 ) -> Result<DecodedCoordinatorLog, StoreError> {
-    let clean_len = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |last| last + 1);
+    let lines = clean_lines(bytes);
+    let (clean_len, torn) = (lines.clean_len, lines.torn);
     let mut records = Vec::new();
-    for (index, line) in bytes[..clean_len]
-        .split_inclusive(|byte| *byte == b'\n')
-        .enumerate()
-    {
-        let record = serde_json::from_slice(&line[..line.len() - 1]).map_err(|source| {
-            StoreError::BadRecord {
-                path: path.to_path_buf(),
-                line: index + 1,
-                source,
-            }
+    for (index, line) in lines.enumerate() {
+        let record = serde_json::from_slice(line).map_err(|source| StoreError::BadRecord {
+            path: path.to_path_buf(),
+            line: index + 1,
+            source,
         })?;
         records.push(record);
     }
     Ok(DecodedCoordinatorLog {
         records,
         clean_len,
-        torn: clean_len < bytes.len(),
+        torn,
     })
 }
 
@@ -358,13 +356,7 @@ fn verify_graph_registry(root: &Path, state: &CoordinatorState) -> Result<(), St
                 io_error("read", &path, source)
             }
         })?;
-        let found = digest_bytes(&bytes);
-        if found != *digest {
-            return Err(StoreError::GraphDigest {
-                expected: *digest,
-                found,
-            });
-        }
+        // `decode_graph` digests, decodes, and validates in one pass.
         let _ = decode_graph(*digest, &bytes)?;
     }
     Ok(())
@@ -435,22 +427,33 @@ fn write_once_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    write_atomically_with(path, bytes, io_error)
+}
+
+/// Atomically publish `bytes` at `path` — temp write with fsync, rename, and a
+/// parent-directory sync — mapping each failing IO action through `error`. The
+/// one copy of the crash-safety plumbing every durable file in the crate uses.
+pub(crate) fn write_atomically_with<E>(
+    path: &Path,
+    bytes: &[u8],
+    error: impl Fn(&'static str, &Path, io::Error) -> E,
+) -> Result<(), E> {
     let temporary = path.with_extension("tmp");
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&temporary)
-        .map_err(|source| io_error("create", &temporary, source))?;
+        .map_err(|source| error("create", &temporary, source))?;
     file.write_all(bytes)
         .and_then(|()| file.flush())
         .and_then(|()| file.sync_data())
-        .map_err(|source| io_error("write", &temporary, source))?;
-    fs::rename(&temporary, path).map_err(|source| io_error("rename", path, source))?;
+        .map_err(|source| error("write", &temporary, source))?;
+    fs::rename(&temporary, path).map_err(|source| error("rename", path, source))?;
     if let Some(parent) = path.parent() {
         File::open(parent)
             .and_then(|directory| directory.sync_data())
-            .map_err(|source| io_error("sync", parent, source))?;
+            .map_err(|source| error("sync", parent, source))?;
     }
     Ok(())
 }

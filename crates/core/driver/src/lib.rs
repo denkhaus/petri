@@ -17,7 +17,7 @@ mod sink;
 
 pub use decision::{
     AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
-    RoutingRequest, RoutingResolution,
+    RoutingRequest, RoutingResolution, default_group_decision,
 };
 pub use observe::{EventObserver, ObserveError};
 pub use run::{

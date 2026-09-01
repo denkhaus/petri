@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -432,8 +433,12 @@ impl NodeRecord {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunContext {
     /// Keyed by node instance name, so a matrix clone records under `build#2`.
-    pub nodes: BTreeMap<SmolStr, NodeRecord>,
-    pub kv:    BTreeMap<SmolStr, Value>,
+    ///
+    /// Both maps are `Arc`-backed copy-on-write: the engine snapshots the run
+    /// context per routing decision, so a snapshot is two reference bumps, and
+    /// a mutation deep-copies only while a snapshot is still outstanding.
+    pub nodes: Arc<BTreeMap<SmolStr, NodeRecord>>,
+    pub kv:    Arc<BTreeMap<SmolStr, Value>>,
 }
 
 impl RunContext {
@@ -451,13 +456,17 @@ impl RunContext {
 
     /// Record a completed firing. Called by the core only, on a final attempt.
     pub fn record(&mut self, name: SmolStr, record: NodeRecord) {
-        self.nodes.insert(name, record);
+        Arc::make_mut(&mut self.nodes).insert(name, record);
     }
 
     /// Merge `context_updates`, last write winning. Called by the core only.
     pub fn merge(&mut self, updates: &BTreeMap<SmolStr, Value>) {
+        if updates.is_empty() {
+            return;
+        }
+        let kv = Arc::make_mut(&mut self.kv);
         for (key, value) in updates {
-            self.kv.insert(key.clone(), value.clone());
+            kv.insert(key.clone(), value.clone());
         }
     }
 

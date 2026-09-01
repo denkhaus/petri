@@ -74,7 +74,6 @@ async fn middleware_composes_over_the_core_proposal_and_checkpoints_fold_state()
     };
     let resolution = pipeline
         .route(RoutingRequest {
-            firing:          FiringId::new(1),
             decision_id:     DecisionId::route(FiringId::new(1), Attempt::FIRST),
             restart_allowed: true,
             groups:          vec![proposal],

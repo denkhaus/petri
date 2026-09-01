@@ -104,7 +104,7 @@ tokio = { version = "1", features = [
     "io-util",
     "fs",
 ] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 # The ObjectService's HTTP stack (per review decision: the listener rides hyper).
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

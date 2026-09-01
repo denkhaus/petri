@@ -108,7 +108,6 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
                 | Command::ExpandNode { .. }
                 | Command::AcquireScope { .. }
                 | Command::ReleaseScope { .. }
-                | Command::FinishRun { .. }
                 | Command::FinishExecution { .. } => {}
             }
         }
@@ -120,14 +119,12 @@ pub fn resume(graph: Graph, log: &EventLog) -> Result<ResumePoint, ReplayMismatc
         .map(|scope| Command::AcquireScope { scope })
         .collect();
     pending.extend(state.pending_admissions().map(|admission| Command::Admit {
-        point:       admission.point,
         decision_id: admission.decision_id,
     }));
     pending.extend(
         state
             .pending_routings()
             .map(|routing| Command::ResolveRouting {
-                firing:          routing.firing,
                 decision_id:     routing.decision_id,
                 restart_allowed: routing.restart_allowed,
                 groups:          routing.groups.clone(),

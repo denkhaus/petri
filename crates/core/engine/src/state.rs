@@ -11,9 +11,7 @@ use ir::{
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::event::{
-    AdmitPoint, DecisionId, EngineExit, EngineStart, ResolvedFiring, RoutingProposal,
-};
+use crate::event::{DecisionId, EngineExit, EngineStart, ResolvedFiring, RoutingProposal};
 use crate::log::EventLog;
 
 /// A node execution attempt.
@@ -46,7 +44,6 @@ pub struct Firing {
 /// One unresolved durable admission command.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingAdmission {
-    pub point:       AdmitPoint,
     pub decision_id: DecisionId,
     /// Present for `AttemptStart`; execution admission has no firing payload.
     pub resolved:    Option<ResolvedFiring>,
@@ -314,8 +311,11 @@ pub enum RunError {
     InvalidRouting { firing: FiringId, reason: SmolStr },
     #[error("routing for firing {firing} was blocked: {reason}")]
     RoutingBlocked { firing: FiringId, reason: SmolStr },
-    #[error("admission at {point:?} was blocked: {reason}")]
-    AdmissionBlocked { point: AdmitPoint, reason: SmolStr },
+    #[error("admission at {decision:?} was blocked: {reason}")]
+    AdmissionBlocked {
+        decision: DecisionId,
+        reason:   SmolStr,
+    },
     #[error("event arrived before RunStarted")]
     NotStarted,
     #[error("event arrived after the run finished")]
@@ -705,9 +705,9 @@ impl EngineState {
     }
 
     pub(crate) fn remove_admission_for_firing(&mut self, firing: FiringId) {
-        self.pending_admissions.retain(|_, pending| {
-            !matches!(pending.point, AdmitPoint::AttemptStart { firing: id, .. } if id == firing)
-        });
+        self.pending_admissions.retain(
+            |id, _| !matches!(id, DecisionId::AttemptStart { firing: f, .. } if *f == firing),
+        );
     }
 
     pub(crate) fn insert_pending_routing(&mut self, pending: PendingRouting) {
@@ -1294,7 +1294,7 @@ impl EngineState {
     }
 
     /// Terminal release: drop every held scope, and say which they were.
-    /// Nothing can need an environment after `FinishRun`, and a finished
+    /// Nothing can need an environment after `FinishExecution`, and a finished
     /// serialized state must claim no resources — a token parked at an
     /// unsatisfiable join no longer holds its environment past the end of
     /// the run.

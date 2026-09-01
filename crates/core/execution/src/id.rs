@@ -48,13 +48,22 @@ run_id!(SandboxLeaseId);
 
 impl InvocationId {
     pub const ROOT: Self = Self(0);
+
+    /// The workspace-prefix fragment this invocation contributes to scope
+    /// identities: durable lease records and the driver's workspace names
+    /// both build on it, so it has exactly one spelling.
+    pub fn workspace_prefix(self) -> String {
+        format!("invocation-{self}")
+    }
 }
 
-/// A firing qualified by its run-scoped execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct FiringAddress {
-    pub execution: ExecutionId,
-    pub firing:    FiringId,
+impl ExecutionId {
+    /// The environment-prefix fragment this execution contributes to scope
+    /// identities — the per-execution counterpart of
+    /// [`InvocationId::workspace_prefix`].
+    pub fn environment_prefix(self) -> String {
+        format!("execution-{self}")
+    }
 }
 
 /// The durable idempotency key for a nested call.

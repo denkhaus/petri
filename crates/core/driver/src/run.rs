@@ -8,9 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::{
-    Admission, AdmitPoint, CANCEL_ESCALATION_KEY, Command, DecisionId, EngineExit, EngineStart,
-    EngineState, Event, EventLog, GroupDecision, ReplayMismatch, ResolvedFiring, RouteDecision,
-    apply,
+    Admission, CANCEL_ESCALATION_KEY, Command, DecisionId, EngineExit, EngineStart, EngineState,
+    Event, EventLog, GroupDecision, ReplayMismatch, ResolvedFiring, RouteDecision, apply,
 };
 use executor::{
     AcquireContext, EnvError, EnvHandle, EnvironmentId, Executor, NoProgress, ProgressSink,
@@ -288,12 +287,10 @@ enum Signal {
         next_attempt: Attempt,
     },
     Admitted {
-        point:       AdmitPoint,
         decision_id: DecisionId,
         resolution:  AdmissionResolution,
     },
     RoutingResolved {
-        firing:      FiringId,
         decision_id: DecisionId,
         resolution:  RoutingResolution,
     },
@@ -410,7 +407,9 @@ pub struct Driver {
     next_acquire_id:  u64,
     acquire_failures: HashMap<ScopeId, String>,
     pending_starts:   HashMap<ScopeId, Vec<ResolvedFiring>>,
-    early_deliveries: HashMap<FiringId, Vec<Forward>>,
+    /// Deliveries that arrived before execution admission resolved. Unlike
+    /// [`Forward`], every buffered delivery carries an ack.
+    early_deliveries: HashMap<FiringId, Vec<(Control, DeliverAck)>>,
     pending_forwards: HashMap<FiringId, Vec<Forward>>,
     pending_failures: HashMap<FiringId, (Attempt, String)>,
     scope_failed:     HashSet<ScopeId>,
@@ -629,11 +628,9 @@ impl Driver {
             };
             self.on_signal(signal).await;
         }
-        for (_, forwards) in self.early_deliveries.drain() {
-            for forward in forwards {
-                if let Some(ack) = forward.ack {
-                    let _ = ack.send(DeliverDisposition::NotLive);
-                }
+        for (_, deliveries) in self.early_deliveries.drain() {
+            for (_, ack) in deliveries {
+                let _ = ack.send(DeliverDisposition::NotLive);
             }
         }
         self.abort_decisions();
@@ -749,26 +746,39 @@ impl Driver {
                 });
             }
             Signal::Admitted {
-                point,
                 decision_id,
                 resolution,
             } => {
                 self.decision_tasks.remove(&decision_id);
+                // A stop tier can clear a pending decision after its resolver
+                // was asked; the moot answer is dropped, exactly as an aborted
+                // resolver task's answer never arrives.
+                if !self
+                    .engine
+                    .pending_admissions()
+                    .any(|pending| pending.decision_id == decision_id)
+                {
+                    return;
+                }
                 self.feed(Event::Admitted {
-                    point,
                     decision_id,
                     decision: resolution.decision,
                     trace: resolution.trace,
                 });
             }
             Signal::RoutingResolved {
-                firing,
                 decision_id,
                 resolution,
             } => {
                 self.decision_tasks.remove(&decision_id);
+                if !self
+                    .engine
+                    .pending_routings()
+                    .any(|pending| pending.decision_id == decision_id)
+                {
+                    return;
+                }
                 self.feed(Event::RoutingResolved {
-                    firing,
                     decision_id,
                     groups: resolution.groups,
                 });
@@ -831,6 +841,24 @@ impl Driver {
         }
     }
 
+    fn track_decision(&mut self, decision_id: DecisionId, task: JoinHandle<()>) {
+        if let Some(previous) = self.decision_tasks.insert(decision_id, task) {
+            previous.abort();
+        }
+    }
+
+    /// Queue a synchronously resolved decision on the signal channel. A full
+    /// channel falls back to a task that awaits capacity; decisions are
+    /// validated by id, so relative order between them carries no meaning.
+    fn send_decision_signal(&self, signal: Signal) {
+        if let Err(mpsc::error::TrySendError::Full(signal)) = self.tx.try_send(signal) {
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(signal).await;
+            });
+        }
+    }
+
     /// Append-then-apply, then dispatch whatever the core asked for.
     ///
     /// The append happens inside `apply`, which records this event as
@@ -880,15 +908,12 @@ impl Driver {
         if self
             .engine
             .pending_admissions()
-            .any(|pending| matches!(pending.point, AdmitPoint::ExecutionStart))
+            .any(|pending| matches!(pending.decision_id, DecisionId::ExecutionStart))
         {
             self.early_deliveries
                 .entry(firing)
                 .or_default()
-                .push(Forward {
-                    ctl,
-                    ack: Some(ack),
-                });
+                .push((ctl, ack));
             return;
         }
         let commands = self.apply_event(Event::ControlRequested { firing, ctl });
@@ -918,73 +943,82 @@ impl Driver {
 
     fn dispatch(&mut self, command: Command) {
         match command {
-            Command::Admit { point, decision_id } => {
+            Command::Admit { decision_id } => {
+                let request = AdmitRequest { decision_id };
+                if let Some(resolution) = self.decisions.admit_now(&request) {
+                    self.send_decision_signal(Signal::Admitted {
+                        decision_id,
+                        resolution,
+                    });
+                    return;
+                }
                 let resolver = self.decisions.clone();
                 let tx = self.tx.clone();
-                let task = tokio::spawn(async move {
-                    let resolution = resolver
-                        .admit(AdmitRequest { point, decision_id })
-                        .await
-                        .unwrap_or_else(|error| AdmissionResolution {
-                            decision: Admission::Block {
-                                reason: SmolStr::new(error.message()),
-                            },
-                            trace:    Vec::new(),
+                let task =
+                    tokio::spawn(async move {
+                        let resolution = resolver.admit(request).await.unwrap_or_else(|error| {
+                            AdmissionResolution {
+                                decision: Admission::Block {
+                                    reason: SmolStr::new(error.message()),
+                                },
+                                trace:    Vec::new(),
+                            }
                         });
-                    let _ = tx
-                        .send(Signal::Admitted {
-                            point,
-                            decision_id,
-                            resolution,
-                        })
-                        .await;
-                });
-                if let Some(previous) = self.decision_tasks.insert(decision_id, task) {
-                    previous.abort();
-                }
+                        let _ = tx
+                            .send(Signal::Admitted {
+                                decision_id,
+                                resolution,
+                            })
+                            .await;
+                    });
+                self.track_decision(decision_id, task);
             }
             Command::ResolveRouting {
-                firing,
                 decision_id,
                 restart_allowed,
                 groups,
             } => {
+                let request = RoutingRequest {
+                    decision_id,
+                    restart_allowed,
+                    groups,
+                };
+                if let Some(resolution) = self.decisions.route_now(&request) {
+                    self.send_decision_signal(Signal::RoutingResolved {
+                        decision_id,
+                        resolution,
+                    });
+                    return;
+                }
                 let resolver = self.decisions.clone();
                 let tx = self.tx.clone();
-                let task = tokio::spawn(async move {
-                    let group_ids: Vec<u32> = groups.iter().map(|group| group.group).collect();
-                    let resolution = resolver
-                        .route(RoutingRequest {
-                            firing,
-                            decision_id,
-                            restart_allowed,
-                            groups,
-                        })
-                        .await
-                        .unwrap_or_else(|error| RoutingResolution {
-                            groups: group_ids
-                                .into_iter()
-                                .map(|group| GroupDecision {
-                                    group,
-                                    draw: None,
-                                    trace: Vec::new(),
-                                    decision: RouteDecision::Block {
-                                        reason: SmolStr::new(error.message()),
-                                    },
-                                })
-                                .collect(),
+                let task =
+                    tokio::spawn(async move {
+                        let group_ids: Vec<u32> =
+                            request.groups.iter().map(|group| group.group).collect();
+                        let resolution = resolver.route(request).await.unwrap_or_else(|error| {
+                            RoutingResolution {
+                                groups: group_ids
+                                    .into_iter()
+                                    .map(|group| GroupDecision {
+                                        group,
+                                        draw: None,
+                                        trace: Vec::new(),
+                                        decision: RouteDecision::Block {
+                                            reason: SmolStr::new(error.message()),
+                                        },
+                                    })
+                                    .collect(),
+                            }
                         });
-                    let _ = tx
-                        .send(Signal::RoutingResolved {
-                            firing,
-                            decision_id,
-                            resolution,
-                        })
-                        .await;
-                });
-                if let Some(previous) = self.decision_tasks.insert(decision_id, task) {
-                    previous.abort();
-                }
+                        let _ = tx
+                            .send(Signal::RoutingResolved {
+                                decision_id,
+                                resolution,
+                            })
+                            .await;
+                    });
+                self.track_decision(decision_id, task);
             }
             Command::AcquireScope { scope } => self.acquire(scope),
             Command::ReleaseScope { scope } => self.release(scope),
@@ -1027,9 +1061,7 @@ impl Driver {
             }
             // The core resolves expansion itself, and the run ends when the loop
             // sees the state finished.
-            Command::ExpandNode { .. }
-            | Command::FinishRun { .. }
-            | Command::FinishExecution { .. } => {}
+            Command::ExpandNode { .. } | Command::FinishExecution { .. } => {}
         }
     }
 
@@ -1201,19 +1233,13 @@ impl Driver {
     }
 
     fn scope_spec(&self, scope: ScopeId) -> ScopeSpec {
-        let scope_name = format!("scope-{}", scope.raw());
-        let environment = self.config.environment_prefix.as_ref().map_or_else(
-            || scope_name.clone(),
-            |prefix| format!("{prefix}-{scope_name}"),
-        );
-        let workspace = self.config.workspace_override.clone().unwrap_or_else(|| {
-            WorkspaceId::new(self.config.workspace_prefix.as_ref().map_or_else(
-                || scope_name.clone(),
-                |prefix| format!("{prefix}-{scope_name}"),
-            ))
-        });
-        let mut spec = ScopeSpec::new(scope, &scope_name)
-            .with_environment_id(EnvironmentId::new(environment))
+        let environment = EnvironmentId::scoped(self.config.environment_prefix.as_deref(), scope);
+        let workspace =
+            self.config.workspace_override.clone().unwrap_or_else(|| {
+                WorkspaceId::scoped(self.config.workspace_prefix.as_deref(), scope)
+            });
+        let mut spec = ScopeSpec::new(scope, environment.as_str())
+            .with_environment_id(environment)
             .with_workspace_id(workspace)
             .with_grace(self.config.grace);
         let Some(definition) = self.engine.graph().scope(scope) else {
@@ -1625,10 +1651,8 @@ impl Driver {
         let Some(deliveries) = self.early_deliveries.remove(&firing) else {
             return;
         };
-        for delivery in deliveries {
-            if let Some(ack) = delivery.ack {
-                self.on_deliver(firing, delivery.ctl, ack);
-            }
+        for (ctl, ack) in deliveries {
+            self.on_deliver(firing, ctl, ack);
         }
     }
 

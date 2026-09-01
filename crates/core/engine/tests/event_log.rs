@@ -41,10 +41,13 @@ fn routing_tokens_appear_in_the_log() {
         .count();
     // One seed, two from the fan-out, two into the join.
     assert_eq!(tokens, 5);
-    assert!(matches!(
-        h.state.log.events().next(),
-        Some(Event::RunStarted)
-    ));
+    assert!(
+        matches!(
+            h.state.log.events().next(),
+            Some(Event::ExecutionStarted(_))
+        ),
+        "the compatibility spelling normalizes before the append"
+    );
     assert_eq!(h.state.log.version(), LOG_VERSION);
 
     // Sequence numbers are dense and in order.
@@ -113,7 +116,7 @@ fn the_run_finishes_once() {
     let finishes = h
         .commands
         .iter()
-        .filter(|c| matches!(c, Command::FinishRun { .. }))
+        .filter(|c| matches!(c, Command::FinishExecution { .. }))
         .count();
     assert_eq!(finishes, 1);
     assert!(h.state.is_finished());
@@ -236,7 +239,7 @@ fn records_say_whether_they_came_from_outside_or_from_the_core() {
             .all(|e| !matches!(e, Event::TokenEmitted(_) | Event::NodeExpanded { .. })),
         "routed tokens and splices are the core's own"
     );
-    assert!(matches!(external.first(), Some(Event::RunStarted)));
+    assert!(matches!(external.first(), Some(Event::ExecutionStarted(_))));
 
     let core_records = h
         .state

@@ -4,14 +4,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use driver::{
-    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
-    RoutingRequest, RoutingResolution,
+    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, RoutingRequest,
+    RoutingResolution, default_group_decision,
 };
 use engine::{
     Admission, DecisionId, Event, EventRecord, GroupDecision, Intervention, MiddlewareKey,
     RouteDecision, RoutingProposal,
 };
-use ir::{EdgeTransition, FiringId, NodeId, Outcome, Value};
+use ir::{Attempt, FiringId, NodeId, Outcome, Value};
 use smol_str::SmolStr;
 
 use crate::{ExecutionId, InvocationId};
@@ -28,8 +28,40 @@ pub enum FoldEvent<'a> {
     },
     RouteApplied {
         firing:   FiringId,
-        decision: &'a RouteDecision,
+        decision: RouteDecision,
     },
+}
+
+/// The middleware fold projection of one engine event.
+///
+/// The one definition both fold paths share: the live observer derives from the
+/// post-apply state, and the resume rebuild derives from a replayed prefix —
+/// only their finality and node lookups differ. Checkpointed middleware state
+/// is validated across resume, so the two paths must fold identically.
+pub(crate) fn derive_fold_event(
+    event: &Event,
+    is_final_attempt: impl Fn(FiringId, Attempt) -> bool,
+    node_of: impl Fn(FiringId) -> Option<NodeId>,
+) -> Option<FoldEvent<'_>> {
+    match event {
+        Event::ExecutionStarted(_) => Some(FoldEvent::ExecutionStarted),
+        Event::StepFinished {
+            firing,
+            attempt,
+            outcome,
+        } if is_final_attempt(*firing, *attempt) => {
+            node_of(*firing).map(|node| FoldEvent::FinalOutcome {
+                firing: *firing,
+                node,
+                outcome,
+            })
+        }
+        Event::RouteApplied(applied) => Some(FoldEvent::RouteApplied {
+            firing:   applied.firing(),
+            decision: applied.decision(),
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +74,6 @@ pub struct DecisionAddress {
 #[derive(Clone, Debug)]
 pub struct AdmitCall {
     pub address: DecisionAddress,
-    pub point:   engine::AdmitPoint,
     pub state:   Value,
 }
 
@@ -50,7 +81,7 @@ pub struct AdmitCall {
 pub struct RouteCall {
     pub address:  DecisionAddress,
     pub firing:   FiringId,
-    pub proposal: RoutingProposal,
+    pub proposal: Arc<RoutingProposal>,
     pub state:    Value,
 }
 
@@ -74,6 +105,8 @@ impl MiddlewareError {
 
 type AdmitFuture = Pin<Box<dyn Future<Output = Result<Admission, MiddlewareError>> + Send>>;
 type RouteFuture = Pin<Box<dyn Future<Output = Result<RouteDecision, MiddlewareError>> + Send>>;
+type LayerFuture<D, T> =
+    Pin<Box<dyn Future<Output = Result<Resolved<D, T>, MiddlewareError>> + Send>>;
 
 #[derive(Clone)]
 pub struct AdmitNext {
@@ -156,16 +189,29 @@ pub fn validate_middleware_state(
     Ok(())
 }
 
+/// A chain layer's decision with the interventions recorded below it.
 #[derive(Clone)]
-struct PipelineAdmission {
-    decision: Admission,
-    trace:    Vec<MiddlewareKey>,
+struct Resolved<D, T> {
+    decision: D,
+    trace:    Vec<T>,
 }
 
-#[derive(Clone)]
-struct PipelineRoute {
-    decision: RouteDecision,
-    trace:    Vec<Intervention>,
+/// Combine a layer's decision with the downstream result: the downstream trace
+/// carries forward, and the layer is prepended only when it changed the
+/// decision.
+fn resolve_layer<D: PartialEq, T>(
+    downstream: Option<Resolved<D, T>>,
+    decision: D,
+    entry: impl FnOnce(&D) -> T,
+) -> Resolved<D, T> {
+    let diverged = downstream
+        .as_ref()
+        .is_none_or(|value| value.decision != decision);
+    let mut trace = downstream.map_or_else(Vec::new, |value| value.trace);
+    if diverged {
+        trace.insert(0, entry(&decision));
+    }
+    Resolved { decision, trace }
 }
 
 /// One execution-bound middleware chain and its externally owned state.
@@ -236,7 +282,6 @@ impl DecisionResolver for MiddlewarePipeline {
             self.chain.clone(),
             self.state.clone(),
             self.address(request.decision_id),
-            request.point,
         )
         .await
         .map_err(|error| DecisionError::new(error.message()))?;
@@ -247,31 +292,59 @@ impl DecisionResolver for MiddlewarePipeline {
     }
 
     async fn route(&self, request: RoutingRequest) -> Result<RoutingResolution, DecisionError> {
-        let baseline = DefaultDecisionResolver.route(request.clone()).await?;
+        let DecisionId::Route { firing, .. } = request.decision_id else {
+            return Err(DecisionError::new(
+                "a routing request must carry a route decision id",
+            ));
+        };
         let mut groups = Vec::with_capacity(request.groups.len());
-        for (proposal, baseline) in request.groups.into_iter().zip(baseline.groups) {
-            let draw = baseline.draw;
+        for proposal in request.groups {
+            let baseline = default_group_decision(&proposal, request.restart_allowed)?;
+            let proposal = Arc::new(proposal);
             let resolved = route_at(
                 0,
                 self.chain.clone(),
                 self.state.clone(),
                 self.address(request.decision_id),
-                request.firing,
+                firing,
                 proposal.clone(),
                 baseline.decision,
             )
             .await
             .map_err(|error| DecisionError::new(error.message()))?;
-            let decision =
-                enforce_restart_limit(request.restart_allowed, &proposal, resolved.decision);
+            let decision = engine::enforce_restart_limit(
+                request.restart_allowed,
+                &proposal,
+                resolved.decision,
+            );
             groups.push(GroupDecision {
                 group: proposal.group,
-                draw,
+                draw: baseline.draw,
                 trace: resolved.trace,
                 decision,
             });
         }
         Ok(RoutingResolution { groups })
+    }
+
+    fn admit_now(&self, _request: &AdmitRequest) -> Option<AdmissionResolution> {
+        self.chain.is_empty().then(|| AdmissionResolution {
+            decision: Admission::Admit,
+            trace:    Vec::new(),
+        })
+    }
+
+    fn route_now(&self, request: &RoutingRequest) -> Option<RoutingResolution> {
+        if !self.chain.is_empty() {
+            return None;
+        }
+        let groups = request
+            .groups
+            .iter()
+            .map(|proposal| default_group_decision(proposal, request.restart_allowed))
+            .collect::<Result<_, _>>()
+            .ok()?;
+        Some(RoutingResolution { groups })
     }
 }
 
@@ -280,11 +353,10 @@ fn admit_at(
     chain: Arc<[Arc<dyn Middleware>]>,
     state: Arc<RwLock<MiddlewareState>>,
     address: DecisionAddress,
-    point: engine::AdmitPoint,
-) -> Pin<Box<dyn Future<Output = Result<PipelineAdmission, MiddlewareError>> + Send>> {
+) -> LayerFuture<Admission, MiddlewareKey> {
     Box::pin(async move {
         let Some(middleware) = chain.get(index).cloned() else {
-            return Ok(PipelineAdmission {
+            return Ok(Resolved {
                 decision: Admission::Admit,
                 trace:    Vec::new(),
             });
@@ -299,7 +371,7 @@ fn admit_at(
                 let state = next_state.clone();
                 let captured = next_captured.clone();
                 Box::pin(async move {
-                    let resolved = admit_at(index + 1, chain, state, address, point).await?;
+                    let resolved = admit_at(index + 1, chain, state, address).await?;
                     let decision = resolved.decision.clone();
                     *captured.lock().unwrap_or_else(PoisonError::into_inner) = Some(resolved);
                     Ok(decision)
@@ -312,7 +384,6 @@ fn admit_at(
             .admit(
                 AdmitCall {
                     address,
-                    point,
                     state: middleware_state,
                 },
                 next,
@@ -321,17 +392,8 @@ fn admit_at(
         let downstream = captured
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let mut trace = downstream
-            .as_ref()
-            .map_or_else(Vec::new, |value| value.trace.clone());
-        if downstream
-            .as_ref()
-            .is_none_or(|value| value.decision != decision)
-        {
-            trace.insert(0, key);
-        }
-        Ok(PipelineAdmission { decision, trace })
+            .take();
+        Ok(resolve_layer(downstream, decision, |_| key))
     })
 }
 
@@ -341,12 +403,12 @@ fn route_at(
     state: Arc<RwLock<MiddlewareState>>,
     address: DecisionAddress,
     firing: FiringId,
-    proposal: RoutingProposal,
+    proposal: Arc<RoutingProposal>,
     baseline: RouteDecision,
-) -> Pin<Box<dyn Future<Output = Result<PipelineRoute, MiddlewareError>> + Send>> {
+) -> LayerFuture<RouteDecision, Intervention> {
     Box::pin(async move {
         let Some(middleware) = chain.get(index).cloned() else {
-            return Ok(PipelineRoute {
+            return Ok(Resolved {
                 decision: baseline,
                 trace:    Vec::new(),
             });
@@ -390,17 +452,10 @@ fn route_at(
         let downstream = captured
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let mut trace = downstream
-            .as_ref()
-            .map_or_else(Vec::new, |value| value.trace.clone());
-        if downstream
-            .as_ref()
-            .is_none_or(|value| value.decision != decision)
-        {
-            trace.insert(0, intervention(key, &decision));
-        }
-        Ok(PipelineRoute { decision, trace })
+            .take();
+        Ok(resolve_layer(downstream, decision, |decision| {
+            intervention(key, decision)
+        }))
     })
 }
 
@@ -437,28 +492,6 @@ fn intervention(key: MiddlewareKey, decision: &RouteDecision) -> Intervention {
     }
 }
 
-fn enforce_restart_limit(
-    restart_allowed: bool,
-    proposal: &RoutingProposal,
-    decision: RouteDecision,
-) -> RouteDecision {
-    if restart_allowed {
-        return decision;
-    }
-    match decision {
-        RouteDecision::Emit(edge)
-            if proposal.candidates.iter().any(|candidate| {
-                candidate.edge == edge && candidate.transition == EdgeTransition::Restart
-            }) =>
-        {
-            RouteDecision::Block {
-                reason: SmolStr::new("maximum executions per invocation reached"),
-            }
-        }
-        decision => decision,
-    }
-}
-
 #[derive(Clone)]
 pub struct MiddlewareFoldObserver {
     chain:   Arc<[Arc<dyn Middleware>]>,
@@ -466,52 +499,25 @@ pub struct MiddlewareFoldObserver {
     failure: Arc<Mutex<Option<MiddlewareError>>>,
 }
 
-impl MiddlewareFoldObserver {
-    pub fn checkpoint(&self) -> MiddlewareState {
-        self.state
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-}
-
 #[async_trait::async_trait]
 impl driver::EventObserver for MiddlewareFoldObserver {
     fn on_record(&self, record: &EventRecord, state: &engine::EngineState) {
-        let fold = match &record.event {
-            Event::ExecutionStarted(_) | Event::RunStarted => Some(FoldEvent::ExecutionStarted),
-            Event::StepFinished {
-                firing,
-                attempt,
-                outcome,
-            } if state
-                .history()
-                .iter()
-                .any(|entry| entry.firing == *firing && entry.attempt == *attempt) =>
-            {
+        if self.chain.is_empty() {
+            return;
+        }
+        // Finality: `apply` records the final attempt in history in the same
+        // transition, so the matching entry sits at (or near) the tail.
+        let fold = derive_fold_event(
+            &record.event,
+            |firing, attempt| {
                 state
-                    .firing_node(*firing)
-                    .map(|node| FoldEvent::FinalOutcome {
-                        firing: *firing,
-                        node,
-                        outcome,
-                    })
-            }
-            Event::RouteApplied(applied) => {
-                let (firing, decision) = match applied {
-                    engine::RouteApplied::Edge { firing, edge, .. } => {
-                        (*firing, RouteDecision::Emit(*edge))
-                    }
-                    engine::RouteApplied::Jump { firing, target } => {
-                        (*firing, RouteDecision::Jump(*target))
-                    }
-                    engine::RouteApplied::None { firing, .. } => (*firing, RouteDecision::None),
-                };
-                self.fold_owned(firing, &decision);
-                None
-            }
-            _ => None,
-        };
+                    .history()
+                    .iter()
+                    .rev()
+                    .any(|entry| entry.firing == firing && entry.attempt == attempt)
+            },
+            |firing| state.firing_node(firing),
+        );
         if let Some(event) = fold {
             self.apply_fold(&event);
         }
@@ -534,10 +540,6 @@ impl driver::EventObserver for MiddlewareFoldObserver {
 }
 
 impl MiddlewareFoldObserver {
-    fn fold_owned(&self, firing: FiringId, decision: &RouteDecision) {
-        self.apply_fold(&FoldEvent::RouteApplied { firing, decision });
-    }
-
     fn apply_fold(&self, event: &FoldEvent<'_>) {
         let mut states = self.state.write().unwrap_or_else(PoisonError::into_inner);
         for middleware in self.chain.iter() {

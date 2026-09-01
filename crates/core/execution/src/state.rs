@@ -41,7 +41,6 @@ pub struct ExecutionDeclaration {
 pub struct ExecutionState {
     pub declaration: ExecutionDeclaration,
     pub exit:        Option<EngineExit>,
-    pub successor:   Option<ExecutionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -91,7 +90,7 @@ pub enum StateError {
     MiddlewareChain,
 }
 
-/// The replayed invocation tree and allocation high-water marks.
+/// The replayed invocation tree.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoordinatorState {
     pub root:             Option<InvocationId>,
@@ -101,8 +100,6 @@ pub struct CoordinatorState {
     pub executions:       BTreeMap<ExecutionId, ExecutionState>,
     pub calls:            BTreeMap<ParentCallKey, InvocationId>,
     pub run_status:       Option<RunStatus>,
-    next_invocation:      u64,
-    next_execution:       u64,
 }
 
 impl CoordinatorState {
@@ -123,26 +120,41 @@ impl CoordinatorState {
         Ok(state)
     }
 
-    pub fn allocate_invocation(&mut self) -> InvocationId {
-        let id = InvocationId::new(self.next_invocation.max(1));
-        self.next_invocation = id
-            .raw()
-            .checked_add(1)
-            .expect("one run cannot declare 2^64 invocations");
-        id
+    /// The next free invocation id, derived from the declared tree. Ids only
+    /// ever come from here, so the map's high key is the allocation state.
+    /// Zero is the root's reserved id.
+    pub fn next_invocation_id(&self) -> InvocationId {
+        let next = self
+            .invocations
+            .keys()
+            .next_back()
+            .map_or(0, |id| {
+                id.raw()
+                    .checked_add(1)
+                    .expect("one run cannot declare 2^64 invocations")
+            })
+            .max(1);
+        InvocationId::new(next)
     }
 
-    pub fn allocate_execution(&mut self) -> ExecutionId {
-        let id = ExecutionId::new(self.next_execution);
-        self.next_execution = id
-            .raw()
-            .checked_add(1)
-            .expect("one run cannot declare 2^64 executions");
-        id
+    /// The next free execution id, on the same rule.
+    pub fn next_execution_id(&self) -> ExecutionId {
+        ExecutionId::new(self.executions.keys().next_back().map_or(0, |id| {
+            id.raw()
+                .checked_add(1)
+                .expect("one run cannot declare 2^64 executions")
+        }))
     }
 
-    pub fn invocation_for_call(&self, call: &ParentCallKey) -> Option<InvocationId> {
-        self.calls.get(call).copied()
+    /// The execution declared after this one in its invocation, if any.
+    pub fn successor_of(&self, execution: ExecutionId) -> Option<ExecutionId> {
+        let invocation =
+            &self.invocations[&self.executions.get(&execution)?.declaration.invocation];
+        let index = invocation
+            .executions
+            .iter()
+            .position(|candidate| *candidate == execution)?;
+        invocation.executions.get(index + 1).copied()
     }
 
     pub fn apply(&mut self, event: &CoordinatorEvent) -> Result<(), StateError> {
@@ -172,7 +184,6 @@ impl CoordinatorState {
                 }
                 self.root = Some(*root);
                 self.middleware_chain.clone_from(middleware_chain);
-                self.next_invocation = 1;
             }
             CoordinatorEvent::GraphRegistered { digest } => {
                 if !self.graphs.insert(*digest) {
@@ -205,7 +216,6 @@ impl CoordinatorState {
                     }
                     self.calls.insert(call.clone(), *invocation);
                 }
-                self.next_invocation = self.next_invocation.max(invocation.raw().saturating_add(1));
                 self.invocations.insert(*invocation, InvocationState {
                     declaration: InvocationDeclaration {
                         id:              *invocation,
@@ -244,25 +254,19 @@ impl CoordinatorState {
                     });
                 }
                 if let Some(predecessor) = predecessor {
+                    // The predecessor is the invocation's last execution — the
+                    // check above pinned that — so it can have no successor
+                    // yet; only its exit needs to justify one.
                     let prior = self
                         .executions
                         .get(predecessor)
                         .ok_or(StateError::UnknownExecution(*predecessor))?;
-                    if prior.successor.is_some()
-                        || !matches!(prior.exit, Some(EngineExit::Restart { .. }))
-                    {
+                    if !matches!(prior.exit, Some(EngineExit::Restart { .. })) {
                         return Err(StateError::InvalidPredecessor {
                             execution: *execution,
                         });
                     }
                 }
-                if let Some(predecessor) = predecessor {
-                    self.executions
-                        .get_mut(predecessor)
-                        .expect("the predecessor was checked above")
-                        .successor = Some(*execution);
-                }
-                self.next_execution = self.next_execution.max(execution.raw().saturating_add(1));
                 self.executions.insert(*execution, ExecutionState {
                     declaration: ExecutionDeclaration {
                         id:               *execution,
@@ -272,7 +276,6 @@ impl CoordinatorState {
                         middleware_state: middleware_state.clone(),
                     },
                     exit:        None,
-                    successor:   None,
                 });
                 self.invocations
                     .get_mut(invocation)
@@ -293,7 +296,7 @@ impl CoordinatorState {
             CoordinatorEvent::InvocationFinished { invocation, result } => {
                 let state = self
                     .invocations
-                    .get_mut(invocation)
+                    .get(invocation)
                     .ok_or(StateError::UnknownInvocation(*invocation))?;
                 if state.result.is_some() {
                     return Err(StateError::DuplicateInvocationFinish(*invocation));
@@ -302,8 +305,10 @@ impl CoordinatorState {
                     .executions
                     .get(&result.final_execution)
                     .ok_or(StateError::UnknownExecution(result.final_execution))?;
+                // The final execution must be the invocation's last one — a
+                // non-last execution already has a successor.
                 if final_execution.declaration.invocation != *invocation
-                    || final_execution.successor.is_some()
+                    || state.executions.last() != Some(&result.final_execution)
                     || !matches!(final_execution.exit, Some(EngineExit::Terminal { .. }))
                 {
                     return Err(StateError::InvalidFinalExecution {
@@ -311,7 +316,10 @@ impl CoordinatorState {
                         execution:  result.final_execution,
                     });
                 }
-                state.result = Some(result.clone());
+                self.invocations
+                    .get_mut(invocation)
+                    .expect("the invocation was checked above")
+                    .result = Some(result.clone());
             }
             CoordinatorEvent::InvocationCancelRequested { invocation } => {
                 self.invocations

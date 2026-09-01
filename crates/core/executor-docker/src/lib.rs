@@ -709,7 +709,7 @@ impl DockerExecutor {
         guard.defuse();
         Ok(EnvHandle::new(
             scope.id,
-            scope.instance.clone(),
+            SmolStr::new(scope.instance()),
             Arc::new(DockerEnv {
                 container: name.clone(),
                 workspace: workspace.clone(),
@@ -738,7 +738,7 @@ impl Executor for DockerExecutor {
         skip_all,
         fields(
             scope = scope.id.raw(),
-            instance = %scope.instance,
+            instance = %scope.instance(),
             image = Empty,
             service_count = scope.services.len(),
             container = Empty,

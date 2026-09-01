@@ -28,6 +28,17 @@ macro_rules! scope_identity {
                 Self(value.into())
             }
 
+            /// The scope-qualified identity `{prefix}-scope-{id}`, or the bare
+            /// `scope-{id}` without a prefix. The one owner of the fragment
+            /// every layer that names a scope's environment or workspace must
+            /// agree on.
+            pub fn scoped(prefix: Option<&str>, scope: ScopeId) -> Self {
+                match prefix {
+                    Some(prefix) => Self(SmolStr::new(format!("{prefix}-scope-{}", scope.raw()))),
+                    None => Self(SmolStr::new(format!("scope-{}", scope.raw()))),
+                }
+            }
+
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -99,8 +110,6 @@ impl ServiceSpec {
 #[derive(Clone)]
 pub struct ScopeSpec {
     pub id:           ScopeId,
-    /// Compatibility spelling for the environment identity.
-    pub instance:     SmolStr,
     /// Process, container, and service fence identity.
     pub environment:  EnvironmentId,
     /// Persistent filesystem identity. It can outlive an environment.
@@ -122,7 +131,6 @@ impl fmt::Debug for ScopeSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScopeSpec")
             .field("id", &self.id)
-            .field("instance", &self.instance)
             .field("environment", &self.environment)
             .field("workspace_id", &self.workspace_id)
             .field("env", &self.env.keys())
@@ -139,7 +147,6 @@ impl ScopeSpec {
         let instance = SmolStr::new(instance);
         Self {
             id,
-            instance: instance.clone(),
             environment: EnvironmentId::new(instance.clone()),
             workspace_id: WorkspaceId::new(instance),
             env: BTreeMap::new(),
@@ -150,9 +157,13 @@ impl ScopeSpec {
         }
     }
 
+    /// Compatibility spelling for the environment identity.
+    pub fn instance(&self) -> &str {
+        self.environment.as_str()
+    }
+
     #[must_use]
     pub fn with_environment_id(mut self, environment: EnvironmentId) -> Self {
-        self.instance = SmolStr::new(environment.as_str());
         self.environment = environment;
         self
     }

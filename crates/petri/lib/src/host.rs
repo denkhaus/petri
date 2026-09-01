@@ -37,13 +37,12 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use execution::{Coordinator, CoordinatorError, CoordinatorOptions, InvocationId};
+use execution::{Coordinator, CoordinatorError, CoordinatorOptions, GraphDigest, InvocationId};
 use runtime::Runtime;
 use runtime::driver::{Driver, EventObserver, ObserveError, ResumeError, ResumeInfo, RunReport};
-use runtime::engine::{self, EngineState, EventLog, EventRecord, InvalidRecords};
+use runtime::engine::{self, EngineState, EventLog, EventRecord};
 use runtime::executor::Masker;
 use runtime::ir::{self, Graph};
-use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 /// The event stream's file name under the run dir.
@@ -103,90 +102,22 @@ pub enum HostError {
     MissingExecutionReport,
 }
 
-/// Why `events.jsonl` bytes could not become an [`EventLog`].
-///
-/// The torn-line rule is strict: a final line is *torn* only when EOF arrives
-/// before its terminating newline, and only then is it dropped (see
-/// [`DecodedEvents::torn`]). A newline-terminated line that fails to decode
-/// refuses the load — corruption or tampering must not be silently accepted as
-/// a crash prefix.
-#[derive(Debug, thiserror::Error)]
-pub enum EventsDecodeError {
-    #[error("no complete header line")]
-    MissingHeader,
-    #[error("the header line is not `{{\"version\": N}}`")]
-    BadHeader(#[source] serde_json::Error),
-    #[error("line {line} is not an event record")]
-    BadRecord {
-        line:   usize,
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error(transparent)]
-    Invalid(#[from] InvalidRecords),
-}
-
-/// The first line of `events.jsonl`.
-#[derive(Serialize, Deserialize)]
-struct Header {
-    version: u32,
-}
+/// Why `events.jsonl` bytes could not become an [`EventLog`]: the execution
+/// crate owns the framing, and this host reads and writes the same format.
+pub type EventsDecodeError = execution::EngineLogDecodeError;
 
 /// One successful `events.jsonl` decode.
-#[derive(Debug)]
-pub struct DecodedEvents {
-    pub log:       EventLog,
-    /// Byte length of the clean prefix: everything up to and including the last
-    /// terminating newline. Resume truncates the file here before appending.
-    pub clean_len: usize,
-    /// An EOF-torn final line was dropped. Worth a warning; never an error.
-    pub torn:      bool,
-}
+pub type DecodedEvents = execution::DecodedEngineLog;
 
 /// Decode `events.jsonl` bytes: header, records, strict torn-line rule.
 pub fn decode_events(bytes: &[u8]) -> Result<DecodedEvents, EventsDecodeError> {
-    let clean_len = bytes
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |last| last + 1);
-    let mut lines = bytes[..clean_len]
-        .split_inclusive(|b| *b == b'\n')
-        .map(|line| &line[..line.len() - 1]);
-
-    let Some(header) = lines.next() else {
-        return Err(EventsDecodeError::MissingHeader);
-    };
-    let header: Header = serde_json::from_slice(header).map_err(EventsDecodeError::BadHeader)?;
-
-    let mut records: Vec<EventRecord> = Vec::new();
-    for (index, line) in lines.enumerate() {
-        let record = serde_json::from_slice(line).map_err(|e| EventsDecodeError::BadRecord {
-            line:   index + 2,
-            source: e,
-        })?;
-        records.push(record);
-    }
-    let log = EventLog::try_from_records(header.version, records)?;
-    Ok(DecodedEvents {
-        log,
-        clean_len,
-        torn: clean_len < bytes.len(),
-    })
+    execution::decode_engine_log(bytes)
 }
 
 /// Render a log in the `events.jsonl` framing: what [`JsonlEventLog`] writes
 /// incrementally, produced in one piece.
 pub fn encode_events(log: &EventLog) -> Vec<u8> {
-    let mut out = serde_json::to_vec(&Header {
-        version: log.version(),
-    })
-    .expect("a header always encodes");
-    out.push(b'\n');
-    for record in log.records() {
-        out.extend(serde_json::to_vec(record).expect("a record always encodes"));
-        out.push(b'\n');
-    }
-    out
+    execution::encode_engine_log(log)
 }
 
 /// Read and decode a run dir's `events.jsonl`.
@@ -377,14 +308,7 @@ pub async fn run(rt: &Runtime, graph: Graph) -> Result<RunReport, HostError> {
     let mut coordinator =
         Coordinator::create(run_runtime, Vec::new(), CoordinatorOptions::default())?;
     let digest = coordinator.register_graph(&graph)?;
-    coordinator.run_root(digest, BTreeMap::default()).await?;
-    let report = coordinator
-        .take_root_report()
-        .ok_or(HostError::MissingExecutionReport)?;
-    engine::verify_replay(graph, &report.state.log)?;
-    mirror_legacy_files(&run_dir, &encoded, &coordinator, digest)?;
-    coordinator.finish().await;
-    Ok(report)
+    finish_root(rt, &run_dir, coordinator, digest, graph, &encoded).await
 }
 
 fn read_graph(rt: &Runtime) -> Result<Graph, HostError> {
@@ -479,41 +403,48 @@ pub async fn resume(rt: &Runtime) -> Result<RunReport, HostError> {
 
     let run_runtime = rt.prepare_run(&run_dir);
     let (mut coordinator, torn) =
-        Coordinator::resume(run_runtime, &[], CoordinatorOptions::default())?;
+        Coordinator::resume(run_runtime, Vec::new(), CoordinatorOptions::default())?;
     if torn {
         tracing::warn!("truncated an EOF-torn coordinator record before resume");
     }
-    if restore_legacy_engine_prefix(&run_dir, &coordinator)? {
-        // Compatibility for callers that deliberately edit the legacy mirror
-        // to model a crash prefix. New coordinator-only layouts never enter
-        // this branch.
-        drop(coordinator);
-        let graph = read_graph(rt)?;
-        return rt
-            .run_verified(graph, |graph| {
-                resume_over(rt, graph).map(|(driver, _info)| driver)
-            })
-            .await;
-    }
-    let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
-    let digest = root.declaration.graph;
-    let graph = coordinator.store().load_graph(digest)?;
+    let digest = coordinator.store().state().invocations[&InvocationId::ROOT]
+        .declaration
+        .graph;
+    let graph = (*coordinator.load_graph(digest)?).clone();
     let encoded = coordinator.store().graph_bytes(digest)?;
+    finish_root(rt, &run_dir, coordinator, digest, graph, &encoded).await
+}
+
+/// The shared tail of [`run`] and [`resume`]: run the root invocation to its
+/// result, verify replay when the runtime asks for it, refresh the legacy
+/// mirror, and tear the run services down.
+async fn finish_root(
+    rt: &Runtime,
+    run_dir: &Path,
+    mut coordinator: Coordinator,
+    digest: GraphDigest,
+    graph: Graph,
+    encoded: &[u8],
+) -> Result<RunReport, HostError> {
     coordinator.run_root(digest, BTreeMap::default()).await?;
     let report = coordinator
         .take_root_report()
         .ok_or(HostError::MissingExecutionReport)?;
-    engine::verify_replay(graph, &report.state.log)?;
-    mirror_legacy_files(&run_dir, &encoded, &coordinator, digest)?;
+    if rt.run_options().verify_replay {
+        engine::verify_replay(graph, &report.state.log)?;
+    }
+    mirror_legacy_files(run_dir, encoded, &coordinator)?;
     coordinator.finish().await;
     Ok(report)
 }
 
+/// Refresh the read-only legacy mirror — `graph.json` plus a copy of the root
+/// execution's engine log — beside the coordinator layout. Purely an export:
+/// resume never reads it back.
 fn mirror_legacy_files(
     run_dir: &Path,
     graph: &[u8],
     coordinator: &Coordinator,
-    _digest: execution::GraphDigest,
 ) -> Result<(), HostError> {
     write_file(&run_dir.join(GRAPH_FILE), graph)?;
     let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
@@ -525,39 +456,10 @@ fn mirror_legacy_files(
         .store()
         .execution_dir(InvocationId::ROOT, execution)
         .join(EVENTS_FILE);
-    let bytes = fs::read(&source).map_err(|source_error| HostError::Io {
-        action: "read",
+    fs::copy(&source, run_dir.join(EVENTS_FILE)).map_err(|source_error| HostError::Io {
+        action: "copy",
         path:   source,
         source: source_error,
     })?;
-    write_file(&run_dir.join(EVENTS_FILE), &bytes)
-}
-
-fn restore_legacy_engine_prefix(
-    run_dir: &Path,
-    coordinator: &Coordinator,
-) -> Result<bool, HostError> {
-    let legacy = run_dir.join(EVENTS_FILE);
-    if !legacy.is_file() {
-        return Ok(false);
-    }
-    let root = &coordinator.store().state().invocations[&InvocationId::ROOT];
-    let Some(execution) = root.executions.last().copied() else {
-        return Ok(false);
-    };
-    let nested = coordinator
-        .store()
-        .execution_dir(InvocationId::ROOT, execution)
-        .join(EVENTS_FILE);
-    let legacy_bytes = fs::read(&legacy).map_err(|source| HostError::Io {
-        action: "read",
-        path: legacy.clone(),
-        source,
-    })?;
-    let nested_bytes = fs::read(&nested).unwrap_or_default();
-    if legacy_bytes != nested_bytes {
-        write_file(&nested, &legacy_bytes)?;
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(())
 }

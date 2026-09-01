@@ -1,22 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{fmt, io};
 
-use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey, RouteDecision};
+use engine::{EngineExit, EngineStart, EntryPoint, MiddlewareKey};
 use ir::{Control, FailureClass, FailureInfo, FiringId, Graph, ResultProjection, RunStatus, Value};
 use runtime::RunRuntime;
 use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::client::StartRequest;
+use crate::middleware::derive_fold_event;
 use crate::{
     CoordinatorEvent, CoordinatorInvocationClient, CoordinatorRecord, CoordinatorStore,
-    EngineLogError, ExecutionId, ExecutionObserver, FoldEvent, GraphDigest, InvocationHandle,
-    InvocationId, InvocationResult, InvocationSecrets, InvocationStatus, InvokeError,
-    JsonlEngineLog, Middleware, MiddlewarePipeline, MiddlewareState, ParentCallKey, ResourceError,
-    ResourceStore, SandboxAllocationKey, SandboxBinding, SandboxMode, SecretBindings, StoreError,
+    EngineLogError, ExecutionId, ExecutionObserver, GraphDigest, InvocationHandle, InvocationId,
+    InvocationResult, InvocationSecrets, InvocationStatus, InvokeError, JsonlEngineLog, Middleware,
+    MiddlewarePipeline, MiddlewareState, ParentCallKey, ResourceError, ResourceStore,
+    SandboxAllocationKey, SandboxBinding, SandboxMode, SecretBindings, StoreError,
     initial_middleware_state, read_engine_log,
 };
 
@@ -61,6 +62,8 @@ pub enum CoordinatorError {
     MissingExecution(InvocationId),
     #[error("execution {0} finished without an engine exit")]
     MissingExit(ExecutionId),
+    #[error("invocation {invocation} reached its execution limit")]
+    ExecutionLimit { invocation: InvocationId },
     #[error("execution {execution} log disagrees with the coordinator log")]
     ConflictingExit { execution: ExecutionId },
     #[error("execution {execution} event writer failed: {message}")]
@@ -79,6 +82,23 @@ pub enum CoordinatorError {
         #[source]
         source: io::Error,
     },
+}
+
+/// What a start request resolved to.
+enum StartOutcome {
+    /// Wait for a superseded prior attempt to settle, then requeue the
+    /// request.
+    Requeue { previous: InvocationId },
+    /// Attach to this invocation — newly declared, or found by its call key.
+    Attach {
+        invocation: InvocationId,
+        is_new:     bool,
+    },
+}
+
+/// A coordinator failure rendered for the invoking step.
+fn invoke_error(error: impl fmt::Display) -> InvokeError {
+    InvokeError::Coordinator(SmolStr::new(error.to_string()))
 }
 
 struct ControlRequest {
@@ -151,17 +171,59 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
+    /// Start a fresh run. `middleware` may be empty; the configured chain's
+    /// keys are recorded durably either way.
     pub fn create(
         runtime: RunRuntime,
-        middleware_chain: Vec<MiddlewareKey>,
+        middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
     ) -> Result<Self, CoordinatorError> {
-        let store = CoordinatorStore::create(runtime.run_dir(), middleware_chain)?;
+        let keys = middleware.iter().map(|item| item.key()).collect();
+        let store = CoordinatorStore::create(runtime.run_dir(), keys)?;
         let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
+        Ok(Self::assemble(
+            store, resources, runtime, middleware, options,
+        ))
+    }
+
+    /// Resume a crashed run. `middleware` must match the recorded chain.
+    pub fn resume(
+        runtime: RunRuntime,
+        middleware: Vec<Arc<dyn Middleware>>,
+        options: CoordinatorOptions,
+    ) -> Result<(Self, bool), CoordinatorError> {
+        let (mut store, torn) = CoordinatorStore::resume(runtime.run_dir())?;
+        let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
+        let keys: Vec<MiddlewareKey> = middleware.iter().map(|item| item.key()).collect();
+        if store.state().middleware_chain != keys {
+            return Err(StoreError::State(crate::StateError::MiddlewareChain).into());
+        }
+        validate_resources(&mut store, &resources)?;
+        for lease in store.state().invocations.values().filter_map(|invocation| {
+            match invocation.declaration.sandbox {
+                SandboxBinding::Inherited { lease } => Some(lease),
+                SandboxBinding::Isolated => None,
+            }
+        }) {
+            resources.resolve(lease)?;
+        }
+        Ok((
+            Self::assemble(store, resources, runtime, middleware, options),
+            torn,
+        ))
+    }
+
+    fn assemble(
+        store: CoordinatorStore,
+        resources: ResourceStore,
+        runtime: RunRuntime,
+        middleware: Vec<Arc<dyn Middleware>>,
+        options: CoordinatorOptions,
+    ) -> Self {
         let (start_tx, start_rx) = mpsc::channel(128);
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
-        Ok(Self {
+        Self {
             store,
             runtime,
             options,
@@ -175,74 +237,10 @@ impl Coordinator {
             statuses: BTreeMap::new(),
             active: BTreeSet::new(),
             active_handles: BTreeMap::new(),
-            middleware: Vec::new(),
+            middleware,
             last_root_report: None,
             resources,
-        })
-    }
-
-    pub fn resume(
-        runtime: RunRuntime,
-        middleware_chain: &[MiddlewareKey],
-        options: CoordinatorOptions,
-    ) -> Result<(Self, bool), CoordinatorError> {
-        let (store, torn) = CoordinatorStore::resume(runtime.run_dir())?;
-        let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
-        if store.state().middleware_chain != middleware_chain {
-            return Err(StoreError::State(crate::StateError::MiddlewareChain).into());
         }
-        validate_resources(&store, &resources)?;
-        for invocation in store.state().invocations.values() {
-            if let SandboxBinding::Inherited { lease } = invocation.declaration.sandbox {
-                resources.resolve(lease)?;
-            }
-        }
-        let (start_tx, start_rx) = mpsc::channel(128);
-        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
-        Ok((
-            Self {
-                store,
-                runtime,
-                options,
-                observers: Vec::new(),
-                start_tx,
-                start_rx,
-                cancel_tx,
-                cancel_rx,
-                control_tx,
-                control_rx,
-                statuses: BTreeMap::new(),
-                active: BTreeSet::new(),
-                active_handles: BTreeMap::new(),
-                middleware: Vec::new(),
-                last_root_report: None,
-                resources,
-            },
-            torn,
-        ))
-    }
-
-    pub fn create_with_middleware(
-        runtime: RunRuntime,
-        middleware: Vec<Arc<dyn Middleware>>,
-        options: CoordinatorOptions,
-    ) -> Result<Self, CoordinatorError> {
-        let keys = middleware.iter().map(|item| item.key()).collect();
-        let mut coordinator = Self::create(runtime, keys, options)?;
-        coordinator.middleware = middleware;
-        Ok(coordinator)
-    }
-
-    pub fn resume_with_middleware(
-        runtime: RunRuntime,
-        middleware: Vec<Arc<dyn Middleware>>,
-        options: CoordinatorOptions,
-    ) -> Result<(Self, bool), CoordinatorError> {
-        let keys: Vec<_> = middleware.iter().map(|item| item.key()).collect();
-        let (mut coordinator, torn) = Self::resume(runtime, &keys, options)?;
-        coordinator.middleware = middleware;
-        Ok((coordinator, torn))
     }
 
     #[must_use]
@@ -253,6 +251,11 @@ impl Coordinator {
 
     pub fn store(&self) -> &CoordinatorStore {
         &self.store
+    }
+
+    /// A registered graph, decoded and validated once and cached by digest.
+    pub fn load_graph(&mut self, digest: GraphDigest) -> Result<Arc<Graph>, CoordinatorError> {
+        Ok(self.store.load_graph(digest)?)
     }
 
     pub fn take_root_report(&mut self) -> Option<driver::ExecutionReport> {
@@ -322,6 +325,10 @@ impl Coordinator {
                 .declaration
                 .clone();
             let registered = self.store.load_graph(graph)?;
+            let recorded = self.store.state().executions[&execution]
+                .exit
+                .clone()
+                .ok_or(CoordinatorError::MissingExit(execution))?;
             let (report, _) = self
                 .run_execution(
                     InvocationId::ROOT,
@@ -331,12 +338,7 @@ impl Coordinator {
                     registered,
                 )
                 .await?;
-            if report.exit
-                != self.store.state().executions[&execution]
-                    .exit
-                    .clone()
-                    .ok_or(CoordinatorError::MissingExit(execution))?
-            {
+            if report.exit != recorded {
                 return Err(CoordinatorError::ConflictingExit { execution });
             }
             self.last_root_report = Some(report);
@@ -417,10 +419,7 @@ impl Coordinator {
 
             match exit {
                 EngineExit::Restart { target, .. } => {
-                    if self.store.state().executions[&execution]
-                        .successor
-                        .is_none()
-                    {
+                    if self.store.state().successor_of(execution).is_none() {
                         self.declare_successor(
                             invocation,
                             execution,
@@ -453,7 +452,7 @@ impl Coordinator {
         &mut self,
         invocation: InvocationId,
     ) -> Result<ExecutionId, CoordinatorError> {
-        let execution = self.store.state_mut_allocate_execution();
+        let execution = self.store.state().next_execution_id();
         let declaration = &self.store.state().invocations[&invocation].declaration;
         self.append(CoordinatorEvent::ExecutionDeclared {
             execution,
@@ -482,11 +481,9 @@ impl Coordinator {
     ) -> Result<ExecutionId, CoordinatorError> {
         let count = self.store.state().invocations[&invocation].executions.len();
         if count >= self.options.max_executions as usize {
-            return Err(CoordinatorError::ConflictingExit {
-                execution: predecessor,
-            });
+            return Err(CoordinatorError::ExecutionLimit { invocation });
         }
-        let execution = self.store.state_mut_allocate_execution();
+        let execution = self.store.state().next_execution_id();
         self.append(CoordinatorEvent::ExecutionDeclared {
             execution,
             invocation,
@@ -511,7 +508,7 @@ impl Coordinator {
         execution: ExecutionId,
         start: &EngineStart,
         middleware_state: MiddlewareState,
-        graph: Graph,
+        graph: Arc<Graph>,
     ) -> Result<(driver::ExecutionReport, MiddlewareState), CoordinatorError> {
         let directory = self.store.execution_dir(invocation, execution);
         fs::create_dir_all(&directory).map_err(|source| CoordinatorError::Io {
@@ -569,12 +566,12 @@ impl Coordinator {
                 }
             })?;
             let high_water = decoded.log.len() as u64;
-            let (driver, _) = self.runtime.resume_driver_with_secrets_in_workspace(
-                graph,
+            let (driver, _) = self.runtime.resume_driver(
+                (*graph).clone(),
                 decoded.log,
                 &directory,
-                format!("execution-{execution}"),
-                format!("invocation-{invocation}"),
+                execution.environment_prefix(),
+                invocation.workspace_prefix(),
                 workspace_override,
                 secrets,
             )?;
@@ -584,12 +581,12 @@ impl Coordinator {
             )
         } else {
             let writer = Arc::new(JsonlEngineLog::create(&events)?);
-            let driver = self.runtime.driver_with_secrets_in_workspace(
-                graph,
+            let driver = self.runtime.driver(
+                (*graph).clone(),
                 start.clone(),
                 &directory,
-                format!("execution-{execution}"),
-                format!("invocation-{invocation}"),
+                execution.environment_prefix(),
+                invocation.workspace_prefix(),
                 workspace_override,
                 secrets,
             );
@@ -702,20 +699,7 @@ impl Coordinator {
             }
             SandboxBinding::Isolated => {
                 for scope in &graph.scopes {
-                    let workspace = executor::WorkspaceId::new(format!(
-                        "invocation-{invocation}-scope-{}",
-                        scope.id.raw()
-                    ));
-                    let resource_id = SmolStr::new(workspace.as_str());
-                    self.resources.ensure_record(
-                        SandboxAllocationKey {
-                            invocation,
-                            scope: scope.id,
-                        },
-                        "petri-local",
-                        resource_id,
-                        workspace,
-                    )?;
+                    self.ensure_local_lease(invocation, scope.id)?;
                 }
                 Ok(None)
             }
@@ -729,142 +713,135 @@ impl Coordinator {
             attempt: request.request.site.attempt,
             slot:    request.request.site.slot.clone(),
         };
-        if !self.store.state().graphs.contains(&request.request.graph) {
-            let _ = request
-                .reply
-                .send(Err(InvokeError::UnknownGraph(request.request.graph)));
-            return None;
-        }
-        if let Err(error) = self.refuse_secret(&request.request.context) {
-            let _ = request
-                .reply
-                .send(Err(InvokeError::Coordinator(SmolStr::new(
-                    error.to_string(),
-                ))));
-            return None;
-        }
-
-        let (invocation, is_new) =
-            if let Some(invocation) = self.store.state().calls.get(&key).copied() {
-                let declaration = &self.store.state().invocations[&invocation].declaration;
-                let sandbox_matches = matches!(
-                    (request.request.sandbox, declaration.sandbox),
-                    (SandboxMode::Isolated, SandboxBinding::Isolated)
-                        | (SandboxMode::Inherit, SandboxBinding::Inherited { .. })
-                );
-                if declaration.graph != request.request.graph
-                    || declaration.context != request.request.context
-                    || declaration.secret_bindings != request.request.secrets
-                    || !sandbox_matches
-                {
-                    let _ = request.reply.send(Err(InvokeError::RequestMismatch));
-                    return None;
-                }
-                (invocation, false)
-            } else {
-                let previous = self
-                    .store
-                    .state()
-                    .calls
-                    .iter()
-                    .filter(|(candidate, _)| {
-                        candidate.parent == key.parent
-                            && candidate.firing == key.firing
-                            && candidate.slot == key.slot
-                    })
-                    .max_by_key(|(candidate, _)| candidate.attempt)
-                    .map(|(candidate, invocation)| (candidate.clone(), *invocation));
-                if let Some((previous_key, previous)) = previous {
-                    if previous_key.attempt > key.attempt {
-                        let _ = request.reply.send(Err(InvokeError::RequestMismatch));
-                        return None;
-                    }
-                    if self.store.state().invocations[&previous].result.is_none() {
-                        if let Err(error) = self.handle_cancel(previous).await {
-                            let _ =
-                                request
-                                    .reply
-                                    .send(Err(InvokeError::Coordinator(SmolStr::new(
-                                        error.to_string(),
-                                    ))));
-                            return None;
+        match self.resolve_start(&request, &key).await {
+            Err(error) => {
+                let _ = request.reply.send(Err(error));
+                None
+            }
+            Ok(StartOutcome::Requeue { previous }) => {
+                // The request re-enters the queue once the superseded attempt
+                // settles; the reply travels with it.
+                let sender = self
+                    .statuses
+                    .entry(previous)
+                    .or_insert_with(|| watch::channel(InvocationStatus::Declared).0);
+                let mut status = sender.subscribe();
+                let starts = self.start_tx.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if matches!(*status.borrow(), InvocationStatus::Finished(_)) {
+                            let _ = starts.send(request).await;
+                            break;
                         }
-                        let sender = self
-                            .statuses
-                            .entry(previous)
-                            .or_insert_with(|| watch::channel(InvocationStatus::Declared).0);
-                        let mut status = sender.subscribe();
-                        let starts = self.start_tx.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                if matches!(*status.borrow(), InvocationStatus::Finished(_)) {
-                                    let _ = starts.send(request).await;
-                                    break;
-                                }
-                                if status.changed().await.is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                        return (!self.active.contains(&previous)).then_some(previous);
+                        if status.changed().await.is_err() {
+                            break;
+                        }
                     }
+                });
+                (!self.active.contains(&previous)).then_some(previous)
+            }
+            Ok(StartOutcome::Attach { invocation, is_new }) => {
+                let sender = self.statuses.entry(invocation).or_insert_with(|| {
+                    let status = self.store.state().invocations[&invocation]
+                        .result
+                        .clone()
+                        .map_or(InvocationStatus::Declared, InvocationStatus::Finished);
+                    watch::channel(status).0
+                });
+                let handle =
+                    InvocationHandle::new(invocation, sender.subscribe(), self.cancel_tx.clone());
+                let reply_delivered = request.reply.send(Ok(handle)).is_ok();
+                let incomplete = self.store.state().invocations[&invocation].result.is_none();
+                if !reply_delivered && incomplete {
+                    let _ = self.cancel_tx.send(invocation);
                 }
-                if self.store.state().invocations.len() >= self.options.max_invocations as usize {
-                    let _ = request.reply.send(Err(InvokeError::InvocationLimit));
-                    return None;
-                }
-                let invocation = self.store.state_mut_allocate_invocation();
-                let sandbox =
-                    match request.request.sandbox {
-                        SandboxMode::Isolated => SandboxBinding::Isolated,
-                        SandboxMode::Inherit => match self.inherited_binding(&key) {
-                            Ok(binding) => binding,
-                            Err(CoordinatorError::NoInheritableSandbox) => {
-                                let _ = request.reply.send(Err(InvokeError::NoInheritableSandbox));
-                                return None;
-                            }
-                            Err(error) => {
-                                let _ = request.reply.send(Err(InvokeError::Coordinator(
-                                    SmolStr::new(error.to_string()),
-                                )));
-                                return None;
-                            }
-                        },
-                    };
-                let event = CoordinatorEvent::InvocationDeclared {
-                    invocation,
-                    call: Some(key),
-                    graph: request.request.graph,
-                    context: request.request.context.clone(),
-                    secret_bindings: request.request.secrets.clone(),
-                    sandbox,
-                };
-                if let Err(error) = self.append(event) {
-                    let _ = request
-                        .reply
-                        .send(Err(InvokeError::Coordinator(SmolStr::new(
-                            error.to_string(),
-                        ))));
-                    return None;
-                }
-                (invocation, true)
-            };
-
-        let sender = self.statuses.entry(invocation).or_insert_with(|| {
-            let status = self.store.state().invocations[&invocation]
-                .result
-                .clone()
-                .map_or(InvocationStatus::Declared, InvocationStatus::Finished);
-            watch::channel(status).0
-        });
-        let handle = InvocationHandle::new(invocation, sender.subscribe(), self.cancel_tx.clone());
-        let reply_delivered = request.reply.send(Ok(handle)).is_ok();
-        let incomplete = self.store.state().invocations[&invocation].result.is_none();
-        if !reply_delivered && incomplete {
-            let _ = self.cancel_tx.send(invocation);
+                (incomplete && !self.active.contains(&invocation) && (is_new || reply_delivered))
+                    .then_some(invocation)
+            }
         }
-        (incomplete && !self.active.contains(&invocation) && (is_new || reply_delivered))
-            .then_some(invocation)
+    }
+
+    /// Decide what a start request attaches to. Every rejection comes back as
+    /// the error; `handle_start` owns the one reply send.
+    async fn resolve_start(
+        &mut self,
+        request: &StartRequest,
+        key: &ParentCallKey,
+    ) -> Result<StartOutcome, InvokeError> {
+        if !self.store.state().graphs.contains(&request.request.graph) {
+            return Err(InvokeError::UnknownGraph(request.request.graph));
+        }
+        self.refuse_secret(&request.request.context)
+            .map_err(invoke_error)?;
+
+        if let Some(invocation) = self.store.state().calls.get(key).copied() {
+            let declaration = &self.store.state().invocations[&invocation].declaration;
+            let sandbox_matches = matches!(
+                (request.request.sandbox, declaration.sandbox),
+                (SandboxMode::Isolated, SandboxBinding::Isolated)
+                    | (SandboxMode::Inherit, SandboxBinding::Inherited { .. })
+            );
+            if declaration.graph != request.request.graph
+                || declaration.context != request.request.context
+                || declaration.secret_bindings != request.request.secrets
+                || !sandbox_matches
+            {
+                return Err(InvokeError::RequestMismatch);
+            }
+            return Ok(StartOutcome::Attach {
+                invocation,
+                is_new: false,
+            });
+        }
+
+        let previous = self
+            .store
+            .state()
+            .calls
+            .iter()
+            .filter(|(candidate, _)| {
+                candidate.parent == key.parent
+                    && candidate.firing == key.firing
+                    && candidate.slot == key.slot
+            })
+            .max_by_key(|(candidate, _)| candidate.attempt)
+            .map(|(candidate, invocation)| (candidate.clone(), *invocation));
+        if let Some((previous_key, previous)) = previous {
+            if previous_key.attempt > key.attempt {
+                return Err(InvokeError::RequestMismatch);
+            }
+            if self.store.state().invocations[&previous].result.is_none() {
+                self.handle_cancel(previous).await.map_err(invoke_error)?;
+                return Ok(StartOutcome::Requeue { previous });
+            }
+        }
+        if self.store.state().invocations.len() >= self.options.max_invocations as usize {
+            return Err(InvokeError::InvocationLimit);
+        }
+        let invocation = self.store.state().next_invocation_id();
+        let sandbox = match request.request.sandbox {
+            SandboxMode::Isolated => SandboxBinding::Isolated,
+            SandboxMode::Inherit => match self.inherited_binding(key) {
+                Ok(binding) => binding,
+                Err(CoordinatorError::NoInheritableSandbox) => {
+                    return Err(InvokeError::NoInheritableSandbox);
+                }
+                Err(error) => return Err(invoke_error(error)),
+            },
+        };
+        self.append(CoordinatorEvent::InvocationDeclared {
+            invocation,
+            call: Some(key.clone()),
+            graph: request.request.graph,
+            context: request.request.context.clone(),
+            secret_bindings: request.request.secrets.clone(),
+            sandbox,
+        })
+        .map_err(invoke_error)?;
+        Ok(StartOutcome::Attach {
+            invocation,
+            is_new: true,
+        })
     }
 
     async fn handle_cancel(&mut self, cancelled: InvocationId) -> Result<(), CoordinatorError> {
@@ -966,26 +943,33 @@ impl Coordinator {
             .execution_dir(parent_invocation, call.parent)
             .join("events.jsonl");
         let decoded = read_engine_log(&events)?;
-        let state = engine::replay(graph.clone(), &decoded.log);
-        let node = state
+        let state = engine::replay((*graph).clone(), &decoded.log);
+        let scope = state
             .firing_node(call.firing)
             .and_then(|node| graph.node(node))
-            .ok_or(CoordinatorError::NoInheritableSandbox)?;
-        let allocation = SandboxAllocationKey {
-            invocation: parent_invocation,
-            scope:      node.scope,
-        };
-        let workspace = executor::WorkspaceId::new(format!(
-            "invocation-{parent_invocation}-scope-{}",
-            node.scope.raw()
-        ));
+            .ok_or(CoordinatorError::NoInheritableSandbox)?
+            .scope;
+        let lease = self.ensure_local_lease(parent_invocation, scope)?;
+        Ok(SandboxBinding::Inherited { lease })
+    }
+
+    /// Reconcile the durable lease for one invocation-owned local workspace.
+    /// The record's identity composes exactly as the driver composes the
+    /// workspace it will acquire.
+    fn ensure_local_lease(
+        &mut self,
+        invocation: InvocationId,
+        scope: ir::ScopeId,
+    ) -> Result<crate::SandboxLeaseId, CoordinatorError> {
+        let workspace = executor::WorkspaceId::scoped(Some(&invocation.workspace_prefix()), scope);
         let resource_id = SmolStr::new(workspace.as_str());
-        let record =
-            self.resources
-                .ensure_record(allocation, "petri-local", resource_id, workspace)?;
-        Ok(SandboxBinding::Inherited {
-            lease: record.lease,
-        })
+        let record = self.resources.ensure_record(
+            SandboxAllocationKey { invocation, scope },
+            "petri-local",
+            resource_id,
+            workspace,
+        )?;
+        Ok(record.lease)
     }
 
     fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, CoordinatorError> {
@@ -1006,7 +990,7 @@ impl Coordinator {
 }
 
 fn validate_resources(
-    store: &CoordinatorStore,
+    store: &mut CoordinatorStore,
     resources: &ResourceStore,
 ) -> Result<(), CoordinatorError> {
     for record in resources.records() {
@@ -1020,7 +1004,8 @@ fn validate_resources(
                 lease: record.lease,
             });
         }
-        let graph = store.load_graph(invocation.declaration.graph)?;
+        let digest = invocation.declaration.graph;
+        let graph = store.load_graph(digest)?;
         if !graph
             .scopes
             .iter()
@@ -1076,7 +1061,7 @@ fn project_result(
         failure,
         final_execution: execution,
         output,
-        context: state.run_context().kv.clone(),
+        context: (*state.run_context().kv).clone(),
     }
 }
 
@@ -1091,43 +1076,23 @@ fn rebuild_middleware(
         .iter()
         .map(|record| (record.firing, record.attempt))
         .collect();
+    let nodes_by_firing: BTreeMap<_, _> = state
+        .history()
+        .iter()
+        .map(|record| (record.firing, record.node))
+        .collect();
     // Fold the durable prefix here. `Driver::resume` presents any regenerated
     // core suffix to the fold observer before it dispatches pending commands,
-    // so folding that suffix here too would count it twice.
+    // so folding that suffix here too would count it twice. The derivation is
+    // the live observer's own, so the two paths cannot drift.
     for record in log.records() {
-        match &record.event {
-            Event::ExecutionStarted(_) | Event::RunStarted => {
-                pipeline.fold(&FoldEvent::ExecutionStarted)?;
-            }
-            Event::StepFinished {
-                firing,
-                attempt,
-                outcome,
-            } if final_attempts.contains(&(*firing, *attempt)) => {
-                if let Some(node) = state.firing_node(*firing) {
-                    pipeline.fold(&FoldEvent::FinalOutcome {
-                        firing: *firing,
-                        node,
-                        outcome,
-                    })?;
-                }
-            }
-            Event::RouteApplied(applied) => {
-                let (firing, decision) = match applied {
-                    engine::RouteApplied::Edge { firing, edge, .. } => {
-                        (*firing, RouteDecision::Emit(*edge))
-                    }
-                    engine::RouteApplied::Jump { firing, target } => {
-                        (*firing, RouteDecision::Jump(*target))
-                    }
-                    engine::RouteApplied::None { firing, .. } => (*firing, RouteDecision::None),
-                };
-                pipeline.fold(&FoldEvent::RouteApplied {
-                    firing,
-                    decision: &decision,
-                })?;
-            }
-            _ => {}
+        let fold = derive_fold_event(
+            &record.event,
+            |firing, attempt| final_attempts.contains(&(firing, attempt)),
+            |firing| nodes_by_firing.get(&firing).copied(),
+        );
+        if let Some(event) = fold {
+            pipeline.fold(&event)?;
         }
     }
     Ok(())

@@ -366,7 +366,10 @@ async fn observers_see_the_regenerated_suffix_first() {
     let routing = seq_of(&report.state.log, |record| {
         matches!(
             &record.event,
-            Event::RoutingResolved { firing, .. } if *firing == a
+            Event::RoutingResolved {
+                decision_id: engine::DecisionId::Route { firing, .. },
+                ..
+            } if *firing == a
         )
     });
     let cut = routing + 1;

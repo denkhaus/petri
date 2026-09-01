@@ -7,6 +7,7 @@ use driver::{EventObserver, ObserveError};
 use engine::{EngineState, EventLog, EventRecord, InvalidRecords, LOG_VERSION};
 use serde::{Deserialize, Serialize};
 
+use crate::jsonl::clean_lines;
 use crate::{CoordinatorRecord, ExecutionId};
 
 #[async_trait::async_trait]
@@ -45,6 +46,31 @@ pub struct DecodedEngineLog {
     pub torn:      bool,
 }
 
+/// Why engine-log bytes could not become an [`EventLog`], with no file
+/// identity attached — callers that read from a path wrap this in
+/// [`EngineLogError`].
+///
+/// The torn-line rule is strict: a final line is *torn* only when EOF arrives
+/// before its terminating newline, and only then is it dropped. A
+/// newline-terminated line that fails to decode refuses the load — corruption
+/// or tampering must not be silently accepted as a crash prefix.
+#[derive(Debug, thiserror::Error)]
+pub enum EngineLogDecodeError {
+    #[error("no complete header line")]
+    MissingHeader,
+    #[error("the header line is not `{{\"version\": N}}`")]
+    BadHeader(#[source] serde_json::Error),
+    #[error("line {line} is not an event record")]
+    BadRecord {
+        line:   usize,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(transparent)]
+    Invalid(#[from] InvalidRecords),
+}
+
+/// An engine log file that could not be read or decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineLogError {
     #[error("could not {action} `{path}`: {source}")]
@@ -54,76 +80,65 @@ pub enum EngineLogError {
         #[source]
         source: io::Error,
     },
-    #[error("`{path}` has no complete engine-log header")]
-    MissingHeader { path: PathBuf },
-    #[error("`{path}` has an invalid engine-log header")]
-    BadHeader {
+    #[error("`{path}`: {source}")]
+    Decode {
         path:   PathBuf,
         #[source]
-        source: serde_json::Error,
-    },
-    #[error("`{path}` has an invalid engine record on line {line}")]
-    BadRecord {
-        path:   PathBuf,
-        line:   usize,
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("`{path}` has an invalid engine history: {source}")]
-    Invalid {
-        path:   PathBuf,
-        #[source]
-        source: InvalidRecords,
+        source: EngineLogDecodeError,
     },
 }
 
+/// The first line of an `events.jsonl` file.
 #[derive(Serialize, Deserialize)]
 struct Header {
     version: u32,
 }
 
-pub fn decode_engine_log(path: &Path, bytes: &[u8]) -> Result<DecodedEngineLog, EngineLogError> {
-    let clean_len = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |last| last + 1);
-    let mut lines = bytes[..clean_len]
-        .split_inclusive(|byte| *byte == b'\n')
-        .map(|line| &line[..line.len() - 1]);
-    let header = lines.next().ok_or_else(|| EngineLogError::MissingHeader {
-        path: path.to_path_buf(),
-    })?;
-    let header: Header =
-        serde_json::from_slice(header).map_err(|source| EngineLogError::BadHeader {
-            path: path.to_path_buf(),
-            source,
-        })?;
+/// Decode `events.jsonl` bytes: header, records, strict torn-line rule.
+pub fn decode_engine_log(bytes: &[u8]) -> Result<DecodedEngineLog, EngineLogDecodeError> {
+    let mut lines = clean_lines(bytes);
+    let (clean_len, torn) = (lines.clean_len, lines.torn);
+    let header = lines.next().ok_or(EngineLogDecodeError::MissingHeader)?;
+    let header: Header = serde_json::from_slice(header).map_err(EngineLogDecodeError::BadHeader)?;
     let mut records = Vec::new();
     for (index, line) in lines.enumerate() {
-        records.push(
-            serde_json::from_slice(line).map_err(|source| EngineLogError::BadRecord {
-                path: path.to_path_buf(),
+        records.push(serde_json::from_slice(line).map_err(|source| {
+            EngineLogDecodeError::BadRecord {
                 line: index + 2,
                 source,
-            })?,
-        );
+            }
+        })?);
     }
-    let log = EventLog::try_from_records(header.version, records).map_err(|source| {
-        EngineLogError::Invalid {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
+    let log = EventLog::try_from_records(header.version, records)?;
     Ok(DecodedEngineLog {
         log,
         clean_len,
-        torn: clean_len < bytes.len(),
+        torn,
     })
 }
 
+/// Render a log in the `events.jsonl` framing: what [`JsonlEngineLog`] writes
+/// incrementally, produced in one piece.
+pub fn encode_engine_log(log: &EventLog) -> Vec<u8> {
+    let mut out = serde_json::to_vec(&Header {
+        version: log.version(),
+    })
+    .expect("a header always encodes");
+    out.push(b'\n');
+    for record in log.records() {
+        out.extend(serde_json::to_vec(record).expect("a record always encodes"));
+        out.push(b'\n');
+    }
+    out
+}
+
+/// Read and decode one execution's `events.jsonl`.
 pub fn read_engine_log(path: &Path) -> Result<DecodedEngineLog, EngineLogError> {
     let bytes = fs::read(path).map_err(|source| log_io("read", path, source))?;
-    decode_engine_log(path, &bytes)
+    decode_engine_log(&bytes).map_err(|source| EngineLogError::Decode {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 struct Writer {

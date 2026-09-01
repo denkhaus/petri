@@ -22,9 +22,9 @@ use smol_str::SmolStr;
 
 use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};
 use crate::event::{
-    Admission, AdmitPoint, Command, DecisionId, EngineExit, EngineStart, EntryPoint, Event,
-    GroupDecision, Intervention, ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate,
-    RoutingProposal, SpliceClone, SubgraphSplice, WeightedDraw,
+    Admission, Command, DecisionId, EngineExit, EngineStart, EntryPoint, Event, GroupDecision,
+    Intervention, ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate, RoutingProposal,
+    SpliceClone, SubgraphSplice, WeightedDraw,
 };
 use crate::log::EventSource;
 use crate::splice::{
@@ -44,6 +44,12 @@ const ADMISSION_BLOCKED_CLASS: FailureClass = FailureClass::new_static("admissio
 /// splices, cascading cancellations). Those are drained inside this call, so
 /// the caller only ever feeds in events that came from outside.
 pub fn apply(mut state: EngineState, ev: Event) -> (EngineState, Vec<Command>) {
+    // The compatibility start spelling normalizes before the append, so a log
+    // only ever records `ExecutionStarted` and consumers match one spelling.
+    let ev = match ev {
+        Event::RunStarted => Event::ExecutionStarted(EngineStart::default()),
+        ev => ev,
+    };
     let mut commands = Vec::new();
     let mut queue: VecDeque<Event> = VecDeque::from([ev]);
     // The first event came from outside; everything the drain adds is the core's
@@ -83,12 +89,14 @@ fn step(
         state.push_error(RunError::AlreadyFinished);
         return;
     }
-    if !state.is_started() && !matches!(event, Event::RunStarted | Event::ExecutionStarted(_)) {
+    if !state.is_started() && !matches!(event, Event::ExecutionStarted(_)) {
         state.push_error(RunError::NotStarted);
         return;
     }
 
     match event {
+        // Normalized to `ExecutionStarted` in `apply` before the append; this arm
+        // only keeps the match exhaustive.
         Event::RunStarted => on_execution_started(state, EngineStart::default(), cmds),
         Event::ExecutionStarted(start) => on_execution_started(state, start, cmds),
         Event::TokenEmitted(token) => on_token(state, token, cmds, queue),
@@ -113,16 +121,14 @@ fn step(
             outcome,
         } => on_step_finished(state, firing, attempt, outcome, cmds, queue),
         Event::Admitted {
-            point,
             decision_id,
             decision,
             trace: _,
-        } => on_admitted(state, point, decision_id, decision, cmds, queue),
+        } => on_admitted(state, decision_id, decision, cmds, queue),
         Event::RoutingResolved {
-            firing,
             decision_id,
             groups,
-        } => on_routing_resolved(state, firing, decision_id, &groups, queue),
+        } => on_routing_resolved(state, decision_id, &groups, queue),
         Event::RouteApplied(applied) => on_route_applied(state, applied, cmds, queue),
         Event::RetryElapsed {
             firing,
@@ -147,14 +153,12 @@ fn on_execution_started(state: &mut EngineState, start: EngineStart, cmds: &mut 
         state.push_error(RunError::UnknownEntryNode(node));
     }
     state.mark_started(start);
-    let point = AdmitPoint::ExecutionStart;
-    let decision_id = DecisionId::execution_start();
+    let decision_id = DecisionId::ExecutionStart;
     state.insert_pending_admission(PendingAdmission {
-        point,
         decision_id,
         resolved: None,
     });
-    cmds.push(Command::Admit { point, decision_id });
+    cmds.push(Command::Admit { decision_id });
 }
 
 fn seed_execution(state: &mut EngineState, queue: &mut VecDeque<Event>) {
@@ -187,7 +191,6 @@ fn seed_execution(state: &mut EngineState, queue: &mut VecDeque<Event>) {
 
 fn on_admitted(
     state: &mut EngineState,
-    point: AdmitPoint,
     decision_id: DecisionId,
     decision: Admission,
     cmds: &mut Vec<Command>,
@@ -197,27 +200,21 @@ fn on_admitted(
         state.push_error(RunError::UnknownDecision(decision_id));
         return;
     };
-    if pending.point != point {
-        state.push_error(RunError::DecisionMismatch {
-            decision: decision_id,
-        });
-        return;
-    }
-    match (point, decision, pending.resolved) {
-        (AdmitPoint::ExecutionStart, Admission::Admit, None) => seed_execution(state, queue),
-        (AdmitPoint::ExecutionStart, Admission::Block { reason }, None) => {
-            state.push_error(RunError::AdmissionBlocked { point, reason });
-        }
-        (AdmitPoint::ExecutionStart, Admission::Skip { .. }, None) => {
-            state.push_error(RunError::DecisionMismatch {
+    match (decision_id, decision, pending.resolved) {
+        (DecisionId::ExecutionStart, Admission::Admit, None) => seed_execution(state, queue),
+        (DecisionId::ExecutionStart, Admission::Block { reason }, None) => {
+            state.push_error(RunError::AdmissionBlocked {
                 decision: decision_id,
+                reason,
             });
         }
-        (AdmitPoint::AttemptStart { firing, attempt }, decision, Some(resolved))
+        (DecisionId::AttemptStart { firing, attempt }, decision, Some(resolved))
             if resolved.id() == firing && resolved.attempt() == attempt =>
         {
             apply_attempt_admission(state, resolved, decision, cmds);
         }
+        // `Skip` at execution start, a missing or mismatched payload, a `Route`
+        // id: none of these has a coherent admission to apply.
         _ => state.push_error(RunError::DecisionMismatch {
             decision: decision_id,
         }),
@@ -239,7 +236,7 @@ fn apply_attempt_admission(
         state.push_error(RunError::UnknownNode(firing.node));
         return;
     };
-    match decision {
+    let outcome = match decision {
         Admission::Admit => {
             if let Some(firing) = state.firing_mut(firing_id) {
                 firing.awaiting_admission = false;
@@ -248,61 +245,42 @@ fn apply_attempt_admission(
                 cmds.push(Command::AcquireScope { scope: node.scope });
             }
             cmds.push(Command::StartStep(resolved));
+            return;
         }
-        Admission::Skip { outcome } => {
-            state.remove_firing(firing_id);
-            state.record_outcome(FiringRecord {
-                firing:     firing_id,
-                node:       firing.node,
-                name:       node.name.clone(),
-                generation: firing.generation,
-                attempt:    firing.attempt,
-                outcome:    outcome.clone(),
-            });
-            route(
-                state,
-                &node,
-                firing_id,
-                firing.generation,
-                firing.attempt,
-                &firing.inputs,
-                &outcome,
-                cmds,
-            );
-        }
+        Admission::Skip { outcome } => outcome,
         Admission::Block { reason } => {
-            state.remove_firing(firing_id);
             state.push_error(RunError::AdmissionBlocked {
-                point:  AdmitPoint::AttemptStart {
+                decision: DecisionId::AttemptStart {
                     firing:  firing_id,
                     attempt: firing.attempt,
                 },
-                reason: reason.clone(),
+                reason:   reason.clone(),
             });
-            let outcome = Outcome::new(
+            Outcome::new(
                 Status::Failure(FailureInfo::new(reason).with_class(ADMISSION_BLOCKED_CLASS)),
                 Value::Null,
-            );
-            state.record_outcome(FiringRecord {
-                firing:     firing_id,
-                node:       firing.node,
-                name:       node.name.clone(),
-                generation: firing.generation,
-                attempt:    firing.attempt,
-                outcome:    outcome.clone(),
-            });
-            route(
-                state,
-                &node,
-                firing_id,
-                firing.generation,
-                firing.attempt,
-                &firing.inputs,
-                &outcome,
-                cmds,
-            );
+            )
         }
-    }
+    };
+    state.remove_firing(firing_id);
+    state.record_outcome(FiringRecord {
+        firing:     firing_id,
+        node:       firing.node,
+        name:       node.name.clone(),
+        generation: firing.generation,
+        attempt:    firing.attempt,
+        outcome:    outcome.clone(),
+    });
+    route(
+        state,
+        &node,
+        firing_id,
+        firing.generation,
+        firing.attempt,
+        &firing.inputs,
+        &outcome,
+        cmds,
+    );
 }
 
 // ── Tokens and the firing rule ────────────────────────────────────────────
@@ -556,17 +534,12 @@ fn try_fire(
         awaiting_admission: true,
     };
     state.insert_firing(firing);
-    let point = AdmitPoint::AttemptStart {
-        firing:  firing_id,
-        attempt: Attempt::FIRST,
-    };
     let decision_id = DecisionId::attempt_start(firing_id, Attempt::FIRST);
     state.insert_pending_admission(PendingAdmission {
-        point,
         decision_id,
         resolved: Some(resolved),
     });
-    cmds.push(Command::Admit { point, decision_id });
+    cmds.push(Command::Admit { decision_id });
 }
 
 /// Whether any token waiting at this join was emitted by a firing whose
@@ -895,17 +868,12 @@ fn on_retry_elapsed(
         f.awaiting_retry = false;
         f.awaiting_admission = true;
     }
-    let point = AdmitPoint::AttemptStart {
-        firing:  firing_id,
-        attempt: next_attempt,
-    };
     let decision_id = DecisionId::attempt_start(firing_id, next_attempt);
     state.insert_pending_admission(PendingAdmission {
-        point,
         decision_id,
         resolved: Some(resolved),
     });
-    cmds.push(Command::Admit { point, decision_id });
+    cmds.push(Command::Admit { decision_id });
 }
 
 /// End a live firing that could not be restarted, recording the failure and
@@ -1083,7 +1051,6 @@ fn route(
         groups: proposals.clone(),
     });
     cmds.push(Command::ResolveRouting {
-        firing,
         decision_id,
         restart_allowed,
         groups: proposals,
@@ -1133,11 +1100,14 @@ fn routing_candidate(state: &EngineState, arm: &ir::Edge, rank: Option<f64>) -> 
 
 fn on_routing_resolved(
     state: &mut EngineState,
-    firing: FiringId,
     decision_id: DecisionId,
     groups: &[GroupDecision],
     queue: &mut VecDeque<Event>,
 ) {
+    let DecisionId::Route { firing, .. } = decision_id else {
+        state.push_error(RunError::UnknownDecision(decision_id));
+        return;
+    };
     let Some(pending) = state.take_pending_routing(firing) else {
         state.push_error(RunError::UnknownDecision(decision_id));
         return;
@@ -1155,29 +1125,32 @@ fn on_routing_resolved(
             return;
         }
     };
-    state.set_prepared_routes(firing, prepared.clone());
-    if matches!(prepared.front(), Some(PreparedRoute::Jump { .. })) {
-        let Some(PreparedRoute::Jump { target, .. }) = prepared.front() else {
-            return;
-        };
+    // A jump replaces the whole prepared list with itself, so it is only ever
+    // the sole element. The applied records carry ids alone; the payloads stay
+    // in the stored routes, uncloned.
+    if let Some(PreparedRoute::Jump { target, .. }) = prepared.front() {
         queue.push_back(Event::RouteApplied(RouteApplied::Jump {
             firing,
             target: *target,
         }));
-        return;
+    } else {
+        for route in &prepared {
+            let applied = match route {
+                PreparedRoute::Edge { group, edge, .. } => RouteApplied::Edge {
+                    firing,
+                    group: *group,
+                    edge: *edge,
+                },
+                PreparedRoute::None { group } => RouteApplied::None {
+                    firing,
+                    group: *group,
+                },
+                PreparedRoute::Jump { .. } => continue,
+            };
+            queue.push_back(Event::RouteApplied(applied));
+        }
     }
-    for route in prepared {
-        let applied = match route {
-            PreparedRoute::Edge { group, edge, .. } => RouteApplied::Edge {
-                firing,
-                group,
-                edge,
-            },
-            PreparedRoute::None { group } => RouteApplied::None { firing, group },
-            PreparedRoute::Jump { .. } => continue,
-        };
-        queue.push_back(Event::RouteApplied(applied));
-    }
+    state.set_prepared_routes(firing, prepared);
 }
 
 fn validate_and_prepare_routes(
@@ -1203,7 +1176,7 @@ fn validate_and_prepare_routes(
             .get(index)
             .ok_or_else(|| SmolStr::new("the proposal names an unknown routing group"))?;
         validate_trace(state, pending, group, resolved)?;
-        let expected = proposed_pick(proposal, resolved.draw.as_ref())?;
+        let expected = deterministic_pick(proposal, resolved.draw.as_ref())?;
         match &resolved.decision {
             RouteDecision::Emit(edge) => {
                 let Some(arm) = group.arms.iter().find(|arm| arm.id == *edge) else {
@@ -1327,7 +1300,14 @@ fn validate_trace(
     Ok(())
 }
 
-fn proposed_pick(
+/// The deterministic pick for one routing proposal, given the recorded draw.
+///
+/// This is the single definition of the selection tie-breaks. The core's
+/// validator recomputes the expected pick with it, and the default host
+/// resolver and the engine test harness call the same function — any drift
+/// between producer and validator would reject the resolver's own decision as
+/// `InvalidRouting` mid-run.
+pub fn deterministic_pick(
     proposal: &RoutingProposal,
     draw: Option<&WeightedDraw>,
 ) -> Result<Option<ir::EdgeId>, SmolStr> {
@@ -1405,25 +1385,52 @@ fn proposed_pick(
     }
 }
 
+/// The canonical reason a restart route is refused past the execution limit.
+pub const RESTART_LIMIT_REASON: &str = "maximum executions per invocation reached";
+
+/// Downgrade an over-budget restart `Emit` into a `Block`.
+///
+/// The single definition of the restart-limit courtesy every resolver owes: the
+/// core rejects an over-budget restart emit as `InvalidRouting`, so a resolver
+/// that skipped this downgrade would fail the run instead of blocking the
+/// route.
+pub fn enforce_restart_limit(
+    restart_allowed: bool,
+    proposal: &RoutingProposal,
+    decision: RouteDecision,
+) -> RouteDecision {
+    if restart_allowed {
+        return decision;
+    }
+    match decision {
+        RouteDecision::Emit(edge)
+            if proposal.candidates.iter().any(|candidate| {
+                candidate.edge == edge && candidate.transition == EdgeTransition::Restart
+            }) =>
+        {
+            RouteDecision::Block {
+                reason: SmolStr::new(RESTART_LIMIT_REASON),
+            }
+        }
+        decision => decision,
+    }
+}
+
 fn on_route_applied(
     state: &mut EngineState,
     applied: RouteApplied,
     cmds: &mut Vec<Command>,
     queue: &mut VecDeque<Event>,
 ) {
-    let firing = match applied {
-        RouteApplied::Edge { firing, .. }
-        | RouteApplied::Jump { firing, .. }
-        | RouteApplied::None { firing, .. } => firing,
-    };
-    let Some(prepared) = state.prepared_route(firing).cloned() else {
+    let firing = applied.firing();
+    let Some(prepared) = state.prepared_route(firing) else {
         state.push_error(RunError::InvalidRouting {
             firing,
             reason: SmolStr::new("RouteApplied has no prepared decision"),
         });
         return;
     };
-    let matches = match (&applied, &prepared) {
+    let matches = match (&applied, prepared) {
         (
             RouteApplied::Edge { group, edge, .. },
             PreparedRoute::Edge {
@@ -1833,35 +1840,12 @@ fn settle_awaiting_retry(
     routes: bool,
     cmds: &mut Vec<Command>,
 ) {
-    state.remove_firing(firing.id);
     state.add_retry_tombstone(firing.id);
-    let Some(node) = state.graph.node(firing.node).cloned() else {
-        state.push_error(RunError::UnknownNode(firing.node));
-        return;
-    };
-    let outcome = synthetic(Status::Cancelled);
-    state.record_outcome(FiringRecord {
-        firing:     firing.id,
-        node:       firing.node,
-        name:       node.name.clone(),
-        generation: firing.generation,
-        attempt:    firing.attempt,
-        outcome:    outcome.clone(),
-    });
-    if routes {
-        route(
-            state,
-            &node,
-            firing.id,
-            firing.generation,
-            firing.attempt,
-            &firing.inputs,
-            &outcome,
-            cmds,
-        );
-    }
+    settle_parked_firing(state, firing, routes, cmds);
 }
 
+/// The same settle for a firing caught awaiting admission: its pending decision
+/// is withdrawn instead of a tombstone being left.
 fn settle_awaiting_admission(
     state: &mut EngineState,
     firing: &Firing,
@@ -1869,6 +1853,17 @@ fn settle_awaiting_admission(
     cmds: &mut Vec<Command>,
 ) {
     state.remove_admission_for_firing(firing.id);
+    settle_parked_firing(state, firing, routes, cmds);
+}
+
+/// The shared settle: retire the firing, record `Cancelled`, and — under a
+/// cancel only — route the outcome.
+fn settle_parked_firing(
+    state: &mut EngineState,
+    firing: &Firing,
+    routes: bool,
+    cmds: &mut Vec<Command>,
+) {
     state.remove_firing(firing.id);
     let Some(node) = state.graph.node(firing.node).cloned() else {
         state.push_error(RunError::UnknownNode(firing.node));
@@ -1927,12 +1922,7 @@ fn finish_if_quiescent(state: &mut EngineState, cmds: &mut Vec<Command>) {
     for scope in state.release_all_scopes() {
         cmds.push(Command::ReleaseScope { scope });
     }
-    if let EngineExit::Terminal { status } = &exit {
-        cmds.push(Command::FinishRun { status: *status });
-        cmds.push(Command::FinishExecution { exit: exit.clone() });
-    } else {
-        cmds.push(Command::FinishExecution { exit });
-    }
+    cmds.push(Command::FinishExecution { exit });
 }
 
 fn type_name(value: &Value) -> &'static str {

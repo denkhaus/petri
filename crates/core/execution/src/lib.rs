@@ -4,6 +4,7 @@ mod client;
 mod coordinator;
 mod event;
 mod id;
+mod jsonl;
 mod middleware;
 mod observe;
 mod resource;
@@ -22,8 +23,8 @@ pub use event::{
     InvocationStatus, SandboxBinding, SandboxMode, SecretBinding, SecretBindings,
 };
 pub use id::{
-    CallSite, ExecutionId, FiringAddress, GraphDigest, InvocationId, ParentCallKey,
-    SandboxAllocationKey, SandboxLeaseId,
+    CallSite, ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxAllocationKey,
+    SandboxLeaseId,
 };
 pub use middleware::{
     AdmitCall, AdmitNext, DecisionAddress, FoldEvent, Middleware, MiddlewareError,
@@ -31,12 +32,10 @@ pub use middleware::{
     initial_middleware_state, validate_middleware_state,
 };
 pub use observe::{
-    AddressedObserver, DecodedEngineLog, EngineLogError, ExecutionObserver, JsonlEngineLog,
-    decode_engine_log, read_engine_log,
+    AddressedObserver, DecodedEngineLog, EngineLogDecodeError, EngineLogError, ExecutionObserver,
+    JsonlEngineLog, decode_engine_log, encode_engine_log, read_engine_log,
 };
-pub use resource::{
-    ProviderSandbox, ResourceError, ResourceStore, SandboxAdapter, SandboxResourceRecord,
-};
+pub use resource::{ResourceError, ResourceStore, SandboxResourceRecord};
 pub use secret::InvocationSecrets;
 pub use state::{
     CoordinatorState, ExecutionDeclaration, ExecutionState, InvocationDeclaration, InvocationState,

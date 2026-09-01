@@ -61,10 +61,6 @@ impl InvocationHandle {
         self.id
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<InvocationStatus> {
-        self.status.clone()
-    }
-
     pub async fn result(mut self) -> InvocationResult {
         loop {
             if let InvocationStatus::Finished(result) = self.status.borrow().clone() {
