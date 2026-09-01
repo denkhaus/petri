@@ -21,10 +21,10 @@ use std::process::{self, ExitCode};
 use std::{env, fs};
 
 use clap::{Args, Parser, Subcommand};
-use runtime::driver::RunHandle;
+use execution::{CoordinatorHandle, host};
 use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, Lowered};
-use runtime::ir::{CancelScopeId, Graph, RunStatus};
+use runtime::ir::{Graph, RunStatus};
 use runtime::{LoadError, RunOptions, Runtime};
 use tokio::signal;
 use tracing::field::{Empty, display};
@@ -87,7 +87,7 @@ enum Command {
     /// since a format's default run parameters may read it (GHA reads HEAD) —
     /// as the original run: the graph, including the default run parameters,
     /// is the replay's input. A host that persists the graph itself (the run
-    /// dir's `graph.json`) has no such constraint.
+    /// dir's `graphs/<digest>.json`) has no such constraint.
     Replay {
         #[command(flatten)]
         target: FileArgs,
@@ -227,8 +227,8 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
     clippy::print_stderr,
     reason = "the CLI reports the run dir, each step and the final status to the user on stderr"
 )]
-// The run dir is `driver.run`'s field, and the user's first line of output. It
-// is not repeated here.
+// The run dir is the user's first line of output; it is not repeated in the
+// span.
 #[tracing::instrument(
     name = "cli.run",
     skip_all,
@@ -250,20 +250,17 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
 
     eprintln!("run dir: {}", run_dir.display());
     let mut ctrl_c = None;
-    let outcome = rt
-        .run_verified(graph, |graph| {
-            let driver = rt.driver(graph);
-            ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(driver.handle())));
-            Ok::<_, engine::ReplayMismatch>(driver)
-        })
-        .await;
+    let outcome = host::run_with_handle(rt, graph, |handle| {
+        ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(handle)));
+    })
+    .await;
     if let Some(task) = ctrl_c {
         task.abort();
     }
     let report = match outcome {
         Ok(report) => report,
-        Err(mismatch) => {
-            eprintln!("error: {mismatch}");
+        Err(error) => {
+            eprintln!("error: {}", error_chain(&error));
             return ExitCode::from(3);
         }
     };
@@ -293,15 +290,15 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
     }
 }
 
-/// Map Ctrl-C onto the driver's two-tier stop: the first cancels the run —
-/// cleanup steps and release still happen — and any further Ctrl-C feeds the
-/// kill tier. The task holds no cleanup-sensitive state; the run aborts it
-/// once the report is in.
+/// Map Ctrl-C onto the run's two-tier stop: the first cancels the run —
+/// cleanup steps and release still happen — and any further Ctrl-C reaches
+/// the drivers' kill tier. The task holds no cleanup-sensitive state; the run
+/// aborts it once the report is in.
 #[expect(
     clippy::print_stderr,
     reason = "the CLI tells the user what each Ctrl-C did on stderr"
 )]
-async fn cancel_on_ctrl_c(handle: RunHandle) {
+async fn cancel_on_ctrl_c(handle: CoordinatorHandle) {
     let mut cancelled = false;
     loop {
         if signal::ctrl_c().await.is_err() {
@@ -313,7 +310,7 @@ async fn cancel_on_ctrl_c(handle: RunHandle) {
             eprintln!("cancelling the run; Ctrl-C again to kill");
             cancelled = true;
         }
-        handle.cancel(CancelScopeId::ROOT).await;
+        handle.cancel_root();
     }
 }
 

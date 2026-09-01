@@ -608,6 +608,7 @@ name = "petri-cli-core"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "petri-execution",
  "petri-runtime",
  "serde_json",
  "tokio",

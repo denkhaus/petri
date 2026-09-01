@@ -11,6 +11,7 @@ use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::client::StartRequest;
+use crate::host::EVENTS_FILE;
 use crate::middleware::derive_fold_event;
 use crate::{
     CoordinatorEvent, CoordinatorInvocationClient, CoordinatorRecord, CoordinatorStore,
@@ -504,7 +505,7 @@ impl Coordinator {
         graph: Arc<Graph>,
     ) -> Result<(driver::ExecutionReport, MiddlewareState), CoordinatorError> {
         let directory = self.store.create_execution_dir(invocation, execution)?;
-        let events = directory.join("events.jsonl");
+        let events = directory.join(EVENTS_FILE);
         let secrets = self.invocation_secrets(invocation);
         let workspace_override = self.prepare_sandbox(invocation, &graph)?;
         let pipeline = Arc::new(

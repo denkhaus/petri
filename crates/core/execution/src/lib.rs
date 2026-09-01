@@ -3,6 +3,7 @@
 mod client;
 mod coordinator;
 mod event;
+pub mod host;
 mod id;
 mod jsonl;
 mod middleware;

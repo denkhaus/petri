@@ -34,11 +34,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-pub use execution;
+pub use execution::{self, host};
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 pub use runtime::{LocalExecutor, RunOptions, Runtime, driver, engine, ir};
-
-pub mod host;
 
 /// The executor interface, with the two local executors as submodules.
 pub mod executor {

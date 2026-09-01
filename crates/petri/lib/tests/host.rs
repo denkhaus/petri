@@ -1,28 +1,53 @@
-//! The standalone host's run dir: `graph.json` + `events.jsonl`, the
-//! `JsonlEventLog` battery, the strict read-back rules, and the known-secret
-//! refusal.
+//! The standalone host's run dir under the coordinator layout: the per-run
+//! store, the per-execution `events.jsonl`, the strict read-back rules, and
+//! the known-secret refusal.
 
 use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use petri::driver::EventObserver;
+use petri::driver::{EventObserver, ExecutionReport};
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
 use petri::execution::{self, CoordinatorError};
 use petri::executor::docker::{self, RUN_ID_FILE};
 use petri::executor::{MapSecrets, Retention, SecretProvider as _};
-use petri::host::{self, EVENTS_FILE, EventsDecodeError, GRAPH_FILE, HostError};
-use petri::ir::{
-    CancelScopeId, Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef,
-};
+use petri::host::{self, EVENTS_FILE, EventsDecodeError, HostError};
+use petri::ir::{Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
 use petri::steps::PROCESS_KIND;
 use petri::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, add_script, wait_for_file};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time;
 
 fn test_runtime(dir: &RunDir) -> Runtime {
     petri::runtime().options(RunOptions::new(dir.path()))
+}
+
+/// The root invocation's first execution directory — the engine log a
+/// single-execution run writes and resume reads.
+fn root_events(dir: &RunDir) -> PathBuf {
+    dir.path()
+        .join("invocations/0000000000000000/executions/0000000000000000")
+        .join(EVENTS_FILE)
+}
+
+/// The coordinator workspace for scope 0 of the root invocation.
+fn root_workspace(dir: &RunDir) -> PathBuf {
+    dir.path().join("scopes/invocation-0-scope-0/work")
+}
+
+/// The single graph the run registered, from `graphs/`.
+fn registered_graph_bytes(dir: &RunDir) -> Vec<u8> {
+    let graphs = dir.path().join(execution::GRAPHS_DIR);
+    let mut entries: Vec<PathBuf> = fs::read_dir(&graphs)
+        .expect("the graphs dir exists")
+        .map(|entry| entry.expect("the graphs dir reads").path())
+        .collect();
+    assert_eq!(entries.len(), 1, "one registered graph: {entries:?}");
+    fs::read(entries.remove(0)).expect("the graph reads")
 }
 
 fn two_step_graph() -> Graph {
@@ -34,9 +59,9 @@ fn two_step_graph() -> Graph {
     b.build()
 }
 
-/// End to end: both files exist, `graph.json` is the graph byte-exact,
-/// `events.jsonl` reads back equal to the in-memory log, and the reloaded pair
-/// passes `verify_replay`.
+/// End to end: the registered graph is byte-exact, the execution's
+/// `events.jsonl` reads back equal to the in-memory log, and the reloaded
+/// pair passes `verify_replay`.
 #[tokio::test]
 async fn the_run_dir_is_self_describing() {
     let dir = RunDir::new("host-e2e");
@@ -50,14 +75,14 @@ async fn the_run_dir_is_self_describing() {
         report.observer_errors
     );
 
-    let graph_bytes = fs::read(dir.path().join(GRAPH_FILE)).expect("graph.json exists");
+    let graph_bytes = registered_graph_bytes(&dir);
     assert_eq!(
         graph_bytes,
         serde_json::to_vec(&graph).expect("encodes"),
         "the graph is persisted byte-exact"
     );
 
-    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("events.jsonl reads");
+    let decoded = host::read_events(&root_events(&dir)).expect("events.jsonl reads");
     assert!(!decoded.torn);
     assert_eq!(
         serde_json::to_vec(&decoded.log).expect("encodes"),
@@ -181,12 +206,14 @@ async fn the_files_hold_no_secret_bytes() {
     let report = host::run(&rt, b.build()).await.expect("runs");
     assert_eq!(report.status, RunStatus::Success);
 
-    for file in [EVENTS_FILE, GRAPH_FILE] {
-        let text = fs::read_to_string(dir.path().join(file)).expect("exists");
-        assert!(!text.contains(SECRET), "the secret leaked into {file}");
-    }
-    let events = fs::read_to_string(dir.path().join(EVENTS_FILE)).expect("exists");
+    let events = fs::read_to_string(root_events(&dir)).expect("exists");
+    assert!(!events.contains(SECRET), "the secret leaked into the log");
     assert!(events.contains("***"), "the masked line was persisted");
+    let graph_text = String::from_utf8(registered_graph_bytes(&dir)).expect("the graph is UTF-8");
+    assert!(
+        !graph_text.contains(SECRET),
+        "the secret leaked into the graph"
+    );
 }
 
 /// A registered secret value placed in `Graph.params`: the host refuses to
@@ -209,48 +236,63 @@ async fn a_known_secret_in_the_graph_refuses_the_run() {
         Ok(_) => panic!("the run started with a secret in the graph"),
         Err(other) => panic!("expected the known-secret refusal, got {other}"),
     }
-    assert!(
-        !dir.path().join(GRAPH_FILE).exists(),
-        "nothing was persisted"
-    );
+    let persisted = fs::read_dir(dir.path().join(execution::GRAPHS_DIR)).map_or(0, Iterator::count);
+    assert_eq!(persisted, 0, "nothing was persisted");
 }
 
 /// Wait for the marker a script writes, so a stop lands mid-step.
 async fn started(dir: &RunDir) {
     assert!(
-        wait_for_file(&dir.workspace().join("running"), Duration::from_secs(10)).await,
+        wait_for_file(
+            &root_workspace(dir).join("running"),
+            Duration::from_secs(10)
+        )
+        .await,
         "the step never started"
     );
 }
 
-/// A cancelled run still leaves complete files: the battery's `finish` is
+/// Run a one-script graph through the host on its own task, handing the
+/// coordinator handle back so the test can stop the run mid-step.
+fn spawn_run(
+    dir: &RunDir,
+    script: &str,
+) -> (
+    JoinHandle<Result<ExecutionReport, HostError>>,
+    oneshot::Receiver<execution::CoordinatorHandle>,
+) {
+    let rt = test_runtime(dir);
+    let mut b = GraphBuilder::new();
+    add_script(&mut b, "long", ScopeId::new(0), script);
+    let graph = b.build();
+    let (tx, rx) = oneshot::channel();
+    let run = tokio::spawn(async move {
+        host::run_with_handle(&rt, graph, |handle| {
+            let _ = tx.send(handle);
+        })
+        .await
+    });
+    (run, rx)
+}
+
+/// A cancelled run still leaves complete files: every log's `finish` is
 /// awaited inside the run, whatever way the run ended.
 #[tokio::test]
 async fn a_cancelled_run_leaves_complete_files() {
     let dir = RunDir::new("host-cancel");
-    let rt = test_runtime(&dir);
-    let mut b = GraphBuilder::new();
-    add_script(
-        &mut b,
-        "long",
-        ScopeId::new(0),
-        "echo go > running; sleep 300",
-    );
-
-    let driver = host::driver(&rt, b.build()).expect("prepared");
-    let handle = driver.handle();
-    let run = tokio::spawn(driver.run());
+    let (run, handle) = spawn_run(&dir, "echo go > running; sleep 300");
+    let handle = handle.await.expect("the run started");
     started(&dir).await;
-    handle.cancel(CancelScopeId::ROOT).await;
+    handle.cancel_root();
 
-    let report = run.await.expect("the run task");
+    let report = run.await.expect("the run task").expect("the run completes");
     assert_eq!(report.status, RunStatus::Cancelled);
     assert!(
         report.observer_errors.is_empty(),
         "{:?}",
         report.observer_errors
     );
-    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads");
+    let decoded = host::read_events(&root_events(&dir)).expect("reads");
     assert_eq!(
         serde_json::to_vec(&decoded.log).expect("encodes"),
         serde_json::to_vec(&report.state.log).expect("encodes"),
@@ -261,25 +303,18 @@ async fn a_cancelled_run_leaves_complete_files() {
 #[tokio::test]
 async fn a_killed_run_leaves_complete_files() {
     let dir = RunDir::new("host-kill");
-    let rt = test_runtime(&dir);
-    let mut b = GraphBuilder::new();
-    add_script(
-        &mut b,
-        "stubborn",
-        ScopeId::new(0),
+    let (run, handle) = spawn_run(
+        &dir,
         "trap '' TERM; echo go > running; while :; do sleep 0.1; done",
     );
-
-    let driver = host::driver(&rt, b.build()).expect("prepared");
-    let handle = driver.handle();
-    let run = tokio::spawn(driver.run());
+    let handle = handle.await.expect("the run started");
     started(&dir).await;
-    handle.cancel(CancelScopeId::ROOT).await;
-    handle.cancel(CancelScopeId::ROOT).await;
+    handle.cancel_root();
+    handle.cancel_root();
 
-    let report = run.await.expect("the run task");
+    let report = run.await.expect("the run task").expect("the run completes");
     assert_eq!(report.status, RunStatus::Cancelled);
-    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads");
+    let decoded = host::read_events(&root_events(&dir)).expect("reads");
     assert_eq!(
         serde_json::to_vec(&decoded.log).expect("encodes"),
         serde_json::to_vec(&report.state.log).expect("encodes"),
@@ -298,10 +333,7 @@ async fn a_killed_run_leaves_complete_files() {
 /// complete lines (header included), plus `extra` raw bytes: the crash
 /// simulator.
 fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
-    let path = dir
-        .path()
-        .join("invocations/0000000000000000/executions/0000000000000000")
-        .join(EVENTS_FILE);
+    let path = root_events(dir);
     let bytes = fs::read(&path).expect("reads");
     let mut end = 0;
     let mut seen = 0;
@@ -339,7 +371,7 @@ async fn a_crashed_run_resumes_from_the_run_dir() {
         resumed.observer_errors
     );
 
-    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads");
+    let decoded = host::read_events(&root_events(&dir)).expect("reads");
     assert_eq!(
         serde_json::to_vec(&decoded.log).expect("encodes"),
         serde_json::to_vec(&resumed.state.log).expect("encodes"),
@@ -360,7 +392,7 @@ async fn a_torn_tail_is_truncated_and_resumed() {
     let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(resumed.status, RunStatus::Success);
 
-    let decoded = host::read_events(&dir.path().join(EVENTS_FILE)).expect("reads clean");
+    let decoded = host::read_events(&root_events(&dir)).expect("reads clean");
     assert!(!decoded.torn, "the torn tail is gone");
     assert_eq!(
         serde_json::to_vec(&decoded.log).expect("encodes"),
@@ -460,16 +492,16 @@ async fn resume_fences_the_crashed_container() {
         ),
     );
     let graph = b.build();
-    let workspace = dir.workspace();
+    let workspace = root_workspace(&dir);
     let heartbeat = workspace.join("heartbeat");
 
-    let driver = host::driver(&rt, graph).expect("prepared");
-    let run = tokio::spawn(driver.run());
+    let run = tokio::spawn(async move { host::run(&rt, graph).await });
     assert!(
         wait_for_file(&heartbeat, Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
-    // The crash: the driver is gone, release never runs, the container beats on.
+    // The crash: the host task is gone — coordinator, driver and lease drop,
+    // release never runs, the container beats on.
     run.abort();
     let _ = run.await;
     // The crashed run's id, as a resuming process must find it.
@@ -478,6 +510,10 @@ async fn resume_fences_the_crashed_container() {
     let prefix = format!("petri-{run_id}-");
 
     fs::write(workspace.join("done"), b"").expect("done");
+    // A resuming process builds everything fresh over the same run dir.
+    let mut options = RunOptions::new(dir.path());
+    options.retention = Retention::Always;
+    let rt = petri::runtime().options(options);
     let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(
         resumed.status,
