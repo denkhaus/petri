@@ -618,7 +618,7 @@ jobs:
     clippy::print_stderr,
     reason = "a test binary has no log sink; stderr carries the note about the skipped test"
 )]
-fn a_moving_reference_is_resolved_again_for_a_later_load() {
+fn a_moving_reference_pins_for_a_run_and_resolves_again_for_a_later_one() {
     if !have("git") {
         eprintln!("skipping: git is needed");
         return;
@@ -628,6 +628,8 @@ fn a_moving_reference_is_resolved_again_for_a_later_load() {
     fixture_action(&remotes);
     let repo = remotes.join("acme/hello");
     git(&repo, &["branch", "-M", "main"]);
+    // The host builds one source per run: pins hold for its life, and a fresh
+    // source — the next run — asks the remote again.
     let source = GitActionSource::new(run_dir.path().join("cache"))
         .with_remote_base(format!("file://{}", remotes.display()));
     let reference = ActionRef::parse("acme/hello@main").unwrap();
@@ -646,8 +648,17 @@ fn a_moving_reference_is_resolved_again_for_a_later_load() {
         "move main",
     ]);
 
-    let second = github_actions::ActionSource::resolve(&source, &reference).unwrap();
-    assert_ne!(first.sha(), second.sha());
+    let pinned = github_actions::ActionSource::resolve(&source, &reference).unwrap();
+    assert_eq!(first.sha(), pinned.sha(), "one run sees one commit");
+
+    let later_run = GitActionSource::new(run_dir.path().join("cache"))
+        .with_remote_base(format!("file://{}", remotes.display()));
+    let second = github_actions::ActionSource::resolve(&later_run, &reference).unwrap();
+    assert_ne!(
+        first.sha(),
+        second.sha(),
+        "a later run sees the moved branch"
+    );
 }
 
 /// `actions/checkout@v4` then `actions/setup-node@v4`, from GitHub, for real.

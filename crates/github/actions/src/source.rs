@@ -3,8 +3,11 @@
 //!
 //! Resolution asks the remote (`git ls-remote`), so a moving tag such as `v4`
 //! resolves to whatever it points at now — as GitHub does at the start of a run
-//! — and the graph pins that commit. Fetching is by the reference as written,
-//! one commit deep. Trees are extracted once per commit with `git archive`.
+//! — and pins for the life of the source. The host builds one source per run,
+//! so every firing in a run — matrix legs, retries, deferred plans — sees the
+//! same commit, and a later run resolves afresh. Fetching is by the reference
+//! as written, one commit deep. Trees are extracted once per commit with
+//! `git archive`.
 //!
 //! Everything shells out to `git`, which every machine that runs workflows has.
 
@@ -30,6 +33,9 @@ pub struct GitActionSource {
     /// not block each other, while two steps cannot write one cache entry at
     /// once.
     locks:       Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
+    /// Successful resolutions, pinned for the life of the source — one run.
+    /// Failures are not cached; a retry may ask the remote again.
+    resolved:    Mutex<HashMap<String, PinnedAction>>,
 }
 
 impl GitActionSource {
@@ -38,6 +44,7 @@ impl GitActionSource {
             cache:       cache.into(),
             remote_base: "https://github.com".into(),
             locks:       Mutex::new(HashMap::new()),
+            resolved:    Mutex::new(HashMap::new()),
         }
     }
 
@@ -227,6 +234,15 @@ impl ActionSource for GitActionSource {
                 .expect("a commit reference is a full hexadecimal id"));
         }
         let key = reference.to_string();
+        if let Some(pinned) = self
+            .resolved
+            .lock()
+            .expect("resolution pins are not poisoned")
+            .get(&key)
+        {
+            Span::current().record("sha", pinned.sha());
+            return Ok(pinned.clone());
+        }
         let url = self.url(reference);
         let listing = git(
             &["ls-remote", "--tags", "--heads", &url, reference.git_ref()],
@@ -267,10 +283,17 @@ impl ActionSource for GitActionSource {
             message:   format!("no tag or branch `{}` at {url}", reference.git_ref()),
         })?;
         Span::current().record("sha", sha.as_str());
-        PinnedAction::try_new(reference.clone(), sha).map_err(|e| ActionSourceError::Unresolvable {
-            reference: key,
-            message:   e.to_string(),
-        })
+        let pinned = PinnedAction::try_new(reference.clone(), sha).map_err(|e| {
+            ActionSourceError::Unresolvable {
+                reference: key.clone(),
+                message:   e.to_string(),
+            }
+        })?;
+        self.resolved
+            .lock()
+            .expect("resolution pins are not poisoned")
+            .insert(key, pinned.clone());
+        Ok(pinned)
     }
 
     fn manifest(&self, pinned: &PinnedAction) -> Result<String, ActionSourceError> {
