@@ -17,8 +17,8 @@ use executor::{CONTAINER_RUNTIME_CLASS, ContainerRunner, ExecEnv, SecretProvider
 pub use ir::StepFailure;
 use ir::placeholder::contains_placeholder;
 use ir::{
-    Attempt, Control, FailureClass, FiringId, Outcome, StepEvent, StepKind, StepKindId, StepKinds,
-    Value,
+    Attempt, Control, FailureClass, FiringId, Outcome, ScopeId, StepEvent, StepKind, StepKindId,
+    StepKinds, Value,
 };
 use serde::de::DeserializeOwned;
 use smol_str::SmolStr;
@@ -33,6 +33,8 @@ pub(crate) const BAD_CONFIG_CLASS: FailureClass = FailureClass::new_static("bad_
 pub struct StepCtx {
     pub firing:  FiringId,
     pub attempt: Attempt,
+    /// The resource scope the step runs in.
+    pub scope:   ScopeId,
     /// The node's instance name, for log file naming and messages.
     pub node:    SmolStr,
     /// The resolved config. Free of expression placeholders; may hold `$secret`

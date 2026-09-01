@@ -776,10 +776,16 @@ impl Coordinator {
 
         if let Some(invocation) = self.store.state().calls.get(key).copied() {
             let declaration = &self.store.state().invocations[&invocation].declaration;
+            // A kind-match only: when the parent invocation is itself
+            // inherited, the child reuses the parent's lease, whose scope
+            // belongs to an ancestor's graph rather than the caller's.
             let sandbox_matches = matches!(
                 (request.request.sandbox, declaration.sandbox),
                 (SandboxMode::Isolated, SandboxBinding::Isolated)
-                    | (SandboxMode::Inherit, SandboxBinding::Inherited { .. })
+                    | (
+                        SandboxMode::Inherit { .. },
+                        SandboxBinding::Inherited { .. }
+                    )
             );
             if declaration.graph != request.request.graph
                 || declaration.context != request.request.context
@@ -821,7 +827,7 @@ impl Coordinator {
         let invocation = self.store.state().next_invocation_id();
         let sandbox = match request.request.sandbox {
             SandboxMode::Isolated => SandboxBinding::Isolated,
-            SandboxMode::Inherit => match self.inherited_binding(key) {
+            SandboxMode::Inherit { scope } => match self.inherited_binding(key, scope) {
                 Ok(binding) => binding,
                 Err(CoordinatorError::NoInheritableSandbox) => {
                     return Err(InvokeError::NoInheritableSandbox);
@@ -914,9 +920,15 @@ impl Coordinator {
         }
     }
 
+    /// Resolve `SandboxMode::Inherit` for a new child. The call key pins the
+    /// parent invocation, and the caller names its own scope, so no engine log
+    /// is read. The claimed scope must be declared by the parent's graph
+    /// before it can mint a durable lease: `validate_resources` refuses a
+    /// lease for an unknown scope on the next resume.
     fn inherited_binding(
         &mut self,
         call: &ParentCallKey,
+        scope: ir::ScopeId,
     ) -> Result<SandboxBinding, CoordinatorError> {
         let execution = self
             .store
@@ -933,22 +945,13 @@ impl Coordinator {
             self.resources.resolve(lease)?;
             return Ok(SandboxBinding::Inherited { lease });
         }
-        let graph = self.store.load_graph(
-            self.store.state().invocations[&parent_invocation]
-                .declaration
-                .graph,
-        )?;
-        let events = self
-            .store
-            .execution_dir(parent_invocation, call.parent)
-            .join("events.jsonl");
-        let decoded = read_engine_log(&events)?;
-        let state = engine::replay((*graph).clone(), &decoded.log);
-        let scope = state
-            .firing_node(call.firing)
-            .and_then(|node| graph.node(node))
-            .ok_or(CoordinatorError::NoInheritableSandbox)?
-            .scope;
+        let digest = self.store.state().invocations[&parent_invocation]
+            .declaration
+            .graph;
+        let graph = self.store.load_graph(digest)?;
+        if !graph.scopes.iter().any(|declared| declared.id == scope) {
+            return Err(CoordinatorError::NoInheritableSandbox);
+        }
         let lease = self.ensure_local_lease(parent_invocation, scope)?;
         Ok(SandboxBinding::Inherited { lease })
     }

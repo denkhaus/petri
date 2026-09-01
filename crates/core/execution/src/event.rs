@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use engine::{EngineExit, EngineStart, MiddlewareKey};
-use ir::{FailureInfo, RunStatus, Value};
+use ir::{FailureInfo, RunStatus, ScopeId, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -27,7 +27,10 @@ pub enum SecretBinding {
 /// What a caller requests before declaration resolves the binding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SandboxMode {
-    Inherit,
+    /// Share the caller's sandbox. The caller names its own scope — the step
+    /// knows where it runs — so the coordinator resolves the binding without
+    /// reading the parent's engine log.
+    Inherit { scope: ScopeId },
     #[default]
     Isolated,
 }

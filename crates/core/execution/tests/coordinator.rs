@@ -231,7 +231,7 @@ impl Step for InvokeStep {
                 context: BTreeMap::new(),
                 secrets: SecretBindings::None,
                 sandbox: if config.inherit {
-                    SandboxMode::Inherit
+                    SandboxMode::Inherit { scope: ctx.scope }
                 } else {
                     SandboxMode::Isolated
                 },

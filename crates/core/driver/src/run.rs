@@ -1395,6 +1395,7 @@ impl Driver {
         let ctx = StepCtx {
             firing,
             attempt,
+            scope,
             node: name.clone(),
             config: resolved.config().clone(),
             env,
