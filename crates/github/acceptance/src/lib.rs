@@ -18,7 +18,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use frontend::{Diagnostic, DirFiles, Frontend as _, Severity};
+use frontend::{CompileInputs, Diagnostic, DirFiles, Frontend as _, Severity};
 use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 use frontend_gha::{ActionSource, GitHubActions, RunnerMap};
 use smol_str::SmolStr;
@@ -397,7 +397,9 @@ pub fn lower_one(
         None => GitHubActions::new(),
     }
     .with_runners(runners);
-    let result = panic::catch_unwind(AssertUnwindSafe(|| format.load(&rel, &text, &files)));
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        format.load(&rel, &text, &files, &CompileInputs::new())
+    }));
     match result {
         Err(payload) => {
             let message = payload

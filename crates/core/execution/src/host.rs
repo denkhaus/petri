@@ -18,14 +18,17 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{fs, io};
 
 use driver::ExecutionReport;
+use executor::SecretProvider;
 use ir::Graph;
 use runtime::Runtime;
 
 use crate::{
-    Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, GraphDigest, InvocationId,
+    Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, ExecutionObserver,
+    GraphDigest, InvocationId,
 };
 
 /// Each execution's engine-log file name under its execution directory.
@@ -91,6 +94,39 @@ pub fn read_events(path: &Path) -> Result<DecodedEvents, HostError> {
     })
 }
 
+/// Everything a host hands the coordinator for one fresh run: the root graph,
+/// the pre-lowered child graphs a nested-workflow step may invoke (every one
+/// is registered before the root starts, so an invoke by digest always
+/// resolves), and the observers that see every execution's records.
+pub struct HostRun {
+    pub graph:     Graph,
+    pub children:  Vec<Graph>,
+    pub observers: Vec<Arc<dyn ExecutionObserver>>,
+}
+
+impl HostRun {
+    /// A root graph alone: no children, no observers.
+    pub fn new(graph: Graph) -> Self {
+        Self {
+            graph,
+            children: Vec::new(),
+            observers: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_children(mut self, children: Vec<Graph>) -> Self {
+        self.children = children;
+        self
+    }
+
+    #[must_use]
+    pub fn observe(mut self, observer: Arc<dyn ExecutionObserver>) -> Self {
+        self.observers.push(observer);
+        self
+    }
+}
+
 /// Run a graph with the durable run dir, to completion. Every log's `finish`
 /// is awaited inside the run, so the run dir is complete when this returns.
 /// With the runtime's `verify_replay` on (the default), the final execution's
@@ -108,16 +144,39 @@ pub async fn run_with_handle(
     graph: Graph,
     with_handle: impl FnOnce(CoordinatorHandle),
 ) -> Result<ExecutionReport, HostError> {
+    run_configured(rt, HostRun::new(graph), |handle, _| with_handle(handle)).await
+}
+
+/// The general form of [`run`]: children and observers from `run`, and the
+/// handle plus the run's secret provider handed to `with_handle` before the
+/// run starts — the provider is how an answerer registers a dynamic secret
+/// (`answer:<id>`) before delivering its reference into a live firing.
+pub async fn run_configured(
+    rt: &Runtime,
+    run: HostRun,
+    with_handle: impl FnOnce(CoordinatorHandle, Arc<dyn SecretProvider>),
+) -> Result<ExecutionReport, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
     let run_runtime = rt.prepare_run(&run_dir);
+    let secrets = run_runtime.secret_provider();
     let mut coordinator =
         Coordinator::create(run_runtime, Vec::new(), CoordinatorOptions::default())?;
-    let digest = match coordinator.register_graph(&graph) {
-        Err(CoordinatorError::SecretInDurableData) => return Err(HostError::SecretInGraph),
-        result => result?,
-    };
-    with_handle(coordinator.handle());
-    finish_root(rt, coordinator, digest, graph).await
+    for observer in run.observers {
+        coordinator = coordinator.observe(observer);
+    }
+    let digest = register(&mut coordinator, &run.graph)?;
+    for child in &run.children {
+        register(&mut coordinator, child)?;
+    }
+    with_handle(coordinator.handle(), secrets);
+    finish_root(rt, coordinator, digest, run.graph).await
+}
+
+fn register(coordinator: &mut Coordinator, graph: &Graph) -> Result<GraphDigest, HostError> {
+    match coordinator.register_graph(graph) {
+        Err(CoordinatorError::SecretInDurableData) => Err(HostError::SecretInGraph),
+        result => Ok(result?),
+    }
 }
 
 /// Continue the run in the runtime's run dir, to completion — the crash side

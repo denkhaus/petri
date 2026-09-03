@@ -1,0 +1,32 @@
+[package]
+name = "petri-fabro-acceptance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Fabro acceptance battery: the compatibility corpus, corpus runs under stubs, the Fabro oracle, and real workflows run end to end."
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# The package is `petri-fabro-acceptance`; the crate is `fabro_acceptance`, so code reads `fabro_acceptance::…`.
+name = "fabro_acceptance"
+
+[dependencies]
+ir = { workspace = true }
+frontend = { workspace = true }
+frontend-fabro = { workspace = true }
+fabro-steps = { workspace = true }
+runtime = { workspace = true }
+execution = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+testkit = { workspace = true }
+tokio = { workspace = true }
+steps = { workspace = true }

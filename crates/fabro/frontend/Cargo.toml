@@ -1,28 +1,29 @@
 [package]
-name = "petri-frontend"
+name = "petri-frontend-fabro"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Shared frontend machinery: diagnostics, spanned YAML, the expression grammar, graph printing."
+description = "Fabro Graphviz DOT workflows to HIR."
 publish = false
 
 [lints]
 workspace = true
 
 [lib]
-# The package is `petri-frontend`; the crate is `frontend`, so code reads `frontend::…`.
-name = "frontend"
+# The package is `petri-frontend-fabro`; the crate is `frontend_fabro`, so code reads `frontend_fabro::…`.
+name = "frontend_fabro"
 
 [dependencies]
 ir = { workspace = true }
-marked-yaml = { workspace = true }
-yaml-rust2 = { workspace = true }
+frontend = { workspace = true }
+minijinja = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -18,7 +18,7 @@ use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
-use frontend::{DirFiles, Frontend, Lowered, Span};
+use frontend::{CompileInputs, DirFiles, Frontend, Lowered, Span};
 use ir::{Graph, RunStatus};
 use tracing::field::Empty;
 
@@ -310,6 +310,7 @@ impl Runtime {
         file: &Path,
         format: Option<&str>,
         repo: Option<&Path>,
+        inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
         let frontend = self.frontend_for(file, format)?;
         let span = tracing::Span::current();
@@ -325,35 +326,51 @@ impl Runtime {
             .to_string_lossy()
             .into_owned();
         let files = DirFiles { root: repo };
-        let lowered = frontend.load(&name, &text, &files);
+        let lowered = frontend.load(&name, &text, &files, inputs);
         if let Some(graph) = &lowered.graph {
             span.record("node_count", graph.nodes.len());
         }
         Ok(lowered)
     }
 
-    /// [`Runtime::lower`], then validate the graph against the step registry,
-    /// so an unregistered kind or a bad literal config is a diagnostic here
-    /// rather than a step failure at firing time. Only the registry pass runs:
-    /// the frontend already ran the structural passes when it lowered.
+    /// [`Runtime::lower`], then validate the graph — and every pre-lowered
+    /// child graph — against the step registry, so an unregistered kind or a
+    /// bad literal config is a diagnostic here rather than a step failure at
+    /// firing time. Only the registry pass runs: the frontend already ran the
+    /// structural passes when it lowered.
     pub fn check(
         &self,
         file: &Path,
         format: Option<&str>,
         repo: Option<&Path>,
+        inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
-        let mut lowered = self.lower(file, format, repo)?;
-        if let Some(graph) = lowered.graph.take() {
-            match ir::validate_step_kinds(&graph, &self.steps) {
-                Ok(()) => lowered.graph = Some(graph),
-                Err(errors) => {
-                    let span = Span::file(file.to_string_lossy().as_ref());
-                    for error in errors {
-                        lowered
-                            .diagnostics
-                            .error(error.code(), span.clone(), error.to_string());
-                    }
-                }
+        let mut lowered = self.lower(file, format, repo, inputs)?;
+        let span = Span::file(file.to_string_lossy().as_ref());
+        let mut errors = Vec::new();
+        if let Some(graph) = &lowered.graph {
+            errors.extend(
+                ir::validate_step_kinds(graph, &self.steps)
+                    .err()
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        for child in &lowered.children {
+            errors.extend(
+                ir::validate_step_kinds(child, &self.steps)
+                    .err()
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        if !errors.is_empty() {
+            lowered.graph = None;
+            lowered.children.clear();
+            for error in errors {
+                lowered
+                    .diagnostics
+                    .error(error.code(), span.clone(), error.to_string());
             }
         }
         Ok(lowered)

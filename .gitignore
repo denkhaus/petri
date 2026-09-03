@@ -13,3 +13,6 @@ tmp
 /crates/github/corpus/*
 !/crates/github/corpus/REPORT.md
 !/crates/github/corpus/RUNS.md
+/crates/fabro/corpus/*
+!/crates/fabro/corpus/REPORT.md
+!/crates/fabro/corpus/RUNS.md

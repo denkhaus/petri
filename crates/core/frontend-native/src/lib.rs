@@ -20,7 +20,7 @@ mod model;
 use std::path::Path;
 
 use frontend::yaml::Document;
-use frontend::{Diagnostics, FileSource, Frontend, Lowered};
+use frontend::{CompileInputs, Diagnostics, FileSource, Frontend, Lowered};
 pub use lower::lower;
 
 /// Parse and lower a native-format document. Pure: text in, graph and
@@ -50,7 +50,13 @@ impl Frontend for Native {
         true
     }
 
-    fn load(&self, file: &str, text: &str, _files: &dyn FileSource) -> Lowered {
+    fn load(
+        &self,
+        file: &str,
+        text: &str,
+        _files: &dyn FileSource,
+        _inputs: &CompileInputs,
+    ) -> Lowered {
         load(file, text)
     }
 }

@@ -192,9 +192,15 @@ impl Diagnostics {
 
 /// What a frontend hands back: a graph when there were no errors, and
 /// everything it had to say either way.
+///
+/// `children` are the graphs a nested-workflow step invokes, lowered at the
+/// same time as the root (a compiled artifact). The host registers every one
+/// before the run starts; a step names its child by digest
+/// ([`crate::graph_digest`]). Empty for every format without nesting.
 #[derive(Debug)]
 pub struct Lowered {
     pub graph:       Option<ir::Graph>,
+    pub children:    Vec<ir::Graph>,
     pub diagnostics: Diagnostics,
 }
 
@@ -202,14 +208,27 @@ impl Lowered {
     pub fn rejected(diagnostics: Diagnostics) -> Self {
         Self {
             graph: None,
+            children: Vec::new(),
             diagnostics,
         }
     }
 
     /// A graph is only handed out when nothing was an Error.
     pub fn from_parts(graph: ir::Graph, diagnostics: Diagnostics) -> Self {
+        Self::with_children(graph, Vec::new(), diagnostics)
+    }
+
+    /// [`Self::from_parts`] with the pre-lowered child graphs. Like the root,
+    /// they are handed out only when nothing was an Error.
+    pub fn with_children(
+        graph: ir::Graph,
+        children: Vec<ir::Graph>,
+        diagnostics: Diagnostics,
+    ) -> Self {
+        let clean = !diagnostics.has_errors();
         Self {
-            graph: (!diagnostics.has_errors()).then_some(graph),
+            graph: clean.then_some(graph),
+            children: if clean { children } else { Vec::new() },
             diagnostics,
         }
     }

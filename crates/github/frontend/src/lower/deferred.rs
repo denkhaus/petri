@@ -115,7 +115,11 @@ pub fn plan_deferred_action(
         needs:        request.needs.clone(),
         depth:        request.depth,
     };
-    let Lowered { graph, diagnostics } = lower_internal(
+    let Lowered {
+        graph,
+        diagnostics,
+        children: _,
+    } = lower_internal(
         &model,
         files,
         actions,

@@ -45,8 +45,14 @@ pub mod executor {
 
 /// The frontend interface, with every format this distribution ships.
 pub mod frontend {
+    pub use frontend_fabro as fabro;
     pub use frontend_gha as gha;
     pub use runtime::frontend::*;
+}
+
+/// The Fabro component's run-time half: its step kinds and the stub registry.
+pub mod fabro {
+    pub use fabro_steps::*;
 }
 
 /// Step kinds, with the standard registry.
@@ -108,12 +114,14 @@ pub fn runtime() -> Runtime {
             "tool cache directory could not be created"
         );
     }
-    Runtime::standard()
+    let runtime = Runtime::standard()
+        .frontend(frontend_fabro::Fabro::new())
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests.clone())
                 .with_runners(runners)
                 .with_checkout_substitution(substitute_checkout),
-        )
+        );
+    fabro_steps::register(runtime)
         .step(github::RunStep)
         .step(github::ActionStep)
         .step(github::DockerActionStep)

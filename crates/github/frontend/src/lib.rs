@@ -94,7 +94,7 @@ pub use action::{
 };
 pub use composite::MAX_DEPTH as COMPOSITE_MAX_DEPTH;
 use frontend::yaml::Document;
-use frontend::{Diagnostics, FileSource, Frontend, Lowered};
+use frontend::{CompileInputs, Diagnostics, FileSource, Frontend, Lowered};
 pub use lower::{DeferredActionPlan, PlannedDeferredAction, plan_deferred_action};
 pub use runners::RunnerMap;
 use serde_json::Value;
@@ -224,7 +224,13 @@ impl Frontend for GitHubActions {
         parts.windows(2).any(|w| w == [".github", "workflows"])
     }
 
-    fn load(&self, file: &str, text: &str, files: &dyn FileSource) -> Lowered {
+    fn load(
+        &self,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        _inputs: &CompileInputs,
+    ) -> Lowered {
         load_configured(
             file,
             text,

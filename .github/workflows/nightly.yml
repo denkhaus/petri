@@ -59,7 +59,7 @@ jobs:
           shared-key: nightly-${{ matrix.runner }}
 
       - name: Fetch the corpus
-        run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh
+        run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh && scripts/corpus-fetch-fabro.sh
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -72,6 +72,7 @@ jobs:
         env:
           PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
           PETRI_REQUIRE_CORPUS: '1'
+          PETRI_REQUIRE_FABRO_CORPUS: '1'
 
       - name: No containers left behind
         if: matrix.docker == 'required'

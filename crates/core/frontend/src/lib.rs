@@ -8,6 +8,7 @@
 //! trait a format implements so the CLI can hold a list of them.
 
 pub mod diag;
+mod digest;
 pub mod expr;
 mod files;
 mod format;
@@ -15,6 +16,7 @@ pub mod print;
 pub mod yaml;
 
 pub use diag::{Diagnostic, Diagnostics, Lowered, Severity, Span};
+pub use digest::graph_digest;
 pub use files::{DirFiles, FileSource, MapFiles, NoFiles};
-pub use format::{Frontend, by_name, detect};
+pub use format::{CompileInputs, Frontend, by_name, detect};
 pub use print::print_graph;

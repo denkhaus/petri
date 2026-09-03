@@ -1,31 +1,33 @@
 [package]
-name = "petri"
+name = "petri-fabro-steps"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "A token-flow workflow engine: core, plus every component it ships with."
+description = "Fabro step kinds: command, wait, human, agent over ACP, nested workflow, and the stub registry that simulates them all."
 publish = false
 
 [lints]
 workspace = true
 
+[lib]
+# The package is `petri-fabro-steps`; the crate is `fabro_steps`, so code reads `fabro_steps::…`.
+name = "fabro_steps"
+
 [dependencies]
-runtime = { workspace = true }
+ir = { workspace = true }
+executor = { workspace = true }
 execution = { workspace = true }
-frontend-gha = { workspace = true }
+steps = { workspace = true }
+runtime = { workspace = true }
 frontend-fabro = { workspace = true }
-fabro-steps = { workspace = true }
-github-actions = { workspace = true }
-github-objects = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smol_str = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 testkit = { workspace = true }
-smol_str = { workspace = true }

@@ -21,9 +21,10 @@ use std::process::{self, ExitCode};
 use std::{env, fs};
 
 use clap::{Args, Parser, Subcommand};
+use execution::host::HostRun;
 use execution::{CoordinatorHandle, host};
 use runtime::engine::{self, EventLog};
-use runtime::frontend::{self, Lowered};
+use runtime::frontend::{self, CompileInputs, Lowered};
 use runtime::ir::{Graph, RunStatus};
 use runtime::{LoadError, RunOptions, Runtime};
 use tokio::signal;
@@ -39,16 +40,64 @@ struct Cli {
 #[derive(Args)]
 struct FileArgs {
     /// The workflow file.
-    file:   PathBuf,
+    file:        PathBuf,
     /// Which format the file is in. Guessed from its path when omitted; the
     /// last frontend asked claims everything, so an unrecognized path is
     /// native.
     #[arg(long)]
-    format: Option<String>,
+    format:      Option<String>,
     /// Repository root, for resolving a format's local includes. Defaults to
     /// wherever the file's own format says its repository root is.
     #[arg(long)]
-    repo:   Option<PathBuf>,
+    repo:        Option<PathBuf>,
+    /// A run input the format renders before lowering, as `KEY=VALUE`. The
+    /// value is read as JSON when it parses as JSON, else as a string.
+    /// Repeatable; later values win.
+    #[arg(long = "input", value_name = "KEY=VALUE")]
+    inputs:      Vec<String>,
+    /// A JSON file of run inputs: either `{"inputs": {...}, "vars": {...}}`
+    /// or a flat object of inputs. `--input` values land on top of it.
+    #[arg(long)]
+    inputs_file: Option<PathBuf>,
+}
+
+impl FileArgs {
+    /// The compile inputs these arguments describe. `Err` is a usage error.
+    fn compile_inputs(&self) -> Result<CompileInputs, String> {
+        let mut inputs = CompileInputs::new();
+        if let Some(path) = &self.inputs_file {
+            let text = fs::read_to_string(path)
+                .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
+            let serde_json::Value::Object(mut map) = value else {
+                return Err(format!("{} must hold a JSON object", path.display()));
+            };
+            let has_sections = map.contains_key("inputs") || map.contains_key("vars");
+            if has_sections {
+                for (section, target) in
+                    [("inputs", &mut inputs.inputs), ("vars", &mut inputs.vars)]
+                {
+                    if let Some(serde_json::Value::Object(values)) = map.remove(section) {
+                        target.extend(values.into_iter().map(|(k, v)| (k.into(), v)));
+                    }
+                }
+            } else {
+                inputs
+                    .inputs
+                    .extend(map.into_iter().map(|(k, v)| (k.into(), v)));
+            }
+        }
+        for pair in &self.inputs {
+            let Some((key, value)) = pair.split_once('=') else {
+                return Err(format!("`--input {pair}` is not `KEY=VALUE`"));
+            };
+            let value = serde_json::from_str(value)
+                .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+            inputs.inputs.insert(key.into(), value);
+        }
+        Ok(inputs)
+    }
 }
 
 #[derive(Subcommand)]
@@ -145,10 +194,18 @@ fn error_chain(error: &dyn Error) -> String {
     reason = "the CLI reports diagnostics to the user on stderr, clear of the command's own output"
 )]
 fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered, ExitCode> {
+    let inputs = match target.compile_inputs() {
+        Ok(inputs) => inputs,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return Err(ExitCode::from(2));
+        }
+    };
     match rt.check(
         &target.file,
         target.format.as_deref(),
         target.repo.as_deref(),
+        &inputs,
     ) {
         Ok(lowered) => {
             for d in lowered.diagnostics.iter() {
@@ -250,7 +307,8 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
 
     eprintln!("run dir: {}", run_dir.display());
     let mut ctrl_c = None;
-    let outcome = host::run_with_handle(rt, graph, |handle| {
+    let host_run = HostRun::new(graph).with_children(lowered.children);
+    let outcome = host::run_configured(rt, host_run, |handle, _| {
         ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(handle)));
     })
     .await;

@@ -1,0 +1,3 @@
+# The Fabro commit the compatibility corpus and the oracle fixtures are generated from.
+# scripts/corpus-fetch-fabro.sh fetches this commit; `--repin` re-resolves HEAD and rewrites it.
+775b62b500c957fe319710fe34e6327ae1eb1bbf

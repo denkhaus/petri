@@ -64,7 +64,7 @@ jobs:
       # The compatibility corpus is other projects' workflows, fetched rather
       # than committed. `gh api` needs a token on a runner.
       - name: Fetch the corpus
-        run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh
+        run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh && scripts/corpus-fetch-fabro.sh
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -83,6 +83,7 @@ jobs:
           # The corpus was just fetched, so a skipped corpus battery means the
           # fetch failed.
           PETRI_REQUIRE_CORPUS: '1'
+          PETRI_REQUIRE_FABRO_CORPUS: '1'
 
       - name: No containers left behind
         if: matrix.docker == 'required'
