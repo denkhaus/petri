@@ -131,8 +131,8 @@ async fn loop_restart_produces_a_successor_execution() {
     assert_eq!(r.executions, 2);
     assert_eq!(
         r.nodes(),
-        ["work", "check", "exit"],
-        "the successor's own history"
+        ["start", "work", "check", "work", "check", "exit"],
+        "both executions in order; the successor starts at the restart target"
     );
 }
 
