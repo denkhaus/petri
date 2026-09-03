@@ -1,0 +1,11 @@
+{
+  "name": "retries_exhausted_stays_failed",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\", max_retries=1]\n  recover [prompt=\"x\"]\n  start -> a\n  a -> recover [condition=\"outcome=failed\"]\n  a -> exit\n  recover -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_class": "retry_requested",
+      "failure_reason": "flaky"
+    }
+  }
+}

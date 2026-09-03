@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use executor::{ExitStatus, LogLine, ProcessSpec, Sig};
+use executor::{ExitStatus, LogLine, ProcessSpec, Sig, StdinMode};
 use ir::placeholder::SECRET_REF_KEY;
 use ir::{Control, FailureClass, FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
 use serde::Deserialize;
@@ -235,6 +235,7 @@ pub async fn run_resolved(
         args: argv,
         env,
         cwd: working_dir,
+        stdin: StdinMode::Null,
     };
 
     let mut handle = ctx

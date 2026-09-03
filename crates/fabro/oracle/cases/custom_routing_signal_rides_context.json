@@ -1,0 +1,11 @@
+{
+  "name": "custom_routing_signal_rides_context",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  slow [prompt=\"x\"]\n  fast [prompt=\"x\"]\n  start -> a\n  a -> fast [condition=\"context.mode=fast\"]\n  a -> slow\n  fast -> exit\n  slow -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "context_updates": {
+        "mode": "fast"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "static_fan_out_joins_all_branches",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  fork [shape=component]\n  a [prompt=\"x\"]\n  b [prompt=\"x\"]\n  merge [shape=tripleoctagon]\n  report [prompt=\"x\"]\n  start -> fork\n  fork -> a\n  fork -> b\n  a -> merge\n  b -> merge\n  merge -> report -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "context_updates": {
+        "seen_a": "1"
+      }
+    },
+    "b": {
+      "context_updates": {
+        "seen_b": "1"
+      }
+    }
+  },
+  "departure": "Fabro records the branches as parallel branch events, not stages, so its path omits `a` and `b`, and keeps branch context under parallel.results without merging it. Under Petri every branch is a node with a final record, branch results ride tokens into the fan-in's output, and a branch's context_updates still merge into kv."
+}

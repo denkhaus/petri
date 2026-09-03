@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use frontend::{CompileInputs, Diagnostic, DirFiles, Frontend as _, Severity};
 use frontend_fabro::Fabro;
 
+pub mod runs;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
     /// Lowered with no diagnostics at all.

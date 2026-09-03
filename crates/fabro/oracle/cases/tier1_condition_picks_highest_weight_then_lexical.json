@@ -1,0 +1,5 @@
+{
+  "name": "tier1_condition_picks_highest_weight_then_lexical",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  b [prompt=\"x\"]\n  c [prompt=\"x\"]\n  start -> a\n  a -> b [condition=\"outcome=succeeded\", weight=1]\n  a -> c [condition=\"outcome=succeeded\", weight=5]\n  a -> exit\n  b -> exit\n  c -> exit\n\n}\n",
+  "scripts": {}
+}

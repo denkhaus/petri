@@ -1,0 +1,11 @@
+{
+  "name": "retries_exhausted_allow_partial",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\", max_retries=1, allow_partial=true]\n  b [prompt=\"x\"]\n  start -> a\n  a -> b [condition=\"outcome=partially_succeeded\"]\n  a -> exit\n  b -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_class": "retry_requested",
+      "failure_reason": "flaky"
+    }
+  }
+}

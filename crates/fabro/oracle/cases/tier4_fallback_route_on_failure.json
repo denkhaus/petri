@@ -1,0 +1,10 @@
+{
+  "name": "tier4_fallback_route_on_failure",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  b [prompt=\"x\"]\n  start -> a\n  a -> b\n  b -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_reason": "boom"
+    }
+  }
+}

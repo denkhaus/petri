@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use executor::{ExecEnv, ProcessSpec};
+use executor::{ExecEnv, ProcessSpec, StdinMode};
 use frontend_gha::exprs::Sentinel;
 use ir::FailureClass;
 use smol_str::SmolStr;
@@ -187,6 +187,7 @@ async fn compute(
         args:    vec![SmolStr::new("-e"), SmolStr::new(HELPER_JS)],
         env:     helper_env,
         cwd:     None,
+        stdin:   StdinMode::Null,
     };
     let mut handle = env.spawn(spec).await.map_err(|e| {
         fail(format!(

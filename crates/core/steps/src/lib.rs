@@ -9,6 +9,7 @@ mod ctx;
 mod noop;
 mod outputs;
 mod process;
+pub mod question;
 
 pub use caps::{CAPABILITY_UNAVAILABLE_CLASS, Capabilities, CapabilitiesBuilder};
 pub use ctx::{Registry, Step, StepCtx, StepFailure, StepRunner};
@@ -18,4 +19,7 @@ pub use process::{
     Ending, PROCESS_KIND, ProcessConfig, ProcessStep, SECRET_MISPLACED_CLASS,
     SECRET_UNAVAILABLE_CLASS, Shell, SoftFail, ValueOrSecretRef, WORKSPACE_CLASS,
     check_misplaced_secret, ending_outcome, ladder, resolve_env_refs, run_resolved, stringify,
+};
+pub use question::{
+    ANSWER_KEY, ANSWER_SECRET_PREFIX, Answer, QUESTION_KEY, Question, QuestionOption,
 };

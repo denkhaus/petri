@@ -1,0 +1,11 @@
+{
+  "name": "partially_succeed_policy_classifies_before_routing",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\", on_failure=\"partially_succeed\"]\n  recover [prompt=\"x\"]\n  b [prompt=\"x\"]\n  start -> a\n  a -> recover [condition=\"outcome=failed\"]\n  a -> b\n  recover -> exit\n  b -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_reason": "boom"
+    }
+  },
+  "departure": "deliberate departure: Fabro takes the explicit outcome=failed edge and only promotes an unmatched failure; Petri classifies once at the step boundary, so the failure is a partial success before routing and `b` is taken"
+}

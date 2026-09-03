@@ -11,6 +11,7 @@ use std::{fmt, io, process};
 
 use async_trait::async_trait;
 use smol_str::SmolStr;
+use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 
 use crate::error::EnvError;
@@ -28,7 +29,23 @@ pub struct ProcessSpec {
     pub env:     BTreeMap<SmolStr, SmolStr>,
     /// Relative to the workspace root.
     pub cwd:     Option<PathBuf>,
+    /// What the process reads on standard input. The default is nothing.
+    pub stdin:   StdinMode,
 }
+
+/// Where a process's standard input comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StdinMode {
+    /// `/dev/null`: the process reads end-of-file at once.
+    #[default]
+    Null,
+    /// A pipe the step writes through [`ProcessHandle::stdin`] — a script's
+    /// input, or one half of a protocol spoken over stdio.
+    Piped,
+}
+
+/// The writing end of a piped standard input.
+pub type StdinWriter = Box<dyn AsyncWrite + Send + Sync + Unpin>;
 
 impl ProcessSpec {
     pub fn new(program: &str, args: &[&str]) -> Self {
@@ -37,7 +54,14 @@ impl ProcessSpec {
             args:    args.iter().map(|a| SmolStr::new(*a)).collect(),
             env:     BTreeMap::new(),
             cwd:     None,
+            stdin:   StdinMode::Null,
         }
+    }
+
+    #[must_use]
+    pub fn with_stdin(mut self, stdin: StdinMode) -> Self {
+        self.stdin = stdin;
+        self
     }
 
     #[must_use]
@@ -58,8 +82,9 @@ impl fmt::Debug for ProcessSpec {
         f.debug_struct("ProcessSpec")
             .field("program", &self.program)
             .field("args", &self.args.len())
-            .field("env", &self.env.keys())
+            .field("env", &self.env.len())
             .field("cwd", &self.cwd)
+            .field("stdin", &self.stdin)
             .finish()
     }
 }
@@ -156,6 +181,12 @@ pub trait ProcessHandle: Send {
     /// The merged, stream-tagged output. Available once; later calls return
     /// `None`.
     fn lines(&mut self) -> Option<LineStream>;
+
+    /// The writing end of the process's standard input, when the spec asked
+    /// for [`StdinMode::Piped`]. Available once; dropping it closes the pipe.
+    fn stdin(&mut self) -> Option<StdinWriter> {
+        None
+    }
 
     async fn wait(&mut self) -> Result<ExitStatus, EnvError>;
 

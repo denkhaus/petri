@@ -1,0 +1,18 @@
+{
+  "name": "retry_requested_then_success",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\", max_retries=2]\n  start -> a -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "calls": [
+        {
+          "outcome": "failed",
+          "failure_class": "retry_requested",
+          "failure_reason": "flaky"
+        },
+        {
+          "outcome": "succeeded"
+        }
+      ]
+    }
+  }
+}

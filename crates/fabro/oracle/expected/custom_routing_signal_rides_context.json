@@ -1,0 +1,28 @@
+{
+  "fabro_commit": "775b62b500c957fe319710fe34e6327ae1eb1bbf",
+  "fabro": {
+    "status": "success",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "a",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "fast",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "context": {
+      "mode": "fast"
+    },
+    "executions": 1
+  }
+}

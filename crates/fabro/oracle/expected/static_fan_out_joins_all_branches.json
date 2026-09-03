@@ -1,0 +1,69 @@
+{
+  "fabro_commit": "775b62b500c957fe319710fe34e6327ae1eb1bbf",
+  "fabro": {
+    "status": "success",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "fork",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "merge",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "report",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "context": {},
+    "executions": 1
+  },
+  "departure": "Fabro records the branches as parallel branch events, not stages, so its path omits `a` and `b`, and keeps branch context under parallel.results without merging it. Under Petri every branch is a node with a final record, branch results ride tokens into the fan-in's output, and a branch's context_updates still merge into kv.",
+  "petri": {
+    "status": "success",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "fork",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "a",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "b",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "merge",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "report",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "context": {
+      "seen_a": "1",
+      "seen_b": "1"
+    },
+    "executions": 1
+  }
+}

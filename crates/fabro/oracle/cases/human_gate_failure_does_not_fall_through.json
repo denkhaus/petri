@@ -1,0 +1,10 @@
+{
+  "name": "human_gate_failure_does_not_fall_through",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  gate [shape=hexagon]\n  yes [prompt=\"x\"]\n  no [prompt=\"x\"]\n  start -> gate\n  gate -> yes [label=\"[Y] Yes\"]\n  gate -> no [label=\"[N] No\"]\n  yes -> exit\n  no -> exit\n\n}\n",
+  "scripts": {
+    "gate": {
+      "outcome": "failed",
+      "failure_reason": "interrupted"
+    }
+  }
+}

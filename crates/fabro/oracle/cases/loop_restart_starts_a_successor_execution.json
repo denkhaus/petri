@@ -1,0 +1,20 @@
+{
+  "name": "loop_restart_starts_a_successor_execution",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  work [prompt=\"x\", max_visits=3]\n  check [shape=diamond]\n  start -> work -> check\n  check -> exit [condition=\"context.done=true\"]\n  check -> work [loop_restart=true]\n\n}\n",
+  "scripts": {
+    "work": {
+      "calls": [
+        {
+          "context_updates": {
+            "done": "false"
+          }
+        },
+        {
+          "context_updates": {
+            "done": "true"
+          }
+        }
+      ]
+    }
+  }
+}

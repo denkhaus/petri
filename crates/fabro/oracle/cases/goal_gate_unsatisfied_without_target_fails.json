@@ -1,0 +1,10 @@
+{
+  "name": "goal_gate_unsatisfied_without_target_fails",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  work [prompt=\"x\"]\n  verify [prompt=\"x\", goal_gate=true]\n  start -> work -> verify -> exit\n\n}\n",
+  "scripts": {
+    "verify": {
+      "outcome": "failed",
+      "failure_reason": "not yet"
+    }
+  }
+}

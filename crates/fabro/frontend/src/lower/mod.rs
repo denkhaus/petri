@@ -1361,7 +1361,7 @@ impl Ctx<'_> {
                 .attrs
                 .bool("loop_restart", &mut self.diags)
                 .unwrap_or(false);
-            let map = self.branch_payload(edge, index, res.kind);
+            let map = self.branch_payload(edge, index, res.kind, workflow);
             lowered.push(routing::OutEdge {
                 to,
                 target: edge.to.clone(),
@@ -1427,18 +1427,30 @@ impl Ctx<'_> {
     }
 
     /// The payload a branch sends to a fan-in: `{ index, value: { id, status,
-    /// output } }`, so the fan-in can put branches back in order.
-    fn branch_payload(&mut self, edge: &EdgeDecl, index: usize, kind: Kind) -> Option<ExprId> {
+    /// output } }`, so the fan-in can put branches back in order. A clone of a
+    /// `for_each` template carries `index`; a static branch is its position
+    /// among the fan-out's arms.
+    fn branch_payload(
+        &mut self,
+        edge: &EdgeDecl,
+        index: usize,
+        kind: Kind,
+        workflow: &Workflow,
+    ) -> Option<ExprId> {
         if self.kinds.get(&edge.to) != Some(&Kind::FanIn) || kind == Kind::FanIn {
             return None;
         }
+        let is_template = workflow.incoming(&edge.from).iter().any(|e| {
+            self.kinds.get(&e.from) == Some(&Kind::Parallel)
+                && workflow
+                    .node(&e.from)
+                    .is_some_and(|n| n.attrs.contains("for_each"))
+        });
         let exprs = self.b.exprs();
-        let index_expr = {
-            // A clone of a `for_each` template carries `index`; a static branch
-            // is its position among the fan-out's arms.
-            let bound = exprs.var("index");
-            let position = exprs.lit(u64::try_from(index).unwrap_or(u64::MAX));
-            exprs.call("default", vec![bound, position])
+        let index_expr = if is_template {
+            exprs.var("index")
+        } else {
+            exprs.lit(u64::try_from(index).unwrap_or(u64::MAX))
         };
         let id = exprs.lit(edge.from.as_str());
         let status = exprs.var("status");

@@ -72,18 +72,12 @@ fn unknown_outcome_values_are_rejected_and_custom_signals_ride_context() {
 
 #[test]
 fn context_keys_compare_as_fabro_text() {
-    assert!(holds(
-        "context.tests_passed=true",
-        "success",
-        json!({}),
-        &[("tests_passed", json!(true))]
-    ));
-    assert!(holds(
-        "context.tests_passed=true",
-        "success",
-        json!({}),
-        &[("tests_passed", json!("true"))]
-    ));
+    assert!(holds("context.tests_passed=true", "success", json!({}), &[
+        ("tests_passed", json!(true))
+    ]));
+    assert!(holds("context.tests_passed=true", "success", json!({}), &[
+        ("tests_passed", json!("true"))
+    ]));
     assert!(holds("context.n=42", "success", json!({}), &[(
         "n",
         json!(42)
@@ -216,12 +210,7 @@ fn boolean_operators_and_precedence() {
     let kv = [("a", json!("0")), ("b", json!("2")), ("c", json!("3"))];
     assert!(holds("a=1 && b=2 || c=3", "success", json!({}), &kv));
     assert!(!holds("a=1 || b=2 && c=0", "success", json!({}), &kv));
-    assert!(holds(
-        "outcome=succeeded && b=2",
-        "success",
-        json!({}),
-        &kv
-    ));
+    assert!(holds("outcome=succeeded && b=2", "success", json!({}), &kv));
     assert!(holds("!outcome=failed && c=3", "success", json!({}), &kv));
     assert!(rejected("a=1 b=2").contains(&"fabro.condition.syntax".to_string()));
 }

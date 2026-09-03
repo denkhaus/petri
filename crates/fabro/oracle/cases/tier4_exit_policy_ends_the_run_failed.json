@@ -1,0 +1,10 @@
+{
+  "name": "tier4_exit_policy_ends_the_run_failed",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  graph [on_failure=\"exit\"]\n  a [prompt=\"x\"]\n  b [prompt=\"x\"]\n  start -> a\n  a -> b\n  b -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_reason": "boom"
+    }
+  }
+}

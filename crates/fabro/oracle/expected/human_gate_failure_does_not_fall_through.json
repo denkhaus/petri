@@ -1,0 +1,18 @@
+{
+  "fabro_commit": "775b62b500c957fe319710fe34e6327ae1eb1bbf",
+  "fabro": {
+    "status": "failed",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "gate",
+        "outcome": "failed"
+      }
+    ],
+    "context": {},
+    "executions": 1
+  }
+}

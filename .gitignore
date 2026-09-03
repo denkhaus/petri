@@ -16,3 +16,5 @@ tmp
 /crates/fabro/corpus/*
 !/crates/fabro/corpus/REPORT.md
 !/crates/fabro/corpus/RUNS.md
+/crates/fabro/oracle/generator/target
+/crates/fabro/oracle/generator/Cargo.lock

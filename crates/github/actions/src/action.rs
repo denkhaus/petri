@@ -309,6 +309,7 @@ async fn unpack(ctx: &StepCtx, tar_rel: &Path, pinned: &PinnedAction) -> Result<
             ],
             env:     BTreeMap::default(),
             cwd:     None,
+            stdin:   executor::StdinMode::Null,
         })
         .await
         .map_err(|e| stage_error(format!("could not run `tar` for `{pinned}`: {e}")))?;

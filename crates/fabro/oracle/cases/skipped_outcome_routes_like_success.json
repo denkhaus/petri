@@ -1,0 +1,10 @@
+{
+  "name": "skipped_outcome_routes_like_success",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  b [prompt=\"x\"]\n  start -> a\n  a -> b [condition=\"outcome=skipped\"]\n  a -> exit\n  b -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "skipped"
+    }
+  },
+  "departure": "Fabro records no stage for a skipped outcome, so its path omits `a`; Petri records every final outcome, `skipped` included. The routing (an `outcome=skipped` edge is taken) is the same."
+}

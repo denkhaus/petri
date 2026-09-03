@@ -59,6 +59,7 @@ use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
     AcquireContext, ContainerRunner, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus,
     LineStream, ProcessHandle, ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
+    StdinMode, StdinWriter,
 };
 use ir::RuntimeTarget;
 use smol_str::SmolStr;
@@ -939,6 +940,10 @@ impl ExecEnv for DockerEnv {
             "--env-file".into(),
             env_file.display().to_string(),
         ];
+        if spec.stdin == StdinMode::Piped {
+            // `-i` keeps the client's stdin attached to the exec'd process.
+            argv.push("-i".into());
+        }
         for (key, _) in &split.inherit {
             argv.push("-e".into());
             argv.push(key.to_string());
@@ -977,7 +982,10 @@ impl ExecEnv for DockerEnv {
         let mut command = Command::new("docker");
         command
             .args(&argv)
-            .stdin(Stdio::null())
+            .stdin(match spec.stdin {
+                StdinMode::Null => Stdio::null(),
+                StdinMode::Piped => Stdio::piped(),
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -1004,6 +1012,7 @@ impl ExecEnv for DockerEnv {
             tokio::spawn(pump(stderr, ir::LogStream::Stderr, tx.clone()));
         }
         drop(tx);
+        let stdin: Option<StdinWriter> = child.stdin.take().map(|s| Box::new(s) as StdinWriter);
 
         Ok(Box::new(DockerProcess {
             container: self.container.clone(),
@@ -1013,6 +1022,7 @@ impl ExecEnv for DockerEnv {
             env_file,
             pgid: None,
             lines: Some(rx),
+            stdin,
         }))
     }
 
@@ -1097,6 +1107,7 @@ struct DockerProcess {
     env_file:    PathBuf,
     pgid:        Option<i32>,
     lines:       Option<LineStream>,
+    stdin:       Option<StdinWriter>,
 }
 
 impl DockerProcess {
@@ -1141,6 +1152,10 @@ impl DockerProcess {
 impl ProcessHandle for DockerProcess {
     fn lines(&mut self) -> Option<LineStream> {
         self.lines.take()
+    }
+
+    fn stdin(&mut self) -> Option<StdinWriter> {
+        self.stdin.take()
     }
 
     async fn wait(&mut self) -> Result<ExitStatus, EnvError> {

@@ -1,0 +1,11 @@
+{
+  "name": "conditional_node_routes_on_previous_outcome_via_context",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  work [prompt=\"x\"]\n  gate [shape=diamond]\n  fix [prompt=\"x\"]\n  start -> work -> gate\n  gate -> exit [condition=\"context.verified=true\"]\n  gate -> fix\n  fix -> exit\n\n}\n",
+  "scripts": {
+    "work": {
+      "context_updates": {
+        "verified": "true"
+      }
+    }
+  }
+}

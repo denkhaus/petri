@@ -328,6 +328,7 @@ async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure
             ],
             env:     BTreeMap::default(),
             cwd:     None,
+            stdin:   executor::StdinMode::Null,
         })
         .await
         .map_err(|e| checkout_error(format!("could not run `tar`: {e}")))?;

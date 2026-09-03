@@ -9,8 +9,8 @@
 //! drives every routing tier and failure policy through a real run with no
 //! model, shell or person.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 use frontend_fabro::kinds::{
     AGENT_KIND, COMMAND_KIND, HUMAN_KIND, RETRY_REQUESTED_CLASS, WAIT_KIND, WORKFLOW_KIND,
@@ -43,10 +43,13 @@ pub struct Simulate {
     pub suggested_next_ids: Vec<String>,
     #[serde(default)]
     pub context_updates:    BTreeMap<SmolStr, Value>,
-    /// Scripted per attempt: the entry at `attempt - 1` wins, the last entry
-    /// repeats. Lets one node fail twice and then succeed.
+    /// Scripted per call: the n-th time this node's stub runs in a run — an
+    /// attempt after a retry, a second visit after a goal-gate jump or a
+    /// `loop_restart` — takes the n-th entry, and the last entry repeats.
+    /// Fabro's engine calls a handler once per attempt in the same order, so
+    /// the oracle generator scripts its handlers the same way.
     #[serde(default)]
-    pub attempts:           Vec<Self>,
+    pub calls:              Vec<Self>,
 }
 
 #[derive(Deserialize)]
@@ -120,11 +123,9 @@ impl StepRunner for StubStep {
         };
         let node = config.node.clone().unwrap_or_else(|| ctx.node.to_string());
         let mut script = config.simulate.clone().unwrap_or_default();
-        if !script.attempts.is_empty() {
-            let index = usize::try_from(ctx.attempt.raw())
-                .unwrap_or(1)
-                .saturating_sub(1);
-            let chosen = script.attempts[index.min(script.attempts.len() - 1)].clone();
+        if !script.calls.is_empty() {
+            let call = next_call(ctx.env.workspace_path(), &ctx.node);
+            let chosen = script.calls[call.min(script.calls.len() - 1)].clone();
             script = chosen;
         }
         let mut output = json!({
@@ -132,7 +133,9 @@ impl StepRunner for StubStep {
             "node": node,
             "text": format!("[Simulated] {}", ctx.node),
         });
+        let answers = script.outcome.as_deref().is_none_or(|o| o == "succeeded");
         if self.kind == HUMAN_KIND
+            && answers
             && script.preferred_label.is_none()
             && script.suggested_next_ids.is_empty()
         {
@@ -199,6 +202,22 @@ impl StepRunner for StubStep {
             .insert(SmolStr::new("failure_class"), json!(class));
         outcome
     }
+}
+
+/// How many times a scripted stub has run for `node` in the run whose
+/// workspace is `workspace`, counted here because a step has no memory of
+/// its own across attempts, visits and restarted executions. The workspace
+/// path is one per invocation, so a run's successor executions share the
+/// count while different runs (different run dirs) do not. Test-only state:
+/// replay never runs a step, so the counter cannot touch determinism.
+fn next_call(workspace: &str, node: &str) -> usize {
+    static CALLS: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+    let mut calls = CALLS.lock().expect("the stub call table is not poisoned");
+    let table = calls.get_or_insert_with(HashMap::new);
+    let count = table.entry(format!("{workspace}/{node}")).or_insert(0);
+    let current = *count;
+    *count += 1;
+    current
 }
 
 /// The Fabro spelling of an engine status.

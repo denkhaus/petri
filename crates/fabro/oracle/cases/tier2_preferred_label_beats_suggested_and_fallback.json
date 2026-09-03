@@ -1,0 +1,12 @@
+{
+  "name": "tier2_preferred_label_beats_suggested_and_fallback",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  fix [prompt=\"x\"]\n  ship [prompt=\"x\"]\n  start -> a\n  a -> ship [label=\"[S] Ship\"]\n  a -> fix [label=\"[F] Fix\"]\n  fix -> exit\n  ship -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "preferred_label": "Fix",
+      "suggested_next_ids": [
+        "ship"
+      ]
+    }
+  }
+}

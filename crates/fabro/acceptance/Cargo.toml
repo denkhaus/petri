@@ -21,6 +21,7 @@ frontend-fabro = { workspace = true }
 fabro-steps = { workspace = true }
 runtime = { workspace = true }
 execution = { workspace = true }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
@@ -28,5 +29,4 @@ smol_str = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 testkit = { workspace = true }
-tokio = { workspace = true }
 steps = { workspace = true }

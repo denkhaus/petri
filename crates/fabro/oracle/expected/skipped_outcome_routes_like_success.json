@@ -1,0 +1,46 @@
+{
+  "fabro_commit": "775b62b500c957fe319710fe34e6327ae1eb1bbf",
+  "fabro": {
+    "status": "success",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "b",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "context": {},
+    "executions": 1
+  },
+  "departure": "Fabro records no stage for a skipped outcome, so its path omits `a`; Petri records every final outcome, `skipped` included. The routing (an `outcome=skipped` edge is taken) is the same.",
+  "petri": {
+    "status": "success",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "a",
+        "outcome": "skipped"
+      },
+      {
+        "node": "b",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "context": {},
+    "executions": 1
+  }
+}

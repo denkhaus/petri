@@ -77,7 +77,7 @@ use async_trait::async_trait;
 use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
     AcquireContext, EnvError, EnvHandle, ExecEnv, Executor, ExitStatus, LineStream, ProcessHandle,
-    ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig,
+    ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig, StdinMode, StdinWriter,
 };
 use smol_str::SmolStr;
 use tokio::io::AsyncReadExt as _;
@@ -162,7 +162,8 @@ const SENTINEL_SCRIPT: &str = r#"
 sf="$1"; gf="$2"; fence="$3"; shift 3
 printf '%s\n' "$$" > "$gf.tmp" && mv "$gf.tmp" "$gf"
 if [ -e "$fence" ]; then exit 0; fi
-"$@" &
+exec 3<&0
+"$@" <&3 &
 w=$!
 trap '' TERM
 exec >/dev/null 2>&1
@@ -459,7 +460,10 @@ impl ExecEnv for HostEnv {
             .arg(spec.program.as_str())
             .args(spec.args.iter().map(SmolStr::as_str))
             .current_dir(&cwd)
-            .stdin(Stdio::null())
+            .stdin(match spec.stdin {
+                StdinMode::Null => Stdio::null(),
+                StdinMode::Piped => Stdio::piped(),
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
@@ -492,6 +496,7 @@ impl ExecEnv for HostEnv {
             tokio::spawn(pump(stderr, ir::LogStream::Stderr, tx.clone()));
         }
         drop(tx);
+        let stdin: Option<StdinWriter> = child.stdin.take().map(|s| Box::new(s) as StdinWriter);
 
         // The registry owns the sentinel from here to release. A poisoned lock
         // still has to take the group: dropping it here would leak exactly the
@@ -510,6 +515,7 @@ impl ExecEnv for HostEnv {
             status_file,
             status: None,
             lines: Some(rx),
+            stdin,
         }))
     }
 
@@ -592,6 +598,7 @@ struct HostProcess {
     /// after each rung of the cancellation ladder.
     status:      Option<ExitStatus>,
     lines:       Option<LineStream>,
+    stdin:       Option<StdinWriter>,
 }
 
 impl HostProcess {
@@ -613,6 +620,10 @@ impl HostProcess {
 impl ProcessHandle for HostProcess {
     fn lines(&mut self) -> Option<LineStream> {
         self.lines.take()
+    }
+
+    fn stdin(&mut self) -> Option<StdinWriter> {
+        self.stdin.take()
     }
 
     /// A recorded status or group death, whichever comes first — never the

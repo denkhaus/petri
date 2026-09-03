@@ -1,0 +1,12 @@
+{
+  "name": "tier3_suggested_ids_lowest_index_wins",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  p1 [prompt=\"x\"]\n  p2 [prompt=\"x\"]\n  start -> a\n  a -> p1\n  a -> p2\n  p1 -> exit\n  p2 -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "suggested_next_ids": [
+        "p2",
+        "p1"
+      ]
+    }
+  }
+}
