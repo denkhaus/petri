@@ -15,11 +15,15 @@
 //! run parameters a run would otherwise have to hard-code — so no command here
 //! has a special case for one format.
 
+mod answer;
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
+use std::sync::Arc;
 use std::{env, fs};
 
+use answer::{Answerer, Mode};
 use clap::{Args, Parser, Subcommand};
 use execution::host::HostRun;
 use execution::{CoordinatorHandle, host};
@@ -121,14 +125,21 @@ enum Command {
     /// Run a workflow file to completion.
     Run {
         #[command(flatten)]
-        target:  FileArgs,
+        target:       FileArgs,
         /// Where workspaces, logs and `events.json` go. Defaults to a fresh
         /// directory under the system temp dir, printed at start.
         #[arg(long)]
-        run_dir: Option<PathBuf>,
+        run_dir:      Option<PathBuf>,
         /// Do not echo step output.
         #[arg(long)]
-        quiet:   bool,
+        quiet:        bool,
+        /// Answer a step's question — a human gate — from the terminal:
+        /// the question is printed and one line is read from stdin.
+        #[arg(long, conflicts_with = "auto_approve")]
+        interactive:  bool,
+        /// Answer every step's question with its default choice.
+        #[arg(long)]
+        auto_approve: bool,
     },
     /// Replay a saved event log against the workflow and verify byte-identity.
     ///
@@ -160,12 +171,19 @@ pub async fn main(make: impl Fn() -> Runtime) -> ExitCode {
             target,
             run_dir,
             quiet,
+            interactive,
+            auto_approve,
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
             let mut options = RunOptions::new(&run_dir);
             options.echo = !quiet;
-            run(&make().options(options), &target, &run_dir).await
+            let mode = match (interactive, auto_approve) {
+                (true, _) => Some(Mode::Interactive),
+                (_, true) => Some(Mode::AutoApprove),
+                _ => None,
+            };
+            run(&make().options(options), &target, &run_dir, mode).await
         }
         Command::Replay { target, log } => replay(&make(), &target, &log),
     }
@@ -291,7 +309,7 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
     skip_all,
     fields(workflow_file = %target.file.display(), status = Empty)
 )]
-async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
+async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path, answers: Option<Mode>) -> ExitCode {
     let lowered = match lowered_graph(rt, target, false) {
         Ok(lowered) => lowered,
         Err(code) => return code,
@@ -307,8 +325,15 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path) -> ExitCode {
 
     eprintln!("run dir: {}", run_dir.display());
     let mut ctrl_c = None;
-    let host_run = HostRun::new(graph).with_children(lowered.children);
-    let outcome = host::run_configured(rt, host_run, |handle, _| {
+    let mut host_run = HostRun::new(graph).with_children(lowered.children);
+    let answerer = answers.map(|mode| Arc::new(Answerer::new(mode)));
+    if let Some(answerer) = &answerer {
+        host_run = host_run.observe(answerer.clone());
+    }
+    let outcome = host::run_configured(rt, host_run, |handle, secrets| {
+        if let Some(answerer) = &answerer {
+            answerer.wire(handle.clone(), secrets);
+        }
         ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(handle)));
     })
     .await;

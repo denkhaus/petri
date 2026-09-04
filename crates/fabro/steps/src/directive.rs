@@ -1,0 +1,213 @@
+//! The routing directive a Fabro stage reports: the last JSON object in its
+//! text that carries a routing field (`outcome`, `preferred_next_label`,
+//! `suggested_next_ids`, `context_updates`, `failure_reason`). What Fabro's
+//! `structured_output` module scans for, in the same order and with the same
+//! closed outcome set.
+
+use std::collections::BTreeMap;
+
+use frontend_fabro::kinds::OUTCOMES;
+use frontend_fabro::labels::strip_accelerator;
+use ir::Value;
+use serde_json::json;
+use smol_str::SmolStr;
+
+/// The fields that make a JSON object a routing directive.
+pub const ROUTING_FIELDS: &[&str] = &[
+    "preferred_next_label",
+    "outcome",
+    "failure_reason",
+    "suggested_next_ids",
+    "context_updates",
+];
+
+/// A parsed directive.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Directive {
+    /// One of the four Fabro outcomes, when the object names one.
+    pub outcome:            Option<String>,
+    pub failure_reason:     Option<String>,
+    /// The preferred label, accelerator stripped.
+    pub preferred_label:    Option<String>,
+    pub suggested_next_ids: Vec<String>,
+    pub context_updates:    BTreeMap<SmolStr, Value>,
+}
+
+/// Why a directive was refused.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DirectiveError {
+    #[error("no JSON object in the response carries a routing field ({})", ROUTING_FIELDS.join(", "))]
+    Missing,
+    #[error("the routing JSON object is malformed: {0}")]
+    Malformed(String),
+    #[error("`outcome` must be one of {}, not `{value}`", OUTCOMES.join(", "))]
+    UnknownOutcome { value: String },
+}
+
+/// Every top-level JSON object in `text`, outermost only, as slices.
+fn json_objects(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut depth = 0_usize;
+    let mut start = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' if depth > 0 => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0
+                    && let Some(s) = start.take()
+                    && text.is_char_boundary(s)
+                    && text.is_char_boundary(index + 1)
+                {
+                    out.push(&text[s..=index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn has_routing_field(object: &serde_json::Map<String, Value>) -> bool {
+    ROUTING_FIELDS.iter().any(|f| object.contains_key(*f))
+}
+
+/// The directive in `text`: the last JSON object with a routing field.
+pub fn parse(text: &str) -> Result<Directive, DirectiveError> {
+    let mut last: Option<serde_json::Map<String, Value>> = None;
+    let mut malformed: Option<String> = None;
+    for candidate in json_objects(text) {
+        match serde_json::from_str::<Value>(candidate) {
+            Ok(Value::Object(object)) if has_routing_field(&object) => last = Some(object),
+            Ok(_) => {}
+            Err(error) => {
+                if ROUTING_FIELDS
+                    .iter()
+                    .any(|f| candidate.contains(&format!("\"{f}\"")))
+                {
+                    malformed = Some(error.to_string());
+                }
+            }
+        }
+    }
+    let Some(object) = last else {
+        return Err(malformed.map_or(DirectiveError::Missing, DirectiveError::Malformed));
+    };
+    let mut directive = Directive::default();
+    if let Some(outcome) = object.get("outcome").and_then(Value::as_str) {
+        if !OUTCOMES.contains(&outcome) {
+            return Err(DirectiveError::UnknownOutcome {
+                value: outcome.to_string(),
+            });
+        }
+        directive.outcome = Some(outcome.to_string());
+    }
+    directive.failure_reason = object
+        .get("failure_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    directive.preferred_label = object
+        .get("preferred_next_label")
+        .and_then(Value::as_str)
+        .map(|l| strip_accelerator(l).to_string());
+    if let Some(ids) = object.get("suggested_next_ids").and_then(Value::as_array) {
+        directive.suggested_next_ids = ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    if let Some(updates) = object.get("context_updates").and_then(Value::as_object) {
+        directive.context_updates = updates
+            .iter()
+            .map(|(k, v)| (SmolStr::new(k), v.clone()))
+            .collect();
+    }
+    Ok(directive)
+}
+
+impl Directive {
+    /// The output fields a step reports from this directive.
+    pub fn output_fields(&self) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        if let Some(label) = &self.preferred_label {
+            out.insert("preferred_label".into(), json!(label));
+        }
+        if !self.suggested_next_ids.is_empty() {
+            out.insert("suggested_next_ids".into(), json!(self.suggested_next_ids));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_last_routing_object_wins_and_prose_is_ignored() {
+        let text = r#"Working... {"note": 1}
+        {"outcome": "failed", "failure_reason": "tests", "preferred_next_label": "[F] Fix"}
+        done {"context_updates": {"verified": true}, "suggested_next_ids": ["a", "b"]}"#;
+        let directive = parse(text).expect("parses");
+        assert_eq!(directive.outcome, None);
+        assert_eq!(directive.suggested_next_ids, ["a", "b"]);
+        assert_eq!(
+            directive.context_updates.get("verified"),
+            Some(&json!(true))
+        );
+        let first =
+            parse(r#"{"outcome": "failed", "preferred_next_label": "[F] Fix"}"#).expect("parses");
+        assert_eq!(first.outcome.as_deref(), Some("failed"));
+        assert_eq!(first.preferred_label.as_deref(), Some("Fix"));
+    }
+
+    #[test]
+    fn refusals_are_specific() {
+        assert_eq!(
+            parse("no json here").expect_err("missing"),
+            DirectiveError::Missing
+        );
+        assert_eq!(
+            parse(r#"{"outcome": "error"}"#).expect_err("unknown"),
+            DirectiveError::UnknownOutcome {
+                value: "error".into(),
+            }
+        );
+        assert!(matches!(
+            parse(r#"{"outcome": "failed", }"#).expect_err("malformed"),
+            DirectiveError::Malformed(_)
+        ));
+        assert_eq!(
+            parse(r#"{"summary": "ok"}"#).expect_err("missing"),
+            DirectiveError::Missing
+        );
+    }
+
+    #[test]
+    fn nested_and_string_braces_do_not_split_objects() {
+        let text = r#"{"context_updates": {"a": {"b": "}"}}, "outcome": "succeeded"}"#;
+        let directive = parse(text).expect("parses");
+        assert_eq!(directive.outcome.as_deref(), Some("succeeded"));
+        assert_eq!(directive.context_updates["a"], json!({ "b": "}" }));
+    }
+}

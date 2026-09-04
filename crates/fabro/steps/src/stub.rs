@@ -24,6 +24,8 @@ use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepRunner};
 
+use crate::outcome::fabro_outcome;
+
 /// What a stub is told to return.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -218,16 +220,6 @@ fn next_call(workspace: &str, node: &str) -> usize {
     let current = *count;
     *count += 1;
     current
-}
-
-/// The Fabro spelling of an engine status.
-pub fn fabro_outcome(status: &Status) -> &'static str {
-    match status {
-        Status::Success => "succeeded",
-        Status::PartialSuccess { .. } => "partially_succeeded",
-        Status::Skipped => "skipped",
-        Status::Failure(_) | Status::Cancelled | Status::TimedOut => "failed",
-    }
 }
 
 /// A `Step`-shaped wrapper so a caller can register a stub under a typed
