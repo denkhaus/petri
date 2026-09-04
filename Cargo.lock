@@ -992,6 +992,7 @@ version = "0.1.0"
 dependencies = [
  "petri",
  "petri-cli-core",
+ "petri-testkit",
  "tokio",
  "tracing-subscriber",
 ]
@@ -1054,7 +1055,6 @@ dependencies = [
  "petri-testkit",
  "serde",
  "serde_json",
- "sha2",
  "smol_str",
  "thiserror",
  "tokio",
@@ -1152,7 +1152,6 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
- "sha2",
  "smol_str",
  "thiserror",
  "yaml-rust2",
@@ -1169,6 +1168,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "shlex",
  "smol_str",
  "thiserror",
  "toml",
@@ -1262,6 +1262,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "smol_str",
  "thiserror",
 ]

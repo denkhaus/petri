@@ -6,11 +6,13 @@
 
 use std::collections::BTreeMap;
 
-use frontend_fabro::kinds::OUTCOMES;
+use frontend_fabro::kinds::{OUTCOMES, StageOutcome};
 use frontend_fabro::labels::strip_accelerator;
 use ir::Value;
 use serde_json::json;
 use smol_str::SmolStr;
+
+use crate::outcome::Stage;
 
 /// The fields that make a JSON object a routing directive.
 pub const ROUTING_FIELDS: &[&str] = &[
@@ -25,7 +27,7 @@ pub const ROUTING_FIELDS: &[&str] = &[
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Directive {
     /// One of the four Fabro outcomes, when the object names one.
-    pub outcome:            Option<String>,
+    pub outcome:            Option<StageOutcome>,
     pub failure_reason:     Option<String>,
     /// The preferred label, accelerator stripped.
     pub preferred_label:    Option<String>,
@@ -87,6 +89,11 @@ fn json_objects(text: &str) -> Vec<&str> {
     out
 }
 
+/// The last complete top-level JSON object in `text`.
+pub(crate) fn last_json_object(text: &str) -> Option<&str> {
+    json_objects(text).into_iter().next_back()
+}
+
 fn has_routing_field(object: &serde_json::Map<String, Value>) -> bool {
     ROUTING_FIELDS.iter().any(|f| object.contains_key(*f))
 }
@@ -114,12 +121,12 @@ pub fn parse(text: &str) -> Result<Directive, DirectiveError> {
     };
     let mut directive = Directive::default();
     if let Some(outcome) = object.get("outcome").and_then(Value::as_str) {
-        if !OUTCOMES.contains(&outcome) {
-            return Err(DirectiveError::UnknownOutcome {
-                value: outcome.to_string(),
-            });
-        }
-        directive.outcome = Some(outcome.to_string());
+        directive.outcome =
+            Some(
+                StageOutcome::parse(outcome).ok_or_else(|| DirectiveError::UnknownOutcome {
+                    value: outcome.to_string(),
+                })?,
+            );
     }
     directive.failure_reason = object
         .get("failure_reason")
@@ -146,6 +153,22 @@ pub fn parse(text: &str) -> Result<Directive, DirectiveError> {
 }
 
 impl Directive {
+    /// Apply the routing fields to a stage result.
+    pub fn apply_to(self, stage: &mut Stage) {
+        let output_fields = self.output_fields();
+        if let Some(outcome) = self.outcome {
+            stage.outcome = outcome;
+            if outcome == StageOutcome::Failed {
+                stage.failure_reason = self.failure_reason;
+                stage.failure_class.clear();
+            }
+        }
+        for (key, value) in output_fields {
+            stage.output.insert(key, value);
+        }
+        stage.context_updates.extend(self.context_updates);
+    }
+
     /// The output fields a step reports from this directive.
     pub fn output_fields(&self) -> serde_json::Map<String, Value> {
         let mut out = serde_json::Map::new();
@@ -177,7 +200,7 @@ mod tests {
         );
         let first =
             parse(r#"{"outcome": "failed", "preferred_next_label": "[F] Fix"}"#).expect("parses");
-        assert_eq!(first.outcome.as_deref(), Some("failed"));
+        assert_eq!(first.outcome, Some(StageOutcome::Failed));
         assert_eq!(first.preferred_label.as_deref(), Some("Fix"));
     }
 
@@ -207,7 +230,7 @@ mod tests {
     fn nested_and_string_braces_do_not_split_objects() {
         let text = r#"{"context_updates": {"a": {"b": "}"}}, "outcome": "succeeded"}"#;
         let directive = parse(text).expect("parses");
-        assert_eq!(directive.outcome.as_deref(), Some("succeeded"));
+        assert_eq!(directive.outcome, Some(StageOutcome::Succeeded));
         assert_eq!(directive.context_updates["a"], json!({ "b": "}" }));
     }
 }

@@ -104,13 +104,7 @@ impl GraphDigest {
     }
 
     pub fn to_hex(self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut output = String::with_capacity(64);
-        for byte in self.0 {
-            output.push(char::from(HEX[usize::from(byte >> 4)]));
-            output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
-        output
+        ir::digest_hex(&self.0)
     }
 }
 

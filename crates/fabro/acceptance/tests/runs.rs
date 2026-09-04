@@ -5,7 +5,7 @@
 
 use std::{env, fs};
 
-use fabro_acceptance::runs::{run, runs_report};
+use fabro_acceptance::runs::{run_with_children, runs_report};
 use fabro_acceptance::{corpus_root, has_corpus, lower_one, pin, workflows};
 
 #[tokio::test]
@@ -26,10 +26,10 @@ async fn every_lowered_corpus_workflow_runs_under_stubs() {
     let mut results = Vec::new();
     for file in workflows(&root) {
         let (_, graph) = lower_one(&root, &file);
-        let Some(graph) = graph else {
+        let Some(artifact) = graph else {
             continue;
         };
-        let result = run(graph, "corpus").await;
+        let result = run_with_children(artifact.graph, artifact.children, "corpus").await;
         results.push((file, result));
     }
     assert!(!results.is_empty(), "some corpus workflows lower");

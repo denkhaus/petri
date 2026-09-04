@@ -5,7 +5,8 @@
 //! closed, and no answer ever falls through to an unconditional edge — the
 //! lowering guards the fallback tier for human gates.
 
-use frontend_fabro::kinds::HUMAN_KIND;
+use frontend_fabro::Policy;
+use frontend_fabro::kinds::{HUMAN_KIND, StageOutcome};
 use frontend_fabro::labels::strip_accelerator;
 use ir::{Control, LogStream, Outcome, StepKindId, Value};
 use serde::Deserialize;
@@ -38,11 +39,9 @@ pub struct HumanConfig {
     #[serde(default)]
     pub question_type:   Option<String>,
     #[serde(default)]
-    pub review_target:   Option<bool>,
-    #[serde(default)]
     pub sensitive:       Option<bool>,
     #[serde(default)]
-    pub on_failure:      Option<String>,
+    pub on_failure:      Option<Policy>,
     #[serde(default)]
     pub timeout_ms:      Option<u64>,
     #[serde(default)]
@@ -98,7 +97,7 @@ impl Step for HumanStep {
                     config.node
                 ),
                 "bad_config",
-                config.on_failure.as_deref(),
+                config.on_failure,
             )
             .into_outcome(&config.node);
         }
@@ -116,7 +115,7 @@ impl Step for HumanStep {
                     return Stage::failed(
                         "human interaction interrupted before an answer was provided",
                         "interrupted",
-                        config.on_failure.as_deref(),
+                        config.on_failure,
                     )
                     .into_outcome(&config.node);
                 }
@@ -135,7 +134,7 @@ impl Step for HumanStep {
                     .await;
                 continue;
             }
-            let mut stage = Stage::new("succeeded", config.on_failure.as_deref());
+            let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
             let chosen = answer
                 .choice
                 .as_deref()

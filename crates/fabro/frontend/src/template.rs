@@ -7,6 +7,7 @@
 //! `{{ inputs.NAME }}` token becomes one shell word — so a script never runs
 //! through a template engine that would eat its braces.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use frontend::{CompileInputs, FileSource};
@@ -169,29 +170,39 @@ pub fn render_with(
     }
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
+    let root_name = includes.as_ref().map_or_else(
+        || "__petri_root__".to_string(),
+        |includes| join(&includes.base_dir, "__petri_root__"),
+    );
     if let Some(includes) = includes {
-        let base = includes.base_dir;
         // Includes are read from the repository before the render, so the
         // loader owns a snapshot and needs no lifetime on the source.
         let files: &dyn FileSource = includes.files;
         let mut cache: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut pending = Vec::new();
-        collect_includes(text, &mut pending);
-        while let Some(name) = pending.pop() {
-            let path = join(&base, &name);
+        let mut names = Vec::new();
+        collect_includes(text, &mut names);
+        pending.extend(names.into_iter().map(|name| (name, root_name.clone())));
+        while let Some((name, parent)) = pending.pop() {
+            let path = join_template_path(&name, &parent);
             if cache.contains_key(&path) {
                 continue;
             }
             let content = files.read(&path);
             if let Some(content) = &content {
-                collect_includes(content, &mut pending);
+                let mut children = Vec::new();
+                collect_includes(content, &mut children);
+                pending.extend(children.into_iter().map(|name| (name, path.clone())));
             }
             cache.insert(path, content);
         }
-        env.set_loader(move |name| Ok(cache.get(&join(&base, name)).cloned().flatten()));
+        env.set_path_join_callback(|name, parent| Cow::Owned(join_template_path(name, parent)));
+        env.set_loader(move |name| Ok(cache.get(name).cloned().flatten()));
     }
+    env.add_template_owned(root_name.clone(), text.to_string())
+        .map_err(|e| TemplateError::Syntax(e.to_string()))?;
     let template = env
-        .template_from_str(text)
+        .get_template(&root_name)
         .map_err(|e| TemplateError::Syntax(e.to_string()))?;
     // Name the first unbound variable up front: MiniJinja's own undefined
     // error does not say which name it was.
@@ -218,6 +229,21 @@ fn join(base: &str, name: &str) -> String {
     } else {
         format!("{base}/{name}")
     }
+}
+
+fn join_template_path(name: &str, parent: &str) -> String {
+    let mut parts: Vec<&str> = parent.split('/').filter(|part| !part.is_empty()).collect();
+    parts.pop();
+    for part in name.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    parts.join("/")
 }
 
 /// The names `{% include "..." %}` tags in `text` refer to, so a loader can
@@ -286,7 +312,7 @@ pub fn render_script(script: &str, language: &str, ctx: &Context) -> Result<Stri
         out.push_str(&rest[..start]);
         if is_token {
             let text = ctx.token_text(token)?;
-            out.push_str(&quote(&text, language));
+            out.push_str(&quote(&text, language)?);
         } else {
             out.push_str(&rest[start..start + end + 2]);
         }
@@ -296,22 +322,14 @@ pub fn render_script(script: &str, language: &str, ctx: &Context) -> Result<Stri
     Ok(out)
 }
 
-fn quote(text: &str, language: &str) -> String {
+fn quote(text: &str, language: &str) -> Result<String, TemplateError> {
     if language == "python" {
-        let escaped = text
-            .replace('\\', "\\\\")
-            .replace('\'', "\\'")
-            .replace('\n', "\\n");
-        return format!("'{escaped}'");
+        return serde_json::to_string(text)
+            .map_err(|error| TemplateError::Render(error.to_string()));
     }
-    if !text.is_empty()
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:@=+".contains(c))
-    {
-        return text.to_string();
-    }
-    format!("'{}'", text.replace('\'', "'\\''"))
+    shlex::try_quote(text)
+        .map(Cow::into_owned)
+        .map_err(|error| TemplateError::Render(format!("cannot quote a shell value: {error}")))
 }
 
 #[cfg(test)]
@@ -371,7 +389,7 @@ mod tests {
         );
         assert_eq!(
             render_script("print({{ inputs.msg }})", "python", &ctx).expect("renders"),
-            "print('hello world')"
+            "print(\"hello world\")"
         );
         assert!(
             render_script("{{ inputs.nope }}", "shell", &ctx)

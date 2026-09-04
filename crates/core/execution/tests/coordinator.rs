@@ -220,7 +220,7 @@ impl Step for InvokeStep {
             Ok(client) => client,
             Err(error) => return error.into(),
         };
-        let handle = match client
+        let mut handle = match client
             .start_or_attach(InvocationRequest {
                 site:    CallSite {
                     firing:  ctx.firing,

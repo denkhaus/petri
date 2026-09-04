@@ -1,6 +1,6 @@
 //! `github/action`: one phase of a JavaScript action.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -297,20 +297,12 @@ fn stage_error(message: String) -> StepFailure {
 /// per-file writes this replaced never consulted cancellation either.
 async fn unpack(ctx: &StepCtx, tar_rel: &Path, pinned: &PinnedAction) -> Result<(), StepFailure> {
     let workspace = ctx.env.workspace_path().to_string();
+    let archive = format!("{workspace}/{}", tar_rel.display());
     let mut handle = ctx
         .env
-        .spawn(executor::ProcessSpec {
-            program: SmolStr::new("tar"),
-            args:    vec![
-                SmolStr::new("-xf"),
-                SmolStr::new(format!("{workspace}/{}", tar_rel.display())),
-                SmolStr::new("-C"),
-                SmolStr::new(&workspace),
-            ],
-            env:     BTreeMap::default(),
-            cwd:     None,
-            stdin:   executor::StdinMode::Null,
-        })
+        .spawn(executor::ProcessSpec::new("tar", &[
+            "-xf", &archive, "-C", &workspace,
+        ]))
         .await
         .map_err(|e| stage_error(format!("could not run `tar` for `{pinned}`: {e}")))?;
     // Silent on success; on failure the last lines are the diagnosis.

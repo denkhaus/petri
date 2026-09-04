@@ -14,6 +14,7 @@
 
 mod builder;
 mod desugar;
+mod digest;
 pub mod expr;
 mod flow;
 mod graph;
@@ -28,6 +29,7 @@ pub use desugar::{
     CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, parallel_for_each,
     sequential_for_each, sequential_for_each_over,
 };
+pub use digest::{digest_hex, encode_graph, graph_digest, graph_digest_bytes};
 pub use expr::{
     BinOp, EvalEnv, EvalError, Expr, ExprTable, StaticCtx, UnOp, eval, eval_bool, is_truthy,
 };

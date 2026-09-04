@@ -8,15 +8,18 @@ use ir::{
     Backoff, BinOp, Candidate, Edge, EdgeTransition, Exhaustion, ExprId, GraphBuilder, Guard,
     NodeId, PickPolicy, RetryOn, RetryPolicy, RoutingGroup, SelectionPolicy, Tier, UnOp,
 };
+use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::kinds::RETRY_REQUESTED_CLASS;
 use crate::model::{Attrs, NodeDecl, Workflow};
 
 /// One of Fabro's failure policies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Policy {
     /// The outcome stays failed and may take an unconditional edge.
+    #[default]
     Route,
     /// The outcome stays failed and skips the unconditional edge, so the run
     /// ends unless a conditional edge or a retry target applies.

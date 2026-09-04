@@ -3,17 +3,18 @@
 //! the run context, and — with `output_schema="routing"` — the last JSON
 //! object of the output read as a routing directive.
 
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use executor::{ProcessSpec, StdinMode};
-use frontend_fabro::kinds::COMMAND_KIND;
+use frontend_fabro::Policy;
+use frontend_fabro::kinds::{COMMAND_KIND, StageOutcome};
 use ir::{FailureClass, LogStream, Outcome, StepEvent, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Ending, Step, StepCtx, StepFailure, ladder};
 use tokio::io::AsyncWriteExt as _;
-use tokio::sync::mpsc;
 use tokio::time;
 
 use crate::directive;
@@ -47,7 +48,7 @@ pub struct CommandConfig {
     #[serde(default)]
     pub output_schema: Option<Value>,
     #[serde(default)]
-    pub on_failure:    Option<String>,
+    pub on_failure:    Option<Policy>,
     #[serde(default)]
     pub timeout_ms:    Option<u64>,
     /// The run context at spawn, resolved by the engine.
@@ -84,6 +85,48 @@ fn stdin_text(value: &Value) -> Option<Vec<u8>> {
     }
 }
 
+#[derive(Default)]
+struct OutputTail {
+    bytes:     VecDeque<u8>,
+    truncated: bool,
+}
+
+impl OutputTail {
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.len() >= OUTPUT_CAP {
+            self.bytes.clear();
+            self.bytes.extend(&bytes[bytes.len() - OUTPUT_CAP..]);
+            self.truncated = true;
+            return;
+        }
+        self.bytes.extend(bytes);
+        if self.bytes.len() > OUTPUT_CAP {
+            self.truncated = true;
+            self.bytes.drain(..self.bytes.len() - OUTPUT_CAP);
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        self.push(line.as_bytes());
+        self.push(b"\n");
+    }
+
+    fn render(&self) -> String {
+        let bytes: Vec<u8> = self.bytes.iter().copied().collect();
+        let start = bytes
+            .iter()
+            .position(|byte| byte & 0b1100_0000 != 0b1000_0000)
+            .unwrap_or(bytes.len());
+        let tail = String::from_utf8(bytes[start..].to_vec())
+            .expect("the captured output was valid UTF-8 before its prefix was truncated");
+        if self.truncated || start > 0 {
+            format!("{TRUNCATED}{tail}")
+        } else {
+            tail
+        }
+    }
+}
+
 async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
     let (program, args) = match config.language.as_str() {
         "python" => ("python3", vec!["-c".to_string(), config.script.clone()]),
@@ -112,13 +155,17 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
             let _ = writer.shutdown().await;
         });
     }
-    let (captured_tx, mut captured_rx) = mpsc::unbounded_channel::<String>();
+    let captured = Arc::new(Mutex::new(OutputTail::default()));
     let mut drain = None;
     if let Some(mut lines) = handle.lines() {
         let logs = ctx.logs.clone();
+        let captured = captured.clone();
         drain = Some(tokio::spawn(async move {
             while let Some(line) = lines.recv().await {
-                let _ = captured_tx.send(line.line.clone());
+                captured
+                    .lock()
+                    .expect("the output tail lock is not poisoned")
+                    .push_line(&line.line);
                 let _ = logs
                     .send(StepEvent::Log {
                         stream: LogStream::Stdout,
@@ -130,28 +177,22 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     }
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
-    if let Some(drain) = drain {
-        let _ = time::timeout(time::Duration::from_secs(5), drain).await;
+    if let Some(mut drain) = drain
+        && time::timeout(time::Duration::from_secs(5), &mut drain)
+            .await
+            .is_err()
+    {
+        drain.abort();
+        let _ = drain.await;
     }
-    let mut output = String::new();
-    while let Ok(line) = captured_rx.try_recv() {
-        output.push_str(&line);
-        output.push('\n');
-    }
-    let output = if output.len() > OUTPUT_CAP {
-        let keep = output.len() - OUTPUT_CAP;
-        let mut start = keep;
-        while !output.is_char_boundary(start) {
-            start += 1;
-        }
-        format!("{TRUNCATED}{}", &output[start..])
-    } else {
-        output
-    };
+    let output = captured
+        .lock()
+        .expect("the output tail lock is not poisoned")
+        .render();
 
     let mut stage = match ending {
         Ending::Natural(status) if status.is_success() => {
-            Stage::new("succeeded", config.on_failure.as_deref())
+            Stage::new(StageOutcome::Succeeded, config.on_failure)
         }
         Ending::Natural(status) => {
             let (reason, class) = match (status.code, status.signal) {
@@ -180,7 +221,7 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
                 reason.push('\n');
                 reason.push_str(tail.trim_end());
             }
-            Stage::failed(reason, class.as_str(), config.on_failure.as_deref())
+            Stage::failed(reason, class.as_str(), config.on_failure)
         }
         Ending::Signalled { .. } => {
             let mut out = serde_json::Map::new();
@@ -198,7 +239,7 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         .context_updates
         .insert(SmolStr::new("command.output"), json!(output));
 
-    if stage.outcome == "succeeded"
+    if stage.outcome == StageOutcome::Succeeded
         && config
             .output_schema
             .as_ref()
@@ -206,24 +247,13 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     {
         match directive::parse(&output) {
             Ok(directive) => {
-                if let Some(outcome) = &directive.outcome {
-                    stage.outcome.clone_from(outcome);
-                    if outcome == "failed" {
-                        stage.failure_reason.clone_from(&directive.failure_reason);
-                        stage.failure_class = String::new();
-                    }
-                }
-                for (key, value) in directive.output_fields() {
-                    stage.output.insert(key, value);
-                }
-                let updates: BTreeMap<SmolStr, Value> = directive.context_updates;
-                stage.context_updates.extend(updates);
+                directive.apply_to(&mut stage);
             }
             Err(error) => {
                 stage = Stage::failed(
                     format!("the script's output is not a routing directive: {error}"),
                     "bad_output",
-                    config.on_failure.as_deref(),
+                    config.on_failure,
                 );
                 stage.output.insert("stdout".into(), json!(output));
             }

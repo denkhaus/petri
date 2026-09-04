@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use frontend_fabro::kinds::WAIT_KIND;
+use frontend_fabro::kinds::{StageOutcome, WAIT_KIND};
 use ir::{Control, Outcome, StepKindId};
 use serde::Deserialize;
 use serde_json::json;
@@ -39,7 +39,7 @@ impl Step for WaitStep {
                 },
             }
         }
-        let mut stage = Stage::new("succeeded", None);
+        let mut stage = Stage::new(StageOutcome::Succeeded, None);
         stage
             .output
             .insert("waited_ms".into(), json!(config.duration_ms));

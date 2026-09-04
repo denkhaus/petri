@@ -45,6 +45,12 @@ pub struct Outcome {
     pub panic:       Option<String>,
 }
 
+/// A lowered root graph and every nested workflow it may invoke.
+pub struct Artifact {
+    pub graph:    ir::Graph,
+    pub children: Vec<ir::Graph>,
+}
+
 impl Outcome {
     pub fn unsupported_features(&self) -> Vec<String> {
         let mut out: Vec<String> = self
@@ -119,7 +125,7 @@ pub fn check_one(root: &Path, file: &str) -> Outcome {
 }
 
 /// [`check_one`], keeping the graph when there is one.
-pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<ir::Graph>) {
+pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<Artifact>) {
     let path = root.join(file);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -166,8 +172,13 @@ pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<ir::Graph>) {
             )
         }
         Ok(lowered) => {
-            let diagnostics = lowered.diagnostics.into_vec();
-            let class = if lowered.graph.is_some() {
+            let frontend::Lowered {
+                graph,
+                children,
+                diagnostics,
+            } = lowered;
+            let diagnostics = diagnostics.into_vec();
+            let class = if graph.is_some() {
                 if diagnostics.is_empty() {
                     Class::Clean
                 } else {
@@ -186,11 +197,11 @@ pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<ir::Graph>) {
                 Outcome {
                     file: file.to_string(),
                     class,
-                    nodes: lowered.graph.as_ref().map_or(0, |g| g.nodes.len()),
+                    nodes: graph.as_ref().map_or(0, |g| g.nodes.len()),
                     diagnostics,
                     panic: None,
                 },
-                lowered.graph,
+                graph.map(|graph| Artifact { graph, children }),
             )
         }
     }

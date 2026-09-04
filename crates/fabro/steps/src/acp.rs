@@ -9,13 +9,15 @@
 //! and the transport is Petri's [`ProcessHandle`] rather than a socket the
 //! crate owns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use executor::{LineStream, ProcessHandle, ProcessSpec, Sig, StdinMode, StdinWriter};
 use ir::{Control, LogStream, StepEvent, Value};
+use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
+use steps::Answer;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -45,39 +47,24 @@ impl AgentCommand {
 
     /// `acp.config`: the JSON stdio server shape `{command, args, env}`.
     pub fn from_config(config: &Value) -> Result<Self, String> {
-        let program = config
-            .get("command")
-            .and_then(Value::as_str)
-            .filter(|c| !c.is_empty())
-            .ok_or_else(|| "`acp.config` needs a `command`".to_string())?
-            .to_string();
-        let args = config
-            .get("args")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let env = match config.get("env") {
-            Some(Value::Array(pairs)) => pairs
-                .iter()
-                .filter_map(|p| {
-                    Some((
-                        p.get("name")?.as_str()?.to_string(),
-                        p.get("value")?.as_str()?.to_string(),
-                    ))
-                })
+        let config: StdioConfig = serde_json::from_value(config.clone())
+            .map_err(|error| format!("invalid `acp.config`: {error}"))?;
+        if config.command.is_empty() {
+            return Err("`acp.config` needs a non-empty `command`".into());
+        }
+        let env = match config.env {
+            None => BTreeMap::new(),
+            Some(ConfigEnv::Map(env)) => env,
+            Some(ConfigEnv::Pairs(pairs)) => pairs
+                .into_iter()
+                .map(|pair| (pair.name, pair.value))
                 .collect(),
-            Some(Value::Object(map)) => map
-                .iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect(),
-            _ => BTreeMap::new(),
         };
-        Ok(Self { program, args, env })
+        Ok(Self {
+            program: config.command,
+            args: config.args,
+            env,
+        })
     }
 
     pub fn spec(&self) -> ProcessSpec {
@@ -91,6 +78,30 @@ impl AgentCommand {
             .with_env(env)
             .with_stdin(StdinMode::Piped)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StdioConfig {
+    command: String,
+    #[serde(default)]
+    args:    Vec<String>,
+    #[serde(default)]
+    env:     Option<ConfigEnv>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfigEnv {
+    Map(BTreeMap<String, String>),
+    Pairs(Vec<EnvPair>),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvPair {
+    name:  String,
+    value: String,
 }
 
 /// Why a turn did not complete.
@@ -111,10 +122,7 @@ pub enum AcpError {
 /// What a completed turn produced.
 #[derive(Clone, Debug, Default)]
 pub struct Turn {
-    pub text:        String,
-    pub stop_reason: String,
-    /// Every `session/update` that was not an agent text chunk, for observers.
-    pub updates:     Vec<Value>,
+    pub text: String,
 }
 
 /// One live connection to an agent process.
@@ -331,8 +339,12 @@ impl Client {
 
     async fn on_notification(&mut self, method: &str, params: Value, turn: &mut Turn) {
         if method != "session/update" {
-            turn.updates
-                .push(json!({ "method": method, "params": params }));
+            let _ = self
+                .logs
+                .send(StepEvent::Custom(
+                    json!({ "acp": { "method": method, "params": params } }),
+                ))
+                .await;
             return;
         }
         let update = params.get("update").cloned().unwrap_or(Value::Null);
@@ -349,7 +361,6 @@ impl Client {
             .logs
             .send(StepEvent::Custom(json!({ "acp": update })))
             .await;
-        turn.updates.push(update);
     }
 
     async fn on_request(
@@ -407,9 +418,8 @@ impl Client {
             .clone()
             .ok_or_else(|| AcpError::Protocol("no session".into()))?;
         let mut turn = Turn::default();
-        let mut pending: Vec<String> = vec![text.to_string()];
-        while let Some(prompt) = pending.first().cloned() {
-            pending.remove(0);
+        let mut pending = VecDeque::from([text.to_string()]);
+        while let Some(prompt) = pending.pop_front() {
             let id = self
                 .request(
                     "session/prompt",
@@ -443,7 +453,7 @@ impl Client {
                     ctl = control.recv() => {
                         if let Some(Control::Deliver(value)) = ctl {
                             if let Some(text) = steer_text(&value) {
-                                pending.push(text);
+                                pending.push_back(text);
                             }
                         } else {
                             self.cancel(&session, grace).await;
@@ -452,7 +462,6 @@ impl Client {
                     }
                 }
             };
-            turn.stop_reason.clone_from(&stop_reason);
             match stop_reason.as_str() {
                 "end_turn" | "refusal" => {}
                 "cancelled" => return Err(AcpError::Cancelled),
@@ -495,15 +504,11 @@ impl Client {
 
 /// The text a delivered steering value carries: a string, or `{ "text": … }`.
 fn steer_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) => Some(s.clone()),
-        Value::Object(map) => map
-            .get("text")
-            .or_else(|| map.get("$answer").and_then(|a| a.get("text")))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        _ => None,
-    }
+    let answer = Answer::from_value(value)?;
+    answer
+        .text
+        .and_then(|text| text.as_str().map(str::to_string))
+        .or(answer.choice)
 }
 
 #[cfg(test)]
@@ -531,5 +536,12 @@ mod tests {
         assert_eq!(command.args, ["--acp"]);
         assert_eq!(command.env.get("K").map(String::as_str), Some("v"));
         assert!(AgentCommand::from_config(&json!({ "args": [] })).is_err());
+        assert!(AgentCommand::from_config(&json!({ "command": ["agent"], "args": [] })).is_err());
+        assert!(
+            AgentCommand::from_config(&json!({ "command": "agent", "args": "--acp" })).is_err()
+        );
+        assert!(
+            AgentCommand::from_config(&json!({ "command": "agent", "unknown": true })).is_err()
+        );
     }
 }

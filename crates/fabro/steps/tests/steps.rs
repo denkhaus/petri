@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use fabro_steps::command::OUTPUT_CAP;
 use fabro_steps::register;
 use frontend_fabro::load;
 use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
@@ -73,6 +74,19 @@ async fn a_command_runs_in_bash_and_reports_its_output() {
         report.state.run_context().get("command.output"),
         Some(&json!("hello\nerr\n"))
     );
+}
+
+#[tokio::test]
+async fn a_command_keeps_only_a_bounded_output_tail() {
+    let graph = lower(&dot(r#"
+        c [shape=parallelogram, script="printf '%070000d' 0"]
+        start -> c -> exit
+    "#));
+    let report = run(graph, "fabro-command-output-cap").await;
+    let result = output_of(&report, "c");
+    let output = result["stdout"].as_str().expect("string output");
+    assert!(output.starts_with("\n… [output truncated]\n"));
+    assert!(output.len() <= OUTPUT_CAP + 24, "{}", output.len());
 }
 
 #[tokio::test]

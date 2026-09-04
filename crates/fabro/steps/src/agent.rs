@@ -10,12 +10,12 @@
 //! sends it. `model`, `provider` and `reasoning_effort` are observer metadata
 //! in phase one: the ACP command owns model selection.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::time::Instant;
 
-use frontend_fabro::kinds::AGENT_KIND;
-use ir::{LogStream, Metrics, Outcome, Status, StepKindId, Value};
+use frontend_fabro::Policy;
+use frontend_fabro::kinds::{AGENT_KIND, GOAL_CHECK_NODE, MAX_OUTPUT_RETRIES, StageOutcome};
+use ir::{LogStream, Metrics, Outcome, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
@@ -34,6 +34,7 @@ pub const DEFAULT_COMMAND_ENV: &str = "PETRI_ACP_COMMAND";
 const PREAMBLE_EXCERPT: usize = 600;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub label:            String,
     pub node:             String,
@@ -50,17 +51,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
-    pub speed:            Option<String>,
-    #[serde(default)]
-    pub backend:          Option<String>,
-    #[serde(default)]
-    pub thread_id:        Option<String>,
-    #[serde(default)]
-    pub max_tokens:       Option<String>,
-    #[serde(default)]
     pub fidelity:         Option<String>,
-    #[serde(default)]
-    pub project_memory:   Option<bool>,
     #[serde(default)]
     pub output_schema:    Option<Value>,
     #[serde(default = "default_output_retries")]
@@ -68,7 +59,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub acp:              Option<Value>,
     #[serde(default)]
-    pub on_failure:       Option<String>,
+    pub on_failure:       Option<Policy>,
     #[serde(default)]
     pub timeout_ms:       Option<u64>,
     #[serde(default)]
@@ -171,7 +162,7 @@ impl AgentConfig {
         };
         let mut lines = Vec::new();
         for (name, record) in nodes {
-            if name == "start" || name == "goal_check" {
+            if name == "start" || name == GOAL_CHECK_NODE {
                 continue;
             }
             let status = record.get("status").and_then(Value::as_str).unwrap_or("?");
@@ -207,10 +198,19 @@ impl Step for AgentStep {
     type Config = AgentConfig;
 
     async fn run(&self, config: AgentConfig, mut ctx: StepCtx) -> Outcome {
-        let on_failure = config.on_failure.clone();
+        let on_failure = config.on_failure;
         let fail = |reason: String, class: &str| {
-            Stage::failed(reason, class, on_failure.as_deref()).into_outcome(&config.node)
+            Stage::failed(reason, class, on_failure).into_outcome(&config.node)
         };
+        if config.output_retries > MAX_OUTPUT_RETRIES {
+            return fail(
+                format!(
+                    "`output_retries={}` exceeds the hard maximum of {MAX_OUTPUT_RETRIES}",
+                    config.output_retries
+                ),
+                "bad_config",
+            );
+        }
         let command = match config.command() {
             Ok(command) => command,
             Err(message) => return fail(message, "acp_unconfigured"),
@@ -248,8 +248,8 @@ impl Step for AgentStep {
 
         let mut prompt = config.assemble(&contract);
         let mut repairs = 0_u64;
-        let mut turns = Vec::new();
-        let outcome = loop {
+        let mut turn_count = 0_u64;
+        let (outcome, text) = loop {
             let turn = match client.prompt(&prompt, &mut ctx.control, grace).await {
                 Ok(turn) => turn,
                 Err(AcpError::Cancelled) => {
@@ -269,10 +269,10 @@ impl Step for AgentStep {
                 }
             };
             ctx.log(LogStream::Stdout, turn.text.clone()).await;
-            let text = turn.text.clone();
-            turns.push(turn);
+            let text = turn.text;
+            turn_count += 1;
             match validate(&contract, &text) {
-                Ok(parsed) => break parsed,
+                Ok(parsed) => break (parsed, text),
                 Err(problem) if repairs < config.output_retries => {
                     repairs += 1;
                     ctx.log(
@@ -298,10 +298,9 @@ impl Step for AgentStep {
         };
         client.terminate(grace).await;
 
-        let text = turns.last().map(|t| t.text.clone()).unwrap_or_default();
-        let mut stage = Stage::new("succeeded", config.on_failure.as_deref());
+        let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
         stage.output.insert("text".into(), json!(text));
-        stage.output.insert("turns".into(), json!(turns.len()));
+        stage.output.insert("turns".into(), json!(turn_count));
         stage.context_updates.insert(
             SmolStr::new(format!("response.{}", config.node)),
             json!(text),
@@ -313,7 +312,7 @@ impl Step for AgentStep {
             .context_updates
             .insert(SmolStr::new("last_stage"), json!(config.node));
         match outcome {
-            Parsed::Directive(directive) => apply_directive(&mut stage, directive),
+            Parsed::Directive(directive) => directive.apply_to(&mut stage),
             Parsed::Structured(value) => {
                 stage.output.insert("structured".into(), value.clone());
                 stage
@@ -327,12 +326,8 @@ impl Step for AgentStep {
             .with_duration_ms(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         metrics
             .custom
-            .insert(SmolStr::new("acp.turns"), json!(turns.len()));
+            .insert(SmolStr::new("acp.turns"), json!(turn_count));
         result.metrics = metrics;
-        if let Status::Failure(_) = &result.status {
-            // A directive that reports `failed` keeps the node's own failure
-            // class empty.
-        }
         result
     }
 }
@@ -342,20 +337,6 @@ enum Parsed {
     Plain,
     Directive(Directive),
     Structured(Value),
-}
-
-fn apply_directive(stage: &mut Stage, directive: Directive) {
-    if let Some(outcome) = &directive.outcome {
-        stage.outcome.clone_from(outcome);
-        if outcome == "failed" {
-            stage.failure_reason.clone_from(&directive.failure_reason);
-        }
-    }
-    for (key, value) in directive.output_fields() {
-        stage.output.insert(key, value);
-    }
-    let updates: BTreeMap<SmolStr, Value> = directive.context_updates;
-    stage.context_updates.extend(updates);
 }
 
 /// Check the response against the contract. With no contract, a routing
@@ -371,7 +352,7 @@ fn validate(contract: &Contract, text: &str) -> Result<Parsed, String> {
             .map(Parsed::Directive)
             .map_err(|e| e.to_string()),
         Contract::Schema(validator, _) => {
-            let object = last_json_object(text)
+            let object = directive::last_json_object(text)
                 .ok_or_else(|| "no JSON object in the response".to_string())?;
             let value: Value =
                 serde_json::from_str(object).map_err(|e| format!("invalid JSON: {e}"))?;
@@ -388,47 +369,4 @@ fn validate(contract: &Contract, text: &str) -> Result<Parsed, String> {
             }
         }
     }
-}
-
-/// The last top-level JSON object in `text`.
-fn last_json_object(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut depth = 0_usize;
-    let mut start = None;
-    let mut last = None;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, byte) in bytes.iter().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if *byte == b'\\' {
-                escaped = true;
-            } else if *byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' if depth > 0 => in_string = true,
-            b'{' => {
-                if depth == 0 {
-                    start = Some(index);
-                }
-                depth += 1;
-            }
-            b'}' if depth > 0 => {
-                depth -= 1;
-                if depth == 0
-                    && let Some(s) = start.take()
-                    && text.is_char_boundary(s)
-                    && text.is_char_boundary(index + 1)
-                {
-                    last = Some(&text[s..=index]);
-                }
-            }
-            _ => {}
-        }
-    }
-    last
 }

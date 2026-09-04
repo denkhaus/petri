@@ -2,7 +2,7 @@
 //! classes and edge chains are applied. Mirrors Fabro's own semantic pass,
 //! with positions kept for diagnostics.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use frontend::{Diagnostics, Span};
@@ -217,28 +217,55 @@ pub struct EdgeDecl {
 /// The workflow, in declaration order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workflow {
-    pub name:  String,
-    pub attrs: Attrs,
-    pub nodes: Vec<NodeDecl>,
-    pub edges: Vec<EdgeDecl>,
-    pub span:  Span,
+    pub name:       String,
+    pub attrs:      Attrs,
+    pub nodes:      Vec<NodeDecl>,
+    pub edges:      Vec<EdgeDecl>,
+    pub span:       Span,
+    node_index:     HashMap<String, usize>,
+    outgoing_index: HashMap<String, Vec<usize>>,
+    incoming_index: HashMap<String, Vec<usize>>,
 }
 
 impl Workflow {
     pub fn node(&self, id: &str) -> Option<&NodeDecl> {
-        self.nodes.iter().find(|n| n.id == id)
+        self.node_index.get(id).map(|index| &self.nodes[*index])
     }
 
     pub fn node_mut(&mut self, id: &str) -> Option<&mut NodeDecl> {
-        self.nodes.iter_mut().find(|n| n.id == id)
+        let index = *self.node_index.get(id)?;
+        self.nodes.get_mut(index)
     }
 
     pub fn outgoing(&self, id: &str) -> Vec<&EdgeDecl> {
-        self.edges.iter().filter(|e| e.from == id).collect()
+        self.outgoing_index
+            .get(id)
+            .into_iter()
+            .flatten()
+            .map(|index| &self.edges[*index])
+            .collect()
     }
 
     pub fn incoming(&self, id: &str) -> Vec<&EdgeDecl> {
-        self.edges.iter().filter(|e| e.to == id).collect()
+        self.incoming_index
+            .get(id)
+            .into_iter()
+            .flatten()
+            .map(|index| &self.edges[*index])
+            .collect()
+    }
+
+    fn push_edge(&mut self, edge: EdgeDecl) {
+        let index = self.edges.len();
+        self.outgoing_index
+            .entry(edge.from.clone())
+            .or_default()
+            .push(index);
+        self.incoming_index
+            .entry(edge.to.clone())
+            .or_default()
+            .push(index);
+        self.edges.push(edge);
     }
 }
 
@@ -248,11 +275,14 @@ pub fn build(dot: &DotGraph) -> Workflow {
     collect_declared(&dot.statements, &mut declared);
     let mut state = Builder {
         workflow: Workflow {
-            name:  dot.name.name.clone(),
-            attrs: Attrs::default(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            span:  dot.name.span.clone(),
+            name:           dot.name.name.clone(),
+            attrs:          Attrs::default(),
+            nodes:          Vec::new(),
+            edges:          Vec::new(),
+            span:           dot.name.span.clone(),
+            node_index:     HashMap::new(),
+            outgoing_index: HashMap::new(),
+            incoming_index: HashMap::new(),
         },
         declared,
         node_defaults: Attrs::default(),
@@ -285,10 +315,11 @@ impl Builder {
     fn ensure_node(&mut self, id: &Ident, declared: bool) -> &mut NodeDecl {
         let index = self
             .workflow
-            .nodes
-            .iter()
-            .position(|n| n.id == id.name)
+            .node_index
+            .get(&id.name)
+            .copied()
             .unwrap_or_else(|| {
+                let index = self.workflow.nodes.len();
                 self.workflow.nodes.push(NodeDecl {
                     id: id.name.clone(),
                     attrs: self.node_defaults.clone(),
@@ -296,7 +327,8 @@ impl Builder {
                     span: id.span.clone(),
                     declared,
                 });
-                self.workflow.nodes.len() - 1
+                self.workflow.node_index.insert(id.name.clone(), index);
+                index
             });
         let node = &mut self.workflow.nodes[index];
         node.declared |= declared;
@@ -355,7 +387,7 @@ impl Builder {
                         Self::apply_block(&mut attrs, block);
                     }
                     for pair in stmt.nodes.windows(2) {
-                        self.workflow.edges.push(EdgeDecl {
+                        self.workflow.push_edge(EdgeDecl {
                             from:    pair[0].name.clone(),
                             to:      pair[1].name.clone(),
                             attrs:   attrs.clone(),

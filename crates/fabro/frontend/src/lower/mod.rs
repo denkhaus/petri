@@ -24,7 +24,10 @@ pub use routing::{FailurePolicy, Policy};
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 
-use crate::kinds::{AGENT_KIND, COMMAND_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND};
+use crate::kinds::{
+    AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, WAIT_KIND,
+    WORKFLOW_KIND,
+};
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
 use crate::{condition, dot, labels, model, stylesheet};
@@ -138,6 +141,11 @@ struct Resolved {
     policy: FailurePolicy,
 }
 
+struct Structure {
+    start: String,
+    exit:  String,
+}
+
 struct Ctx<'a> {
     files:            &'a dyn FileSource,
     diags:            Diagnostics,
@@ -147,6 +155,8 @@ struct Ctx<'a> {
     ids:              HashMap<String, NodeId>,
     spans:            HashMap<NodeId, Span>,
     kinds:            HashMap<String, Kind>,
+    /// Static parallel branch node → the fan-out arm's ordinal.
+    branch_indices:   HashMap<String, usize>,
     /// The directory of the workflow file, for `@file` references.
     base_dir:         String,
     template:         Context,
@@ -200,6 +210,7 @@ fn lower_nested(
         ids: HashMap::new(),
         spans: HashMap::new(),
         kinds: HashMap::new(),
+        branch_indices: HashMap::new(),
         base_dir,
         template,
         goal: String::new(),
@@ -211,10 +222,11 @@ fn lower_nested(
     ctx.stack.push(file.to_string());
 
     ctx.graph_attrs(&mut workflow);
-    if !ctx.structure(&workflow) {
+    let Some(structure) = ctx.structure(&workflow) else {
         return Lowered::rejected(ctx.diags);
-    }
-    ctx.kinds(&workflow);
+    };
+    ctx.kinds(&workflow, &structure);
+    ctx.static_branch_indices(&workflow);
 
     // Pass 1: ids, in declaration order.
     for node in &workflow.nodes {
@@ -230,16 +242,16 @@ fn lower_nested(
         resolved.push(ctx.node(node, &workflow));
     }
     // Pass 3: routing, then the goal gate, then back edges, joins and budgets.
-    let exit = ctx.exit_node(&workflow);
+    let exit = ctx.ids[&structure.exit];
     let goal_check = ctx.goal_check(&workflow, exit);
     for (node, res) in workflow.nodes.iter().zip(&resolved) {
-        ctx.routing(node, res, &workflow, goal_check);
+        ctx.routing(node, res, &workflow, exit, goal_check);
     }
-    ctx.parallel(&workflow, &resolved);
-    let start = ctx.ids[&Ctx::start_id(&workflow)];
+    ctx.parallel(&workflow, &resolved, exit, goal_check);
+    let start = ctx.ids[&structure.start];
     ctx.b.mark_entry(start);
     ctx.back_edges(start);
-    ctx.joins_and_budgets(&workflow, &resolved);
+    ctx.joins_and_budgets(&workflow, &resolved, goal_check);
 
     if ctx.diags.has_errors() {
         return Lowered::rejected(ctx.diags);
@@ -355,7 +367,13 @@ fn duration_ms(duration: Duration) -> Value {
 }
 
 impl Ctx<'_> {
-    fn unknown_attrs(&mut self, attrs: &Attrs, known: &[&str], what: &str) {
+    fn unknown_attrs(
+        &mut self,
+        attrs: &Attrs,
+        known: &[&str],
+        ignored: &[(&str, &str)],
+        what: &str,
+    ) {
         for (key, attr) in attrs.iter() {
             if attrs::ATTRACTOR.contains(&key) {
                 self.diags.unsupported(
@@ -396,15 +414,15 @@ impl Ctx<'_> {
                 );
                 continue;
             }
-            if known.contains(&key) || attrs::LAYOUT.contains(&key) {
-                continue;
-            }
-            if let Some((_, why)) = attrs::NODE_IGNORED.iter().find(|(k, _)| *k == key) {
+            if let Some((_, why)) = ignored.iter().find(|(ignored, _)| *ignored == key) {
                 self.diags.warning(
                     &format!("ignored.{key}"),
                     attr.span.clone(),
                     format!("`{key}` on {what} is ignored: {why}"),
                 );
+                continue;
+            }
+            if known.contains(&key) || attrs::LAYOUT.contains(&key) {
                 continue;
             }
             self.diags.warning(
@@ -475,22 +493,8 @@ impl Ctx<'_> {
     // ── Graph level ────────────────────────────────────────────────────────
 
     fn graph_attrs(&mut self, workflow: &mut Workflow) {
-        let known: Vec<&str> = attrs::GRAPH
-            .iter()
-            .copied()
-            .chain(attrs::GRAPH_IGNORED.iter().map(|(k, _)| *k))
-            .collect();
         let attrs = workflow.attrs.clone();
-        self.unknown_attrs(&attrs, &known, "the graph");
-        for (key, why) in attrs::GRAPH_IGNORED {
-            if let Some(attr) = attrs.get(key) {
-                self.diags.warning(
-                    &format!("ignored.{key}"),
-                    attr.span.clone(),
-                    format!("graph attribute `{key}` is ignored: {why}"),
-                );
-            }
-        }
+        self.unknown_attrs(&attrs, attrs::GRAPH, attrs::GRAPH_IGNORED, "the graph");
         let span = workflow.span.clone();
         let goal_span = attrs.span_of("goal", &span);
         let goal = attrs.text("goal").unwrap_or_default();
@@ -559,38 +563,8 @@ impl Ctx<'_> {
 
     // ── Structure ──────────────────────────────────────────────────────────
 
-    fn start_id(workflow: &Workflow) -> String {
-        workflow
-            .nodes
-            .iter()
-            .find(|n| shape_of(n) == "Mdiamond")
-            .or_else(|| workflow.node("start"))
-            .or_else(|| workflow.node("Start"))
-            .map(|n| n.id.clone())
-            .unwrap_or_default()
-    }
-
-    fn exit_id(workflow: &Workflow) -> Option<String> {
-        workflow
-            .nodes
-            .iter()
-            .find(|n| shape_of(n) == "Msquare")
-            .or_else(|| {
-                ["exit", "Exit", "end", "End"]
-                    .iter()
-                    .find_map(|id| workflow.node(id))
-            })
-            .map(|n| n.id.clone())
-    }
-
-    fn exit_node(&self, workflow: &Workflow) -> NodeId {
-        let id = Self::exit_id(workflow).expect("structure() checked the exit");
-        self.ids[&id]
-    }
-
-    /// The checks a graph must pass before lowering makes sense. False means
-    /// stop: the diagnostics already say why.
-    fn structure(&mut self, workflow: &Workflow) -> bool {
+    /// The checks a graph must pass before lowering makes sense.
+    fn structure(&mut self, workflow: &Workflow) -> Option<Structure> {
         let mut ok = true;
         for node in &workflow.nodes {
             if !node.declared {
@@ -602,23 +576,80 @@ impl Ctx<'_> {
                 ok = false;
             }
         }
-        let start = Self::start_id(workflow);
-        if start.is_empty() {
+        if workflow.node(GOAL_CHECK_NODE).is_some() {
+            self.diags.error(
+                "fabro.reserved_node_id",
+                workflow.node(GOAL_CHECK_NODE)?.span.clone(),
+                format!("`{GOAL_CHECK_NODE}` is reserved for goal-gate lowering"),
+            );
+            ok = false;
+        }
+        let starts: Vec<&NodeDecl> = workflow
+            .nodes
+            .iter()
+            .filter(|node| {
+                shape_of(node) == "Mdiamond"
+                    || node.attrs.text("type").as_deref() == Some("start")
+                    || matches!(node.id.as_str(), "start" | "Start")
+            })
+            .collect();
+        let exits: Vec<&NodeDecl> = workflow
+            .nodes
+            .iter()
+            .filter(|node| {
+                shape_of(node) == "Msquare"
+                    || node.attrs.text("type").as_deref() == Some("exit")
+                    || matches!(node.id.as_str(), "exit" | "Exit" | "end" | "End")
+            })
+            .collect();
+        if starts.is_empty() {
             self.diags.error(
                 "fabro.no_start",
                 workflow.span.clone(),
-                "the workflow has no start node (`shape=Mdiamond`, or an id of `start`)",
+                "the workflow has no start node (`shape=Mdiamond`, `type=start`, or an id of `start`)",
             );
-            return false;
+            return None;
         }
-        let Some(exit) = Self::exit_id(workflow) else {
+        if starts.len() > 1 {
+            self.diags.error(
+                "fabro.multiple_starts",
+                workflow.span.clone(),
+                format!(
+                    "the workflow has multiple start nodes: {}",
+                    starts
+                        .iter()
+                        .map(|node| node.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+            ok = false;
+        }
+        if exits.is_empty() {
             self.diags.error(
                 "fabro.no_exit",
                 workflow.span.clone(),
-                "the workflow has no exit node (`shape=Msquare`, or an id of `exit`)",
+                "the workflow has no exit node (`shape=Msquare`, `type=exit`, or an id of `exit`)",
             );
-            return false;
-        };
+            return None;
+        }
+        if exits.len() > 1 {
+            self.diags.error(
+                "fabro.multiple_exits",
+                workflow.span.clone(),
+                format!(
+                    "the workflow has multiple exit nodes: {}",
+                    exits
+                        .iter()
+                        .map(|node| node.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+            ok = false;
+        }
+        let start = starts[0].id.clone();
+        let exit = exits[0].id.clone();
         for edge in &workflow.edges {
             if edge.to == start {
                 self.diags.error(
@@ -668,13 +699,45 @@ impl Ctx<'_> {
             );
             ok = false;
         }
-        ok
+        ok.then_some(Structure { start, exit })
     }
 
-    fn kinds(&mut self, workflow: &Workflow) {
+    fn kinds(&mut self, workflow: &Workflow, structure: &Structure) {
         for node in &workflow.nodes {
-            let kind = self.kind_of(node);
+            let kind = if node.id == structure.start {
+                Kind::Start
+            } else if node.id == structure.exit {
+                Kind::Exit
+            } else {
+                self.kind_of(node)
+            };
             self.kinds.insert(node.id.clone(), kind);
+        }
+    }
+
+    fn static_branch_indices(&mut self, workflow: &Workflow) {
+        for parallel in &workflow.nodes {
+            if self.kinds.get(&parallel.id) != Some(&Kind::Parallel)
+                || parallel.attrs.contains("for_each")
+            {
+                continue;
+            }
+            for (index, edge) in workflow.outgoing(&parallel.id).into_iter().enumerate() {
+                let mut seen = HashSet::new();
+                let mut pending = VecDeque::from([edge.to.as_str()]);
+                while let Some(id) = pending.pop_front() {
+                    if !seen.insert(id) || self.kinds.get(id) == Some(&Kind::FanIn) {
+                        continue;
+                    }
+                    self.branch_indices.insert(id.to_string(), index);
+                    pending.extend(
+                        workflow
+                            .outgoing(id)
+                            .into_iter()
+                            .map(|edge| edge.to.as_str()),
+                    );
+                }
+            }
         }
     }
 
@@ -703,12 +766,12 @@ impl Ctx<'_> {
     // ── Nodes ──────────────────────────────────────────────────────────────
 
     fn node(&mut self, node: &NodeDecl, workflow: &Workflow) -> Resolved {
-        let known: Vec<&str> = attrs::NODE
-            .iter()
-            .copied()
-            .chain(attrs::NODE_IGNORED.iter().map(|(k, _)| *k))
-            .collect();
-        self.unknown_attrs(&node.attrs, &known, &format!("node `{}`", node.id));
+        self.unknown_attrs(
+            &node.attrs,
+            attrs::NODE,
+            attrs::NODE_IGNORED,
+            &format!("node `{}`", node.id),
+        );
         let kind = self.kinds[&node.id];
         let id = self.ids[&node.id];
         let shape = shape_of(node);
@@ -787,7 +850,7 @@ impl Ctx<'_> {
                 (Some(StepRef::new(WAIT_KIND, config)), timeout)
             }
             Kind::ManagerLoop => {
-                let config = self.workflow_config(node);
+                let config = self.workflow_config(node, policy);
                 (
                     Some(StepRef::new(WORKFLOW_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),
@@ -902,15 +965,7 @@ impl Ctx<'_> {
         ) {
             config.insert("prompt".into(), Value::String(prompt));
         }
-        for key in [
-            "model",
-            "provider",
-            "reasoning_effort",
-            "speed",
-            "backend",
-            "thread_id",
-            "max_tokens",
-        ] {
+        for key in ["model", "provider", "reasoning_effort"] {
             if let Some(value) = node.attrs.text(key) {
                 config.insert(key.into(), Value::String(value));
             }
@@ -928,12 +983,20 @@ impl Ctx<'_> {
         if let Some(fidelity) = self.fidelity(node, workflow) {
             config.insert("fidelity".into(), Value::String(fidelity));
         }
-        if let Some(memory) = node.attrs.bool("project_memory", &mut self.diags) {
-            config.insert("project_memory".into(), Value::Bool(memory));
-        }
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {
-            config.insert("output_retries".into(), Value::from(retries.max(0)));
+            let retries = retries.max(0);
+            if retries > i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX) {
+                self.diags.error(
+                    "fabro.output_retries_too_large",
+                    node.attrs.span_of("output_retries", &node.span),
+                    format!("`output_retries={retries}` exceeds the hard maximum of {MAX_OUTPUT_RETRIES}"),
+                );
+            }
+            config.insert(
+                "output_retries".into(),
+                Value::from(retries.min(i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX))),
+            );
         }
         self.acp(node, workflow, &mut config);
         let nodes = self.b.exprs().var("nodes");
@@ -1180,9 +1243,6 @@ impl Ctx<'_> {
             }
             config.insert("question_type".into(), Value::String(kind));
         }
-        if let Some(review) = node.attrs.bool("review_target", &mut self.diags) {
-            config.insert("review_target".into(), Value::Bool(review));
-        }
         if let Some(sensitive) = node.attrs.bool("sensitive", &mut self.diags) {
             config.insert("sensitive".into(), Value::Bool(sensitive));
         }
@@ -1193,13 +1253,17 @@ impl Ctx<'_> {
         Value::Object(config)
     }
 
-    fn workflow_config(&mut self, node: &NodeDecl) -> Value {
+    fn workflow_config(&mut self, node: &NodeDecl, policy: FailurePolicy) -> Value {
         let mut config = Map::new();
         config.insert(
             "label".into(),
             Value::String(node.attrs.text("label").unwrap_or_else(|| node.id.clone())),
         );
         config.insert("node".into(), Value::String(node.id.clone()));
+        config.insert(
+            "on_failure".into(),
+            Value::String(policy.on_failure.name().into()),
+        );
         let kv = self.b.exprs().var("kv");
         config.insert("kv".into(), placeholder(kv));
         if let Some(cycles) = node.attrs.int("manager.max_cycles", &mut self.diags) {
@@ -1212,7 +1276,11 @@ impl Ctx<'_> {
             config.insert("poll_interval_ms".into(), duration_ms(interval));
         }
         if let Some(stop) = node.attrs.text("manager.stop_condition") {
-            config.insert("stop_condition".into(), Value::String(stop));
+            let span = node.attrs.span_of("manager.stop_condition", &node.span);
+            let mut table = ir::ExprTable::new();
+            if condition::lower(&stop, &mut table, &span, &mut self.diags).is_some() {
+                config.insert("stop_condition".into(), Value::String(stop));
+            }
         }
         let source = node.attrs.text("stack.child_workflow");
         let inline = node.attrs.text("stack.child_dot_source");
@@ -1360,9 +1428,11 @@ impl Ctx<'_> {
         }
         gates.sort_by(|a, b| a.id.cmp(&b.id));
         let exit_span = self.spans[&exit].clone();
-        let check = self
-            .b
-            .add_node("goal_check", self.scope, StepRef::new("noop", Value::Null));
+        let check = self.b.add_node(
+            GOAL_CHECK_NODE,
+            self.scope,
+            StepRef::new("noop", Value::Null),
+        );
         self.spans.insert(check, exit_span.clone());
         self.b.set_meta(
             check,
@@ -1429,6 +1499,7 @@ impl Ctx<'_> {
         node: &NodeDecl,
         res: &Resolved,
         workflow: &Workflow,
+        exit: NodeId,
         goal_check: Option<NodeId>,
     ) {
         if matches!(res.kind, Kind::Exit | Kind::Parallel) {
@@ -1439,7 +1510,6 @@ impl Ctx<'_> {
         if edges.is_empty() {
             return;
         }
-        let exit = self.exit_node(workflow);
         let random = match node.attrs.text("selection").as_deref() {
             None => self.random,
             Some("random") => true,
@@ -1467,6 +1537,7 @@ impl Ctx<'_> {
             self.unknown_attrs(
                 &edge.attrs,
                 attrs::EDGE,
+                &[],
                 &format!("edge `{} -> {}`", edge.from, edge.to),
             );
             let cond = self.edge_condition(edge, res, policy);
@@ -1573,11 +1644,16 @@ impl Ctx<'_> {
                     .node(&e.from)
                     .is_some_and(|n| n.attrs.contains("for_each"))
         });
+        let static_index = self
+            .branch_indices
+            .get(&edge.from)
+            .copied()
+            .unwrap_or(index);
         let exprs = self.b.exprs();
         let index_expr = if is_template {
             exprs.var("index")
         } else {
-            exprs.lit(u64::try_from(index).unwrap_or(u64::MAX))
+            exprs.lit(u64::try_from(static_index).unwrap_or(u64::MAX))
         };
         let id = exprs.lit(edge.from.as_str());
         let status = exprs.var("status");
@@ -1588,10 +1664,16 @@ impl Ctx<'_> {
 
     // ── Parallel ───────────────────────────────────────────────────────────
 
-    fn parallel(&mut self, workflow: &Workflow, resolved: &[Resolved]) {
+    fn parallel(
+        &mut self,
+        workflow: &Workflow,
+        resolved: &[Resolved],
+        exit: NodeId,
+        goal_check: Option<NodeId>,
+    ) {
         for (node, res) in workflow.nodes.iter().zip(resolved) {
             match res.kind {
-                Kind::Parallel => self.fan_out(node, res, workflow),
+                Kind::Parallel => self.fan_out(node, res, workflow, exit, goal_check),
                 Kind::FanIn => {
                     let ordered = {
                         let exprs = self.b.exprs();
@@ -1608,7 +1690,14 @@ impl Ctx<'_> {
         }
     }
 
-    fn fan_out(&mut self, node: &NodeDecl, res: &Resolved, workflow: &Workflow) {
+    fn fan_out(
+        &mut self,
+        node: &NodeDecl,
+        res: &Resolved,
+        workflow: &Workflow,
+        exit: NodeId,
+        goal_check: Option<NodeId>,
+    ) {
         let edges = workflow.outgoing(&node.id);
         for edge in &edges {
             if edge
@@ -1635,6 +1724,7 @@ impl Ctx<'_> {
             let targets: Vec<NodeId> = edges
                 .iter()
                 .filter_map(|e| self.ids.get(&e.to).copied())
+                .map(|target| goal_check.filter(|_| target == exit).unwrap_or(target))
                 .collect();
             self.b.fan_out(res.id, &targets);
             return;
@@ -1739,34 +1829,45 @@ impl Ctx<'_> {
             Gray,
             Black,
         }
+        struct Frame {
+            node:  NodeId,
+            next:  usize,
+            edges: Vec<(EdgeId, NodeId)>,
+        }
         let count = self.b.graph().nodes.len();
         let mut color = vec![Color::White; count];
         let mut back: HashSet<EdgeId> = HashSet::new();
-        // (node, index of the next edge to visit)
-        let mut stack: Vec<(NodeId, usize)> = vec![(start, 0)];
-        color[start.index()] = Color::Gray;
         let successors = |graph: &ir::Graph, node: NodeId| -> Vec<(EdgeId, NodeId)> {
             graph
                 .node(node)
                 .map(|n| n.routing.edges().map(|e| (e.id, e.to)).collect())
                 .unwrap_or_default()
         };
-        while let Some((node, next)) = stack.last().copied() {
-            let edges = successors(self.b.graph(), node);
-            if next >= edges.len() {
-                color[node.index()] = Color::Black;
+        let mut stack = vec![Frame {
+            node:  start,
+            next:  0,
+            edges: successors(self.b.graph(), start),
+        }];
+        color[start.index()] = Color::Gray;
+        while let Some(frame) = stack.last_mut() {
+            if frame.next >= frame.edges.len() {
+                color[frame.node.index()] = Color::Black;
                 stack.pop();
                 continue;
             }
-            stack.last_mut().expect("non-empty").1 += 1;
-            let (edge, to) = edges[next];
+            let (edge, to) = frame.edges[frame.next];
+            frame.next += 1;
             match color[to.index()] {
                 Color::Gray => {
                     back.insert(edge);
                 }
                 Color::White => {
                     color[to.index()] = Color::Gray;
-                    stack.push((to, 0));
+                    stack.push(Frame {
+                        node:  to,
+                        next:  0,
+                        edges: successors(self.b.graph(), to),
+                    });
                 }
                 Color::Black => {}
             }
@@ -1782,7 +1883,12 @@ impl Ctx<'_> {
         }
     }
 
-    fn joins_and_budgets(&mut self, workflow: &Workflow, resolved: &[Resolved]) {
+    fn joins_and_budgets(
+        &mut self,
+        workflow: &Workflow,
+        resolved: &[Resolved],
+        goal_check: Option<NodeId>,
+    ) {
         let looped = loop_reachable(&self.b.graph().body);
         let global = workflow
             .attrs
@@ -1846,13 +1952,6 @@ impl Ctx<'_> {
             self.b.set_budget(res.id, Budget::new(max_firings, timeout));
         }
         // The synthetic goal check, when it exists, loops too.
-        let goal_check = self
-            .b
-            .graph()
-            .nodes
-            .iter()
-            .find(|n| n.name == "goal_check")
-            .map(|n| n.id);
         if let Some(check) = goal_check {
             self.b.set_join(check, JoinPolicy::Any);
             if looped.contains(&check) {

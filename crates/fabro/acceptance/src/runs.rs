@@ -13,12 +13,12 @@ use std::{env, fs, process};
 use execution::host::{self, HostRun};
 use execution::{CoordinatorRecord, ExecutionId, ExecutionObserver};
 use fabro_steps::fabro_outcome;
-use ir::{Graph, RunStatus, Value};
+use frontend_fabro::kinds::GOAL_CHECK_NODE;
+use ir::{Graph, Value};
 use runtime::engine::{EngineState, EventRecord};
 use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// The standard runtime plus the Fabro stub registry, over `run_dir`.
 pub fn stub_runtime(run_dir: &Path) -> Runtime {
@@ -100,10 +100,10 @@ impl ExecutionObserver for PathObserver {
         if history.len() > *known {
             let mut visits = self.visits.lock().expect("not poisoned");
             for record in &history[*known..] {
-                if record.name != "goal_check" {
+                if record.name != GOAL_CHECK_NODE {
                     visits.push(Visit {
                         node:    record.name.to_string(),
-                        outcome: fabro_outcome(&record.outcome.status).to_string(),
+                        outcome: fabro_outcome(&record.outcome.status).as_str().to_string(),
                     });
                 }
             }
@@ -117,10 +117,17 @@ impl ExecutionObserver for PathObserver {
 /// Run `graph` through the standalone host (so `loop_restart` successions
 /// happen) and fold the report. Replay is verified by the runtime.
 pub async fn run(graph: Graph, label: &str) -> RunResult {
+    run_with_children(graph, Vec::new(), label).await
+}
+
+/// Run a root graph with every pre-lowered child workflow it may invoke.
+pub async fn run_with_children(graph: Graph, children: Vec<Graph>, label: &str) -> RunResult {
     let dir = fresh_run_dir(label);
     let rt = stub_runtime(&dir);
     let observer = Arc::new(PathObserver::default());
-    let host_run = HostRun::new(graph.clone()).observe(observer.clone());
+    let host_run = HostRun::new(graph)
+        .with_children(children)
+        .observe(observer.clone());
     let report = host::run_configured(&rt, host_run, |_, _| {})
         .await
         .unwrap_or_else(|e| panic!("the run completes: {e}"));
@@ -137,14 +144,10 @@ pub async fn run(graph: Graph, label: &str) -> RunResult {
         .state
         .start()
         .map_or(1, |start| start.execution_index + 1);
-    let status = match report.status {
-        RunStatus::Success => "success",
-        RunStatus::Failed => "failed",
-        RunStatus::Cancelled => "cancelled",
-    };
+    let status = report.status.to_string();
     let _ = fs::remove_dir_all(&dir);
     RunResult {
-        status: status.to_string(),
+        status,
         path,
         context,
         executions,
@@ -230,10 +233,5 @@ pub fn runs_report(results: &[(String, RunResult)], pin: &str) -> String {
 
 /// The `RunResult` as the oracle records it, for a fixture diff.
 pub fn result_json(result: &RunResult) -> Value {
-    json!({
-        "status": result.status,
-        "path": result.path,
-        "context": result.context,
-        "executions": result.executions,
-    })
+    serde_json::to_value(result).expect("RunResult is serializable")
 }

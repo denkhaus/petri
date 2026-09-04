@@ -79,14 +79,39 @@ impl FileArgs {
             };
             let has_sections = map.contains_key("inputs") || map.contains_key("vars");
             if has_sections {
+                if let Some(unexpected) = map
+                    .keys()
+                    .find(|key| !matches!(key.as_str(), "inputs" | "vars"))
+                {
+                    return Err(format!(
+                        "{} has unexpected top-level key `{unexpected}`; a sectioned input file permits only `inputs` and `vars`",
+                        path.display()
+                    ));
+                }
                 for (section, target) in
                     [("inputs", &mut inputs.inputs), ("vars", &mut inputs.vars)]
                 {
-                    if let Some(serde_json::Value::Object(values)) = map.remove(section) {
-                        target.extend(values.into_iter().map(|(k, v)| (k.into(), v)));
+                    let Some(value) = map.remove(section) else {
+                        continue;
+                    };
+                    let serde_json::Value::Object(values) = value else {
+                        return Err(format!(
+                            "{} field `{section}` must hold a JSON object",
+                            path.display()
+                        ));
+                    };
+                    if values.contains_key("") {
+                        return Err(format!(
+                            "{} field `{section}` contains an empty key",
+                            path.display()
+                        ));
                     }
+                    target.extend(values.into_iter().map(|(k, v)| (k.into(), v)));
                 }
             } else {
+                if map.contains_key("") {
+                    return Err(format!("{} contains an empty input key", path.display()));
+                }
                 inputs
                     .inputs
                     .extend(map.into_iter().map(|(k, v)| (k.into(), v)));
@@ -96,6 +121,9 @@ impl FileArgs {
             let Some((key, value)) = pair.split_once('=') else {
                 return Err(format!("`--input {pair}` is not `KEY=VALUE`"));
             };
+            if key.is_empty() {
+                return Err("`--input` keys cannot be empty".into());
+            }
             let value = serde_json::from_str(value)
                 .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
             inputs.inputs.insert(key.into(), value);

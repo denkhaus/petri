@@ -61,7 +61,7 @@ impl InvocationHandle {
         self.id
     }
 
-    pub async fn result(mut self) -> InvocationResult {
+    pub async fn result(&mut self) -> InvocationResult {
         loop {
             if let InvocationStatus::Finished(result) = self.status.borrow().clone() {
                 return result;

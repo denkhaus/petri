@@ -4,8 +4,8 @@
 
 | Result (of the 32 Fabro workflows) | Count | Share |
 |---|---|---|
-| lowered clean | 20 | 62% |
-| lowered with warnings | 10 | 31% |
+| lowered clean | 19 | 59% |
+| lowered with warnings | 11 | 34% |
 | rejected with a specific `unsupported.*` code | 2 | 6% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
@@ -25,10 +25,11 @@
 | Code | Occurrences |
 |---|---|
 | `fabro.internal_context` | 1 |
-| `fabro.prompt_missing` | 42 |
+| `fabro.prompt_missing` | 40 |
 | `fabro.unknown_attribute` | 31 |
-| `fabro.unknown_shape` | 2 |
+| `ignored.project_memory` | 5 |
 | `ignored.stall_timeout` | 1 |
+| `ignored.thread_id` | 2 |
 | `info.budget.default` | 20 |
 
 ## Every file
@@ -37,12 +38,12 @@
 |---|---|---|---|
 | `.fabro/workflows/card-game-fast/workflow.fabro` | warnings | 7 | `info.budget.default` |
 | `.fabro/workflows/card-game/workflow.fabro` | warnings | 21 | `info.budget.default` |
-| `.fabro/workflows/code-review/code-review.fabro` | unsupported | 0 | `fabro.internal_context`, `ignored.stall_timeout`, `unsupported.on_failure.succeed`, `unsupported.template.unbound_input` |
+| `.fabro/workflows/code-review/code-review.fabro` | unsupported | 0 | `fabro.internal_context`, `ignored.project_memory`, `ignored.stall_timeout`, `unsupported.on_failure.succeed`, `unsupported.template.unbound_input` |
 | `.fabro/workflows/context-demo/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/daytona-medium/workflow.fabro` | warnings | 4 | `info.budget.default` |
 | `.fabro/workflows/gh-list/workflow.fabro` | clean | 4 |  |
 | `.fabro/workflows/gh-triage/workflow.fabro` | clean | 3 |  |
-| `.fabro/workflows/goal/workflow.fabro` | clean | 7 |  |
+| `.fabro/workflows/goal/workflow.fabro` | warnings | 7 | `ignored.thread_id` |
 | `.fabro/workflows/hello/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/implement-issue/workflow.fabro` | warnings | 4 | `info.budget.default` |
 | `.fabro/workflows/implement-plan/workflow.fabro` | warnings | 12 | `info.budget.default` |
@@ -78,6 +79,6 @@
 | `test/attractor/refactor_test_moderate.dot` | unsupported | 0 | `info.budget.default`, `unsupported.auto_status` |
 | `test/attractor/refactor_test_vague.dot` | unsupported | 0 | `info.budget.default`, `unsupported.auto_status` |
 | `test/attractor/reference_template.dot` | unsupported | 0 | `fabro.prompt_missing`, `fabro.unknown_attribute`, `info.budget.default`, `unsupported.auto_status`, `unsupported.outcome_value` |
-| `test/attractor/semport.dot` | unsupported | 0 | `fabro.prompt_missing`, `fabro.unknown_attribute`, `fabro.unknown_shape`, `info.budget.default`, `unsupported.attractor`, `unsupported.outcome_value` |
+| `test/attractor/semport.dot` | unsupported | 0 | `fabro.prompt_missing`, `fabro.unknown_attribute`, `info.budget.default`, `unsupported.attractor`, `unsupported.outcome_value` |
 | `test/attractor/simple_example.dot` | clean | 4 |  |
 | `test/attractor/solitaire_fast.dot` | unsupported | 0 | `info.budget.default`, `unsupported.auto_status` |

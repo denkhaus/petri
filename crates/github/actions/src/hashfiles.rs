@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use executor::{ExecEnv, ProcessSpec, StdinMode};
+use executor::{ExecEnv, ProcessSpec};
 use frontend_gha::exprs::Sentinel;
 use ir::FailureClass;
 use smol_str::SmolStr;
@@ -182,13 +182,7 @@ async fn compute(
         SmolStr::new("PETRI_HASHFILES_ROOT"),
         SmolStr::new(github_workspace),
     );
-    let spec = ProcessSpec {
-        program: SmolStr::new("node"),
-        args:    vec![SmolStr::new("-e"), SmolStr::new(HELPER_JS)],
-        env:     helper_env,
-        cwd:     None,
-        stdin:   StdinMode::Null,
-    };
+    let spec = ProcessSpec::new("node", &["-e", HELPER_JS]).with_env(helper_env);
     let mut handle = env.spawn(spec).await.map_err(|e| {
         fail(format!(
             "computing `hashFiles({display})` needs `node` in the job environment: {e}"

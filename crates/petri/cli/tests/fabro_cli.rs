@@ -1,21 +1,15 @@
 //! The shipped binary runs a Fabro workflow and answers its human gate with
 //! `--auto-approve`: the in-process answer surface, end to end.
 
-use std::path::PathBuf;
-use std::process::{self, Command};
+use std::process::Command;
 use std::{env, fs};
 
-fn temp(label: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("petri-fabro-cli-{label}-{}", process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
-    dir
-}
+use testkit::RunDir;
 
 #[test]
 fn petri_run_auto_approve_answers_a_human_gate() {
-    let dir = temp("auto-approve");
-    let workflow = dir.join("gate.fabro");
+    let dir = RunDir::new("fabro-cli-auto-approve");
+    let workflow = dir.path().join("gate.fabro");
     fs::write(
         &workflow,
         r#"digraph Gate {
@@ -32,7 +26,7 @@ fn petri_run_auto_approve_answers_a_human_gate() {
         }"#,
     )
     .expect("write the workflow");
-    let run_dir = dir.join("run");
+    let run_dir = dir.path().join("run");
     let output = Command::new(env!("CARGO_BIN_EXE_petri"))
         .args(["run", "--quiet", "--auto-approve", "--run-dir"])
         .arg(&run_dir)
@@ -47,19 +41,18 @@ fn petri_run_auto_approve_answers_a_human_gate() {
     );
     assert!(!stderr.contains("success no"), "{stderr}");
     assert!(stderr.contains("run: success"), "{stderr}");
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn petri_check_lowers_a_fabro_file_and_rejects_the_deprecated_spelling() {
-    let dir = temp("check");
-    let good = dir.join("good.fabro");
+    let dir = RunDir::new("fabro-cli-check");
+    let good = dir.path().join("good.fabro");
     fs::write(
         &good,
         "digraph G { start [shape=Mdiamond] exit [shape=Msquare] a [prompt=\"x\"] start -> a -> exit }",
     )
     .expect("write");
-    let bad = dir.join("bad.fabro");
+    let bad = dir.path().join("bad.fabro");
     fs::write(
         &bad,
         "digraph G { start [shape=Mdiamond] exit [shape=Msquare] a [prompt=\"x\", on_failure=\"succeed\"] start -> a -> exit }",
@@ -88,13 +81,12 @@ fn petri_check_lowers_a_fabro_file_and_rejects_the_deprecated_spelling() {
         "{}",
         String::from_utf8_lossy(&rejected.stderr)
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn petri_run_dry_run_simulates_the_fabro_stages() {
-    let dir = temp("dry-run");
-    let workflow = dir.join("agents.fabro");
+    let dir = RunDir::new("fabro-cli-dry-run");
+    let workflow = dir.path().join("agents.fabro");
     fs::write(
         &workflow,
         r#"digraph Agents {
@@ -110,7 +102,7 @@ fn petri_run_dry_run_simulates_the_fabro_stages() {
         }"#,
     )
     .expect("write the workflow");
-    let run_dir = dir.join("run");
+    let run_dir = dir.path().join("run");
     let output = Command::new(env!("CARGO_BIN_EXE_petri"))
         .args(["run", "--quiet", "--dry-run", "--run-dir"])
         .arg(&run_dir)
@@ -125,5 +117,4 @@ fn petri_run_dry_run_simulates_the_fabro_stages() {
             "{stage}:\n{stderr}"
         );
     }
-    let _ = fs::remove_dir_all(&dir);
 }

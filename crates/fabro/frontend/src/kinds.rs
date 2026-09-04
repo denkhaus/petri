@@ -5,6 +5,7 @@
 //! registry a run uses is the distribution's choice.
 
 use ir::StepKindId;
+use serde::{Deserialize, Serialize};
 
 /// An agent or prompt node (`box`, `tab`): one turn of an agent over ACP.
 pub const AGENT_KIND: StepKindId = StepKindId::new_static("fabro/agent");
@@ -16,6 +17,10 @@ pub const HUMAN_KIND: StepKindId = StepKindId::new_static("fabro/human");
 pub const WAIT_KIND: StepKindId = StepKindId::new_static("fabro/wait");
 /// A manager loop (`house`): a nested workflow.
 pub const WORKFLOW_KIND: StepKindId = StepKindId::new_static("fabro/workflow");
+/// Reserved name of the synthetic node that enforces goal gates.
+pub const GOAL_CHECK_NODE: &str = "goal_check";
+/// The most repair turns one agent step accepts from configuration.
+pub const MAX_OUTPUT_RETRIES: u64 = 100;
 
 /// Every kind the frontend emits, for a registry that stubs them all.
 pub const ALL: &[&StepKindId] = &[
@@ -29,6 +34,38 @@ pub const ALL: &[&StepKindId] = &[
 /// The closed set of stage outcomes a Fabro step may report, and the only
 /// values `outcome=X` may name in a condition.
 pub const OUTCOMES: &[&str] = &["succeeded", "partially_succeeded", "failed", "skipped"];
+
+/// The closed set of outcomes a Fabro stage reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageOutcome {
+    #[default]
+    Succeeded,
+    PartiallySucceeded,
+    Failed,
+    Skipped,
+}
+
+impl StageOutcome {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "succeeded" => Self::Succeeded,
+            "partially_succeeded" => Self::PartiallySucceeded,
+            "failed" => Self::Failed,
+            "skipped" => Self::Skipped,
+            _ => return None,
+        })
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::PartiallySucceeded => "partially_succeeded",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
 
 /// The failure class a step reports when it wants another attempt: the one
 /// class the lowered retry policy retries on.

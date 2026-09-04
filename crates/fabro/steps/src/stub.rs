@@ -12,19 +12,18 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use frontend_fabro::kinds::{
-    AGENT_KIND, COMMAND_KIND, HUMAN_KIND, RETRY_REQUESTED_CLASS, WAIT_KIND, WORKFLOW_KIND,
-};
+use frontend_fabro::Policy;
+use frontend_fabro::kinds::{ALL, HUMAN_KIND, StageOutcome};
 use frontend_fabro::labels::strip_accelerator;
 use ir::placeholder::contains_placeholder;
-use ir::{FailureClass, FailureInfo, Outcome, Status, StepKindId, Value};
+use ir::{FailureClass, Outcome, StepKindId, Value};
 use runtime::Runtime;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepRunner};
 
-use crate::outcome::fabro_outcome;
+use crate::outcome::Stage;
 
 /// What a stub is told to return.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -32,7 +31,7 @@ use crate::outcome::fabro_outcome;
 pub struct Simulate {
     /// `succeeded` (default), `partially_succeeded`, `failed` or `skipped`.
     #[serde(default)]
-    pub outcome:            Option<String>,
+    pub outcome:            Option<StageOutcome>,
     /// The failure class when `outcome` is `failed`: `retry_requested` asks
     /// for another attempt.
     #[serde(default)]
@@ -59,7 +58,7 @@ struct StubConfig {
     #[serde(default)]
     node:            Option<String>,
     #[serde(default)]
-    on_failure:      Option<String>,
+    on_failure:      Option<Policy>,
     #[serde(default)]
     choices:         Vec<Choice>,
     #[serde(default)]
@@ -79,12 +78,20 @@ struct Choice {
 
 /// The simulated step for one kind.
 pub struct StubStep {
-    kind: StepKindId,
+    kind:  StepKindId,
+    calls: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl StubStep {
     pub fn new(kind: StepKindId) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            calls: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn with_calls(kind: StepKindId, calls: Arc<Mutex<HashMap<String, usize>>>) -> Self {
+        Self { kind, calls }
     }
 }
 
@@ -126,7 +133,7 @@ impl StepRunner for StubStep {
         let node = config.node.clone().unwrap_or_else(|| ctx.node.to_string());
         let mut script = config.simulate.clone().unwrap_or_default();
         if !script.calls.is_empty() {
-            let call = next_call(ctx.env.workspace_path(), &ctx.node);
+            let call = self.next_call(ctx.env.workspace_path(), &ctx.node);
             let chosen = script.calls[call.min(script.calls.len() - 1)].clone();
             script = chosen;
         }
@@ -135,7 +142,9 @@ impl StepRunner for StubStep {
             "node": node,
             "text": format!("[Simulated] {}", ctx.node),
         });
-        let answers = script.outcome.as_deref().is_none_or(|o| o == "succeeded");
+        let answers = script
+            .outcome
+            .is_none_or(|outcome| outcome == StageOutcome::Succeeded);
         if self.kind == HUMAN_KIND
             && answers
             && script.preferred_label.is_none()
@@ -163,46 +172,25 @@ impl StepRunner for StubStep {
         if !script.suggested_next_ids.is_empty() {
             output["suggested_next_ids"] = json!(script.suggested_next_ids);
         }
-        let outcome_name = script.outcome.clone().unwrap_or_else(|| "succeeded".into());
-        let (status, class) = match outcome_name.as_str() {
-            "succeeded" => (Status::Success, String::new()),
-            "partially_succeeded" => (Status::partial_clean(), String::new()),
-            "skipped" => (Status::Skipped, String::new()),
-            "failed" => {
+        let stage_outcome = script.outcome.unwrap_or_default();
+        let mut stage = match stage_outcome {
+            StageOutcome::Failed => {
                 let class = script.failure_class.clone().unwrap_or_default();
                 let reason = script
                     .failure_reason
                     .clone()
                     .unwrap_or_else(|| format!("[Simulated] {} failed", ctx.node));
-                let info = FailureInfo::new(reason).with_class(FailureClass::new(class.as_str()));
-                // A non-retryable failure under `on_failure="partially_succeed"`
-                // is classified here, at the step boundary, once.
-                if config.on_failure.as_deref() == Some("partially_succeed")
-                    && class != RETRY_REQUESTED_CLASS
-                {
-                    (Status::partial(info), class)
-                } else {
-                    (Status::Failure(info), class)
-                }
+                Stage::failed(reason, &class, config.on_failure)
             }
-            other => {
-                return steps::StepFailure {
-                    class:   FailureClass::new_static("bad_output"),
-                    message: format!(
-                        "`{other}` is not a stage outcome (succeeded, partially_succeeded, failed, skipped)"
-                    ),
-                }
-                .into();
-            }
+            other => Stage::new(other, config.on_failure),
         };
-        output["outcome"] = json!(fabro_outcome(&status));
-        output["failure_class"] = json!(class);
-        let mut outcome = Outcome::new(status, output);
-        outcome.context_updates = script.context_updates;
-        outcome
-            .context_updates
-            .insert(SmolStr::new("failure_class"), json!(class));
-        outcome
+        stage.output.clone_from(
+            output
+                .as_object()
+                .expect("the simulated output is constructed as an object"),
+        );
+        stage.context_updates = script.context_updates;
+        stage.into_outcome(&node)
     }
 }
 
@@ -212,14 +200,17 @@ impl StepRunner for StubStep {
 /// path is one per invocation, so a run's successor executions share the
 /// count while different runs (different run dirs) do not. Test-only state:
 /// replay never runs a step, so the counter cannot touch determinism.
-fn next_call(workspace: &str, node: &str) -> usize {
-    static CALLS: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
-    let mut calls = CALLS.lock().expect("the stub call table is not poisoned");
-    let table = calls.get_or_insert_with(HashMap::new);
-    let count = table.entry(format!("{workspace}/{node}")).or_insert(0);
-    let current = *count;
-    *count += 1;
-    current
+impl StubStep {
+    fn next_call(&self, workspace: &str, node: &str) -> usize {
+        let mut calls = self
+            .calls
+            .lock()
+            .expect("the stub call table is not poisoned");
+        let count = calls.entry(format!("{workspace}/{node}")).or_insert(0);
+        let current = *count;
+        *count += 1;
+        current
+    }
 }
 
 /// A `Step`-shaped wrapper so a caller can register a stub under a typed
@@ -237,14 +228,12 @@ impl Step for Simulate {
 /// Register a stub for every Fabro step kind.
 pub fn register_stubs(runtime: Runtime) -> Runtime {
     let mut registry = runtime.registry().clone();
-    for kind in [
-        AGENT_KIND,
-        COMMAND_KIND,
-        HUMAN_KIND,
-        WAIT_KIND,
-        WORKFLOW_KIND,
-    ] {
-        registry.register_runner(Arc::new(StubStep::new(kind)));
+    let calls = Arc::new(Mutex::new(HashMap::new()));
+    for kind in ALL {
+        registry.register_runner(Arc::new(StubStep::with_calls(
+            (*kind).clone(),
+            calls.clone(),
+        )));
     }
     runtime.steps(registry)
 }

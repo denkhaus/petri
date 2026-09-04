@@ -113,7 +113,9 @@ async fn gh_list_runs_its_commands_against_a_stub_gh() {
         return;
     };
     let (outcome, graph) = lower_one(&root, ".fabro/workflows/gh-list/workflow.fabro");
-    let mut graph = graph.unwrap_or_else(|| panic!("gh-list lowers: {:?}", outcome.diagnostics));
+    let artifact = graph.unwrap_or_else(|| panic!("gh-list lowers: {:?}", outcome.diagnostics));
+    assert!(artifact.children.is_empty());
+    let mut graph = artifact.graph;
     let dir = fresh_run_dir("fabro-e2e-gh-list");
     let bin = install_gh_stub(&dir);
     let log = dir.join("gh.log");
@@ -165,7 +167,9 @@ async fn hello_runs_its_agent_against_the_fake_acp_agent() {
     let dir = fresh_run_dir("fabro-e2e-hello");
     let agent = fake_acp_agent(&dir, &root).expect("the fake agent ships with the corpus");
     let (outcome, graph) = lower_one(&root, ".fabro/workflows/hello/workflow.fabro");
-    let mut graph = graph.unwrap_or_else(|| panic!("hello lowers: {:?}", outcome.diagnostics));
+    let artifact = graph.unwrap_or_else(|| panic!("hello lowers: {:?}", outcome.diagnostics));
+    assert!(artifact.children.is_empty());
+    let mut graph = artifact.graph;
     node_config(&mut graph, "greet")["acp"] =
         json!({ "command": format!("python3 {}", agent.display()) });
     let report = run(&real(&dir), graph).await;

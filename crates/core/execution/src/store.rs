@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use ir::Graph;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::jsonl::clean_lines;
 use crate::{
@@ -230,7 +229,7 @@ impl CoordinatorStore {
         &mut self,
         graph: &Graph,
     ) -> Result<(GraphDigest, Option<CoordinatorRecord>), StoreError> {
-        let bytes = serde_json::to_vec(graph).map_err(StoreError::Encode)?;
+        let bytes = ir::encode_graph(graph).map_err(StoreError::Encode)?;
         self.register_graph_bytes(&bytes)
     }
 
@@ -398,7 +397,7 @@ fn decode_graph(digest: GraphDigest, bytes: &[u8]) -> Result<Graph, StoreError> 
 }
 
 fn digest_bytes(bytes: &[u8]) -> GraphDigest {
-    GraphDigest::from_bytes(Sha256::digest(bytes).into())
+    GraphDigest::from_bytes(ir::graph_digest_bytes(bytes))
 }
 
 fn acquire_lease(file: &File, root: &Path) -> Result<(), StoreError> {

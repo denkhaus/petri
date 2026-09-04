@@ -92,7 +92,6 @@ pub(super) const GRAPH: &[&str] = &[
     "on_failure",
     "on_retries_exhausted",
     "default_fidelity",
-    "default_thread",
     "default_model",
     "default_provider",
     "max_node_visits",
@@ -104,6 +103,10 @@ pub(super) const GRAPH: &[&str] = &[
 /// Graph-level attributes whose meaning belongs to a host policy Petri does
 /// not run in phase one. Each is named in an `ignored.*` warning.
 pub(super) const GRAPH_IGNORED: &[(&str, &str)] = &[
+    (
+        "default_thread",
+        "Petri does not yet preserve agent threads between nodes",
+    ),
     (
         "loop_restart_signature_limit",
         "the circuit breaker is routing middleware, a later phase",
@@ -131,22 +134,16 @@ pub(super) const NODE: &[&str] = &[
     "retry_policy",
     "max_visits",
     "goal_gate",
-    "review_target",
     "retry_target",
     "fallback_retry_target",
     "on_failure",
     "on_retries_exhausted",
     "allow_partial",
     "fidelity",
-    "thread_id",
     "timeout",
     "model",
     "provider",
     "reasoning_effort",
-    "max_tokens",
-    "speed",
-    "backend",
-    "project_memory",
     "acp.command",
     "acp.config",
     "selection",
@@ -164,6 +161,21 @@ pub(super) const NODE: &[&str] = &[
 /// Node attributes carried into the step config untouched but not acted on
 /// in phase one.
 pub(super) const NODE_IGNORED: &[(&str, &str)] = &[
+    (
+        "review_target",
+        "human review targets are not implemented in phase one",
+    ),
+    (
+        "thread_id",
+        "Petri does not yet preserve agent threads between nodes",
+    ),
+    ("max_tokens", "the ACP agent owns its token limit"),
+    ("speed", "the ACP agent owns its speed setting"),
+    ("backend", "the ACP command selects its backend"),
+    (
+        "project_memory",
+        "project memory is not implemented in phase one",
+    ),
     ("tool_hooks.pre", "agent tool hooks are a later phase"),
     ("tool_hooks.post", "agent tool hooks are a later phase"),
 ];

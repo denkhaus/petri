@@ -439,6 +439,51 @@ fn static_fan_out_and_fan_in_lower_to_groups_and_an_all_join() {
 }
 
 #[test]
+fn static_fan_in_payloads_keep_the_fan_out_branch_order() {
+    let graph = lower_ok(&dot(r#"
+        fork [shape=component]
+        a [prompt="x"]
+        a_tail [prompt="x"]
+        b [prompt="x"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a -> a_tail -> merge
+        fork -> b -> merge
+        merge -> exit
+    "#));
+    let index = |name: &str| {
+        let map = node(&graph, name).routing.groups[0].arms[0]
+            .map
+            .expect("branch payload");
+        eval_expr(&graph, map, &statics("success", &json!(name)), &[])["index"]
+            .as_u64()
+            .expect("numeric branch index")
+    };
+    assert_eq!(index("a_tail"), 0);
+    assert_eq!(index("b"), 1);
+}
+
+#[test]
+fn parallel_edges_to_exit_still_pass_through_the_goal_check() {
+    let graph = lower_ok(&dot(r#"
+        fork [shape=component]
+        gate [prompt="x", goal_gate=true, retry_target="gate"]
+        start -> fork
+        fork -> gate
+        fork -> exit
+        gate -> exit
+    "#));
+    let targets: Vec<String> = node(&graph, "fork")
+        .routing
+        .groups
+        .iter()
+        .flat_map(|group| group.arms.iter())
+        .map(|arm| target_name(&graph, arm.to))
+        .collect();
+    assert_eq!(targets, ["gate", "goal_check"]);
+}
+
+#[test]
 fn for_each_lowers_to_an_expansion_on_the_template_node() {
     let graph = lower_ok(&dot(r#"
         plan [shape=parallelogram, script="echo"]
@@ -565,7 +610,11 @@ fn file_references_and_workflow_toml_defaults_resolve_through_the_file_source() 
             "wf/prompts/plan.md",
             "Plan {{ inputs.mode }}\n{% include \"partials/tail.md\" %}",
         ),
-        ("wf/prompts/partials/tail.md", "tail"),
+        (
+            "wf/prompts/partials/tail.md",
+            "tail {% include \"nested/end.md\" %}",
+        ),
+        ("wf/prompts/partials/nested/end.md", "done"),
         ("wf/workflow.toml", "[run.inputs]\nmode = \"fast\"\n"),
     ]);
     let text = dot(r#"
@@ -576,7 +625,7 @@ fn file_references_and_workflow_toml_defaults_resolve_through_the_file_source() 
     let graph = lowered.graph.expect("lowers");
     assert_eq!(
         node(&graph, "a").step.config["prompt"],
-        json!("Plan fast\ntail")
+        json!("Plan fast\ntail done")
     );
     assert!(
         codes(&dot(r#"
@@ -589,6 +638,32 @@ fn file_references_and_workflow_toml_defaults_resolve_through_the_file_source() 
 
 #[test]
 fn structural_mistakes_are_specific_errors() {
+    let id_only = lower_ok("digraph G { start; exit; start -> exit }");
+    assert_eq!(id_only.entry, [node_id(&id_only, "start")]);
+    assert_eq!(
+        id_only.completion,
+        Completion::TerminalNode(node_id(&id_only, "exit"))
+    );
+    let typed = lower_ok("digraph G { begin [type=start]; done [type=exit]; begin -> done }");
+    assert_eq!(typed.entry, [node_id(&typed, "begin")]);
+    assert_eq!(
+        typed.completion,
+        Completion::TerminalNode(node_id(&typed, "done"))
+    );
+    assert!(
+        codes("digraph G { start; other [shape=Mdiamond]; exit; start -> other -> exit }")
+            .contains(&"fabro.multiple_starts".to_string())
+    );
+    assert!(
+        codes("digraph G { start; exit; done [shape=Msquare]; start -> exit; start -> done }")
+            .contains(&"fabro.multiple_exits".to_string())
+    );
+    assert!(
+        codes(&dot(
+            "goal_check [prompt=\"x\"] start -> goal_check -> exit"
+        ))
+        .contains(&"fabro.reserved_node_id".to_string())
+    );
     assert!(
         codes("digraph G { a [prompt=\"x\"] a -> exit  exit [shape=Msquare] }")
             .contains(&"fabro.no_start".to_string())
@@ -652,6 +727,32 @@ fn structural_mistakes_are_specific_errors() {
     "#))
         .is_empty(),
         "layout attributes are dropped silently"
+    );
+}
+
+#[test]
+fn unused_attributes_warn_and_unbounded_agent_repairs_are_rejected() {
+    let diags = diagnostics(&dot(r#"
+        graph [default_thread="shared"]
+        a [prompt="x", speed="fast", review_target=true]
+        start -> a -> exit
+    "#));
+    for code in [
+        "ignored.default_thread",
+        "ignored.speed",
+        "ignored.review_target",
+    ] {
+        assert!(
+            diags.iter().any(|diagnostic| diagnostic.code == code),
+            "{code}"
+        );
+    }
+    assert!(
+        codes(&dot(r#"
+            a [prompt="x", output_retries=101]
+            start -> a -> exit
+        "#))
+        .contains(&"fabro.output_retries_too_large".to_string())
     );
 }
 

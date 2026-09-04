@@ -32,6 +32,38 @@ use crate::state::{
 /// the step, and a later attempt can succeed.
 pub const INVALID_SPLICE_CLASS: FailureClass = FailureClass::new_static("invalid_splice");
 
+/// Copy a selection policy while moving its edge and expression ids into a
+/// new id space.
+pub(crate) fn remap_selection_policy<S: Copy, T>(
+    policy: &ir::SelectionPolicy<S>,
+    mut edge: impl FnMut(EdgeId<S>) -> EdgeId<T>,
+    mut expr: impl FnMut(ExprId<S>) -> ExprId<T>,
+) -> ir::SelectionPolicy<T> {
+    match policy {
+        ir::SelectionPolicy::FirstMatch => ir::SelectionPolicy::FirstMatch,
+        ir::SelectionPolicy::Tiered(tiers) => ir::SelectionPolicy::Tiered(
+            tiers
+                .iter()
+                .map(|tier| ir::Tier {
+                    candidates: tier
+                        .candidates
+                        .iter()
+                        .map(|candidate| ir::Candidate {
+                            edge: edge(candidate.edge),
+                            when: match candidate.when {
+                                Guard::Always => Guard::Always,
+                                Guard::Expr(id) => Guard::Expr(expr(id)),
+                            },
+                            rank: candidate.rank.map(&mut expr),
+                        })
+                        .collect(),
+                    pick:       tier.pick,
+                })
+                .collect(),
+        ),
+    }
+}
+
 /// The canonical invalid-splice conversion: the outcome becomes a
 /// `Failure{class: invalid_splice}` with `message`, output and metrics are
 /// kept, and `context_updates` drop with the requests. Both converters — the
@@ -900,33 +932,18 @@ fn remap_node(
                 }
             })
             .collect();
-        node.routing.groups.push(SelectGroup {
-            policy: match &group.policy {
-                ir::SelectionPolicy::FirstMatch => ir::SelectionPolicy::FirstMatch,
-                ir::SelectionPolicy::Tiered(tiers) => ir::SelectionPolicy::Tiered(
-                    tiers
-                        .iter()
-                        .map(|tier| ir::Tier {
-                            candidates: tier
-                                .candidates
-                                .iter()
-                                .map(|candidate| ir::Candidate {
-                                    edge: edge_map
-                                        .get(&candidate.edge)
-                                        .copied()
-                                        .unwrap_or_else(|| EdgeId::new(candidate.edge.raw())),
-                                    when: match candidate.when {
-                                        Guard::Always => Guard::Always,
-                                        Guard::Expr(id) => Guard::Expr(shift(id)),
-                                    },
-                                    rank: candidate.rank.map(shift),
-                                })
-                                .collect(),
-                            pick:       tier.pick,
-                        })
-                        .collect(),
-                ),
+        let policy = remap_selection_policy(
+            &group.policy,
+            |edge| {
+                edge_map
+                    .get(&edge)
+                    .copied()
+                    .unwrap_or_else(|| EdgeId::new(edge.raw()))
             },
+            shift,
+        );
+        node.routing.groups.push(SelectGroup {
+            policy,
             arms,
             fallthrough: group.fallthrough,
         });

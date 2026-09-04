@@ -29,7 +29,7 @@ use crate::event::{
 use crate::log::EventSource;
 use crate::splice::{
     PreparedSeed, PreparedSplice, apply_prepared_splice, commit_splice_plan,
-    prepare_outcome_splices, reject_splices,
+    prepare_outcome_splices, reject_splices, remap_selection_policy,
 };
 use crate::state::{
     BatchPolicy, EngineState, Firing, FiringRecord, PendingAdmission, PendingRouting,
@@ -1604,15 +1604,11 @@ fn expand(
                         arm.to = *new_target;
                     }
                 }
-                if let ir::SelectionPolicy::Tiered(tiers) = &mut group.policy {
-                    for tier in tiers {
-                        for candidate in &mut tier.candidates {
-                            if let Some(fresh) = edge_map.get(&candidate.edge) {
-                                candidate.edge = *fresh;
-                            }
-                        }
-                    }
-                }
+                group.policy = remap_selection_policy(
+                    &group.policy,
+                    |edge| edge_map.get(&edge).copied().unwrap_or(edge),
+                    |expr| expr,
+                );
             }
             nodes.push(clone);
         }

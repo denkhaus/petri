@@ -29,7 +29,6 @@ use std::{env, fs, io, process};
 
 use ir::{FailureClass, LogStream, Outcome, Value};
 use serde_json::Map;
-use smol_str::SmolStr;
 use steps::{Ending, Step, StepCtx, StepFailure, ending_outcome, ladder};
 use tokio::process::Command;
 use tokio::{fs as async_fs, task, time};
@@ -316,20 +315,12 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
 /// applies as it does to every process.
 async fn extract(tar_rel: &str, ctx: &mut StepCtx) -> Result<Ending, StepFailure> {
     let workspace = ctx.env.workspace_path().to_string();
+    let archive = format!("{workspace}/{tar_rel}");
     let mut handle = ctx
         .env
-        .spawn(executor::ProcessSpec {
-            program: SmolStr::new("tar"),
-            args:    vec![
-                SmolStr::new("-xf"),
-                SmolStr::new(format!("{workspace}/{tar_rel}")),
-                SmolStr::new("-C"),
-                SmolStr::new(workspace),
-            ],
-            env:     BTreeMap::default(),
-            cwd:     None,
-            stdin:   executor::StdinMode::Null,
-        })
+        .spawn(executor::ProcessSpec::new("tar", &[
+            "-xf", &archive, "-C", &workspace,
+        ]))
         .await
         .map_err(|e| checkout_error(format!("could not run `tar`: {e}")))?;
     let drain = session::forward_lines(handle.lines(), ctx.logs.clone());
