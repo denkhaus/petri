@@ -208,7 +208,9 @@ impl SandboxExecutor {
 
     /// Ends every sandbox that carries `label`: a crashed predecessor of this
     /// environment. Removing it makes its status unreadable and frees the
-    /// deterministic name for the fresh create.
+    /// deterministic name for the fresh create. Deletion is by id, with no
+    /// handle: a predecessor that is stopped or half-created goes the same
+    /// way as a running one.
     async fn fence_by_label(&self, label: &str) -> Result<(), EnvError> {
         let mut filter = SandboxFilter::default();
         filter
@@ -220,15 +222,8 @@ impl SandboxExecutor {
             .await
             .map_err(|error| acquire_failed(&error))?;
         for status in matches {
-            match self.provider.attach(&status.id, None).await {
-                Ok(sandbox) => {
-                    if let Err(error) = sandbox.delete().await {
-                        tracing::warn!(error = ?error, "fencing a prior sandbox failed");
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(error = ?error, "attaching a prior sandbox for the fence failed");
-                }
+            if let Err(error) = self.provider.delete(&status.id, None).await {
+                tracing::warn!(error = ?error, "fencing a prior sandbox failed");
             }
         }
         Ok(())
