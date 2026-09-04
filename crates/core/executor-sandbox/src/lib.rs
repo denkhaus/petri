@@ -151,8 +151,16 @@ impl SandboxExecutor {
             (BackendKind::Host, RuntimeTarget::HostProcess) => {
                 SandboxSpec::new(SandboxSource::HostDirectory).working_directory(workspace_host)
             }
-            (BackendKind::Docker, RuntimeTarget::Container { image, .. }) => {
-                let provider_config = docker_provider_config(workspace_host, None);
+            (
+                BackendKind::Docker,
+                RuntimeTarget::Container {
+                    image, credentials, ..
+                },
+            ) => {
+                let registry_auth = self.registry_auth(credentials.as_ref(), ctx)?;
+                let sidecars = self.sidecars(scope, ctx)?;
+                let provider_config =
+                    docker_provider_config(workspace_host, registry_auth, sidecars);
                 let mut spec = SandboxSpec::new(SandboxSource::Image {
                     reference: image.to_string(),
                 })
@@ -191,8 +199,73 @@ impl SandboxExecutor {
         for (key, value) in &scope.env {
             spec = spec.env_var(key.as_str(), value.as_str());
         }
-        let _ = ctx;
         Ok(spec)
+    }
+
+    /// Resolves image pull credentials to a `registry_auth` value, or `None`
+    /// when the scope declares none.
+    fn registry_auth(
+        &self,
+        credentials: Option<&ir::RegistryCredentials>,
+        ctx: &AcquireContext,
+    ) -> Result<Option<serde_json::Value>, EnvError> {
+        let Some(credentials) = credentials else {
+            return Ok(None);
+        };
+        let password = self.resolve_secret(&credentials.password_secret, ctx)?;
+        Ok(Some(serde_json::json!({
+            "username": credentials.username.as_str(),
+            "password": password,
+        })))
+    }
+
+    /// Maps the scope's services to Docker sidecars. Ports are dropped: a
+    /// containerized job reaches a service by its network alias, not a
+    /// published port.
+    fn sidecars(
+        &self,
+        scope: &ScopeSpec,
+        ctx: &AcquireContext,
+    ) -> Result<Vec<serde_json::Value>, EnvError> {
+        let mut sidecars = Vec::with_capacity(scope.services.len());
+        for service in &scope.services {
+            let env: serde_json::Map<String, serde_json::Value> = service
+                .env
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.as_str().to_owned(),
+                        serde_json::Value::String(value.to_string()),
+                    )
+                })
+                .collect();
+            let mut sidecar = serde_json::json!({
+                "name": service.name.as_str(),
+                "image": service.image.as_str(),
+                "env": env,
+            });
+            if let Some(credentials) = &service.credentials {
+                let password = self.resolve_secret(&credentials.password_secret, ctx)?;
+                sidecar["registry_auth"] = serde_json::json!({
+                    "username": credentials.username.as_str(),
+                    "password": password,
+                });
+            }
+            sidecars.push(sidecar);
+        }
+        Ok(sidecars)
+    }
+
+    /// Resolves a secret by name inside acquire, registering it for masking.
+    fn resolve_secret(&self, name: &str, ctx: &AcquireContext) -> Result<String, EnvError> {
+        ctx.secrets()
+            .resolve(name)
+            .map(|secret| secret.expose().to_string())
+            .map_err(|error| EnvError::Backend {
+                backend:   SmolStr::new(self.backend.as_str()),
+                operation: SmolStr::new("acquire"),
+                message:   format!("resolving secret `{name}`: {error}"),
+            })
     }
 
     fn acquire_failed(&self, error: &sandbox_driver::Error) -> EnvError {
@@ -312,6 +385,7 @@ fn fresh_run_id() -> String {
 fn docker_provider_config(
     workspace_host: &str,
     registry_auth: Option<serde_json::Value>,
+    sidecars: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     let mut config = serde_json::json!({
         "init": true,
@@ -320,6 +394,9 @@ fn docker_provider_config(
     });
     if let Some(auth) = registry_auth {
         config["registry_auth"] = auth;
+    }
+    if !sidecars.is_empty() {
+        config["sidecars"] = serde_json::Value::Array(sidecars);
     }
     config
 }

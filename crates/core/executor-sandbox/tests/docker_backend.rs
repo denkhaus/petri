@@ -153,10 +153,61 @@ async fn a_reacquire_fences_the_crashed_predecessor() {
 /// The environment label the fence keys on, recomputed from the run dir's
 /// recorded run id.
 fn env_label(run_dir: &Path) -> String {
-    let run_id = fs::read_to_string(run_dir.join("sandbox-run-id"))
+    // The container scope uses environment id "env-1".
+    format!("{}/env-1", run_id(run_dir))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_scope_realizes_and_sweeps_its_service() {
+    use std::process::Command;
+
+    use executor::ServiceSpec;
+
+    let dir = tmp::TempDir::new();
+    let Some(executor) = docker_executor(dir.path()).await else {
+        return;
+    };
+    // A declared service becomes a sidecar on a per-sandbox network; the
+    // sidecar carries an env var the workload could read by alias. (The
+    // image is not a daemon, so this checks the realize/sweep lifecycle, not
+    // DNS liveness — sandbox-driver's own conformance covers a live service.)
+    let mut scope = container_scope();
+    let mut service = ServiceSpec::new("svc", TEST_IMAGE);
+    service.env.insert("SVC_TOKEN".into(), "value".into());
+    scope.services = vec![service];
+
+    let handle = executor
+        .acquire(&scope, &AcquireContext::bare())
+        .await
+        .expect("acquire with a service");
+
+    // The sidecar network is named after this run's sandbox, so the check is
+    // specific and immune to any leftover networks on the daemon.
+    let network = format!("petri-{}-env-1-net", run_id(dir.path()));
+    let exists = |name: &str| {
+        let out = Command::new("docker")
+            .args(["network", "ls", "--format", "{{.Name}}"])
+            .output()
+            .expect("docker network ls")
+            .stdout;
+        String::from_utf8(out)
+            .expect("utf8")
+            .lines()
+            .any(|line| line == name)
+    };
+    assert!(
+        exists(&network),
+        "the sidecar network is present during the scope"
+    );
+
+    executor.release(handle, ScopeOutcome::Succeeded).await;
+    assert!(!exists(&network), "release swept the sidecar network");
+}
+
+/// The run id recorded under the run dir.
+fn run_id(run_dir: &Path) -> String {
+    fs::read_to_string(run_dir.join("sandbox-run-id"))
         .expect("run id recorded")
         .trim()
-        .to_owned();
-    // The container scope uses environment id "env-1".
-    format!("{run_id}/env-1")
+        .to_owned()
 }
