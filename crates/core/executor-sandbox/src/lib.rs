@@ -12,6 +12,7 @@
 mod env;
 mod host;
 mod oneshot;
+mod options;
 mod routing;
 
 use std::io::{self, ErrorKind};
@@ -35,6 +36,13 @@ pub use crate::host::HostExecutor;
 use crate::oneshot::{ContainerPrefix, OneShotRunner};
 pub use crate::routing::RoutingExecutor;
 
+/// Every container on the local daemon whose name starts with `prefix`. For
+/// tests and sweeps that check a run left nothing behind; best-effort, empty
+/// when no daemon answers.
+pub async fn list_containers(prefix: &str) -> Vec<String> {
+    oneshot::list_containers(prefix).await
+}
+
 /// The container path every scope's workspace is mounted at.
 const CONTAINER_WORKSPACE: &str = "/workspace";
 /// The alias a container reaches the driver's machine through.
@@ -45,7 +53,7 @@ const DOCKER_HOST_ALIAS: &str = "host.docker.internal";
 const ENVIRONMENT_LABEL: &str = "petri.environment";
 /// The file under the run dir holding the run id the environment label
 /// carries; minted once, read back by any executor over the same run dir.
-const RUN_ID_FILE: &str = "sandbox-run-id";
+pub const RUN_ID_FILE: &str = "sandbox-run-id";
 
 /// An [`Executor`] that realizes container scopes on one sandbox-driver
 /// provider. The workspace is a host directory bind-mounted into the
@@ -116,6 +124,7 @@ impl SandboxExecutor {
         let env = SandboxEnv::new(
             sandbox.clone(),
             CONTAINER_WORKSPACE.to_owned(),
+            workspace_host.clone(),
             DOCKER_HOST_ALIAS.to_owned(),
             ambient,
             scope.grace,
@@ -206,7 +215,9 @@ fn build_spec(
     ctx: &AcquireContext,
 ) -> Result<SandboxSpec, EnvError> {
     let RuntimeTarget::Container {
-        image, credentials, ..
+        image,
+        options,
+        credentials,
     } = &scope.runtime.target
     else {
         return Err(EnvError::Backend {
@@ -217,9 +228,11 @@ fn build_spec(
                 .into(),
         });
     };
+    let container = options::parse_container(options)?;
     let registry_auth = registry_auth(credentials.as_ref(), ctx)?;
     let sidecars = sidecars(scope, ctx)?;
-    let provider_config = docker_provider_config(workspace_host, registry_auth, sidecars);
+    let provider_config =
+        docker_provider_config(workspace_host, registry_auth, sidecars, &container);
     let mut spec = SandboxSpec::new(SandboxSource::Image {
         reference: image.to_string(),
     })
@@ -227,9 +240,14 @@ fn build_spec(
     .provider_config(provider_config)
     .name(container_name(label))
     .label(ENVIRONMENT_LABEL, label);
+    spec.user.clone_from(&container.user);
 
-    // Scope env is the trusted channel for the container.
+    // Scope env is the trusted channel for the container; a `-e` option lands
+    // on top, as the later `docker create` flag would have.
     for (key, value) in &scope.env {
+        spec = spec.env_var(key.as_str(), value.as_str());
+    }
+    for (key, value) in &container.env {
         spec = spec.env_var(key.as_str(), value.as_str());
     }
     Ok(spec)
@@ -267,11 +285,42 @@ fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<serde_json::V
                 )
             })
             .collect();
+        let parsed = options::parse_service(&service.options)?;
+        let mut env = env;
+        for (key, value) in &parsed.env {
+            env.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
         let mut sidecar = serde_json::json!({
             "name": service.name.as_str(),
             "image": service.image.as_str(),
             "env": env,
+            "dns": parsed.dns,
+            "cap_add": parsed.cap_add,
         });
+        if let Some(user) = &parsed.user {
+            sidecar["user"] = serde_json::Value::String(user.clone());
+        }
+        if let Some(entrypoint) = &parsed.entrypoint {
+            sidecar["entrypoint"] = serde_json::json!(entrypoint);
+        }
+        if let Some(health) = &parsed.health {
+            let mut check = serde_json::json!({
+                "cmd": health.cmd.clone().unwrap_or_default(),
+            });
+            if let Some(ms) = health.interval_ms {
+                check["interval_ms"] = serde_json::json!(ms);
+            }
+            if let Some(ms) = health.timeout_ms {
+                check["timeout_ms"] = serde_json::json!(ms);
+            }
+            if let Some(retries) = health.retries {
+                check["retries"] = serde_json::json!(retries);
+            }
+            if let Some(ms) = health.start_period_ms {
+                check["start_period_ms"] = serde_json::json!(ms);
+            }
+            sidecar["health"] = check;
+        }
         if let Some(credentials) = &service.credentials {
             let password = resolve_secret(&credentials.password_secret, ctx)?;
             sidecar["registry_auth"] = serde_json::json!({
@@ -306,7 +355,7 @@ fn acquire_failed(error: &sandbox_driver::Error) -> EnvError {
 
 /// A deterministic sandbox name from an environment label, so a re-acquire
 /// targets the same container. Non-name characters become hyphens.
-fn container_name(label: &str) -> String {
+pub(crate) fn container_name(label: &str) -> String {
     let sanitized: String = label
         .chars()
         .map(|c| {
@@ -322,7 +371,7 @@ fn container_name(label: &str) -> String {
 
 /// Reads the run id from the run dir, minting and recording it on first use.
 /// Write-then-rename, so a reader sees the whole id or none.
-async fn load_or_record_run_id(run_dir: &PathBuf) -> Result<SmolStr, EnvError> {
+pub(crate) async fn load_or_record_run_id(run_dir: &PathBuf) -> Result<SmolStr, EnvError> {
     let path = run_dir.join(RUN_ID_FILE);
     let io_error =
         |action, path: &Path, error: io::Error| EnvError::workspace(action, path.display(), error);
@@ -370,12 +419,23 @@ fn docker_provider_config(
     workspace_host: &str,
     registry_auth: Option<serde_json::Value>,
     sidecars: Vec<serde_json::Value>,
+    container: &options::ContainerOptions,
 ) -> serde_json::Value {
+    // `shell: auto`: steps run through `exec 'prog' 'args'`, which needs no
+    // Bash semantics, so an image without bash (alpine) still works — the
+    // provider probes for /bin/bash and falls back to /bin/sh.
     let mut config = serde_json::json!({
         "init": true,
+        "shell": "auto",
         "binds": [{ "host": workspace_host, "container": CONTAINER_WORKSPACE }],
         "extra_hosts": [format!("{DOCKER_HOST_ALIAS}:host-gateway")],
+        "dns": container.dns,
+        "cap_add": container.cap_add,
+        "privileged": container.privileged,
     });
+    if let Some(platform) = &container.platform {
+        config["platform"] = serde_json::Value::String(platform.clone());
+    }
     if let Some(auth) = registry_auth {
         config["registry_auth"] = auth;
     }

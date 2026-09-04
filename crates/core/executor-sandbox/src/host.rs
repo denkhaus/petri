@@ -244,16 +244,16 @@ impl HostExecutor {
     /// The whole of [`Executor::acquire`], so its several `?` sites report
     /// through one boundary.
     async fn acquire_inner(&self, scope: &ScopeSpec) -> Result<EnvHandle, EnvError> {
-        // This executor is deliberately Docker-free; a scope that declares
-        // sidecar services needs a composition that can realize them.
-        // `LocalExecutor` satisfies this guard by realizing the services
-        // itself and handing this executor a spec with none.
+        // Services require a containerized job: sidecars are reached by alias
+        // on the job container's network, and a bare host process has no such
+        // network. This is a deliberate removal of host-job services; run the
+        // workflow on the Docker backend or give the job a `container:`.
         if !scope.services.is_empty() {
             return Err(EnvError::Backend {
                 backend:   SmolStr::new("host"),
                 operation: SmolStr::new("acquire"),
-                message:   "this scope declares service containers, which the host executor \
-                          cannot realize; use the local executor"
+                message:   "this scope declares services, which require a containerized job; \
+                          give the job a container image or run it on the docker backend"
                     .into(),
             });
         }

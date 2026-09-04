@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +20,8 @@ use executor::{
     StdinWriter,
 };
 use sandbox_driver::{ExecControls, ExecSpec, OutputStream, Sandbox, StdinSource, Termination};
-use tokio::io::{AsyncWriteExt, duplex};
+use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -29,20 +30,25 @@ const OUTPUT_PIPE_CAPACITY: usize = 64 * 1024;
 
 /// One live sandbox, handed to step kinds as their spawn capability.
 pub(crate) struct SandboxEnv {
-    sandbox:      Arc<dyn Sandbox>,
+    sandbox:        Arc<dyn Sandbox>,
     /// The workspace path as a process in the sandbox sees it.
-    workspace:    String,
+    workspace:      String,
+    /// The same workspace on the host: the bind-mount source. Workspace file
+    /// I/O goes here directly, not through the sandbox, so it is one write
+    /// away and never races the container's view of the mount.
+    workspace_host: PathBuf,
     /// The driver's machine as a process in the sandbox reaches it.
-    host_address: String,
+    host_address:   String,
     /// The effective environment, read once at acquire.
-    ambient:      BTreeMap<String, String>,
-    grace:        Duration,
+    ambient:        BTreeMap<String, String>,
+    grace:          Duration,
 }
 
 impl SandboxEnv {
     pub(crate) fn new(
         sandbox: Arc<dyn Sandbox>,
         workspace: String,
+        workspace_host: PathBuf,
         host_address: String,
         ambient: BTreeMap<String, String>,
         grace: Duration,
@@ -50,6 +56,7 @@ impl SandboxEnv {
         Self {
             sandbox,
             workspace,
+            workspace_host,
             host_address,
             ambient,
             grace,
@@ -110,6 +117,15 @@ fn libc_sigterm() -> i32 {
 impl ExecEnv for SandboxEnv {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
         let command = exec_command(&spec);
+        // `docker exec -w` refuses a directory that does not exist yet (`repo/`
+        // before the first checkout), so create the step's cwd through the
+        // bind mount first, as the workspace root itself already is.
+        if let Some(cwd) = &spec.cwd {
+            let host_cwd = self.workspace_host.join(cwd);
+            fs::create_dir_all(&host_cwd)
+                .await
+                .map_err(|error| EnvError::workspace("create", host_cwd.display(), error))?;
+        }
         let working_dir = spec
             .cwd
             .as_ref()
@@ -224,44 +240,56 @@ impl ExecEnv for SandboxEnv {
         false
     }
 
+    // Workspace files live on the host bind mount, so these go straight to
+    // the host path — the same bytes the container sees, one write away.
+
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
-        let path = relative.to_string_lossy();
-        match self.sandbox.fs().read(&path).await {
+        match fs::read(self.workspace_host.join(relative)).await {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if is_not_found(&error) => Ok(None),
-            Err(error) => Err(backend_error("read", &error)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(EnvError::workspace("read", relative.display(), error)),
         }
     }
 
-    async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
-        let path = relative.to_string_lossy();
-        self.sandbox
-            .fs()
-            .write(&path, contents)
+    async fn read_file_limited(
+        &self,
+        relative: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, EnvError> {
+        let file = match fs::File::open(self.workspace_host.join(relative)).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(EnvError::workspace("open", relative.display(), error)),
+        };
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
             .await
-            .map_err(|error| backend_error("write", &error))
+            .map_err(|error| EnvError::workspace("read", relative.display(), error))?;
+        if bytes.len() > limit {
+            return Err(EnvError::workspace(
+                "read",
+                relative.display(),
+                executor::oversized_read(limit),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
+        let path = self.workspace_host.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|error| EnvError::workspace("create", parent.display(), error))?;
+        }
+        fs::write(&path, contents)
+            .await
+            .map_err(|error| EnvError::workspace("write", relative.display(), error))
     }
 
     fn grace(&self) -> Duration {
         self.grace
-    }
-}
-
-/// Whether a filesystem error means the path does not exist. The host
-/// provider surfaces `io::NotFound`; exec-derived reads surface an exec
-/// failure whose command was a `cat` of a missing file.
-fn is_not_found(error: &sandbox_driver::Error) -> bool {
-    matches!(error, sandbox_driver::Error::NotFound { .. })
-        || matches!(error, sandbox_driver::Error::Io { source, .. }
-            if source.kind() == ErrorKind::NotFound)
-        || matches!(error, sandbox_driver::Error::Exec(_))
-}
-
-fn backend_error(operation: &str, error: &sandbox_driver::Error) -> EnvError {
-    EnvError::Backend {
-        backend:   smol_str::SmolStr::new("sandbox"),
-        operation: smol_str::SmolStr::new(operation),
-        message:   error.to_string(),
     }
 }
 

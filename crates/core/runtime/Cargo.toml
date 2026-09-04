@@ -20,6 +20,7 @@ engine = { workspace = true }
 executor = { workspace = true }
 executor-host = { workspace = true }
 executor-docker = { workspace = true }
+executor-sandbox = { workspace = true }
 steps = { workspace = true }
 driver = { workspace = true }
 frontend = { workspace = true }
@@ -32,4 +33,3 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 testkit = { workspace = true }
-executor-sandbox = { workspace = true }

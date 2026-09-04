@@ -346,7 +346,7 @@ pub(crate) async fn sweep(prefix: &ContainerPrefix) {
     }
 }
 
-async fn list_containers(prefix: &str) -> Vec<String> {
+pub(crate) async fn list_containers(prefix: &str) -> Vec<String> {
     run_docker(&["ps", "-a", "--format", "{{.Names}}"])
         .await
         .map(|out| {

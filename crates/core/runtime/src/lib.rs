@@ -19,11 +19,14 @@ pub use driver;
 pub use engine;
 pub use ir;
 
-/// The executor interface, with the two local executors as submodules.
+/// The executor interface, with the local executors as submodules: the
+/// sandbox-driver adapter the standard runtime uses, and the two older
+/// executors it replaces.
 pub mod executor {
     pub use ::executor::*;
     pub use executor_docker as docker;
     pub use executor_host as host;
+    pub use executor_sandbox as sandbox;
 }
 
 /// The frontend interface, with the native format as a submodule.

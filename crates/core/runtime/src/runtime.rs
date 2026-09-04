@@ -18,11 +18,10 @@ use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
+use executor_sandbox::RoutingExecutor;
 use frontend::{CompileInputs, DirFiles, Frontend, Lowered, Span};
 use ir::{Graph, RunStatus};
 use tracing::field::Empty;
-
-use crate::local::LocalExecutor;
 
 /// The knobs a run gets, with the defaults the driver documents.
 #[derive(Clone, Debug)]
@@ -111,7 +110,7 @@ impl Runtime {
     /// The standard configuration: the formats and step kinds core itself owns
     /// — the `native` frontend, the `noop` and `process` steps — no
     /// secrets, and, unless [`Runtime::executor`] overrides it, the
-    /// composed [`LocalExecutor`] dispatching by each scope's
+    /// [`RoutingExecutor`] dispatching by each scope's
     /// [`ir::RuntimeTarget`].
     ///
     /// A distribution or a consumer registers its own frontends on top with
@@ -182,8 +181,8 @@ impl Runtime {
         self
     }
 
-    /// Use one executor for every scope, whatever its target — the composed
-    /// [`LocalExecutor`] included.
+    /// Use one executor for every scope, whatever its target — the
+    /// [`RoutingExecutor`] included.
     #[must_use]
     pub fn executor(mut self, executor: impl Executor + 'static) -> Self {
         self.executor = Some(Arc::new(executor));
@@ -504,15 +503,19 @@ impl Runtime {
         self.secrets.masker()
     }
 
-    /// The composed local executor over the run dir. It takes its identity from
-    /// the run dir, so a resumed run's executors reach the crashed run's
+    /// The routing executor over the run dir: native host processes, and the
+    /// local Docker daemon for container scopes. It takes its identity from the
+    /// run dir, so a resumed run's executors reach the crashed run's
     /// environments.
     fn default_executor(&self) -> Arc<dyn Executor> {
         self.default_executor_for(&self.options.run_dir)
     }
 
     fn default_executor_for(&self, run_dir: &Path) -> Arc<dyn Executor> {
-        Arc::new(LocalExecutor::new(run_dir).with_retention(self.options.retention))
+        Arc::new(RoutingExecutor::local(
+            run_dir.to_path_buf(),
+            self.options.retention,
+        ))
     }
 }
 

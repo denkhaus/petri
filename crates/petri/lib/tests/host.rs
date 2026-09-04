@@ -10,7 +10,7 @@ use std::time::Duration;
 use petri::driver::{EventObserver, ExecutionReport};
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
 use petri::execution::{self, CoordinatorError};
-use petri::executor::docker::{self, RUN_ID_FILE};
+use petri::executor::sandbox::{self as sandbox, RUN_ID_FILE};
 use petri::executor::{MapSecrets, Retention, SecretProvider as _};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, HostError};
 use petri::ir::{Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
@@ -529,7 +529,7 @@ async fn resume_fences_the_crashed_container() {
         before,
         "the crashed container kept writing: the fence missed it"
     );
-    let leftovers = docker::list_containers(&prefix).await;
+    let leftovers = sandbox::list_containers(&prefix).await;
     assert!(
         leftovers.is_empty(),
         "containers were left behind: {leftovers:?}"

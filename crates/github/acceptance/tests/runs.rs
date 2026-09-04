@@ -53,7 +53,7 @@ use frontend_gha::identity;
 use github_actions::{ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource};
 use runtime::driver::ExecutionReport;
 use runtime::engine::{Event, FIRING_ENV_CLASS};
-use runtime::executor::docker::RUN_ID_FILE;
+use runtime::executor::sandbox::RUN_ID_FILE;
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{self, Graph};
 use runtime::{RunOptions, Runtime};

@@ -14,9 +14,13 @@ use executor::{
 };
 use ir::RuntimeTarget;
 use sandbox_driver::SandboxProvider;
+use sandbox_driver_docker::DockerProvider;
 use smol_str::SmolStr;
+use tokio::fs;
+use tokio::sync::OnceCell;
 
-use crate::{HostExecutor, SandboxExecutor};
+use crate::oneshot::{self, ContainerPrefix, OneShotRunner};
+use crate::{HostExecutor, SandboxExecutor, container_name, load_or_record_run_id};
 
 /// Which backend acquired a scope, so release reaches the same one.
 #[derive(Clone, Copy)]
@@ -33,9 +37,15 @@ enum Route {
 /// the Docker provider. A run with no Docker daemon still serves its
 /// host-process scopes, and a container scope then fails routably at acquire.
 pub struct RoutingExecutor {
-    host:   HostExecutor,
-    docker: Option<SandboxExecutor>,
-    routes: Mutex<HashMap<(ir::ScopeId, SmolStr), Route>>,
+    host:      HostExecutor,
+    /// The Docker executor, or `None` when no daemon is reachable. Filled
+    /// eagerly by [`RoutingExecutor::new`], or on the first container scope by
+    /// [`RoutingExecutor::local`], so a host-only run never touches a daemon.
+    docker:    OnceCell<Option<SandboxExecutor>>,
+    run_dir:   PathBuf,
+    retention: Retention,
+    run_id:    OnceCell<SmolStr>,
+    routes:    Mutex<HashMap<(ir::ScopeId, SmolStr), (Route, ContainerPrefix)>>,
 }
 
 impl RoutingExecutor {
@@ -47,27 +57,92 @@ impl RoutingExecutor {
         retention: Retention,
     ) -> Self {
         let host = HostExecutor::new(run_dir.clone()).with_retention(retention);
-        let docker = docker_provider
-            .map(|provider| SandboxExecutor::new(provider, run_dir).with_retention(retention));
+        let docker = docker_provider.map(|provider| {
+            SandboxExecutor::new(provider, run_dir.clone()).with_retention(retention)
+        });
         Self {
             host,
-            docker,
+            docker: OnceCell::new_with(Some(docker)),
+            run_dir,
+            retention,
+            run_id: OnceCell::new(),
             routes: Mutex::new(HashMap::new()),
         }
     }
 
-    fn record(&self, scope: &ScopeSpec, route: Route) {
+    /// A router over this machine: the native host executor, and the local
+    /// Docker daemon connected on the first container scope. The standard
+    /// runtime's default.
+    pub fn local(run_dir: PathBuf, retention: Retention) -> Self {
+        let host = HostExecutor::new(run_dir.clone()).with_retention(retention);
+        Self {
+            host,
+            docker: OnceCell::new(),
+            run_dir,
+            retention,
+            run_id: OnceCell::new(),
+            routes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The Docker executor, connecting to the local daemon on first use when
+    /// the router was built with [`RoutingExecutor::local`].
+    async fn docker(&self) -> Option<&SandboxExecutor> {
+        self.docker
+            .get_or_init(|| async {
+                match DockerProvider::connect().await {
+                    Ok(provider) => Some(
+                        SandboxExecutor::new(Arc::new(provider), self.run_dir.clone())
+                            .with_retention(self.retention),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(error = ?error, "no docker daemon for container scopes");
+                        None
+                    }
+                }
+            })
+            .await
+            .as_ref()
+    }
+
+    fn record(&self, scope: &ScopeSpec, route: Route, one_shots: ContainerPrefix) {
         self.routes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert((scope.id, SmolStr::new(scope.environment.as_str())), route);
+            .insert(
+                (scope.id, SmolStr::new(scope.environment.as_str())),
+                (route, one_shots),
+            );
     }
 
-    fn take_route(&self, env: &EnvHandle) -> Option<Route> {
+    fn take_route(&self, env: &EnvHandle) -> Option<(Route, ContainerPrefix)> {
         self.routes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&(env.scope(), SmolStr::new(env.instance())))
+    }
+
+    /// The one-shot container prefix for a scope, from the run id and the
+    /// scope's environment id — the same key on both routes, so a re-acquire
+    /// and release sweep exactly this scope's action containers.
+    async fn one_shot_prefix(&self, scope: &ScopeSpec) -> Result<ContainerPrefix, EnvError> {
+        let run_id = self
+            .run_id
+            .get_or_try_init(|| load_or_record_run_id(&self.run_dir))
+            .await
+            .cloned()?;
+        let label = format!("{run_id}/{}", scope.environment.as_str());
+        Ok(ContainerPrefix::new(format!(
+            "{}-s",
+            container_name(&label)
+        )))
+    }
+
+    /// The env-file directory for a host scope's one-shot action containers.
+    fn scope_dir(&self, scope: &ScopeSpec) -> PathBuf {
+        self.run_dir
+            .join("scopes")
+            .join(scope.workspace_id.as_str())
     }
 }
 
@@ -80,12 +155,26 @@ impl Executor for RoutingExecutor {
     ) -> Result<EnvHandle, EnvError> {
         match scope.runtime.target {
             RuntimeTarget::HostProcess => {
+                // Docker actions in a host job run as one-shot containers on
+                // the local daemon; bind a runner to the host environment.
+                let one_shots = self.one_shot_prefix(scope).await?;
+                oneshot::sweep(&one_shots).await;
                 let handle = self.host.acquire(scope, ctx).await?;
-                self.record(scope, Route::Host);
-                Ok(handle)
+                let scope_dir = self.scope_dir(scope);
+                let runner = OneShotRunner::new(
+                    one_shots.clone(),
+                    self.host.workspace_for(scope.environment.as_str()),
+                    scope_dir.join("exec-env"),
+                    scope_dir.join("one-shots"),
+                    scope,
+                    None,
+                    ctx,
+                );
+                self.record(scope, Route::Host, one_shots);
+                Ok(handle.with_runner(Arc::new(runner)))
             }
             RuntimeTarget::Container { .. } => {
-                let Some(docker) = &self.docker else {
+                let Some(docker) = self.docker().await else {
                     return Err(EnvError::Backend {
                         backend:   SmolStr::new("docker"),
                         operation: SmolStr::new("acquire"),
@@ -94,16 +183,30 @@ impl Executor for RoutingExecutor {
                     });
                 };
                 let handle = docker.acquire(scope, ctx).await?;
-                self.record(scope, Route::Docker);
+                // The Docker executor bound the scope's one-shot runner; record
+                // an empty prefix here since it sweeps its own.
+                self.record(scope, Route::Docker, ContainerPrefix::new(String::new()));
                 Ok(handle)
             }
         }
     }
 
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
+        let instance = SmolStr::new(env.instance());
         match self.take_route(&env) {
-            Some(Route::Host) => self.host.release(env, outcome).await,
-            Some(Route::Docker) => match &self.docker {
+            Some((Route::Host, one_shots)) => {
+                // Sweep the host job's action containers and their env files
+                // before releasing the process environment.
+                oneshot::sweep(&one_shots).await;
+                let env_files = self
+                    .run_dir
+                    .join("scopes")
+                    .join(instance.as_str())
+                    .join("exec-env");
+                let _ = fs::remove_dir_all(&env_files).await;
+                self.host.release(env, outcome).await
+            }
+            Some((Route::Docker, _)) => match self.docker().await {
                 Some(docker) => docker.release(env, outcome).await,
                 None => ReleaseReport::default()
                     .problem("a docker route has no docker executor to release it"),

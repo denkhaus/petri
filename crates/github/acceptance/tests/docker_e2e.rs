@@ -200,9 +200,12 @@ jobs:
     );
 }
 
-/// `services:` end to end, in both placements at once: the host job reaches
-/// its service over the published port on localhost, and the containerized job
-/// reaches its own by name — each healthy before the job's first step.
+/// `services:` in both placements at once. A containerized job reaches its
+/// service by name, healthy before the job's first step. A host job cannot:
+/// services require a containerized job (sidecars are reached by alias on the
+/// job container's network, which a bare host process has no route to), so
+/// its acquire fails routably with `env_acquire` and the message names the
+/// fix. The rest of the run is unaffected.
 #[tokio::test]
 async fn services_are_reachable_from_host_and_containerized_jobs() {
     if !is_docker_ready().await {
@@ -231,6 +234,11 @@ jobs:
     services:
       redis:
         image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       # The trailing dot prevents a host-provided DNS search suffix from hiding
       # Docker's network alias.
@@ -241,14 +249,35 @@ jobs:
     let report = run_host(graph, "services-e2e").await;
     assert_eq!(
         report.status,
-        RunStatus::Success,
-        "{:?}\n{:?}",
+        RunStatus::Failed,
+        "the host job's acquire fails; {:?}\n{:?}",
         errors(&report),
         log_lines(&report)
     );
     let lines = log_lines(&report);
-    assert!(lines.iter().any(|l| l == "service-reachable"), "{lines:?}");
     assert!(lines.iter().any(|l| l == "service-resolved"), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l == "service-reachable"),
+        "a host job must not realize services: {lines:?}"
+    );
+    let host_failure = report
+        .state
+        .history()
+        .iter()
+        .filter(|r| r.name.starts_with("on-host/"))
+        .find_map(|r| r.outcome.status.failure_info())
+        .expect("the host job's firings fail");
+    assert_eq!(host_failure.class.as_str(), "env_acquire");
+    assert!(
+        host_failure.message.contains("containerized job"),
+        "the message names the fix: {}",
+        host_failure.message
+    );
+    assert_eq!(
+        status_of(&report, "inside/step-1").as_deref(),
+        Some("success"),
+        "the containerized job is unaffected"
+    );
 }
 
 /// A containerized step's env arrives byte for byte through the executor's
