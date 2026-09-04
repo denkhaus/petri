@@ -144,12 +144,7 @@ impl CoordinatorStore {
     pub fn resume(root: impl Into<PathBuf>) -> Result<(Self, bool), StoreError> {
         let root = root.into();
         let metadata_path = root.join(RUN_FILE);
-        let lease = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&metadata_path)
-            .map_err(|source| io_error("open", &metadata_path, source))?;
-        acquire_lease(&lease, &root)?;
+        let lease = hold_run_lease(&root)?;
         let metadata: RunMetadata = read_json(&metadata_path)?;
         if metadata.format_version != COORDINATOR_FORMAT_VERSION {
             return Err(StoreError::UnsupportedFormat {

@@ -372,14 +372,23 @@ impl Coordinator {
             .state()
             .run_status
             .unwrap_or(RunStatus::Cancelled);
-        let remaining: Vec<crate::SandboxLeaseId> = self
+        let remaining: Vec<_> = self
             .resources()
             .records()
-            .filter(|record| record.holds_resource())
-            .map(|record| record.lease)
+            .filter(|record| record.needs_release())
+            .map(|record| {
+                let owner_status = self
+                    .store
+                    .state()
+                    .invocations
+                    .get(&record.allocation.invocation)
+                    .and_then(|invocation| invocation.result.as_ref())
+                    .map_or(status, |result| result.status);
+                (record.lease, owner_status)
+            })
             .collect();
-        for lease in remaining {
-            self.release_lease(lease, status).await;
+        for (lease, owner_status) in remaining {
+            self.release_lease(lease, owner_status).await;
         }
         self.runtime.finish_with_status(status).await;
     }
@@ -417,7 +426,7 @@ impl Coordinator {
         let owned: Vec<crate::SandboxLeaseId> = self
             .resources()
             .records()
-            .filter(|record| record.allocation.invocation == invocation && record.holds_resource())
+            .filter(|record| record.allocation.invocation == invocation && record.needs_release())
             .map(|record| record.lease)
             .collect();
         for lease in owned {
@@ -801,9 +810,7 @@ impl Coordinator {
             .graph;
         let graph = self.store.load_graph(digest)?;
         graph
-            .scopes
-            .iter()
-            .find(|declared| declared.id == scope)
+            .scope(scope)
             .map(|declared| declared.runtime.clone())
             .ok_or(CoordinatorError::NoInheritableSandbox)
     }

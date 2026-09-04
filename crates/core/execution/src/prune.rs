@@ -63,12 +63,10 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
     let store = Arc::new(Mutex::new(ResourceStore::load(
         run_dir.join(crate::RESOURCES_DIR),
     )?));
-    let run_runtime = rt.prepare_run(&run_dir);
-    run_runtime.attach_lease_ledger(Arc::new(ResourceLedger::new(store.clone())));
-    let router = run_runtime
-        .sandbox_router()
-        .cloned()
+    let router = rt
+        .sandbox_router_for(&run_dir)
         .ok_or(PruneError::NoRouter)?;
+    router.set_ledger(Arc::new(ResourceLedger::new(store.clone())));
 
     let candidates: Vec<(SandboxLeaseId, String)> = store
         .lock()
@@ -96,8 +94,5 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
             Err(error) => report.problems.push((lease, error.to_string())),
         }
     }
-    run_runtime
-        .finish_with_status(ir::RunStatus::Cancelled)
-        .await;
     Ok(report)
 }

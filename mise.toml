@@ -51,7 +51,7 @@ run = [
 [tasks."test:release"]
 description = "Run all Rust tests in release mode"
 depends = ["plugins:build"]
-env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker" }
+env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_PLUGIN_DEV = "1" }
 run = "cargo nextest run --locked --release --workspace --all-targets --all-features --no-tests=pass"
 
 [tasks."build:release"]

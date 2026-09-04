@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use petri::driver::{EventObserver, ExecutionReport};
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
@@ -21,7 +21,6 @@ use serde_json::json;
 use testkit::{RunDir, add_script, wait_for_file};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio::time;
 
 fn test_runtime(dir: &RunDir) -> Runtime {
     petri::runtime().options(RunOptions::new(dir.path()))
@@ -456,13 +455,8 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
 /// fences it — one stop, one start — before re-dispatching the step into the
 /// same workspace.
 #[tokio::test]
-#[expect(
-    clippy::print_stderr,
-    reason = "the skip notice tells whoever runs the tests why this Docker battery did nothing; a test binary has no other sink"
-)]
 async fn resume_fences_the_crashed_container() {
-    if !testkit::is_docker_available().await {
-        eprintln!("skipping: no Docker plugin with a reachable daemon");
+    if !testkit::is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("host-docker-resume");
@@ -502,11 +496,10 @@ sleep 300
 
     let run = tokio::spawn(async move { host::run(&rt, graph).await });
     // The root invocation's scope 0 is the run's first lease.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !dir.path().join(RUN_ID_FILE).exists() {
-        assert!(Instant::now() < deadline, "the run never started");
-        time::sleep(Duration::from_millis(50)).await;
-    }
+    assert!(
+        wait_for_file(&dir.path().join(RUN_ID_FILE), Duration::from_secs(60)).await,
+        "the run never started"
+    );
     let sandbox = testkit::sandbox_name(dir.path(), 0);
     assert!(
         testkit::wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(60))
@@ -557,13 +550,8 @@ sleep 300
 /// its record saying so; `petri sandbox prune` deletes it, records the
 /// tombstone, and refuses to run while a live process holds the run.
 #[tokio::test]
-#[expect(
-    clippy::print_stderr,
-    reason = "the skip notice tells whoever runs the tests why this Docker battery did nothing; a test binary has no other sink"
-)]
 async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
-    if !testkit::is_docker_available().await {
-        eprintln!("skipping: no Docker plugin with a reachable daemon");
+    if !testkit::is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("host-docker-prune");
@@ -606,9 +594,22 @@ async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
     assert!(record.resource_id.is_some() && record.fingerprint.is_some());
     drop(records);
 
-    let pruned = prune(&rt).await.expect("prune");
+    // Prune only deletes sandboxes, even when runtime retention would
+    // otherwise remove host workspaces.
+    let workspace = root_workspace(&dir);
+    fs::create_dir_all(&workspace).expect("create host workspace");
+    let sentinel = workspace.join("sentinel");
+    fs::write(&sentinel, b"keep host workspace").expect("write sentinel");
+    let mut options = RunOptions::new(dir.path());
+    options.retention = Retention::Never;
+    let prune_rt = petri::runtime().options(options);
+    let pruned = prune(&prune_rt).await.expect("prune");
     assert!(pruned.is_clean(), "{pruned:?}");
     assert_eq!(pruned.deleted.len(), 1, "{pruned:?}");
+    assert_eq!(
+        fs::read(&sentinel).expect("prune preserves the host workspace"),
+        b"keep host workspace"
+    );
     assert!(
         testkit::container_id(&sandbox).await.is_none(),
         "prune deleted the sandbox"
@@ -625,12 +626,14 @@ async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
     drop(records);
 
     // A second prune finds only the tombstone.
-    let again = prune(&rt).await.expect("prune again");
+    let again = prune(&prune_rt).await.expect("prune again");
     assert!(again.deleted.is_empty() && again.is_clean(), "{again:?}");
 
     // A held run is refused.
     let held = execution::hold_run_lease(dir.path()).expect("hold the run");
-    let error = prune(&rt).await.expect_err("a held run is not pruned");
+    let error = prune(&prune_rt)
+        .await
+        .expect_err("a held run is not pruned");
     assert!(matches!(error, PruneError::RunHeld(_)), "{error}");
     drop(held);
 }

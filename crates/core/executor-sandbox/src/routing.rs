@@ -3,22 +3,23 @@
 //! [`SandboxExecutor`] over the Docker plugin. It is the composition the
 //! runtime registers for a run.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use executor::{
     AcquireContext, EnvError, EnvHandle, Executor, ReleaseReport, Retention, SandboxLeaseId,
-    ScopeOutcome, ScopeSpec,
+    ScopeOutcome, ScopeSpec, WorkspaceId,
 };
 use ir::RuntimeTarget;
 use sandbox_driver::SandboxId;
 use tokio::sync::OnceCell;
 
-use crate::actions::{self, ActionHostRunner};
+use crate::actions::{ActionHost, ActionHostRunner};
 use crate::host::HostTeardown;
 use crate::lease::{LeaseLedger, MemoryLedger};
-use crate::plugin::{FixedProvider, PluginError, PluginSettings, PluginSupervisor, ProviderSource};
+use crate::plugin::{FixedProvider, PluginSettings, PluginSupervisor, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
 use crate::{HostExecutor, SandboxExecutor, SandboxTeardown};
 
@@ -26,7 +27,7 @@ use crate::{HostExecutor, SandboxExecutor, SandboxTeardown};
 pub const CONTAINER_KIND: &str = "docker";
 
 /// What ends a host scope's action host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ActionOwner {
     Lease(SandboxLeaseId),
     Scope(ir::ScopeId),
@@ -37,6 +38,12 @@ enum ActionOwner {
 enum ContainerSource {
     Env { dev: Option<bool> },
     Fixed(Arc<dyn ProviderSource>),
+}
+
+/// One settings snapshot and one supervised process for the entire router.
+struct ProviderConfig {
+    source:       Arc<dyn ProviderSource>,
+    host_address: Result<String, String>,
 }
 
 /// Routes scopes to the native host executor or the container
@@ -50,10 +57,11 @@ enum ContainerSource {
 pub struct RoutingExecutor {
     host:         HostExecutor,
     source:       ContainerSource,
+    provider:     OnceLock<Result<ProviderConfig, String>>,
     container:    OnceCell<Result<Arc<SandboxExecutor>, String>>,
     /// The action hosts of host scopes, each keyed by what ends it: the
     /// lease that owns it, or the scope itself when no coordinator named one.
-    action_hosts: Mutex<Vec<(ActionOwner, Arc<ActionHostRunner>)>>,
+    action_hosts: Mutex<BTreeMap<(ActionOwner, WorkspaceId), Arc<ActionHost>>>,
     ledger:       OnceLock<Arc<dyn LeaseLedger>>,
     identity:     Arc<RunIdentity>,
     retention:    Retention,
@@ -97,8 +105,9 @@ impl RoutingExecutor {
         Self {
             host: HostExecutor::new(run_dir.clone()).with_retention(retention),
             source,
+            provider: OnceLock::new(),
             container: OnceCell::new(),
-            action_hosts: Mutex::new(Vec::new()),
+            action_hosts: Mutex::new(BTreeMap::new()),
             ledger: OnceLock::new(),
             identity: Arc::new(RunIdentity::new(run_dir)),
             retention,
@@ -116,24 +125,25 @@ impl RoutingExecutor {
         &self.identity
     }
 
-    fn provider_source(&self) -> Result<Arc<dyn ProviderSource>, PluginError> {
-        match &self.source {
-            ContainerSource::Fixed(source) => Ok(Arc::clone(source)),
-            ContainerSource::Env { dev } => {
-                let settings = PluginSettings::from_env(CONTAINER_KIND, *dev)?;
-                Ok(Arc::new(PluginSupervisor::new(settings)))
-            }
-        }
-    }
-
-    fn host_address(&self, source: &dyn ProviderSource) -> Result<String, PluginError> {
-        match &self.source {
-            ContainerSource::Fixed(_) => Ok(crate::DOCKER_HOST_ALIAS.to_owned()),
-            ContainerSource::Env { dev } => {
-                let _ = source;
-                PluginSettings::from_env(CONTAINER_KIND, *dev)?.host_address()
-            }
-        }
+    fn provider(&self) -> Result<&ProviderConfig, EnvError> {
+        self.provider
+            .get_or_init(|| match &self.source {
+                ContainerSource::Fixed(source) => Ok(ProviderConfig {
+                    source:       source.clone(),
+                    host_address: Ok(crate::DOCKER_HOST_ALIAS.to_owned()),
+                }),
+                ContainerSource::Env { dev } => {
+                    let settings = PluginSettings::from_env(CONTAINER_KIND, *dev)
+                        .map_err(|error| error.to_string())?;
+                    let host_address = settings.host_address().map_err(|error| error.to_string());
+                    Ok(ProviderConfig {
+                        source: Arc::new(PluginSupervisor::new(settings)),
+                        host_address,
+                    })
+                }
+            })
+            .as_ref()
+            .map_err(|message| EnvError::backend(CONTAINER_KIND, "configure", message.clone()))
     }
 
     /// The container executor, built on first use. A configuration error
@@ -141,16 +151,14 @@ impl RoutingExecutor {
     async fn container(&self) -> Result<Arc<SandboxExecutor>, EnvError> {
         self.container
             .get_or_init(|| async {
-                let source = self.provider_source().map_err(|error| error.to_string())?;
-                let host_address = self
-                    .host_address(source.as_ref())
-                    .map_err(|error| error.to_string())?;
+                let provider = self.provider().map_err(|error| error.to_string())?;
+                let host_address = provider.host_address.clone()?;
                 let ledger =
                     self.ledger.get().cloned().unwrap_or_else(|| {
                         Arc::new(MemoryLedger::default()) as Arc<dyn LeaseLedger>
                     });
                 Ok(Arc::new(SandboxExecutor::new(
-                    source,
+                    provider.source.clone(),
                     ledger,
                     Arc::clone(&self.identity),
                     self.retention,
@@ -168,6 +176,65 @@ impl RoutingExecutor {
         self.identity.container_prefix().await
     }
 
+    fn action_host(
+        &self,
+        owner: ActionOwner,
+        scope: &ScopeSpec,
+    ) -> Result<Arc<ActionHost>, EnvError> {
+        let provider = self.provider()?;
+        let host_address = provider
+            .host_address
+            .as_ref()
+            .map_err(|message| EnvError::backend(CONTAINER_KIND, "configure", message.clone()))?;
+        let key = (owner, scope.workspace_id.clone());
+        let mut hosts = self
+            .action_hosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Ok(hosts
+            .entry(key)
+            .or_insert_with(|| {
+                Arc::new(ActionHost::new(
+                    provider.source.clone(),
+                    self.identity.clone(),
+                    workspace_dir(self.identity.run_dir(), scope.workspace_id.as_str()),
+                    scope.workspace_id.as_str().to_owned(),
+                    host_address.clone(),
+                ))
+            })
+            .clone())
+    }
+
+    /// Keep failed hosts registered so a later release can retry cleanup.
+    async fn release_action_hosts(&self, owner: ActionOwner) -> ReleaseReport {
+        let hosts: Vec<_> = self
+            .action_hosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|((candidate, _), _)| *candidate == owner)
+            .map(|(key, host)| (key.clone(), host.clone()))
+            .collect();
+        let mut report = ReleaseReport::default();
+        for (key, host) in hosts {
+            match host.teardown().await {
+                Ok(removed) => {
+                    if removed {
+                        report = report.released("action host");
+                    }
+                    self.action_hosts
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&key);
+                }
+                Err(error) => {
+                    report = report.problem(format!("action host teardown failed: {error}"));
+                }
+            }
+        }
+        report
+    }
+
     /// Ends a lease: stops its sandbox, then keeps or deletes it by this
     /// router's retention for `outcome`. The coordinator calls this when
     /// the invocation that owns the lease finishes.
@@ -176,25 +243,14 @@ impl RoutingExecutor {
         lease: SandboxLeaseId,
         outcome: ScopeOutcome,
     ) -> ReleaseReport {
-        let mut report = ReleaseReport::default();
-        let action_hosts: Vec<Arc<ActionHostRunner>> = {
-            let mut hosts = self
-                .action_hosts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let (mine, rest): (Vec<_>, Vec<_>) = hosts
-                .drain(..)
-                .partition(|(owner, _)| *owner == ActionOwner::Lease(lease));
-            *hosts = rest;
-            mine.into_iter().map(|(_, runner)| runner).collect()
-        };
-        for runner in action_hosts {
-            match runner.teardown().await {
-                Ok(true) => report = report.released("action host"),
-                Ok(false) => {}
-                Err(error) => {
-                    report = report.problem(format!("action host teardown failed: {error}"));
-                }
+        let mut report = self.release_action_hosts(ActionOwner::Lease(lease)).await;
+        // A host lease's resource id is a workspace id, not a provider id.
+        // Its only provider resources are the action hosts just released.
+        if let Some(ledger) = self.ledger.get() {
+            match ledger.lookup(lease) {
+                Ok(Some(record)) if record.provider.as_deref() == Some("host") => return report,
+                Err(error) => return report.problem(error.to_string()),
+                _ => {}
             }
         }
         // The lease may be a container lease this process never acquired —
@@ -244,43 +300,17 @@ impl Executor for RoutingExecutor {
     ) -> Result<EnvHandle, EnvError> {
         match scope.runtime.target {
             RuntimeTarget::HostProcess => {
-                // A crashed predecessor's action host, and its one-shots,
-                // go before the scope is used again — only when a marker
-                // says there was one, so a Docker-free run never launches
-                // the plugin.
-                if let Ok(source) = self.provider_source() {
-                    actions::sweep_stale(
-                        source.as_ref(),
-                        &self.identity,
-                        scope.workspace_id.as_str(),
-                    )
-                    .await;
+                let owner = ctx
+                    .lease()
+                    .map_or(ActionOwner::Scope(scope.id), ActionOwner::Lease);
+                let action_host = self.action_host(owner, scope);
+                if let Ok(host) = &action_host {
+                    host.prepare().await;
                 }
                 let handle = self.host.acquire(scope, ctx).await?;
-                // Docker actions in a host job run as one-shot containers
-                // beside an action host on the local daemon, created when
-                // the first one runs; a machine without a plugin still runs
-                // the host scope, and the action then fails routably.
-                match self.provider_source() {
-                    Ok(source) => {
-                        let host_address = self
-                            .host_address(source.as_ref())
-                            .unwrap_or_else(|_| crate::DOCKER_HOST_ALIAS.to_owned());
-                        let runner = Arc::new(ActionHostRunner::new(
-                            source,
-                            Arc::clone(&self.identity),
-                            workspace_dir(self.identity.run_dir(), scope.workspace_id.as_str()),
-                            scope,
-                            host_address,
-                        ));
-                        let owner = ctx
-                            .lease()
-                            .map_or(ActionOwner::Scope(scope.id), ActionOwner::Lease);
-                        self.action_hosts
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .push((owner, Arc::clone(&runner)));
-                        Ok(handle.with_runner(runner))
+                match action_host {
+                    Ok(host) => {
+                        Ok(handle.with_runner(Arc::new(ActionHostRunner::new(host, scope))))
                     }
                     Err(error) => {
                         tracing::debug!(error = %error, "no container plugin for host-scope actions");
@@ -310,27 +340,11 @@ impl Executor for RoutingExecutor {
         // A standalone host scope's action host goes with the scope; a
         // coordinator-owned one goes with its lease, at `release_lease`.
         let scope = env.scope();
+        let ended = self.release_action_hosts(ActionOwner::Scope(scope)).await;
         let mut report = self.host.release(env, outcome).await;
-        let mine: Vec<Arc<ActionHostRunner>> = {
-            let mut hosts = self
-                .action_hosts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let (mine, rest): (Vec<_>, Vec<_>) = hosts
-                .drain(..)
-                .partition(|(owner, _)| *owner == ActionOwner::Scope(scope));
-            *hosts = rest;
-            mine.into_iter().map(|(_, runner)| runner).collect()
-        };
-        for runner in mine {
-            match runner.teardown().await {
-                Ok(true) => report = report.released("action host"),
-                Ok(false) => {}
-                Err(error) => {
-                    report = report.problem(format!("action host teardown failed: {error}"));
-                }
-            }
-        }
+        report.released.extend(ended.released);
+        report.kept.extend(ended.kept);
+        report.problems.extend(ended.problems);
         report
     }
 }

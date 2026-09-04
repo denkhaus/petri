@@ -52,11 +52,15 @@ pub struct SandboxResourceRecord {
 }
 
 impl SandboxResourceRecord {
-    /// Whether anything of this lease may still exist on its provider.
-    pub fn holds_resource(&self) -> bool {
-        self.provider != HOST_PROVIDER
-            && !matches!(self.state, LeaseState::Deleted)
-            && (self.resource_id.is_some() || self.pending.is_some())
+    /// Whether this lease still needs release. Host leases can own action
+    /// hosts. A stopped sandbox with no pending intent already had its
+    /// retention applied by its owning invocation.
+    pub fn needs_release(&self) -> bool {
+        self.state != LeaseState::Deleted
+            && (self.provider == HOST_PROVIDER
+                || self.pending.is_some()
+                || self.state == LeaseState::Live
+                || (self.state == LeaseState::Allocating && self.fingerprint.is_some()))
     }
 }
 

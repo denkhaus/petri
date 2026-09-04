@@ -40,6 +40,7 @@ use sandbox_driver::{Error as DriverError, Sandbox, SandboxFilter, SandboxId, Sa
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::task::JoinSet;
 
 use crate::plugin::ProviderSource;
 use crate::run::{RunIdentity, WORKSPACE_LABEL};
@@ -202,10 +203,12 @@ struct LeaseSlot {
 }
 
 /// What an acquire needs to know beyond the lease.
-pub struct LeaseRequest<'a> {
+pub(crate) struct LeaseRequest<'a> {
     pub lease:        SandboxLeaseId,
     /// The workspace the lease names, for the reconcile label.
     pub workspace_id: &'a str,
+    /// A standalone acquisition has no coordinator to release its lease.
+    pub standalone:   bool,
 }
 
 /// One live handle and a holder count per lease, over one provider source.
@@ -214,6 +217,7 @@ pub struct SandboxLeaseManager {
     ledger:   Arc<dyn LeaseLedger>,
     identity: Arc<RunIdentity>,
     leases:   Mutex<HashMap<SandboxLeaseId, Arc<AsyncMutex<LeaseSlot>>>>,
+    cleanup:  Mutex<JoinSet<()>>,
 }
 
 impl SandboxLeaseManager {
@@ -227,6 +231,7 @@ impl SandboxLeaseManager {
             ledger,
             identity,
             leases: Mutex::new(HashMap::new()),
+            cleanup: Mutex::new(JoinSet::new()),
         }
     }
 
@@ -252,11 +257,11 @@ impl SandboxLeaseManager {
     /// as the lease's state requires, and counting the caller as a holder.
     /// `build_spec` produces the create spec, given the labels every Petri
     /// sandbox carries.
-    pub async fn acquire(
-        &self,
+    pub(crate) async fn acquire(
+        self: &Arc<Self>,
         request: LeaseRequest<'_>,
         build_spec: impl FnOnce(&[(String, String)]) -> Result<SandboxSpec, EnvError>,
-    ) -> Result<Arc<dyn Sandbox>, EnvError> {
+    ) -> Result<AcquiredSandbox, EnvError> {
         // An owned guard: a create hands it to its task, so an acquire that
         // is dropped mid-create still keeps the lease locked until the
         // create has settled one way or the other.
@@ -266,7 +271,7 @@ impl SandboxLeaseManager {
             if live.generation == generation {
                 let sandbox = Arc::clone(&live.sandbox);
                 slot.holders += 1;
-                return Ok(sandbox);
+                return Ok(self.acquired(&request, sandbox));
             }
             // A new plugin generation: every old handle is dead, and the
             // sandbox is fenced below before anyone resumes on it.
@@ -312,14 +317,7 @@ impl SandboxLeaseManager {
                         // The record was reserved but no resource exists:
                         // the create never happened or never completed.
                         return self
-                            .create(
-                                &provider,
-                                request.lease,
-                                &labels,
-                                build_spec,
-                                slot,
-                                generation,
-                            )
+                            .create(&provider, &request, &labels, build_spec, slot, generation)
                             .await;
                     }
                     0 => {
@@ -371,14 +369,7 @@ impl SandboxLeaseManager {
                 match matches.len() {
                     0 => {
                         return self
-                            .create(
-                                &provider,
-                                request.lease,
-                                &labels,
-                                build_spec,
-                                slot,
-                                generation,
-                            )
+                            .create(&provider, &request, &labels, build_spec, slot, generation)
                             .await;
                     }
                     1 => {
@@ -409,8 +400,23 @@ impl SandboxLeaseManager {
             sandbox: Arc::clone(&sandbox),
             generation,
         });
-        slot.holders = 1;
-        Ok(sandbox)
+        // Older generations can still have holders finishing or abandoning
+        // initialization. Their later release must not consume this holder.
+        slot.holders += 1;
+        Ok(self.acquired(&request, sandbox))
+    }
+
+    fn acquired(
+        self: &Arc<Self>,
+        request: &LeaseRequest<'_>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> AcquiredSandbox {
+        AcquiredSandbox {
+            manager:    self.clone(),
+            lease:      request.lease,
+            standalone: request.standalone,
+            sandbox:    Some(sandbox),
+        }
     }
 
     fn check_fingerprint(
@@ -441,82 +447,56 @@ impl SandboxLeaseManager {
     /// The create runs in its own task, which owns the lease's lock: an
     /// acquire nobody waited out (a cancelled scope, a sweep aborting the
     /// run) drops this future, and the provider's create — already sent —
-    /// still completes, with the lease locked until it has. The
-    /// [`Landing`] says what to do with the result: while the acquire
-    /// lives, the sandbox is recorded live and lands for it; once the
-    /// acquire is gone, whatever lands is deleted on arrival, so an
-    /// abandoned acquire leaves nothing. A sandbox that landed while the
-    /// acquire lived is the lease's from then on, even if the acquire is
-    /// dropped before it reads it: it is recorded, and its release ends it.
+    /// still completes, with the lease locked until it has. The task
+    /// returns an acquisition guard. Dropping either the task's unread
+    /// result or later environment initialization releases that holder.
     async fn create(
-        &self,
+        self: &Arc<Self>,
         provider: &Arc<dyn sandbox_driver::SandboxProvider>,
-        lease: SandboxLeaseId,
+        request: &LeaseRequest<'_>,
         labels: &[(String, String)],
         build_spec: impl FnOnce(&[(String, String)]) -> Result<SandboxSpec, EnvError>,
         mut slot: OwnedMutexGuard<LeaseSlot>,
         generation: u64,
-    ) -> Result<Arc<dyn Sandbox>, EnvError> {
+    ) -> Result<AcquiredSandbox, EnvError> {
+        let lease = request.lease;
+        let standalone = request.standalone;
         self.ledger
             .allocating(lease, self.source.kind(), self.source.fingerprint())
             .map_err(|error| Self::ledger_failed(&error))?;
         let spec = build_spec(labels)?;
-        let landing = Arc::new(Mutex::new(Landing {
-            wanted:  true,
-            sandbox: None,
-        }));
-        let _guard = LandingGuard(Arc::clone(&landing));
-        let provider = Arc::clone(provider);
-        let ledger = Arc::clone(&self.ledger);
-        let task_landing = Arc::clone(&landing);
+        let provider = provider.clone();
+        let manager = self.clone();
         let created = tokio::spawn(async move {
             let sandbox = provider
                 .create(&spec, None)
                 .await
                 .map_err(|error| acquire_failed(&error))?;
-            let wanted = {
-                let mut landing = task_landing.lock().unwrap_or_else(PoisonError::into_inner);
-                if landing.wanted {
-                    landing.sandbox = Some(Arc::clone(&sandbox));
-                }
-                landing.wanted
+            let acquired = AcquiredSandbox {
+                manager: manager.clone(),
+                lease,
+                standalone,
+                sandbox: Some(sandbox.clone()),
             };
-            if wanted {
-                // Recorded and live under the lease's lock, before anyone
-                // can see it.
-                ledger
-                    .live(lease, sandbox.id().as_str())
-                    .map_err(|error| Self::ledger_failed(&error))?;
-                slot.live = Some(LiveSandbox {
-                    sandbox,
-                    generation,
-                });
-                slot.holders = 1;
-            } else if let Err(error) = sandbox.delete().await {
-                tracing::warn!(error = %error, "deleting an abandoned create failed");
-            }
+            slot.live = Some(LiveSandbox {
+                sandbox: sandbox.clone(),
+                generation,
+            });
+            slot.holders += 1;
+            manager
+                .ledger
+                .live(lease, sandbox.id().as_str())
+                .map_err(|error| Self::ledger_failed(&error))?;
             drop(slot);
-            Ok::<(), EnvError>(())
+            Ok::<_, EnvError>(acquired)
         });
-        match created.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(error) => {
-                return Err(EnvError::backend(
-                    BACKEND,
-                    "acquire",
-                    format!("the sandbox create task failed: {error}"),
-                ));
-            }
-        }
-        landing
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .sandbox
-            .take()
-            .ok_or_else(|| {
-                EnvError::backend(BACKEND, "acquire", "the sandbox create returned nothing")
-            })
+        created.await.map_err(|error| {
+            EnvError::backend(
+                BACKEND,
+                "acquire",
+                format!("the sandbox create task failed: {error}"),
+            )
+        })?
     }
 
     /// Attaches a recorded sandbox and fences it: one stop, then one start.
@@ -571,6 +551,34 @@ impl SandboxLeaseManager {
         slot.holders
     }
 
+    async fn abandon(&self, lease: SandboxLeaseId, standalone: bool) {
+        let mut slot = self.slot(lease).lock_owned().await;
+        slot.holders = slot.holders.saturating_sub(1);
+        if standalone && slot.holders == 0 {
+            let report = self
+                .release_locked(lease, Retention::Never, ScopeOutcome::Failed, slot)
+                .await;
+            for problem in report.problems {
+                tracing::warn!(
+                    lease = lease.raw(),
+                    problem,
+                    "abandoned sandbox cleanup failed"
+                );
+            }
+        }
+    }
+
+    fn abandon_in_background(self: &Arc<Self>, lease: SandboxLeaseId, standalone: bool) {
+        let mut cleanup = self.cleanup.lock().unwrap_or_else(PoisonError::into_inner);
+        while let Some(result) = cleanup.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!(%error, "sandbox cleanup task failed");
+            }
+        }
+        let manager = self.clone();
+        cleanup.spawn(async move { manager.abandon(lease, standalone).await });
+    }
+
     /// The live handle, if the lease has one in this process.
     pub async fn live(&self, lease: SandboxLeaseId) -> Option<Arc<dyn Sandbox>> {
         let slot = self.slot(lease);
@@ -587,8 +595,17 @@ impl SandboxLeaseManager {
         retention: Retention,
         outcome: ScopeOutcome,
     ) -> ReleaseReport {
-        let slot = self.slot(lease);
-        let mut slot = slot.lock().await;
+        let slot = self.slot(lease).lock_owned().await;
+        self.release_locked(lease, retention, outcome, slot).await
+    }
+
+    async fn release_locked(
+        &self,
+        lease: SandboxLeaseId,
+        retention: Retention,
+        outcome: ScopeOutcome,
+        mut slot: OwnedMutexGuard<LeaseSlot>,
+    ) -> ReleaseReport {
         let report = ReleaseReport::default();
         let live = slot.live.take();
         slot.holders = 0;
@@ -605,7 +622,11 @@ impl SandboxLeaseManager {
         if let Err(error) = self.check_fingerprint(lease, &record) {
             return report.problem(error.to_string());
         }
-        let Some(resource_id) = record.resource_id.clone() else {
+        let resource_id = record.resource_id.clone().or_else(|| {
+            live.as_ref()
+                .map(|live| SmolStr::new(live.sandbox.id().as_str()))
+        });
+        let Some(resource_id) = resource_id else {
             // Reserved but never created: nothing on the provider to end.
             return report;
         };
@@ -712,21 +733,41 @@ impl SandboxLeaseManager {
     }
 }
 
-/// Where a spawned create lands its result: see
-/// [`SandboxLeaseManager::create`].
-struct Landing {
-    /// Whether an acquire still waits for the sandbox.
-    wanted:  bool,
-    sandbox: Option<Arc<dyn Sandbox>>,
+/// Owns a holder until environment initialization hands it to an EnvHandle.
+/// An unread create result and an interrupted environment read both drop
+/// this guard. The manager owns any asynchronous cleanup that drop starts.
+pub(crate) struct AcquiredSandbox {
+    manager:    Arc<SandboxLeaseManager>,
+    lease:      SandboxLeaseId,
+    standalone: bool,
+    sandbox:    Option<Arc<dyn Sandbox>>,
 }
 
-/// Marks the landing unwanted when the acquire is dropped: a create that
-/// has not landed yet is deleted on arrival by its task.
-struct LandingGuard(Arc<Mutex<Landing>>);
+impl AcquiredSandbox {
+    pub(crate) fn sandbox(&self) -> &Arc<dyn Sandbox> {
+        self.sandbox
+            .as_ref()
+            .expect("an acquisition owns its sandbox")
+    }
 
-impl Drop for LandingGuard {
+    pub(crate) fn into_sandbox(mut self) -> Arc<dyn Sandbox> {
+        self.sandbox
+            .take()
+            .expect("an acquisition owns its sandbox")
+    }
+
+    pub(crate) async fn release(mut self) {
+        self.manager.abandon(self.lease, self.standalone).await;
+        self.sandbox = None;
+    }
+}
+
+impl Drop for AcquiredSandbox {
     fn drop(&mut self) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).wanted = false;
+        if self.sandbox.is_some() {
+            self.manager
+                .abandon_in_background(self.lease, self.standalone);
+        }
     }
 }
 

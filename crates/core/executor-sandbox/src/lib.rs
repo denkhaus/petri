@@ -14,6 +14,8 @@
 //! ([`plugin`]), which is the path a third-party provider must take, so
 //! Petri's own take it too.
 
+#[cfg(test)]
+mod acquire_tests;
 mod actions;
 mod env;
 mod files;
@@ -112,32 +114,43 @@ impl SandboxExecutor {
             None => (SandboxLeaseId::new(u64::from(scope.id.raw())), true),
         };
         let name = self.identity.container_name(lease).await?;
-        let sandbox = self
+        let acquired = self
             .manager
             .acquire(
                 lease::LeaseRequest {
                     lease,
                     workspace_id: scope.workspace_id.as_str(),
+                    standalone,
                 },
                 |labels| build_spec(scope, labels, &name, ctx),
             )
             .await?;
+        let sandbox = acquired.sandbox();
 
         // The ambient environment is a fact the steps rely on (`PATH` for
         // the process step, say); a provider that cannot report it is not
         // one this executor can serve, and says so at acquire.
-        let ambient = sandbox.environment().await.map_err(|error| {
-            EnvError::backend(
-                BACKEND,
-                "acquire",
-                format!("the sandbox's environment could not be read: {error}"),
-            )
-        })?;
+        let ambient = match sandbox.environment().await {
+            Ok(ambient) => ambient,
+            Err(error) => {
+                acquired.release().await;
+                return Err(EnvError::backend(
+                    BACKEND,
+                    "acquire",
+                    format!("the sandbox's environment could not be read: {error}"),
+                ));
+            }
+        };
+        let mut env_overrides = scope.env.clone();
+        if let RuntimeTarget::Container { options, .. } = &scope.runtime.target {
+            env_overrides.extend(options.env.clone());
+        }
         let workspace = sandbox.working_directory().to_owned();
         let env = SandboxEnv {
             sandbox: sandbox.clone(),
             workspace: workspace.clone(),
             ambient,
+            env: env_overrides,
             grace: scope.grace,
             host_address: self.host_address.clone(),
         };
@@ -150,7 +163,7 @@ impl SandboxExecutor {
             env: scope.env.clone(),
         };
         let teardown = SandboxTeardown {
-            sandbox,
+            sandbox: acquired.into_sandbox(),
             lease,
             standalone,
         };

@@ -323,16 +323,26 @@ pub fn sandbox_name(run_dir: &Path, lease: u64) -> String {
     format!("petri-{}-l{lease}", recorded_run_id(run_dir))
 }
 
+/// Runs a Docker inspection command, bounding daemon waits and ending the
+/// client when a caller stops waiting.
+async fn docker_output<'a>(args: impl IntoIterator<Item = &'a str>) -> Option<Vec<u8>> {
+    let output = time::timeout(
+        Duration::from_secs(30),
+        Command::new("docker")
+            .args(args)
+            .stdin(process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
 /// `docker exec` a command in a running container; its stdout on success.
 async fn container_exec(container: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("docker")
-        .arg("exec")
-        .arg(container)
-        .args(args)
-        .output()
-        .await
-        .ok()?;
-    output.status.success().then_some(output.stdout)
+    docker_output(["exec", container].into_iter().chain(args.iter().copied())).await
 }
 
 /// The bytes of `path` inside a running container, through the `docker`
@@ -350,73 +360,52 @@ pub async fn container_write(container: &str, path: &str, contents: &str) -> boo
         .is_some()
 }
 
-/// The size of `path` inside a running container, 0 when absent.
-pub async fn container_file_len(container: &str, path: &str) -> u64 {
-    container_read(container, path)
-        .await
-        .map_or(0, |bytes| bytes.len() as u64)
-}
-
 /// Waits for `path` to exist inside a running container.
 pub async fn wait_for_container_file(container: &str, path: &str, limit: Duration) -> bool {
-    let deadline = Instant::now() + limit;
-    while Instant::now() < deadline {
-        if container_exec(container, &["test", "-e", path])
-            .await
-            .is_some()
-        {
-            return true;
+    time::timeout(limit, async {
+        loop {
+            if container_exec(container, &["test", "-e", path])
+                .await
+                .is_some()
+            {
+                return;
+            }
+            time::sleep(Duration::from_millis(100)).await;
         }
-        time::sleep(Duration::from_millis(100)).await;
-    }
-    false
+    })
+    .await
+    .is_ok()
 }
 
 /// The daemon's id for the container named `name`, when it exists.
 pub async fn container_id(name: &str) -> Option<String> {
-    let output = Command::new("docker")
-        .args(["inspect", "--format", "{{.Id}}", name])
-        .output()
-        .await
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let output = docker_output(["inspect", "--format", "{{.Id}}", name]).await?;
+    Some(String::from_utf8_lossy(&output).trim().to_owned())
 }
 
 /// Whether the container named `name` is running.
 pub async fn container_is_running(name: &str) -> bool {
-    let output = Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Running}}", name])
-        .output()
-        .await;
-    output.is_ok_and(|output| {
-        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
-    })
+    docker_output(["inspect", "--format", "{{.State.Running}}", name])
+        .await
+        .is_some_and(|output| String::from_utf8_lossy(&output).trim() == "true")
 }
 
 /// The one-shot containers the Docker provider ran beside the sandbox with
 /// container id `sandbox_id`, by the label the provider stamps on them.
 pub async fn list_one_shots(sandbox_id: &str) -> Vec<String> {
-    let output = Command::new("docker")
-        .args([
-            "ps",
-            "-a",
-            "--filter",
-            &format!("label=sh.sandbox-driver.one-shot={sandbox_id}"),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .await;
-    let Ok(output) = output else {
+    let Some(output) = docker_output([
+        "ps",
+        "-a",
+        "--filter",
+        &format!("label=sh.sandbox-driver.one-shot={sandbox_id}"),
+        "--format",
+        "{{.Names}}",
+    ])
+    .await
+    else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output)
         .lines()
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -428,17 +417,10 @@ pub async fn list_one_shots(sandbox_id: &str) -> Vec<String> {
 /// `prefix`, through the `docker` CLI: the oracle a leak check compares
 /// Petri's own accounting against. Empty when there is no CLI or daemon.
 pub async fn list_containers(prefix: &str) -> Vec<String> {
-    let output = Command::new("docker")
-        .args(["ps", "-a", "--format", "{{.Names}}"])
-        .output()
-        .await;
-    let Ok(output) = output else {
+    let Some(output) = docker_output(["ps", "-a", "--format", "{{.Names}}"]).await else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output)
         .lines()
         .map(str::trim)
         .filter(|name| name.starts_with(prefix))

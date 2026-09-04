@@ -22,8 +22,9 @@
 //!
 //! The plugin starts from an empty environment. Only named variables are
 //! forwarded: `PATH` and `HOME`, the Docker daemon selection and its TLS
-//! companions, and Daytona's credentials. Credentials stay ambient and are
-//! never stored in Petri configuration.
+//! companions, and Daytona's credentials. The values are captured with the
+//! settings and reused at each launch. Credentials are not persisted or
+//! included in the settings' debug output.
 //!
 //! # Supervision
 //!
@@ -37,10 +38,11 @@
 //! manager fences every sandbox once before a holder resumes on it.
 
 use std::collections::BTreeMap;
-use std::env;
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{env, fmt};
 
 use executor::EnvError;
 use sandbox_driver::{HealthStatus, ProviderKind, SandboxProvider};
@@ -48,13 +50,13 @@ use sandbox_driver_protocol::PluginProvider;
 use sandbox_driver_protocol::discovery::{PluginConfig, launch_plugin};
 use tokio::sync::Mutex;
 
+use crate::DOCKER_HOST_ALIAS;
+
 /// The naming prefix plugin discovery searches `PATH` for:
 /// `sandbox-driver-<kind>`.
 pub const PLUGIN_PREFIX: &str = "sandbox-driver";
 /// Turns unpinned plugins on for every kind.
 pub const DEV_MODE_VAR: &str = "PETRI_SANDBOX_PLUGIN_DEV";
-/// The alias a local Docker daemon resolves to this machine.
-const DOCKER_LOCAL_HOST_ALIAS: &str = "host.docker.internal";
 
 /// The SHA-256 pins compiled into this build, one per plugin kind and
 /// target triple. Empty until Petri bundles a sandbox-driver release; every
@@ -125,7 +127,7 @@ impl PluginError {
 }
 
 /// Where a plugin is and how it is trusted, for one provider kind.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PluginSettings {
     kind:         ProviderKind,
     path:         Option<PathBuf>,
@@ -133,12 +135,26 @@ pub struct PluginSettings {
     dev:          bool,
     host_address: Option<String>,
     env:          BTreeMap<String, String>,
-    inherit_env:  Vec<String>,
     /// A non-secret description of the backend the plugin will drive, from
     /// the same environment it inherits: the effective daemon endpoint,
     /// account, and target. Recorded on every lease and checked before a
     /// recorded sandbox is touched again.
     fingerprint:  String,
+}
+
+impl fmt::Debug for PluginSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PluginSettings")
+            .field("kind", &self.kind)
+            .field("path", &self.path)
+            .field("sha256", &self.sha256)
+            .field("dev", &self.dev)
+            .field("host_address", &self.host_address)
+            .field("env_keys", &self.env.keys())
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
 }
 
 impl PluginSettings {
@@ -147,31 +163,40 @@ impl PluginSettings {
     /// module level. `dev_override` is the CLI flag; `None` reads the
     /// environment and the build profile.
     pub fn from_env(kind: &str, dev_override: Option<bool>) -> Result<Self, PluginError> {
+        Self::from_lookup(kind, dev_override, |name| env::var_os(name))
+    }
+
+    fn from_lookup(
+        kind: &str,
+        dev_override: Option<bool>,
+        read: impl Fn(&str) -> Option<OsString>,
+    ) -> Result<Self, PluginError> {
+        let text = |name: &str| read(name).and_then(|value| value.into_string().ok());
         let provider_kind =
             ProviderKind::try_new(kind).map_err(|_| PluginError::Kind(kind.to_owned()))?;
         let upper = kind.to_ascii_uppercase().replace('-', "_");
-        let path = env::var_os(format!("PETRI_SANDBOX_{upper}_PLUGIN")).map(PathBuf::from);
-        let sha256 = env::var(format!("PETRI_SANDBOX_{upper}_SHA256"))
-            .ok()
+        let path = read(&format!("PETRI_SANDBOX_{upper}_PLUGIN")).map(PathBuf::from);
+        let sha256 = text(&format!("PETRI_SANDBOX_{upper}_SHA256"))
             .filter(|value| !value.trim().is_empty())
             .or_else(|| pinned_sha256(kind).map(str::to_owned));
         let dev = dev_override.unwrap_or_else(|| {
-            env::var(DEV_MODE_VAR).is_ok_and(|value| !value.is_empty() && value != "0")
+            text(DEV_MODE_VAR).is_some_and(|value| !value.is_empty() && value != "0")
                 || cfg!(debug_assertions)
         });
-        let inherit_env: Vec<String> = forwarded_env(kind).into_iter().map(str::to_owned).collect();
-        let host_address = env::var(format!("PETRI_SANDBOX_{upper}_HOST_ADDRESS"))
-            .ok()
+        let env = forwarded_env(kind)
+            .into_iter()
+            .filter_map(|name| text(name).map(|value| (name.to_owned(), value)))
+            .collect();
+        let host_address = text(&format!("PETRI_SANDBOX_{upper}_HOST_ADDRESS"))
             .filter(|value| !value.trim().is_empty());
-        let fingerprint = fingerprint_for(kind);
+        let fingerprint = fingerprint_for(kind, &env);
         Ok(Self {
             kind: provider_kind,
             path,
             sha256,
             dev,
             host_address,
-            env: BTreeMap::new(),
-            inherit_env,
+            env,
             fingerprint,
         })
     }
@@ -202,7 +227,7 @@ impl PluginSettings {
         infer_host_address(
             self.kind.as_str(),
             self.host_address.as_deref(),
-            &env::var("DOCKER_HOST").unwrap_or_default(),
+            self.env.get("DOCKER_HOST").map_or("", String::as_str),
         )
     }
 
@@ -226,7 +251,6 @@ impl PluginSettings {
             config.dev = true;
         }
         config.env.clone_from(&self.env);
-        config.inherit_env.clone_from(&self.inherit_env);
         Ok(config)
     }
 }
@@ -258,7 +282,7 @@ fn infer_host_address(
         return Ok(address.to_owned());
     }
     match kind {
-        "docker" if docker_host_is_local(docker_host) => Ok(DOCKER_LOCAL_HOST_ALIAS.to_owned()),
+        "docker" if docker_host_is_local(docker_host) => Ok(DOCKER_HOST_ALIAS.to_owned()),
         "docker" => Err(PluginError::RemoteDaemonNeedsHostAddress {
             docker_host: docker_host.trim().to_owned(),
         }),
@@ -276,22 +300,21 @@ fn docker_host_is_local(docker_host: &str) -> bool {
 }
 
 /// The non-secret backend identity for `kind`, from the environment.
-fn fingerprint_for(kind: &str) -> String {
+fn fingerprint_for(kind: &str, env: &BTreeMap<String, String>) -> String {
+    let value = |name: &str| env.get(name).map_or("", String::as_str);
     match kind {
         "docker" => {
-            let docker_host = env::var("DOCKER_HOST").unwrap_or_default();
-            let endpoint = if docker_host_is_local(&docker_host) {
-                "local".to_owned()
-            } else {
-                docker_host.trim().to_owned()
+            let endpoint = match value("DOCKER_HOST").trim() {
+                "" => "default",
+                configured => configured,
             };
             format!("docker:{endpoint}")
         }
         "daytona" => format!(
             "daytona:{}:{}:{}",
-            env::var("DAYTONA_API_URL").unwrap_or_default(),
-            env::var("DAYTONA_ORGANIZATION_ID").unwrap_or_default(),
-            env::var("DAYTONA_TARGET").unwrap_or_default()
+            value("DAYTONA_API_URL"),
+            value("DAYTONA_ORGANIZATION_ID"),
+            value("DAYTONA_TARGET")
         ),
         other => other.to_owned(),
     }
@@ -487,15 +510,81 @@ impl ProviderSource for FixedProvider {
     }
 }
 
-/// Whether `path` is an executable file, for a caller that wants to know
-/// before launching.
-pub fn plugin_exists(path: &Path) -> bool {
-    path.is_file()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+
+    #[test]
+    fn docker_fingerprints_distinguish_daemon_endpoints() {
+        let endpoints = [
+            "",
+            "unix:///var/run/docker.sock",
+            "unix:///run/user/1000/docker.sock",
+            "npipe:////./pipe/docker_engine",
+            "npipe:////./pipe/another_engine",
+            "tcp://10.0.0.5:2376",
+        ];
+        let fingerprints: BTreeSet<_> = endpoints
+            .into_iter()
+            .map(|endpoint| {
+                fingerprint_for(
+                    "docker",
+                    &BTreeMap::from([("DOCKER_HOST".to_owned(), endpoint.to_owned())]),
+                )
+            })
+            .collect();
+        assert_eq!(fingerprints.len(), endpoints.len());
+    }
+
+    #[test]
+    fn settings_keep_the_environment_used_for_their_fingerprint() {
+        let original = "tcp://10.0.0.5:2376";
+        let mut environment = BTreeMap::from([
+            ("DOCKER_HOST", OsString::from(original)),
+            ("UNRELATED_SECRET", OsString::from("do not forward")),
+        ]);
+        let settings = PluginSettings::from_lookup("docker", Some(true), |name| {
+            environment.get(name).cloned()
+        })
+        .expect("settings");
+        environment.insert("DOCKER_HOST", OsString::from("unix:///another.sock"));
+
+        let config = settings.config().expect("dev configuration");
+        assert_eq!(
+            config.env.get("DOCKER_HOST").map(String::as_str),
+            Some(original)
+        );
+        assert!(!config.env.contains_key("UNRELATED_SECRET"));
+        assert!(config.inherit_env.is_empty());
+        assert_eq!(settings.fingerprint(), format!("docker:{original}"));
+        assert!(matches!(
+            settings.host_address(),
+            Err(PluginError::RemoteDaemonNeedsHostAddress { docker_host }) if docker_host == original
+        ));
+    }
+
+    #[test]
+    fn settings_debug_does_not_expose_forwarded_credentials() {
+        let secret = "private-daytona-token";
+        let settings = PluginSettings::from_lookup("daytona", Some(true), |name| {
+            (name == "DAYTONA_API_KEY").then(|| OsString::from(secret))
+        })
+        .expect("settings");
+        assert_eq!(
+            settings
+                .config()
+                .expect("dev configuration")
+                .env
+                .get("DAYTONA_API_KEY")
+                .map(String::as_str),
+            Some(secret)
+        );
+        let debug = format!("{settings:?}");
+        assert!(debug.contains("DAYTONA_API_KEY"));
+        assert!(!debug.contains(secret));
+    }
 
     #[test]
     fn a_local_docker_host_is_recognized() {
@@ -514,7 +603,7 @@ mod tests {
             "npipe:////./pipe/docker_engine",
         ] {
             let address = infer_host_address("docker", None, local).expect("inferred");
-            assert_eq!(address, DOCKER_LOCAL_HOST_ALIAS, "for `{local}`");
+            assert_eq!(address, DOCKER_HOST_ALIAS, "for `{local}`");
         }
     }
 

@@ -47,6 +47,9 @@ pub(crate) struct SandboxEnv {
     pub(crate) workspace:    String,
     /// The effective environment, read once at acquire.
     pub(crate) ambient:      BTreeMap<String, String>,
+    /// This holder's scope environment and container options, over the
+    /// sandbox's original environment and under the process's own.
+    pub(crate) env:          BTreeMap<SmolStr, SmolStr>,
     pub(crate) grace:        Duration,
     /// How a process in the sandbox reaches services on Petri's machine.
     pub(crate) host_address: String,
@@ -210,7 +213,12 @@ impl ExecEnv for SandboxEnv {
         if let Some(dir) = working_dir {
             exec_spec = exec_spec.working_dir(dir);
         }
-        for (key, value) in &spec.env {
+        for (key, value) in self
+            .env
+            .iter()
+            .filter(|(key, _)| !spec.env.contains_key(*key))
+            .chain(spec.env.iter())
+        {
             exec_spec = exec_spec.env_var(key.as_str(), value.as_str());
         }
         let stdin = matches!(spec.stdin, StdinMode::Piped);
@@ -230,7 +238,10 @@ impl ExecEnv for SandboxEnv {
     }
 
     fn ambient_env(&self, name: &str) -> Option<String> {
-        self.ambient.get(name).cloned()
+        self.env
+            .get(name)
+            .map(ToString::to_string)
+            .or_else(|| self.ambient.get(name).cloned())
     }
 
     fn shares_host_filesystem(&self) -> bool {

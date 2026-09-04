@@ -527,6 +527,14 @@ impl Runtime {
         self.default_router_for(run_dir)
     }
 
+    /// Build the standard sandbox router for maintenance without starting
+    /// run services. A caller-supplied executor owns its own resources.
+    pub fn sandbox_router_for(&self, run_dir: &Path) -> Option<Arc<RoutingExecutor>> {
+        self.executor
+            .is_none()
+            .then(|| self.default_router_for(run_dir))
+    }
+
     fn default_router_for(&self, run_dir: &Path) -> Arc<RoutingExecutor> {
         Arc::new(match self.options.sandbox_plugin_dev {
             Some(dev) => RoutingExecutor::local_with_dev(run_dir, self.options.retention, dev),

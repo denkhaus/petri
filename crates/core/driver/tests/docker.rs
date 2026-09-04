@@ -57,11 +57,6 @@ fn docker_graph(name: &str, run: &str) -> ir::Graph {
     graph
 }
 
-/// The sandbox a bare driver keys scope 0 to: lease 0 of the run.
-fn sandbox_of(prefix: &str) -> String {
-    format!("{prefix}l0")
-}
-
 /// A step runs inside the container, in the sandbox's own workspace.
 #[tokio::test]
 async fn a_step_runs_inside_the_container() {
@@ -122,7 +117,7 @@ sleep 300
         .with_retention(Retention::Never);
 
     let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = sandbox_of(&prefix);
+    let sandbox = sandbox_name(dir.path(), 0);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
@@ -211,7 +206,7 @@ while :; do sleep 0.1; done
         .with_retention(Retention::Never);
 
     let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = sandbox_of(&prefix);
+    let sandbox = sandbox_name(dir.path(), 0);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
@@ -283,7 +278,7 @@ sleep 300
 
     let (driver, prefix) =
         docker_driver_named(graph.clone(), &dir, config(Retention::Always)).await;
-    let sandbox = sandbox_of(&prefix);
+    let sandbox = sandbox_name(dir.path(), 0);
     let run = tokio::spawn(driver.run());
     assert!(
         wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(60)).await,
@@ -674,7 +669,7 @@ while :; do sleep 0.1; done
         .with_retention(Retention::Never);
 
     let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = sandbox_of(&prefix);
+    let sandbox = sandbox_name(dir.path(), 0);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 

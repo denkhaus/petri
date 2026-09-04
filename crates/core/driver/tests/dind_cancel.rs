@@ -76,7 +76,7 @@ docker build --progress=plain b 2>&1 | tee build.log
         .with_retention(Retention::Never);
 
     let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = format!("{prefix}l0");
+    let sandbox = sandbox_name(dir.path(), 0);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 

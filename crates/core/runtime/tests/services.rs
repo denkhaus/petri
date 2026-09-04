@@ -7,7 +7,7 @@ use executor::{AcquireContext, Executor as _, Retention, ScopeOutcome, ScopeSpec
 use executor_sandbox::RoutingExecutor;
 use ir::{RuntimeSpec, ScopeId};
 use smol_str::SmolStr;
-use testkit::{RunDir, is_docker_ready, list_containers};
+use testkit::{RunDir, is_docker_ready, list_containers, sandbox_name};
 use tokio::process::Command;
 
 const REDIS: &str = "redis:7-alpine";
@@ -74,7 +74,7 @@ async fn a_container_scope_reaches_its_service_by_name() {
         "the job resolves the service: {status:?}"
     );
 
-    let base = container_base(&dir, 0).await;
+    let base = sandbox_name(dir.path(), 0);
     let network = format!("{base}-net");
     assert_eq!(
         list_containers(&format!("{network}-")).await.len(),
@@ -116,7 +116,7 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
         .expect_err("a dead service fails the scope");
     assert!(error.to_string().contains("flaky"), "{error}");
 
-    let base = container_base(&dir, 0).await;
+    let base = sandbox_name(dir.path(), 0);
     let network = format!("{base}-net");
     assert!(
         list_containers(&base).await.is_empty(),
@@ -126,17 +126,6 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
         is_network_gone(&network).await,
         "the failed acquire left no network"
     );
-}
-
-/// The scope's sandbox name, computed the way the executor computes it: the
-/// run's container prefix plus the lease, which a bare executor keys by the
-/// scope id.
-async fn container_base(dir: &RunDir, scope: u64) -> String {
-    let prefix = local(dir)
-        .container_prefix()
-        .await
-        .expect("the run id is recorded");
-    format!("{prefix}l{scope}")
 }
 
 async fn is_network_gone(network: &str) -> bool {
