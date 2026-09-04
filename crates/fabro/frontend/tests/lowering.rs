@@ -25,7 +25,7 @@ fn shapes_lower_to_their_step_kinds() {
         h [shape=hexagon, label="Ok?"]
         w [shape=insulator, duration="1s"]
         d [shape=diamond]
-        m [shape=house, stack.child_workflow="child.fabro", manager.max_cycles=3]
+        m [shape=house, stack.child_dot_source="digraph C { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }", manager.max_cycles=3]
         start -> a -> p -> c -> inferred -> h
         h -> w [label="[Y] Yes"]
         w -> d -> m -> exit
@@ -42,6 +42,7 @@ fn shapes_lower_to_their_step_kinds() {
     assert_eq!(node(&graph, "w").step.kind, WAIT_KIND);
     assert_eq!(node(&graph, "w").step.config["duration_ms"], json!(1000));
     assert_eq!(node(&graph, "m").step.kind, WORKFLOW_KIND);
+    assert!(node(&graph, "m").step.config["child_digest"].is_string());
     assert_eq!(
         graph.completion,
         Completion::TerminalNode(node_id(&graph, "exit"))

@@ -18,6 +18,9 @@ crates/github/frontend   the GitHub Actions frontend: lowers workflow files to t
 crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
+crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP, nested workflow, and the stub registry
+crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
 ```
@@ -25,8 +28,8 @@ crates/petri/cli       the shipped `petri` binary: the distribution handed to co
 Packages are named `petri-*` and arrows point down. Core never depends on a component; components
 depend on core and never on each other; only the distribution names them all.
 `crates/petri/lib/tests/layering.rs` enforces this from `cargo metadata`. The next
-format (CircleCI, RWX, fabro) is a `crates/<component>/` directory and one
-registration in the distribution.
+format (CircleCI, RWX) is a `crates/<component>/` directory and one
+registration in the distribution, as `crates/fabro/` is.
 
 A node fires when its **join policy** is satisfied by incoming tokens. On completion
 its **routing policy** emits tokens on outgoing edges. Routing is an AND of XORs:
@@ -110,6 +113,16 @@ crates/github/acceptance/tests/gha_e2e.rs    frontend §7 3-6, run for real: tru
 crates/core/runtime/tests/native_e2e.rs      frontend §7 7: the cycle, run end to end
 crates/github/acceptance/tests/harness.rs    frontend §7 8: every corpus workflow lowers or is rejected specifically
 crates/github/acceptance/tests/e2e.rs        frontend §7 9: two real corpus workflows run on the executor
+
+crates/fabro/frontend/tests/lowering.rs      Fabro plan §7 3: tiers, failure policies, goal gates, parallel, budgets, rejections
+crates/fabro/frontend/tests/conditions.rs    Fabro plan §7 4: the condition grammar against Fabro's semantics
+crates/fabro/frontend/tests/fuzz.rs          Fabro plan §7 1: arbitrary text never panics the parser
+crates/fabro/acceptance/tests/harness.rs     Fabro plan §7 2: every corpus file lowers or is rejected specifically; REPORT.md
+crates/fabro/acceptance/tests/runs.rs        Fabro plan §7 5: every lowered corpus file runs under stubs; RUNS.md
+crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripted battery, checked against the Fabro oracle
+crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator
+crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
+crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 ```
 
 Docker tests skip with a message when no daemon is reachable, so `mise run test`

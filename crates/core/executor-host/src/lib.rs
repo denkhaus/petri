@@ -264,11 +264,18 @@ impl HostExecutor {
         // Group records and status files live beside the workspace, not in it,
         // so steps never see them and workspace teardown never races the
         // sentinel's rename — one generation dir per acquisition, which is what
-        // isolates a dead run's status files from this one's.
-        let groups_root = workspace.parent().map_or_else(
-            || workspace.join(format!(".{GROUPS_DIR}")),
-            |p| p.join(GROUPS_DIR),
-        );
+        // isolates a dead run's status files from this one's. They are keyed
+        // by the *environment*, not the workspace: two environments may share
+        // a workspace (a nested invocation inheriting its parent's sandbox),
+        // and the fence must reach only the crashed predecessors of this
+        // environment, never a live sibling's groups.
+        let groups_root = workspace
+            .parent()
+            .map_or_else(
+                || workspace.join(format!(".{GROUPS_DIR}")),
+                |p| p.join(GROUPS_DIR),
+            )
+            .join(scope.environment.as_str());
         async_fs::create_dir_all(&groups_root)
             .await
             .map_err(|e| EnvError::workspace("create", groups_root.display(), e))?;

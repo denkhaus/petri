@@ -39,7 +39,9 @@ pub mod template;
 use std::path::{Component, Path, PathBuf};
 
 use frontend::{CompileInputs, Diagnostics, FileSource, Frontend, Lowered, NoFiles};
-pub use lower::{FailurePolicy, Kind, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, Policy, shape_of};
+pub use lower::{
+    FailurePolicy, Kind, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, Policy, shape_of,
+};
 
 /// Parse and lower one workflow. `file` is the repository-relative path the
 /// spans carry and `@file` references resolve beside; `files` reads them.

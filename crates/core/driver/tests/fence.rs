@@ -22,8 +22,14 @@ fn spec() -> ScopeSpec {
     ScopeSpec::new(ScopeId::new(0), "scope-0")
 }
 
+/// The environment's group records: beside the workspace, under the
+/// environment's own name.
 fn groups_root(dir: &RunDir) -> PathBuf {
-    dir.path().join("scopes").join("scope-0").join("groups")
+    dir.path()
+        .join("scopes")
+        .join("scope-0")
+        .join("groups")
+        .join("scope-0")
 }
 
 /// The generation dirs currently under the scope, sorted by name.

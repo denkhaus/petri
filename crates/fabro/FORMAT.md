@@ -1,0 +1,195 @@
+# The Fabro dialect, as lowered
+
+Petri runs Fabro workflows: Graphviz DOT files (`*.fabro`, `*.dot`) in the
+subset Fabro accepts. This page says what each Fabro construct becomes in the
+engine's IR, and what is refused. Fabro's own documentation defines the
+language; `.ai/plans/fabro-frontend-phase-one.md` records the decisions.
+
+The rule throughout: **every construct lowers onto what the core has**. No
+engine semantics were added for Fabro. A construct that cannot lower is a
+specific `unsupported.*` rejection, never a silent approximation.
+
+## Run creation happens at load
+
+Fabro renders templates, resolves `@file` references and applies its model
+stylesheet once, when a run is created, and persists the literal graph. The
+frontend does the same at load, so `petri check --print-graph` shows the graph
+a run will execute.
+
+| Fabro | At load |
+|---|---|
+| `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint |
+| the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
+| `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
+| `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
+| `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
+| `import` | `unsupported.import` (later phase) |
+
+Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
+`goal`), so the persisted graph is self-describing for replay.
+
+## Nodes
+
+| Shape / type | Petri node | Step config |
+|---|---|---|
+| `Mdiamond` start | `noop`, the entry | |
+| `Msquare` exit | `noop`; `Completion::TerminalNode(exit)` | |
+| `diamond` conditional | `noop` | |
+| `box` agent, `tab` prompt | `fabro/agent` | prompt, goal, fidelity, model metadata, `output_schema`, `output_retries`, `acp` |
+| `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema` |
+| `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive` |
+| `component` parallel | `noop` with one routing group per branch, or a `for_each` expansion (below) | |
+| `tripleoctagon` fan-in | `noop`, `join: all`; its output is the ordered branch results | |
+| `insulator` wait | `fabro/wait` | `duration_ms` |
+| `house` manager loop | `fabro/workflow` | the child graph's digest, `manager.*` |
+| `circle`, `doublecircle`, other shapes | `fabro/agent`, with a `fabro.unknown_shape` warning | |
+
+Every node's `meta` carries `label`, `shape`, `kind`, `classes`, `span`, and
+`model` / `provider` / `reasoning_effort` when set. Every step config carries
+`kv` (the run context at spawn) and `on_failure`.
+
+Timeouts: `timeout` is the per-attempt `Budget.timeout`. Without one, a
+command gets 600 s (Fabro's default), an agent 24 h, a human gate 30 days, a
+wait its duration plus an hour. A bare number (`timeout=1200`) is the
+Attractor spelling and is refused; write the unit.
+
+Retries: `max_retries` (default `default_max_retries`, default 0) or a
+`retry_policy` preset (`none`, `standard`, `aggressive`, `linear`, `patient`)
+becomes `RetryPolicy`. Only a failure the step classed `retry_requested` is
+retried: Fabro's retry intent is a flag on the outcome, never a status.
+`allow_partial=true` — Fabro's spelling of `on_retries_exhausted="partially_succeed"` —
+is `Exhaustion::AcceptPartial`.
+
+## Routing
+
+Each node's outgoing edges become one routing group with `SelectionPolicy::Tiered`
+and Fabro's four tiers, `Fallthrough::NoEmit` (no match is a normal end):
+
+| Tier | Candidates | `when` | pick |
+|---|---|---|---|
+| 1 | edges with a `condition` | the lowered condition | `selection`: `HighestWeightThenLexical` (default) or `WeightedRandom` |
+| 2 | unconditional edges with a `label` | `normalize_label(output.preferred_label) == "<label key>"` | `First` |
+| 3 | unconditional edges | `index_of(output.suggested_next_ids, "<target>") != null`, ranked by that index | `LowestRankThenArmOrder` |
+| 4 | unconditional edges | the failure policy (below) | `selection` |
+
+Labels: the accelerator prefix (`[Y] Yes`, `Y) Yes`, `Y - Yes`) is stripped on
+both sides before the engine's `normalize_label`. `selection="random"` with a
+conditional edge is `fabro.random_with_conditions`, as in Fabro. `loop_restart=true`
+is `EdgeTransition::Restart`: the execution ends and a successor starts at the
+target with empty context.
+
+### Conditions
+
+| Fabro | Petri expression |
+|---|---|
+| `outcome=succeeded` / `partially_succeeded` / `skipped` | `status == 'success'` / `'partial_success'` / `'skipped'` |
+| `outcome=failed` | `failure() || cancelled() || timed_out()` |
+| `outcome=<anything else>` | `unsupported.outcome_value`: domain signals ride `context_updates` |
+| `preferred_label=X` | `to_string(default(output.preferred_label, '')) == 'X'` |
+| `context.K=X`, bare `K=X` | `to_string(default(get(kv, 'K'), '')) == 'X'` — Fabro's text comparison |
+| `K` (bare) | non-empty, not `"false"`, not `"0"` |
+| `K > 5` and friends | both sides numeric, else false (`loose_*` builtins) |
+| `K contains X` | array element equality, else substring |
+| `K matches re` | `matches(...)`; the pattern is validated at load |
+
+### Failure policy
+
+Two attributes, one value set — `route`, `exit`, `partially_succeed` — and the
+specific one wins:
+
+- `on_failure` decides a non-retryable failure; `on_retries_exhausted` decides a
+  retryable one that ran out of attempts (`allow_partial=true` spells the latter's
+  `partially_succeed`).
+- `route`: the unconditional edge is taken. `exit`: it is guarded `!failed`, so
+  the run quiesces and fails under `TerminalNode`. `partially_succeed`: the step
+  classifies the failure as `PartialSuccess` (failure kept in `underlying`) and it
+  routes as a success.
+- A human gate never falls through on failure, whatever the policy.
+- `on_failure="succeed"` and `auto_status=true` are refused: they would record
+  a clean success for a step that failed.
+
+**Deliberate departure.** Fabro promotes a failed outcome only when no explicit
+route matches, so an `outcome=failed` edge on a `succeed` node is still taken.
+Petri classifies once, at the step boundary, before routing sees the outcome;
+an `outcome=failed` edge on a `partially_succeed` node is unreachable and gets
+the `fabro.unreachable_failure_edge` lint. Two behaviors want two nodes.
+
+### Goal gates and loops
+
+`goal_gate=true` nodes lower to a `goal_check` noop in front of `exit`: for each
+gate (in id order) an arm guarded by `!default(nodes.<gate>.success_like, false)`
+jumps back to the first existing retry target of the node's `retry_target`, its
+`fallback_retry_target`, the graph's, the graph's fallback; a gate with no target
+ends the run failed; the last arm reaches `exit` when every gate passed.
+
+A depth-first search from start marks every cycle-closing edge `back`; every
+node forward-reachable from a back edge's target gets a finite
+`Budget.max_firings`: `max_visits`, else `max_node_visits`, else 500 (Fabro's
+unlimited, with one `info.budget.default` note). A value above 500 is refused.
+Every node except a fan-in joins with `Any`.
+
+## Parallel
+
+A `component` node without `for_each` fans out with one routing group per
+branch; every branch's edge into the `tripleoctagon` carries
+`{ index, value: { id, status, output } }`, and the fan-in's output is those
+values in branch order. `for_each="context.K"` makes the component evaluate
+`get(kv, 'K')` (its precondition enforces Fabro's 1000-item cap) and marks the
+single template node — an agent or prompt — with `Expansion::ForEach` over its
+input, `max_parallel` carried, `fail_fast: false`. Branch results ride tokens;
+`stdin_source="context.parallel.results"` on a later command reads the nearest
+fan-in's output.
+
+## Nested workflows
+
+`stack.child_workflow` (a path; `fabro/…` stands for `.fabro/…`) or
+`stack.child_dot_source` (inline DOT) is lowered with the parent, to at most
+three levels, with cycles refused. The child graph is registered before the
+run starts, and the `fabro/workflow` step invokes it by digest through the
+coordinator, once per cycle up to `manager.max_cycles`, until
+`manager.stop_condition` holds over the child's final context. The child
+inherits the parent's sandbox and secrets; the parent's cancel cancels it.
+
+## Steps at run time
+
+- **`fabro/command`** runs the script in bash (`language="python"`: `python3 -c`)
+  with stderr merged, feeds `stdin_source` through the process's stdin, keeps
+  the last 64 KiB of output in `output.stdout` and `command.output`, and with
+  `output_schema="routing"` reads the last JSON object of the output as the
+  routing directive (`outcome`, `preferred_next_label`, `suggested_next_ids`,
+  `context_updates`, `failure_reason`).
+- **`fabro/agent`** runs one turn of the Agent Client Protocol agent named by
+  `acp.command` / `acp.config` (node, then graph, then `PETRI_ACP_COMMAND`),
+  assembles the prompt from the goal, a compact preamble over earlier stages and
+  the node's prompt, reads the routing directive from the response, validates
+  `output_schema` with `output_retries` repair turns inside the attempt, and
+  forwards steering deliveries as follow-up prompts. `model`, `provider` and
+  `reasoning_effort` are observer metadata in phase one; the ACP command owns
+  model selection.
+- **`fabro/human`** asks through the core `Question` event and routes on the
+  delivered answer. `petri run --interactive` answers from the terminal,
+  `--auto-approve` takes the first choice; a `sensitive=true` gate's free text
+  crosses as a `$secret` reference.
+- **`fabro/wait`** sleeps, cancel-aware.
+- **`fabro/workflow`** is the nested invocation above.
+- **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
+  gate takes its first choice, as Fabro's `--dry-run` does.
+
+## Refused
+
+| Construct | Code |
+|---|---|
+| `on_failure="succeed"`, `on_retries_exhausted="succeed"` | `unsupported.on_failure.succeed` |
+| `auto_status=true` | `unsupported.auto_status` |
+| `outcome=X` for X outside the four outcomes | `unsupported.outcome_value` |
+| `llm_prompt`, `is_codergen`, `node_type`, bare-number timeouts | `unsupported.attractor` |
+| `import` | `unsupported.import` |
+| `acp_command` (legacy) | `unsupported.acp_command` |
+| a `tripleoctagon` with a `prompt` | `unsupported.fan_in.prompt` |
+| an unbound `{{ inputs.* }}` | `unsupported.template.unbound_input` |
+| ports, HTML strings, undirected graphs, `strict`, anonymous subgraphs | `unsupported.dot.*` |
+
+Ignored loudly (a warning naming the attribute): `stall_timeout` and
+`loop_restart_signature_limit` (host policy, later phases), `tool_hooks.*`, and
+any attribute Fabro does not define. Graphviz layout attributes are dropped
+silently.

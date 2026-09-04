@@ -771,6 +771,24 @@ and cross-run semantics stay with the driver layer (D2); BuildKite
 Native format: `next:` → one group; `parallel:` → multiple
 groups; `for_each` + `parallel: true|false` → `ForEach` vs cycle desugar.
 
+**Fabro** (`crates/fabro/FORMAT.md`; exercises the whole engine): every node's
+edges → one `Tiered` routing group with Fabro's four tiers (conditions;
+preferred label; suggested targets ranked by index; the fallback guarded by the
+`on_failure` / `on_retries_exhausted` policy), `Fallthrough::NoEmit`; start →
+entry noop; exit → `Completion::TerminalNode`; `goal_gate` → a `goal_check`
+noop before exit with back arms to the retry-target chain; DFS-classified
+back edges, `Any` joins, `Budget.max_firings` capped at 500;
+`loop_restart` → `EdgeTransition::Restart`; `component` → fan-out groups or
+`Expansion::ForEach` over the template node; `tripleoctagon` → `All` join with
+the ordered branch results as output; `house` → a nested invocation by graph
+digest. Conditions lower onto the expression language with Fabro's text
+comparison, truthiness and numeric rules spelled out; `outcome=X` names only
+the four Fabro outcomes. Deprecated success spellings, the Attractor dialect,
+imports and unknown outcome values are specific `unsupported.*` rejections.
+One deliberate departure: the `partially_succeed` classification happens at the
+step boundary, before routing, so an explicit `outcome=failed` edge on such a
+node is unreachable (linted).
+
 ## 13. Failure-class registry (grep anchor; extend here first)
 
 **Step outcome classes** (`FailureInfo.class`, matchable by `retry_on`):

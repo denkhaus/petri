@@ -4,8 +4,8 @@
 
 | Result (of the 32 Fabro workflows) | Count | Share |
 |---|---|---|
-| lowered clean | 21 | 65% |
-| lowered with warnings | 9 | 28% |
+| lowered clean | 20 | 62% |
+| lowered with warnings | 10 | 31% |
 | rejected with a specific `unsupported.*` code | 2 | 6% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
@@ -29,7 +29,7 @@
 | `fabro.unknown_attribute` | 31 |
 | `fabro.unknown_shape` | 2 |
 | `ignored.stall_timeout` | 1 |
-| `info.budget.default` | 19 |
+| `info.budget.default` | 20 |
 
 ## Every file
 
@@ -44,7 +44,7 @@
 | `.fabro/workflows/gh-triage/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/goal/workflow.fabro` | clean | 7 |  |
 | `.fabro/workflows/hello/workflow.fabro` | clean | 3 |  |
-| `.fabro/workflows/implement-issue/workflow.fabro` | clean | 4 |  |
+| `.fabro/workflows/implement-issue/workflow.fabro` | warnings | 4 | `info.budget.default` |
 | `.fabro/workflows/implement-plan/workflow.fabro` | warnings | 12 | `info.budget.default` |
 | `.fabro/workflows/interview/workflow.fabro` | clean | 8 |  |
 | `.fabro/workflows/patch-cves/workflow.fabro` | clean | 3 |  |

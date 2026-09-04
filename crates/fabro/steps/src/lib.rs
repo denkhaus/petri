@@ -2,11 +2,11 @@
 //!
 //! The frontend names five kinds (`frontend_fabro::kinds`); this crate
 //! registers them. [`register`] installs the real steps — `fabro/command`,
-//! `fabro/wait`, `fabro/human`, `fabro/agent` over ACP, and, as it lands,
-//! `fabro/workflow` — and [`register_stubs`] installs one simulated step per
-//! name (Fabro's `--dry-run` handlers) so a graph lowers, validates and runs
-//! end to end with no model, shell or person. Which registry a run uses is the
-//! distribution's choice.
+//! `fabro/wait`, `fabro/human`, `fabro/agent` over ACP and `fabro/workflow` —
+//! and [`register_stubs`] installs one simulated step per name (Fabro's
+//! `--dry-run` handlers) so a graph lowers, validates and runs end to end with
+//! no model, shell or person. Which registry a run uses is the distribution's
+//! choice.
 
 pub mod acp;
 pub mod agent;
@@ -16,8 +16,7 @@ pub mod human;
 mod outcome;
 mod stub;
 pub mod wait;
-
-use std::sync::Arc;
+pub mod workflow;
 
 pub use agent::AgentStep;
 pub use command::CommandStep;
@@ -27,16 +26,15 @@ pub use outcome::{Stage, fabro_outcome};
 use runtime::Runtime;
 pub use stub::{Simulate, StubStep, register_stubs};
 pub use wait::WaitStep;
+pub use workflow::WorkflowStep;
 
 /// Register the real Fabro step kinds on a runtime. Kinds without a real
 /// implementation yet register their stub, so every lowered graph validates.
 pub fn register(runtime: Runtime) -> Runtime {
-    let runtime = runtime
+    runtime
         .step(CommandStep)
         .step(WaitStep)
         .step(HumanStep)
-        .step(AgentStep);
-    let mut registry = runtime.registry().clone();
-    registry.register_runner(Arc::new(StubStep::new(WORKFLOW_KIND)));
-    runtime.steps(registry)
+        .step(AgentStep)
+        .step(WorkflowStep)
 }

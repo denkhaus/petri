@@ -10,7 +10,7 @@
 mod attrs;
 mod routing;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
@@ -27,7 +27,7 @@ use smol_str::SmolStr;
 use crate::kinds::{AGENT_KIND, COMMAND_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND};
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
-use crate::{condition, labels, stylesheet};
+use crate::{condition, dot, labels, model, stylesheet};
 
 /// The hard maximum on firings of any node in a loop, and the value Fabro's
 /// "unlimited" lowers to.
@@ -35,6 +35,10 @@ pub const MAX_FIRINGS: u32 = 500;
 
 /// The most items a `for_each` fan-out may expand, as Fabro caps it.
 pub const MAX_FOR_EACH_ITEMS: u64 = 1_000;
+
+/// How deep nested workflows may go below the root — the GitHub frontend's
+/// reusable-workflow limit, shared so the two formats agree.
+pub const MAX_CALL_DEPTH: usize = 3;
 
 /// Default per-attempt timeouts where Fabro has one, or where the engine
 /// needs a finite one.
@@ -151,16 +155,33 @@ struct Ctx<'a> {
     random:           bool,
     /// One `info.budget.default` per graph.
     budget_defaulted: bool,
+    /// Pre-lowered child workflows, root first.
+    children:         Vec<ir::Graph>,
+    /// The chain of workflow files being lowered, root first, for cycle and
+    /// depth checks on nested workflows.
+    stack:            Vec<String>,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
 /// `@file` references and child workflows relative to the repository root.
 pub(crate) fn lower(
+    workflow: Workflow,
+    file: &str,
+    files: &dyn FileSource,
+    inputs: &CompileInputs,
+    diags: Diagnostics,
+) -> Lowered {
+    lower_nested(workflow, file, files, inputs, diags, Vec::new())
+}
+
+/// [`lower`] for a workflow `stack` deep in nested-workflow calls.
+fn lower_nested(
     mut workflow: Workflow,
     file: &str,
     files: &dyn FileSource,
     inputs: &CompileInputs,
     mut diags: Diagnostics,
+    stack: Vec<String>,
 ) -> Lowered {
     let mut template = Context::new(inputs);
     read_input_defaults(file, files, &mut template, &mut diags);
@@ -184,7 +205,10 @@ pub(crate) fn lower(
         goal: String::new(),
         random: false,
         budget_defaulted: false,
+        children: Vec::new(),
+        stack,
     };
+    ctx.stack.push(file.to_string());
 
     ctx.graph_attrs(&mut workflow);
     if !ctx.structure(&workflow) {
@@ -226,6 +250,7 @@ pub(crate) fn lower(
         spans,
         template,
         goal,
+        children,
         ..
     } = ctx;
     let mut graph = b.build();
@@ -277,7 +302,7 @@ pub(crate) fn lower(
         }
         diags.push(d);
     }
-    Lowered::from_parts(graph, diags)
+    Lowered::with_children(graph, children, diags)
 }
 
 /// `workflow.toml` beside the workflow: `[run.inputs]` holds the defaults an
@@ -1191,23 +1216,125 @@ impl Ctx<'_> {
         }
         let source = node.attrs.text("stack.child_workflow");
         let inline = node.attrs.text("stack.child_dot_source");
-        match (source, inline) {
+        let child = match (source, inline) {
             (Some(path), _) => {
-                config.insert("child_workflow".into(), Value::String(path));
+                config.insert("child_workflow".into(), Value::String(path.clone()));
+                let span = node.attrs.span_of("stack.child_workflow", &node.span);
+                self.child_from_file(&path, &span, &node.id)
             }
             (None, Some(source)) => {
-                config.insert("child_dot_source".into(), Value::String(source));
-            }
-            (None, None) => self.diags.error(
-                "fabro.manager_loop_without_child",
-                node.span.clone(),
-                format!(
-                    "manager loop `{}` needs `stack.child_workflow` or `stack.child_dot_source`",
+                config.insert("child_dot_source".into(), Value::String(source.clone()));
+                let span = node.attrs.span_of("stack.child_dot_source", &node.span);
+                let name = format!(
+                    "{}#{}",
+                    self.stack.last().map_or("", String::as_str),
                     node.id
-                ),
-            ),
+                );
+                self.child_from_text(&name, &source, &span)
+            }
+            (None, None) => {
+                self.diags.error(
+                    "fabro.manager_loop_without_child",
+                    node.span.clone(),
+                    format!(
+                        "manager loop `{}` needs `stack.child_workflow` or `stack.child_dot_source`",
+                        node.id
+                    ),
+                );
+                None
+            }
+        };
+        if let Some(digest) = child {
+            config.insert("child_digest".into(), Value::String(digest));
         }
         Value::Object(config)
+    }
+
+    /// Where a `stack.child_workflow` path reads from: as written against the
+    /// repository root, with Fabro's bundle prefix `fabro/` standing for
+    /// `.fabro/`, or beside the workflow file.
+    fn child_from_file(&mut self, path: &str, span: &Span, node: &str) -> Option<String> {
+        let mut candidates = vec![path.to_string()];
+        if let Some(rest) = path.strip_prefix("fabro/") {
+            candidates.push(format!(".fabro/{rest}"));
+        }
+        if !self.base_dir.is_empty() {
+            candidates.push(format!("{}/{path}", self.base_dir));
+        }
+        let found = candidates.iter().find_map(|candidate| {
+            self.files
+                .read(candidate)
+                .map(|text| (candidate.clone(), text))
+        });
+        let Some((resolved, text)) = found else {
+            self.diags.error(
+                "fabro.child_workflow_not_found",
+                span.clone(),
+                format!(
+                    "manager loop `{node}` names `{path}`, which cannot be read ({} tried)",
+                    candidates.join(", ")
+                ),
+            );
+            return None;
+        };
+        self.child_from_text(&resolved, &text, span)
+    }
+
+    /// Lower a child workflow now, so `petri check` validates it and the run
+    /// registers it before the root starts. Its digest names it.
+    fn child_from_text(&mut self, name: &str, text: &str, span: &Span) -> Option<String> {
+        if self.stack.iter().any(|f| f == name) {
+            self.diags.error(
+                "fabro.workflow_cycle",
+                span.clone(),
+                format!(
+                    "workflow call cycle: {} -> `{name}`",
+                    self.stack.join(" -> ")
+                ),
+            );
+            return None;
+        }
+        if self.stack.len() > MAX_CALL_DEPTH {
+            self.diags.error(
+                "fabro.workflow_depth",
+                span.clone(),
+                format!("nested workflows nest more than {MAX_CALL_DEPTH} deep at `{name}`"),
+            );
+            return None;
+        }
+        let dot = match dot::parse(name, text) {
+            Ok(dot) => dot,
+            Err(diagnostic) => {
+                self.diags.push(diagnostic);
+                return None;
+            }
+        };
+        let workflow = model::build(&dot);
+        let to_map = |map: &BTreeMap<String, Value>| {
+            map.iter()
+                .map(|(k, v)| (SmolStr::new(k), v.clone()))
+                .collect()
+        };
+        let inputs = CompileInputs {
+            inputs: to_map(self.template.inputs()),
+            vars:   to_map(self.template.vars()),
+        };
+        let lowered = lower_nested(
+            workflow,
+            name,
+            self.files,
+            &inputs,
+            Diagnostics::new(),
+            self.stack.clone(),
+        );
+        for diagnostic in lowered.diagnostics.iter() {
+            self.diags.push(diagnostic.clone());
+        }
+        let graph = lowered.graph?;
+        let digest = frontend::graph_digest(&graph);
+        self.children.extend(lowered.children);
+        self.children.push(graph);
+        Some(digest)
     }
 
     // ── Goal gates ─────────────────────────────────────────────────────────

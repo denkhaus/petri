@@ -1128,6 +1128,7 @@ dependencies = [
  "jsonschema",
  "petri-execution",
  "petri-executor",
+ "petri-frontend",
  "petri-frontend-fabro",
  "petri-ir",
  "petri-runtime",
