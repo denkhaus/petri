@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_str::SmolStr;
 
+use crate::container::{ContainerOptions, ServiceOptions};
 use crate::expr::ExprTable;
 use crate::flow::{FailureClass, Status, StatusKind};
 use crate::ids::{Attempt, EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
@@ -721,10 +722,10 @@ pub enum RuntimeTarget {
     /// A process inside a container started from `image`.
     Container {
         image:       SmolStr,
-        /// Raw engine flags, passed through to whatever runs the container. The
-        /// core never reads them.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        options:     Vec<SmolStr>,
+        /// Typed container options, lowered by the frontend from whatever
+        /// its format calls them. The core never reads them.
+        #[serde(default)]
+        options:     ContainerOptions,
         /// Registry auth for pulling the image. Carries a secret *name*, never
         /// a value: the graph stays serializable and plaintext exists
         /// only inside the executor's acquire.
@@ -753,12 +754,11 @@ pub struct ServiceSpec<S = Live> {
     pub image:       SmolStr,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env:         BTreeMap<SmolStr, ExprOrValue<S>>,
-    /// Port publications, as written (`host:container` or `container`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports:       Vec<SmolStr>,
-    /// Raw engine flags, opaque to the core (health checks ride here).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options:     Vec<SmolStr>,
+    /// Typed service options, lowered by the frontend (the health check
+    /// rides here). No port publications: a service is reached by its
+    /// name on the scope's network, never through a published port.
+    #[serde(default)]
+    pub options:     ServiceOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<RegistryCredentials>,
 }
@@ -769,8 +769,7 @@ impl<S> ServiceSpec<S> {
             name:        SmolStr::new(name),
             image:       SmolStr::new(image),
             env:         BTreeMap::new(),
-            ports:       Vec::new(),
-            options:     Vec::new(),
+            options:     ServiceOptions::default(),
             credentials: None,
         }
     }
@@ -794,7 +793,7 @@ impl RuntimeSpec {
         Self {
             target:       RuntimeTarget::Container {
                 image:       SmolStr::new(image),
-                options:     Vec::new(),
+                options:     ContainerOptions::default(),
                 credentials: None,
             },
             requirements: Vec::new(),

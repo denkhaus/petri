@@ -13,6 +13,7 @@
 //! `engine` crate; side effects live behind traits in the host.
 
 mod builder;
+pub mod container;
 mod desugar;
 mod digest;
 pub mod expr;
@@ -25,6 +26,10 @@ mod step;
 pub mod validate;
 
 pub use builder::{Arm, GraphBuilder};
+pub use container::{
+    ContainerOptions, HealthCheck, OptionError, ServiceOptions, parse_container_options,
+    parse_service_options,
+};
 pub use desugar::{
     CollectorExprs, LoopExprs, SequentialForEach, collector_exprs, parallel_for_each,
     sequential_for_each, sequential_for_each_over,

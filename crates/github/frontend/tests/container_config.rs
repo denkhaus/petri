@@ -1,6 +1,7 @@
-//! Container config lowering: `container.options` as raw engine flags,
-//! `container.credentials` as a username plus a secret *name*, and
-//! expression-valued images resolved through the static contexts.
+//! Container config lowering: `container.options` to typed fields with an
+//! unknown flag rejected by name, `container.credentials` as a username plus
+//! a secret *name*, and expression-valued images resolved through the static
+//! contexts.
 
 use frontend::NoFiles;
 use frontend_gha::load;
@@ -36,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/acme/builder:1
-      options: --cpus 2 --health-cmd "curl -f localhost"
+      options: --user root --dns 127.0.0.1 --cap-add=NET_ADMIN -e "GREETING=hello world"
       credentials:
         username: robot
         password: ${{ secrets.GHCR_TOKEN }}
@@ -54,16 +55,75 @@ jobs:
         unreachable!()
     };
     assert_eq!(image, "ghcr.io/acme/builder:1");
-    assert_eq!(options, &[
-        "--cpus",
-        "2",
-        "--health-cmd",
-        "curl -f localhost"
-    ]);
+    // The flags are typed at lowering; the graph never carries raw text.
+    assert_eq!(options.user.as_deref(), Some("root"));
+    assert_eq!(options.dns, ["127.0.0.1"]);
+    assert_eq!(options.cap_add, ["NET_ADMIN"]);
+    assert_eq!(options.env, [("GREETING".into(), "hello world".into())]);
+    assert!(!options.privileged);
     let credentials = credentials.as_ref().expect("credentials");
     assert_eq!(credentials.username, "robot");
     // The graph carries the secret's *name*, never a value.
     assert_eq!(credentials.password_secret, "GHCR_TOKEN");
+}
+
+/// A flag with no typed mapping is a lowering rejection that names the
+/// flag, so the author sees it before anything runs — the executor no
+/// longer has to fail the acquire for it.
+#[test]
+fn an_unknown_container_option_is_rejected_by_name() {
+    let text = r"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      options: --cpus 2 --user root
+    steps:
+      - run: echo hi
+";
+    let lowered = lower(text);
+    assert!(lowered.graph.is_none());
+    let rejection = lowered
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "unsupported.container.option")
+        .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics.iter().collect::<Vec<_>>()));
+    assert!(
+        rejection.message.contains("--cpus"),
+        "{}",
+        rejection.message
+    );
+    assert_eq!(rejection.span.line, 8, "anchored on the options line");
+}
+
+/// A service flag on the job container is misplaced, and says so.
+#[test]
+fn a_service_only_flag_on_the_job_container_is_rejected() {
+    let text = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.20
+      options: --health-cmd "curl -f localhost"
+    steps:
+      - run: echo hi
+"#;
+    let lowered = lower(text);
+    assert!(lowered.graph.is_none());
+    let rejection = lowered
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "unsupported.container.option")
+        .expect("the misplaced flag is rejected");
+    assert!(
+        rejection.message.contains("--health-cmd") && rejection.message.contains("service"),
+        "{}",
+        rejection.message
+    );
 }
 
 #[test]

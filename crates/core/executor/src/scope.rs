@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ir::{RegistryCredentials, RuntimeSpec, ScopeId, WorkspacePolicy};
+use ir::{RegistryCredentials, RuntimeSpec, ScopeId, ServiceOptions, WorkspacePolicy};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -67,10 +67,8 @@ pub struct ServiceSpec {
     pub name:        SmolStr,
     pub image:       SmolStr,
     pub env:         BTreeMap<SmolStr, SmolStr>,
-    /// Port publications, as written (`host:container` or `container`).
-    pub ports:       Vec<SmolStr>,
-    /// Raw engine flags, passed through (health checks ride here).
-    pub options:     Vec<SmolStr>,
+    /// Typed service options (the health check rides here).
+    pub options:     ServiceOptions,
     pub credentials: Option<RegistryCredentials>,
 }
 
@@ -84,7 +82,6 @@ impl fmt::Debug for ServiceSpec {
             .field("name", &self.name)
             .field("image", &self.image)
             .field("env", &self.env.keys())
-            .field("ports", &self.ports)
             .field("options", &self.options)
             .field("credentials", &self.credentials)
             .finish()
@@ -97,8 +94,7 @@ impl ServiceSpec {
             name:        SmolStr::new(name),
             image:       SmolStr::new(image),
             env:         BTreeMap::new(),
-            ports:       Vec::new(),
-            options:     Vec::new(),
+            options:     ServiceOptions::default(),
             credentials: None,
         }
     }

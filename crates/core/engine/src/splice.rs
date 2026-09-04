@@ -850,13 +850,11 @@ fn remap_scope(scope: &Scope<Local>, live_id: ScopeId, expr_base: u32) -> Scope 
                 name,
                 image,
                 env,
-                ports,
                 options,
                 credentials,
             } = service;
             let mut s = ir::ServiceSpec::new(name, image);
             s.env = shift_env(env);
-            s.ports.clone_from(ports);
             s.options.clone_from(options);
             s.credentials.clone_from(credentials);
             s

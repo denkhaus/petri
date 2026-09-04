@@ -17,19 +17,13 @@ const RESOLVE_REDIS: &str = "nslookup redis.";
 
 fn redis_service() -> ServiceSpec {
     let mut service = ServiceSpec::new("redis", REDIS);
-    service.options = [
-        "--health-cmd",
-        "redis-cli ping",
-        "--health-interval",
-        "1s",
-        "--health-timeout",
-        "3s",
-        "--health-retries",
-        "30",
-    ]
-    .iter()
-    .map(|o| SmolStr::new(*o))
-    .collect();
+    service.options.health = Some(ir::HealthCheck {
+        cmd: Some(SmolStr::new("redis-cli ping")),
+        interval_ms: Some(1_000),
+        timeout_ms: Some(3_000),
+        retries: Some(30),
+        ..ir::HealthCheck::default()
+    });
     service
 }
 
@@ -108,10 +102,11 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
     // must come up, so the provider waits and notices. Without one a sidecar
     // may exit — a migration job does — and the acquire would succeed.
     let mut flaky = ServiceSpec::new("flaky", "alpine:3.20");
-    flaky.options = ["--health-cmd", "true", "--health-interval", "1s"]
-        .iter()
-        .map(|o| SmolStr::new(*o))
-        .collect();
+    flaky.options.health = Some(ir::HealthCheck {
+        cmd: Some(SmolStr::new("true")),
+        interval_ms: Some(1_000),
+        ..ir::HealthCheck::default()
+    });
     let spec = ScopeSpec::new(ScopeId::new(0), "scope-0")
         .with_runtime(RuntimeSpec::container("alpine:3.20"))
         .with_services(vec![flaky]);

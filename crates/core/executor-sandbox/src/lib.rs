@@ -13,7 +13,6 @@ mod env;
 mod files;
 mod host;
 mod oneshot;
-mod options;
 mod routing;
 mod run;
 
@@ -253,11 +252,9 @@ fn build_spec(
              executor or a runner image",
         ));
     };
-    let container = options::parse_container(options)?;
     let registry_auth = registry_auth(credentials.as_ref(), ctx)?;
     let sidecars = sidecars(scope, ctx)?;
-    let provider_config =
-        docker_provider_config(workspace_host, registry_auth, sidecars, &container);
+    let provider_config = docker_provider_config(workspace_host, registry_auth, sidecars, options);
     let mut spec = SandboxSpec::new(SandboxSource::Image {
         reference: image.to_string(),
     })
@@ -265,14 +262,14 @@ fn build_spec(
     .provider_config(provider_config.into_value())
     .name(name)
     .label(ENVIRONMENT_LABEL, label);
-    spec.user.clone_from(&container.user);
+    spec.user = options.user.as_ref().map(ToString::to_string);
 
     // Scope env is the trusted channel for the container; a `-e` option lands
     // on top, as the later `docker create` flag would have.
     for (key, value) in &scope.env {
         spec = spec.env_var(key.as_str(), value.as_str());
     }
-    for (key, value) in &container.env {
+    for (key, value) in &options.env {
         spec = spec.env_var(key.as_str(), value.as_str());
     }
     Ok(spec)
@@ -301,22 +298,30 @@ fn registry_auth(
 fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<Sidecar>, EnvError> {
     let mut sidecars = Vec::with_capacity(scope.services.len());
     for service in &scope.services {
-        let parsed = options::parse_service(&service.options)?;
+        let typed = &service.options;
         let mut sidecar = Sidecar::new(service.name.as_str(), service.image.as_str());
         // Declared env first, then `-e` flags on top, as `docker create`
         // would apply them.
         sidecar.env = service
             .env
             .iter()
+            .chain(typed.env.iter().map(|(key, value)| (key, value)))
             .map(|(key, value)| (key.to_string(), value.to_string()))
-            .chain(parsed.env.iter().cloned())
             .collect();
-        sidecar.dns = parsed.dns;
-        sidecar.cap_add = parsed.cap_add;
-        sidecar.user = parsed.user;
-        sidecar.entrypoint = parsed.entrypoint;
-        sidecar.health = parsed.health.map(|health| Health {
-            cmd:             health.cmd.unwrap_or_default(),
+        sidecar.dns = typed.dns.iter().map(ToString::to_string).collect();
+        sidecar.cap_add = typed.cap_add.iter().map(ToString::to_string).collect();
+        sidecar.user = typed.user.as_ref().map(ToString::to_string);
+        sidecar.privileged = typed.privileged;
+        sidecar.entrypoint = typed
+            .entrypoint
+            .as_ref()
+            .map(|words| words.iter().map(ToString::to_string).collect());
+        sidecar.health = typed.health.as_ref().map(|health| Health {
+            cmd:             health
+                .cmd
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             interval_ms:     health.interval_ms,
             timeout_ms:      health.timeout_ms,
             retries:         health.retries,
@@ -360,22 +365,22 @@ fn docker_provider_config(
     workspace_host: &str,
     registry_auth: Option<RegistryAuth>,
     sidecars: Vec<Sidecar>,
-    container: &options::ContainerOptions,
+    container: &ir::ContainerOptions,
 ) -> DockerProviderConfig {
     // Steps run as a program plus arguments, so an image without bash
     // (alpine) works: the provider's exec wrapper needs only /bin/sh.
     DockerProviderConfig {
         init: true,
         privileged: container.privileged,
-        platform: container.platform.clone(),
+        platform: container.platform.as_ref().map(ToString::to_string),
         binds: vec![BindMount {
             host:      workspace_host.to_owned(),
             container: CONTAINER_WORKSPACE.to_owned(),
             mode:      None,
         }],
         extra_hosts: vec![format!("{DOCKER_HOST_ALIAS}:host-gateway")],
-        dns: container.dns.clone(),
-        cap_add: container.cap_add.clone(),
+        dns: container.dns.iter().map(ToString::to_string).collect(),
+        cap_add: container.cap_add.iter().map(ToString::to_string).collect(),
         registry_auth,
         sidecars,
         ..DockerProviderConfig::default()

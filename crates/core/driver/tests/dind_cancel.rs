@@ -14,7 +14,6 @@ use executor::Retention;
 use executor_sandbox::list_containers;
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, RuntimeTarget, ScopeId, StepRef, validate};
 use serde_json::json;
-use smol_str::SmolStr;
 use steps::PROCESS_KIND;
 use support::*;
 use testkit::is_docker_ready;
@@ -36,7 +35,7 @@ fn dind_graph(script: &str) -> ir::Graph {
     let mut scope = ir::Scope::new(ScopeId::new(0));
     scope.runtime = RuntimeSpec::container(DIND_IMAGE);
     if let RuntimeTarget::Container { options, .. } = &mut scope.runtime.target {
-        options.push(SmolStr::new("--privileged"));
+        options.privileged = true;
     }
     let scope = b.add_scope(scope);
     b.add_node(

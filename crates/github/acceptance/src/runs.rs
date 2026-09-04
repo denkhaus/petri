@@ -668,9 +668,10 @@ pub fn containerize(
         let image = image_for(&scope.runtime.requirements);
         scope.runtime.target = RuntimeTarget::Container {
             image:       SmolStr::new(&image),
-            options:     platform
-                .map(|p| vec![SmolStr::new("--platform"), SmolStr::new(p)])
-                .unwrap_or_default(),
+            options:     ir::ContainerOptions {
+                platform: platform.map(SmolStr::new),
+                ..ir::ContainerOptions::default()
+            },
             credentials: None,
         };
     }
@@ -703,7 +704,7 @@ pub fn privilege(graph: &mut Graph, image: &str) {
         } = &mut scope.runtime.target
             && scope_image == image
         {
-            options.push(SmolStr::new("--privileged"));
+            options.privileged = true;
         }
     }
 }
@@ -2143,12 +2144,7 @@ mod tests {
             })
             .collect();
         assert!(!options.is_empty(), "a dind scope exists");
-        assert!(
-            options
-                .iter()
-                .all(|o| o.iter().any(|flag| flag == "--privileged")),
-            "{options:?}"
-        );
+        assert!(options.iter().all(|o| o.privileged), "{options:?}");
     }
 
     fn pinned(reference: &str) -> ActionLocation {

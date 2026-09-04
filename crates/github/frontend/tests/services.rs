@@ -1,6 +1,6 @@
 //! `services:` lowering: sidecar containers onto the job's scope, realized at
-//! acquisition — image, env, ports, and `options` split into the flags GitHub
-//! hands the engine.
+//! acquisition — image, env, and `options` typed at lowering; `ports` warned
+//! about and dropped.
 
 use frontend::NoFiles;
 use frontend_gha::load;
@@ -52,13 +52,69 @@ jobs:
         service.env.get("POSTGRES_DB"),
         Some(&ir::ExprOrValue::Value(serde_json::json!("django")))
     );
-    assert_eq!(service.ports, vec!["5432:5432"]);
-    assert_eq!(service.options, vec![
-        "--health-cmd",
-        "pg_isready",
-        "--health-interval",
-        "10s",
-    ]);
+    // Options are typed at lowering: the health check arrives as fields.
+    let health = service.options.health.as_ref().expect("the health check");
+    assert_eq!(health.cmd.as_deref(), Some("pg_isready"));
+    assert_eq!(health.interval_ms, Some(10_000));
+}
+
+/// `ports:` is accepted and dropped with a warning that names the service:
+/// the job reaches a service by its name on the scope's network, and no
+/// port is published to the host. The graph still lowers.
+#[test]
+fn service_ports_are_warned_about_and_dropped() {
+    let text = r"
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        ports:
+          - 5432:5432
+    steps:
+      - run: echo hi
+";
+    let lowered = lower(text);
+    assert!(lowered.graph.is_some(), "ports do not reject the workflow");
+    let warning = lowered
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "ignored.services.ports")
+        .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics.iter().collect::<Vec<_>>()));
+    assert_eq!(warning.severity, frontend::Severity::Warning);
+    assert!(warning.message.contains("postgres"), "{}", warning.message);
+}
+
+/// An unknown service flag is rejected at lowering, naming the service and
+/// the flag.
+#[test]
+fn an_unknown_service_option_is_rejected_by_name() {
+    let text = r"
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        options: --memory 1g
+    steps:
+      - run: echo hi
+";
+    let lowered = lower(text);
+    assert!(lowered.graph.is_none());
+    let rejection = lowered
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "unsupported.container.option")
+        .expect("the unknown flag is rejected");
+    assert!(
+        rejection.message.contains("--memory") && rejection.message.contains("redis"),
+        "{}",
+        rejection.message
+    );
 }
 
 #[test]

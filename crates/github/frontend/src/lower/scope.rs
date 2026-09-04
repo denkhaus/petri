@@ -178,7 +178,7 @@ impl<'a> Lowering<'_, 'a> {
 
         if let Some(container) = job.container {
             let mut image_node = None;
-            let mut options: Vec<SmolStr> = Vec::new();
+            let mut options = ir::ContainerOptions::default();
             let mut credentials = None;
             if container.as_str().is_some() {
                 image_node = Some(container);
@@ -197,7 +197,7 @@ impl<'a> Lowering<'_, 'a> {
                 }
                 image_node = m.get("image");
                 if let Some(node) = m.get("options") {
-                    options = self.engine_flags(node, "container");
+                    options = self.container_options(node);
                 }
                 if let Some(node) = m.get("credentials") {
                     credentials = self.registry_credentials(node, "container");
@@ -268,10 +268,12 @@ impl<'a> Lowering<'_, 'a> {
         }
     }
 
-    /// `options:` — raw engine flags, split the way GitHub hands them to the
-    /// engine. Opaque from here on: the graph carries them, executors pass
-    /// them through.
-    fn engine_flags(&mut self, node: Node<'_>, what: &str) -> Vec<SmolStr> {
+    /// `options:` — engine flags, split the way GitHub hands them to the
+    /// engine and lowered to the typed fields the core carries. A flag with
+    /// no typed mapping is rejected here, naming it, so the failure lands
+    /// where the author can act on it rather than inside an executor's
+    /// acquire. `None` reports the rejection.
+    fn engine_flags(&mut self, node: Node<'_>, what: &str) -> Option<Vec<SmolStr>> {
         let text = node.as_str().unwrap_or_default();
         if text.contains("${{") {
             self.diags.unsupported(
@@ -280,12 +282,53 @@ impl<'a> Lowering<'_, 'a> {
                 format!("`{what}` options carry an expression"),
                 "options are fixed per scope; use literals",
             );
-            return Vec::new();
+            return None;
         }
-        crate::split_shell_words(text)
-            .into_iter()
-            .map(SmolStr::new)
-            .collect()
+        Some(
+            crate::split_shell_words(text)
+                .into_iter()
+                .map(SmolStr::new)
+                .collect(),
+        )
+    }
+
+    /// A job container's `options:`, typed.
+    fn container_options(&mut self, node: Node<'_>) -> ir::ContainerOptions {
+        let Some(flags) = self.engine_flags(node, "container") else {
+            return ir::ContainerOptions::default();
+        };
+        match ir::parse_container_options(&flags) {
+            Ok(options) => options,
+            Err(error) => {
+                self.reject_option(node, "container", &error);
+                ir::ContainerOptions::default()
+            }
+        }
+    }
+
+    /// A service's `options:`, typed.
+    fn service_options(&mut self, node: Node<'_>, alias: &str) -> ir::ServiceOptions {
+        let Some(flags) = self.engine_flags(node, "service") else {
+            return ir::ServiceOptions::default();
+        };
+        match ir::parse_service_options(&flags) {
+            Ok(options) => options,
+            Err(error) => {
+                self.reject_option(node, &format!("service `{alias}`"), &error);
+                ir::ServiceOptions::default()
+            }
+        }
+    }
+
+    fn reject_option(&mut self, node: Node<'_>, what: &str, error: &ir::OptionError) {
+        self.diags.unsupported(
+            "container.option",
+            node.span(),
+            format!("{what} option `{}`: {}", error.flag, error.why),
+            "the job container takes `-e`, `--user`, `--dns`, `--cap-add`, `--privileged` and \
+             `--platform`; a service takes `-e`, `--user`, `--entrypoint`, `--dns`, `--cap-add` \
+             and the `--health-*` flags",
+        );
     }
 
     /// `credentials:` — registry auth. The username resolves at lowering (a
@@ -339,9 +382,11 @@ impl<'a> Lowering<'_, 'a> {
     }
 
     /// `services:` onto the scope: sidecar containers with the job's lifetime,
-    /// realized at acquisition. Images and ports are literal; env lowers like
-    /// scope env (resolved against the run's parameters); `options` splits into
-    /// the flags GitHub hands the engine, opaque from here on.
+    /// realized at acquisition. Images are literal; env lowers like scope env
+    /// (resolved against the run's parameters); `options` lowers to typed
+    /// fields; `ports` is accepted with a warning and dropped, because a
+    /// service is reached by its name on the scope's network and never
+    /// through a published port.
     fn services_for(&mut self, job: &Job<'a>) -> Vec<ir::ServiceSpec> {
         let Some(node) = job.services else {
             return Vec::new();
@@ -407,26 +452,18 @@ impl<'a> Lowering<'_, 'a> {
                     }
                 }
                 if let Some(ports) = sm.get("ports") {
-                    let entries: Vec<Node<'_>> = match ports.as_sequence() {
-                        Some(seq) => seq.iter().collect(),
-                        None => vec![ports],
-                    };
-                    for entry in entries {
-                        let text = super::scalar_text(entry);
-                        if text.contains("${{") {
-                            self.diags.unsupported(
-                                "container.expression",
-                                entry.span(),
-                                format!("service `{alias}` has an expression-valued port"),
-                                "ports are fixed per scope; use literals",
-                            );
-                            continue;
-                        }
-                        service.ports.push(SmolStr::new(text));
-                    }
+                    self.diags.warning(
+                        "ignored.services.ports",
+                        ports.span(),
+                        format!(
+                            "service `{alias}` publishes ports, which is ignored: the job reaches \
+                             the service as `{alias}` on the scope's network, and no port is \
+                             published to the host"
+                        ),
+                    );
                 }
                 if let Some(options) = sm.get("options") {
-                    service.options = self.engine_flags(options, "service");
+                    service.options = self.service_options(options, alias);
                 }
                 sm.get("image")
             } else {

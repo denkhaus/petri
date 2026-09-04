@@ -1264,7 +1264,6 @@ impl Driver {
                 name:        service.name.clone(),
                 image:       service.image.clone(),
                 env:         resolve(&service.env),
-                ports:       service.ports.clone(),
                 options:     service.options.clone(),
                 credentials: service.credentials.clone(),
             })
