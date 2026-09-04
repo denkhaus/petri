@@ -42,8 +42,11 @@ pub(crate) struct SandboxEnv {
     pub(crate) grace:          Duration,
 }
 
-/// Maps a finished `run_streaming` to the executor's exit status. A signal
-/// wins over a code, so a foreign signal reads the same on every backend.
+/// Maps a finished `run_streaming` to the executor's exit status. The
+/// observed signal wins over a code, so a foreign signal and the provider's
+/// own ladder read the same on every backend. The fallbacks below are for a
+/// provider that stopped the command but could not observe how (Daytona ends
+/// a session without seeing the child's status).
 fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>) -> ExitStatus {
     if let Some(signal) = signal {
         return ExitStatus::signalled(signal);
