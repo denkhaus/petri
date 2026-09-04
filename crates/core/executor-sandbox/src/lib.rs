@@ -388,12 +388,10 @@ fn docker_provider_config(
     sidecars: Vec<serde_json::Value>,
     container: &options::ContainerOptions,
 ) -> serde_json::Value {
-    // `shell: auto`: steps run through `exec 'prog' 'args'`, which needs no
-    // Bash semantics, so an image without bash (alpine) still works — the
-    // provider probes for /bin/bash and falls back to /bin/sh.
+    // Steps run as a program plus arguments, so an image without bash
+    // (alpine) works: the provider's exec wrapper needs only /bin/sh.
     let mut config = serde_json::json!({
         "init": true,
-        "shell": "auto",
         "binds": [{ "host": workspace_host, "container": CONTAINER_WORKSPACE }],
         "extra_hosts": [format!("{DOCKER_HOST_ALIAS}:host-gateway")],
         "dns": container.dns,

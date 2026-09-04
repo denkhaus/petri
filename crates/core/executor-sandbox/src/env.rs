@@ -19,6 +19,7 @@ use executor::{
     StdinWriter,
 };
 use sandbox_driver::{ExecControls, ExecSpec, OutputStream, Sandbox, StdinSource, Termination};
+use smol_str::SmolStr;
 use tokio::fs;
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -41,32 +42,6 @@ pub(crate) struct SandboxEnv {
     pub(crate) grace:          Duration,
 }
 
-/// Quotes one argument for a Bash command line with single quotes.
-fn shell_quote(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('\'');
-    for c in value.chars() {
-        if c == '\'' {
-            quoted.push_str("'\\''");
-        } else {
-            quoted.push(c);
-        }
-    }
-    quoted.push('\'');
-    quoted
-}
-
-/// Builds the `exec 'prog' 'arg'...` command line the Bash contract runs.
-fn exec_command(spec: &ProcessSpec) -> String {
-    let mut command = String::from("exec ");
-    command.push_str(&shell_quote(&spec.program));
-    for arg in &spec.args {
-        command.push(' ');
-        command.push_str(&shell_quote(arg));
-    }
-    command
-}
-
 /// Maps a finished `run_streaming` to the executor's exit status. A signal
 /// wins over a code, so a foreign signal reads the same on every backend.
 fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>) -> ExitStatus {
@@ -86,7 +61,6 @@ fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>)
 #[async_trait]
 impl ExecEnv for SandboxEnv {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
-        let command = exec_command(&spec);
         // `docker exec -w` refuses a directory that does not exist yet (`repo/`
         // before the first checkout), so create the step's cwd through the
         // bind mount first, as the workspace root itself already is.
@@ -101,7 +75,12 @@ impl ExecEnv for SandboxEnv {
             .as_ref()
             .map(|cwd| cwd.to_string_lossy().into_owned());
 
-        let mut exec_spec = ExecSpec::new(command).no_timeout();
+        // The step's program and arguments go to the sandbox as given: the
+        // exec contract is an argument vector, so nothing is quoted or
+        // interpreted on the way.
+        let mut exec_spec = ExecSpec::new(spec.program.as_str())
+            .args(spec.args.iter().map(SmolStr::as_str))
+            .no_timeout();
         if let Some(dir) = working_dir {
             exec_spec = exec_spec.working_dir(dir);
         }
