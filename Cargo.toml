@@ -99,6 +99,10 @@ proptest = "1.11"
 minijinja = "=2.19.0"
 # `workflow.toml` beside a Fabro workflow carries its input defaults.
 toml = "0.9"
+# The Fabro agent step validates `output_schema` JSON Schemas as Fabro does.
+jsonschema = { version = "0.42", default-features = false }
+# `acp.command` is a shell-quoted command line; split it the way Fabro does.
+shlex = "1"
 libc = "0.2"
 # Full `regex`, not `regex-lite`: the `matches` builtin must accept every pattern
 # the frontends it serves validate at parse time, so this is a language-compatibility

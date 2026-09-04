@@ -42,17 +42,6 @@ fn runtime(dir: &RunDir) -> Runtime {
     register(Runtime::standard()).options(options)
 }
 
-/// Script a node's stub, for the kinds that still stub.
-fn script_node(graph: &mut Graph, node: &str, value: Value) {
-    let node = graph
-        .body
-        .nodes
-        .iter_mut()
-        .find(|n| n.name == node)
-        .expect("node");
-    node.step.config["simulate"] = value;
-}
-
 async fn run(graph: Graph, label: &str) -> ExecutionReport {
     let dir = RunDir::new(label);
     let rt = runtime(&dir);
@@ -113,16 +102,11 @@ async fn a_failing_command_fails_with_its_exit_status_and_routes() {
 
 #[tokio::test]
 async fn stdin_source_feeds_the_script_from_the_context() {
-    let mut graph = lower(&dot(r#"
-        a [prompt="x"]
+    let graph = lower(&dot(r#"
+        a [shape=parallelogram, output_schema="routing", script="echo '{\"context_updates\": {\"payload\": \"from context\"}}'"]
         c [shape=parallelogram, script="cat", stdin_source="context.payload"]
         start -> a -> c -> exit
     "#));
-    script_node(
-        &mut graph,
-        "a",
-        json!({ "context_updates": { "payload": "from context" } }),
-    );
     let report = run(graph, "fabro-command-stdin").await;
     assert_eq!(
         report.status,

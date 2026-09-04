@@ -22,6 +22,8 @@ steps = { workspace = true }
 runtime = { workspace = true }
 frontend-fabro = { workspace = true }
 async-trait = { workspace = true }
+jsonschema = { workspace = true }
+shlex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
