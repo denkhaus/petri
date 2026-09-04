@@ -1,0 +1,36 @@
+[package]
+name = "petri-executor-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Petri executor over the sandbox-driver provider family"
+
+publish = false
+
+[lib]
+name = "executor_sandbox"
+
+[lints]
+workspace = true
+
+[dependencies]
+executor.workspace = true
+ir.workspace = true
+sandbox-driver.workspace = true
+sandbox-driver-host.workspace = true
+sandbox-driver-docker.workspace = true
+async-trait.workspace = true
+smol_str.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "macros", "time", "fs"] }
+tokio-util = "0.7"
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ir.workspace = true
+smol_str.workspace = true
+sandbox-driver.workspace = true
+sandbox-driver-host.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

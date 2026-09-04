@@ -6,6 +6,7 @@ members = [
     "crates/core/executor",
     "crates/core/executor-host",
     "crates/core/executor-docker",
+    "crates/core/executor-sandbox",
     "crates/core/steps",
     "crates/core/driver",
     "crates/core/execution",
@@ -73,6 +74,13 @@ engine = { package = "petri-engine", path = "crates/core/engine" }
 executor = { package = "petri-executor", path = "crates/core/executor" }
 executor-host = { package = "petri-executor-host", path = "crates/core/executor-host" }
 executor-docker = { package = "petri-executor-docker", path = "crates/core/executor-docker" }
+executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/executor-sandbox" }
+# sandbox-driver lives in the sibling `lithoscomputer/sandbox-driver` repo. Path
+# dependency during development; pin by git revision once the matching commit is
+# pushed (see .ai/plans/sandbox-driver-adoption.md).
+sandbox-driver = { path = "../sandbox-driver/crates/sandbox-driver" }
+sandbox-driver-host = { path = "../sandbox-driver/crates/sandbox-driver-host" }
+sandbox-driver-docker = { path = "../sandbox-driver/crates/sandbox-driver-docker" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }
