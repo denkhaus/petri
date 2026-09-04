@@ -207,3 +207,42 @@ fn run_id(run_dir: &Path) -> String {
         .trim()
         .to_owned()
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_shot_action_container_shares_the_workspace() {
+    use executor::OneShotContainer;
+
+    let dir = tmp::TempDir::new();
+    let Some(executor) = docker_executor(dir.path()).await else {
+        return;
+    };
+    let handle = executor
+        .acquire(&container_scope(), &AcquireContext::bare())
+        .await
+        .expect("acquire");
+    let runner = handle
+        .container_runner()
+        .expect("a container scope binds a one-shot runner");
+    assert_eq!(runner.workspace_path(), "/workspace");
+
+    // A one-shot action container writes into the shared workspace and exits
+    // with its own status.
+    let spec = OneShotContainer::registry(TEST_IMAGE)
+        .with_entrypoint("bash")
+        .with_args(&["-c", "echo from-action > /workspace/action.txt; exit 4"]);
+    let mut process = runner.run(spec).await.expect("run one-shot");
+    let status = process.wait().await.expect("wait");
+    assert_eq!(status.code, Some(4));
+
+    let host_file = dir
+        .path()
+        .join("scopes")
+        .join("env-1")
+        .join("work")
+        .join("action.txt");
+    assert_eq!(
+        fs::read_to_string(&host_file).expect("host file").trim(),
+        "from-action"
+    );
+    executor.release(handle, ScopeOutcome::Succeeded).await;
+}

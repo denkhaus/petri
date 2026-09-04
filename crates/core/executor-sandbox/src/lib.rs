@@ -11,6 +11,7 @@
 
 mod env;
 mod host;
+mod oneshot;
 mod routing;
 
 use std::io::{self, ErrorKind};
@@ -31,6 +32,7 @@ use tokio::sync::OnceCell;
 
 use crate::env::SandboxEnv;
 pub use crate::host::HostExecutor;
+use crate::oneshot::{ContainerPrefix, OneShotRunner};
 pub use crate::routing::RoutingExecutor;
 
 /// The container path every scope's workspace is mounted at.
@@ -97,6 +99,12 @@ impl SandboxExecutor {
         let label = self.environment_label(scope).await?;
         self.fence_by_label(&label).await?;
 
+        // One-shot action containers hang off the job container; their prefix
+        // is a fence target too, so a crash leaves nothing behind.
+        let job_name = container_name(&label);
+        let one_shot_prefix = ContainerPrefix::new(format!("{job_name}-s"));
+        oneshot::sweep(&one_shot_prefix).await;
+
         let spec = build_spec(scope, &workspace_host_str, &label, ctx)?;
         let sandbox = self
             .provider
@@ -112,17 +120,37 @@ impl SandboxExecutor {
             ambient,
             scope.grace,
         );
+
+        // Docker actions in this scope run as one-shot containers on the job's
+        // network namespace, sharing its services and host alias.
+        let scope_dir = self
+            .run_dir
+            .join("scopes")
+            .join(scope.workspace_id.as_str());
+        let env_files = scope_dir.join("exec-env");
+        let runner = OneShotRunner::new(
+            one_shot_prefix.clone(),
+            workspace_host.clone(),
+            env_files.clone(),
+            scope_dir.join("one-shots"),
+            scope,
+            Some(format!("container:{job_name}")),
+            ctx,
+        );
         let teardown = SandboxTeardown {
             sandbox,
             retention: self.retention,
             workspace_host: workspace_host.clone(),
+            one_shot_prefix,
+            env_files,
         };
         Ok(EnvHandle::new(
             scope.id,
             SmolStr::new(scope.environment.as_str()),
             Arc::new(env),
             teardown,
-        ))
+        )
+        .with_runner(Arc::new(runner)))
     }
 
     /// The environment label value for a scope: the run id and the scope's
@@ -360,9 +388,12 @@ fn docker_provider_config(
 /// What release needs: the sandbox to tear down, whether to keep a failed
 /// workspace, and where that workspace lives on the host.
 struct SandboxTeardown {
-    sandbox:        Arc<dyn Sandbox>,
-    retention:      Retention,
-    workspace_host: PathBuf,
+    sandbox:         Arc<dyn Sandbox>,
+    retention:       Retention,
+    workspace_host:  PathBuf,
+    one_shot_prefix: ContainerPrefix,
+    /// Per-spawn env files: never retained, they can hold resolved secrets.
+    env_files:       PathBuf,
 }
 
 impl fmt::Debug for SandboxTeardown {
@@ -371,6 +402,8 @@ impl fmt::Debug for SandboxTeardown {
             .field("sandbox", &self.sandbox.id())
             .field("retention", &self.retention)
             .field("workspace_host", &self.workspace_host)
+            .field("one_shot_prefix", &self.one_shot_prefix.as_str())
+            .field("env_files", &self.env_files)
             .finish()
     }
 }
@@ -408,7 +441,14 @@ impl Executor for SandboxExecutor {
         let sandbox = teardown.sandbox.clone();
         let retention = teardown.retention;
         let workspace_host = teardown.workspace_host.clone();
+        let one_shot_prefix = teardown.one_shot_prefix.clone();
+        let env_files = teardown.env_files.clone();
         drop(env);
+
+        // One-shot action containers may hang off the job container's netns;
+        // remove them first, and their env files whatever the retention policy.
+        oneshot::sweep(&one_shot_prefix).await;
+        let _ = fs::remove_dir_all(&env_files).await;
 
         // The workspace is a host bind mount, so the container holds nothing
         // worth keeping: delete it always.
