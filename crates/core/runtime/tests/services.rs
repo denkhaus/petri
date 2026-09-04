@@ -103,8 +103,10 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
     }
     let dir = RunDir::new("services-dead");
     let executor = local(&dir);
-    // Plain alpine has nothing long-running: the container exits at once. A
-    // health check makes the provider wait on it and notice.
+    // Plain alpine has nothing long-running: the container exits at once.
+    // The health check is what makes that a failure: it says the service
+    // must come up, so the provider waits and notices. Without one a sidecar
+    // may exit — a migration job does — and the acquire would succeed.
     let mut flaky = ServiceSpec::new("flaky", "alpine:3.20");
     flaky.options = ["--health-cmd", "true", "--health-interval", "1s"]
         .iter()
