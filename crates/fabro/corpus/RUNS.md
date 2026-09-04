@@ -4,13 +4,14 @@ Every corpus workflow that lowers, run end to end on the host executor under the
 
 | Result | Count |
 |---|---|
-| reached exit | 35 |
-| ended without exit | 0 |
+| reached exit | 38 |
+| ended without exit | 1 |
 
 | File | Status | Stages | Path |
 |---|---|---|---|
 | `.fabro/workflows/card-game-fast/workflow.fabro` | success | 5 | start → plan_app → implement_app → verify_app → exit |
 | `.fabro/workflows/card-game/workflow.fabro` | success | 20 | start → expand_spec → impl_setup → verify_setup → check_setup → impl_data → verify_data → check_data → impl_logic → verify_logic → check_logic → impl_ui → verify_ui → check_ui → impl_integration → verify_integration → check_integration → review → check_review → exit |
+| `.fabro/workflows/code-review/code-review.fabro` | failed | 3 | start → prepare → finders |
 | `.fabro/workflows/context-demo/workflow.fabro` | success | 3 | start → emit → exit |
 | `.fabro/workflows/daytona-medium/workflow.fabro` | success | 3 | start → inspect → exit |
 | `.fabro/workflows/gh-list/workflow.fabro` | success | 4 | start → list_prs → list_issues → exit |
@@ -43,4 +44,7 @@ Every corpus workflow that lowers, run end to end on the host executor under the
 | `test/attractor/batch_has_errors.dot` | success | 3 | start → work → exit |
 | `test/attractor/batch_warnings_only.dot` | success | 3 | start → work → exit |
 | `test/attractor/refactor_test_complex.dot` | success | 37 | start → impl_setup → verify_setup → check_setup → impl_loader → verify_loader → check_loader → impl_tracer → verify_tracer → check_tracer → impl_metrics → verify_metrics → check_metrics → impl_tables → verify_tables → check_tables → impl_writer → verify_writer → check_writer → impl_validator → verify_validator → check_validator → impl_rasterizer → verify_rasterizer → check_rasterizer → impl_cli → verify_cli → check_cli → impl_test_harness → verify_test_harness → check_test_harness → impl_integration → verify_integration → check_integration → review → check_review → exit |
+| `test/attractor/refactor_test_moderate.dot` | success | 26 | start → expand_spec → impl_setup → verify_setup → check_setup → impl_crawler → verify_crawler → check_crawler → impl_robots → verify_robots → check_robots → impl_checker → verify_checker → check_checker → impl_formatter → verify_formatter → check_formatter → impl_cli → verify_cli → check_cli → impl_integration → verify_integration → check_integration → review → check_review → exit |
+| `test/attractor/refactor_test_vague.dot` | success | 20 | start → expand_spec → impl_setup → verify_setup → check_setup → impl_data_structures → verify_data_structures → check_data_structures → impl_game_logic → verify_game_logic → check_game_logic → impl_terminal_ui → verify_terminal_ui → check_terminal_ui → impl_integration → verify_integration → check_integration → review → check_review → exit |
 | `test/attractor/simple_example.dot` | success | 4 | start → run_tests → report → exit |
+| `test/attractor/solitaire_fast.dot` | success | 20 | start → expand_spec → impl_setup → verify_setup → check_setup → impl_data_structures → verify_data_structures → check_data_structures → impl_game_logic → verify_game_logic → check_game_logic → impl_terminal_ui → verify_terminal_ui → check_terminal_ui → impl_integration → verify_integration → check_integration → review → check_review → exit |

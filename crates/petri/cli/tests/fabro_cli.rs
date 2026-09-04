@@ -44,7 +44,8 @@ fn petri_run_auto_approve_answers_a_human_gate() {
 }
 
 #[test]
-fn petri_check_lowers_a_fabro_file_and_rejects_the_deprecated_spelling() {
+fn petri_check_lowers_a_fabro_file_and_warns_on_the_deprecated_spelling() {
+    // REMOVE AFTER 2026-10-04: `on_failure="succeed"` is refused again.
     let dir = RunDir::new("fabro-cli-check");
     let good = dir.path().join("good.fabro");
     fs::write(
@@ -70,16 +71,16 @@ fn petri_check_lowers_a_fabro_file_and_rejects_the_deprecated_spelling() {
     );
     let printed = String::from_utf8_lossy(&ok.stdout);
     assert!(printed.contains("step=fabro/agent"), "{printed}");
-    let rejected = Command::new(env!("CARGO_BIN_EXE_petri"))
+    let shimmed = Command::new(env!("CARGO_BIN_EXE_petri"))
         .args(["check"])
         .arg(&bad)
         .output()
         .expect("petri runs");
-    assert!(!rejected.status.success());
+    let stderr = String::from_utf8_lossy(&shimmed.stderr);
+    assert!(shimmed.status.success(), "{stderr}");
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("unsupported.on_failure.succeed"),
-        "{}",
-        String::from_utf8_lossy(&rejected.stderr)
+        stderr.contains("deprecated.on_failure.succeed") && stderr.contains("2026-10-04"),
+        "{stderr}"
     );
 }
 
@@ -117,4 +118,50 @@ fn petri_run_dry_run_simulates_the_fabro_stages() {
             "{stage}:\n{stderr}"
         );
     }
+}
+
+#[test]
+fn petri_check_without_inputs_warns_where_a_run_would_stop() {
+    let dir = RunDir::new("fabro-cli-check-inputs");
+    let workflow = dir.path().join("pr.fabro");
+    fs::write(
+        &workflow,
+        r#"digraph Pr {
+            graph [goal="Simplify {{ inputs.pr }}"]
+            start [shape=Mdiamond]
+            exit [shape=Msquare]
+            a [prompt="Read {{ inputs.pr }}"]
+            start -> a -> exit
+        }"#,
+    )
+    .expect("write the workflow");
+    let checked = Command::new(env!("CARGO_BIN_EXE_petri"))
+        .arg("check")
+        .arg(&workflow)
+        .output()
+        .expect("petri runs");
+    let stderr = String::from_utf8_lossy(&checked.stderr);
+    assert!(checked.status.success(), "{stderr}");
+    assert!(stderr.contains("fabro.unbound_input"), "{stderr}");
+    let bound = Command::new(env!("CARGO_BIN_EXE_petri"))
+        .args(["check", "--input", "pr=42"])
+        .arg(&workflow)
+        .output()
+        .expect("petri runs");
+    let stderr = String::from_utf8_lossy(&bound.stderr);
+    assert!(bound.status.success(), "{stderr}");
+    assert!(!stderr.contains("unbound"), "{stderr}");
+    let run_dir = dir.path().join("run");
+    let ran = Command::new(env!("CARGO_BIN_EXE_petri"))
+        .args(["run", "--quiet", "--dry-run", "--run-dir"])
+        .arg(&run_dir)
+        .arg(&workflow)
+        .output()
+        .expect("petri runs");
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(!ran.status.success(), "a run needs the input:\n{stderr}");
+    assert!(
+        stderr.contains("unsupported.template.unbound_input"),
+        "{stderr}"
+    );
 }

@@ -267,14 +267,24 @@ fn error_chain(error: &dyn Error) -> String {
     clippy::print_stderr,
     reason = "the CLI reports diagnostics to the user on stderr, clear of the command's own output"
 )]
-fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered, ExitCode> {
-    let inputs = match target.compile_inputs() {
+fn lowered_graph(
+    rt: &Runtime,
+    target: &FileArgs,
+    json: bool,
+    validate_only: bool,
+) -> Result<Lowered, ExitCode> {
+    let mut inputs = match target.compile_inputs() {
         Ok(inputs) => inputs,
         Err(message) => {
             eprintln!("error: {message}");
             return Err(ExitCode::from(2));
         }
     };
+    // A check given no inputs validates the file as written: an input it
+    // reads is a warning, not a reason to stop. A run always needs them.
+    if validate_only && target.inputs.is_empty() && target.inputs_file.is_none() {
+        inputs = inputs.with_unbound_as_warning();
+    }
     match rt.check(
         &target.file,
         target.format.as_deref(),
@@ -320,7 +330,7 @@ fn lowered_graph(rt: &Runtime, target: &FileArgs, json: bool) -> Result<Lowered,
     )
 )]
 fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> ExitCode {
-    let lowered = match lowered_graph(rt, target, json) {
+    let lowered = match lowered_graph(rt, target, json, true) {
         Ok(lowered) => lowered,
         Err(code) => return code,
     };
@@ -366,7 +376,7 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
     fields(workflow_file = %target.file.display(), status = Empty)
 )]
 async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path, answers: Option<Mode>) -> ExitCode {
-    let lowered = match lowered_graph(rt, target, false) {
+    let lowered = match lowered_graph(rt, target, false, false) {
         Ok(lowered) => lowered,
         Err(code) => return code,
     };
@@ -463,7 +473,7 @@ async fn cancel_on_ctrl_c(handle: CoordinatorHandle) {
     fields(workflow_file = %target.file.display(), event_log = %log_path.display())
 )]
 fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
-    let lowered = match lowered_graph(rt, target, false) {
+    let lowered = match lowered_graph(rt, target, false, false) {
         Ok(lowered) => lowered,
         Err(code) => return code,
     };

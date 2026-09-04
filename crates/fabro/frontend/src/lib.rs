@@ -101,20 +101,25 @@ impl Frontend for Fabro {
 
     /// The nearest ancestor holding a `.fabro` directory — the bundle root
     /// Fabro resolves `fabro/...` paths against — else the file's own
-    /// directory.
+    /// directory. A file inside the bundle itself belongs to the bundle's
+    /// parent, never to `.fabro`.
     fn repo_root(&self, file: &Path) -> PathBuf {
         let dir = file
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let mut current = Some(dir.as_path());
         while let Some(candidate) = current {
-            if candidate.join(".fabro").is_dir()
-                || candidate
-                    .components()
-                    .next_back()
-                    .is_some_and(|c| c == Component::Normal(".fabro".as_ref()))
-            {
+            if candidate.join(".fabro").is_dir() {
                 return candidate.to_path_buf();
+            }
+            if candidate
+                .components()
+                .next_back()
+                .is_some_and(|c| c == Component::Normal(".fabro".as_ref()))
+            {
+                return candidate
+                    .parent()
+                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
             }
             current = candidate.parent();
         }

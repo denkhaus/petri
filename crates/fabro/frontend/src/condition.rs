@@ -19,7 +19,7 @@
 use frontend::{Diagnostics, Span};
 use ir::{BinOp, ExprId, ExprTable, UnOp};
 
-use crate::kinds::OUTCOMES;
+use crate::kinds::{COMPAT_SUNSET, OUTCOMES};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -263,10 +263,15 @@ pub fn parse(text: &str) -> Result<Condition, ConditionError> {
 
 /// The engine expressions the lowering builds on.
 struct Builder<'a> {
-    table: &'a mut ExprTable,
-    diags: &'a mut Diagnostics,
-    span:  &'a Span,
-    ok:    bool,
+    table:   &'a mut ExprTable,
+    diags:   &'a mut Diagnostics,
+    span:    &'a Span,
+    ok:      bool,
+    /// The node's failure policy is the `succeed` shim: a failure it
+    /// converted is a partial status whose reported outcome is not
+    /// `partially_succeeded`, and it reads as `succeeded`.
+    /// REMOVE AFTER 2026-10-04.
+    succeed: bool,
 }
 
 impl Builder<'_> {
@@ -300,13 +305,50 @@ impl Builder<'_> {
         self.table.binary(BinOp::Eq, status, want)
     }
 
+    /// A partial status the `succeed` policy made out of a failure: the step
+    /// reported anything but a genuine `partially_succeeded` (the step
+    /// boundary says `succeeded`; exhausted retries leave `failed`).
+    /// REMOVE AFTER 2026-10-04.
+    fn converted_failure(&mut self) -> ExprId {
+        let partial = self.status_is("partial_success");
+        let reported = self.table.path("output", &["outcome"]);
+        let empty = self.table.lit("");
+        let reported = self.table.call("default", vec![reported, empty]);
+        let genuine = self.table.lit("partially_succeeded");
+        let converted = self.table.binary(BinOp::Ne, reported, genuine);
+        self.table.binary(BinOp::And, partial, converted)
+    }
+
     /// `outcome=X`: `failed` covers every non-success terminal status the
     /// engine distinguishes, since Fabro folds them all into `failed`.
     fn outcome_is(&mut self, value: &str) -> Option<ExprId> {
         match value {
+            "succeeded" if self.succeed => {
+                let success = self.status_is("success");
+                let converted = self.converted_failure();
+                Some(self.table.binary(BinOp::Or, success, converted))
+            }
+            "partially_succeeded" if self.succeed => {
+                let partial = self.status_is("partial_success");
+                let converted = self.converted_failure();
+                let genuine = self.table.unary(UnOp::Not, converted);
+                Some(self.table.binary(BinOp::And, partial, genuine))
+            }
             "succeeded" => Some(self.status_is("success")),
             "partially_succeeded" => Some(self.status_is("partial_success")),
             "skipped" => Some(self.status_is("skipped")),
+            // REMOVE AFTER 2026-10-04: refuse the alias again.
+            "success" => {
+                self.diags.warning(
+                    "deprecated.outcome_alias",
+                    self.span.clone(),
+                    format!(
+                        "`outcome=success` is not a stage outcome (Fabro never matches it); read \
+                         as `outcome=succeeded` until {COMPAT_SUNSET}"
+                    ),
+                );
+                self.outcome_is("succeeded")
+            }
             "failed" => {
                 let failure = self.status_is("failure");
                 let cancelled = self.status_is("cancelled");
@@ -464,11 +506,14 @@ impl Builder<'_> {
 }
 
 /// Parse and lower one condition. `None` means a diagnostic was emitted.
+/// `succeed` says the node converts failures under the `succeed` policy, so
+/// a converted failure reads as `succeeded`.
 pub fn lower(
     text: &str,
     table: &mut ExprTable,
     span: &Span,
     diags: &mut Diagnostics,
+    succeed: bool,
 ) -> Option<ExprId> {
     let condition = match parse(text) {
         Ok(condition) => condition,
@@ -486,6 +531,7 @@ pub fn lower(
         diags,
         span,
         ok: true,
+        succeed,
     };
     let id = builder.condition(&condition);
     builder.ok.then_some(id)

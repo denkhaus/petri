@@ -5,11 +5,12 @@
 mod support;
 
 use std::time::Duration;
+use std::{env, fs, process};
 
-use frontend::CompileInputs;
 use frontend::print::print_expr;
-use frontend_fabro::MAX_FIRINGS;
+use frontend::{CompileInputs, Frontend};
 use frontend_fabro::kinds::{AGENT_KIND, COMMAND_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND};
+use frontend_fabro::{Fabro, MAX_FIRINGS};
 use ir::placeholder::contains_placeholder;
 use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy};
 use serde_json::json;
@@ -259,20 +260,37 @@ fn the_unreachable_failure_edge_is_linted() {
 }
 
 #[test]
-fn deprecated_success_spellings_are_rejected_with_specific_codes() {
-    assert!(
-        codes(&dot(r#"
+fn deprecated_success_spellings_lower_with_dated_warnings() {
+    // REMOVE AFTER 2026-10-04: both spellings go back to `unsupported.*`.
+    let text = dot(r#"
         a [prompt="x", on_failure="succeed"]
-        start -> a -> exit
-    "#))
-        .contains(&"unsupported.on_failure.succeed".to_string())
+        b [prompt="x", auto_status=true]
+        start -> a -> b -> exit
+    "#);
+    let found = codes(&text);
+    assert!(
+        found.contains(&"deprecated.on_failure.succeed".to_string()),
+        "{found:?}"
     );
     assert!(
-        codes(&dot(r#"
-        a [prompt="x", auto_status=true]
-        start -> a -> exit
-    "#))
-        .contains(&"unsupported.auto_status".to_string())
+        found.contains(&"deprecated.auto_status".to_string()),
+        "{found:?}"
+    );
+    assert!(
+        diagnostics(&text)
+            .iter()
+            .all(|d| d.message.contains("2026-10-04") || !d.code.starts_with("deprecated.")),
+        "every shim warning names its sunset"
+    );
+    let graph = lower_ok(&text);
+    assert_eq!(
+        node(&graph, "a").step.config["on_failure"],
+        json!("succeed")
+    );
+    assert_eq!(
+        node(&graph, "b").step.config["on_failure"],
+        json!("succeed"),
+        "`auto_status=true` is the node's `on_failure=\"succeed\"`"
     );
     assert!(
         codes(&dot(r#"
@@ -792,4 +810,194 @@ fn stdin_source_reads_the_context_or_the_fan_in() {
     };
     assert_eq!(stdin("m"), "nodes.merge.output");
     assert_eq!(stdin("k"), "get(kv, 'output.a')");
+}
+
+#[test]
+fn negative_weights_shift_so_the_lowest_is_zero_and_order_holds() {
+    let graph = lower_ok(&dot(r#"
+        a [prompt="x"]
+        b [prompt="x"]
+        c [prompt="x"]
+        d [prompt="x"]
+        start -> a
+        a -> b [weight=-1]
+        a -> c [weight=-5]
+        a -> d
+        a -> exit [weight=2]
+        b -> exit
+        c -> exit
+        d -> exit
+    "#));
+    let weights: Vec<u32> = node(&graph, "a").routing.groups[0]
+        .arms
+        .iter()
+        .map(|a| a.weight)
+        .collect();
+    assert_eq!(weights, [4, 0, 5, 7], "shifted by the lowest, -5");
+    let graph = lower_ok(&dot(r#"
+        graph [selection="random"]
+        a [prompt="x"]
+        b [prompt="x"]
+        start -> a
+        a -> b [weight=-3]
+        a -> exit [weight=2]
+        b -> exit
+    "#));
+    let weights: Vec<u32> = node(&graph, "a").routing.groups[0]
+        .arms
+        .iter()
+        .map(|a| a.weight)
+        .collect();
+    assert_eq!(
+        weights,
+        [1, 2],
+        "random: a weight at or below zero counts as one"
+    );
+}
+
+/// REMOVE AFTER 2026-10-04 with the shim.
+#[test]
+fn a_succeed_node_reads_its_converted_failure_as_succeeded() {
+    let graph = lower_ok(&dot(r#"
+        a [prompt="x", on_failure="succeed"]
+        b [prompt="x"]
+        c [prompt="x"]
+        d [prompt="x"]
+        start -> a
+        a -> b [condition="outcome=succeeded"]
+        a -> c [condition="outcome=partially_succeeded"]
+        a -> d [condition="outcome=failed"]
+        a -> exit
+        b -> exit
+        c -> exit
+        d -> exit
+    "#));
+    let tiers = tiers(&graph, "a");
+    let (succeeded, partial, failed) = (tiers[0].1[0].1, tiers[0].1[1].1, tiers[0].1[2].1);
+    let converted = statics("partial_success", &json!({ "outcome": "succeeded" }));
+    assert!(eval_guard(&graph, succeeded, &converted, &[]));
+    assert!(!eval_guard(&graph, partial, &converted, &[]));
+    assert!(!eval_guard(&graph, failed, &converted, &[]));
+    let exhausted = statics("partial_success", &json!({ "outcome": "failed" }));
+    assert!(
+        eval_guard(&graph, succeeded, &exhausted, &[]),
+        "retries that ran out under `succeed` read as succeeded too"
+    );
+    let genuine = statics(
+        "partial_success",
+        &json!({ "outcome": "partially_succeeded" }),
+    );
+    assert!(!eval_guard(&graph, succeeded, &genuine, &[]));
+    assert!(eval_guard(&graph, partial, &genuine, &[]));
+    let clean = statics("success", &json!({ "outcome": "succeeded" }));
+    assert!(eval_guard(&graph, succeeded, &clean, &[]));
+    assert!(matches!(
+        tiers.last().expect("fallback").1[0].1,
+        Guard::Always
+    ));
+}
+
+#[test]
+fn a_check_with_no_inputs_warns_on_unbound_inputs_and_keeps_the_text() {
+    let text = dot(r#"
+        graph [goal="Fix {{ inputs.pr }}"]
+        a [prompt="Look at {{ inputs.pr }} for {{ vars.owner }}"]
+        c [shape=parallelogram, script="gh pr view {{ inputs.pr }}"]
+        start -> a -> c -> exit
+    "#);
+    let lenient = CompileInputs::new().with_unbound_as_warning();
+    let lowered = frontend_fabro::load("w.fabro", &text, &frontend::NoFiles, &lenient);
+    let graph = lowered.graph.expect("lowers with warnings");
+    let found: Vec<&str> = lowered
+        .diagnostics
+        .iter()
+        .map(|d| d.code.as_str())
+        .collect();
+    assert!(
+        found.iter().all(|c| *c == "fabro.unbound_input"),
+        "{found:?}"
+    );
+    assert_eq!(lowered.diagnostics.errors().count(), 0);
+    assert_eq!(
+        node(&graph, "a").step.config["prompt"],
+        json!("Look at {{ inputs.pr }} for {{ vars.owner }}"),
+        "left unrendered"
+    );
+    assert_eq!(
+        node(&graph, "c").step.config["script"],
+        json!("gh pr view {{ inputs.pr }}")
+    );
+    assert!(
+        codes(&text).contains(&"unsupported.template.unbound_input".to_string()),
+        "strict without the flag"
+    );
+}
+
+#[test]
+fn the_bundle_root_is_the_parent_of_dot_fabro() {
+    let base = env::temp_dir().join(format!("petri-fabro-root-{}", process::id()));
+    let inside = base.join(".fabro/workflows/one");
+    fs::create_dir_all(&inside).expect("create the bundle");
+    fs::create_dir_all(base.join("docs")).expect("create docs");
+    let frontend = Fabro::new();
+    assert_eq!(
+        frontend.repo_root(&inside.join("workflow.fabro")),
+        base,
+        "a file inside the bundle belongs to the bundle's parent"
+    );
+    assert_eq!(frontend.repo_root(&base.join("docs/demo.fabro")), base);
+    let loose = env::temp_dir().join(format!("petri-fabro-loose-{}", process::id()));
+    fs::create_dir_all(&loose).expect("create a dir with no bundle");
+    assert_eq!(
+        frontend.repo_root(&loose.join("w.fabro")),
+        loose,
+        "no bundle: the file's own directory"
+    );
+    let _ = fs::remove_dir_all(&base);
+    let _ = fs::remove_dir_all(&loose);
+}
+
+#[test]
+fn a_template_local_set_inside_an_if_renders_and_a_missing_input_is_named() {
+    let text = dot(r#"
+        graph [model_stylesheet="
+            {% if 'kimi' in inputs.model %}{% set effort = 'high' %}{% else %}{% set effort = 'low' %}{% endif %}
+            * { model: {{ inputs.model }}; reasoning_effort: {{ effort }}; }
+        "]
+        a [prompt="x"]
+        start -> a -> exit
+    "#);
+    let graph = lower_ok_with(
+        &text,
+        &frontend::NoFiles,
+        &CompileInputs::new().with_input("model", "kimi-k3"),
+    );
+    assert_eq!(node(&graph, "a").step.config["model"], json!("kimi-k3"));
+    assert_eq!(
+        node(&graph, "a").step.config["reasoning_effort"],
+        json!("high")
+    );
+    let strict = diagnostics(&text);
+    assert!(
+        strict
+            .iter()
+            .any(|d| d.code == "unsupported.template.unbound_input"
+                && d.message.contains("inputs.model")),
+        "the missing input is named, not the template-local `effort`: {strict:?}"
+    );
+    // A lenient check skips the stylesheet it could not render instead of
+    // parsing the template text as a stylesheet.
+    let lenient = frontend_fabro::load(
+        "w.fabro",
+        &text,
+        &frontend::NoFiles,
+        &CompileInputs::new().with_unbound_as_warning(),
+    );
+    let found: Vec<&str> = lenient
+        .diagnostics
+        .iter()
+        .map(|d| d.code.as_str())
+        .collect();
+    assert_eq!(found, ["fabro.unbound_input"], "{found:?}");
+    assert!(lenient.graph.is_some());
 }

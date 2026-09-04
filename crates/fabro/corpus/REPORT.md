@@ -5,8 +5,8 @@
 | Result (of the 32 Fabro workflows) | Count | Share |
 |---|---|---|
 | lowered clean | 19 | 59% |
-| lowered with warnings | 11 | 34% |
-| rejected with a specific `unsupported.*` code | 2 | 6% |
+| lowered with warnings | 12 | 37% |
+| rejected with a specific `unsupported.*` code | 1 | 3% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -15,18 +15,19 @@
 | `unsupported.*` feature | Files |
 |---|---|
 | `attractor` | 5 |
-| `auto_status` | 4 |
-| `on_failure.succeed` | 1 |
 | `outcome_value` | 3 |
-| `template.unbound_input` | 2 |
+| `template.unbound_input` | 1 |
 
 ## Warnings by code
 
 | Code | Occurrences |
 |---|---|
+| `deprecated.auto_status` | 8 |
+| `deprecated.on_failure.succeed` | 6 |
 | `fabro.internal_context` | 1 |
 | `fabro.prompt_missing` | 40 |
 | `fabro.unknown_attribute` | 31 |
+| `fabro.unreachable_failure_edge` | 1 |
 | `ignored.project_memory` | 5 |
 | `ignored.stall_timeout` | 1 |
 | `ignored.thread_id` | 2 |
@@ -38,7 +39,7 @@
 |---|---|---|---|
 | `.fabro/workflows/card-game-fast/workflow.fabro` | warnings | 7 | `info.budget.default` |
 | `.fabro/workflows/card-game/workflow.fabro` | warnings | 21 | `info.budget.default` |
-| `.fabro/workflows/code-review/code-review.fabro` | unsupported | 0 | `fabro.internal_context`, `ignored.project_memory`, `ignored.stall_timeout`, `unsupported.on_failure.succeed`, `unsupported.template.unbound_input` |
+| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `deprecated.on_failure.succeed`, `fabro.internal_context`, `ignored.project_memory`, `ignored.stall_timeout` |
 | `.fabro/workflows/context-demo/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/daytona-medium/workflow.fabro` | warnings | 4 | `info.budget.default` |
 | `.fabro/workflows/gh-list/workflow.fabro` | clean | 4 |  |
@@ -76,9 +77,9 @@
 | `test/attractor/green_test_moderate.dot` | unsupported | 0 | `info.budget.default`, `unsupported.attractor` |
 | `test/attractor/green_test_vague.dot` | unsupported | 0 | `info.budget.default`, `unsupported.attractor` |
 | `test/attractor/refactor_test_complex.dot` | warnings | 38 | `info.budget.default` |
-| `test/attractor/refactor_test_moderate.dot` | unsupported | 0 | `info.budget.default`, `unsupported.auto_status` |
-| `test/attractor/refactor_test_vague.dot` | unsupported | 0 | `info.budget.default`, `unsupported.auto_status` |
-| `test/attractor/reference_template.dot` | unsupported | 0 | `fabro.prompt_missing`, `fabro.unknown_attribute`, `info.budget.default`, `unsupported.auto_status`, `unsupported.outcome_value` |
+| `test/attractor/refactor_test_moderate.dot` | warnings | 27 | `deprecated.auto_status`, `info.budget.default` |
+| `test/attractor/refactor_test_vague.dot` | warnings | 21 | `deprecated.auto_status`, `info.budget.default` |
+| `test/attractor/reference_template.dot` | unsupported | 0 | `deprecated.auto_status`, `fabro.prompt_missing`, `fabro.unknown_attribute`, `fabro.unreachable_failure_edge`, `info.budget.default`, `unsupported.outcome_value` |
 | `test/attractor/semport.dot` | unsupported | 0 | `fabro.prompt_missing`, `fabro.unknown_attribute`, `info.budget.default`, `unsupported.attractor`, `unsupported.outcome_value` |
 | `test/attractor/simple_example.dot` | clean | 4 |  |
-| `test/attractor/solitaire_fast.dot` | unsupported | 0 | `info.budget.default`, `unsupported.auto_status` |
+| `test/attractor/solitaire_fast.dot` | warnings | 21 | `deprecated.auto_status`, `info.budget.default` |

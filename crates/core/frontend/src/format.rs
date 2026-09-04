@@ -20,13 +20,25 @@ use crate::files::FileSource;
 /// shape. A format that renders nothing ignores it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompileInputs {
-    pub inputs: BTreeMap<SmolStr, Value>,
-    pub vars:   BTreeMap<SmolStr, Value>,
+    pub inputs:             BTreeMap<SmolStr, Value>,
+    pub vars:               BTreeMap<SmolStr, Value>,
+    /// Whether a template that reads an input no one supplied is a warning
+    /// that leaves the text unrendered, instead of an error. `petri check`
+    /// sets this when it was given no inputs at all, so a workflow validates
+    /// before its inputs exist. A run never sets it.
+    pub unbound_is_warning: bool,
 }
 
 impl CompileInputs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Report an unbound input as a warning and leave its text unrendered.
+    #[must_use]
+    pub fn with_unbound_as_warning(mut self) -> Self {
+        self.unbound_is_warning = true;
+        self
     }
 
     #[must_use]

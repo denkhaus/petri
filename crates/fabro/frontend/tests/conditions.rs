@@ -214,3 +214,22 @@ fn boolean_operators_and_precedence() {
     assert!(holds("!outcome=failed && c=3", "success", json!({}), &kv));
     assert!(rejected("a=1 b=2").contains(&"fabro.condition.syntax".to_string()));
 }
+
+/// REMOVE AFTER 2026-10-04 with the alias itself.
+#[test]
+fn outcome_success_is_read_as_succeeded_with_a_dated_warning() {
+    assert!(holds("outcome=success", "success", json!({}), &[]));
+    assert!(!holds("outcome=success", "failure", json!({}), &[]));
+    let found = codes(&dot(
+        "a [prompt=\"x\"]\nb [prompt=\"x\"]\nstart -> a\na -> exit [condition=\"outcome=success\"]\na -> b\nb -> exit",
+    ));
+    assert!(
+        found.contains(&"deprecated.outcome_alias".to_string()),
+        "{found:?}"
+    );
+    assert!(
+        !found.contains(&"unsupported.outcome_value".to_string()),
+        "{found:?}"
+    );
+    assert!(rejected("outcome=failure").contains(&"unsupported.outcome_value".to_string()));
+}

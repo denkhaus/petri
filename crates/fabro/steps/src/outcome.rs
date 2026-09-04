@@ -58,7 +58,11 @@ impl Stage {
     /// The engine outcome. A non-retryable failure under
     /// `on_failure="partially_succeed"` becomes a `PartialSuccess` here — the
     /// one classification point — with the failure kept in `underlying`.
+    /// Under the `succeed` shim it is the same partial status, but the
+    /// reported `outcome` is `succeeded`, as Fabro reports it.
     pub fn into_outcome(mut self, node: &str) -> Outcome {
+        // REMOVE AFTER 2026-10-04: drop the `succeed` arm and `reported`.
+        let mut reported = None;
         let status = match self.outcome {
             StageOutcome::Succeeded => Status::Success,
             StageOutcome::PartiallySucceeded => Status::partial_clean(),
@@ -70,15 +74,21 @@ impl Stage {
                     .unwrap_or_else(|| format!("stage `{node}` failed"));
                 let info = FailureInfo::new(reason)
                     .with_class(FailureClass::new(self.failure_class.as_str()));
-                if self.on_failure == Some(Policy::PartiallySucceed) && !self.retry_requested() {
-                    Status::partial(info)
-                } else {
-                    Status::Failure(info)
+                match self.on_failure {
+                    Some(Policy::PartiallySucceed) if !self.retry_requested() => {
+                        Status::partial(info)
+                    }
+                    Some(Policy::Succeed) if !self.retry_requested() => {
+                        reported = Some(StageOutcome::Succeeded);
+                        Status::partial(info)
+                    }
+                    _ => Status::Failure(info),
                 }
             }
         };
+        let reported = reported.unwrap_or_else(|| fabro_outcome(&status));
         self.output
-            .insert("outcome".into(), json!(fabro_outcome(&status).as_str()));
+            .insert("outcome".into(), json!(reported.as_str()));
         self.output
             .insert("failure_class".into(), json!(self.failure_class));
         if let Some(reason) = &self.failure_reason {

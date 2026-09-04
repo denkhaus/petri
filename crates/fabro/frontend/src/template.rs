@@ -204,21 +204,31 @@ pub fn render_with(
     let template = env
         .get_template(&root_name)
         .map_err(|e| TemplateError::Syntax(e.to_string()))?;
-    // Name the first unbound variable up front: MiniJinja's own undefined
-    // error does not say which name it was.
-    let mut unbound: Vec<String> = template
-        .undeclared_variables(true)
-        .into_iter()
-        .filter(|name| !ctx.binds(name))
-        .collect();
-    unbound.sort();
-    if let Some(name) = unbound.into_iter().next() {
-        return Err(TemplateError::Unbound { name });
-    }
+    // Render first: what renders is bound, whatever a static reading says (a
+    // `{% set %}` inside an `{% if %}` reads as undeclared to MiniJinja's
+    // analysis, and renders fine). The analysis only names the missing input
+    // afterwards, since MiniJinja's own undefined error does not say which
+    // name it was; an input or var comes before a template-local name.
     template.render(ctx.value()).map_err(|e| match e.kind() {
-        minijinja::ErrorKind::UndefinedError => TemplateError::Unbound {
-            name: undefined_name(&e).unwrap_or_else(|| "?".into()),
-        },
+        minijinja::ErrorKind::UndefinedError => {
+            let mut unbound: Vec<String> = template
+                .undeclared_variables(true)
+                .into_iter()
+                .filter(|name| !ctx.binds(name))
+                .collect();
+            unbound.sort_by_key(|name| {
+                let input =
+                    name.starts_with("inputs.") || name.starts_with("vars.") || name == "goal";
+                (!input, name.clone())
+            });
+            TemplateError::Unbound {
+                name: unbound
+                    .into_iter()
+                    .next()
+                    .or_else(|| undefined_name(&e))
+                    .unwrap_or_else(|| "?".into()),
+            }
+        }
         _ => TemplateError::Render(e.to_string()),
     })
 }

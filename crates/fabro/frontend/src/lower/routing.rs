@@ -27,6 +27,14 @@ pub enum Policy {
     /// The failure becomes a `PartialSuccess` that keeps the failure on the
     /// record, and routes as a success.
     PartiallySucceed,
+    /// Fabro's `succeed`: like `partially_succeed`, except the stage reports
+    /// `succeeded` to its edge conditions and to later stages, as Fabro
+    /// shows them. The step record still carries the failure as a partial
+    /// status. A 30-day compatibility shim for `on_failure="succeed"` and
+    /// `auto_status=true`.
+    ///
+    /// REMOVE AFTER 2026-10-04.
+    Succeed,
 }
 
 impl Policy {
@@ -35,6 +43,7 @@ impl Policy {
             "route" => Self::Route,
             "exit" => Self::Exit,
             "partially_succeed" => Self::PartiallySucceed,
+            "succeed" => Self::Succeed,
             _ => return None,
         })
     }
@@ -44,15 +53,23 @@ impl Policy {
             Self::Route => "route",
             Self::Exit => "exit",
             Self::PartiallySucceed => "partially_succeed",
+            Self::Succeed => "succeed",
         }
     }
 
     /// Whether a still-failed outcome under this policy takes the
     /// unconditional edge.
     fn routes(self) -> bool {
-        // A `partially_succeed` outcome that is still failed at routing time
-        // is one the policy did not apply to; it routes like `route`.
-        matches!(self, Self::Route | Self::PartiallySucceed)
+        // A `partially_succeed` or `succeed` outcome that is still failed at
+        // routing time is one the policy did not apply to; it routes like
+        // `route`.
+        matches!(self, Self::Route | Self::PartiallySucceed | Self::Succeed)
+    }
+
+    /// Whether running out of retries turns the last failure into a partial
+    /// success (`Exhaustion::AcceptPartial`).
+    fn accepts_partial(self) -> bool {
+        matches!(self, Self::PartiallySucceed | Self::Succeed)
     }
 }
 
@@ -72,7 +89,11 @@ impl FailurePolicy {
     /// contradicts an explicit `on_retries_exhausted`.
     pub fn of(node: &NodeDecl, workflow: &Workflow, diags: &mut Diagnostics) -> Self {
         let read = |key: &str, attrs: &Attrs| attrs.text(key).and_then(|text| Policy::parse(&text));
+        // Fabro reads `auto_status=true` as the node's `on_failure="succeed"`
+        // when no explicit `on_failure` is set. REMOVE AFTER 2026-10-04.
+        let auto_status = node.attrs.bool("auto_status", diags).unwrap_or(false);
         let on_failure = read("on_failure", &node.attrs)
+            .or_else(|| auto_status.then_some(Policy::Succeed))
             .or_else(|| read("on_failure", &workflow.attrs))
             .unwrap_or(Policy::Route);
         let allow_partial = node.attrs.bool("allow_partial", diags).unwrap_or(false);
@@ -100,6 +121,13 @@ impl FailurePolicy {
             on_retries_exhausted,
         }
     }
+
+    /// Whether either policy is the `succeed` shim, so a failure this node
+    /// converts reads as `succeeded` to its edge conditions.
+    /// REMOVE AFTER 2026-10-04.
+    pub fn succeeds(self) -> bool {
+        self.on_failure == Policy::Succeed || self.on_retries_exhausted == Policy::Succeed
+    }
 }
 
 /// One outgoing edge, lowered as far as routing needs.
@@ -110,9 +138,30 @@ pub(super) struct OutEdge {
     pub label:     Option<String>,
     /// The static key a preferred label is compared against.
     pub label_key: Option<String>,
-    pub weight:    u32,
+    /// As written: Fabro allows a negative weight to deprioritize an edge.
+    /// [`group`] maps a node's weights onto the engine's unsigned ones.
+    pub weight:    i64,
     pub restart:   bool,
     pub map:       Option<ExprId>,
+}
+
+/// The engine weight of each edge. Order and ties are Fabro's: when a node
+/// has a negative weight, every weight shifts up so the lowest is zero. Under
+/// random selection a weight at or below zero counts as one, as Fabro's
+/// `weighted_random` counts it.
+fn engine_weights(edges: &[OutEdge], random: bool) -> Vec<u32> {
+    let floor = edges.iter().map(|e| e.weight).min().unwrap_or(0).min(0);
+    edges
+        .iter()
+        .map(|e| {
+            let weight = if random {
+                e.weight.max(1)
+            } else {
+                e.weight - floor
+            };
+            u32::try_from(weight).unwrap_or(u32::MAX)
+        })
+        .collect()
 }
 
 /// `!(failure() || cancelled() || timed_out())`: the statuses Fabro folds
@@ -175,17 +224,18 @@ pub(super) fn group(
         PickPolicy::HighestWeightThenLexical
     };
     let truth = b.exprs().lit(true);
+    let weights = engine_weights(edges, random);
     let mut arms = Vec::with_capacity(edges.len());
     let mut conditional = Vec::new();
     let mut labelled = Vec::new();
     let mut suggested = Vec::new();
     let mut fallback = Vec::new();
-    for edge in edges {
+    for (edge, weight) in edges.iter().zip(weights) {
         let id = b.next_edge_id();
         // The tiers carry the real conditions; the arm's own guard is the
         // literal truth so invariant 2 (`Always` only last) holds whatever the
         // order.
-        let mut arm = Edge::when(id, edge.to, truth).with_weight(edge.weight);
+        let mut arm = Edge::when(id, edge.to, truth).with_weight(weight);
         arm.map = edge.map;
         if let Some(label) = &edge.label {
             arm.label = Some(SmolStr::new(label));
@@ -330,7 +380,7 @@ pub(super) fn retry_policy(
     let retry = RetryPolicy::attempts(attempts)
         .with_backoff(backoff)
         .with_retry_on(RetryOn::classes(&[RETRY_REQUESTED_CLASS]));
-    if policy.on_retries_exhausted == Policy::PartiallySucceed {
+    if policy.on_retries_exhausted.accepts_partial() {
         return retry.accepting_partial();
     }
     debug_assert_eq!(retry.on_exhaustion, Exhaustion::Fail);

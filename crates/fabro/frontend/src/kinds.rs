@@ -70,3 +70,11 @@ impl StageOutcome {
 /// The failure class a step reports when it wants another attempt: the one
 /// class the lowered retry policy retries on.
 pub const RETRY_REQUESTED_CLASS: &str = "retry_requested";
+
+/// The day the 30-day Fabro compatibility shims expire: the `succeed`
+/// failure policy (`on_failure="succeed"`, `auto_status=true`) and the
+/// `outcome=success` condition alias. Every shim names this date in its
+/// warning and carries a `REMOVE AFTER 2026-10-04` comment.
+///
+/// REMOVE AFTER 2026-10-04: delete the shims and this constant together.
+pub const COMPAT_SUNSET: &str = "2026-10-04";

@@ -327,3 +327,34 @@ async fn a_cancelled_gate_fails_closed() {
         "a failed gate never falls through"
     );
 }
+
+/// The `succeed` shim: the failed command keeps its failure on the record as
+/// a partial status, reports `succeeded`, and its `outcome=succeeded` edge is
+/// taken. REMOVE AFTER 2026-10-04 with the shim.
+#[tokio::test]
+async fn a_succeed_policy_reports_succeeded_and_keeps_the_failure_on_record() {
+    let graph = lower(&dot(r#"
+        c [shape=parallelogram, script="echo boom; exit 3", on_failure="succeed"]
+        ok [shape=parallelogram, script="true"]
+        bad [shape=parallelogram, script="true"]
+        start -> c
+        c -> ok [condition="outcome=succeeded"]
+        c -> bad [condition="outcome=failed"]
+        c -> exit
+        ok -> exit
+        bad -> exit
+    "#));
+    let report = run(graph, "fabro-command-succeed-shim").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(status_of(&report, "c").as_deref(), Some("partial_success"));
+    let output = output_of(&report, "c");
+    assert_eq!(output["outcome"], json!("succeeded"));
+    assert_eq!(output["failure_class"], json!("exit_status:3"));
+    assert_eq!(status_of(&report, "ok").as_deref(), Some("success"));
+    assert_eq!(status_of(&report, "bad"), None);
+}

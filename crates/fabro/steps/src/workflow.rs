@@ -87,7 +87,7 @@ impl StopCondition {
         let mut table = ir::ExprTable::new();
         let mut diags = frontend::Diagnostics::new();
         let span = frontend::Span::file("manager.stop_condition");
-        let Some(expr) = condition::lower(condition, &mut table, &span, &mut diags) else {
+        let Some(expr) = condition::lower(condition, &mut table, &span, &mut diags, false) else {
             return Err(diags
                 .iter()
                 .map(ToString::to_string)

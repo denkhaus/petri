@@ -25,8 +25,8 @@ use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 
 use crate::kinds::{
-    AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, WAIT_KIND,
-    WORKFLOW_KIND,
+    AGENT_KIND, COMMAND_KIND, COMPAT_SUNSET, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES,
+    WAIT_KIND, WORKFLOW_KIND,
 };
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
@@ -170,6 +170,9 @@ struct Ctx<'a> {
     /// The chain of workflow files being lowered, root first, for cycle and
     /// depth checks on nested workflows.
     stack:            Vec<String>,
+    /// Whether an unbound template input is a warning that leaves the text
+    /// unrendered: `petri check` with no inputs. A run is always strict.
+    lenient_unbound:  bool,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -218,6 +221,7 @@ fn lower_nested(
         budget_defaulted: false,
         children: Vec::new(),
         stack,
+        lenient_unbound: inputs.unbound_is_warning,
     };
     ctx.stack.push(file.to_string());
 
@@ -396,12 +400,15 @@ impl Ctx<'_> {
                 continue;
             }
             if key == "auto_status" {
-                self.diags.unsupported(
-                    "auto_status",
+                // REMOVE AFTER 2026-10-04: reject the attribute again.
+                self.diags.warning(
+                    "deprecated.auto_status",
                     attr.span.clone(),
-                    "`auto_status` is a deprecated spelling of `on_failure=\"succeed\"`, which \
-                     records a clean success for a step that failed",
-                    "use `on_failure=\"partially_succeed\"`, which keeps the failure on the record",
+                    format!(
+                        "`auto_status` is the deprecated spelling of `on_failure=\"succeed\"`: a \
+                         failed step is recorded as a partial success that reports `succeeded`. \
+                         Accepted until {COMPAT_SUNSET}; use `on_failure=\"partially_succeed\"`"
+                    ),
                 );
                 continue;
             }
@@ -435,6 +442,15 @@ impl Ctx<'_> {
 
     fn template_error(&mut self, error: &TemplateError, span: &Span, what: &str) {
         match error {
+            TemplateError::Unbound { name } if self.lenient_unbound => self.diags.warning(
+                "fabro.unbound_input",
+                span.clone(),
+                format!(
+                    "{what} reads `{{{{ {name} }}}}`, which no input binds; it is left unrendered \
+                     because no inputs were given. Pass `--input {}=VALUE` to render it",
+                    name.strip_prefix("inputs.").unwrap_or(name)
+                ),
+            ),
             TemplateError::Unbound { name } => self.diags.unsupported(
                 "template.unbound_input",
                 span.clone(),
@@ -452,8 +468,22 @@ impl Ctx<'_> {
     }
 
     /// Render a prompt-like text, resolving a leading `@file` first. An
-    /// `{% include %}` resolves beside the file it appears in.
+    /// `{% include %}` resolves beside the file it appears in. Under a
+    /// lenient check an unbound input leaves the text as written.
     fn rendered(&mut self, text: &str, span: &Span, what: &str) -> Option<String> {
+        self.render_text(text, span, what, true)
+    }
+
+    /// [`Self::rendered`]; `keep_unrendered` says whether a lenient check
+    /// keeps the text an unbound input left unrendered, or drops it because
+    /// it must parse afterwards (a `model_stylesheet`).
+    fn render_text(
+        &mut self,
+        text: &str,
+        span: &Span,
+        what: &str,
+        keep_unrendered: bool,
+    ) -> Option<String> {
         let mut include_dir = self.base_dir.clone();
         let text = match text.strip_prefix('@') {
             Some(reference) => {
@@ -484,8 +514,9 @@ impl Ctx<'_> {
         match template::render_with(&text, &self.template, Some(includes)) {
             Ok(rendered) => Some(rendered),
             Err(error) => {
+                let unrendered = keep_unrendered && self.lenient_unbound && error.is_unbound();
                 self.template_error(&error, span, what);
-                None
+                unrendered.then_some(text)
             }
         }
     }
@@ -513,7 +544,9 @@ impl Ctx<'_> {
         }
         if let Some(sheet) = attrs.text("model_stylesheet") {
             let sheet_span = attrs.span_of("model_stylesheet", &span);
-            if let Some(rendered) = self.rendered(&sheet, &sheet_span, "the `model_stylesheet`") {
+            if let Some(rendered) =
+                self.render_text(&sheet, &sheet_span, "the `model_stylesheet`", false)
+            {
                 match stylesheet::parse(&rendered) {
                     Ok(sheet) => stylesheet::apply(&sheet, workflow, &sheet_span, &mut self.diags),
                     Err(error) => self.diags.error(
@@ -524,40 +557,34 @@ impl Ctx<'_> {
                 }
             }
         }
-        if let Some(policy) = attrs.text("on_failure")
-            && Policy::parse(&policy).is_none()
-        {
-            self.bad_policy("on_failure", &policy, &attrs.span_of("on_failure", &span));
-        }
-        if let Some(policy) = attrs.text("on_retries_exhausted")
-            && Policy::parse(&policy).is_none()
-        {
-            self.bad_policy(
-                "on_retries_exhausted",
-                &policy,
-                &attrs.span_of("on_retries_exhausted", &span),
-            );
+        for key in ["on_failure", "on_retries_exhausted"] {
+            self.check_policy(key, &attrs, &span);
         }
     }
 
-    fn bad_policy(&mut self, key: &str, value: &str, span: &Span) {
-        if value == "succeed" {
-            self.diags.unsupported(
-                &format!("{key}.succeed"),
-                span.clone(),
+    /// Diagnose one failure-policy attribute: an unknown spelling is an
+    /// error, and the `succeed` shim is a dated warning.
+    fn check_policy(&mut self, key: &str, attrs: &Attrs, span: &Span) {
+        let Some(value) = attrs.text(key) else {
+            return;
+        };
+        match Policy::parse(&value) {
+            // REMOVE AFTER 2026-10-04: refuse `succeed` again.
+            Some(Policy::Succeed) => self.diags.warning(
+                &format!("deprecated.{key}.succeed"),
+                attrs.span_of(key, span),
                 format!(
-                    "`{key}=\"succeed\"` would record a clean success for a step that failed, \
-                     which the event log forbids"
+                    "`{key}=\"succeed\"` records a failed step as a partial success that reports \
+                     `succeeded`. Accepted until {COMPAT_SUNSET}; use `partially_succeed`, which \
+                     keeps the failure on the record"
                 ),
-                "use `partially_succeed`: the node routes as a success and keeps the failure on \
-                 its record",
-            );
-        } else {
-            self.diags.error(
+            ),
+            Some(_) => {}
+            None => self.diags.error(
                 "fabro.bad_on_failure",
-                span.clone(),
+                attrs.span_of(key, span),
                 format!("`{key}` must be `route`, `exit` or `partially_succeed`, not `{value}`"),
-            );
+            ),
         }
     }
 
@@ -777,11 +804,7 @@ impl Ctx<'_> {
         let shape = shape_of(node);
         let label = node.attrs.text("label").unwrap_or_else(|| node.id.clone());
         for key in ["on_failure", "on_retries_exhausted"] {
-            if let Some(value) = node.attrs.text(key)
-                && Policy::parse(&value).is_none()
-            {
-                self.bad_policy(key, &value, &node.attrs.span_of(key, &node.span));
-            }
+            self.check_policy(key, &node.attrs, &node.span);
         }
         let policy = FailurePolicy::of(node, workflow, &mut self.diags);
         let explicit = self.explicit_timeout(node);
@@ -1098,7 +1121,11 @@ impl Ctx<'_> {
                     }
                     Err(error) => {
                         let span = node.attrs.span_of("script", &node.span);
+                        let unrendered = self.lenient_unbound && error.is_unbound();
                         self.template_error(&error, &span, &format!("node `{}` `script`", node.id));
+                        if unrendered {
+                            config.insert("script".into(), Value::String(script));
+                        }
                     }
                 }
             }
@@ -1278,7 +1305,7 @@ impl Ctx<'_> {
         if let Some(stop) = node.attrs.text("manager.stop_condition") {
             let span = node.attrs.span_of("manager.stop_condition", &node.span);
             let mut table = ir::ExprTable::new();
-            if condition::lower(&stop, &mut table, &span, &mut self.diags).is_some() {
+            if condition::lower(&stop, &mut table, &span, &mut self.diags, false).is_some() {
                 config.insert("stop_condition".into(), Value::String(stop));
             }
         }
@@ -1384,8 +1411,9 @@ impl Ctx<'_> {
                 .collect()
         };
         let inputs = CompileInputs {
-            inputs: to_map(self.template.inputs()),
-            vars:   to_map(self.template.vars()),
+            inputs:             to_map(self.template.inputs()),
+            vars:               to_map(self.template.vars()),
+            unbound_is_warning: self.lenient_unbound,
         };
         let lowered = lower_nested(
             workflow,
@@ -1541,19 +1569,7 @@ impl Ctx<'_> {
                 &format!("edge `{} -> {}`", edge.from, edge.to),
             );
             let cond = self.edge_condition(edge, res, policy);
-            let weight = match edge.attrs.int("weight", &mut self.diags) {
-                Some(w) if w < 0 => {
-                    self.diags.error(
-                        "fabro.bad_weight",
-                        edge.attrs.span_of("weight", &edge.span),
-                        "an edge `weight` cannot be negative",
-                    );
-                    0
-                }
-                Some(w) => u32::try_from(w).unwrap_or(u32::MAX),
-                None => 0,
-            };
-            let weight = if random { weight.max(1) } else { weight };
+            let weight = edge.attrs.int("weight", &mut self.diags).unwrap_or(0);
             let label = edge.attrs.text("label").filter(|l| !l.is_empty());
             let restart = edge
                 .attrs
@@ -1605,23 +1621,31 @@ impl Ctx<'_> {
             return None;
         }
         let span = edge.attrs.span_of("condition", &edge.span);
-        if policy.on_failure == Policy::PartiallySucceed
-            && condition::parse(&text).is_ok_and(|c| mentions_failed(&c))
+        if matches!(
+            policy.on_failure,
+            Policy::PartiallySucceed | Policy::Succeed
+        ) && condition::parse(&text).is_ok_and(|c| mentions_failed(&c))
         {
             self.diags.warning(
                 "fabro.unreachable_failure_edge",
                 span.clone(),
                 format!(
-                    "`{}` has `on_failure=\"partially_succeed\"`, so a non-retryable failure is \
-                     classified as a partial success before routing sees it, and this \
-                     `outcome=failed` edge can never match. Fabro would take it; under Petri the \
-                     outcome is classified once, at the step boundary. Use two nodes for both \
-                     behaviors",
-                    res.id
+                    "`{}` has `on_failure=\"{}\"`, so a non-retryable failure is classified as a \
+                     partial success before routing sees it, and this `outcome=failed` edge can \
+                     never match. Fabro would take it; under Petri the outcome is classified \
+                     once, at the step boundary. Use two nodes for both behaviors",
+                    res.id,
+                    policy.on_failure.name()
                 ),
             );
         }
-        condition::lower(&text, self.b.exprs(), &span, &mut self.diags)
+        condition::lower(
+            &text,
+            self.b.exprs(),
+            &span,
+            &mut self.diags,
+            policy.succeeds(),
+        )
     }
 
     /// The payload a branch sends to a fan-in: `{ index, value: { id, status,

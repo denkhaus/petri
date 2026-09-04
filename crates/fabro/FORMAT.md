@@ -18,7 +18,7 @@ a run will execute.
 
 | Fabro | At load |
 |---|---|
-| `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint |
+| `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint. `petri check` given no inputs at all downgrades it to the warning `fabro.unbound_input` and leaves the text unrendered, so a file validates before its inputs exist; a run is always strict |
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
@@ -72,6 +72,12 @@ and Fabro's four tiers, `Fallthrough::NoEmit` (no match is a normal end):
 | 3 | unconditional edges | `index_of(output.suggested_next_ids, "<target>") != null`, ranked by that index | `LowestRankThenArmOrder` |
 | 4 | unconditional edges | the failure policy (below) | `selection` |
 
+Weights are Fabro's: highest wins, ties break on the lexical target id, and a
+negative `weight` deprioritizes an edge. The engine's weights are unsigned, so a
+node with a negative weight has every weight shifted up until the lowest is
+zero (order and ties unchanged). Under `selection="random"` a weight at or below
+zero counts as one, as Fabro counts it.
+
 Labels: the accelerator prefix (`[Y] Yes`, `Y) Yes`, `Y - Yes`) is stripped on
 both sides before the engine's `normalize_label`. `selection="random"` with a
 conditional edge is `fabro.random_with_conditions`, as in Fabro. `loop_restart=true`
@@ -84,6 +90,7 @@ target with empty context.
 |---|---|
 | `outcome=succeeded` / `partially_succeeded` / `skipped` | `status == 'success'` / `'partial_success'` / `'skipped'` |
 | `outcome=failed` | `failure() || cancelled() || timed_out()` |
+| `outcome=success` | read as `outcome=succeeded` with the warning `deprecated.outcome_alias`, until 2026-10-04 (Fabro itself never matches it) |
 | `outcome=<anything else>` | `unsupported.outcome_value`: domain signals ride `context_updates` |
 | `preferred_label=X` | `to_string(default(output.preferred_label, '')) == 'X'` |
 | `context.K=X`, bare `K=X` | `to_string(default(get(kv, 'K'), '')) == 'X'` — Fabro's text comparison |
@@ -105,8 +112,17 @@ specific one wins:
   classifies the failure as `PartialSuccess` (failure kept in `underlying`) and it
   routes as a success.
 - A human gate never falls through on failure, whatever the policy.
-- `on_failure="succeed"` and `auto_status=true` are refused: they would record
-  a clean success for a step that failed.
+- `on_failure="succeed"` (and `auto_status=true`, its deprecated spelling) is a
+  30-day compatibility shim, accepted until **2026-10-04** with the warning
+  `deprecated.on_failure.succeed` / `deprecated.auto_status`. It lowers like
+  `partially_succeed` with one difference at the step boundary: the step keeps
+  the failure on its record as a `PartialSuccess`, but reports
+  `output.outcome = "succeeded"`, and the node's `outcome=succeeded` conditions
+  match that converted failure while `outcome=partially_succeeded` does not — what
+  Fabro shows its conditions. The event log never records a clean success for a
+  failed step. After the sunset both spellings are refused again
+  (`unsupported.on_failure.succeed`, `unsupported.auto_status`); rewrite the
+  workflow to `partially_succeed` first.
 
 **Deliberate departure.** Fabro promotes a failed outcome only when no explicit
 route matches, so an `outcome=failed` edge on a `succeed` node is still taken.
@@ -179,15 +195,20 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
 
 | Construct | Code |
 |---|---|
-| `on_failure="succeed"`, `on_retries_exhausted="succeed"` | `unsupported.on_failure.succeed` |
-| `auto_status=true` | `unsupported.auto_status` |
-| `outcome=X` for X outside the four outcomes | `unsupported.outcome_value` |
+| `outcome=X` for X outside the four outcomes (and, after 2026-10-04, `success`) | `unsupported.outcome_value` |
 | `llm_prompt`, `is_codergen`, `node_type`, bare-number timeouts | `unsupported.attractor` |
 | `import` | `unsupported.import` |
 | `acp_command` (legacy) | `unsupported.acp_command` |
 | a `tripleoctagon` with a `prompt` | `unsupported.fan_in.prompt` |
-| an unbound `{{ inputs.* }}` | `unsupported.template.unbound_input` |
+| an unbound `{{ inputs.* }}` (a warning, `fabro.unbound_input`, under `petri check` with no inputs) | `unsupported.template.unbound_input` |
 | ports, HTML strings, undirected graphs, `strict`, anonymous subgraphs | `unsupported.dot.*` |
+
+**Accepted until 2026-10-04.** Two Fabro spellings that phase one refused are
+shims for 30 days, each with a warning that names the date and a
+`REMOVE AFTER 2026-10-04` comment at every site (`grep -r "REMOVE AFTER"`):
+`on_failure="succeed"` / `auto_status=true` (see "Failure policy") and
+`outcome=success` in a condition (see "Conditions"). `.ai/plans/fabro-local-workflows.md`
+lists the workflows that depend on them and what to do at the sunset.
 
 Ignored loudly (a warning naming the attribute): `stall_timeout` and
 `loop_restart_signature_limit` (host policy, later phases), `tool_hooks.*`, and

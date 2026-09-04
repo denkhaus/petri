@@ -8,6 +8,15 @@ use std::{env, fs};
 use fabro_acceptance::runs::{run_with_children, runs_report};
 use fabro_acceptance::{corpus_root, has_corpus, lower_one, pin, workflows};
 
+/// Corpus workflows that cannot reach exit under stubs, and why. A stub
+/// produces no context, so a `for_each` whose list a real command builds has
+/// nothing to expand, and the engine reports the null list as a run error —
+/// Fabro's engine fails that stage the same way.
+const EXPECTED_STOPS: &[(&str, &str)] = &[(
+    ".fabro/workflows/code-review/code-review.fabro",
+    "`finders` fans out over a list the `prepare` command builds",
+)];
+
 #[tokio::test]
 #[expect(
     clippy::print_stderr,
@@ -35,9 +44,17 @@ async fn every_lowered_corpus_workflow_runs_under_stubs() {
     assert!(!results.is_empty(), "some corpus workflows lower");
     let markdown = runs_report(&results, &pin());
     fs::write(root.join("../RUNS.md"), &markdown).expect("write the sweep");
+    for (file, why) in EXPECTED_STOPS {
+        let result = results.iter().find(|(f, _)| f == file);
+        assert!(
+            result.is_some_and(|(_, r)| r.status != "success"),
+            "{file} is listed as an expected stop ({why}) but reached exit or did not lower; \
+             drop it from EXPECTED_STOPS"
+        );
+    }
     let stuck: Vec<_> = results
         .iter()
-        .filter(|(_, r)| r.status != "success")
+        .filter(|(f, r)| r.status != "success" && !EXPECTED_STOPS.iter().any(|(e, _)| e == f))
         .collect();
     assert!(
         stuck.is_empty(),
