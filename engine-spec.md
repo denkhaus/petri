@@ -591,11 +591,12 @@ default keep-on-failure (`always|on_failure|never`). Container executor
 (`executor-sandbox` over a sandbox-driver provider, Docker today): one sandbox
 per scope instance — pull if-not-present, an init process, the workspace
 bind-mounted from the host run dir at `/workspace`, a long-lived POSIX init;
-steps run through the provider's exec as `exec 'prog' 'args'…`, so they need no
-Bash semantics and the provider probes for `/bin/bash`, falling back to
-`/bin/sh` on images without it (alpine); release deletes the container always
+steps go to the provider's exec as a program plus arguments, which the
+provider runs directly under a `/bin/sh` wrapper, so no shell interprets them
+and an image without bash (alpine) works; release deletes the container always
 (the workspace is the host directory) and keeps or removes that directory by
-retention. Image contract: must provide `setsid` (busybox/util-linux both do).
+retention. Image contract: must provide `/bin/sh`, `env`, and `setsid`
+(busybox/util-linux both do).
 Services require a containerized job: declared `services` become sidecar
 containers on a per-scope network reached by alias, and a bare host process
 that declares services fails at acquire with `env_acquire`, the message naming
