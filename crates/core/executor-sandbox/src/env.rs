@@ -24,15 +24,12 @@ use tokio::io::{AsyncWriteExt, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::BackendKind;
-
 /// Bytes of pipe buffer between the output sink and each line pump.
 const OUTPUT_PIPE_CAPACITY: usize = 64 * 1024;
 
 /// One live sandbox, handed to step kinds as their spawn capability.
 pub(crate) struct SandboxEnv {
     sandbox:      Arc<dyn Sandbox>,
-    backend:      BackendKind,
     /// The workspace path as a process in the sandbox sees it.
     workspace:    String,
     /// The driver's machine as a process in the sandbox reaches it.
@@ -45,7 +42,6 @@ pub(crate) struct SandboxEnv {
 impl SandboxEnv {
     pub(crate) fn new(
         sandbox: Arc<dyn Sandbox>,
-        backend: BackendKind,
         workspace: String,
         host_address: String,
         ambient: BTreeMap<String, String>,
@@ -53,7 +49,6 @@ impl SandboxEnv {
     ) -> Self {
         Self {
             sandbox,
-            backend,
             workspace,
             host_address,
             ambient,
@@ -204,7 +199,6 @@ impl ExecEnv for SandboxEnv {
         Ok(Box::new(SandboxProcess {
             lines: Some(line_rx),
             stdin: stdin_writer.map(|(writer, _)| writer),
-            backend: self.backend,
             cancel,
             kill,
             grace: self.grace,
@@ -226,7 +220,8 @@ impl ExecEnv for SandboxEnv {
     }
 
     fn shares_host_filesystem(&self) -> bool {
-        matches!(self.backend, BackendKind::Host)
+        // A container sees only the bind-mounted workspace, never host paths.
+        false
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
@@ -234,7 +229,7 @@ impl ExecEnv for SandboxEnv {
         match self.sandbox.fs().read(&path).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if is_not_found(&error) => Ok(None),
-            Err(error) => Err(backend_error(self.backend, "read", &error)),
+            Err(error) => Err(backend_error("read", &error)),
         }
     }
 
@@ -244,7 +239,7 @@ impl ExecEnv for SandboxEnv {
             .fs()
             .write(&path, contents)
             .await
-            .map_err(|error| backend_error(self.backend, "write", &error))
+            .map_err(|error| backend_error("write", &error))
     }
 
     fn grace(&self) -> Duration {
@@ -262,9 +257,9 @@ fn is_not_found(error: &sandbox_driver::Error) -> bool {
         || matches!(error, sandbox_driver::Error::Exec(_))
 }
 
-fn backend_error(backend: BackendKind, operation: &str, error: &sandbox_driver::Error) -> EnvError {
+fn backend_error(operation: &str, error: &sandbox_driver::Error) -> EnvError {
     EnvError::Backend {
-        backend:   smol_str::SmolStr::new(backend.as_str()),
+        backend:   smol_str::SmolStr::new("sandbox"),
         operation: smol_str::SmolStr::new(operation),
         message:   error.to_string(),
     }
@@ -273,14 +268,13 @@ fn backend_error(backend: BackendKind, operation: &str, error: &sandbox_driver::
 /// The process handle a step drives: its output, its stdin, its wait, and the
 /// two-level cancellation ladder.
 struct SandboxProcess {
-    lines:   Option<LineStream>,
-    stdin:   Option<StdinWriter>,
-    backend: BackendKind,
-    cancel:  CancellationToken,
-    kill:    CancellationToken,
-    grace:   Duration,
-    status:  watch::Receiver<Option<Result<ExitStatus, String>>>,
-    cached:  Option<ExitStatus>,
+    lines:  Option<LineStream>,
+    stdin:  Option<StdinWriter>,
+    cancel: CancellationToken,
+    kill:   CancellationToken,
+    grace:  Duration,
+    status: watch::Receiver<Option<Result<ExitStatus, String>>>,
+    cached: Option<ExitStatus>,
 }
 
 #[async_trait]
@@ -302,7 +296,7 @@ impl ProcessHandle for SandboxProcess {
             let current = status.borrow_and_update().clone();
             if let Some(result) = current {
                 let value = result.map_err(|message| EnvError::Backend {
-                    backend: smol_str::SmolStr::new(self.backend.as_str()),
+                    backend: smol_str::SmolStr::new("sandbox"),
                     operation: smol_str::SmolStr::new("exec"),
                     message,
                 })?;

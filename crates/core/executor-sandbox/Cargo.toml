@@ -18,9 +18,9 @@ workspace = true
 executor.workspace = true
 ir.workspace = true
 sandbox-driver.workspace = true
-sandbox-driver-host.workspace = true
 sandbox-driver-docker.workspace = true
 async-trait.workspace = true
+libc.workspace = true
 smol_str.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "macros", "time", "fs"] }
 tokio-util = "0.7"
@@ -32,5 +32,5 @@ serde_json.workspace = true
 ir.workspace = true
 smol_str.workspace = true
 sandbox-driver.workspace = true
-sandbox-driver-host.workspace = true
+sandbox-driver-docker.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

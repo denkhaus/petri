@@ -1,6 +1,7 @@
 //! An [`Executor`] that routes each scope to the backend its runtime target
-//! needs: a host process to the host provider, a container to the Docker
-//! provider. It is the composition the runtime registers for a run.
+//! needs: a host process to the native [`HostExecutor`], a container to the
+//! Docker [`SandboxExecutor`]. It is the composition the runtime registers for
+//! a run.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use ir::RuntimeTarget;
 use sandbox_driver::SandboxProvider;
 use smol_str::SmolStr;
 
-use crate::{BackendKind, SandboxExecutor};
+use crate::{HostExecutor, SandboxExecutor};
 
 /// Which backend acquired a scope, so release reaches the same one.
 #[derive(Clone, Copy)]
@@ -24,31 +25,30 @@ enum Route {
     Docker,
 }
 
-/// Routes scopes to a host or Docker [`SandboxExecutor`] by runtime target.
+/// Routes scopes to the native host executor or the Docker [`SandboxExecutor`]
+/// by runtime target.
 ///
-/// A host-process scope runs on the host provider; a container scope runs on
+/// A host-process scope runs as real processes on this machine, with the
+/// sentinel and crash fence a bare process needs; a container scope runs on
 /// the Docker provider. A run with no Docker daemon still serves its
 /// host-process scopes, and a container scope then fails routably at acquire.
 pub struct RoutingExecutor {
-    host:   SandboxExecutor,
+    host:   HostExecutor,
     docker: Option<SandboxExecutor>,
     routes: Mutex<HashMap<(ir::ScopeId, SmolStr), Route>>,
 }
 
 impl RoutingExecutor {
-    /// Builds a router over the two providers. `docker` is optional so a
-    /// host-only run needs no daemon.
+    /// Builds a router. `docker_provider` is optional so a host-only run needs
+    /// no daemon; both backends root their workspaces under `run_dir`.
     pub fn new(
-        host_provider: Arc<dyn SandboxProvider>,
         docker_provider: Option<Arc<dyn SandboxProvider>>,
         run_dir: PathBuf,
         retention: Retention,
     ) -> Self {
-        let host = SandboxExecutor::new(host_provider, BackendKind::Host, run_dir.clone())
-            .with_retention(retention);
-        let docker = docker_provider.map(|provider| {
-            SandboxExecutor::new(provider, BackendKind::Docker, run_dir).with_retention(retention)
-        });
+        let host = HostExecutor::new(run_dir.clone()).with_retention(retention);
+        let docker = docker_provider
+            .map(|provider| SandboxExecutor::new(provider, run_dir).with_retention(retention));
         Self {
             host,
             docker,

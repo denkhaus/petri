@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::{fs, mem};
 
 use executor::{AcquireContext, Executor, ProcessSpec, ScopeOutcome, ScopeSpec};
-use executor_sandbox::{BackendKind, SandboxExecutor};
+use executor_sandbox::SandboxExecutor;
 use sandbox_driver::SandboxProvider;
 use sandbox_driver_docker::DockerProvider;
 
@@ -48,11 +48,7 @@ mod tmp {
 async fn docker_executor(run_dir: &Path) -> Option<SandboxExecutor> {
     let provider = DockerProvider::connect().await.ok()?;
     let provider: Arc<dyn SandboxProvider> = Arc::new(provider);
-    Some(SandboxExecutor::new(
-        provider,
-        BackendKind::Docker,
-        run_dir.to_path_buf(),
-    ))
+    Some(SandboxExecutor::new(provider, run_dir.to_path_buf()))
 }
 
 fn container_scope() -> ScopeSpec {

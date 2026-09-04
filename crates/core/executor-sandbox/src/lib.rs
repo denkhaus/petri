@@ -1,14 +1,16 @@
-//! A Petri [`Executor`] over the sandbox-driver provider family.
+//! Petri executors over the sandbox-driver provider family.
 //!
-//! One `SandboxExecutor` realizes every scope on one backend — host or
-//! Docker — by mapping a [`ScopeSpec`] to a `SandboxSpec`, creating the
-//! sandbox, and handing steps a [`ExecEnv`] over it. It replaces the
-//! bespoke host and Docker executors: the provider owns process execution,
-//! the filesystem, and teardown, and this crate is the thin adapter that
-//! speaks the executor interface on top.
+//! Two shapes share the [`Executor`] interface. [`SandboxExecutor`] realizes a
+//! container scope on a sandbox-driver provider — Docker today, Daytona later:
+//! the provider owns process execution, the filesystem, and teardown, and this
+//! crate maps a [`ScopeSpec`] onto a `SandboxSpec`. [`HostExecutor`] keeps the
+//! host backend native — real processes in a workspace directory, with the
+//! process-group sentinel and crash fence that a bare host process needs and a
+//! container does not. [`RoutingExecutor`] sends each scope to the one its
+//! runtime target needs.
 
-mod backend;
 mod env;
+mod host;
 mod routing;
 
 use std::io::{self, ErrorKind};
@@ -27,11 +29,11 @@ use smol_str::SmolStr;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-pub use crate::backend::BackendKind;
 use crate::env::SandboxEnv;
+pub use crate::host::HostExecutor;
 pub use crate::routing::RoutingExecutor;
 
-/// The container path every scope's workspace is mounted or created at.
+/// The container path every scope's workspace is mounted at.
 const CONTAINER_WORKSPACE: &str = "/workspace";
 /// The alias a container reaches the driver's machine through.
 const DOCKER_HOST_ALIAS: &str = "host.docker.internal";
@@ -43,10 +45,11 @@ const ENVIRONMENT_LABEL: &str = "petri.environment";
 /// carries; minted once, read back by any executor over the same run dir.
 const RUN_ID_FILE: &str = "sandbox-run-id";
 
-/// An [`Executor`] backed by one sandbox-driver provider.
+/// An [`Executor`] that realizes container scopes on one sandbox-driver
+/// provider. The workspace is a host directory bind-mounted into the
+/// container, so logs, artifacts, and retention see it on the host.
 pub struct SandboxExecutor {
     provider:  Arc<dyn SandboxProvider>,
-    backend:   BackendKind,
     run_dir:   PathBuf,
     retention: Retention,
     /// The run id the environment label carries, resolved on first use from
@@ -55,12 +58,11 @@ pub struct SandboxExecutor {
 }
 
 impl SandboxExecutor {
-    /// Builds an executor over `provider`. The `backend` selects how scopes
-    /// map onto specs; `run_dir` roots every workspace under `scopes/`.
-    pub fn new(provider: Arc<dyn SandboxProvider>, backend: BackendKind, run_dir: PathBuf) -> Self {
+    /// Builds an executor over `provider`; `run_dir` roots every workspace
+    /// under `scopes/`.
+    pub fn new(provider: Arc<dyn SandboxProvider>, run_dir: PathBuf) -> Self {
         Self {
             provider,
-            backend,
             run_dir,
             retention: Retention::default(),
             run_id: OnceCell::new(),
@@ -73,8 +75,8 @@ impl SandboxExecutor {
         self
     }
 
-    /// The host directory a scope's workspace lives in, on both backends: a
-    /// designated directory for host, and a bind-mount source for Docker.
+    /// The host directory a scope's workspace lives in: the bind-mount source
+    /// for the container.
     fn workspace_host_path(&self, workspace_id: &str) -> PathBuf {
         self.run_dir.join("scopes").join(workspace_id).join("work")
     }
@@ -90,42 +92,28 @@ impl SandboxExecutor {
             .map_err(|error| EnvError::workspace("create", workspace_host.display(), error))?;
         let workspace_host_str = workspace_host.display().to_string();
 
-        // The environment label is the reconcile key. On the Docker backend a
-        // matching sandbox is a crashed predecessor: end it before creating a
-        // fresh one. The host provider's registry is in-process, so its label
-        // query is empty after a restart and the fence is a no-op there.
-        let label = match self.backend {
-            BackendKind::Docker => Some(self.environment_label(scope).await?),
-            BackendKind::Host => None,
-        };
-        if let Some(label) = &label {
-            self.fence_by_label(label).await?;
-        }
+        // The environment label is the reconcile key: a matching sandbox is a
+        // crashed predecessor, ended before the fresh create.
+        let label = self.environment_label(scope).await?;
+        self.fence_by_label(&label).await?;
 
-        let spec = self.build_spec(scope, &workspace_host_str, label.as_deref(), ctx)?;
+        let spec = build_spec(scope, &workspace_host_str, &label, ctx)?;
         let sandbox = self
             .provider
             .create(&spec, None)
             .await
-            .map_err(|error| self.acquire_failed(&error))?;
+            .map_err(|error| acquire_failed(&error))?;
 
-        let (workspace_path, host_address) = match self.backend {
-            BackendKind::Host => (workspace_host_str.clone(), "127.0.0.1".to_owned()),
-            BackendKind::Docker => (CONTAINER_WORKSPACE.to_owned(), DOCKER_HOST_ALIAS.to_owned()),
-        };
         let ambient = sandbox.environment().await.unwrap_or_default();
-
         let env = SandboxEnv::new(
             sandbox.clone(),
-            self.backend,
-            workspace_path,
-            host_address,
+            CONTAINER_WORKSPACE.to_owned(),
+            DOCKER_HOST_ALIAS.to_owned(),
             ambient,
             scope.grace,
         );
         let teardown = SandboxTeardown {
             sandbox,
-            backend: self.backend,
             retention: self.retention,
             workspace_host: workspace_host.clone(),
         };
@@ -135,145 +123,6 @@ impl SandboxExecutor {
             Arc::new(env),
             teardown,
         ))
-    }
-
-    /// Maps a scope to a `SandboxSpec` for this backend. `label`, when
-    /// present, names the environment for the reconcile fence and pins a
-    /// deterministic sandbox name so a re-acquire targets the same one.
-    fn build_spec(
-        &self,
-        scope: &ScopeSpec,
-        workspace_host: &str,
-        label: Option<&str>,
-        ctx: &AcquireContext,
-    ) -> Result<SandboxSpec, EnvError> {
-        let mut spec = match (self.backend, &scope.runtime.target) {
-            (BackendKind::Host, RuntimeTarget::HostProcess) => {
-                SandboxSpec::new(SandboxSource::HostDirectory).working_directory(workspace_host)
-            }
-            (
-                BackendKind::Docker,
-                RuntimeTarget::Container {
-                    image, credentials, ..
-                },
-            ) => {
-                let registry_auth = self.registry_auth(credentials.as_ref(), ctx)?;
-                let sidecars = self.sidecars(scope, ctx)?;
-                let provider_config =
-                    docker_provider_config(workspace_host, registry_auth, sidecars);
-                let mut spec = SandboxSpec::new(SandboxSource::Image {
-                    reference: image.to_string(),
-                })
-                .working_directory(CONTAINER_WORKSPACE)
-                .provider_config(provider_config);
-                if let Some(label) = label {
-                    spec = spec
-                        .name(container_name(label))
-                        .label(ENVIRONMENT_LABEL, label);
-                }
-                spec
-            }
-            (BackendKind::Docker, RuntimeTarget::HostProcess) => {
-                // A host-process scope on the Docker backend runs in the
-                // runner image the runtime selected and recorded on the spec.
-                return Err(EnvError::Backend {
-                    backend:   SmolStr::new("docker"),
-                    operation: SmolStr::new("acquire"),
-                    message:   "a host-process scope needs a runner image on the docker backend; \
-                              the runtime must set a container target"
-                        .into(),
-                });
-            }
-            (BackendKind::Host, RuntimeTarget::Container { .. }) => {
-                return Err(EnvError::Backend {
-                    backend:   SmolStr::new("host"),
-                    operation: SmolStr::new("acquire"),
-                    message:
-                        "the host backend cannot run a container scope; use the docker backend"
-                            .into(),
-                });
-            }
-        };
-
-        // Scope env is the trusted channel on both backends.
-        for (key, value) in &scope.env {
-            spec = spec.env_var(key.as_str(), value.as_str());
-        }
-        Ok(spec)
-    }
-
-    /// Resolves image pull credentials to a `registry_auth` value, or `None`
-    /// when the scope declares none.
-    fn registry_auth(
-        &self,
-        credentials: Option<&ir::RegistryCredentials>,
-        ctx: &AcquireContext,
-    ) -> Result<Option<serde_json::Value>, EnvError> {
-        let Some(credentials) = credentials else {
-            return Ok(None);
-        };
-        let password = self.resolve_secret(&credentials.password_secret, ctx)?;
-        Ok(Some(serde_json::json!({
-            "username": credentials.username.as_str(),
-            "password": password,
-        })))
-    }
-
-    /// Maps the scope's services to Docker sidecars. Ports are dropped: a
-    /// containerized job reaches a service by its network alias, not a
-    /// published port.
-    fn sidecars(
-        &self,
-        scope: &ScopeSpec,
-        ctx: &AcquireContext,
-    ) -> Result<Vec<serde_json::Value>, EnvError> {
-        let mut sidecars = Vec::with_capacity(scope.services.len());
-        for service in &scope.services {
-            let env: serde_json::Map<String, serde_json::Value> = service
-                .env
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        key.as_str().to_owned(),
-                        serde_json::Value::String(value.to_string()),
-                    )
-                })
-                .collect();
-            let mut sidecar = serde_json::json!({
-                "name": service.name.as_str(),
-                "image": service.image.as_str(),
-                "env": env,
-            });
-            if let Some(credentials) = &service.credentials {
-                let password = self.resolve_secret(&credentials.password_secret, ctx)?;
-                sidecar["registry_auth"] = serde_json::json!({
-                    "username": credentials.username.as_str(),
-                    "password": password,
-                });
-            }
-            sidecars.push(sidecar);
-        }
-        Ok(sidecars)
-    }
-
-    /// Resolves a secret by name inside acquire, registering it for masking.
-    fn resolve_secret(&self, name: &str, ctx: &AcquireContext) -> Result<String, EnvError> {
-        ctx.secrets()
-            .resolve(name)
-            .map(|secret| secret.expose().to_string())
-            .map_err(|error| EnvError::Backend {
-                backend:   SmolStr::new(self.backend.as_str()),
-                operation: SmolStr::new("acquire"),
-                message:   format!("resolving secret `{name}`: {error}"),
-            })
-    }
-
-    fn acquire_failed(&self, error: &sandbox_driver::Error) -> EnvError {
-        EnvError::Backend {
-            backend:   SmolStr::new(self.backend.as_str()),
-            operation: SmolStr::new("acquire"),
-            message:   error.to_string(),
-        }
     }
 
     /// The environment label value for a scope: the run id and the scope's
@@ -303,7 +152,7 @@ impl SandboxExecutor {
             .provider
             .list(&filter)
             .await
-            .map_err(|error| self.acquire_failed(&error))?;
+            .map_err(|error| acquire_failed(&error))?;
         for status in matches {
             match self.provider.attach(&status.id, None).await {
                 Ok(sandbox) => {
@@ -317,6 +166,113 @@ impl SandboxExecutor {
             }
         }
         Ok(())
+    }
+}
+
+/// Maps a container scope to a `SandboxSpec`, pinning a deterministic name and
+/// the environment `label` so a re-acquire targets the same one.
+fn build_spec(
+    scope: &ScopeSpec,
+    workspace_host: &str,
+    label: &str,
+    ctx: &AcquireContext,
+) -> Result<SandboxSpec, EnvError> {
+    let RuntimeTarget::Container {
+        image, credentials, ..
+    } = &scope.runtime.target
+    else {
+        return Err(EnvError::Backend {
+            backend:   SmolStr::new("sandbox"),
+            operation: SmolStr::new("acquire"),
+            message:   "this executor realizes container scopes only; a host-process scope \
+                        needs the host executor or a runner image"
+                .into(),
+        });
+    };
+    let registry_auth = registry_auth(credentials.as_ref(), ctx)?;
+    let sidecars = sidecars(scope, ctx)?;
+    let provider_config = docker_provider_config(workspace_host, registry_auth, sidecars);
+    let mut spec = SandboxSpec::new(SandboxSource::Image {
+        reference: image.to_string(),
+    })
+    .working_directory(CONTAINER_WORKSPACE)
+    .provider_config(provider_config)
+    .name(container_name(label))
+    .label(ENVIRONMENT_LABEL, label);
+
+    // Scope env is the trusted channel for the container.
+    for (key, value) in &scope.env {
+        spec = spec.env_var(key.as_str(), value.as_str());
+    }
+    Ok(spec)
+}
+
+/// Resolves image pull credentials to a `registry_auth` value, or `None` when
+/// the scope declares none.
+fn registry_auth(
+    credentials: Option<&ir::RegistryCredentials>,
+    ctx: &AcquireContext,
+) -> Result<Option<serde_json::Value>, EnvError> {
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
+    let password = resolve_secret(&credentials.password_secret, ctx)?;
+    Ok(Some(serde_json::json!({
+        "username": credentials.username.as_str(),
+        "password": password,
+    })))
+}
+
+/// Maps the scope's services to Docker sidecars. Ports are dropped: a
+/// containerized job reaches a service by its network alias, not a published
+/// port.
+fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<serde_json::Value>, EnvError> {
+    let mut sidecars = Vec::with_capacity(scope.services.len());
+    for service in &scope.services {
+        let env: serde_json::Map<String, serde_json::Value> = service
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str().to_owned(),
+                    serde_json::Value::String(value.to_string()),
+                )
+            })
+            .collect();
+        let mut sidecar = serde_json::json!({
+            "name": service.name.as_str(),
+            "image": service.image.as_str(),
+            "env": env,
+        });
+        if let Some(credentials) = &service.credentials {
+            let password = resolve_secret(&credentials.password_secret, ctx)?;
+            sidecar["registry_auth"] = serde_json::json!({
+                "username": credentials.username.as_str(),
+                "password": password,
+            });
+        }
+        sidecars.push(sidecar);
+    }
+    Ok(sidecars)
+}
+
+/// Resolves a secret by name inside acquire, registering it for masking.
+fn resolve_secret(name: &str, ctx: &AcquireContext) -> Result<String, EnvError> {
+    ctx.secrets()
+        .resolve(name)
+        .map(|secret| secret.expose().to_string())
+        .map_err(|error| EnvError::Backend {
+            backend:   SmolStr::new("sandbox"),
+            operation: SmolStr::new("acquire"),
+            message:   format!("resolving secret `{name}`: {error}"),
+        })
+}
+
+fn acquire_failed(error: &sandbox_driver::Error) -> EnvError {
+    EnvError::Backend {
+        backend:   SmolStr::new("sandbox"),
+        operation: SmolStr::new("acquire"),
+        message:   error.to_string(),
     }
 }
 
@@ -405,7 +361,6 @@ fn docker_provider_config(
 /// workspace, and where that workspace lives on the host.
 struct SandboxTeardown {
     sandbox:        Arc<dyn Sandbox>,
-    backend:        BackendKind,
     retention:      Retention,
     workspace_host: PathBuf,
 }
@@ -414,7 +369,6 @@ impl fmt::Debug for SandboxTeardown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SandboxTeardown")
             .field("sandbox", &self.sandbox.id())
-            .field("backend", &self.backend)
             .field("retention", &self.retention)
             .field("workspace_host", &self.workspace_host)
             .finish()
@@ -423,11 +377,7 @@ impl fmt::Debug for SandboxTeardown {
 
 #[async_trait]
 impl Executor for SandboxExecutor {
-    #[tracing::instrument(
-        name = "scope.acquire",
-        skip_all,
-        fields(scope = scope.id.raw(), backend = self.backend.as_str())
-    )]
+    #[tracing::instrument(name = "scope.acquire", skip_all, fields(scope = scope.id.raw()))]
     async fn acquire(
         &self,
         scope: &ScopeSpec,
@@ -456,13 +406,12 @@ impl Executor for SandboxExecutor {
             return report.problem("sandbox executor was handed a foreign environment");
         };
         let sandbox = teardown.sandbox.clone();
-        let backend = teardown.backend;
         let retention = teardown.retention;
         let workspace_host = teardown.workspace_host.clone();
         drop(env);
 
-        // On host and Docker the workspace is a host directory, so the
-        // sandbox itself holds nothing worth keeping: delete it always.
+        // The workspace is a host bind mount, so the container holds nothing
+        // worth keeping: delete it always.
         match sandbox.delete().await {
             Ok(()) => report = report.released("sandbox"),
             Err(error) => {
@@ -471,10 +420,8 @@ impl Executor for SandboxExecutor {
             }
         }
 
-        // The host directory is the workspace on both backends; keep it on a
-        // failure the retention policy says to keep.
+        // Keep the host workspace on a failure the retention policy keeps.
         let workspace = format!("workspace {}", workspace_host.display());
-        let _ = backend;
         if retention.keeps(outcome) {
             return report.kept(workspace);
         }

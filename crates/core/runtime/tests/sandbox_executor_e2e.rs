@@ -3,7 +3,6 @@
 //! driver and coordinator stack runs a graph over `RoutingExecutor` and the
 //! in-process host provider, with byte-identical replay.
 
-use std::sync::Arc;
 use std::{env, fs, process};
 
 use executor_sandbox::RoutingExecutor;
@@ -11,8 +10,6 @@ use runtime::executor::Retention;
 use runtime::frontend::native::load;
 use runtime::ir::RunStatus;
 use runtime::{RunOptions, Runtime};
-use sandbox_driver::SandboxProvider;
-use sandbox_driver_host::HostProvider;
 
 const CYCLE: &str = r#"
 name: poll-until-ready
@@ -49,8 +46,7 @@ async fn the_cycle_runs_end_to_end_over_the_sandbox_adapter() {
     let mut options = RunOptions::new(&dir);
     options.retention = Retention::Never;
 
-    let host: Arc<dyn SandboxProvider> = Arc::new(HostProvider::new());
-    let executor = RoutingExecutor::new(host, None, dir.clone(), Retention::Never);
+    let executor = RoutingExecutor::new(None, dir.clone(), Retention::Never);
 
     let rt = Runtime::standard().options(options).executor(executor);
     let report = rt.run(graph).await.expect("replay is byte-identical");

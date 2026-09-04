@@ -2,13 +2,10 @@
 //! exit status, environment, and the cancellation ladder, with no daemon.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use executor::{AcquireContext, Executor, ProcessSpec, ScopeOutcome, ScopeSpec, Sig};
-use executor_sandbox::{BackendKind, SandboxExecutor};
-use sandbox_driver::SandboxProvider;
-use sandbox_driver_host::HostProvider;
+use executor_sandbox::HostExecutor;
 use tokio::time::timeout;
 
 #[allow(unreachable_pub, reason = "test-local helper module")]
@@ -48,9 +45,8 @@ mod tmp {
     }
 }
 
-fn host_executor(run_dir: &Path) -> SandboxExecutor {
-    let provider: Arc<dyn SandboxProvider> = Arc::new(HostProvider::new());
-    SandboxExecutor::new(provider, BackendKind::Host, run_dir.to_path_buf())
+fn host_executor(run_dir: &Path) -> HostExecutor {
+    HostExecutor::new(run_dir.to_path_buf())
 }
 
 fn scope() -> ScopeSpec {

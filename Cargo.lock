@@ -1208,18 +1208,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
-dependencies = [
- "bitflags 2.13.1",
- "cfg-if",
- "cfg_aliases",
- "libc",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1500,11 +1488,11 @@ name = "petri-executor-sandbox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "libc",
  "petri-executor",
  "petri-ir",
  "sandbox-driver",
  "sandbox-driver-docker",
- "sandbox-driver-host",
  "serde",
  "serde_json",
  "smol_str",
@@ -1695,8 +1683,6 @@ dependencies = [
  "petri-ir",
  "petri-steps",
  "petri-testkit",
- "sandbox-driver",
- "sandbox-driver-host",
  "smol_str",
  "thiserror",
  "tokio",
@@ -2026,18 +2012,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "sandbox-driver-host"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "nix",
- "sandbox-driver",
  "tokio",
  "tokio-util",
  "tracing",
