@@ -1591,10 +1591,26 @@ fn expand(
             // Clones never expand again; that is what makes expansion terminate.
             clone.expand = None;
             for group in &mut clone.routing.groups {
+                // Fresh edge ids, and the tiers that name edges follow them: a
+                // tiered policy's candidates refer to arms by id, so a clone
+                // whose tiers still named the template's arms would find no
+                // eligible edge and emit nothing.
+                let mut edge_map: BTreeMap<ir::EdgeId, ir::EdgeId> = BTreeMap::new();
                 for arm in &mut group.arms {
-                    arm.id = state.next_edge_id();
+                    let fresh = state.next_edge_id();
+                    edge_map.insert(arm.id, fresh);
+                    arm.id = fresh;
                     if let Some(new_target) = remap.get(&arm.to) {
                         arm.to = *new_target;
+                    }
+                }
+                if let ir::SelectionPolicy::Tiered(tiers) = &mut group.policy {
+                    for tier in tiers {
+                        for candidate in &mut tier.candidates {
+                            if let Some(fresh) = edge_map.get(&candidate.edge) {
+                                candidate.edge = *fresh;
+                            }
+                        }
                     }
                 }
             }

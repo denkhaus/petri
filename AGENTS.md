@@ -10,6 +10,7 @@ Use these documents as the authoritative design sources:
 - `engine-spec.md` defines the engine and intermediate representation.
 - `frontend-handoff.md` defines the frontend contract.
 - `crates/core/frontend-native/FORMAT.md` defines the native workflow format.
+- `crates/fabro/FORMAT.md` defines the Fabro dialect as lowered.
 - `README.md` maps the design to the workspace and test suites.
 
 ## Rust style
@@ -32,6 +33,9 @@ style-guide defaults.
 - Use `mise run fmt` to format Rust with the pinned nightly formatter.
 - Use `scripts/corpus-fetch.sh` and `scripts/corpus-fetch-actions.sh` to prepare
   the GitHub Actions compatibility corpus.
+- Use `scripts/corpus-fetch-fabro.sh` to prepare the Fabro compatibility corpus,
+  and `scripts/oracle-regenerate.sh` to refresh the Fabro oracle fixtures when
+  the Fabro pin changes.
 
 Docker tests skip when no Docker daemon is available. CI requires Docker tests
 on Linux and requires the compatibility corpus on all runners.

@@ -121,6 +121,8 @@ crates/fabro/acceptance/tests/harness.rs     Fabro plan §7 2: every corpus file
 crates/fabro/acceptance/tests/runs.rs        Fabro plan §7 5: every lowered corpus file runs under stubs; RUNS.md
 crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripted battery, checked against the Fabro oracle
 crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator
+crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, end to end
+crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 ```

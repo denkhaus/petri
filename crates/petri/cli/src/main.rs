@@ -9,7 +9,11 @@ use std::process::ExitCode;
 #[tokio::main]
 async fn main() -> ExitCode {
     logging::init();
-    cli::main(petri::runtime).await
+    cli::main(|mode| match mode {
+        cli::RuntimeMode::Real => petri::runtime(),
+        cli::RuntimeMode::DryRun => petri::dry_run_runtime(),
+    })
+    .await
 }
 
 /// Operator diagnostics.

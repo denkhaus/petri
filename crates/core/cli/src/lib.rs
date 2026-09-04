@@ -140,6 +140,11 @@ enum Command {
         /// Answer every step's question with its default choice.
         #[arg(long)]
         auto_approve: bool,
+        /// Simulate the step kinds that offer it (Fabro's stages) instead of
+        /// running them: every stage succeeds, a human gate takes its first
+        /// choice.
+        #[arg(long)]
+        dry_run:      bool,
     },
     /// Replay a saved event log against the workflow and verify byte-identity.
     ///
@@ -156,23 +161,35 @@ enum Command {
     },
 }
 
+/// Which runtime a command wants from the factory it is handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMode {
+    /// The real step kinds.
+    Real,
+    /// `run --dry-run`: the distribution's simulated step kinds, for formats
+    /// that have them — a workflow runs end to end with no model, shell or
+    /// person behind its stages.
+    DryRun,
+}
+
 /// Parse the arguments and run the command, on a runtime from `make`. One
 /// command, one runtime.
-pub async fn main(make: impl Fn() -> Runtime) -> ExitCode {
+pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Check {
             target,
             print_graph,
             json,
-        } => check(&make(), &target, print_graph, json),
-        Command::PrintGraph { target } => check(&make(), &target, true, false),
+        } => check(&make(RuntimeMode::Real), &target, print_graph, json),
+        Command::PrintGraph { target } => check(&make(RuntimeMode::Real), &target, true, false),
         Command::Run {
             target,
             run_dir,
             quiet,
             interactive,
             auto_approve,
+            dry_run,
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
@@ -183,9 +200,20 @@ pub async fn main(make: impl Fn() -> Runtime) -> ExitCode {
                 (_, true) => Some(Mode::AutoApprove),
                 _ => None,
             };
-            run(&make().options(options), &target, &run_dir, mode).await
+            let runtime_mode = if dry_run {
+                RuntimeMode::DryRun
+            } else {
+                RuntimeMode::Real
+            };
+            run(
+                &make(runtime_mode).options(options),
+                &target,
+                &run_dir,
+                mode,
+            )
+            .await
         }
-        Command::Replay { target, log } => replay(&make(), &target, &log),
+        Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
     }
 }
 

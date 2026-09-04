@@ -423,3 +423,46 @@ fn two_expansions_in_one_cascade_get_distinct_ids() {
         );
     }
 }
+
+/// A template node routed by a `Tiered` policy: the clone's tiers must name
+/// the clone's own arms, not the template's, or no clone ever emits and the
+/// collector never fires.
+#[test]
+fn a_tiered_template_node_routes_its_clones() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let plan = b.add_step("plan", scope, NOOP);
+    let deploy = b.add_step("deploy", scope, NOOP);
+    let collect = b.add_step("collect", scope, NOOP);
+    let collector = collector_exprs(b.exprs());
+    let items = b.exprs().var("input");
+    b.link(plan, deploy);
+    let ids = b.select(deploy, vec![
+        Arm::always(collect).with_map(collector.indexed),
+    ]);
+    b.node_mut(deploy).routing.groups[0].policy = ir::SelectionPolicy::Tiered(vec![ir::Tier {
+        candidates: vec![ir::Candidate {
+            edge: ids[0],
+            when: ir::Guard::Always,
+            rank: None,
+        }],
+        pick:       ir::PickPolicy::First,
+    }]);
+    b.node_mut(collect).routing = ir::Routing::terminal();
+    b.set_join(collect, JoinPolicy::All);
+    parallel_for_each(&mut b, deploy, items, ExpandTarget::Node, None, false);
+    let graph = b.build();
+    validate(&graph).expect("valid");
+
+    let mut h = Harness::new(graph).respond_with(|info| match info.base.as_str() {
+        "plan" => Outcome::success(json!(["a", "b"])),
+        _ => Outcome::success(Value::Null),
+    });
+    assert_eq!(h.run(), RunStatus::Success);
+    assert_eq!(h.start_count("deploy"), 2);
+    assert_eq!(
+        h.start_count("collect"),
+        1,
+        "every clone's tier found its own arm"
+    );
+}

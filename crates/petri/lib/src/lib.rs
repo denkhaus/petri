@@ -20,7 +20,8 @@
 //! ```no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let rt = petri::runtime().options(petri::RunOptions::new("/tmp/petri-demo"));
-//! let lowered = rt.check(std::path::Path::new("pipeline.yml"), None, None)?;
+//! let inputs = petri::frontend::CompileInputs::new();
+//! let lowered = rt.check(std::path::Path::new("pipeline.yml"), None, None, &inputs)?;
 //! if let Some(graph) = lowered.graph {
 //!     let report = rt.run(graph).await?;
 //!     println!("{}", report.status);
@@ -87,6 +88,18 @@ pub mod github {
 /// `Runtime::standard()` for core alone, `Runtime::bare()` for nothing — and
 /// registers what it wants.
 pub fn runtime() -> Runtime {
+    assemble(fabro_steps::register)
+}
+
+/// [`runtime`] with the Fabro step kinds simulated — `petri run --dry-run`:
+/// every Fabro stage succeeds and a human gate takes its first choice, as
+/// Fabro's own `--dry-run` does. The GitHub Actions kinds have no simulation
+/// and run for real.
+pub fn dry_run_runtime() -> Runtime {
+    assemble(fabro_steps::register_stubs)
+}
+
+fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
     let secrets = GithubSecrets::new();
     // The provisioner registers the results token with this run's mask set, so
     // it is built ahead of the closure that captures its masker.
@@ -121,7 +134,7 @@ pub fn runtime() -> Runtime {
                 .with_runners(runners)
                 .with_checkout_substitution(substitute_checkout),
         );
-    fabro_steps::register(runtime)
+    fabro(runtime)
         .step(github::RunStep)
         .step(github::ActionStep)
         .step(github::DockerActionStep)
