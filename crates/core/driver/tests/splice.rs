@@ -221,7 +221,7 @@ async fn a_crash_between_the_finish_and_its_core_records_reconstructs_the_batch(
 
     let dir2 = RunDir::new("splice-resume-2");
     let executor: Arc<dyn executor::Executor> =
-        Arc::new(executor_host::HostExecutor::new(dir2.path()));
+        Arc::new(executor_sandbox::HostExecutor::new(dir2.path()));
     let (driver, info) = Driver::resume(
         graph.clone(),
         prefix,

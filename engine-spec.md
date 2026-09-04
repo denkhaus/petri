@@ -563,8 +563,8 @@ instance with class `env_acquire` via ordinary `StepFinished` events.
 owns cleanup; remote sandboxes outlive workers by design), so the `Executor`
 contract carries one more rule: when `acquire` returns, no process from a
 previous acquisition of that scope can still mutate the workspace or be
-observed as this environment's status. The host executor implements it with
-generation-scoped `groups/<generation>/` records and a publication handshake
+observed as this environment's status. The host executor (the native host module of `executor-sandbox`) implements it
+with generation-scoped `groups/<generation>/` records and a publication handshake
 (the sentinel durably records its pgid, then checks a `fenced` marker, only
 then spawns the workload; the fencer writes markers before reading records) —
 and while anything of a discovered group lives, the group's own in-group
@@ -573,21 +573,35 @@ signals a bare recorded pgid** — it can be recycled to an innocent — so a gr
 that never drains fails the acquire with the typed `FenceLeaked` error, and the
 scope's firings fail routably; cleanup belongs to the operator or host policy
 (an identity-bound kill via Linux `pidfd` is an optional platform upgrade,
-never a requirement). Docker's fence is remove-by-deterministic-name; the name
-carries a run id the executor records in the run dir (`docker-run-id`) before
-its first container exists, so any executor over the same run dir — a resuming
-process's included — reaches the same containers, and a fork into a fresh run
-dir gets a fresh id. The fence is idempotent and covers the workspace only: side effects
+never a requirement). The container fence is reconcile-by-environment-label:
+every container carries `petri.environment=<run id>/<environment id>`, and
+`acquire` lists the provider's sandboxes by that label and deletes each match
+before it creates; the container's name (`petri-<run id>-<environment id>`) and
+its one-shot action containers (`…-s<token>`) are swept the same way. The run id
+is recorded in the run dir (`sandbox-run-id`) before the run's first container
+exists, so any executor over the same run dir — a resuming process's included —
+computes the same labels and reaches the same containers, and a fork into a
+fresh run dir gets a fresh id. The fence is idempotent and covers the workspace only: side effects
 outside it may have happened in the crashed attempt and happen again — resume
 is **at-least-once for external side effects**, exactly-once only for the log
 and the workspace fence.
 
 Host executor: workspace per scope instance under the run dir; retention
-default keep-on-failure (`always|on_failure|never`). Docker executor: container
-per scope instance — pull `if-not-present`, `--init`, workspace bind-mounted
-from the host run dir, long-lived init command; steps via `docker exec`;
-release = TERM, grace, `rm -f`. Image contract: must provide `setsid`
-(busybox/util-linux both do). Parallel steps sharing a workspace: declared file
+default keep-on-failure (`always|on_failure|never`). Container executor
+(`executor-sandbox` over a sandbox-driver provider, Docker today): one sandbox
+per scope instance — pull if-not-present, an init process, the workspace
+bind-mounted from the host run dir at `/workspace`, a long-lived POSIX init;
+steps run through the provider's exec as `exec 'prog' 'args'…`, so they need no
+Bash semantics and the provider probes for `/bin/bash`, falling back to
+`/bin/sh` on images without it (alpine); release deletes the container always
+(the workspace is the host directory) and keeps or removes that directory by
+retention. Image contract: must provide `setsid` (busybox/util-linux both do).
+Services require a containerized job: declared `services` become sidecar
+containers on a per-scope network reached by alias, and a bare host process
+that declares services fails at acquire with `env_acquire`, the message naming
+the fix. Raw `container.options` and `services.<id>.options` lower to typed
+fields (env, user, DNS, added capabilities, privilege, platform; a service's
+entrypoint and health check); an unknown flag fails the acquire naming it. Parallel steps sharing a workspace: declared file
 conflicts or isolated overlays remain future work; v1 native format should not
 encourage intra-scope parallel writes to the same paths.
 

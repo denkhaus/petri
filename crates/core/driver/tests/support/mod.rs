@@ -15,8 +15,7 @@ use std::time::Duration;
 use driver::{Driver, ExecutionReport, RunConfig};
 use engine::{Event, EventLog, EventRecord};
 use executor::{Executor, MapSecrets, Retention};
-use executor_docker::DockerExecutor;
-use executor_host::HostExecutor;
+use executor_sandbox::{HostExecutor, RoutingExecutor};
 use ir::{Control, FiringId, Graph, Outcome, ScopeId, Value};
 use steps::{ProcessStep, Registry};
 pub(crate) use testkit::*;
@@ -158,14 +157,15 @@ pub(crate) fn runners_with_wedged() -> Registry {
     registry
 }
 
-/// Build a driver over the Docker executor, and the container-name prefix it
+/// Build a driver over the routing executor (container scopes go to Docker),
+/// and the container-name prefix it
 /// will use, so a leak check can look only at this test's own containers.
 pub(crate) async fn docker_driver_named(
     graph: Graph,
     dir: &RunDir,
     config: RunConfig,
 ) -> (Driver, String) {
-    let executor = DockerExecutor::new(dir.path()).with_retention(config.keep_workspaces);
+    let executor = RoutingExecutor::local(dir.path().to_path_buf(), config.keep_workspaces);
     let prefix = executor
         .container_prefix()
         .await
@@ -181,8 +181,10 @@ pub(crate) async fn docker_driver_named(
 }
 
 pub(crate) fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Driver {
-    let executor: Arc<dyn Executor> =
-        Arc::new(DockerExecutor::new(dir.path()).with_retention(config.keep_workspaces));
+    let executor: Arc<dyn Executor> = Arc::new(RoutingExecutor::local(
+        dir.path().to_path_buf(),
+        config.keep_workspaces,
+    ));
     Driver::new(
         graph,
         executor,

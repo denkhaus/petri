@@ -17,8 +17,8 @@ mod routing;
 
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::{fmt, process};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::{fmt, mem, process};
 
 use async_trait::async_trait;
 use executor::{
@@ -85,6 +85,14 @@ impl SandboxExecutor {
         self
     }
 
+    /// The name prefix every container this run owns starts with,
+    /// `petri-<run id>-`, for a leak check after release. Reads or mints the
+    /// run id, so it is stable across executors over one run dir.
+    pub async fn container_prefix(&self) -> Result<String, EnvError> {
+        let run_id = self.resolve_run_id().await?;
+        Ok(format!("petri-{run_id}-"))
+    }
+
     /// The host directory a scope's workspace lives in: the bind-mount source
     /// for the container.
     fn workspace_host_path(&self, workspace_id: &str) -> PathBuf {
@@ -114,11 +122,7 @@ impl SandboxExecutor {
         oneshot::sweep(&one_shot_prefix).await;
 
         let spec = build_spec(scope, &workspace_host_str, &label, ctx)?;
-        let sandbox = self
-            .provider
-            .create(&spec, None)
-            .await
-            .map_err(|error| acquire_failed(&error))?;
+        let sandbox = self.create_guarded(spec).await?;
 
         let ambient = sandbox.environment().await.unwrap_or_default();
         let env = SandboxEnv::new(
@@ -160,6 +164,45 @@ impl SandboxExecutor {
             teardown,
         )
         .with_runner(Arc::new(runner)))
+    }
+
+    /// Creates the sandbox in a task this future's drop does not abort, and
+    /// removes it when nobody waited for it. Dropping an in-flight create does
+    /// not cancel the daemon's create: the container appears moments after the
+    /// client is gone, past any fence that already ran — Created, never
+    /// started, cleaned by nothing. The guard closes that leak: whichever side
+    /// sees the other's mark deletes the sandbox, exactly once.
+    async fn create_guarded(&self, spec: SandboxSpec) -> Result<Arc<dyn Sandbox>, EnvError> {
+        let slot: Arc<Mutex<AbandonSlot>> = Arc::new(Mutex::new(AbandonSlot::default()));
+        let guard = AbandonGuard { slot: slot.clone() };
+        let provider = self.provider.clone();
+        let task_slot = slot.clone();
+        let created = tokio::spawn(async move {
+            let sandbox = provider.create(&spec, None).await?;
+            let abandoned = {
+                let mut slot = task_slot.lock().unwrap_or_else(PoisonError::into_inner);
+                if slot.abandoned {
+                    true
+                } else {
+                    slot.sandbox = Some(sandbox.clone());
+                    false
+                }
+            };
+            if abandoned {
+                let _ = sandbox.delete().await;
+            }
+            Ok::<_, sandbox_driver::Error>(sandbox)
+        });
+        let sandbox = created
+            .await
+            .map_err(|error| EnvError::Backend {
+                backend:   SmolStr::new("sandbox"),
+                operation: SmolStr::new("acquire"),
+                message:   format!("the create task failed: {error}"),
+            })?
+            .map_err(|error| acquire_failed(&error))?;
+        guard.defuse();
+        Ok(sandbox)
     }
 
     /// The environment label value for a scope: the run id and the scope's
@@ -468,6 +511,43 @@ impl fmt::Debug for SandboxTeardown {
     }
 }
 
+/// Shared between an acquire future and its create task: the created sandbox,
+/// and whether the acquire was dropped before it took delivery.
+#[derive(Default)]
+struct AbandonSlot {
+    abandoned: bool,
+    sandbox:   Option<Arc<dyn Sandbox>>,
+}
+
+/// Marks the acquire abandoned on drop, unless defused. If the create task has
+/// already delivered a sandbox nobody will release, the drop removes it.
+struct AbandonGuard {
+    slot: Arc<Mutex<AbandonSlot>>,
+}
+
+impl AbandonGuard {
+    fn defuse(self) {
+        mem::forget(self);
+    }
+}
+
+impl Drop for AbandonGuard {
+    fn drop(&mut self) {
+        let orphan = {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            slot.abandoned = true;
+            slot.sandbox.take()
+        };
+        if let Some(sandbox) = orphan {
+            // Best effort, like the rest of the fence: on a runtime that is
+            // itself shutting down the spawn is dropped unrun.
+            let _detached = tokio::spawn(async move {
+                let _ = sandbox.delete().await;
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl Executor for SandboxExecutor {
     #[tracing::instrument(name = "scope.acquire", skip_all, fields(scope = scope.id.raw()))]
@@ -513,7 +593,7 @@ impl Executor for SandboxExecutor {
         // The workspace is a host bind mount, so the container holds nothing
         // worth keeping: delete it always.
         match sandbox.delete().await {
-            Ok(()) => report = report.released("sandbox"),
+            Ok(()) => report = report.released(format!("container {}", sandbox.id())),
             Err(error) => {
                 tracing::warn!(error = ?error, "sandbox delete failed");
                 report = report.problem(format!("sandbox delete failed: {error}"));

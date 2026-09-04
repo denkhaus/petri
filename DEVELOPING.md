@@ -85,11 +85,11 @@ the real constraint in the reason. Do not add a workspace-wide exemption to
 silence one site.
 
 Project-written unsafe code is denied by default: `unsafe_code = "deny"` in the
-workspace lint table. `petri-executor-host` is the only exception. It is
-limited to POSIX process control (`killpg`) and the macOS `libproc` queries
-that the host executor uses to observe a process group without signalling it.
-The crate takes the exception with a reasoned `#![allow(unsafe_code, ...)]` at
-the top of its `lib.rs`.
+workspace lint table. The host executor module of `petri-executor-sandbox`
+(`src/host.rs`) is the only exception. It is limited to POSIX process control
+(`killpg`) and the macOS `libproc` queries the host executor uses to observe a
+process group without signalling it. The module takes the exception with a
+reasoned `#![allow(unsafe_code, ...)]` at its top.
 
 Every unsafe operation carries an adjacent `SAFETY:` comment. The comment must
 prove the preconditions that operation relies on: pointer validity, initialized

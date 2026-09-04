@@ -29,7 +29,7 @@ mod logging {
     use tracing_subscriber::filter::LevelFilter;
 
     /// The knob, in `tracing-subscriber`'s filter syntax: `PETRI_LOG=info`,
-    /// `PETRI_LOG=petri_executor_docker=debug`. Deliberately not `RUST_LOG`,
+    /// `PETRI_LOG=executor_sandbox=debug`. Deliberately not `RUST_LOG`,
     /// which is set globally for other tools and would switch petri's internals
     /// on by surprise.
     const FILTER_ENV: &str = "PETRI_LOG";

@@ -1,17 +1,16 @@
-//! The composed local executor, at the executor level: routing, the
-//! scope-bound one-shot runner in every execution mode, and the crash and
-//! cancel sweeps that keep one-shot containers from leaking.
+//! The routing executor, at the executor level: routing, the scope-bound
+//! one-shot runner in every execution mode, and the crash and cancel sweeps
+//! that keep one-shot containers from leaking.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use executor::{
-    AcquireContext, Executor as _, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec, Sig,
+    AcquireContext, Executor as _, OneShotContainer, Retention, ScopeOutcome, ScopeSpec,
+    ServiceSpec, Sig,
 };
-use executor_docker::{DockerExecutor, list_containers};
-use executor_host::HostExecutor;
+use executor_sandbox::{HostExecutor, RoutingExecutor, list_containers};
 use ir::{RuntimeSpec, ScopeId};
-use runtime::LocalExecutor;
 use testkit::{RunDir, is_docker_ready, wait_for_file};
 use tokio::time;
 
@@ -25,6 +24,10 @@ fn container_spec() -> ScopeSpec {
     host_spec().with_runtime(RuntimeSpec::container(IMAGE))
 }
 
+fn local(dir: &RunDir) -> RoutingExecutor {
+    RoutingExecutor::local(dir.path().to_path_buf(), Retention::default())
+}
+
 /// Every log line of a one-shot handle, drained to completion.
 async fn drain(handle: &mut Box<dyn executor::ProcessHandle>) -> Vec<String> {
     let mut lines = Vec::new();
@@ -36,7 +39,17 @@ async fn drain(handle: &mut Box<dyn executor::ProcessHandle>) -> Vec<String> {
     lines
 }
 
-/// Pure host mode is Docker-free — and says so when handed services.
+/// The one-shot prefix a fresh router over the same run dir computes for a
+/// scope, so a leak check reaches exactly this test's containers.
+async fn one_shot_prefix(dir: &RunDir, instance: &str) -> String {
+    local(dir)
+        .one_shot_prefix_for(instance)
+        .await
+        .expect("the run id is recorded")
+}
+
+/// Services require a containerized job: a bare host process has no route to a
+/// sidecar's network alias, so the host executor refuses and names the fix.
 #[tokio::test]
 async fn the_host_executor_refuses_services() {
     let dir = RunDir::new("host-refuses-services");
@@ -46,15 +59,15 @@ async fn the_host_executor_refuses_services() {
         .acquire(&spec, &AcquireContext::bare())
         .await
         .expect_err("the host executor cannot realize services");
-    assert!(error.to_string().contains("service containers"), "{error}");
+    assert!(error.to_string().contains("containerized job"), "{error}");
 }
 
-/// A host scope acquired through the composition carries a runner, without
-/// touching any daemon. Docker-free machines still run host scopes.
+/// A host scope acquired through the router carries a runner, without touching
+/// any daemon. Docker-free machines still run host scopes.
 #[tokio::test]
 async fn a_local_host_scope_is_bound_to_a_runner() {
     let dir = RunDir::new("local-host-runner");
-    let executor = LocalExecutor::new(dir.path());
+    let executor = local(&dir);
     let handle = executor
         .acquire(&host_spec(), &AcquireContext::bare())
         .await
@@ -62,24 +75,21 @@ async fn a_local_host_scope_is_bound_to_a_runner() {
     let runner = handle
         .container_runner()
         .expect("a runner rides the handle");
-    assert_eq!(
-        runner.workspace_path(),
-        executor_docker::CONTAINER_WORKSPACE
-    );
+    assert_eq!(runner.workspace_path(), "/workspace");
     let report = executor.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
 }
 
-/// Composed local, host scope: a one-shot container runs in the scope's world —
-/// its output is captured, its exit code is the container's, and the scope
-/// workspace is mounted where the runner says it is.
+/// Host scope: a one-shot container runs in the scope's world — its output is
+/// captured, its exit code is the container's, and the scope workspace is
+/// mounted where the runner says it is.
 #[tokio::test]
 async fn a_one_shot_container_runs_in_a_host_scope() {
     if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("local-one-shot");
-    let executor = LocalExecutor::new(dir.path());
+    let executor = local(&dir);
     let handle = executor
         .acquire(&host_spec(), &AcquireContext::bare())
         .await
@@ -107,15 +117,15 @@ async fn a_one_shot_container_runs_in_a_host_scope() {
     assert!(report.is_clean(), "{report:?}");
 }
 
-/// Pure Docker mode: the container scope's handle carries a runner too, and its
-/// one-shots see the same workspace as the job container.
+/// Container scope: the handle carries a runner too, and its one-shots see the
+/// same workspace as the job container.
 #[tokio::test]
 async fn a_pure_docker_scope_is_bound_to_a_runner() {
     if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("docker-scope-runner");
-    let executor = DockerExecutor::new(dir.path());
+    let executor = local(&dir);
     let handle = executor
         .acquire(&container_spec(), &AcquireContext::bare())
         .await
@@ -154,7 +164,7 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
         return;
     }
     let dir = RunDir::new("local-one-shot-cancel");
-    let executor = LocalExecutor::new(dir.path());
+    let executor = local(&dir);
     let handle = executor
         .acquire(&host_spec(), &AcquireContext::bare())
         .await
@@ -178,10 +188,7 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
         .expect("wait");
     assert!(!status.is_success(), "TERM ended it: {status:?}");
 
-    let prefix = DockerExecutor::new(dir.path())
-        .one_shot_prefix("scope-0")
-        .await
-        .expect("the run id is recorded");
+    let prefix = one_shot_prefix(&dir, "scope-0").await;
     assert!(
         list_containers(&prefix).await.is_empty(),
         "nothing is left under {prefix}"
@@ -199,16 +206,13 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
         return;
     }
     let dir = RunDir::new("local-one-shot-crash");
-    let prefix = DockerExecutor::new(dir.path())
-        .one_shot_prefix("scope-0")
-        .await
-        .expect("the run id is recorded");
+    let prefix = one_shot_prefix(&dir, "scope-0").await;
 
     // "Crash": drop the handle without signalling. `kill_on_drop` ends the
     // `docker run` client, but the container keeps running — exactly what a
     // dead driver leaves behind.
     {
-        let executor = LocalExecutor::new(dir.path());
+        let executor = local(&dir);
         let handle = executor
             .acquire(&host_spec(), &AcquireContext::bare())
             .await
@@ -236,7 +240,7 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
 
     // A resuming process over the same run dir reaches the same names: the
     // fence removes the leftover before the scope is used again.
-    let resumed = LocalExecutor::new(dir.path());
+    let resumed = local(&dir);
     let handle = resumed
         .acquire(&host_spec(), &AcquireContext::bare())
         .await

@@ -1399,8 +1399,7 @@ dependencies = [
  "getrandom 0.3.4",
  "petri-engine",
  "petri-executor",
- "petri-executor-docker",
- "petri-executor-host",
+ "petri-executor-sandbox",
  "petri-ir",
  "petri-steps",
  "petri-testkit",
@@ -1455,32 +1454,6 @@ dependencies = [
  "smol_str",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "petri-executor-docker"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "petri-executor",
- "petri-ir",
- "serde_json",
- "smol_str",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "petri-executor-host"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "libc",
- "petri-executor",
- "petri-ir",
- "smol_str",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1675,8 +1648,6 @@ dependencies = [
  "petri-driver",
  "petri-engine",
  "petri-executor",
- "petri-executor-docker",
- "petri-executor-host",
  "petri-executor-sandbox",
  "petri-frontend",
  "petri-frontend-native",
@@ -1712,9 +1683,9 @@ dependencies = [
  "petri-driver",
  "petri-engine",
  "petri-executor",
- "petri-executor-docker",
  "petri-ir",
  "petri-steps",
+ "sandbox-driver-docker",
  "serde",
  "serde_json",
  "smol_str",

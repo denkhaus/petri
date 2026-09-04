@@ -17,8 +17,7 @@ name = "driver"
 [dev-dependencies]
 engine = { workspace = true }
 testkit = { workspace = true }
-executor-host = { workspace = true }
-executor-docker = { workspace = true }
+executor-sandbox = { workspace = true }
 async-trait = { workspace = true }
 
 [dependencies]

@@ -6,7 +6,8 @@ explicit routing, plus the pure state machine that executes it.
 ```
 crates/core/ir         the vocabulary: graph, ids, expressions, values, validation
 crates/core/engine     the sans-IO state machine: apply(state, event) -> (state, commands)
-crates/core/executor   the environment interface; executor-host and executor-docker implement it
+crates/core/executor   the environment interface; executor-sandbox implements it
+crates/core/executor-sandbox  the executors: native host processes, and containers on sandbox-driver providers
 crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
 crates/core/driver     the IO loop between the pure core and real processes
 crates/core/execution  run, invocation, and execution coordination; durable local store
@@ -64,7 +65,7 @@ let (state, commands) = apply(state, Event::ExecutionStarted(EngineStart::defaul
 | exec §2 driver loop | `driver::run` — one channel, so arrival order is the total order |
 | exec §3 process step | `steps::process`, `steps::outputs` |
 | exec §4 cancellation | `steps::process::ladder`, `driver::Driver::on_hard_deadline` |
-| exec §5 environments | `executor::scope` (the interface), `executor_host::HostExecutor`, `executor_docker::DockerExecutor` |
+| exec §5 environments | `executor::scope` (the interface), `executor_sandbox::{HostExecutor, SandboxExecutor, RoutingExecutor}` |
 | exec §6 secrets | `executor::secrets`, `driver::LogSink` |
 | execution hierarchy | `execution::{Coordinator, InvocationId, ExecutionId, InvocationClient}` |
 | standalone persistence | `execution::{CoordinatorStore, ResourceStore}`, one engine log per execution |
@@ -629,11 +630,12 @@ What the audit found and changed:
   `EnvError::Backend { backend, operation, message }`; `ReleaseReport` describes
   what was released and kept as text rather than as `container_removed` /
   `workspace_removed` booleans that would grow a field per executor.
-- **Already right when the audit ran:** the executors live in their own crates
-  (`executor-host`, `executor-docker`), each with a private teardown record the
-  interface carries as an opaque `Teardown` trait object and hands back untouched;
-  the output pump lives in the interface crate because every executor needs it and
-  the line cap must be decided once.
+- **Already right when the audit ran:** the executors live outside the interface
+  crate (today `executor-sandbox`: the native host executor and the sandbox-driver
+  container executor), each with a private teardown record the interface carries
+  as an opaque `Teardown` trait object and hands back untouched; the output pump
+  lives in the interface crate because every executor needs it and the line cap
+  must be decided once.
 - **Kept:** `Retention` (keep-on-failure) is generic — anything with a workspace has
   the question. `Sig` is POSIX; a remote executor maps it. Placement labels stay
   opaque in `RuntimeSpec.requirements`, and the set the GHA frontend accepts is

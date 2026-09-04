@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use driver::RunConfig;
 use executor::{Executor, Retention};
-use executor_docker::{DockerExecutor, list_containers};
+use executor_sandbox::{RoutingExecutor, list_containers};
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
@@ -345,7 +345,7 @@ async fn an_abandoned_acquire_leaves_no_container() {
     let mut timeout_ms: u64 = 50;
     loop {
         let dir = RunDir::new(&format!("docker-abandon-{timeout_ms}"));
-        let executor = DockerExecutor::new(dir.path()).with_retention(Retention::Never);
+        let executor = RoutingExecutor::local(dir.path().to_path_buf(), Retention::Never);
         let prefix = executor
             .container_prefix()
             .await

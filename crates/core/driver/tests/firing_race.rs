@@ -18,7 +18,7 @@ use std::sync::Arc;
 use driver::{Driver, RunConfig};
 use engine::{Admission, Command, EngineState, Event, apply};
 use executor::{Executor, MapSecrets};
-use executor_host::HostExecutor;
+use executor_sandbox::HostExecutor;
 use ir::{GraphBuilder, Outcome, RunStatus, ScopeId, validate};
 use steps::{NOOP_KIND, NoopStep, Registry};
 use support::*;

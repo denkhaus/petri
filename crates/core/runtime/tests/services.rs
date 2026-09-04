@@ -1,16 +1,11 @@
-//! Sidecar services at the executor level: realized with the scope, healthy
-//! before acquire returns, reachable from the scope's world, torn down with
-//! release — and a failed service fails the acquire without leaking.
+//! Sidecar services at the executor level: realized with a container scope,
+//! healthy before acquire returns, reachable from the job by name, torn down
+//! with release — a failed service fails the acquire without leaking — and
+//! refused for a bare host process, which has no route to a service's alias.
 
-use std::net::TcpStream;
-use std::path::Path;
-
-use executor::{
-    AcquireContext, Executor as _, OneShotContainer, ScopeOutcome, ScopeSpec, ServiceSpec,
-};
-use executor_docker::{DockerExecutor, list_containers};
+use executor::{AcquireContext, Executor as _, Retention, ScopeOutcome, ScopeSpec, ServiceSpec};
+use executor_sandbox::{RoutingExecutor, list_containers};
 use ir::{RuntimeSpec, ScopeId};
-use runtime::LocalExecutor;
 use smol_str::SmolStr;
 use testkit::{RunDir, is_docker_ready};
 use tokio::process::Command;
@@ -20,7 +15,7 @@ const REDIS: &str = "redis:7-alpine";
 // Docker's network alias.
 const RESOLVE_REDIS: &str = "nslookup redis.";
 
-fn redis_service(published: Option<&str>) -> ServiceSpec {
+fn redis_service() -> ServiceSpec {
     let mut service = ServiceSpec::new("redis", REDIS);
     service.options = [
         "--health-cmd",
@@ -35,66 +30,40 @@ fn redis_service(published: Option<&str>) -> ServiceSpec {
     .iter()
     .map(|o| SmolStr::new(*o))
     .collect();
-    if let Some(ports) = published {
-        service.ports = vec![SmolStr::new(ports)];
-    }
     service
 }
 
-/// Host scope: the service comes up healthy before acquire returns, its port
-/// is published to the host, the scope's one-shot containers share its
-/// network, and release removes containers and network alike.
-#[tokio::test]
-async fn a_host_scope_realizes_and_tears_down_services() {
-    if !is_docker_ready().await {
-        return;
-    }
-    let dir = RunDir::new("services-host");
-    let executor = LocalExecutor::new(dir.path());
-    let spec = ScopeSpec::new(ScopeId::new(0), "scope-0")
-        .with_services(vec![redis_service(Some("29811:6379"))]);
-    let handle = executor
-        .acquire(&spec, &AcquireContext::bare())
-        .await
-        .expect("acquire realizes the service");
-
-    // Healthy before acquire returned: the published port answers now.
-    TcpStream::connect("127.0.0.1:29811").expect("the published port answers");
-
-    // One-shots run on the scope's network and resolve the service by name.
-    let runner = handle.container_runner().expect("a runner");
-    let one_shot =
-        OneShotContainer::registry("alpine:3.20").with_args(&["sh", "-c", RESOLVE_REDIS]);
-    let mut process = runner.run(one_shot).await.expect("docker run");
-    let status = process.wait().await.expect("wait");
-    assert!(status.is_success(), "the service name resolves: {status:?}");
-
-    let base = container_base(dir.path(), "scope-0").await;
-    assert_eq!(list_containers(&format!("{base}-svc-")).await.len(), 1);
-    let report = executor.release(handle, ScopeOutcome::Succeeded).await;
-    assert!(report.is_clean(), "{report:?}");
-    assert!(
-        list_containers(&format!("{base}-svc-")).await.is_empty(),
-        "release removed the service container"
-    );
-    assert!(
-        is_network_gone(&base).await,
-        "release removed the scope network"
-    );
+fn local(dir: &RunDir) -> RoutingExecutor {
+    RoutingExecutor::local(dir.path().to_path_buf(), Retention::default())
 }
 
-/// Container scope: the job container joins the service network at creation
-/// and reaches the service by name; teardown removes the whole world.
+/// A host scope with services fails at acquire, routably, naming the fix, and
+/// realizes nothing: the sidecar model needs the job container's network.
+#[tokio::test]
+async fn a_host_scope_refuses_services() {
+    let dir = RunDir::new("services-host-refused");
+    let executor = local(&dir);
+    let spec = ScopeSpec::new(ScopeId::new(0), "scope-0").with_services(vec![redis_service()]);
+    let error = executor
+        .acquire(&spec, &AcquireContext::bare())
+        .await
+        .expect_err("services need a containerized job");
+    assert!(error.to_string().contains("containerized job"), "{error}");
+}
+
+/// Container scope: the job container joins the service network at creation,
+/// the service is healthy before acquire returns, the job reaches it by name,
+/// and teardown removes the whole world.
 #[tokio::test]
 async fn a_container_scope_reaches_its_service_by_name() {
     if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("services-container");
-    let executor = DockerExecutor::new(dir.path());
+    let executor = local(&dir);
     let spec = ScopeSpec::new(ScopeId::new(0), "scope-0")
         .with_runtime(RuntimeSpec::container("alpine:3.20"))
-        .with_services(vec![redis_service(None)]);
+        .with_services(vec![redis_service()]);
     let handle = executor
         .acquire(&spec, &AcquireContext::bare())
         .await
@@ -111,11 +80,17 @@ async fn a_container_scope_reaches_its_service_by_name() {
         "the job resolves the service: {status:?}"
     );
 
-    let base = container_base(dir.path(), "scope-0").await;
+    let base = container_base(&dir, "scope-0").await;
+    let network = format!("{base}-net");
+    assert_eq!(
+        list_containers(&format!("{network}-")).await.len(),
+        1,
+        "one sidecar under the scope network"
+    );
     let report = executor.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
     assert!(list_containers(&base).await.is_empty(), "nothing is left");
-    assert!(is_network_gone(&base).await, "the scope network is gone");
+    assert!(is_network_gone(&network).await, "the scope network is gone");
 }
 
 /// A service that exits before it is ready fails the acquire — routably, with
@@ -127,39 +102,48 @@ async fn a_dead_service_fails_the_acquire_and_leaks_nothing() {
         return;
     }
     let dir = RunDir::new("services-dead");
-    let executor = LocalExecutor::new(dir.path());
-    // Plain alpine has nothing long-running: the container exits at once.
+    let executor = local(&dir);
+    // Plain alpine has nothing long-running: the container exits at once. A
+    // health check makes the provider wait on it and notice.
+    let mut flaky = ServiceSpec::new("flaky", "alpine:3.20");
+    flaky.options = ["--health-cmd", "true", "--health-interval", "1s"]
+        .iter()
+        .map(|o| SmolStr::new(*o))
+        .collect();
     let spec = ScopeSpec::new(ScopeId::new(0), "scope-0")
-        .with_services(vec![ServiceSpec::new("flaky", "alpine:3.20")]);
+        .with_runtime(RuntimeSpec::container("alpine:3.20"))
+        .with_services(vec![flaky]);
     let error = executor
         .acquire(&spec, &AcquireContext::bare())
         .await
         .expect_err("a dead service fails the scope");
     assert!(error.to_string().contains("flaky"), "{error}");
 
-    let base = container_base(dir.path(), "scope-0").await;
+    let base = container_base(&dir, "scope-0").await;
+    let network = format!("{base}-net");
     assert!(
-        list_containers(&format!("{base}-svc-")).await.is_empty(),
-        "the failed acquire left no service container"
+        list_containers(&base).await.is_empty(),
+        "the failed acquire left no container"
     );
     assert!(
-        is_network_gone(&base).await,
+        is_network_gone(&network).await,
         "the failed acquire left no network"
     );
 }
 
-/// The scope's base container name, computed the way the executors compute it.
-async fn container_base(run_dir: &Path, instance: &str) -> String {
-    let prefix = DockerExecutor::new(run_dir)
+/// The scope's job container name, computed the way the executor computes it:
+/// the run's container prefix plus the scope's environment id.
+async fn container_base(dir: &RunDir, instance: &str) -> String {
+    let prefix = local(dir)
         .container_prefix()
         .await
         .expect("the run id is recorded");
     format!("{prefix}{instance}")
 }
 
-async fn is_network_gone(base: &str) -> bool {
+async fn is_network_gone(network: &str) -> bool {
     Command::new("docker")
-        .args(["network", "inspect", base])
+        .args(["network", "inspect", network])
         .output()
         .await
         .map_or(true, |out| !out.status.success())

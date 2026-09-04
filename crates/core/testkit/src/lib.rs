@@ -13,8 +13,8 @@ use std::{env, fs, process};
 
 use driver::ExecutionReport;
 use executor::Retention;
-use executor_docker::DockerExecutor;
 use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
+use sandbox_driver_docker::DockerProvider;
 use serde::Deserialize;
 use serde_json::json;
 use steps::PROCESS_KIND;
@@ -292,7 +292,7 @@ pub fn assert_one_terminal_per_firing(report: &ExecutionReport) {
 }
 
 pub async fn is_docker_available() -> bool {
-    DockerExecutor::is_available().await
+    DockerProvider::connect().await.is_ok()
 }
 
 /// The skip-or-require convention every Docker battery shares: skip loudly

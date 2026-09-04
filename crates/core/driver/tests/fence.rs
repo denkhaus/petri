@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use executor::{EnvError, Executor as _, ExitStatus, ProcessSpec, ScopeOutcome, ScopeSpec};
-use executor_host::HostExecutor;
+use executor_sandbox::HostExecutor;
 use ir::ScopeId;
 use support::*;
 use tokio::process::Command;

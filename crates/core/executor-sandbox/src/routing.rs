@@ -126,16 +126,33 @@ impl RoutingExecutor {
     /// scope's environment id — the same key on both routes, so a re-acquire
     /// and release sweep exactly this scope's action containers.
     async fn one_shot_prefix(&self, scope: &ScopeSpec) -> Result<ContainerPrefix, EnvError> {
-        let run_id = self
-            .run_id
+        Ok(ContainerPrefix::new(
+            self.one_shot_prefix_for(scope.environment.as_str()).await?,
+        ))
+    }
+
+    /// The name prefix every container this run owns starts with,
+    /// `petri-<run id>-`, for a leak check after release.
+    pub async fn container_prefix(&self) -> Result<String, EnvError> {
+        let run_id = self.resolve_run_id().await?;
+        Ok(format!("petri-{run_id}-"))
+    }
+
+    /// The one-shot container prefix for the scope whose environment id is
+    /// `instance`, for a leak check: `petri-<run id>-<instance>-s`.
+    pub async fn one_shot_prefix_for(&self, instance: &str) -> Result<String, EnvError> {
+        let run_id = self.resolve_run_id().await?;
+        Ok(format!(
+            "{}-s",
+            container_name(&format!("{run_id}/{instance}"))
+        ))
+    }
+
+    async fn resolve_run_id(&self) -> Result<SmolStr, EnvError> {
+        self.run_id
             .get_or_try_init(|| load_or_record_run_id(&self.run_dir))
             .await
-            .cloned()?;
-        let label = format!("{run_id}/{}", scope.environment.as_str());
-        Ok(ContainerPrefix::new(format!(
-            "{}-s",
-            container_name(&label)
-        )))
+            .cloned()
     }
 
     /// The env-file directory for a host scope's one-shot action containers.

@@ -70,7 +70,7 @@ fn resume_driver_shared(
     registry: Registry,
 ) -> (Driver, ResumeInfo) {
     let executor: Arc<dyn executor::Executor> =
-        Arc::new(executor_host::HostExecutor::new(dir.path()));
+        Arc::new(executor_sandbox::HostExecutor::new(dir.path()));
     Driver::resume(
         graph,
         log,
@@ -712,7 +712,7 @@ async fn the_synthesized_cancel_routes_and_cleanup_redispatches() {
 
 /// An executor stub that counts acquisitions and delegates to the host.
 struct CountingExecutor {
-    inner:    executor_host::HostExecutor,
+    inner:    executor_sandbox::HostExecutor,
     acquires: Arc<AtomicUsize>,
 }
 
@@ -751,7 +751,7 @@ async fn resume_reacquires_held_scopes() {
 
     let acquires = Arc::new(AtomicUsize::new(0));
     let executor: Arc<dyn executor::Executor> = Arc::new(CountingExecutor {
-        inner:    executor_host::HostExecutor::new(dir.path()),
+        inner:    executor_sandbox::HostExecutor::new(dir.path()),
         acquires: acquires.clone(),
     });
     let (driver, _info) = Driver::resume(
@@ -980,7 +980,7 @@ async fn a_tampered_record_refuses_to_resume() {
     let tampered: EventLog = serde_json::from_value(encoded).expect("still decodes");
 
     let executor: Arc<dyn executor::Executor> =
-        Arc::new(executor_host::HostExecutor::new(dir.path()));
+        Arc::new(executor_sandbox::HostExecutor::new(dir.path()));
     let result = Driver::resume(
         graph,
         tampered,
@@ -1041,7 +1041,7 @@ async fn a_rewound_run_diverges_and_still_verifies() {
     fs::write(dir.workspace().join("choice"), b"B").expect("the changed world");
 
     let executor: Arc<dyn executor::Executor> =
-        Arc::new(executor_host::HostExecutor::new(dir.path()).with_retention(RETAIN));
+        Arc::new(executor_sandbox::HostExecutor::new(dir.path()).with_retention(RETAIN));
     let (driver, _info) = Driver::resume(
         graph.clone(),
         prefix,

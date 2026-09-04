@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use driver::{Driver, RunConfig};
 use executor::{Executor, MapSecrets, Retention};
-use executor_host::HostExecutor;
+use executor_sandbox::HostExecutor;
 use ir::{CancelScopeId, Graph, GraphBuilder, RunStatus, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::{NOOP_KIND, NoopStep, PROCESS_KIND, Registry};

@@ -8,7 +8,7 @@
 //!
 //! Everything else is re-export. [`ir`], [`engine`], [`driver`], [`frontend`]
 //! (with [`frontend::gha`] and [`frontend::native`]), [`steps`] and
-//! [`executor`] (with [`executor::host`] and [`executor::docker`]) are
+//! [`executor`] (with [`executor::sandbox`], the executors) are
 //! reachable through this crate, so an external repository names one dependency
 //! and never a layer crate.
 //!
@@ -37,7 +37,7 @@ use std::{env, fs, thread};
 
 pub use execution::{self, host};
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
-pub use runtime::{LocalExecutor, RunOptions, Runtime, driver, engine, ir};
+pub use runtime::{RunOptions, Runtime, driver, engine, ir};
 
 /// The executor interface, with the two local executors as submodules.
 pub mod executor {

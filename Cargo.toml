@@ -4,8 +4,6 @@ members = [
     "crates/core/ir",
     "crates/core/engine",
     "crates/core/executor",
-    "crates/core/executor-host",
-    "crates/core/executor-docker",
     "crates/core/executor-sandbox",
     "crates/core/steps",
     "crates/core/driver",
@@ -72,8 +70,6 @@ absolute_paths = "warn"
 ir = { package = "petri-ir", path = "crates/core/ir" }
 engine = { package = "petri-engine", path = "crates/core/engine" }
 executor = { package = "petri-executor", path = "crates/core/executor" }
-executor-host = { package = "petri-executor-host", path = "crates/core/executor-host" }
-executor-docker = { package = "petri-executor-docker", path = "crates/core/executor-docker" }
 executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/executor-sandbox" }
 # sandbox-driver lives in the sibling `lithoscomputer/sandbox-driver` repo. Path
 # dependency during development; pin by git revision once the matching commit is
