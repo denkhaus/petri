@@ -9,6 +9,7 @@
 
 mod backend;
 mod env;
+mod routing;
 
 use std::fmt;
 use std::io::ErrorKind;
@@ -27,6 +28,7 @@ use tokio::fs;
 
 pub use crate::backend::BackendKind;
 use crate::env::SandboxEnv;
+pub use crate::routing::RoutingExecutor;
 
 /// The container path every scope's workspace is mounted or created at.
 const CONTAINER_WORKSPACE: &str = "/workspace";
@@ -266,9 +268,7 @@ impl Executor for SandboxExecutor {
         }
         match fs::remove_dir_all(&workspace_host).await {
             Ok(()) => report.released(workspace),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                report.released(workspace)
-            }
+            Err(error) if error.kind() == ErrorKind::NotFound => report.released(workspace),
             Err(error) => {
                 tracing::warn!(error = ?error, "workspace removal failed");
                 report.problem(format!(

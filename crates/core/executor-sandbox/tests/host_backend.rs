@@ -5,12 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::time::timeout;
-
 use executor::{AcquireContext, Executor, ProcessSpec, ScopeOutcome, ScopeSpec, Sig};
 use executor_sandbox::{BackendKind, SandboxExecutor};
 use sandbox_driver::SandboxProvider;
 use sandbox_driver_host::HostProvider;
+use tokio::time::timeout;
 
 #[allow(unreachable_pub, reason = "test-local helper module")]
 mod tmp {

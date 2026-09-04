@@ -32,3 +32,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 testkit = { workspace = true }
+executor-sandbox = { workspace = true }
+sandbox-driver = { workspace = true }
+sandbox-driver-host = { workspace = true }
