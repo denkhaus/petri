@@ -29,6 +29,7 @@ use executor::{
 };
 use ir::RuntimeTarget;
 use sandbox_driver::{Sandbox, SandboxFilter, SandboxProvider, SandboxSource, SandboxSpec};
+use sandbox_driver_docker::{BindMount, DockerProviderConfig, Health, RegistryAuth, Sidecar};
 use smol_str::SmolStr;
 use tokio::fs;
 
@@ -261,7 +262,7 @@ fn build_spec(
         reference: image.to_string(),
     })
     .working_directory(CONTAINER_WORKSPACE)
-    .provider_config(provider_config)
+    .provider_config(provider_config.into_value())
     .name(name)
     .label(ENVIRONMENT_LABEL, label);
     spec.user.clone_from(&container.user);
@@ -277,78 +278,56 @@ fn build_spec(
     Ok(spec)
 }
 
-/// Resolves image pull credentials to a `registry_auth` value, or `None` when
-/// the scope declares none.
+/// Resolves image pull credentials to registry auth, or `None` when the
+/// scope declares none.
 fn registry_auth(
     credentials: Option<&ir::RegistryCredentials>,
     ctx: &AcquireContext,
-) -> Result<Option<serde_json::Value>, EnvError> {
+) -> Result<Option<RegistryAuth>, EnvError> {
     let Some(credentials) = credentials else {
         return Ok(None);
     };
     let password = resolve_secret(&credentials.password_secret, ctx)?;
-    Ok(Some(serde_json::json!({
-        "username": credentials.username.as_str(),
-        "password": password,
-    })))
+    Ok(Some(RegistryAuth {
+        username: credentials.username.to_string(),
+        password,
+        server: None,
+    }))
 }
 
 /// Maps the scope's services to Docker sidecars. Ports are dropped: a
 /// containerized job reaches a service by its network alias, not a published
 /// port.
-fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<serde_json::Value>, EnvError> {
+fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<Sidecar>, EnvError> {
     let mut sidecars = Vec::with_capacity(scope.services.len());
     for service in &scope.services {
-        let mut env: serde_json::Map<String, serde_json::Value> = service
+        let parsed = options::parse_service(&service.options)?;
+        let mut sidecar = Sidecar::new(service.name.as_str(), service.image.as_str());
+        // Declared env first, then `-e` flags on top, as `docker create`
+        // would apply them.
+        sidecar.env = service
             .env
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.as_str().to_owned(),
-                    serde_json::Value::String(value.to_string()),
-                )
-            })
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .chain(parsed.env.iter().cloned())
             .collect();
-        let parsed = options::parse_service(&service.options)?;
-        for (key, value) in &parsed.env {
-            env.insert(key.clone(), serde_json::Value::String(value.clone()));
-        }
-        let mut sidecar = serde_json::json!({
-            "name": service.name.as_str(),
-            "image": service.image.as_str(),
-            "env": env,
-            "dns": parsed.dns,
-            "cap_add": parsed.cap_add,
+        sidecar.dns = parsed.dns;
+        sidecar.cap_add = parsed.cap_add;
+        sidecar.user = parsed.user;
+        sidecar.entrypoint = parsed.entrypoint;
+        sidecar.health = parsed.health.map(|health| Health {
+            cmd:             health.cmd.unwrap_or_default(),
+            interval_ms:     health.interval_ms,
+            timeout_ms:      health.timeout_ms,
+            retries:         health.retries,
+            start_period_ms: health.start_period_ms,
         });
-        if let Some(user) = &parsed.user {
-            sidecar["user"] = serde_json::Value::String(user.clone());
-        }
-        if let Some(entrypoint) = &parsed.entrypoint {
-            sidecar["entrypoint"] = serde_json::json!(entrypoint);
-        }
-        if let Some(health) = &parsed.health {
-            let mut check = serde_json::json!({
-                "cmd": health.cmd.clone().unwrap_or_default(),
-            });
-            if let Some(ms) = health.interval_ms {
-                check["interval_ms"] = serde_json::json!(ms);
-            }
-            if let Some(ms) = health.timeout_ms {
-                check["timeout_ms"] = serde_json::json!(ms);
-            }
-            if let Some(retries) = health.retries {
-                check["retries"] = serde_json::json!(retries);
-            }
-            if let Some(ms) = health.start_period_ms {
-                check["start_period_ms"] = serde_json::json!(ms);
-            }
-            sidecar["health"] = check;
-        }
         if let Some(credentials) = &service.credentials {
             let password = resolve_secret(&credentials.password_secret, ctx)?;
-            sidecar["registry_auth"] = serde_json::json!({
-                "username": credentials.username.as_str(),
-                "password": password,
+            sidecar.registry_auth = Some(RegistryAuth {
+                username: credentials.username.to_string(),
+                password,
+                server: None,
             });
         }
         sidecars.push(sidecar);
@@ -379,30 +358,28 @@ fn acquire_failed(error: &sandbox_driver::Error) -> EnvError {
 /// resolves to the gateway.
 fn docker_provider_config(
     workspace_host: &str,
-    registry_auth: Option<serde_json::Value>,
-    sidecars: Vec<serde_json::Value>,
+    registry_auth: Option<RegistryAuth>,
+    sidecars: Vec<Sidecar>,
     container: &options::ContainerOptions,
-) -> serde_json::Value {
+) -> DockerProviderConfig {
     // Steps run as a program plus arguments, so an image without bash
     // (alpine) works: the provider's exec wrapper needs only /bin/sh.
-    let mut config = serde_json::json!({
-        "init": true,
-        "binds": [{ "host": workspace_host, "container": CONTAINER_WORKSPACE }],
-        "extra_hosts": [format!("{DOCKER_HOST_ALIAS}:host-gateway")],
-        "dns": container.dns,
-        "cap_add": container.cap_add,
-        "privileged": container.privileged,
-    });
-    if let Some(platform) = &container.platform {
-        config["platform"] = serde_json::Value::String(platform.clone());
+    DockerProviderConfig {
+        init: true,
+        privileged: container.privileged,
+        platform: container.platform.clone(),
+        binds: vec![BindMount {
+            host:      workspace_host.to_owned(),
+            container: CONTAINER_WORKSPACE.to_owned(),
+            mode:      None,
+        }],
+        extra_hosts: vec![format!("{DOCKER_HOST_ALIAS}:host-gateway")],
+        dns: container.dns.clone(),
+        cap_add: container.cap_add.clone(),
+        registry_auth,
+        sidecars,
+        ..DockerProviderConfig::default()
     }
-    if let Some(auth) = registry_auth {
-        config["registry_auth"] = auth;
-    }
-    if !sidecars.is_empty() {
-        config["sidecars"] = serde_json::Value::Array(sidecars);
-    }
-    config
 }
 
 /// What release needs: the sandbox to tear down, whether to keep a failed
