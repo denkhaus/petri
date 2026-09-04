@@ -75,7 +75,6 @@ executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/exe
 # dependency during development; pin by git revision once the matching commit is
 # pushed (see .ai/plans/sandbox-driver-adoption.md).
 sandbox-driver = { path = "../sandbox-driver/crates/sandbox-driver" }
-sandbox-driver-host = { path = "../sandbox-driver/crates/sandbox-driver-host" }
 sandbox-driver-docker = { path = "../sandbox-driver/crates/sandbox-driver-docker" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
@@ -108,6 +107,7 @@ jsonschema = { version = "0.42", default-features = false }
 # `acp.command` is a shell-quoted command line; split it the way Fabro does.
 shlex = "1"
 libc = "0.2"
+tokio-util = "0.7"
 # Full `regex`, not `regex-lite`: the `matches` builtin must accept every pattern
 # the frontends it serves validate at parse time, so this is a language-compatibility
 # decision, not a binary-size one.

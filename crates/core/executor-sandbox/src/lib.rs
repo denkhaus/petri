@@ -10,15 +10,17 @@
 //! runtime target needs.
 
 mod env;
+mod files;
 mod host;
 mod oneshot;
 mod options;
 mod routing;
+mod run;
 
-use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::{fmt, mem, process};
+use std::{fmt, mem};
 
 use async_trait::async_trait;
 use executor::{
@@ -29,19 +31,14 @@ use ir::RuntimeTarget;
 use sandbox_driver::{Sandbox, SandboxFilter, SandboxProvider, SandboxSource, SandboxSpec};
 use smol_str::SmolStr;
 use tokio::fs;
-use tokio::sync::OnceCell;
 
 use crate::env::SandboxEnv;
 pub use crate::host::HostExecutor;
-use crate::oneshot::{ContainerPrefix, OneShotRunner};
+use crate::oneshot::OneShotRunner;
+pub use crate::oneshot::list_containers;
 pub use crate::routing::RoutingExecutor;
-
-/// Every container on the local daemon whose name starts with `prefix`. For
-/// tests and sweeps that check a run left nothing behind; best-effort, empty
-/// when no daemon answers.
-pub async fn list_containers(prefix: &str) -> Vec<String> {
-    oneshot::list_containers(prefix).await
-}
+pub use crate::run::RUN_ID_FILE;
+use crate::run::{RunIdentity, scope_dir, workspace_dir};
 
 /// The container path every scope's workspace is mounted at.
 const CONTAINER_WORKSPACE: &str = "/workspace";
@@ -50,32 +47,42 @@ const DOCKER_HOST_ALIAS: &str = "host.docker.internal";
 /// The label naming a sandbox's environment, for the reconcile fence. Its
 /// value is unique per run directory and scope, so `acquire` finds and ends
 /// exactly the crashed predecessors of this environment.
-const ENVIRONMENT_LABEL: &str = "petri.environment";
-/// The file under the run dir holding the run id the environment label
-/// carries; minted once, read back by any executor over the same run dir.
-pub const RUN_ID_FILE: &str = "sandbox-run-id";
+pub const ENVIRONMENT_LABEL: &str = "petri.environment";
+
+/// The backend name this crate's errors carry.
+const BACKEND: &str = "sandbox";
 
 /// An [`Executor`] that realizes container scopes on one sandbox-driver
 /// provider. The workspace is a host directory bind-mounted into the
 /// container, so logs, artifacts, and retention see it on the host.
 pub struct SandboxExecutor {
     provider:  Arc<dyn SandboxProvider>,
-    run_dir:   PathBuf,
+    identity:  Arc<RunIdentity>,
     retention: Retention,
-    /// The run id the environment label carries, resolved on first use from
-    /// the run dir so a resuming executor reaches the crashed run's sandboxes.
-    run_id:    OnceCell<SmolStr>,
 }
 
 impl SandboxExecutor {
     /// Builds an executor over `provider`; `run_dir` roots every workspace
     /// under `scopes/`.
-    pub fn new(provider: Arc<dyn SandboxProvider>, run_dir: PathBuf) -> Self {
+    pub fn new(provider: Arc<dyn SandboxProvider>, run_dir: impl Into<PathBuf>) -> Self {
+        Self::with_identity(
+            provider,
+            Arc::new(RunIdentity::new(run_dir.into())),
+            Retention::default(),
+        )
+    }
+
+    /// An executor sharing its run identity with the other executors over the
+    /// same run dir, so every name they derive agrees.
+    pub(crate) fn with_identity(
+        provider: Arc<dyn SandboxProvider>,
+        identity: Arc<RunIdentity>,
+        retention: Retention,
+    ) -> Self {
         Self {
             provider,
-            run_dir,
-            retention: Retention::default(),
-            run_id: OnceCell::new(),
+            identity,
+            retention,
         }
     }
 
@@ -89,14 +96,7 @@ impl SandboxExecutor {
     /// `petri-<run id>-`, for a leak check after release. Reads or mints the
     /// run id, so it is stable across executors over one run dir.
     pub async fn container_prefix(&self) -> Result<String, EnvError> {
-        let run_id = self.resolve_run_id().await?;
-        Ok(format!("petri-{run_id}-"))
-    }
-
-    /// The host directory a scope's workspace lives in: the bind-mount source
-    /// for the container.
-    fn workspace_host_path(&self, workspace_id: &str) -> PathBuf {
-        self.run_dir.join("scopes").join(workspace_id).join("work")
+        self.identity.container_prefix().await
     }
 
     async fn acquire_inner(
@@ -104,48 +104,50 @@ impl SandboxExecutor {
         scope: &ScopeSpec,
         ctx: &AcquireContext,
     ) -> Result<EnvHandle, EnvError> {
-        let workspace_host = self.workspace_host_path(scope.workspace_id.as_str());
-        fs::create_dir_all(&workspace_host)
-            .await
-            .map_err(|error| EnvError::workspace("create", workspace_host.display(), error))?;
-        let workspace_host_str = workspace_host.display().to_string();
+        let run_dir = self.identity.run_dir();
+        let instance = scope.environment.as_str();
+        let workspace_host = workspace_dir(run_dir, scope.workspace_id.as_str());
+        let scope_dir = scope_dir(run_dir, instance);
 
         // The environment label is the reconcile key: a matching sandbox is a
-        // crashed predecessor, ended before the fresh create.
-        let label = self.environment_label(scope).await?;
-        self.fence_by_label(&label).await?;
+        // crashed predecessor, ended before the fresh create. One-shot action
+        // containers hang off the job container; their prefix is a fence
+        // target too, so a crash leaves nothing behind. The three touch
+        // nothing in common, so they run together.
+        let label = self.identity.environment_label(instance).await?;
+        let job_name = self.identity.container_name(instance).await?;
+        let one_shot_prefix = self.identity.one_shot_prefix(instance).await?;
+        let (created, fenced, ()) = tokio::join!(
+            fs::create_dir_all(&workspace_host),
+            self.fence_by_label(&label),
+            oneshot::sweep_scope(&one_shot_prefix, &scope_dir),
+        );
+        created.map_err(|error| EnvError::workspace("create", workspace_host.display(), error))?;
+        fenced?;
 
-        // One-shot action containers hang off the job container; their prefix
-        // is a fence target too, so a crash leaves nothing behind.
-        let job_name = container_name(&label);
-        let one_shot_prefix = ContainerPrefix::new(format!("{job_name}-s"));
-        oneshot::sweep(&one_shot_prefix).await;
-
-        let spec = build_spec(scope, &workspace_host_str, &label, ctx)?;
+        let spec = build_spec(
+            scope,
+            &workspace_host.display().to_string(),
+            &label,
+            &job_name,
+            ctx,
+        )?;
         let sandbox = self.create_guarded(spec).await?;
 
         let ambient = sandbox.environment().await.unwrap_or_default();
-        let env = SandboxEnv::new(
-            sandbox.clone(),
-            CONTAINER_WORKSPACE.to_owned(),
-            workspace_host.clone(),
-            DOCKER_HOST_ALIAS.to_owned(),
+        let env = SandboxEnv {
+            sandbox: sandbox.clone(),
+            workspace_host: workspace_host.clone(),
             ambient,
-            scope.grace,
-        );
+            grace: scope.grace,
+        };
 
         // Docker actions in this scope run as one-shot containers on the job's
         // network namespace, sharing its services and host alias.
-        let scope_dir = self
-            .run_dir
-            .join("scopes")
-            .join(scope.workspace_id.as_str());
-        let env_files = scope_dir.join("exec-env");
         let runner = OneShotRunner::new(
             one_shot_prefix.clone(),
             workspace_host.clone(),
-            env_files.clone(),
-            scope_dir.join("one-shots"),
+            &scope_dir,
             scope,
             Some(format!("container:{job_name}")),
             ctx,
@@ -153,17 +155,14 @@ impl SandboxExecutor {
         let teardown = SandboxTeardown {
             sandbox,
             retention: self.retention,
-            workspace_host: workspace_host.clone(),
+            workspace_host,
             one_shot_prefix,
-            env_files,
+            scope_dir,
         };
-        Ok(EnvHandle::new(
-            scope.id,
-            SmolStr::new(scope.environment.as_str()),
-            Arc::new(env),
-            teardown,
+        Ok(
+            EnvHandle::new(scope.id, SmolStr::new(instance), Arc::new(env), teardown)
+                .with_runner(Arc::new(runner)),
         )
-        .with_runner(Arc::new(runner)))
     }
 
     /// Creates the sandbox in a task this future's drop does not abort, and
@@ -195,29 +194,16 @@ impl SandboxExecutor {
         });
         let sandbox = created
             .await
-            .map_err(|error| EnvError::Backend {
-                backend:   SmolStr::new("sandbox"),
-                operation: SmolStr::new("acquire"),
-                message:   format!("the create task failed: {error}"),
+            .map_err(|error| {
+                EnvError::backend(
+                    BACKEND,
+                    "acquire",
+                    format!("the create task failed: {error}"),
+                )
             })?
             .map_err(|error| acquire_failed(&error))?;
         guard.defuse();
         Ok(sandbox)
-    }
-
-    /// The environment label value for a scope: the run id and the scope's
-    /// environment id, globally unique because the run id is minted once per
-    /// run directory.
-    async fn environment_label(&self, scope: &ScopeSpec) -> Result<String, EnvError> {
-        let run_id = self.resolve_run_id().await?;
-        Ok(format!("{run_id}/{}", scope.environment.as_str()))
-    }
-
-    async fn resolve_run_id(&self) -> Result<SmolStr, EnvError> {
-        self.run_id
-            .get_or_try_init(|| load_or_record_run_id(&self.run_dir))
-            .await
-            .cloned()
     }
 
     /// Ends every sandbox that carries `label`: a crashed predecessor of this
@@ -249,12 +235,13 @@ impl SandboxExecutor {
     }
 }
 
-/// Maps a container scope to a `SandboxSpec`, pinning a deterministic name and
-/// the environment `label` so a re-acquire targets the same one.
+/// Maps a container scope to a `SandboxSpec`, pinning the deterministic
+/// `name` and the environment `label` so a re-acquire targets the same one.
 fn build_spec(
     scope: &ScopeSpec,
     workspace_host: &str,
     label: &str,
+    name: &str,
     ctx: &AcquireContext,
 ) -> Result<SandboxSpec, EnvError> {
     let RuntimeTarget::Container {
@@ -263,13 +250,12 @@ fn build_spec(
         credentials,
     } = &scope.runtime.target
     else {
-        return Err(EnvError::Backend {
-            backend:   SmolStr::new("sandbox"),
-            operation: SmolStr::new("acquire"),
-            message:   "this executor realizes container scopes only; a host-process scope \
-                        needs the host executor or a runner image"
-                .into(),
-        });
+        return Err(EnvError::backend(
+            BACKEND,
+            "acquire",
+            "this executor realizes container scopes only; a host-process scope needs the host \
+             executor or a runner image",
+        ));
     };
     let container = options::parse_container(options)?;
     let registry_auth = registry_auth(credentials.as_ref(), ctx)?;
@@ -281,7 +267,7 @@ fn build_spec(
     })
     .working_directory(CONTAINER_WORKSPACE)
     .provider_config(provider_config)
-    .name(container_name(label))
+    .name(name)
     .label(ENVIRONMENT_LABEL, label);
     spec.user.clone_from(&container.user);
 
@@ -318,7 +304,7 @@ fn registry_auth(
 fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<serde_json::Value>, EnvError> {
     let mut sidecars = Vec::with_capacity(scope.services.len());
     for service in &scope.services {
-        let env: serde_json::Map<String, serde_json::Value> = service
+        let mut env: serde_json::Map<String, serde_json::Value> = service
             .env
             .iter()
             .map(|(key, value)| {
@@ -329,7 +315,6 @@ fn sidecars(scope: &ScopeSpec, ctx: &AcquireContext) -> Result<Vec<serde_json::V
             })
             .collect();
         let parsed = options::parse_service(&service.options)?;
-        let mut env = env;
         for (key, value) in &parsed.env {
             env.insert(key.clone(), serde_json::Value::String(value.clone()));
         }
@@ -381,78 +366,17 @@ fn resolve_secret(name: &str, ctx: &AcquireContext) -> Result<String, EnvError> 
     ctx.secrets()
         .resolve(name)
         .map(|secret| secret.expose().to_string())
-        .map_err(|error| EnvError::Backend {
-            backend:   SmolStr::new("sandbox"),
-            operation: SmolStr::new("acquire"),
-            message:   format!("resolving secret `{name}`: {error}"),
+        .map_err(|error| {
+            EnvError::backend(
+                BACKEND,
+                "acquire",
+                format!("resolving secret `{name}`: {error}"),
+            )
         })
 }
 
 fn acquire_failed(error: &sandbox_driver::Error) -> EnvError {
-    EnvError::Backend {
-        backend:   SmolStr::new("sandbox"),
-        operation: SmolStr::new("acquire"),
-        message:   error.to_string(),
-    }
-}
-
-/// A deterministic sandbox name from an environment label, so a re-acquire
-/// targets the same container. Non-name characters become hyphens.
-pub(crate) fn container_name(label: &str) -> String {
-    let sanitized: String = label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("petri-{sanitized}")
-}
-
-/// Reads the run id from the run dir, minting and recording it on first use.
-/// Write-then-rename, so a reader sees the whole id or none.
-pub(crate) async fn load_or_record_run_id(run_dir: &PathBuf) -> Result<SmolStr, EnvError> {
-    let path = run_dir.join(RUN_ID_FILE);
-    let io_error =
-        |action, path: &Path, error: io::Error| EnvError::workspace(action, path.display(), error);
-    match fs::read_to_string(&path).await {
-        Ok(recorded) if !recorded.trim().is_empty() => {
-            return Ok(SmolStr::new(recorded.trim()));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(io_error("read", &path, error)),
-    }
-    let minted = fresh_run_id();
-    fs::create_dir_all(run_dir)
-        .await
-        .map_err(|error| io_error("create", run_dir, error))?;
-    let staged = run_dir.join(format!("{RUN_ID_FILE}.tmp"));
-    fs::write(&staged, minted.as_bytes())
-        .await
-        .map_err(|error| io_error("write", &staged, error))?;
-    fs::rename(&staged, &path)
-        .await
-        .map_err(|error| io_error("rename", &path, error))?;
-    Ok(SmolStr::new(minted))
-}
-
-/// Unique across processes and time.
-fn fresh_run_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!(
-        "{nanos:x}-{}-{}",
-        process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    EnvError::backend(BACKEND, "acquire", error.to_string())
 }
 
 /// The Docker `provider_config` for a scope container: the workspace is a
@@ -489,14 +413,16 @@ fn docker_provider_config(
 }
 
 /// What release needs: the sandbox to tear down, whether to keep a failed
-/// workspace, and where that workspace lives on the host.
-struct SandboxTeardown {
+/// workspace, where that workspace lives on the host, and the scope's
+/// one-shot world to sweep.
+pub(crate) struct SandboxTeardown {
     sandbox:         Arc<dyn Sandbox>,
     retention:       Retention,
     workspace_host:  PathBuf,
-    one_shot_prefix: ContainerPrefix,
-    /// Per-spawn env files: never retained, they can hold resolved secrets.
-    env_files:       PathBuf,
+    one_shot_prefix: oneshot::ContainerPrefix,
+    /// Holds the one-shot marker and the per-spawn env files, which are never
+    /// retained: they can hold resolved secrets.
+    scope_dir:       PathBuf,
 }
 
 impl fmt::Debug for SandboxTeardown {
@@ -506,7 +432,7 @@ impl fmt::Debug for SandboxTeardown {
             .field("retention", &self.retention)
             .field("workspace_host", &self.workspace_host)
             .field("one_shot_prefix", &self.one_shot_prefix.as_str())
-            .field("env_files", &self.env_files)
+            .field("scope_dir", &self.scope_dir)
             .finish()
     }
 }
@@ -582,13 +508,12 @@ impl Executor for SandboxExecutor {
         let retention = teardown.retention;
         let workspace_host = teardown.workspace_host.clone();
         let one_shot_prefix = teardown.one_shot_prefix.clone();
-        let env_files = teardown.env_files.clone();
+        let scope_dir = teardown.scope_dir.clone();
         drop(env);
 
         // One-shot action containers may hang off the job container's netns;
         // remove them first, and their env files whatever the retention policy.
-        oneshot::sweep(&one_shot_prefix).await;
-        let _ = fs::remove_dir_all(&env_files).await;
+        oneshot::sweep_scope(&one_shot_prefix, &scope_dir).await;
 
         // The workspace is a host bind mount, so the container holds nothing
         // worth keeping: delete it always.

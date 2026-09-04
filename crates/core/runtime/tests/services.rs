@@ -34,7 +34,7 @@ fn redis_service() -> ServiceSpec {
 }
 
 fn local(dir: &RunDir) -> RoutingExecutor {
-    RoutingExecutor::local(dir.path().to_path_buf(), Retention::default())
+    RoutingExecutor::local(dir.path(), Retention::default())
 }
 
 /// A host scope with services fails at acquire, routably, naming the fix, and

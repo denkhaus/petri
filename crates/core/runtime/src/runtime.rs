@@ -512,10 +512,7 @@ impl Runtime {
     }
 
     fn default_executor_for(&self, run_dir: &Path) -> Arc<dyn Executor> {
-        Arc::new(RoutingExecutor::local(
-            run_dir.to_path_buf(),
-            self.options.retention,
-        ))
+        Arc::new(RoutingExecutor::local(run_dir, self.options.retention))
     }
 }
 

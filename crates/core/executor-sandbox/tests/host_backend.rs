@@ -1,53 +1,13 @@
-//! The sandbox executor over the in-process host provider: spawn, output,
-//! exit status, environment, and the cancellation ladder, with no daemon.
+//! The native host executor: spawn, output, exit status, environment, and the
+//! cancellation ladder, with no daemon.
 
 use std::path::Path;
 use std::time::Duration;
 
 use executor::{AcquireContext, Executor, ProcessSpec, ScopeOutcome, ScopeSpec, Sig};
 use executor_sandbox::HostExecutor;
+use testkit::RunDir;
 use tokio::time::timeout;
-
-#[allow(unreachable_pub, reason = "test-local helper module")]
-mod tmp {
-    use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, fs, process};
-
-    pub struct TempDir(PathBuf);
-
-    impl TempDir {
-        pub fn new() -> Self {
-            let base = env::temp_dir().join(format!(
-                "petri-sandbox-adapter-{}-{}",
-                process::id(),
-                nanos()
-            ));
-            fs::create_dir_all(&base).expect("create temp dir");
-            Self(base)
-        }
-
-        pub fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn nanos() -> u128 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    }
-}
-
-fn host_executor(run_dir: &Path) -> HostExecutor {
-    HostExecutor::new(run_dir.to_path_buf())
-}
 
 fn scope() -> ScopeSpec {
     ScopeSpec::new(ir::ScopeId::new(1), "env-1").with_env(
@@ -62,8 +22,8 @@ fn scope() -> ScopeSpec {
 
 #[tokio::test]
 async fn a_step_runs_and_reports_its_exit_code() {
-    let dir = tmp::TempDir::new();
-    let executor = host_executor(dir.path());
+    let dir = RunDir::new("host-exit-code");
+    let executor = HostExecutor::new(dir.path());
     let handle = executor
         .acquire(&scope(), &AcquireContext::bare())
         .await
@@ -86,8 +46,8 @@ async fn a_step_runs_and_reports_its_exit_code() {
 
 #[tokio::test]
 async fn scope_env_reaches_the_process() {
-    let dir = tmp::TempDir::new();
-    let executor = host_executor(dir.path());
+    let dir = RunDir::new("host-scope-env");
+    let executor = HostExecutor::new(dir.path());
     let handle = executor
         .acquire(&scope(), &AcquireContext::bare())
         .await
@@ -112,8 +72,8 @@ async fn scope_env_reaches_the_process() {
 
 #[tokio::test]
 async fn a_sigterm_ends_a_sleeping_step() {
-    let dir = tmp::TempDir::new();
-    let executor = host_executor(dir.path());
+    let dir = RunDir::new("host-sigterm");
+    let executor = HostExecutor::new(dir.path());
     let handle = executor
         .acquire(&scope(), &AcquireContext::bare())
         .await
@@ -137,8 +97,8 @@ async fn a_sigterm_ends_a_sleeping_step() {
 
 #[tokio::test]
 async fn the_workspace_is_written_and_read() {
-    let dir = tmp::TempDir::new();
-    let executor = host_executor(dir.path());
+    let dir = RunDir::new("host-workspace-io");
+    let executor = HostExecutor::new(dir.path());
     let handle = executor
         .acquire(&scope(), &AcquireContext::bare())
         .await

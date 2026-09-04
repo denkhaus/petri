@@ -1,7 +1,7 @@
-//! The same native cycle as `native_e2e`, driven through the sandbox-driver
-//! adapter instead of the built-in local executor: proof that the whole
-//! driver and coordinator stack runs a graph over `RoutingExecutor` and the
-//! in-process host provider, with byte-identical replay.
+//! The same native cycle as `native_e2e`, driven through a `RoutingExecutor`
+//! built with no Docker provider: proof that the whole driver and coordinator
+//! stack runs a graph over the router and the native host executor, with
+//! byte-identical replay.
 
 use std::{env, fs, process};
 

@@ -85,6 +85,16 @@ impl EnvError {
             source,
         }
     }
+
+    /// A refusal or failure of the backing system, in one call: `backend`
+    /// names it, `operation` what was asked of it, `message` its own account.
+    pub fn backend(backend: &str, operation: &str, message: impl Into<String>) -> Self {
+        Self::Backend {
+            backend:   SmolStr::new(backend),
+            operation: SmolStr::new(operation),
+            message:   message.into(),
+        }
+    }
 }
 
 /// What tearing an environment down actually managed to do.

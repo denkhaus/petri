@@ -1,67 +1,53 @@
 //! The sandbox executor over the Docker provider: a container scope with the
 //! workspace bind-mounted, exec exit codes, and the host-visible workspace.
-//! Skips (passes trivially) when no Docker daemon is reachable.
+//! Skips when no Docker daemon is reachable, unless `PETRI_REQUIRE_DOCKER`
+//! says the daemon must be there.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, mem};
 
 use executor::{AcquireContext, Executor, ProcessSpec, ScopeOutcome, ScopeSpec};
-use executor_sandbox::SandboxExecutor;
-use sandbox_driver::SandboxProvider;
+use executor_sandbox::{ENVIRONMENT_LABEL, RUN_ID_FILE, SandboxExecutor};
+use sandbox_driver::{SandboxFilter, SandboxProvider};
 use sandbox_driver_docker::DockerProvider;
+use testkit::{RunDir, is_docker_ready};
 
 const TEST_IMAGE: &str = "buildpack-deps:noble";
+/// The environment id every scope in this battery uses.
+const INSTANCE: &str = "env-1";
 
-mod tmp {
-    use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, fs, process};
-
-    pub(crate) struct TempDir(PathBuf);
-
-    impl TempDir {
-        pub(crate) fn new() -> Self {
-            let base = env::temp_dir().join(format!(
-                "petri-sandbox-docker-{}-{}",
-                process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos())
-            ));
-            fs::create_dir_all(&base).expect("create temp dir");
-            Self(base)
-        }
-
-        pub(crate) fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-}
-
-async fn docker_executor(run_dir: &Path) -> Option<SandboxExecutor> {
-    let provider = DockerProvider::connect().await.ok()?;
+async fn docker_executor(run_dir: &Path) -> SandboxExecutor {
+    let provider = DockerProvider::connect().await.expect("docker daemon");
     let provider: Arc<dyn SandboxProvider> = Arc::new(provider);
-    Some(SandboxExecutor::new(provider, run_dir.to_path_buf()))
+    SandboxExecutor::new(provider, run_dir)
 }
 
 fn container_scope() -> ScopeSpec {
-    ScopeSpec::new(ir::ScopeId::new(1), "env-1")
+    ScopeSpec::new(ir::ScopeId::new(1), INSTANCE)
         .with_runtime(ir::RuntimeSpec::container(TEST_IMAGE))
+}
+
+/// The scope's workspace on the host: the bind-mount source.
+fn host_workspace(dir: &RunDir) -> PathBuf {
+    dir.path().join("scopes").join(INSTANCE).join("work")
+}
+
+/// The run id recorded under the run dir.
+fn run_id(dir: &RunDir) -> String {
+    fs::read_to_string(dir.path().join(RUN_ID_FILE))
+        .expect("run id recorded")
+        .trim()
+        .to_owned()
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_container_step_runs_and_the_workspace_is_a_host_bind_mount() {
-    let dir = tmp::TempDir::new();
-    let Some(executor) = docker_executor(dir.path()).await else {
+    if !is_docker_ready().await {
         return;
-    };
+    }
+    let dir = RunDir::new("sandbox-docker-step");
+    let executor = docker_executor(dir.path()).await;
     let handle = executor
         .acquire(&container_scope(), &AcquireContext::bare())
         .await
@@ -87,12 +73,7 @@ async fn a_container_step_runs_and_the_workspace_is_a_host_bind_mount() {
     assert_eq!(seen, vec!["done".to_owned()]);
     assert_eq!(status.code, Some(5));
 
-    let host_file = dir
-        .path()
-        .join("scopes")
-        .join("env-1")
-        .join("work")
-        .join("out.txt");
+    let host_file = host_workspace(&dir).join("out.txt");
     let on_host = fs::read_to_string(&host_file).expect("read host bind mount");
     assert_eq!(on_host.trim(), "written");
 
@@ -104,12 +85,11 @@ async fn a_container_step_runs_and_the_workspace_is_a_host_bind_mount() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reacquire_fences_the_crashed_predecessor() {
-    use sandbox_driver::SandboxFilter;
-
-    let dir = tmp::TempDir::new();
-    let Some(first) = docker_executor(dir.path()).await else {
+    if !is_docker_ready().await {
         return;
-    };
+    }
+    let dir = RunDir::new("sandbox-docker-fence");
+    let first = docker_executor(dir.path()).await;
     let handle = first
         .acquire(&container_scope(), &AcquireContext::bare())
         .await
@@ -118,9 +98,10 @@ async fn a_reacquire_fences_the_crashed_predecessor() {
     // The provider sees exactly one sandbox for this environment.
     let provider = DockerProvider::connect().await.expect("docker");
     let mut filter = SandboxFilter::default();
-    filter
-        .labels
-        .insert("petri.environment".to_owned(), env_label(dir.path()));
+    filter.labels.insert(
+        ENVIRONMENT_LABEL.to_owned(),
+        format!("{}/{INSTANCE}", run_id(&dir)),
+    );
     let before = provider.list(&filter).await.expect("list");
     assert_eq!(before.len(), 1, "one live sandbox");
     let crashed_id = before[0].id.clone();
@@ -128,7 +109,7 @@ async fn a_reacquire_fences_the_crashed_predecessor() {
     // Simulate a crash: drop the handle without releasing, so the container
     // survives. A second executor over the same run dir must fence it.
     mem::forget(handle);
-    let second = docker_executor(dir.path()).await.expect("second executor");
+    let second = docker_executor(dir.path()).await;
     let handle2 = second
         .acquire(&container_scope(), &AcquireContext::bare())
         .await
@@ -146,23 +127,17 @@ async fn a_reacquire_fences_the_crashed_predecessor() {
     assert!(cleaned.is_empty(), "release removed the container");
 }
 
-/// The environment label the fence keys on, recomputed from the run dir's
-/// recorded run id.
-fn env_label(run_dir: &Path) -> String {
-    // The container scope uses environment id "env-1".
-    format!("{}/env-1", run_id(run_dir))
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_container_scope_realizes_and_sweeps_its_service() {
     use std::process::Command;
 
     use executor::ServiceSpec;
 
-    let dir = tmp::TempDir::new();
-    let Some(executor) = docker_executor(dir.path()).await else {
+    if !is_docker_ready().await {
         return;
-    };
+    }
+    let dir = RunDir::new("sandbox-docker-service");
+    let executor = docker_executor(dir.path()).await;
     // A declared service becomes a sidecar on a per-sandbox network; the
     // sidecar carries an env var the workload could read by alias. (The
     // image is not a daemon, so this checks the realize/sweep lifecycle, not
@@ -177,9 +152,10 @@ async fn a_container_scope_realizes_and_sweeps_its_service() {
         .await
         .expect("acquire with a service");
 
-    // The sidecar network is named after this run's sandbox, so the check is
-    // specific and immune to any leftover networks on the daemon.
-    let network = format!("petri-{}-env-1-net", run_id(dir.path()));
+    // The sidecar network is named after this run's job container, so the
+    // check is specific and immune to any leftover networks on the daemon.
+    let prefix = executor.container_prefix().await.expect("run id");
+    let network = format!("{prefix}{INSTANCE}-net");
     let exists = |name: &str| {
         let out = Command::new("docker")
             .args(["network", "ls", "--format", "{{.Name}}"])
@@ -200,22 +176,15 @@ async fn a_container_scope_realizes_and_sweeps_its_service() {
     assert!(!exists(&network), "release swept the sidecar network");
 }
 
-/// The run id recorded under the run dir.
-fn run_id(run_dir: &Path) -> String {
-    fs::read_to_string(run_dir.join("sandbox-run-id"))
-        .expect("run id recorded")
-        .trim()
-        .to_owned()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_one_shot_action_container_shares_the_workspace() {
     use executor::OneShotContainer;
 
-    let dir = tmp::TempDir::new();
-    let Some(executor) = docker_executor(dir.path()).await else {
+    if !is_docker_ready().await {
         return;
-    };
+    }
+    let dir = RunDir::new("sandbox-docker-one-shot");
+    let executor = docker_executor(dir.path()).await;
     let handle = executor
         .acquire(&container_scope(), &AcquireContext::bare())
         .await
@@ -234,12 +203,7 @@ async fn a_one_shot_action_container_shares_the_workspace() {
     let status = process.wait().await.expect("wait");
     assert_eq!(status.code, Some(4));
 
-    let host_file = dir
-        .path()
-        .join("scopes")
-        .join("env-1")
-        .join("work")
-        .join("action.txt");
+    let host_file = host_workspace(&dir).join("action.txt");
     assert_eq!(
         fs::read_to_string(&host_file).expect("host file").trim(),
         "from-action"

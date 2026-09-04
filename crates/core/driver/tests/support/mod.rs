@@ -165,7 +165,7 @@ pub(crate) async fn docker_driver_named(
     dir: &RunDir,
     config: RunConfig,
 ) -> (Driver, String) {
-    let executor = RoutingExecutor::local(dir.path().to_path_buf(), config.keep_workspaces);
+    let executor = RoutingExecutor::local(dir.path(), config.keep_workspaces);
     let prefix = executor
         .container_prefix()
         .await
@@ -181,10 +181,8 @@ pub(crate) async fn docker_driver_named(
 }
 
 pub(crate) fn docker_driver(graph: Graph, dir: &RunDir, config: RunConfig) -> Driver {
-    let executor: Arc<dyn Executor> = Arc::new(RoutingExecutor::local(
-        dir.path().to_path_buf(),
-        config.keep_workspaces,
-    ));
+    let executor: Arc<dyn Executor> =
+        Arc::new(RoutingExecutor::local(dir.path(), config.keep_workspaces));
     Driver::new(
         graph,
         executor,

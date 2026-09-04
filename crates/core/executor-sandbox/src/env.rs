@@ -8,7 +8,6 @@
 //! the scope's grace, `SIGKILL` triggers the kill token.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,47 +20,25 @@ use executor::{
 };
 use sandbox_driver::{ExecControls, ExecSpec, OutputStream, Sandbox, StdinSource, Termination};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+use tokio::io::{AsyncWriteExt, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
+
+use crate::{BACKEND, CONTAINER_WORKSPACE, DOCKER_HOST_ALIAS, files};
 
 /// Bytes of pipe buffer between the output sink and each line pump.
 const OUTPUT_PIPE_CAPACITY: usize = 64 * 1024;
 
 /// One live sandbox, handed to step kinds as their spawn capability.
 pub(crate) struct SandboxEnv {
-    sandbox:        Arc<dyn Sandbox>,
-    /// The workspace path as a process in the sandbox sees it.
-    workspace:      String,
-    /// The same workspace on the host: the bind-mount source. Workspace file
-    /// I/O goes here directly, not through the sandbox, so it is one write
-    /// away and never races the container's view of the mount.
-    workspace_host: PathBuf,
-    /// The driver's machine as a process in the sandbox reaches it.
-    host_address:   String,
+    pub(crate) sandbox:        Arc<dyn Sandbox>,
+    /// The workspace on the host: the bind-mount source. Workspace file I/O
+    /// goes here directly, not through the sandbox, so it is one write away
+    /// and never races the container's view of the mount.
+    pub(crate) workspace_host: PathBuf,
     /// The effective environment, read once at acquire.
-    ambient:        BTreeMap<String, String>,
-    grace:          Duration,
-}
-
-impl SandboxEnv {
-    pub(crate) fn new(
-        sandbox: Arc<dyn Sandbox>,
-        workspace: String,
-        workspace_host: PathBuf,
-        host_address: String,
-        ambient: BTreeMap<String, String>,
-        grace: Duration,
-    ) -> Self {
-        Self {
-            sandbox,
-            workspace,
-            workspace_host,
-            host_address,
-            ambient,
-            grace,
-        }
-    }
+    pub(crate) ambient:        BTreeMap<String, String>,
+    pub(crate) grace:          Duration,
 }
 
 /// Quotes one argument for a Bash command line with single quotes.
@@ -97,20 +74,13 @@ fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>)
         return ExitStatus::signalled(signal);
     }
     match termination {
-        Termination::Killed => ExitStatus::signalled(libc_sigkill()),
+        Termination::Killed => ExitStatus::signalled(Sig::Kill.number()),
         // The driver's own ladder decides cancel vs timeout; the handle only
         // needs a plausible signalled status for a stop it did not exit from.
-        Termination::Cancelled | Termination::TimedOut => ExitStatus::signalled(libc_sigterm()),
+        Termination::Cancelled | Termination::TimedOut => ExitStatus::signalled(Sig::Term.number()),
         // Exited, Unknown, and any future variant: report the code as-is.
         _ => ExitStatus { code, signal: None },
     }
-}
-
-fn libc_sigkill() -> i32 {
-    9
-}
-fn libc_sigterm() -> i32 {
-    15
 }
 
 #[async_trait]
@@ -217,18 +187,17 @@ impl ExecEnv for SandboxEnv {
             stdin: stdin_writer.map(|(writer, _)| writer),
             cancel,
             kill,
-            grace: self.grace,
             status: status_rx,
             cached: None,
         }))
     }
 
     fn workspace_path(&self) -> &str {
-        &self.workspace
+        CONTAINER_WORKSPACE
     }
 
     fn host_address(&self) -> &str {
-        &self.host_address
+        DOCKER_HOST_ALIAS
     }
 
     fn ambient_env(&self, name: &str) -> Option<String> {
@@ -244,11 +213,7 @@ impl ExecEnv for SandboxEnv {
     // the host path — the same bytes the container sees, one write away.
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
-        match fs::read(self.workspace_host.join(relative)).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(EnvError::workspace("read", relative.display(), error)),
-        }
+        files::read(&self.workspace_host, relative).await
     }
 
     async fn read_file_limited(
@@ -256,36 +221,11 @@ impl ExecEnv for SandboxEnv {
         relative: &Path,
         limit: usize,
     ) -> Result<Option<Vec<u8>>, EnvError> {
-        let file = match fs::File::open(self.workspace_host.join(relative)).await {
-            Ok(file) => file,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(EnvError::workspace("open", relative.display(), error)),
-        };
-        let mut bytes = Vec::new();
-        file.take(limit as u64 + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|error| EnvError::workspace("read", relative.display(), error))?;
-        if bytes.len() > limit {
-            return Err(EnvError::workspace(
-                "read",
-                relative.display(),
-                executor::oversized_read(limit),
-            ));
-        }
-        Ok(Some(bytes))
+        files::read_limited(&self.workspace_host, relative, limit).await
     }
 
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
-        let path = self.workspace_host.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|error| EnvError::workspace("create", parent.display(), error))?;
-        }
-        fs::write(&path, contents)
-            .await
-            .map_err(|error| EnvError::workspace("write", relative.display(), error))
+        files::write(&self.workspace_host, relative, contents).await
     }
 
     fn grace(&self) -> Duration {
@@ -300,7 +240,6 @@ struct SandboxProcess {
     stdin:  Option<StdinWriter>,
     cancel: CancellationToken,
     kill:   CancellationToken,
-    grace:  Duration,
     status: watch::Receiver<Option<Result<ExitStatus, String>>>,
     cached: Option<ExitStatus>,
 }
@@ -323,11 +262,8 @@ impl ProcessHandle for SandboxProcess {
         loop {
             let current = status.borrow_and_update().clone();
             if let Some(result) = current {
-                let value = result.map_err(|message| EnvError::Backend {
-                    backend: smol_str::SmolStr::new("sandbox"),
-                    operation: smol_str::SmolStr::new("exec"),
-                    message,
-                })?;
+                let value =
+                    result.map_err(|message| EnvError::backend(BACKEND, "exec", message))?;
                 self.cached = Some(value);
                 return Ok(value);
             }
@@ -338,7 +274,6 @@ impl ProcessHandle for SandboxProcess {
     }
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
-        let _ = self.grace;
         match sig {
             Sig::Term => self.cancel.cancel(),
             Sig::Kill => self.kill.cancel(),

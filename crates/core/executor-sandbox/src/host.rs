@@ -80,12 +80,14 @@ use executor::{
     ProcessSpec, ReleaseReport, Retention, ScopeOutcome, ScopeSpec, Sig, StdinMode, StdinWriter,
 };
 use smol_str::SmolStr;
-use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::task::spawn_blocking;
 use tokio::{fs as async_fs, time as async_time};
 use tracing::field::Empty;
+
+use crate::files;
+use crate::run::workspace_dir;
 
 /// How often `wait` re-checks for a recorded status or group death.
 pub(crate) const LIVENESS_POLL: Duration = Duration::from_millis(25);
@@ -215,8 +217,9 @@ impl HostExecutor {
         &self.run_dir
     }
 
-    pub fn workspace_for(&self, instance: &str) -> PathBuf {
-        self.run_dir.join("scopes").join(instance).join("work")
+    /// The workspace of `workspace_id`, on this machine.
+    pub fn workspace_for(&self, workspace_id: &str) -> PathBuf {
+        workspace_dir(&self.run_dir, workspace_id)
     }
 }
 
@@ -234,7 +237,7 @@ struct PinnedGroup {
 /// What release needs: the workspace, whether to keep it, and every process
 /// group still pinned.
 #[derive(Clone, Debug)]
-struct HostTeardown {
+pub(crate) struct HostTeardown {
     path:      PathBuf,
     retention: Retention,
     groups:    Arc<Mutex<Vec<PinnedGroup>>>,
@@ -249,13 +252,12 @@ impl HostExecutor {
         // network. This is a deliberate removal of host-job services; run the
         // workflow on the Docker backend or give the job a `container:`.
         if !scope.services.is_empty() {
-            return Err(EnvError::Backend {
-                backend:   SmolStr::new("host"),
-                operation: SmolStr::new("acquire"),
-                message:   "this scope declares services, which require a containerized job; \
-                          give the job a container image or run it on the docker backend"
-                    .into(),
-            });
+            return Err(EnvError::backend(
+                "host",
+                "acquire",
+                "this scope declares services, which require a containerized job; give the job a \
+                 container image or run it on the docker backend",
+            ));
         }
         let workspace = self.workspace_for(scope.workspace_id.as_str());
         async_fs::create_dir_all(&workspace)
@@ -544,11 +546,7 @@ impl ExecEnv for HostEnv {
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
-        match async_fs::read(self.workspace.join(relative)).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(EnvError::workspace("read", relative.display(), e)),
-        }
+        files::read(&self.workspace, relative).await
     }
 
     async fn read_file_limited(
@@ -556,39 +554,11 @@ impl ExecEnv for HostEnv {
         relative: &Path,
         limit: usize,
     ) -> Result<Option<Vec<u8>>, EnvError> {
-        let path = self.workspace.join(relative);
-        let file = match async_fs::File::open(path).await {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(EnvError::workspace("open", relative.display(), e));
-            }
-        };
-        let mut bytes = Vec::new();
-        file.take(limit as u64 + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| EnvError::workspace("read", relative.display(), e))?;
-        if bytes.len() > limit {
-            return Err(EnvError::workspace(
-                "read",
-                relative.display(),
-                executor::oversized_read(limit),
-            ));
-        }
-        Ok(Some(bytes))
+        files::read_limited(&self.workspace, relative, limit).await
     }
 
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
-        let path = self.workspace.join(relative);
-        if let Some(parent) = path.parent() {
-            async_fs::create_dir_all(parent)
-                .await
-                .map_err(|e| EnvError::workspace("create", parent.display(), e))?;
-        }
-        async_fs::write(&path, contents)
-            .await
-            .map_err(|e| EnvError::workspace("write", relative.display(), e))
+        files::write(&self.workspace, relative, contents).await
     }
 
     fn grace(&self) -> Duration {

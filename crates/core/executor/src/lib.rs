@@ -3,9 +3,9 @@
 //! An [`Executor`] materializes the environment for a scope instance and hands
 //! out an [`ExecEnv`] capability. Step kinds are written once against that
 //! capability and never mention where a process actually runs. The executors
-//! themselves live in their own crates — `executor-host` and `executor-docker`
-//! — and this crate knows nothing about either: a new kind of environment is a
-//! new crate, not an edit here.
+//! themselves live in their own crate — `executor-sandbox` — and this crate
+//! knows nothing about them: a new kind of environment is a new crate, not an
+//! edit here.
 //!
 //! Everything in this crate signals **process groups**, never individual pids.
 //! A `run:` script that backgrounds children has to die as a unit.

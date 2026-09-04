@@ -4,12 +4,15 @@
 //!
 //! One `docker run` per invocation, named under the scope's one-shot prefix so
 //! the acquire fence and scope release sweep crash leftovers by name. The
-//! entrypoint is PID 1, so signalling is plain `docker kill`, and the client's
-//! exit code is the container's own. The container shares the job container's
-//! network namespace, so it reaches the job's services and the host alias the
-//! same way the job does. It runs against the local Docker daemon through the
-//! `docker` CLI, independent of the sandbox-driver provider that owns the job
-//! container.
+//! scope's **one-shot marker** gates both sweeps: it is written under the
+//! scope dir before the first container exists, so a scope that never ran a
+//! Docker action never spawns a `docker` client for a sweep with nothing to
+//! look for. The entrypoint is PID 1, so signalling is plain `docker kill`,
+//! and the client's exit code is the container's own. The container shares
+//! the job container's network namespace, so it reaches the job's services
+//! and the host alias the same way the job does. It runs against the local
+//! Docker daemon through the `docker` CLI, independent of the sandbox-driver
+//! provider that owns the job container.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -83,6 +86,17 @@ impl ContainerPrefix {
     }
 }
 
+/// The per-spawn env files under a scope dir. Never retained: they can hold
+/// resolved secrets.
+fn env_files_dir(scope_dir: &Path) -> PathBuf {
+    scope_dir.join("exec-env")
+}
+
+/// The one-shot marker under a scope dir; see the module docs.
+fn marker_path(scope_dir: &Path) -> PathBuf {
+    scope_dir.join("one-shots")
+}
+
 /// Runs one-shot containers in one scope's world.
 pub(crate) struct OneShotRunner {
     prefix:    ContainerPrefix,
@@ -99,11 +113,12 @@ pub(crate) struct OneShotRunner {
 }
 
 impl OneShotRunner {
+    /// A runner for `scope`, whose containers mount `workspace` and whose
+    /// env files and marker live under `scope_dir`.
     pub(crate) fn new(
         prefix: ContainerPrefix,
         workspace: PathBuf,
-        env_files: PathBuf,
-        marker: PathBuf,
+        scope_dir: &Path,
         scope: &ScopeSpec,
         network: Option<String>,
         ctx: &AcquireContext,
@@ -111,12 +126,12 @@ impl OneShotRunner {
         Self {
             prefix,
             workspace,
-            env_files,
+            env_files: env_files_dir(scope_dir),
             env: scope.env.clone(),
             network,
             scope: scope.id,
             progress: ctx.progress().clone(),
-            marker,
+            marker: marker_path(scope_dir),
             marked: OnceCell::new(),
             ensured: Mutex::new(HashSet::new()),
         }
@@ -338,15 +353,28 @@ impl ProcessHandle for OneShotProcess {
     }
 }
 
-/// Removes every one-shot container under `prefix`. Best-effort: a down daemon
-/// has nothing of ours to remove.
-pub(crate) async fn sweep(prefix: &ContainerPrefix) {
-    for name in list_containers(prefix.as_str()).await {
+/// Sweeps a scope's one-shot world: every container under `prefix`, and the
+/// env files under `scope_dir`. The marker gates it — no marker, no one-shot
+/// ever launched, no `docker` client spawned. Best-effort: a down daemon has
+/// nothing of ours to remove.
+pub(crate) async fn sweep_scope(prefix: &ContainerPrefix, scope_dir: &Path) {
+    if !fs::try_exists(marker_path(scope_dir))
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let names = list_containers(prefix.as_str());
+    let (names, _) = tokio::join!(names, fs::remove_dir_all(env_files_dir(scope_dir)));
+    for name in names {
         let _ = run_docker(&["rm", "-f", "-v", &name]).await;
     }
 }
 
-pub(crate) async fn list_containers(prefix: &str) -> Vec<String> {
+/// Every container on the local daemon whose name starts with `prefix`. For
+/// tests and sweeps that check a run left nothing behind; best-effort, empty
+/// when no daemon answers.
+pub async fn list_containers(prefix: &str) -> Vec<String> {
     run_docker(&["ps", "-a", "--format", "{{.Names}}"])
         .await
         .map(|out| {
@@ -451,11 +479,7 @@ fn docker_wait(operation: &str) -> Duration {
 
 async fn run_docker(args: &[&str]) -> Result<String, EnvError> {
     let operation = args.first().copied().unwrap_or("docker");
-    let backend_error = |message: String| EnvError::Backend {
-        backend: SmolStr::new("docker"),
-        operation: SmolStr::new(operation),
-        message,
-    };
+    let backend_error = |message: String| EnvError::backend("docker", operation, message);
     let wait = docker_wait(operation);
     let output = time::timeout(
         wait,

@@ -163,11 +163,11 @@ fn duration_ms(flag: &str, raw: &str) -> Result<u64, EnvError> {
 }
 
 fn unsupported(flag: &str, why: &str) -> EnvError {
-    EnvError::Backend {
-        backend:   SmolStr::new("sandbox"),
-        operation: SmolStr::new("acquire"),
-        message:   format!("container option `{flag}` is not supported: {why}"),
-    }
+    EnvError::backend(
+        crate::BACKEND,
+        "acquire",
+        format!("container option `{flag}` is not supported: {why}"),
+    )
 }
 
 /// A cursor over shell-split flags that reads `--flag value` and

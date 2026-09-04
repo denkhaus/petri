@@ -201,7 +201,7 @@ pub trait ProcessHandle: Send {
 /// Nothing here assumes the workspace is on the machine the driver runs on. A
 /// step kind that needs a file in the workspace asks the environment for it,
 /// and an executor whose workspace is remote — a cloud instance, an agent
-/// elsewhere — answers over whatever transport it has. The two local executors
+/// elsewhere — answers over whatever transport it has. The local executors
 /// answer from the filesystem.
 #[async_trait]
 pub trait ExecEnv: Send + Sync {

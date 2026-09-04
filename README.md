@@ -623,7 +623,7 @@ What the audit found and changed:
   read and wrote its outputs file with `std::fs` on `ExecEnv::workspace()`, a
   host-visible path — true for a host workspace and a bind-mounted container, false
   for anything remote. `workspace()` is gone from the interface; `read_file` and
-  `write_file` take its place, and the two local executors answer from the
+  `write_file` take its place, and the local executors answer from the
   filesystem. A remote executor answers over its transport, and the step kind is
   none the wiser.
 - **The shared error and report types had Docker fields.** `EnvError::Docker` is

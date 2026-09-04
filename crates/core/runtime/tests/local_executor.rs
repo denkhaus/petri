@@ -25,7 +25,7 @@ fn container_spec() -> ScopeSpec {
 }
 
 fn local(dir: &RunDir) -> RoutingExecutor {
-    RoutingExecutor::local(dir.path().to_path_buf(), Retention::default())
+    RoutingExecutor::local(dir.path(), Retention::default())
 }
 
 /// Every log line of a one-shot handle, drained to completion.
