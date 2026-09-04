@@ -3,9 +3,9 @@
 //! A step spawn becomes one `run_streaming` call in an owned task. Output
 //! chunks are fed through the interface crate's own line pump (a duplex pipe
 //! per stream), so the 64 KiB line cap and truncation marker match every
-//! other executor exactly. The polite cancellation ladder maps to the
-//! sandbox-driver two-level stop: `SIGTERM` triggers the cancel token with
-//! the scope's grace, `SIGKILL` triggers the kill token.
+//! other executor exactly. The step's cancellation ladder is the only one:
+//! `SIGTERM` fires the sandbox-driver `term` token, `SIGKILL` fires `kill`,
+//! and the provider sends exactly that signal and nothing more.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,8 +43,8 @@ pub(crate) struct SandboxEnv {
 }
 
 /// Maps a finished `run_streaming` to the executor's exit status. The
-/// observed signal wins over a code, so a foreign signal and the provider's
-/// own ladder read the same on every backend. The fallbacks below are for a
+/// observed signal wins over a code, so a foreign signal and the step's own
+/// ladder read the same on every backend. The fallbacks below are for a
 /// provider that stopped the command but could not observe how (Daytona ends
 /// a session without seeing the child's status).
 fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>) -> ExitStatus {
@@ -52,10 +52,10 @@ fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>)
         return ExitStatus::signalled(signal);
     }
     match termination {
-        Termination::Killed => ExitStatus::signalled(Sig::Kill.number()),
-        // The driver's own ladder decides cancel vs timeout; the handle only
-        // needs a plausible signalled status for a stop it did not exit from.
-        Termination::Cancelled | Termination::TimedOut => ExitStatus::signalled(Sig::Term.number()),
+        Termination::Killed | Termination::TimedOut => ExitStatus::signalled(Sig::Kill.number()),
+        // The step's ladder decides cancel vs timeout; the handle only needs a
+        // plausible signalled status for a stop it did not exit from.
+        Termination::Cancelled => ExitStatus::signalled(Sig::Term.number()),
         // Exited, Unknown, and any future variant: report the code as-is.
         _ => ExitStatus { code, signal: None },
     }
@@ -110,7 +110,7 @@ impl ExecEnv for SandboxEnv {
         tokio::spawn(pump(stdout_reader, ir::LogStream::Stdout, line_tx.clone()));
         tokio::spawn(pump(stderr_reader, ir::LogStream::Stderr, line_tx));
 
-        let cancel = CancellationToken::new();
+        let term = CancellationToken::new();
         let kill = CancellationToken::new();
         let (status_tx, status_rx) = watch::channel(None);
 
@@ -123,9 +123,8 @@ impl ExecEnv for SandboxEnv {
         let sink_stderr = stderr_slot.clone();
         let stdin_source = stdin_writer.as_ref().map(|(_, source)| source.clone());
         let controls = ExecControls {
-            cancel:                Some(cancel.clone()),
+            term:                  Some(term.clone()),
             kill:                  Some(kill.clone()),
-            grace:                 Some(self.grace),
             stdin:                 stdin_source,
             sink:                  Some(Arc::new(move |stream, chunk| {
                 let slot = match stream {
@@ -167,7 +166,7 @@ impl ExecEnv for SandboxEnv {
         Ok(Box::new(SandboxProcess {
             lines: Some(line_rx),
             stdin: stdin_writer.map(|(writer, _)| writer),
-            cancel,
+            term,
             kill,
             status: status_rx,
             cached: None,
@@ -216,11 +215,11 @@ impl ExecEnv for SandboxEnv {
 }
 
 /// The process handle a step drives: its output, its stdin, its wait, and the
-/// two-level cancellation ladder.
+/// two raw stop signals the step's ladder fires.
 struct SandboxProcess {
     lines:  Option<LineStream>,
     stdin:  Option<StdinWriter>,
-    cancel: CancellationToken,
+    term:   CancellationToken,
     kill:   CancellationToken,
     status: watch::Receiver<Option<Result<ExitStatus, String>>>,
     cached: Option<ExitStatus>,
@@ -257,7 +256,7 @@ impl ProcessHandle for SandboxProcess {
 
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError> {
         match sig {
-            Sig::Term => self.cancel.cancel(),
+            Sig::Term => self.term.cancel(),
             Sig::Kill => self.kill.cancel(),
         }
         Ok(())
