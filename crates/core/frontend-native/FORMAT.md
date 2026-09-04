@@ -31,6 +31,14 @@ nodes:
     run: echo "deploying"
 ```
 
+A scope's `runtime` is `host` or `{ container: { image: … } }`, and the
+container form takes only the image. What runs the container, and with which
+flags, is the executor's configuration, not the workflow's; the native format
+carries no container options and no service containers. (The graph has typed
+fields for both — `ir::ContainerOptions`, `ir::ServiceOptions` — which the
+GitHub frontend fills from `container.options` and `services:`. A native key
+for them would lower the same way.)
+
 ## Routing — the explicit part
 
 Fan-out is never implicit. A node routes in exactly one of three ways.

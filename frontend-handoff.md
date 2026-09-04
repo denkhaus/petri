@@ -128,6 +128,16 @@ test it — this is where compatibility bugs are most likely and least visible.
 scope. Each needs a hint naming the alternative or the package that will add
 it.
 
+*Amended 2026-09-04.* Much of that set has since shrunk; `crates/github/SUPPORT.md`
+is the live account. One contract to hold on to from that work: a frontend
+lowers its format's container and service flags into the graph's typed
+options (`ir::ContainerOptions`, `ir::ServiceOptions`) and rejects a flag with
+no typed mapping at lowering as `unsupported.container.option`, naming the
+flag. The graph never carries raw engine flags, and an executor never
+receives an option it cannot honor. Service port publications are warned
+about (`ignored.services.ports`) and dropped: a service is reached by its
+name on the scope's network.
+
 ---
 
 ## 4. Native format

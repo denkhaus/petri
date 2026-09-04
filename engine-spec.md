@@ -600,9 +600,13 @@ retention. Image contract: must provide `/bin/sh`, `env`, and `setsid`
 Services require a containerized job: declared `services` become sidecar
 containers on a per-scope network reached by alias, and a bare host process
 that declares services fails at acquire with `env_acquire`, the message naming
-the fix. Raw `container.options` and `services.<id>.options` lower to typed
-fields (env, user, DNS, added capabilities, privilege, platform; a service's
-entrypoint and health check); an unknown flag fails the acquire naming it. Parallel steps sharing a workspace: declared file
+the fix. Container and service options are typed in the graph
+(`ir::ContainerOptions`, `ir::ServiceOptions`: env, user, DNS, added
+capabilities, privilege; the job container's platform; a service's entrypoint
+and health check). A frontend lowers its format's flags into them and rejects
+a flag with no typed mapping at lowering, naming it, so an executor never
+sees an option it cannot honor. A service has no port publications: it is
+reached by its name on the scope's network. Parallel steps sharing a workspace: declared file
 conflicts or isolated overlays remain future work; v1 native format should not
 encourage intra-scope parallel writes to the same paths.
 

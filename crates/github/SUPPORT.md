@@ -126,9 +126,12 @@ same typed model.
 **Containers.** `container:` on a job runs its steps in a container from the
 image, with the workspace bind-mounted. `container.env` configures the
 container (job and step env win over it; a secret there pushes down into the
-steps like a job-env secret). `container.options` — and a service's — pass
-through to the engine as raw flags, split as GitHub splits them.
-`container.credentials` (and a service's): the username resolves at lowering,
+steps like a job-env secret). `container.options` is split as GitHub splits
+it and lowered to typed fields at lowering: `-e KEY=VALUE`, `--user`, `--dns`,
+`--cap-add`, `--privileged`, and `--platform`. A flag outside that set is
+rejected at lowering, naming the flag (`container.option`, below), so a
+workflow never runs with an option silently dropped, and the author sees the
+problem before anything runs. `container.credentials` (and a service's): the username resolves at lowering,
 the password must be a whole `${{ secrets.NAME }}` reference — the graph
 carries the *name*, and the executor logs in inside acquire with an isolated
 Docker config, so no value enters the graph, the log, or the user's own
@@ -138,14 +141,21 @@ through the static contexts (`inputs`, the checkout's `github` identity);
 the `container.expression` rejection with the reason named.
 
 **Service containers.** `services:` on a job: sidecar containers with the
-job's lifetime, on a per-job network, each reachable by its service name —
-ports published to the host when the job runs on the host, container-to-
-container when the job is containerized. Image, `env`, `ports`, and `options`
-(raw engine flags, health checks included) map through; acquire waits for
-Docker-reported health — the image's `HEALTHCHECK`, or a `--health-cmd` in the
-options; a service with no check is ready when running — and a service that
-never gets healthy fails the job's environment routably, naming itself. Torn
-down with the job on success, failure, cancel, and crash.
+job's lifetime, on a per-job network, each reachable by its service name from
+the job container. Services require a containerized job; a host job that
+declares them fails at acquire, naming the fix. Image, `env`, and `options`
+map through. `options` is typed at lowering like the job container's:
+`-e`, `--user`, `--entrypoint`, `--dns`, `--cap-add`, `--privileged` (a
+Docker-in-Docker service needs it), and the `--health-*` flags; anything else
+is `container.option`. `ports` is accepted with a warning
+(`ignored.services.ports`) and dropped: the job reaches the service as its
+name on the scope's network, and no port is published to the host. Acquire
+waits for a service that declares a `--health-cmd` to report healthy, and a
+service that exits or turns unhealthy first fails the job's environment
+routably, naming itself and quoting the tail of its log. A service with no
+health check is started and not waited on — it may exit, as a one-shot
+migration job does — so a service that must be up needs a check. Torn down
+with the job on success, failure, cancel, and crash.
 
 **Shells.** `bash`, `sh`, `python`, `pwsh`, and any custom template containing
 `{0}` (`bash -el {0}`, `/usr/bin/env bash {0}`): the script is written to a file
