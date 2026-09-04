@@ -13,11 +13,12 @@ use std::{env, fs, process};
 
 use driver::ExecutionReport;
 use executor::Retention;
+use executor_sandbox::{PluginSettings, PluginSupervisor};
 use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
-use sandbox_driver_docker::DockerProvider;
 use serde::Deserialize;
 use serde_json::json;
 use steps::PROCESS_KIND;
+use tokio::process::Command;
 use tokio::time;
 
 /// A process-unique counter, for run ids and directory names.
@@ -291,8 +292,158 @@ pub fn assert_one_terminal_per_firing(report: &ExecutionReport) {
     );
 }
 
+/// Whether the Docker plugin can be launched from this process's environment
+/// and reports a healthy daemon: the same path every container scope takes.
+/// The plugin comes from `PETRI_SANDBOX_DOCKER_PLUGIN`, which `mise run
+/// plugins:build` installs under `target/plugins` and the test tasks point
+/// at.
 pub async fn is_docker_available() -> bool {
-    DockerProvider::connect().await.is_ok()
+    let Ok(settings) = PluginSettings::from_env("docker", None) else {
+        return false;
+    };
+    let supervisor = PluginSupervisor::new(settings);
+    let ready = supervisor.current().await.is_ok();
+    supervisor.shutdown().await;
+    ready
+}
+
+/// The run id an executor recorded under `run_dir`, once one has.
+pub fn recorded_run_id(run_dir: &Path) -> String {
+    fs::read_to_string(run_dir.join(executor_sandbox::RUN_ID_FILE))
+        .expect("the run id is recorded under the run dir")
+        .trim()
+        .to_owned()
+}
+
+/// The name of the container sandbox for `lease` of the run under
+/// `run_dir`: `petri-<run id>-l<lease>`. A bare driver keys each scope's
+/// sandbox by the scope id, so scope 0 is lease 0; a coordinator mints
+/// leases in scope order from 0.
+pub fn sandbox_name(run_dir: &Path, lease: u64) -> String {
+    format!("petri-{}-l{lease}", recorded_run_id(run_dir))
+}
+
+/// `docker exec` a command in a running container; its stdout on success.
+async fn container_exec(container: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg(container)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+/// The bytes of `path` inside a running container, through the `docker`
+/// CLI: how a test sees a workspace that lives in its sandbox. `None`
+/// when the file or the container is not there.
+pub async fn container_read(container: &str, path: &str) -> Option<Vec<u8>> {
+    container_exec(container, &["cat", path]).await
+}
+
+/// Writes `contents` to `path` inside a running container.
+pub async fn container_write(container: &str, path: &str, contents: &str) -> bool {
+    let script = "printf '%s' \"$1\" > \"$2\"";
+    container_exec(container, &["sh", "-c", script, "sh", contents, path])
+        .await
+        .is_some()
+}
+
+/// The size of `path` inside a running container, 0 when absent.
+pub async fn container_file_len(container: &str, path: &str) -> u64 {
+    container_read(container, path)
+        .await
+        .map_or(0, |bytes| bytes.len() as u64)
+}
+
+/// Waits for `path` to exist inside a running container.
+pub async fn wait_for_container_file(container: &str, path: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if container_exec(container, &["test", "-e", path])
+            .await
+            .is_some()
+        {
+            return true;
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// The daemon's id for the container named `name`, when it exists.
+pub async fn container_id(name: &str) -> Option<String> {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.Id}}", name])
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Whether the container named `name` is running.
+pub async fn container_is_running(name: &str) -> bool {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", name])
+        .output()
+        .await;
+    output.is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+    })
+}
+
+/// The one-shot containers the Docker provider ran beside the sandbox with
+/// container id `sandbox_id`, by the label the provider stamps on them.
+pub async fn list_one_shots(sandbox_id: &str) -> Vec<String> {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("label=sh.sandbox-driver.one-shot={sandbox_id}"),
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .await;
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// The names of every container on the local daemon that start with
+/// `prefix`, through the `docker` CLI: the oracle a leak check compares
+/// Petri's own accounting against. Empty when there is no CLI or daemon.
+pub async fn list_containers(prefix: &str) -> Vec<String> {
+    let output = Command::new("docker")
+        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .output()
+        .await;
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| name.starts_with(prefix))
+        .map(String::from)
+        .collect()
 }
 
 /// The skip-or-require convention every Docker battery shares: skip loudly
@@ -308,9 +459,9 @@ pub async fn is_docker_ready() -> bool {
     }
     assert!(
         !env::var("PETRI_REQUIRE_DOCKER").is_ok_and(|v| !v.is_empty()),
-        "PETRI_REQUIRE_DOCKER is set, but no Docker daemon is reachable"
+        "PETRI_REQUIRE_DOCKER is set, but the Docker plugin is missing or reports no daemon"
     );
-    eprintln!("skipping: no Docker daemon reachable");
+    eprintln!("skipping: no Docker plugin with a reachable daemon");
     false
 }
 

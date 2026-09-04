@@ -573,30 +573,57 @@ signals a bare recorded pgid** — it can be recycled to an innocent — so a gr
 that never drains fails the acquire with the typed `FenceLeaked` error, and the
 scope's firings fail routably; cleanup belongs to the operator or host policy
 (an identity-bound kill via Linux `pidfd` is an optional platform upgrade,
-never a requirement). The container fence is reconcile-by-environment-label:
-every container carries `petri.environment=<run id>/<environment id>`, and
-`acquire` lists the provider's sandboxes by that label and deletes each match
-before it creates; the container's name (`petri-<run id>-<environment id>`) and
-its one-shot action containers (`…-s<token>`) are swept the same way. The run id
-is recorded in the run dir (`sandbox-run-id`) before the run's first container
-exists, so any executor over the same run dir — a resuming process's included —
-computes the same labels and reaches the same containers, and a fork into a
-fresh run dir gets a fresh id. The fence is idempotent and covers the workspace only: side effects
-outside it may have happened in the crashed attempt and happen again — resume
-is **at-least-once for external side effects**, exactly-once only for the log
-and the workspace fence.
+never a requirement). **Container scopes are keyed by lease, not by
+environment.** A container sandbox lives as long as the durable sandbox lease
+that names its workspace (`SandboxLeaseId`, allocated by the coordinator per
+`{invocation, scope}`); `EnvironmentId` is one execution's in-process handle on
+that sandbox and names no container. The lease manager keeps one live handle
+and a holder count per lease: a second acquire on a live lease — a restarted
+execution, a nested invocation with an `Inherited { lease }` binding, two
+concurrent scopes over one inherited workspace — reuses the handle and never
+stops the sandbox. Only crash recovery, with no live holder, fences: it lists
+the provider by `petri.workspace=<run id>/<workspace id>`, attaches the one
+recorded match, stops it once (ending whatever a dead execution or a dead
+plugin generation left running, one-shot containers included) and starts it
+once before any holder resumes; more than one match is an `env_acquire`
+error, never an arbitrary choice. A fresh create happens only when
+reconciliation finds no match. The run id is recorded in the run dir
+(`sandbox-run-id`) before the run's first container exists, so any executor
+over the same run dir computes the same labels. Every provider is reached
+through sandbox-driver's JSON-RPC plugin, host and Docker alike (the host
+process backend stays native until its sentinel fence is ported): a plugin
+process that dies fails every in-flight call routably, is never asked to
+replay an ambiguous call, and is relaunched single-flight by the next call, and
+a generation change forces the recovery fence before any holder resumes. The
+durable resource record (`resources/<lease>.json`) is the crash-safe authority:
+it carries the allocation state (`allocating`, `live`, `stopped`, `deleted`),
+a pending intent (`stop`, `delete`) written before the provider call and
+cleared only after it succeeds, the real provider kind and resource id, and a
+non-secret provider fingerprint that recovery, release and prune validate
+before acting. A confirmed record whose resource is missing is `env_acquire`,
+not a silent replacement — its workspace was lost. The fence is idempotent and
+covers the workspace only: side effects outside it may have happened in the
+crashed attempt and happen again — resume is **at-least-once for external side
+effects**, exactly-once only for the log and the workspace fence.
 
 Host executor: workspace per scope instance under the run dir; retention
 default keep-on-failure (`always|on_failure|never`). Container executor
-(`executor-sandbox` over a sandbox-driver provider, Docker today): one sandbox
-per scope instance — pull if-not-present, an init process, the workspace
-bind-mounted from the host run dir at `/workspace`, a long-lived POSIX init;
-steps go to the provider's exec as a program plus arguments, which the
-provider runs directly under a `/bin/sh` wrapper, so no shell interprets them
-and an image without bash (alpine) works; release deletes the container always
-(the workspace is the host directory) and keeps or removes that directory by
-retention. Image contract: must provide `/bin/sh`, `env`, and `setsid`
-(busybox/util-linux both do).
+(`executor-sandbox` over a sandbox-driver plugin, Docker today): one sandbox
+per lease — pull if-not-present, an init process, **the workspace inside the
+sandbox** (Docker: a volume the sandbox owns at `/workspace`; nothing is bound
+from Petri's machine, so a remote daemon works and file I/O goes through the
+provider's filesystem facet), a long-lived POSIX init; steps go to the
+provider's exec as a program plus arguments, which the provider runs directly
+under a `/bin/sh` wrapper, so no shell interprets them and an image without
+bash (alpine) works; one-shot action containers are the provider's own
+operation over the same workspace and network namespace. Per-execution
+release ends that execution's execs and drops its holder; the sandbox is
+stopped when the last holder is gone and its invocation releases the lease,
+and `Retention` then keeps the stopped sandbox (its workspace with it) or
+deletes it. `petri sandbox prune` deletes kept sandboxes later, through the
+same pending-delete record state, and leaves a `deleted` tombstone while the
+run directory exists. Image contract: must provide `/bin/sh`, `env`, and
+`setsid` (busybox/util-linux both do).
 Services require a containerized job: declared `services` become sidecar
 containers on a per-scope network reached by alias, and a bare host process
 that declares services fails at acquire with `env_acquire`, the message naming

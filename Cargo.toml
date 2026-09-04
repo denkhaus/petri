@@ -75,8 +75,9 @@ executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/exe
 # revision. To develop the two together, point these at the sibling checkout
 # with a `[patch]` section in a local, untracked Cargo config, and move the pin
 # forward once the matching sandbox-driver commit is pushed.
-sandbox-driver = { git = "ssh://git@github.com/lithoscomputer/sandbox-driver.git", rev = "f1fe910d46414487448c80ca7e1a4d93665bf2e4" }
-sandbox-driver-docker = { git = "ssh://git@github.com/lithoscomputer/sandbox-driver.git", rev = "f1fe910d46414487448c80ca7e1a4d93665bf2e4" }
+sandbox-driver = { git = "ssh://git@github.com/lithoscomputer/sandbox-driver.git", rev = "49bbb099cb93a7377b18b3dbabee9d477fe46216" }
+sandbox-driver-protocol = { git = "ssh://git@github.com/lithoscomputer/sandbox-driver.git", rev = "49bbb099cb93a7377b18b3dbabee9d477fe46216" }
+sandbox-driver-docker-config = { git = "ssh://git@github.com/lithoscomputer/sandbox-driver.git", rev = "49bbb099cb93a7377b18b3dbabee9d477fe46216" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }

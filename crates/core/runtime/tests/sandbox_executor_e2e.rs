@@ -1,7 +1,7 @@
 //! The same native cycle as `native_e2e`, driven through a `RoutingExecutor`
-//! built with no Docker provider: proof that the whole driver and coordinator
-//! stack runs a graph over the router and the native host executor, with
-//! byte-identical replay.
+//! whose container side is never touched: proof that the whole driver and
+//! coordinator stack runs a graph over the router and the native host
+//! executor, with byte-identical replay, and no plugin launched.
 
 use std::{env, fs, process};
 
@@ -46,7 +46,7 @@ async fn the_cycle_runs_end_to_end_over_the_sandbox_adapter() {
     let mut options = RunOptions::new(&dir);
     options.retention = Retention::Never;
 
-    let executor = RoutingExecutor::new(None, dir.clone(), Retention::Never);
+    let executor = RoutingExecutor::local(dir.clone(), Retention::Never);
 
     let rt = Runtime::standard().options(options).executor(executor);
     let report = rt.run(graph).await.expect("replay is byte-identical");

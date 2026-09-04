@@ -13,12 +13,13 @@ use engine::{
 };
 use executor::{
     AcquireContext, EnvError, EnvHandle, EnvironmentId, Executor, NoProgress, ProgressSink,
-    ReleaseReport, Retention, ScopeOutcome, ScopeSpec, SecretProvider, WorkspaceId,
+    ReleaseReport, Retention, SandboxLeaseId, ScopeOutcome, ScopeSpec, SecretProvider, WorkspaceId,
 };
 use ir::placeholder::SECRET_REF_KEY;
 use ir::{
     Attempt, Control, EvalEnv, ExprOrValue, FailureClass, FailureInfo, FiringId, Graph, NodeId,
-    Outcome, RunContext, RunStatus, ScopeId, StaticCtx, Status, StepEvent, Value, eval,
+    Outcome, RunContext, RunStatus, RuntimeSpec, ScopeId, StaticCtx, Status, StepEvent, Value,
+    eval,
 };
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
@@ -98,6 +99,45 @@ pub struct RunConfig {
     pub workspace_prefix:    Option<SmolStr>,
     /// Exact inherited workspace for every scope in this execution.
     pub workspace_override:  Option<WorkspaceId>,
+    /// The runtime target every scope in this execution runs on, when an
+    /// inherited sandbox decides it instead of the graph.
+    pub runtime_override:    Option<RuntimeSpec>,
+    /// The durable sandbox lease each scope acquires under. A coordinator
+    /// supplies them; a bare driver has none, and its executor then keys
+    /// each sandbox by the scope alone and ends it with the scope.
+    pub scope_leases:        ScopeLeases,
+}
+
+/// Which durable lease each scope of an execution acquires its sandbox under.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ScopeLeases {
+    /// No coordinator: every sandbox is the scope's own.
+    #[default]
+    None,
+    /// One lease per scope of the graph, from the invocation that owns them.
+    Each(BTreeMap<ScopeId, SandboxLeaseId>),
+    /// One inherited lease for every scope: the caller's sandbox.
+    Shared(SandboxLeaseId),
+}
+
+impl ScopeLeases {
+    pub fn lease_for(&self, scope: ScopeId) -> Option<SandboxLeaseId> {
+        match self {
+            Self::None => None,
+            Self::Each(leases) => leases.get(&scope).copied(),
+            Self::Shared(lease) => Some(*lease),
+        }
+    }
+}
+
+/// Everything a coordinator decides about where an execution's scopes run:
+/// the inherited workspace and runtime target, and the leases. `Default` is
+/// what a bare driver gets: the graph's own targets, no leases.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SandboxAssignment {
+    pub workspace_override: Option<WorkspaceId>,
+    pub runtime_override:   Option<RuntimeSpec>,
+    pub leases:             ScopeLeases,
 }
 
 impl RunConfig {
@@ -112,6 +152,8 @@ impl RunConfig {
             environment_prefix:  None,
             workspace_prefix:    None,
             workspace_override:  None,
+            runtime_override:    None,
+            scope_leases:        ScopeLeases::None,
         }
     }
 
@@ -153,6 +195,15 @@ impl RunConfig {
     #[must_use]
     pub fn with_workspace_override(mut self, workspace: WorkspaceId) -> Self {
         self.workspace_override = Some(workspace);
+        self
+    }
+
+    /// Apply a coordinator's sandbox decisions in one step.
+    #[must_use]
+    pub fn with_sandbox_assignment(mut self, assignment: SandboxAssignment) -> Self {
+        self.workspace_override = assignment.workspace_override;
+        self.runtime_override = assignment.runtime_override;
+        self.scope_leases = assignment.leases;
         self
     }
 }
@@ -1121,7 +1172,10 @@ impl Driver {
             return;
         }
         let spec = self.scope_spec(scope);
-        let ctx = AcquireContext::new(self.secrets.clone(), self.progress.clone());
+        let mut ctx = AcquireContext::new(self.secrets.clone(), self.progress.clone());
+        if let Some(lease) = self.config.scope_leases.lease_for(scope) {
+            ctx = ctx.with_lease(lease);
+        }
         let executor = self.executor.clone();
         let tx = self.tx.clone();
         let id = self.next_acquire_id;
@@ -1231,7 +1285,7 @@ impl Driver {
             .with_workspace_id(workspace)
             .with_grace(self.config.grace);
         let Some(definition) = self.engine.graph().scope(scope) else {
-            return spec;
+            return self.override_runtime(spec);
         };
         // Scope env is resolved once, against the run parameters and nothing else:
         // it cannot depend on a firing.
@@ -1272,7 +1326,16 @@ impl Driver {
             .with_env(resolve(&definition.env))
             .with_runtime(definition.runtime.clone())
             .with_services(services);
-        spec
+        self.override_runtime(spec)
+    }
+
+    /// An inherited sandbox decides the runtime target, not the graph: the
+    /// scope runs where its caller's scope runs.
+    fn override_runtime(&self, spec: ScopeSpec) -> ScopeSpec {
+        match &self.config.runtime_override {
+            Some(runtime) => spec.with_runtime(runtime.clone()),
+            None => spec,
+        }
     }
 
     // ── Steps ──────────────────────────────────────────────────────────────

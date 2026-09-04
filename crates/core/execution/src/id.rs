@@ -44,7 +44,10 @@ macro_rules! run_id {
 
 run_id!(InvocationId);
 run_id!(ExecutionId);
-run_id!(SandboxLeaseId);
+
+/// The lease type is the executor interface's: the executor keys sandboxes by
+/// it, and the coordinator allocates it.
+pub use executor::SandboxLeaseId;
 
 impl InvocationId {
     pub const ROOT: Self = Self(0);

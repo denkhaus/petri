@@ -26,7 +26,7 @@ use std::{env, fs};
 use answer::{Answerer, Mode};
 use clap::{Args, Parser, Subcommand};
 use execution::host::HostRun;
-use execution::{CoordinatorHandle, host};
+use execution::{CoordinatorHandle, host, prune as sandbox_prune};
 use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, CompileInputs, Lowered};
 use runtime::ir::{Graph, RunStatus};
@@ -153,27 +153,36 @@ enum Command {
     /// Run a workflow file to completion.
     Run {
         #[command(flatten)]
-        target:       FileArgs,
+        target:             FileArgs,
         /// Where workspaces, logs and `events.json` go. Defaults to a fresh
         /// directory under the system temp dir, printed at start.
         #[arg(long)]
-        run_dir:      Option<PathBuf>,
+        run_dir:            Option<PathBuf>,
         /// Do not echo step output.
         #[arg(long)]
-        quiet:        bool,
+        quiet:              bool,
         /// Answer a step's question — a human gate — from the terminal:
         /// the question is printed and one line is read from stdin.
         #[arg(long, conflicts_with = "auto_approve")]
-        interactive:  bool,
+        interactive:        bool,
         /// Answer every step's question with its default choice.
         #[arg(long)]
-        auto_approve: bool,
+        auto_approve:       bool,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
         /// choice.
         #[arg(long)]
-        dry_run:      bool,
+        dry_run:            bool,
+        /// Allow a sandbox plugin whose checksum this build does not pin —
+        /// a locally built `sandbox-driver-docker`, say. Debug builds
+        /// allow one by default; release builds require this flag or
+        /// `PETRI_SANDBOX_PLUGIN_DEV=1`.
+        #[arg(long)]
+        sandbox_plugin_dev: bool,
     },
+    /// Sandboxes a run holds on its provider.
+    #[command(subcommand)]
+    Sandbox(SandboxCommand),
     /// Replay a saved event log against the workflow and verify byte-identity.
     ///
     /// Lower the same file on the same machine — and the same checkout state,
@@ -186,6 +195,21 @@ enum Command {
         target: FileArgs,
         /// The `events.json` a run wrote.
         log:    PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum SandboxCommand {
+    /// Delete every sandbox a finished or abandoned run still holds on its
+    /// provider, and record each as gone. Refuses a run a live process
+    /// holds. Host workspaces under the run dir are not touched.
+    Prune {
+        /// The run's directory.
+        #[arg(long)]
+        run_dir:            PathBuf,
+        /// Allow a sandbox plugin whose checksum this build does not pin.
+        #[arg(long)]
+        sandbox_plugin_dev: bool,
     },
 }
 
@@ -218,11 +242,13 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             interactive,
             auto_approve,
             dry_run,
+            sandbox_plugin_dev,
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
             let mut options = RunOptions::new(&run_dir);
             options.echo = !quiet;
+            options.sandbox_plugin_dev = sandbox_plugin_dev.then_some(true);
             let mode = match (interactive, auto_approve) {
                 (true, _) => Some(Mode::Interactive),
                 (_, true) => Some(Mode::AutoApprove),
@@ -242,6 +268,44 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             .await
         }
         Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
+        Command::Sandbox(SandboxCommand::Prune {
+            run_dir,
+            sandbox_plugin_dev,
+        }) => {
+            let mut options = RunOptions::new(&run_dir);
+            options.sandbox_plugin_dev = sandbox_plugin_dev.then_some(true);
+            prune(&make(RuntimeMode::Real).options(options)).await
+        }
+    }
+}
+
+/// `sandbox prune`: one line per lease, and a failure exit when any lease
+/// could not be pruned, so a script can retry.
+#[expect(
+    clippy::print_stderr,
+    reason = "the command's report is its output; there is no subscriber to route it to"
+)]
+async fn prune(rt: &Runtime) -> ExitCode {
+    let report = match sandbox_prune::prune(rt).await {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error: {}", error_chain(&error));
+            return ExitCode::from(3);
+        }
+    };
+    for (lease, ids) in &report.deleted {
+        eprintln!("lease {lease}: deleted {}", ids.join(", "));
+    }
+    for lease in &report.clean {
+        eprintln!("lease {lease}: nothing to prune");
+    }
+    for (lease, problem) in &report.problems {
+        eprintln!("lease {lease}: {problem}");
+    }
+    if report.is_clean() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

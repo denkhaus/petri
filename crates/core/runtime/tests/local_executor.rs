@@ -1,6 +1,8 @@
 //! The routing executor, at the executor level: routing, the scope-bound
 //! one-shot runner in every execution mode, and the crash and cancel sweeps
-//! that keep one-shot containers from leaking.
+//! that keep one-shot containers from leaking. A host scope's actions run
+//! beside an **action host** — a small sandbox that binds the scope's host
+//! workspace — created on the first action and ended with the scope.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -9,9 +11,12 @@ use executor::{
     AcquireContext, Executor as _, OneShotContainer, Retention, ScopeOutcome, ScopeSpec,
     ServiceSpec, Sig,
 };
-use executor_sandbox::{HostExecutor, RoutingExecutor, list_containers};
+use executor_sandbox::{HostExecutor, RoutingExecutor};
 use ir::{RuntimeSpec, ScopeId};
-use testkit::{RunDir, is_docker_ready, wait_for_file};
+use testkit::{
+    RunDir, container_id, is_docker_ready, list_containers, list_one_shots, recorded_run_id,
+    wait_for_file,
+};
 use tokio::time;
 
 const IMAGE: &str = "alpine:3.20";
@@ -39,13 +44,10 @@ async fn drain(handle: &mut Box<dyn executor::ProcessHandle>) -> Vec<String> {
     lines
 }
 
-/// The one-shot prefix a fresh router over the same run dir computes for a
-/// scope, so a leak check reaches exactly this test's containers.
-async fn one_shot_prefix(dir: &RunDir, instance: &str) -> String {
-    local(dir)
-        .one_shot_prefix_for(instance)
-        .await
-        .expect("the run id is recorded")
+/// The action host's container name for scope 0 of the run under `dir`:
+/// the run's prefix, `a-`, and the workspace id.
+fn action_host(dir: &RunDir) -> String {
+    format!("petri-{}-a-scope-0", recorded_run_id(dir.path()))
 }
 
 /// Services require a containerized job: a bare host process has no route to a
@@ -188,30 +190,35 @@ async fn a_signalled_one_shot_dies_and_leaves_nothing() {
         .expect("wait");
     assert!(!status.is_success(), "TERM ended it: {status:?}");
 
-    let prefix = one_shot_prefix(&dir, "scope-0").await;
+    let host = container_id(&action_host(&dir))
+        .await
+        .expect("the action host exists while the scope lives");
     assert!(
-        list_containers(&prefix).await.is_empty(),
-        "nothing is left under {prefix}"
+        list_one_shots(&host).await.is_empty(),
+        "nothing of the signalled one-shot is left"
     );
     let report = executor.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
+    assert!(
+        container_id(&action_host(&dir)).await.is_none(),
+        "the action host went with the scope"
+    );
 }
 
-/// The crash path: a one-shot whose client died keeps running; the next acquire
-/// of the same scope over the same run dir fences it away, and release sweeps
-/// whatever a live run abandons.
+/// The crash path: a one-shot whose process died keeps running beside its
+/// action host; the next acquire of the same scope over the same run dir
+/// sweeps both away, and release sweeps whatever a live run abandons.
 #[tokio::test]
 async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
     if !is_docker_ready().await {
         return;
     }
     let dir = RunDir::new("local-one-shot-crash");
-    let prefix = one_shot_prefix(&dir, "scope-0").await;
 
-    // "Crash": drop the handle without signalling. `kill_on_drop` ends the
-    // `docker run` client, but the container keeps running — exactly what a
-    // dead driver leaves behind.
-    {
+    // "Crash": drop the handle without releasing. The process's plugin dies
+    // with its executor, but the action host and the one-shot keep running —
+    // exactly what a dead driver leaves behind.
+    let crashed_host = {
         let executor = local(&dir);
         let handle = executor
             .acquire(&host_spec(), &AcquireContext::bare())
@@ -228,26 +235,32 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
             wait_for_file(&dir.workspace().join("ready"), Duration::from_secs(60)).await,
             "the one-shot never started"
         );
+        let host = container_id(&action_host(&dir))
+            .await
+            .expect("the action host exists");
         drop(process);
         drop(handle);
-    }
-    // Client death is not container death.
+        host
+    };
+    // Process death is not container death.
     time::sleep(Duration::from_millis(300)).await;
     assert!(
-        !list_containers(&prefix).await.is_empty(),
-        "the leftover container survives its client"
+        !list_one_shots(&crashed_host).await.is_empty(),
+        "the leftover one-shot survives its process"
     );
 
-    // A resuming process over the same run dir reaches the same names: the
-    // fence removes the leftover before the scope is used again.
+    // A resuming process over the same run dir finds the marker and the
+    // label: the fence removes the action host, and its one-shot with it,
+    // before the scope is used again.
     let resumed = local(&dir);
     let handle = resumed
         .acquire(&host_spec(), &AcquireContext::bare())
         .await
         .expect("re-acquire");
     assert!(
-        list_containers(&prefix).await.is_empty(),
-        "acquire fenced the crashed one-shot away"
+        list_one_shots(&crashed_host).await.is_empty()
+            && container_id(&action_host(&dir)).await.is_none(),
+        "acquire fenced the crashed action host and its one-shot away"
     );
 
     // And a live run's abandoned one-shot goes with the scope: release sweeps.
@@ -255,17 +268,27 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
     let spec = OneShotContainer::registry(IMAGE).with_args(&["sleep", "300"]);
     let _process = runner.run(spec).await.expect("docker run");
     let deadline = Instant::now() + Duration::from_secs(30);
-    while list_containers(&prefix).await.is_empty() {
+    let host = loop {
+        if let Some(host) = container_id(&action_host(&dir)).await
+            && !list_one_shots(&host).await.is_empty()
+        {
+            break host;
+        }
         assert!(
             Instant::now() < deadline,
             "the abandoned one-shot never appeared"
         );
         time::sleep(Duration::from_millis(100)).await;
-    }
+    };
     let report = resumed.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
     assert!(
+        list_one_shots(&host).await.is_empty() && container_id(&action_host(&dir)).await.is_none(),
+        "release swept the action host and the abandoned one-shot"
+    );
+    let prefix = format!("petri-{}-", recorded_run_id(dir.path()));
+    assert!(
         list_containers(&prefix).await.is_empty(),
-        "release swept the abandoned one-shot"
+        "nothing of the run is left"
     );
 }

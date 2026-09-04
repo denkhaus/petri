@@ -7,7 +7,7 @@ explicit routing, plus the pure state machine that executes it.
 crates/core/ir         the vocabulary: graph, ids, expressions, values, validation
 crates/core/engine     the sans-IO state machine: apply(state, event) -> (state, commands)
 crates/core/executor   the environment interface; executor-sandbox implements it
-crates/core/executor-sandbox  the executors: native host processes, and containers on sandbox-driver providers
+crates/core/executor-sandbox  the executors: native host processes, and containers on sandbox-driver providers, reached through their plugins
 crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
 crates/core/driver     the IO loop between the pure core and real processes
 crates/core/execution  run, invocation, and execution coordination; durable local store
@@ -128,8 +128,13 @@ crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wai
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 ```
 
-Docker tests skip with a message when no daemon is reachable, so `mise run test`
-is green on a machine without one.
+Container scopes reach Docker through the `sandbox-driver-docker` plugin, an
+executable Petri launches and talks JSON-RPC to; no provider crate is linked in.
+`mise run plugins:build` installs the plugin from the sandbox-driver revision the
+workspace pins under `target/plugins/bin`, and the test tasks point
+`PETRI_SANDBOX_DOCKER_PLUGIN` at it. Docker tests skip with a message when the
+plugin is missing or no daemon is reachable, so `mise run test` is green on a
+machine without one.
 
 `mise run test` runs all of them with Nextest, then runs the maintained doctests
 with Cargo.
@@ -621,18 +626,19 @@ What the audit found and changed:
   limits are executor configuration, not something the graph carries.
 - **The step kind assumed the workspace was on this machine.** The process step
   read and wrote its outputs file with `std::fs` on `ExecEnv::workspace()`, a
-  host-visible path — true for a host workspace and a bind-mounted container, false
-  for anything remote. `workspace()` is gone from the interface; `read_file` and
-  `write_file` take its place, and the local executors answer from the
-  filesystem. A remote executor answers over its transport, and the step kind is
-  none the wiser.
+  host-visible path — true for a host workspace, false for anything else.
+  `workspace()` is gone from the interface; `read_file` and `write_file` take its
+  place. The host executor answers from the filesystem; the container executor
+  answers through the sandbox's filesystem facet over the plugin wire, because a
+  sandbox owns its workspace and nothing on this machine mirrors it. The step
+  kind is none the wiser.
 - **The shared error and report types had Docker fields.** `EnvError::Docker` is
   `EnvError::Backend { backend, operation, message }`; `ReleaseReport` describes
   what was released and kept as text rather than as `container_removed` /
   `workspace_removed` booleans that would grow a field per executor.
 - **Already right when the audit ran:** the executors live outside the interface
   crate (today `executor-sandbox`: the native host executor and the sandbox-driver
-  container executor), each with a private teardown record the interface carries
+  container executor over the plugin protocol), each with a private teardown record the interface carries
   as an opaque `Teardown` trait object and hands back untouched; the output pump
   lives in the interface crate because every executor needs it and the line cap
   must be decided once.
@@ -754,10 +760,16 @@ Three things this package taught, kept because they generalise:
 - **A cancellation test that only checks the process is gone will pass on teardown
   alone.** Releasing the scope kills everything either way, so the test has to pin
   *how* the step ended — which signal, which escalation — not merely that it did.
-- **Docker tests skip without a daemon, and `PETRI_REQUIRE_DOCKER` turns that skip
-  into a failure.** CI sets it on the Linux job. A silently skipped acceptance
-  battery is indistinguishable from a passing one, and that job exists precisely to
-  say the battery ran.
+- **Docker tests skip without a plugin and a daemon, and `PETRI_REQUIRE_DOCKER`
+  turns that skip into a failure.** CI sets it on the Linux job. A silently skipped
+  acceptance battery is indistinguishable from a passing one, and that job exists
+  precisely to say the battery ran.
+- **A container test reads the workspace through the sandbox, never through a
+  host path.** The workspace lives in the sandbox's own volume. A test checks a
+  file the step wrote with `ExecEnv::read_file`, or with `docker exec` through
+  `testkit::container_read` when it has no environment handle; a heartbeat that
+  must be seen to stop is measured by a step inside the sandbox and reported in
+  its output.
 
 ## Not built
 

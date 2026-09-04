@@ -8,6 +8,7 @@ mod id;
 mod jsonl;
 mod middleware;
 mod observe;
+pub mod prune;
 mod resource;
 mod secret;
 mod state;
@@ -36,7 +37,10 @@ pub use observe::{
     AddressedObserver, DecodedEngineLog, EngineLogDecodeError, EngineLogError, ExecutionObserver,
     JsonlEngineLog, decode_engine_log, encode_engine_log, read_engine_log,
 };
-pub use resource::{ResourceError, ResourceStore, SandboxResourceRecord};
+pub use resource::{
+    HOST_PROVIDER, LeaseState, PendingIntent, ResourceError, ResourceLedger, ResourceStore,
+    SandboxResourceRecord,
+};
 pub use secret::InvocationSecrets;
 pub use state::{
     CoordinatorState, ExecutionDeclaration, ExecutionState, InvocationDeclaration, InvocationState,
@@ -44,5 +48,5 @@ pub use state::{
 };
 pub use store::{
     COORDINATOR_FILE, CoordinatorStore, DecodedCoordinatorLog, GRAPHS_DIR, INVOCATIONS_DIR,
-    RESOURCES_DIR, RUN_FILE, RunMetadata, StoreError, decode_coordinator_log,
+    RESOURCES_DIR, RUN_FILE, RunMetadata, StoreError, decode_coordinator_log, hold_run_lease,
 };

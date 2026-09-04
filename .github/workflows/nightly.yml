@@ -67,6 +67,12 @@ jobs:
         if: matrix.docker == 'required'
         run: docker pull alpine:3.20
 
+      # Container scopes reach Docker through the sandbox-driver plugin, built
+      # from the revision the workspace pins. A separate step, so a plugin
+      # build failure reads as one.
+      - name: Build the sandbox plugins
+        run: mise run plugins:build
+
       - name: Verify extended checks
         run: mise run check:nightly
         env:

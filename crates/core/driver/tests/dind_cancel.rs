@@ -6,12 +6,10 @@
 
 mod support;
 
-use std::fs;
 use std::time::{Duration, Instant};
 
 use driver::RunConfig;
 use executor::Retention;
-use executor_sandbox::list_containers;
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, RuntimeTarget, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
@@ -76,28 +74,36 @@ docker build --progress=plain b 2>&1 | tee build.log
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(2))
         .with_retention(Retention::Never);
-    let workspace = dir.workspace();
 
     let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
+    let sandbox = format!("{prefix}l0");
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_secs(120)).await,
+        wait_for_container_file(&sandbox, "/workspace/ready", Duration::from_secs(120)).await,
         "the step never started inside the container"
     );
     // The inner build's RUN is executing once the plain-progress log names it.
-    let build_log = workspace.join("build.log");
+    let read = |path: &'static str| {
+        let sandbox = sandbox.clone();
+        async move {
+            container_read(&sandbox, path)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default()
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        if fs::read_to_string(&build_log).is_ok_and(|s| s.contains("RUN sleep 600")) {
+        if read("/workspace/build.log").await.contains("RUN sleep 600") {
             break;
         }
         assert!(
             Instant::now() < deadline,
             "the inner build never reached its RUN; start-docker.log: {}\nbuild.log: {}",
-            fs::read_to_string(workspace.join("start-docker.log")).unwrap_or_default(),
-            fs::read_to_string(&build_log).unwrap_or_default()
+            read("/workspace/start-docker.log").await,
+            read("/workspace/build.log").await
         );
         time::sleep(Duration::from_millis(250)).await;
     }

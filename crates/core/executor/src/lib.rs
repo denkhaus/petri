@@ -30,7 +30,7 @@ pub use env::{
 pub use error::{EnvError, ReleaseReport};
 pub use progress::{NoProgress, Progress, ProgressSink};
 pub use scope::{
-    AcquireContext, DEFAULT_GRACE, EnvHandle, EnvironmentId, Executor, Retention, ScopeOutcome,
-    ScopeSpec, ServiceSpec, Teardown, WorkspaceId,
+    AcquireContext, DEFAULT_GRACE, EnvHandle, EnvironmentId, Executor, Retention, SandboxLeaseId,
+    ScopeOutcome, ScopeSpec, ServiceSpec, Teardown, WorkspaceId,
 };
 pub use secrets::{MapSecrets, Masker, SECRET_REF_KEY, Secret, SecretError, SecretProvider};

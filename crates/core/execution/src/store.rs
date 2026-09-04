@@ -400,6 +400,21 @@ fn digest_bytes(bytes: &[u8]) -> GraphDigest {
     GraphDigest::from_bytes(ir::graph_digest_bytes(bytes))
 }
 
+/// Hold the run's lease without opening its log: what a maintenance command
+/// (prune) takes so no coordinator can resume the run while it works. The
+/// lock lives as long as the returned file. A run a live process holds is
+/// [`StoreError::Leased`].
+pub fn hold_run_lease(root: &Path) -> Result<File, StoreError> {
+    let metadata_path = root.join(RUN_FILE);
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&metadata_path)
+        .map_err(|source| io_error("open", &metadata_path, source))?;
+    acquire_lease(&lease, root)?;
+    Ok(lease)
+}
+
 fn acquire_lease(file: &File, root: &Path) -> Result<(), StoreError> {
     file.try_lock().map_err(|source| match source {
         fs::TryLockError::WouldBlock => StoreError::Leased(root.to_path_buf()),

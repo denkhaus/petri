@@ -8,12 +8,11 @@
 
 mod support;
 
-use std::fs;
 use std::time::{Duration, Instant};
 
 use driver::RunConfig;
 use executor::{Executor, Retention};
-use executor_sandbox::{RoutingExecutor, list_containers};
+use executor_sandbox::RoutingExecutor;
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
@@ -58,7 +57,12 @@ fn docker_graph(name: &str, run: &str) -> ir::Graph {
     graph
 }
 
-/// A step runs inside the container, against the bind-mounted workspace.
+/// The sandbox a bare driver keys scope 0 to: lease 0 of the run.
+fn sandbox_of(prefix: &str) -> String {
+    format!("{prefix}l0")
+}
+
+/// A step runs inside the container, in the sandbox's own workspace.
 #[tokio::test]
 async fn a_step_runs_inside_the_container() {
     if !is_docker_ready().await {
@@ -88,16 +92,17 @@ async fn a_step_runs_inside_the_container() {
     assert_eq!(
         output_of(&report, "inside")["where"],
         json!("/workspace"),
-        "the workspace is bind-mounted at a known path"
+        "the workspace is at a known path inside the sandbox"
     );
 }
 
 /// §7 test 3, Docker variant, and the §4.1 test.
 ///
 /// The step backgrounds a grandchild inside the container. `docker kill` would
-/// signal PID 1 and leave both alive; only `docker exec … kill -- -PGID`
-/// reaches them. The heartbeat file is on the bind mount, so the host can watch
-/// it stop.
+/// signal PID 1 and leave both alive; only a signal to the exec's process
+/// group reaches them. (That the grandchild dies is checked at the executor
+/// level, where the sandbox stays live to read the heartbeat; here the
+/// escalation record says which rung ended the step.)
 #[tokio::test]
 async fn docker_cancel_kills_the_exec_process_group() {
     if !is_docker_ready().await {
@@ -114,20 +119,19 @@ sleep 300
     );
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(2))
-        .with_retention(Retention::Always);
-    let workspace = dir.workspace();
+        .with_retention(Retention::Never);
 
-    let driver = docker_driver(graph, &dir, config);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
+    let sandbox = sandbox_of(&prefix);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
+        wait_for_container_file(&sandbox, "/workspace/ready", Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
-    let heartbeat = workspace.join("heartbeat");
     assert!(
-        wait_for_file(&heartbeat, Duration::from_secs(30)).await,
+        wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(30)).await,
         "the grandchild never ticked"
     );
 
@@ -141,23 +145,16 @@ sleep 300
 
     // This step does not trap TERM, so TERM alone must have ended it. If the signal
     // had not reached the group the ladder would have waited out the whole grace
-    // period and escalated — and the heartbeat check below would then pass for the
-    // wrong reason, because release removes the container either way.
+    // period and escalated.
     assert_eq!(
         output_of(&report, "backgrounder")["cancel_escalation"],
         json!("sigterm"),
         "the signal never reached the exec's process group"
     );
-
-    // If the signal had gone to PID 1 instead of the step's group, the grandchild
-    // would still be ticking here.
-    time::sleep(Duration::from_millis(800)).await;
-    let before = file_len(&heartbeat);
-    time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(
-        file_len(&heartbeat),
-        before,
-        "the grandchild survived: the signal did not reach the exec's process group"
+    let leftovers = list_containers(&prefix).await;
+    assert!(
+        leftovers.is_empty(),
+        "containers were left behind: {leftovers:?}"
     );
 }
 
@@ -177,8 +174,8 @@ async fn docker_release_leaves_no_container() {
     let report = driver.await_run().await;
     assert_eq!(report.status, RunStatus::Success);
     assert!(
-        report.releases.iter().any(|r| r.released_any("container")),
-        "the release reported removing the container: {:?}",
+        report.releases.iter().any(|r| r.released_any("sandbox")),
+        "the release reported removing the sandbox: {:?}",
         report.releases
     );
 
@@ -212,14 +209,14 @@ while :; do sleep 0.1; done
         .with_grace(Duration::from_secs(10))
         .with_cleanup_grace(Duration::from_secs(300))
         .with_retention(Retention::Never);
-    let workspace = dir.workspace();
 
     let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
+    let sandbox = sandbox_of(&prefix);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
     assert!(
-        wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await,
+        wait_for_container_file(&sandbox, "/workspace/ready", Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
     handle.cancel(ir::CancelScopeId::ROOT).await;
@@ -251,9 +248,9 @@ while :; do sleep 0.1; done
 
 /// The fence half of the acquire contract (§9), across a driver's death: the
 /// driver dies with a container step running, a fresh executor over the same
-/// run dir acquires the same scope, and the crashed container stops mutating
-/// the workspace — its name is rebuilt from the run id recorded in the run dir,
-/// not re-minted.
+/// run dir acquires the same scope — the *same sandbox*, found by the run id
+/// recorded in the run dir and the workspace label — and the crashed step's
+/// beater stops mutating the workspace before the next step runs in it.
 #[tokio::test]
 async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
     if !is_docker_ready().await {
@@ -263,53 +260,68 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
     // The beater runs in its own session: an aborted driver still lets the
     // orphaned step task stop its own process group as the channels close, so a
     // detached beater is what a dead *process* leaves behind — only a
-    // container-level fence can end it. With `done` already in the workspace
-    // the step exits at once, so the second run completes instead of beating.
+    // sandbox-level fence can end it. With `done` already in the workspace the
+    // step measures the heartbeat instead of beating: two sizes half a second
+    // apart, equal only if the beater is dead.
     let graph = docker_graph(
         "beat",
-        "[ -e done ] && exit 0\n\
-         setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &\n\
-         sleep 300",
+        r#"
+if [ -e done ]; then
+  a=$(wc -c < heartbeat); sleep 0.5; b=$(wc -c < heartbeat)
+  echo "before=$a" > "$CI_OUTPUT"; echo "after=$b" >> "$CI_OUTPUT"
+  exit 0
+fi
+setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &
+sleep 300
+"#,
     );
-    // The workspace is kept: release would otherwise remove the directory the
-    // heartbeat is checked through, hiding a beater the fence missed.
-    let config = || {
+    let config = |retention| {
         RunConfig::new(dir.path())
             .with_grace(Duration::from_secs(2))
-            .with_retention(Retention::Always)
+            .with_retention(retention)
     };
-    let workspace = dir.workspace();
-    let heartbeat = workspace.join("heartbeat");
 
-    let (driver, prefix) = docker_driver_named(graph.clone(), &dir, config()).await;
+    let (driver, prefix) =
+        docker_driver_named(graph.clone(), &dir, config(Retention::Always)).await;
+    let sandbox = sandbox_of(&prefix);
     let run = tokio::spawn(driver.run());
     assert!(
-        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
+        wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
     // The crash: the driver is gone, release never runs, the container beats on.
     run.abort();
     let _ = run.await;
+    let crashed_id = container_id(&sandbox)
+        .await
+        .expect("the crashed run's container outlives its driver");
     assert!(
-        !list_containers(&prefix).await.is_empty(),
-        "the crashed run's container outlives its driver"
+        container_write(&sandbox, "/workspace/done", "").await,
+        "the crashed container is still running"
     );
 
-    fs::write(workspace.join("done"), b"").expect("done");
-    let report = docker_driver(graph, &dir, config()).await_run().await;
+    let report = docker_driver(graph, &dir, config(Retention::Never))
+        .await_run()
+        .await;
     assert_eq!(
         report.status,
         RunStatus::Success,
         "{:?}",
         report.state.errors()
     );
-
-    let before = file_len(&heartbeat);
-    time::sleep(Duration::from_millis(500)).await;
+    let output = output_of(&report, "beat");
     assert_eq!(
-        file_len(&heartbeat),
-        before,
-        "the crashed container kept writing: the fence missed it"
+        output["before"], output["after"],
+        "the crashed container's beater kept writing: the fence missed it ({output})"
+    );
+    assert!(
+        output["before"].as_str().is_some_and(|n| n.trim() != "0"),
+        "the workspace survived the fence: {output}"
+    );
+    // The same sandbox served both runs, and release ended it.
+    assert!(
+        container_id(&sandbox).await.is_none(),
+        "release removed the sandbox (was {crashed_id})"
     );
     let leftovers = list_containers(&prefix).await;
     assert!(
@@ -318,14 +330,15 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
     );
 }
 
-/// An acquire nobody waited out leaves no container, wherever the drop lands.
-/// The live case is the sweep aborting a run 90s after a cancel it ignored:
-/// the acquire future is dropped mid-flight, the killed `docker create` client
-/// does not cancel the daemon's create, and the container appears *after*
-/// every remove-by-name sweep already ran — Created, never started, cleaned by
-/// nothing. The drop points are sampled across the whole acquire; each
-/// abandoned round must converge to zero containers on its own, with no fence
-/// re-acquire to hide behind (every round gets a fresh run dir and prefix).
+/// An acquire nobody waited out leaves nothing to leak, wherever the drop
+/// lands. The live case is the sweep aborting a run 90s after a cancel it
+/// ignored: the acquire future is dropped mid-flight, and the provider's
+/// create — already sent to the plugin — still completes. Two things cover
+/// it. A create that lands after its acquire is gone is deleted on arrival.
+/// And whatever a crash leaves unrecorded carries the workspace label, so
+/// the next acquire over the same run dir attaches it rather than creating
+/// a second one, and its release ends it. The drop points are sampled across
+/// the whole acquire; every round must end with no container.
 #[tokio::test]
 async fn an_abandoned_acquire_leaves_no_container() {
     if !is_docker_ready().await {
@@ -342,6 +355,8 @@ async fn an_abandoned_acquire_leaves_no_container() {
         "could not pre-pull {IMAGE}"
     );
 
+    let spec = executor::ScopeSpec::new(ScopeId::new(0), "scope-0")
+        .with_runtime(RuntimeSpec::container(IMAGE));
     let mut timeout_ms: u64 = 50;
     loop {
         let dir = RunDir::new(&format!("docker-abandon-{timeout_ms}"));
@@ -350,11 +365,9 @@ async fn an_abandoned_acquire_leaves_no_container() {
             .container_prefix()
             .await
             .expect("the run id is recorded in the run dir");
-        let spec = executor::ScopeSpec::new(ScopeId::new(0), "scope-0")
-            .with_runtime(RuntimeSpec::container(IMAGE));
         let ctx = executor::AcquireContext::bare();
 
-        match time::timeout(
+        let completed = match time::timeout(
             Duration::from_millis(timeout_ms),
             executor.acquire(&spec, &ctx),
         )
@@ -362,21 +375,29 @@ async fn an_abandoned_acquire_leaves_no_container() {
         {
             Ok(result) => {
                 // The whole acquire fit inside this round's timeout: the drop
-                // points have been sampled past the create window. Clean up
-                // and stop.
+                // points have been sampled past the create window.
                 if let Ok(handle) = result {
                     executor
                         .release(handle, executor::ScopeOutcome::Succeeded)
                         .await;
                 }
-                break;
+                true
             }
             Err(_elapsed) => {
+                // A create still in flight after the drop lands and is deleted
+                // on arrival, by the abandoned task on this same executor. Wait
+                // until nothing of the scope is on the daemon and stays that
+                // way for a moment — a create that was already sent shows up
+                // within that window — so the reconcile below sees a settled
+                // daemon, as a fresh process after a crash would.
                 let deadline = Instant::now() + Duration::from_secs(15);
-                loop {
+                let mut empty_checks = 0;
+                while empty_checks < 5 {
                     let leftovers = list_containers(&prefix).await;
                     if leftovers.is_empty() {
-                        break;
+                        empty_checks += 1;
+                    } else {
+                        empty_checks = 0;
                     }
                     assert!(
                         Instant::now() < deadline,
@@ -384,7 +405,32 @@ async fn an_abandoned_acquire_leaves_no_container() {
                     );
                     time::sleep(Duration::from_millis(200)).await;
                 }
+                false
             }
+        };
+        drop(executor);
+        // A fresh process over the same run dir attaches whatever the round
+        // left — at most one sandbox for the scope — and its release ends it.
+        let again = RoutingExecutor::local(dir.path().to_path_buf(), Retention::Never);
+        let handle = again
+            .acquire(&spec, &executor::AcquireContext::bare())
+            .await
+            .expect("the scope reconciles after an abandoned acquire");
+        assert_eq!(
+            list_containers(&prefix).await.len(),
+            1,
+            "exactly one sandbox for the scope after reconciliation"
+        );
+        let report = again
+            .release(handle, executor::ScopeOutcome::Succeeded)
+            .await;
+        assert!(report.is_clean(), "{report:?}");
+        assert!(
+            list_containers(&prefix).await.is_empty(),
+            "round {timeout_ms}ms left containers"
+        );
+        if completed {
+            break;
         }
         timeout_ms += 100;
         assert!(
@@ -625,14 +671,14 @@ while :; do sleep 0.1; done
     );
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(1))
-        .with_retention(Retention::Always);
-    let workspace = dir.workspace();
+        .with_retention(Retention::Never);
 
-    let driver = docker_driver(graph, &dir, config);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
+    let sandbox = sandbox_of(&prefix);
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
-    assert!(wait_for_file(&workspace.join("ready"), Duration::from_secs(60)).await);
+    assert!(wait_for_container_file(&sandbox, "/workspace/ready", Duration::from_secs(60)).await);
     handle.cancel(ir::CancelScopeId::ROOT).await;
 
     let report = time::timeout(Duration::from_secs(30), run)
@@ -645,20 +691,11 @@ while :; do sleep 0.1; done
     assert_eq!(
         output_of(&report, "stubborn")["cancel_escalation"],
         json!("sigkill"),
-        "the escalation is recorded even though no status file was written"
+        "the escalation is recorded even though the provider observed no exit"
     );
-
-    // Nothing recorded a status, which is the state this test exists to cover.
-    let leftovers: Vec<_> = fs::read_dir(workspace.join(".ci").join("pg"))
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    let leftovers = list_containers(&prefix).await;
     assert!(
-        !leftovers.iter().any(|n| n.ends_with(".status")),
-        "a status file appeared after a SIGKILL: {leftovers:?}"
+        leftovers.is_empty(),
+        "containers were left behind: {leftovers:?}"
     );
 }

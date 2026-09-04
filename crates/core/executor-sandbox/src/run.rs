@@ -1,40 +1,43 @@
-//! The run directory: the run id minted once under it, every container name
-//! derived from that id, and the per-scope layout the backends share.
+//! The run directory: the run id minted once under it, the labels every
+//! sandbox of the run carries, and the per-scope layout the host backend
+//! uses.
 
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use executor::EnvError;
+use executor::{EnvError, SandboxLeaseId};
 use smol_str::SmolStr;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::oneshot::ContainerPrefix;
-
-/// The file under the run dir holding the run id the environment label
-/// carries; minted once, read back by any executor over the same run dir.
+/// The file under the run dir holding the run id the labels carry; minted
+/// once, read back by any executor over the same run dir.
 pub const RUN_ID_FILE: &str = "sandbox-run-id";
 
-/// The directory a scope's state lives under: `scopes/<id>`. A workspace is
-/// keyed by its workspace id, which two environments may share (a nested
-/// invocation inheriting its parent's sandbox); everything else a scope
-/// leaves behind is keyed by its environment id.
+/// The label naming a sandbox's workspace: `<run id>/<workspace id>`. It
+/// is the reconcile key: recovery lists the provider by it and attaches the
+/// one match.
+pub const WORKSPACE_LABEL: &str = "petri.workspace";
+/// The label naming the run a sandbox belongs to, for prune.
+pub const RUN_LABEL: &str = "petri.run";
+/// The label naming the lease a sandbox belongs to.
+pub const LEASE_LABEL: &str = "petri.lease";
+
+/// The directory a host scope's state lives under: `scopes/<id>`.
 pub(crate) fn scope_dir(run_dir: &Path, id: &str) -> PathBuf {
     run_dir.join("scopes").join(id)
 }
 
-/// The workspace of `workspace_id`: a host scope's working directory, and a
-/// container scope's bind-mount source.
+/// The workspace of `workspace_id` for the host backend.
 pub(crate) fn workspace_dir(run_dir: &Path, workspace_id: &str) -> PathBuf {
     scope_dir(run_dir, workspace_id).join("work")
 }
 
-/// A run's identity on the daemon: the run id, read or minted once from the
-/// run dir, and every container name derived from it. The executors over one
-/// run dir share one, so the fence key, the job container name, and the
-/// one-shot sweep prefix can never disagree.
-pub(crate) struct RunIdentity {
+/// A run's identity on the provider: the run id, read or minted once from
+/// the run dir, and every label and name derived from it. The executors
+/// over one run dir share one, so the reconcile key can never disagree.
+pub struct RunIdentity {
     run_dir: PathBuf,
     run_id:  OnceCell<SmolStr>,
 }
@@ -52,59 +55,50 @@ impl RunIdentity {
     }
 
     /// The run id, resolved on first use from the run dir so a resuming
-    /// executor reaches the crashed run's containers.
-    pub(crate) async fn run_id(&self) -> Result<SmolStr, EnvError> {
+    /// executor reaches the crashed run's sandboxes.
+    pub async fn run_id(&self) -> Result<SmolStr, EnvError> {
         self.run_id
             .get_or_try_init(|| load_or_record_run_id(&self.run_dir))
             .await
             .cloned()
     }
 
-    /// `petri-<run id>-`: what the name of every container this run owns
-    /// starts with, for a leak check after release.
-    pub(crate) async fn container_prefix(&self) -> Result<String, EnvError> {
+    /// `petri-<run id>-`: what the name of every sandbox this run owns
+    /// starts with, for an operator's `docker ps` and a leak check.
+    pub async fn container_prefix(&self) -> Result<String, EnvError> {
         Ok(format!("petri-{}-", self.run_id().await?))
     }
 
-    /// The environment label value for `instance`: the run id and the scope's
-    /// environment id, globally unique because the run id is minted once per
-    /// run directory.
-    pub(crate) async fn environment_label(&self, instance: &str) -> Result<String, EnvError> {
-        Ok(format!("{}/{instance}", self.run_id().await?))
+    /// The workspace label value for `workspace_id`.
+    pub async fn workspace_label(&self, workspace_id: &str) -> Result<String, EnvError> {
+        Ok(format!("{}/{workspace_id}", self.run_id().await?))
     }
 
-    /// The job container name for `instance`.
-    pub(crate) async fn container_name(&self, instance: &str) -> Result<String, EnvError> {
-        Ok(container_name(&self.environment_label(instance).await?))
+    /// The sandbox name for a lease.
+    pub async fn container_name(&self, lease: SandboxLeaseId) -> Result<String, EnvError> {
+        Ok(format!(
+            "{}l{}",
+            self.container_prefix().await?,
+            lease.raw()
+        ))
     }
 
-    /// The prefix `instance`'s one-shot action containers are named under:
-    /// the job container's name plus `-s`.
-    pub(crate) async fn one_shot_prefix(
+    /// Every label a sandbox of this run carries.
+    pub async fn labels(
         &self,
-        instance: &str,
-    ) -> Result<ContainerPrefix, EnvError> {
-        Ok(ContainerPrefix::new(format!(
-            "{}-s",
-            self.container_name(instance).await?
-        )))
+        lease: SandboxLeaseId,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String)>, EnvError> {
+        let run_id = self.run_id().await?;
+        Ok(vec![
+            (RUN_LABEL.to_owned(), run_id.to_string()),
+            (LEASE_LABEL.to_owned(), lease.raw().to_string()),
+            (
+                WORKSPACE_LABEL.to_owned(),
+                format!("{run_id}/{workspace_id}"),
+            ),
+        ])
     }
-}
-
-/// A deterministic container name from an environment label, so a re-acquire
-/// targets the same container. Non-name characters become hyphens.
-pub(crate) fn container_name(label: &str) -> String {
-    let sanitized: String = label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("petri-{sanitized}")
 }
 
 /// Reads the run id from the run dir, minting and recording it on first use.

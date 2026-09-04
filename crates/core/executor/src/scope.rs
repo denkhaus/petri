@@ -55,6 +55,33 @@ macro_rules! scope_identity {
 scope_identity!(EnvironmentId);
 scope_identity!(WorkspaceId);
 
+/// A durable sandbox lease: the identity a container sandbox lives under. The
+/// coordinator allocates one per `{invocation, scope}` and hands it to every
+/// execution that runs in that sandbox, so a restarted execution and a nested
+/// invocation that inherits the caller's sandbox both name the one resource.
+/// The executor never infers it from a workspace id.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct SandboxLeaseId(u64);
+
+impl SandboxLeaseId {
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for SandboxLeaseId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 /// The default time a step gets between `SIGTERM` and `SIGKILL`.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 
@@ -198,11 +225,16 @@ impl ScopeSpec {
 pub struct AcquireContext {
     secrets:  Arc<dyn SecretProvider>,
     progress: Arc<dyn ProgressSink>,
+    lease:    Option<SandboxLeaseId>,
 }
 
 impl AcquireContext {
     pub fn new(secrets: Arc<dyn SecretProvider>, progress: Arc<dyn ProgressSink>) -> Self {
-        Self { secrets, progress }
+        Self {
+            secrets,
+            progress,
+            lease: None,
+        }
     }
 
     /// No secrets, no progress: tests and hosts with nothing to wire.
@@ -210,7 +242,17 @@ impl AcquireContext {
         Self {
             secrets:  Arc::new(MapSecrets::empty()),
             progress: Arc::new(NoProgress),
+            lease:    None,
         }
+    }
+
+    /// The durable lease this scope's sandbox lives under, when a coordinator
+    /// allocated one. Without it, the executor treats the acquisition as
+    /// standalone: the sandbox is the scope's alone and goes with its release.
+    #[must_use]
+    pub fn with_lease(mut self, lease: SandboxLeaseId) -> Self {
+        self.lease = Some(lease);
+        self
     }
 
     pub fn secrets(&self) -> &Arc<dyn SecretProvider> {
@@ -219,6 +261,10 @@ impl AcquireContext {
 
     pub fn progress(&self) -> &Arc<dyn ProgressSink> {
         &self.progress
+    }
+
+    pub fn lease(&self) -> Option<SandboxLeaseId> {
+        self.lease
     }
 }
 

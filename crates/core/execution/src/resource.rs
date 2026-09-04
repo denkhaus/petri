@@ -1,21 +1,63 @@
+//! Durable sandbox leases: one record per lease under the run's
+//! `resources/`, the crash-safe authority on what the run holds on which
+//! provider.
+//!
+//! A record is reserved before anything exists on a provider, in
+//! [`LeaseState::Allocating`]; it becomes `live` with the provider's own
+//! resource id only after the provider confirms the create (or recovery
+//! finds the one match). Every stop and delete is written down as a
+//! [`PendingIntent`] before the provider is asked and confirmed after, so a
+//! crash between the two leaves a repeatable intent, never a lie. A deleted
+//! lease stays as a tombstone while the run directory exists, so a
+//! historical inherited invocation still resolves during replay while new
+//! work on the lease is refused.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::{fs, io};
 
 use executor::WorkspaceId;
+use executor_sandbox::{LeaseLedger, LeaseRecord, LedgerError};
+pub use executor_sandbox::{LeaseState, PendingIntent};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::store::write_atomically_with;
 use crate::{SandboxAllocationKey, SandboxLeaseId};
 
+/// The provider kind a host-process scope's lease records: its workspace
+/// is a directory under the run dir, governed by the run's retention.
+pub const HOST_PROVIDER: &str = "host";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxResourceRecord {
     pub lease:       SandboxLeaseId,
     pub allocation:  SandboxAllocationKey,
+    /// The provider kind: [`HOST_PROVIDER`], or the sandbox plugin kind the
+    /// lease manager recorded at allocation.
     pub provider:    SmolStr,
-    pub resource_id: SmolStr,
+    /// The provider's own id for the resource, once it exists.
+    #[serde(default)]
+    pub resource_id: Option<SmolStr>,
     pub workspace:   WorkspaceId,
+    #[serde(default)]
+    pub state:       LeaseState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending:     Option<PendingIntent>,
+    /// The non-secret fingerprint of the backend the resource lives on: the
+    /// daemon or endpoint, and the account or target. Never credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<SmolStr>,
+}
+
+impl SandboxResourceRecord {
+    /// Whether anything of this lease may still exist on its provider.
+    pub fn holds_resource(&self) -> bool {
+        self.provider != HOST_PROVIDER
+            && !matches!(self.state, LeaseState::Deleted)
+            && (self.resource_id.is_some() || self.pending.is_some())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +90,8 @@ pub enum ResourceError {
     AllocationMismatch(SandboxAllocationKey),
     #[error("unknown sandbox lease {0}")]
     UnknownLease(SandboxLeaseId),
+    #[error("sandbox lease {0} was deleted; its workspace is gone")]
+    DeletedLease(SandboxLeaseId),
 }
 
 /// Provider-neutral durable sandbox leases under one run's `resources/`.
@@ -107,41 +151,63 @@ impl ResourceStore {
         self.by_lease.values()
     }
 
+    /// The record of `lease`, tombstones included: replay of a historical
+    /// inherited invocation resolves through here.
     pub fn resolve(&self, lease: SandboxLeaseId) -> Result<&SandboxResourceRecord, ResourceError> {
         self.by_lease
             .get(&lease)
             .ok_or(ResourceError::UnknownLease(lease))
     }
 
+    /// The record of `lease` for new work: a tombstone is refused, because
+    /// the workspace it named is gone.
+    pub fn resolve_usable(
+        &self,
+        lease: SandboxLeaseId,
+    ) -> Result<&SandboxResourceRecord, ResourceError> {
+        let record = self.resolve(lease)?;
+        if record.state == LeaseState::Deleted {
+            return Err(ResourceError::DeletedLease(lease));
+        }
+        Ok(record)
+    }
+
+    /// The lease of `allocation`, reserved on first use. `provider` is the
+    /// kind the scope's runtime target names; the sandbox lease manager
+    /// records the real one, with its fingerprint, when it allocates. A host
+    /// lease is live from the start: its workspace is a directory.
     pub fn ensure_record(
         &mut self,
         allocation: SandboxAllocationKey,
         provider: impl Into<SmolStr>,
-        resource_id: impl Into<SmolStr>,
         workspace: WorkspaceId,
     ) -> Result<&SandboxResourceRecord, ResourceError> {
         let provider = provider.into();
-        let resource_id = resource_id.into();
         if let Some(lease) = self.by_allocation.get(&allocation).copied() {
             let record = self
                 .by_lease
                 .get(&lease)
                 .expect("both resource indexes are written together");
-            if record.provider != provider
-                || record.resource_id != resource_id
-                || record.workspace != workspace
-            {
+            if record.workspace != workspace {
                 return Err(ResourceError::AllocationMismatch(allocation));
             }
             return Ok(record);
         }
         let lease = SandboxLeaseId::new(self.next_lease);
+        let host = provider == HOST_PROVIDER;
         let record = SandboxResourceRecord {
             lease,
             allocation,
             provider,
-            resource_id,
+            resource_id: host.then(|| SmolStr::new(workspace.as_str())),
             workspace,
+            state: if host {
+                LeaseState::Live
+            } else {
+                LeaseState::Allocating
+            },
+            pending: None,
+            fingerprint: None,
         };
         self.write(&record)?;
         self.next_lease = self.next_lease.saturating_add(1);
@@ -151,6 +217,20 @@ impl ResourceStore {
             .by_lease
             .get(&lease)
             .expect("the new resource was inserted"))
+    }
+
+    /// Change one record in place, durably: written before the index is
+    /// updated, so a crash leaves the file and the memory in agreement.
+    pub fn update(
+        &mut self,
+        lease: SandboxLeaseId,
+        update: impl FnOnce(&mut SandboxResourceRecord),
+    ) -> Result<(), ResourceError> {
+        let mut record = self.resolve(lease)?.clone();
+        update(&mut record);
+        self.write(&record)?;
+        self.by_lease.insert(lease, record);
+        Ok(())
     }
 
     fn write(&self, record: &SandboxResourceRecord) -> Result<(), ResourceError> {
@@ -165,5 +245,85 @@ fn resource_io(action: &'static str, path: &Path, source: io::Error) -> Resource
         action,
         path: path.to_path_buf(),
         source,
+    }
+}
+
+/// The resource store as the sandbox lease manager's ledger. The
+/// coordinator reserves every lease first; an unknown lease here is a
+/// caller that acquired without one, and is refused rather than invented.
+#[derive(Clone)]
+pub struct ResourceLedger(Arc<Mutex<ResourceStore>>);
+
+impl ResourceLedger {
+    pub fn new(store: Arc<Mutex<ResourceStore>>) -> Self {
+        Self(store)
+    }
+
+    fn update(
+        &self,
+        lease: SandboxLeaseId,
+        update: impl FnOnce(&mut SandboxResourceRecord),
+    ) -> Result<(), LedgerError> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(lease, update)
+            .map_err(|error| LedgerError(error.to_string()))
+    }
+}
+
+impl LeaseLedger for ResourceLedger {
+    fn lookup(&self, lease: SandboxLeaseId) -> Result<Option<LeaseRecord>, LedgerError> {
+        let store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(record) = store.resolve(lease) else {
+            return Ok(None);
+        };
+        Ok(Some(LeaseRecord {
+            state:       record.state,
+            pending:     record.pending,
+            provider:    Some(record.provider.clone()),
+            resource_id: record.resource_id.clone(),
+            fingerprint: record.fingerprint.clone(),
+        }))
+    }
+
+    fn allocating(
+        &self,
+        lease: SandboxLeaseId,
+        provider: &str,
+        fingerprint: &str,
+    ) -> Result<(), LedgerError> {
+        self.update(lease, |record| {
+            record.state = LeaseState::Allocating;
+            record.pending = None;
+            record.provider = SmolStr::new(provider);
+            record.fingerprint = Some(SmolStr::new(fingerprint));
+        })
+    }
+
+    fn live(&self, lease: SandboxLeaseId, resource_id: &str) -> Result<(), LedgerError> {
+        self.update(lease, |record| {
+            record.state = LeaseState::Live;
+            record.pending = None;
+            record.resource_id = Some(SmolStr::new(resource_id));
+        })
+    }
+
+    fn pending(&self, lease: SandboxLeaseId, intent: PendingIntent) -> Result<(), LedgerError> {
+        self.update(lease, |record| record.pending = Some(intent))
+    }
+
+    fn stopped(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
+        self.update(lease, |record| {
+            record.state = LeaseState::Stopped;
+            record.pending = None;
+        })
+    }
+
+    fn deleted(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
+        self.update(lease, |record| {
+            record.state = LeaseState::Deleted;
+            record.pending = None;
+        })
     }
 }

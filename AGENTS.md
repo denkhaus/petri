@@ -37,8 +37,11 @@ style-guide defaults.
   and `scripts/oracle-regenerate.sh` to refresh the Fabro oracle fixtures when
   the Fabro pin changes.
 
-Docker tests skip when no Docker daemon is available. CI requires Docker tests
-on Linux and requires the compatibility corpus on all runners.
+Container scopes run through the `sandbox-driver-docker` plugin, which
+`mise run plugins:build` installs from the pinned sandbox-driver revision.
+Docker tests skip when the plugin is missing or no Docker daemon is available.
+CI requires Docker tests on Linux and requires the compatibility corpus on all
+runners.
 
 ## Safety
 

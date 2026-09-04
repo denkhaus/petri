@@ -13,12 +13,13 @@ use std::{env, fs, io, mem, process};
 
 use driver::{
     Driver, EventObserver, ExecutionReport, ResumeError, ResumeInfo, RunConfig, RunGuard,
+    SandboxAssignment,
 };
 use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
-use executor_sandbox::RoutingExecutor;
+use executor_sandbox::{LeaseLedger, RoutingExecutor};
 use frontend::{CompileInputs, DirFiles, Frontend, Lowered, Span};
 use ir::{Graph, RunStatus};
 use tracing::field::Empty;
@@ -42,6 +43,9 @@ pub struct RunOptions {
     /// Replay the log after the run and fail on any divergence. The determinism
     /// canary; on by default.
     pub verify_replay:       bool,
+    /// Whether an unpinned sandbox plugin may run: `Some` decides, `None`
+    /// leaves it to `PETRI_SANDBOX_PLUGIN_DEV` and the build profile.
+    pub sandbox_plugin_dev:  Option<bool>,
 }
 
 impl RunOptions {
@@ -54,6 +58,7 @@ impl RunOptions {
             retention:           Retention::default(),
             echo:                false,
             verify_replay:       true,
+            sandbox_plugin_dev:  None,
         }
     }
 }
@@ -393,15 +398,22 @@ impl Runtime {
     /// Prepare resources that are shared by every execution in one root run.
     pub fn prepare_run(&self, run_dir: impl Into<PathBuf>) -> RunRuntime {
         let run_dir = run_dir.into();
-        let executor = self
-            .executor
-            .clone()
-            .unwrap_or_else(|| self.default_executor_for(&run_dir));
+        // The standard router is kept by its own type too: the coordinator
+        // hands it the lease ledger and releases leases through it. A
+        // caller-supplied executor manages its own sandboxes.
+        let (executor, router): (Arc<dyn Executor>, Option<Arc<RoutingExecutor>>) =
+            if let Some(executor) = self.executor.clone() {
+                (executor, None)
+            } else {
+                let router = self.default_router_for(&run_dir);
+                (router.clone(), Some(router))
+            };
         let (caps, guards) = self.provision(&run_dir);
         RunRuntime {
             run_dir,
             options: self.options.clone(),
             executor,
+            router,
             steps: self.steps.clone(),
             secrets: self.secrets.clone(),
             observers: self.observers.clone(),
@@ -512,7 +524,14 @@ impl Runtime {
     }
 
     fn default_executor_for(&self, run_dir: &Path) -> Arc<dyn Executor> {
-        Arc::new(RoutingExecutor::local(run_dir, self.options.retention))
+        self.default_router_for(run_dir)
+    }
+
+    fn default_router_for(&self, run_dir: &Path) -> Arc<RoutingExecutor> {
+        Arc::new(match self.options.sandbox_plugin_dev {
+            Some(dev) => RoutingExecutor::local_with_dev(run_dir, self.options.retention, dev),
+            None => RoutingExecutor::local(run_dir, self.options.retention),
+        })
     }
 }
 
@@ -521,6 +540,8 @@ pub struct RunRuntime {
     run_dir:   PathBuf,
     options:   RunOptions,
     executor:  Arc<dyn Executor>,
+    /// The standard router, when the executor is one.
+    router:    Option<Arc<RoutingExecutor>>,
     steps:     ::steps::Registry,
     secrets:   Arc<dyn SecretProvider>,
     observers: Vec<Arc<dyn EventObserver>>,
@@ -534,6 +555,34 @@ impl RunRuntime {
         &self.run_dir
     }
 
+    /// The standard routing executor, when this run uses it: the host that
+    /// prunes sandboxes reaches the run's lease manager through it.
+    pub fn sandbox_router(&self) -> Option<&Arc<RoutingExecutor>> {
+        self.router.as_ref()
+    }
+
+    /// Hand the router the durable record of sandbox leases. Every
+    /// container scope acquired after this is recorded there; before it, or
+    /// under a caller-supplied executor, leases live in memory.
+    pub fn attach_lease_ledger(&self, ledger: Arc<dyn LeaseLedger>) {
+        if let Some(router) = &self.router {
+            router.set_ledger(ledger);
+        }
+    }
+
+    /// End a lease's sandbox: stop it, then keep or delete it by this run's
+    /// retention for `outcome`. A no-op under a caller-supplied executor.
+    pub async fn release_lease(
+        &self,
+        lease: executor::SandboxLeaseId,
+        outcome: executor::ScopeOutcome,
+    ) -> executor::ReleaseReport {
+        match &self.router {
+            Some(router) => router.release_lease(lease, outcome).await,
+            None => executor::ReleaseReport::default(),
+        }
+    }
+
     /// Build one execution driver without provisioning run services again.
     pub fn driver(
         &self,
@@ -542,7 +591,7 @@ impl RunRuntime {
         execution_dir: impl Into<PathBuf>,
         environment_prefix: impl Into<smol_str::SmolStr>,
         workspace_prefix: impl Into<smol_str::SmolStr>,
-        workspace_override: Option<executor::WorkspaceId>,
+        sandbox: SandboxAssignment,
         secrets: Arc<dyn SecretProvider>,
     ) -> Driver {
         let driver = Driver::new(
@@ -554,7 +603,7 @@ impl RunRuntime {
                 execution_dir.into(),
                 environment_prefix.into(),
                 workspace_prefix.into(),
-                workspace_override,
+                sandbox,
             ),
         )
         .with_engine_start(start)
@@ -570,7 +619,7 @@ impl RunRuntime {
         execution_dir: impl Into<PathBuf>,
         environment_prefix: impl Into<smol_str::SmolStr>,
         workspace_prefix: impl Into<smol_str::SmolStr>,
-        workspace_override: Option<executor::WorkspaceId>,
+        sandbox: SandboxAssignment,
         secrets: Arc<dyn SecretProvider>,
     ) -> Result<(Driver, ResumeInfo), ResumeError> {
         let (driver, info) = Driver::resume(
@@ -583,7 +632,7 @@ impl RunRuntime {
                 execution_dir.into(),
                 environment_prefix.into(),
                 workspace_prefix.into(),
-                workspace_override,
+                sandbox,
             ),
         )?;
         let driver = driver.with_capabilities(self.caps.clone());
@@ -610,6 +659,9 @@ impl RunRuntime {
         } else {
             executor::ScopeOutcome::Failed
         };
+        // `scopes/` holds the host backend's workspaces and nothing else: a
+        // container scope's workspace lives in its sandbox, and its lease's
+        // release applied retention to it already.
         if !self.options.retention.keeps(outcome) {
             let _ = fs::remove_dir_all(self.run_dir.join("scopes"));
         }
@@ -620,18 +672,15 @@ impl RunRuntime {
         execution_dir: PathBuf,
         environment_prefix: smol_str::SmolStr,
         workspace_prefix: smol_str::SmolStr,
-        workspace_override: Option<executor::WorkspaceId>,
+        sandbox: SandboxAssignment,
     ) -> RunConfig {
         // An execution ends before its invocation can restart. Workspace
-        // retention therefore belongs to `finish_with_status`, not to an
-        // individual driver release.
-        let mut config = base_run_config(&self.options, execution_dir)
+        // retention therefore belongs to `finish_with_status` and to the
+        // lease's release, not to an individual driver release.
+        base_run_config(&self.options, execution_dir)
             .with_retention(Retention::Always)
-            .with_scope_identities(environment_prefix, workspace_prefix);
-        if let Some(workspace) = workspace_override {
-            config = config.with_workspace_override(workspace);
-        }
-        config
+            .with_scope_identities(environment_prefix, workspace_prefix)
+            .with_sandbox_assignment(sandbox)
     }
 }
 

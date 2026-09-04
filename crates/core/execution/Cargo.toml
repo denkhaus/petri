@@ -19,6 +19,7 @@ engine = { workspace = true }
 driver = { workspace = true }
 runtime = { workspace = true }
 executor = { workspace = true }
+executor-sandbox = { workspace = true }
 steps = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

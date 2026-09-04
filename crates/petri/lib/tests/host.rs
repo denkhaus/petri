@@ -5,12 +5,13 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use petri::driver::{EventObserver, ExecutionReport};
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
+use petri::execution::prune::{PruneError, prune};
 use petri::execution::{self, CoordinatorError};
-use petri::executor::sandbox::{self as sandbox, RUN_ID_FILE};
+use petri::executor::sandbox::RUN_ID_FILE;
 use petri::executor::{MapSecrets, Retention, SecretProvider as _};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, HostError};
 use petri::ir::{Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
@@ -450,9 +451,10 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
 }
 
 /// The Docker fence across a resume, through the host: `host::resume` builds a
-/// fresh executor, which rebuilds the crashed run's container names from the
-/// run id recorded in the run dir and ends the container before re-dispatching
-/// the step.
+/// fresh executor, which finds the crashed run's sandbox by the run id
+/// recorded in the run dir and the lease's workspace label, attaches it, and
+/// fences it — one stop, one start — before re-dispatching the step into the
+/// same workspace.
 #[tokio::test]
 #[expect(
     clippy::print_stderr,
@@ -460,14 +462,12 @@ async fn a_runtime_registered_observer_reaches_the_driver() {
 )]
 async fn resume_fences_the_crashed_container() {
     if !testkit::is_docker_available().await {
-        eprintln!("skipping: no Docker daemon reachable");
+        eprintln!("skipping: no Docker plugin with a reachable daemon");
         return;
     }
     let dir = RunDir::new("host-docker-resume");
-    // The workspace is kept: release would otherwise remove the directory the
-    // heartbeat is checked through, hiding a beater the fence missed.
     let mut options = RunOptions::new(dir.path());
-    options.retention = Retention::Always;
+    options.retention = Retention::Never;
     let rt = petri::runtime().options(options);
     let mut b = GraphBuilder::bare();
     let mut scope = Scope::new(ScopeId::new(0));
@@ -476,43 +476,58 @@ async fn resume_fences_the_crashed_container() {
     // The beater runs in its own session: an aborted driver still lets the
     // orphaned step task stop its own process group as the channels close, so a
     // detached beater is what a dead *process* leaves behind — only a
-    // container-level fence can end it. With `done` already in the workspace
-    // the step exits at once, so the resumed run completes instead of beating.
+    // sandbox-level fence can end it. With `done` already in the workspace the
+    // step measures the heartbeat instead of beating: two sizes half a second
+    // apart, equal only if the beater is dead.
     b.add_node(
         "beat",
         scope,
         StepRef::new(
             PROCESS_KIND,
             testkit::script_with(
-                "[ -e done ] && exit 0\n\
-                 setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &\n\
-                 sleep 300",
+                r#"
+if [ -e done ]; then
+  a=$(wc -c < heartbeat); sleep 0.5; b=$(wc -c < heartbeat)
+  echo "before=$a" > "$CI_OUTPUT"; echo "after=$b" >> "$CI_OUTPUT"
+  exit 0
+fi
+setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' &
+sleep 300
+"#,
                 &json!({ "shell": "sh" }),
             ),
         ),
     );
     let graph = b.build();
-    let workspace = root_workspace(&dir);
-    let heartbeat = workspace.join("heartbeat");
 
     let run = tokio::spawn(async move { host::run(&rt, graph).await });
+    // The root invocation's scope 0 is the run's first lease.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !dir.path().join(RUN_ID_FILE).exists() {
+        assert!(Instant::now() < deadline, "the run never started");
+        time::sleep(Duration::from_millis(50)).await;
+    }
+    let sandbox = testkit::sandbox_name(dir.path(), 0);
     assert!(
-        wait_for_file(&heartbeat, Duration::from_secs(60)).await,
+        testkit::wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(60))
+            .await,
         "the step never started inside the container"
     );
     // The crash: the host task is gone — coordinator, driver and lease drop,
     // release never runs, the container beats on.
     run.abort();
     let _ = run.await;
-    // The crashed run's id, as a resuming process must find it.
-    let run_id =
-        fs::read_to_string(dir.path().join(RUN_ID_FILE)).expect("the run id is in the run dir");
-    let prefix = format!("petri-{run_id}-");
+    let crashed_id = testkit::container_id(&sandbox)
+        .await
+        .expect("the crashed run's sandbox outlives it");
+    assert!(
+        testkit::container_write(&sandbox, "/workspace/done", "").await,
+        "the crashed sandbox is still running"
+    );
 
-    fs::write(workspace.join("done"), b"").expect("done");
     // A resuming process builds everything fresh over the same run dir.
     let mut options = RunOptions::new(dir.path());
-    options.retention = Retention::Always;
+    options.retention = Retention::Never;
     let rt = petri::runtime().options(options);
     let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(
@@ -521,17 +536,101 @@ async fn resume_fences_the_crashed_container() {
         "{:?}",
         resumed.state.errors()
     );
-
-    let before = testkit::file_len(&heartbeat);
-    time::sleep(Duration::from_millis(500)).await;
+    let output = testkit::output_of(&resumed, "beat");
     assert_eq!(
-        testkit::file_len(&heartbeat),
-        before,
-        "the crashed container kept writing: the fence missed it"
+        output["before"], output["after"],
+        "the crashed container's beater kept writing: the fence missed it ({output})"
     );
-    let leftovers = sandbox::list_containers(&prefix).await;
+    assert!(
+        testkit::container_id(&sandbox).await.is_none(),
+        "the run's release ended the sandbox (was {crashed_id})"
+    );
+    let prefix = format!("petri-{}-", testkit::recorded_run_id(dir.path()));
+    let leftovers = testkit::list_containers(&prefix).await;
     assert!(
         leftovers.is_empty(),
         "containers were left behind: {leftovers:?}"
     );
+}
+
+/// A run kept by retention leaves its sandbox stopped on the daemon, with
+/// its record saying so; `petri sandbox prune` deletes it, records the
+/// tombstone, and refuses to run while a live process holds the run.
+#[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice tells whoever runs the tests why this Docker battery did nothing; a test binary has no other sink"
+)]
+async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
+    if !testkit::is_docker_available().await {
+        eprintln!("skipping: no Docker plugin with a reachable daemon");
+        return;
+    }
+    let dir = RunDir::new("host-docker-prune");
+    let mut options = RunOptions::new(dir.path());
+    options.retention = Retention::Always;
+    let rt = petri::runtime().options(options);
+    let mut b = GraphBuilder::bare();
+    let mut scope = Scope::new(ScopeId::new(0));
+    scope.runtime = RuntimeSpec::container("alpine:3.20");
+    let scope = b.add_scope(scope);
+    b.add_node(
+        "write",
+        scope,
+        StepRef::new(
+            PROCESS_KIND,
+            testkit::script_with("echo kept > kept.txt", &json!({ "shell": "sh" })),
+        ),
+    );
+    let report = host::run(&rt, b.build()).await.expect("runs");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+
+    let sandbox = testkit::sandbox_name(dir.path(), 0);
+    assert!(
+        testkit::container_id(&sandbox).await.is_some()
+            && !testkit::container_is_running(&sandbox).await,
+        "retention kept the sandbox, stopped"
+    );
+    let records = execution::ResourceStore::load(dir.path().join(execution::RESOURCES_DIR))
+        .expect("records load");
+    let record = records
+        .resolve(execution::SandboxLeaseId::new(0))
+        .expect("lease 0");
+    assert_eq!(record.state, execution::LeaseState::Stopped);
+    assert_eq!(record.provider, "docker");
+    assert!(record.resource_id.is_some() && record.fingerprint.is_some());
+    drop(records);
+
+    let pruned = prune(&rt).await.expect("prune");
+    assert!(pruned.is_clean(), "{pruned:?}");
+    assert_eq!(pruned.deleted.len(), 1, "{pruned:?}");
+    assert!(
+        testkit::container_id(&sandbox).await.is_none(),
+        "prune deleted the sandbox"
+    );
+    let records = execution::ResourceStore::load(dir.path().join(execution::RESOURCES_DIR))
+        .expect("records load");
+    assert_eq!(
+        records
+            .resolve(execution::SandboxLeaseId::new(0))
+            .expect("the tombstone stays")
+            .state,
+        execution::LeaseState::Deleted
+    );
+    drop(records);
+
+    // A second prune finds only the tombstone.
+    let again = prune(&rt).await.expect("prune again");
+    assert!(again.deleted.is_empty() && again.is_clean(), "{again:?}");
+
+    // A held run is refused.
+    let held = execution::hold_run_lease(dir.path()).expect("hold the run");
+    let error = prune(&rt).await.expect_err("a held run is not pruned");
+    assert!(matches!(error, PruneError::RunHeld(_)), "{error}");
+    drop(held);
 }

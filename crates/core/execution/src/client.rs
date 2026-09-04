@@ -28,6 +28,15 @@ pub enum InvokeError {
     RequestMismatch,
     #[error("the calling firing has no inheritable sandbox")]
     NoInheritableSandbox,
+    /// The child graph declares a container for one of its scopes that is
+    /// not the inherited sandbox's. An inherited child runs in its caller's
+    /// sandbox; a child that needs a different image uses an isolated
+    /// binding.
+    #[error(
+        "the invocation inherits its caller's sandbox but declares a different container for \
+         scope {scope}"
+    )]
+    InheritedContainerMismatch { scope: ir::ScopeId },
     #[error("the invocation coordinator is unavailable")]
     CoordinatorUnavailable,
     #[error("invocation failed before it could return a result: {0}")]

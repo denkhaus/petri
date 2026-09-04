@@ -23,5 +23,5 @@ pub use observe::{EventObserver, ObserveError};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,
     DeliverDisposition, Driver, ExecutionReport, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo,
-    RunConfig, RunGuard, RunHandle,
+    RunConfig, RunGuard, RunHandle, SandboxAssignment, ScopeLeases,
 };

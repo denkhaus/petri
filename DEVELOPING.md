@@ -124,6 +124,14 @@ crate dependencies consistent with the layering rules described there.
 The routine suite runs without Docker or the corpus. It reports skips when those
 resources are absent.
 
+Container scopes run through the `sandbox-driver-docker` plugin. `mise run
+plugins:build` installs it from the pinned sandbox-driver revision under
+`target/plugins/bin`; the test tasks depend on it and set
+`PETRI_SANDBOX_DOCKER_PLUGIN` to that path. To test against another build of the
+plugin, set the variable yourself. A plugin this build does not pin runs only in
+dev mode, which debug builds turn on; a release build needs
+`PETRI_SANDBOX_PLUGIN_DEV=1` or `--sandbox-plugin-dev`.
+
 Nextest is the normal test runner. `mise run test` also uses Cargo to run
 doctests, which Nextest does not run.
 
