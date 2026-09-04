@@ -11,7 +11,7 @@ use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
 use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
 use runtime::executor::Retention;
 use runtime::frontend::{CompileInputs, NoFiles};
-use runtime::ir::{CancelScopeId, Graph, RunStatus, Value};
+use runtime::ir::{CancelScopeId, Graph, RunStatus};
 use runtime::steps::{Answer, Question};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;

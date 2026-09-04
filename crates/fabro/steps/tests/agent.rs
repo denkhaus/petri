@@ -13,7 +13,7 @@ use frontend_fabro::load;
 use runtime::driver::ExecutionReport;
 use runtime::executor::Retention;
 use runtime::frontend::{CompileInputs, NoFiles};
-use runtime::ir::{CancelScopeId, Graph, RunStatus};
+use runtime::ir::{CancelScopeId, ExprOrValue, Graph, RunStatus};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
@@ -72,7 +72,7 @@ fn with_env(mut graph: Graph, pairs: &[(&str, &str)]) -> Graph {
         for (key, value) in pairs {
             scope
                 .env
-                .insert((*key).into(), runtime::ir::ExprOrValue::Value(json!(value)));
+                .insert((*key).into(), ExprOrValue::Value(json!(value)));
         }
     }
     graph
