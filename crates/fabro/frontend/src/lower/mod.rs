@@ -395,7 +395,7 @@ impl Ctx<'_> {
                     "import",
                     attr.span.clone(),
                     "workflow imports are not supported in phase one",
-                    "inline the imported nodes; see .ai/plans/fabro-frontend-phase-one.md §4.2",
+                    "inline the imported nodes; see .ai/plans/done/fabro-frontend-phase-one.md §4.2",
                 );
                 continue;
             }

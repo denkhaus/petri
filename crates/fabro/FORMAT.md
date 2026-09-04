@@ -3,7 +3,7 @@
 Petri runs Fabro workflows: Graphviz DOT files (`*.fabro`, `*.dot`) in the
 subset Fabro accepts. This page says what each Fabro construct becomes in the
 engine's IR, and what is refused. Fabro's own documentation defines the
-language; `.ai/plans/fabro-frontend-phase-one.md` records the decisions.
+language; `.ai/plans/done/fabro-frontend-phase-one.md` records the decisions.
 
 The rule throughout: **every construct lowers onto what the core has**. No
 engine semantics were added for Fabro. A construct that cannot lower is a
@@ -207,7 +207,7 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
 shims for 30 days, each with a warning that names the date and a
 `REMOVE AFTER 2026-10-04` comment at every site (`grep -r "REMOVE AFTER"`):
 `on_failure="succeed"` / `auto_status=true` (see "Failure policy") and
-`outcome=success` in a condition (see "Conditions"). `.ai/plans/fabro-local-workflows.md`
+`outcome=success` in a condition (see "Conditions"). `.ai/plans/done/fabro-local-workflows.md`
 lists the workflows that depend on them and what to do at the sunset.
 
 Ignored loudly (a warning naming the attribute): `stall_timeout` and
