@@ -2,9 +2,9 @@
 //! workspace bind-mounted, exec exit codes, and the host-visible workspace.
 //! Skips (passes trivially) when no Docker daemon is reachable.
 
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::{fs, mem};
 
 use executor::{AcquireContext, Executor, ProcessSpec, ScopeOutcome, ScopeSpec};
 use executor_sandbox::{BackendKind, SandboxExecutor};
@@ -104,4 +104,59 @@ async fn a_container_step_runs_and_the_workspace_is_a_host_bind_mount() {
     // Release deletes the container and, on failure retention, keeps the
     // host workspace.
     assert!(host_file.exists(), "failed workspace kept for debugging");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reacquire_fences_the_crashed_predecessor() {
+    use sandbox_driver::SandboxFilter;
+
+    let dir = tmp::TempDir::new();
+    let Some(first) = docker_executor(dir.path()).await else {
+        return;
+    };
+    let handle = first
+        .acquire(&container_scope(), &AcquireContext::bare())
+        .await
+        .expect("first acquire");
+
+    // The provider sees exactly one sandbox for this environment.
+    let provider = DockerProvider::connect().await.expect("docker");
+    let mut filter = SandboxFilter::default();
+    filter
+        .labels
+        .insert("petri.environment".to_owned(), env_label(dir.path()));
+    let before = provider.list(&filter).await.expect("list");
+    assert_eq!(before.len(), 1, "one live sandbox");
+    let crashed_id = before[0].id.clone();
+
+    // Simulate a crash: drop the handle without releasing, so the container
+    // survives. A second executor over the same run dir must fence it.
+    mem::forget(handle);
+    let second = docker_executor(dir.path()).await.expect("second executor");
+    let handle2 = second
+        .acquire(&container_scope(), &AcquireContext::bare())
+        .await
+        .expect("second acquire");
+
+    let after = provider.list(&filter).await.expect("list again");
+    assert_eq!(after.len(), 1, "still one sandbox after the fence");
+    assert_ne!(
+        after[0].id, crashed_id,
+        "the crashed container was replaced"
+    );
+
+    second.release(handle2, ScopeOutcome::Succeeded).await;
+    let cleaned = provider.list(&filter).await.expect("list after release");
+    assert!(cleaned.is_empty(), "release removed the container");
+}
+
+/// The environment label the fence keys on, recomputed from the run dir's
+/// recorded run id.
+fn env_label(run_dir: &Path) -> String {
+    let run_id = fs::read_to_string(run_dir.join("sandbox-run-id"))
+        .expect("run id recorded")
+        .trim()
+        .to_owned();
+    // The container scope uses environment id "env-1".
+    format!("{run_id}/env-1")
 }

@@ -11,10 +11,10 @@ mod backend;
 mod env;
 mod routing;
 
-use std::fmt;
-use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{fmt, process};
 
 use async_trait::async_trait;
 use executor::{
@@ -22,9 +22,10 @@ use executor::{
     ScopeSpec,
 };
 use ir::RuntimeTarget;
-use sandbox_driver::{Sandbox, SandboxProvider, SandboxSource, SandboxSpec};
+use sandbox_driver::{Sandbox, SandboxFilter, SandboxProvider, SandboxSource, SandboxSpec};
 use smol_str::SmolStr;
 use tokio::fs;
+use tokio::sync::OnceCell;
 
 pub use crate::backend::BackendKind;
 use crate::env::SandboxEnv;
@@ -34,6 +35,13 @@ pub use crate::routing::RoutingExecutor;
 const CONTAINER_WORKSPACE: &str = "/workspace";
 /// The alias a container reaches the driver's machine through.
 const DOCKER_HOST_ALIAS: &str = "host.docker.internal";
+/// The label naming a sandbox's environment, for the reconcile fence. Its
+/// value is unique per run directory and scope, so `acquire` finds and ends
+/// exactly the crashed predecessors of this environment.
+const ENVIRONMENT_LABEL: &str = "petri.environment";
+/// The file under the run dir holding the run id the environment label
+/// carries; minted once, read back by any executor over the same run dir.
+const RUN_ID_FILE: &str = "sandbox-run-id";
 
 /// An [`Executor`] backed by one sandbox-driver provider.
 pub struct SandboxExecutor {
@@ -41,6 +49,9 @@ pub struct SandboxExecutor {
     backend:   BackendKind,
     run_dir:   PathBuf,
     retention: Retention,
+    /// The run id the environment label carries, resolved on first use from
+    /// the run dir so a resuming executor reaches the crashed run's sandboxes.
+    run_id:    OnceCell<SmolStr>,
 }
 
 impl SandboxExecutor {
@@ -52,6 +63,7 @@ impl SandboxExecutor {
             backend,
             run_dir,
             retention: Retention::default(),
+            run_id: OnceCell::new(),
         }
     }
 
@@ -78,7 +90,19 @@ impl SandboxExecutor {
             .map_err(|error| EnvError::workspace("create", workspace_host.display(), error))?;
         let workspace_host_str = workspace_host.display().to_string();
 
-        let spec = self.build_spec(scope, &workspace_host_str, ctx)?;
+        // The environment label is the reconcile key. On the Docker backend a
+        // matching sandbox is a crashed predecessor: end it before creating a
+        // fresh one. The host provider's registry is in-process, so its label
+        // query is empty after a restart and the fence is a no-op there.
+        let label = match self.backend {
+            BackendKind::Docker => Some(self.environment_label(scope).await?),
+            BackendKind::Host => None,
+        };
+        if let Some(label) = &label {
+            self.fence_by_label(label).await?;
+        }
+
+        let spec = self.build_spec(scope, &workspace_host_str, label.as_deref(), ctx)?;
         let sandbox = self
             .provider
             .create(&spec, None)
@@ -113,11 +137,14 @@ impl SandboxExecutor {
         ))
     }
 
-    /// Maps a scope to a `SandboxSpec` for this backend.
+    /// Maps a scope to a `SandboxSpec` for this backend. `label`, when
+    /// present, names the environment for the reconcile fence and pins a
+    /// deterministic sandbox name so a re-acquire targets the same one.
     fn build_spec(
         &self,
         scope: &ScopeSpec,
         workspace_host: &str,
+        label: Option<&str>,
         ctx: &AcquireContext,
     ) -> Result<SandboxSpec, EnvError> {
         let mut spec = match (self.backend, &scope.runtime.target) {
@@ -126,11 +153,17 @@ impl SandboxExecutor {
             }
             (BackendKind::Docker, RuntimeTarget::Container { image, .. }) => {
                 let provider_config = docker_provider_config(workspace_host, None);
-                SandboxSpec::new(SandboxSource::Image {
+                let mut spec = SandboxSpec::new(SandboxSource::Image {
                     reference: image.to_string(),
                 })
                 .working_directory(CONTAINER_WORKSPACE)
-                .provider_config(provider_config)
+                .provider_config(provider_config);
+                if let Some(label) = label {
+                    spec = spec
+                        .name(container_name(label))
+                        .label(ENVIRONMENT_LABEL, label);
+                }
+                spec
             }
             (BackendKind::Docker, RuntimeTarget::HostProcess) => {
                 // A host-process scope on the Docker backend runs in the
@@ -169,6 +202,108 @@ impl SandboxExecutor {
             message:   error.to_string(),
         }
     }
+
+    /// The environment label value for a scope: the run id and the scope's
+    /// environment id, globally unique because the run id is minted once per
+    /// run directory.
+    async fn environment_label(&self, scope: &ScopeSpec) -> Result<String, EnvError> {
+        let run_id = self.resolve_run_id().await?;
+        Ok(format!("{run_id}/{}", scope.environment.as_str()))
+    }
+
+    async fn resolve_run_id(&self) -> Result<SmolStr, EnvError> {
+        self.run_id
+            .get_or_try_init(|| load_or_record_run_id(&self.run_dir))
+            .await
+            .cloned()
+    }
+
+    /// Ends every sandbox that carries `label`: a crashed predecessor of this
+    /// environment. Removing it makes its status unreadable and frees the
+    /// deterministic name for the fresh create.
+    async fn fence_by_label(&self, label: &str) -> Result<(), EnvError> {
+        let mut filter = SandboxFilter::default();
+        filter
+            .labels
+            .insert(ENVIRONMENT_LABEL.to_owned(), label.to_owned());
+        let matches = self
+            .provider
+            .list(&filter)
+            .await
+            .map_err(|error| self.acquire_failed(&error))?;
+        for status in matches {
+            match self.provider.attach(&status.id, None).await {
+                Ok(sandbox) => {
+                    if let Err(error) = sandbox.delete().await {
+                        tracing::warn!(error = ?error, "fencing a prior sandbox failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = ?error, "attaching a prior sandbox for the fence failed");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A deterministic sandbox name from an environment label, so a re-acquire
+/// targets the same container. Non-name characters become hyphens.
+fn container_name(label: &str) -> String {
+    let sanitized: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("petri-{sanitized}")
+}
+
+/// Reads the run id from the run dir, minting and recording it on first use.
+/// Write-then-rename, so a reader sees the whole id or none.
+async fn load_or_record_run_id(run_dir: &PathBuf) -> Result<SmolStr, EnvError> {
+    let path = run_dir.join(RUN_ID_FILE);
+    let io_error =
+        |action, path: &Path, error: io::Error| EnvError::workspace(action, path.display(), error);
+    match fs::read_to_string(&path).await {
+        Ok(recorded) if !recorded.trim().is_empty() => {
+            return Ok(SmolStr::new(recorded.trim()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error("read", &path, error)),
+    }
+    let minted = fresh_run_id();
+    fs::create_dir_all(run_dir)
+        .await
+        .map_err(|error| io_error("create", run_dir, error))?;
+    let staged = run_dir.join(format!("{RUN_ID_FILE}.tmp"));
+    fs::write(&staged, minted.as_bytes())
+        .await
+        .map_err(|error| io_error("write", &staged, error))?;
+    fs::rename(&staged, &path)
+        .await
+        .map_err(|error| io_error("rename", &path, error))?;
+    Ok(SmolStr::new(minted))
+}
+
+/// Unique across processes and time.
+fn fresh_run_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "{nanos:x}-{}-{}",
+        process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// The Docker `provider_config` for a scope container: the workspace is a
