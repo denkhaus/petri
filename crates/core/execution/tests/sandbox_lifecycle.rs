@@ -1,14 +1,18 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use execution::host::EVENTS_FILE;
 use execution::prune::prune;
 use execution::{
     CallSite, Coordinator, CoordinatorInvocationClient, CoordinatorOptions, GraphDigest,
-    InvocationClient as _, InvocationRequest, SandboxMode, SecretBindings,
+    InvocationClient as _, InvocationId, InvocationRequest, ResourceLedger, ResourceStore,
+    SandboxAllocationKey, SandboxMode, SecretBindings,
 };
-use executor::{OneShotContainer, Retention};
+use executor::{
+    AcquireContext, Executor as _, OneShotContainer, Retention, ScopeOutcome, ScopeSpec,
+};
 use ir::{GraphBuilder, Outcome, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
 use runtime::steps::{Step, StepCtx};
 use runtime::{RunOptions, Runtime};
@@ -50,6 +54,16 @@ async fn successful_run_keeps_a_failed_childs_retained_sandbox() {
     if !is_docker_ready().await {
         return;
     }
+    check_failed_child_retention(RuntimeSpec::container("alpine:3.20")).await;
+}
+
+#[tokio::test]
+async fn successful_run_keeps_a_failed_host_childs_workspace() {
+    check_failed_child_retention(RuntimeSpec::default()).await;
+}
+
+async fn check_failed_child_retention(runtime_spec: RuntimeSpec) {
+    let host = matches!(runtime_spec.target, ir::RuntimeTarget::HostProcess);
     let directory = RunDir::new("coordinator-child-retention");
     let mut options = RunOptions::new(directory.path());
     options.retention = Retention::OnFailure;
@@ -64,14 +78,14 @@ async fn successful_run_keeps_a_failed_childs_retained_sandbox() {
     .expect("coordinator starts");
     let mut child = GraphBuilder::bare();
     let mut scope = Scope::new(ScopeId::new(0));
-    scope.runtime = RuntimeSpec::container("alpine:3.20");
+    scope.runtime = runtime_spec;
     let scope = child.add_scope(scope);
     child.add_node(
         "fail",
         scope,
         StepRef::new(
             "process",
-            serde_json::json!({ "run": "exit 1", "shell": "sh" }),
+            serde_json::json!({ "run": "echo retained > proof; exit 1", "shell": "sh" }),
         ),
     );
     let child = coordinator
@@ -91,16 +105,35 @@ async fn successful_run_keeps_a_failed_childs_retained_sandbox() {
         .await
         .expect("run");
     assert_eq!(result.status, RunStatus::Success);
-    let sandbox = sandbox_name(directory.path(), 1);
-    let retained = container_id(&sandbox)
-        .await
-        .expect("child sandbox retained");
+    let store = execution::ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+        .expect("resources");
+    let child = store
+        .records()
+        .find(|record| record.allocation.invocation != execution::InvocationId::ROOT)
+        .expect("child lease");
+    assert_eq!(child.state, execution::LeaseState::Stopped);
+    let workspace = directory
+        .path()
+        .join("scopes")
+        .join(child.workspace.as_str())
+        .join("work");
+    let sandbox = sandbox_name(directory.path(), child.lease.raw());
+    let retained = if host {
+        None
+    } else {
+        container_id(&sandbox).await
+    };
     coordinator.finish().await;
-    assert_eq!(
-        container_id(&sandbox).await.as_deref(),
-        Some(retained.as_str())
-    );
-    assert!(!container_is_running(&sandbox).await);
+    if host {
+        assert_eq!(
+            fs::read_to_string(workspace.join("proof")).expect("retained child workspace"),
+            "retained\n"
+        );
+    } else {
+        assert!(retained.is_some(), "child sandbox retained");
+        assert_eq!(container_id(&sandbox).await, retained);
+        assert!(!container_is_running(&sandbox).await);
+    }
     let report = prune(&runtime).await.expect("cleanup retained sandbox");
     assert!(report.is_clean(), "{report:?}");
 }
@@ -303,4 +336,89 @@ async fn a_failed_host_scope_is_retained_and_pruned_through_a_fresh_plugin() {
         store.records().next().expect("tombstone").state,
         execution::LeaseState::Deleted
     );
+}
+
+#[tokio::test]
+async fn prune_removes_crashed_host_action_containers_including_tombstoned_leases() {
+    if !is_docker_ready().await {
+        return;
+    }
+    for tombstoned in [false, true] {
+        let directory = RunDir::new("host-action-prune");
+        drop(
+            execution::CoordinatorStore::create(directory.path(), Vec::new())
+                .expect("run manifest"),
+        );
+        let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
+        let scope = ScopeSpec::new(ScopeId::new(0), "scope-0");
+        let mut resources = ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+            .expect("resource store");
+        let lease = resources
+            .ensure_record(
+                SandboxAllocationKey {
+                    invocation: InvocationId::ROOT,
+                    scope:      scope.id,
+                },
+                "host",
+                scope.workspace_id.clone(),
+            )
+            .expect("host reservation")
+            .lease;
+        let ledger = Arc::new(ResourceLedger::new(Arc::new(Mutex::new(resources))));
+        let router = runtime
+            .sandbox_router_for(directory.path())
+            .expect("router");
+        router.set_ledger(ledger.clone());
+        let handle = router
+            .acquire(&scope, &AcquireContext::bare().with_lease(lease))
+            .await
+            .expect("host scope");
+        let mut process = handle
+            .container_runner()
+            .expect("action runner")
+            .run(OneShotContainer::registry("alpine:3.20").with_args(&["true"]))
+            .await
+            .expect("action starts");
+        let mut lines = process.lines().expect("action lines");
+        while lines.recv().await.is_some() {}
+        assert!(process.wait().await.expect("action finishes").is_success());
+        let prefix = router.container_prefix().await.expect("prefix");
+        assert_eq!(testkit::list_containers(&prefix).await.len(), 1);
+        // A fresh router has only durable records, just as after a crash.
+        router.shutdown().await;
+        drop(handle);
+        drop(router);
+        if tombstoned {
+            let cleanup = runtime
+                .sandbox_router_for(directory.path())
+                .expect("cleanup router");
+            cleanup.set_ledger(ledger);
+            assert!(
+                cleanup
+                    .release_lease(lease, ScopeOutcome::Succeeded)
+                    .await
+                    .is_clean()
+            );
+            cleanup.shutdown().await;
+        }
+
+        let report = prune(&runtime).await.expect("prune");
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(report.deleted.len(), 1);
+        assert!(testkit::list_containers(&prefix).await.is_empty());
+        let resources = ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+            .expect("persisted tombstone");
+        assert_eq!(
+            resources.resolve(lease).unwrap().state,
+            execution::LeaseState::Deleted
+        );
+        assert!(
+            !directory
+                .path()
+                .join("scopes")
+                .join(scope.workspace_id.as_str())
+                .join("action-host")
+                .exists()
+        );
+    }
 }

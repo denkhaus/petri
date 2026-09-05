@@ -550,7 +550,7 @@ impl Executor for SandboxExecutor {
         let (lease, standalone) = (teardown.lease, teardown.standalone);
         drop(env);
         let remaining = self.manager.release_holder(lease).await;
-        let report = ReleaseReport::default().released(format!("holder of lease {lease}"));
+        let mut report = ReleaseReport::default().released(format!("holder of lease {lease}"));
         if !standalone || remaining > 0 {
             return report;
         }
@@ -558,10 +558,7 @@ impl Executor for SandboxExecutor {
             .manager
             .release_lease(lease, self.retention, outcome)
             .await;
-        ReleaseReport {
-            released: report.released.into_iter().chain(ended.released).collect(),
-            kept:     ended.kept,
-            problems: ended.problems,
-        }
+        report.merge(ended);
+        report
     }
 }

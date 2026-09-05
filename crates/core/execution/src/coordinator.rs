@@ -413,7 +413,7 @@ impl Coordinator {
         for (lease, owner_status) in remaining {
             self.release_lease(lease, owner_status).await;
         }
-        self.runtime.finish_with_status(status).await;
+        self.runtime.finish().await;
     }
 
     fn resources(&self) -> MutexGuard<'_, ResourceStore> {

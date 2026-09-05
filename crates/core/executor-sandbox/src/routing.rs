@@ -16,7 +16,7 @@ use sandbox_driver::SandboxId;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::actions::{ActionHost, ActionHostRunner};
+use crate::actions::{ActionHost, ActionHostRunner, remove_recorded};
 use crate::lease::{LeaseLedger, MemoryLedger};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSupervisor, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
@@ -352,9 +352,7 @@ impl RoutingExecutor {
                     .manager()
                     .release_lease(lease, self.retention, outcome)
                     .await;
-                report.released.extend(ended.released);
-                report.kept.extend(ended.kept);
-                report.problems.extend(ended.problems);
+                report.merge(ended);
             }
             Err(error) => {
                 report = report.problem(format!(
@@ -373,11 +371,28 @@ impl RoutingExecutor {
         lease: SandboxLeaseId,
         workspace_id: &str,
     ) -> Result<Vec<SandboxId>, EnvError> {
-        self.executor_for_record(lease)
+        let executor = self.executor_for_record(lease).await?;
+        // An action host has its own marker and Docker resource. Remove it
+        // before the Host provider deletes the workspace, even if an earlier
+        // cleanup left a tombstone for the Host lease itself.
+        let mut deleted = if executor.manager().source().kind() == "host" {
+            remove_recorded(
+                &*self.provider()?.source,
+                &self.identity,
+                workspace_id,
+                None,
+            )
             .await?
-            .manager()
-            .delete_recorded(lease, workspace_id)
-            .await
+        } else {
+            Vec::new()
+        };
+        deleted.extend(
+            executor
+                .manager()
+                .delete_recorded(lease, workspace_id)
+                .await?,
+        );
+        Ok(deleted)
     }
 }
 
@@ -434,9 +449,7 @@ impl Executor for RoutingExecutor {
             Some(Ok(executor)) => executor.release(env, outcome).await,
             _ => ReleaseReport::default().problem("the environment has no executor to release it"),
         };
-        report.released.extend(ended.released);
-        report.kept.extend(ended.kept);
-        report.problems.extend(ended.problems);
+        report.merge(ended);
         report
     }
 }

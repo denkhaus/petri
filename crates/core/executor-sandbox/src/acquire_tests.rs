@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -104,10 +104,11 @@ impl Sandbox for FakeSandbox {
 }
 
 struct FakeProvider {
-    kind:           ProviderKind,
-    sandbox:        Arc<FakeSandbox>,
-    create_started: Notify,
-    allow_create:   Notify,
+    kind:              ProviderKind,
+    sandbox:           Arc<FakeSandbox>,
+    create_started:    Notify,
+    allow_create:      Notify,
+    lose_create_reply: AtomicBool,
 }
 
 #[async_trait]
@@ -128,6 +129,12 @@ impl SandboxProvider for FakeProvider {
         self.create_started.notify_one();
         self.allow_create.notified().await;
         self.sandbox.created.fetch_add(1, Ordering::SeqCst);
+        if self.lose_create_reply.load(Ordering::SeqCst) {
+            return Err(Error::Timeout {
+                operation: "creating sandbox".to_owned(),
+                elapsed:   Duration::from_secs(1),
+            });
+        }
         Ok(self.sandbox.clone())
     }
 
@@ -161,8 +168,9 @@ impl Fixture {
     fn new(environment: EnvironmentBehavior) -> Self {
         let dir = RunDir::new("sandbox-acquire-cancel");
         let provider = Arc::new(FakeProvider {
-            kind:           ProviderKind::try_new("fake").expect("the test provider kind is valid"),
-            sandbox:        Arc::new(FakeSandbox {
+            kind:              ProviderKind::try_new("fake")
+                .expect("the test provider kind is valid"),
+            sandbox:           Arc::new(FakeSandbox {
                 id: SandboxId::try_new("sandbox-1").expect("the test sandbox id is valid"),
                 capabilities: Capabilities::minimal(Isolation::Container),
                 environment,
@@ -172,8 +180,9 @@ impl Fixture {
                 deletes: AtomicUsize::new(0),
                 deleted: Notify::new(),
             }),
-            create_started: Notify::new(),
-            allow_create:   Notify::new(),
+            create_started:    Notify::new(),
+            allow_create:      Notify::new(),
+            lose_create_reply: AtomicBool::new(false),
         });
         let ledger = Arc::new(MemoryLedger::default());
         let executor = Arc::new(SandboxExecutor::new(
@@ -275,5 +284,18 @@ async fn cancellation_during_create_deletes_the_late_sandbox() {
     assert_eq!(fixture.provider.sandbox.deletes.load(Ordering::SeqCst), 0);
     // The provider finishes only after its caller has been dropped.
     fixture.provider.allow_create.notify_one();
+    fixture.assert_deleted().await;
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_deletes_the_standalone_sandbox() {
+    let fixture = Fixture::new(EnvironmentBehavior::Fail);
+    fixture
+        .provider
+        .lose_create_reply
+        .store(true, Ordering::SeqCst);
+    fixture.provider.allow_create.notify_one();
+    let result = fixture.acquire().await.expect("acquisition task");
+    assert!(result.is_err());
     fixture.assert_deleted().await;
 }

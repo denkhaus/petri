@@ -114,7 +114,7 @@ pub enum PluginError {
          address the daemon's containers can reach Petri at"
     )]
     RemoteDaemonNeedsHostAddress { docker_host: String },
-    #[error("launching the {kind} plugin failed")]
+    #[error("launching the {kind} plugin failed: {source}")]
     Launch {
         kind:   String,
         #[source]
@@ -546,6 +546,19 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn launch_failures_keep_the_cause_in_the_acquire_diagnostic() {
+        let error = PluginError::Launch {
+            kind:   "host".to_owned(),
+            source: Box::new(sandbox_driver::Error::invalid_spec(
+                "sha256",
+                "checksum mismatch",
+            )),
+        }
+        .into_env_error();
+        assert!(error.to_string().contains("checksum mismatch"));
+    }
 
     #[test]
     fn docker_fingerprints_distinguish_daemon_endpoints() {

@@ -207,3 +207,55 @@ async fn a_plugin_crash_fails_calls_then_recovers_one_generation_and_the_same_sa
     assert!(list_containers(&prefix).await.is_empty());
     supervisor.shutdown().await;
 }
+
+#[tokio::test]
+async fn host_actions_recover_after_the_docker_plugin_restarts() {
+    if !is_docker_ready().await {
+        return;
+    }
+    let directory = RunDir::new("host-action-plugin-recovery");
+    let supervisor = Arc::new(PluginSupervisor::new(
+        PluginSettings::from_env("docker", Some(true)).expect("settings"),
+    ));
+    let router = RoutingExecutor::with_provider_source(
+        supervisor.clone(),
+        directory.path(),
+        Retention::Never,
+    );
+    let scope = ScopeSpec::new(ScopeId::new(0), "scope-0");
+    let handle = router
+        .acquire(&scope, &AcquireContext::bare())
+        .await
+        .expect("host scope");
+    let runner = handle.container_runner().expect("action runner");
+    for (index, command) in [
+        "echo before > /workspace/kept",
+        "test $(cat /workspace/kept) = before",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut process = runner
+            .run(OneShotContainer::registry("alpine:3.20").with_args(&["sh", "-c", command]))
+            .await
+            .expect("action starts through the current plugin");
+        let mut lines = process.lines().expect("action lines");
+        while lines.recv().await.is_some() {}
+        assert!(process.wait().await.expect("action finishes").is_success());
+        if index == 0 {
+            supervisor.shutdown().await;
+        }
+    }
+    assert_eq!(supervisor.current().await.unwrap().generation, 2);
+    let prefix = router.container_prefix().await.unwrap();
+    assert_eq!(list_containers(&prefix).await.len(), 1);
+    assert!(
+        router
+            .release(handle, ScopeOutcome::Succeeded)
+            .await
+            .is_clean()
+    );
+    assert!(list_containers(&prefix).await.is_empty());
+    router.shutdown().await;
+    supervisor.shutdown().await;
+}

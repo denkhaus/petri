@@ -325,3 +325,70 @@ async fn recovery_refuses_a_changed_fingerprint_or_a_lost_workspace() {
     assert!(error.to_string().contains("workspace was lost"), "{error}");
     fixture.cleanup(&resumed).await;
 }
+
+#[tokio::test]
+async fn release_reconciles_an_allocation_without_a_recorded_resource_id() {
+    if !is_docker_ready().await {
+        return;
+    }
+    for crash in [Crash::Reserved, Crash::Created] {
+        for retention in [Retention::Never, Retention::Always] {
+            let fixture = Fixture::new();
+            let router = fixture.router(retention, Some(crash));
+            let ctx = AcquireContext::bare().with_lease(LEASE);
+            assert!(router.acquire(&fixture.scope, &ctx).await.is_err());
+            assert!(fixture.record().resource_id.is_none());
+            router.shutdown().await;
+            drop(router);
+
+            let resumed = fixture.router(retention, None);
+            let report = resumed.release_lease(LEASE, ScopeOutcome::Failed).await;
+            assert!(report.is_clean(), "{report:?}");
+            let name = sandbox_name(fixture.directory.path(), LEASE.raw());
+            if crash == Crash::Created && retention == Retention::Always {
+                assert_eq!(fixture.record().state, LeaseState::Stopped);
+                assert!(container_id(&name).await.is_some());
+                assert!(!testkit::container_is_running(&name).await);
+            } else {
+                assert_eq!(fixture.record().state, LeaseState::Deleted);
+                assert!(container_id(&name).await.is_none());
+            }
+            fixture.cleanup(&resumed).await;
+            resumed.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn release_finishes_a_pending_delete_even_when_retention_changes() {
+    if !is_docker_ready().await {
+        return;
+    }
+    for crash in [Crash::DeleteIntent, Crash::Deleted] {
+        let fixture = Fixture::new();
+        let router = fixture.router(Retention::Never, Some(crash));
+        let ctx = AcquireContext::bare().with_lease(LEASE);
+        let handle = router.acquire(&fixture.scope, &ctx).await.unwrap();
+        assert!(
+            router
+                .release(handle, ScopeOutcome::Succeeded)
+                .await
+                .is_clean()
+        );
+        assert!(
+            !router
+                .release_lease(LEASE, ScopeOutcome::Succeeded)
+                .await
+                .is_clean()
+        );
+        assert_eq!(fixture.record().pending, Some(PendingIntent::Delete));
+        router.shutdown().await;
+        drop(router);
+
+        let resumed = fixture.router(Retention::Always, None);
+        let report = resumed.release_lease(LEASE, ScopeOutcome::Failed).await;
+        assert!(report.is_clean(), "{report:?}");
+        fixture.cleanup(&resumed).await;
+        resumed.shutdown().await;
+    }
+}

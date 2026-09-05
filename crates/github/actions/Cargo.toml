@@ -15,6 +15,7 @@ workspace = true
 name = "github_actions"
 
 [dependencies]
+runtime = { workspace = true }
 execution = { workspace = true }
 driver = { workspace = true }
 ir = { workspace = true }
@@ -32,5 +33,4 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-runtime = { workspace = true }
 testkit = { workspace = true }

@@ -21,7 +21,7 @@ use executor::{
 };
 use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
 use frontend::{CompileInputs, DirFiles, Frontend, Lowered, Span};
-use ir::{Graph, RunStatus};
+use ir::Graph;
 use tracing::field::Empty;
 
 /// The knobs a run gets, with the defaults the driver documents.
@@ -383,29 +383,45 @@ impl Runtime {
     /// A driver over this configuration, for callers that need the handle (to
     /// cancel a run in flight). [`Runtime::run`] is the plain path.
     pub fn driver(&self, graph: Graph) -> Driver {
+        let run = self.prepare_run(&self.options.run_dir);
         let driver = Driver::new(
             graph,
-            self.run_executor(),
+            run.executor.clone(),
             self.steps.clone(),
             self.secrets.clone(),
             self.run_config(),
         );
-        self.equip(driver)
+        run.equip_standalone(driver)
     }
 
     /// Prepare resources that are shared by every execution in one root run.
     pub fn prepare_run(&self, run_dir: impl Into<PathBuf>) -> RunRuntime {
         let run_dir = run_dir.into();
+        let (executor, router) = self.executor_for_run(&run_dir);
+        self.provision_run(run_dir, executor, router)
+    }
+
+    fn executor_for_run(
+        &self,
+        run_dir: &Path,
+    ) -> (Arc<dyn Executor>, Option<Arc<RoutingExecutor>>) {
         // The standard router is kept by its own type too: the coordinator
         // hands it the lease ledger and releases leases through it. A
         // caller-supplied executor manages its own sandboxes.
-        let (executor, router): (Arc<dyn Executor>, Option<Arc<RoutingExecutor>>) =
-            if let Some(executor) = self.executor.clone() {
-                (executor, None)
-            } else {
-                let router = self.default_router_for(&run_dir);
-                (router.clone(), Some(router))
-            };
+        if let Some(executor) = self.executor.clone() {
+            (executor, None)
+        } else {
+            let router = self.default_router_for(run_dir);
+            (router.clone(), Some(router))
+        }
+    }
+
+    fn provision_run(
+        &self,
+        run_dir: PathBuf,
+        executor: Arc<dyn Executor>,
+        router: Option<Arc<RoutingExecutor>>,
+    ) -> RunRuntime {
         let (caps, guards) = self.provision(&run_dir);
         RunRuntime {
             run_dir,
@@ -443,36 +459,22 @@ impl Runtime {
         graph: Graph,
         log: EventLog,
     ) -> Result<(Driver, ResumeInfo), ResumeError> {
+        let (executor, router) = self.executor_for_run(&self.options.run_dir);
         let (driver, info) = Driver::resume(
             graph,
             log,
-            self.run_executor(),
+            executor.clone(),
             self.steps.clone(),
             self.secrets.clone(),
             self.run_config(),
         )?;
-        Ok((self.equip(driver), info))
+        let run = self.provision_run(self.options.run_dir.clone(), executor, router);
+        Ok((run.equip_standalone(driver), info))
     }
 
     fn run_config(&self) -> RunConfig {
         base_run_config(&self.options, self.options.run_dir.clone())
             .with_retention(self.options.retention)
-    }
-
-    fn run_executor(&self) -> Arc<dyn Executor> {
-        self.executor
-            .clone()
-            .unwrap_or_else(|| self.default_executor())
-    }
-
-    /// The registrations every driver gets, whichever way it was built.
-    fn equip(&self, mut driver: Driver) -> Driver {
-        let (caps, guards) = self.provision(&self.options.run_dir);
-        for guard in guards {
-            driver = driver.with_run_guard(guard);
-        }
-        driver = driver.with_capabilities(caps);
-        attach(driver, &self.observers, self.progress.as_ref())
     }
 
     /// Run a graph to completion. With `verify_replay` on (the default), the
@@ -513,17 +515,6 @@ impl Runtime {
         self.secrets.masker()
     }
 
-    /// The plugin router selected by the runtime's sandbox options. It takes
-    /// its identity from the run dir, so a resumed run reaches the crashed
-    /// run's sandboxes.
-    fn default_executor(&self) -> Arc<dyn Executor> {
-        self.default_executor_for(&self.options.run_dir)
-    }
-
-    fn default_executor_for(&self, run_dir: &Path) -> Arc<dyn Executor> {
-        self.default_router_for(run_dir)
-    }
-
     /// Build the standard sandbox router for maintenance without starting
     /// run services. A caller-supplied executor owns its own resources.
     pub fn sandbox_router_for(&self, run_dir: &Path) -> Option<Arc<RoutingExecutor>> {
@@ -557,6 +548,16 @@ pub struct RunRuntime {
 }
 
 impl RunRuntime {
+    /// A standalone driver's completion owns this run's service teardown.
+    fn equip_standalone(self, driver: Driver) -> Driver {
+        let driver = attach(
+            driver.with_capabilities(self.caps.clone()),
+            &self.observers,
+            self.progress.as_ref(),
+        );
+        driver.with_run_guard(Box::new(self))
+    }
+
     pub fn run_dir(&self) -> &Path {
         &self.run_dir
     }
@@ -656,23 +657,13 @@ impl RunRuntime {
         self.secrets.masker()
     }
 
-    pub async fn finish_with_status(mut self, status: RunStatus) {
+    /// Tear down run services and plugins after each lease applies retention.
+    pub async fn finish(mut self) {
         for guard in mem::take(&mut self.guards) {
             guard.teardown().await;
         }
         if let Some(router) = &self.router {
             router.shutdown().await;
-        }
-        let outcome = if status == RunStatus::Success {
-            executor::ScopeOutcome::Succeeded
-        } else {
-            executor::ScopeOutcome::Failed
-        };
-        // `scopes/` holds the host backend's workspaces and nothing else: a
-        // container scope's workspace lives in its sandbox, and its lease's
-        // release applied retention to it already.
-        if !self.options.retention.keeps(outcome) {
-            let _ = fs::remove_dir_all(self.run_dir.join("scopes"));
         }
     }
 
@@ -684,12 +675,19 @@ impl RunRuntime {
         sandbox: SandboxAssignment,
     ) -> RunConfig {
         // An execution ends before its invocation can restart. Workspace
-        // retention therefore belongs to `finish_with_status` and to the
-        // lease's release, not to an individual driver release.
+        // retention therefore belongs to the lease's release, not to an
+        // individual driver release.
         base_run_config(&self.options, execution_dir)
             .with_retention(Retention::Always)
             .with_scope_identities(environment_prefix, workspace_prefix)
             .with_sandbox_assignment(sandbox)
+    }
+}
+
+#[async_trait::async_trait]
+impl RunGuard for RunRuntime {
+    async fn teardown(self: Box<Self>) {
+        self.finish().await;
     }
 }
 

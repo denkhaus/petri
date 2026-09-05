@@ -13,15 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use executor::{ContainerRunner, EnvError, OneShotContainer, ProcessHandle, ScopeSpec};
-use sandbox_driver::{
-    Error as DriverError, Sandbox, SandboxFilter, SandboxId, SandboxSource, SandboxSpec,
-};
+use sandbox_driver::{Sandbox, SandboxFilter, SandboxId, SandboxSource, SandboxSpec};
 use sandbox_driver_docker_config::{BindMount, DockerProviderConfig};
 use smol_str::SmolStr;
 use tokio::fs;
 use tokio::sync::Mutex;
 
 use crate::env::OneShotRunner;
+use crate::lease::{LiveSandbox, delete_sandbox};
 use crate::plugin::ProviderSource;
 use crate::run::{RUN_LABEL, RunIdentity, scope_dir};
 use crate::{BACKEND, CONTAINER_WORKSPACE, DOCKER_HOST_ALIAS, acquire_failed};
@@ -49,11 +48,51 @@ fn host_name(prefix: &str, workspace_id: &str) -> String {
     format!("{prefix}a-{safe}")
 }
 
+/// Delete an action host, reconciling an uncertain create by its marker and
+/// label.
+pub(crate) async fn remove_recorded(
+    source: &dyn ProviderSource,
+    identity: &RunIdentity,
+    workspace_id: &str,
+    known: Option<&SandboxId>,
+) -> Result<Vec<SandboxId>, EnvError> {
+    let marker = marker_path(identity.run_dir(), workspace_id);
+    if known.is_none() {
+        match fs::read(&marker).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(EnvError::workspace("read", marker.display(), error)),
+        }
+    }
+    let (provider, _) = source.current().await?;
+    let ids = if let Some(id) = known {
+        vec![id.clone()]
+    } else {
+        let label = identity.workspace_label(workspace_id).await?;
+        let mut filter = SandboxFilter::default();
+        filter.labels.insert(ACTIONS_LABEL.to_owned(), label);
+        provider
+            .list(&filter)
+            .await
+            .map_err(|error| acquire_failed(&error))?
+            .into_iter()
+            .map(|status| status.id)
+            .collect()
+    };
+    for id in &ids {
+        delete_sandbox(&*provider, id)
+            .await
+            .map_err(|error| acquire_failed(&error))?;
+    }
+    let _ = fs::remove_file(marker).await;
+    Ok(ids)
+}
+
 #[derive(Default)]
 struct HostState {
     prepared: bool,
     released: bool,
-    sandbox:  Option<Arc<dyn Sandbox>>,
+    sandbox:  Option<LiveSandbox>,
 }
 
 /// The shared action host, independent of any scope's environment variables.
@@ -88,47 +127,11 @@ impl ActionHost {
         marker_path(self.identity.run_dir(), &self.workspace_id)
     }
 
-    /// Delete a known host, or reconcile an uncertain create by its label.
-    /// The marker avoids contacting a provider when no create was attempted.
-    async fn remove(&self, known: Option<&SandboxId>) -> Result<bool, EnvError> {
-        let marker = self.marker();
-        if known.is_none() {
-            match fs::read(&marker).await {
-                Ok(_) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(EnvError::workspace("read", marker.display(), error)),
-            }
-        }
-        let (provider, _) = self.source.current().await?;
-        let ids = if let Some(id) = known {
-            vec![id.clone()]
-        } else {
-            let label = self.identity.workspace_label(&self.workspace_id).await?;
-            let mut filter = SandboxFilter::default();
-            filter.labels.insert(ACTIONS_LABEL.to_owned(), label);
-            provider
-                .list(&filter)
-                .await
-                .map_err(|error| acquire_failed(&error))?
-                .into_iter()
-                .map(|status| status.id)
-                .collect()
-        };
-        for id in &ids {
-            match provider.delete(id, None).await {
-                Ok(()) | Err(DriverError::NotFound { .. }) => {}
-                Err(error) => return Err(acquire_failed(&error)),
-            }
-        }
-        let _ = fs::remove_file(marker).await;
-        Ok(!ids.is_empty())
-    }
-
     /// Sweep once per workspace in this process. A later inherited acquire
     /// shares this state and cannot sweep its caller's live action host.
     async fn prepare_locked(&self, state: &mut HostState) -> Result<(), EnvError> {
         if !state.prepared {
-            self.remove(None).await?;
+            remove_recorded(&*self.source, &self.identity, &self.workspace_id, None).await?;
             state.prepared = true;
         }
         Ok(())
@@ -141,8 +144,8 @@ impl ActionHost {
         }
     }
 
-    async fn create(&self) -> Result<Arc<dyn Sandbox>, EnvError> {
-        let (provider, _) = self.source.current().await?;
+    async fn create(&self) -> Result<LiveSandbox, EnvError> {
+        let (provider, generation) = self.source.current().await?;
         let label = self.identity.workspace_label(&self.workspace_id).await?;
         let run_id = self.identity.run_id().await?;
         let prefix = self.identity.container_prefix().await?;
@@ -175,10 +178,14 @@ impl ActionHost {
             .provider_config(config.into_value())
             .label(RUN_LABEL, run_id.to_string())
             .label(ACTIONS_LABEL, label);
-        provider
+        let sandbox = provider
             .create(&spec, None)
             .await
-            .map_err(|error| acquire_failed(&error))
+            .map_err(|error| acquire_failed(&error))?;
+        Ok(LiveSandbox {
+            sandbox,
+            generation,
+        })
     }
 
     async fn sandbox(self: &Arc<Self>) -> Result<Arc<dyn Sandbox>, EnvError> {
@@ -190,22 +197,28 @@ impl ActionHost {
                 "the action host was released",
             ));
         }
-        if let Some(sandbox) = &state.sandbox {
-            return Ok(sandbox.clone());
+        if let Some(live) = &state.sandbox {
+            let (_, generation) = self.source.current().await?;
+            if live.generation == generation {
+                return Ok(live.sandbox.clone());
+            }
+            state.sandbox = None;
+            state.prepared = false;
         }
         self.prepare_locked(&mut state).await?;
         let host = self.clone();
         // The task owns the lock until create settles. Cancelling run() cannot
         // discard a late create: teardown waits for it and deletes its result.
         tokio::spawn(async move {
-            let sandbox = match host.create().await {
-                Ok(sandbox) => sandbox,
+            let live = match host.create().await {
+                Ok(live) => live,
                 Err(error) => {
                     state.prepared = false;
                     return Err(error);
                 }
             };
-            state.sandbox = Some(sandbox.clone());
+            let sandbox = live.sandbox.clone();
+            state.sandbox = Some(live);
             Ok::<_, EnvError>(sandbox)
         })
         .await
@@ -217,12 +230,16 @@ impl ActionHost {
         if state.released {
             return Ok(false);
         }
-        let removed = self
-            .remove(state.sandbox.as_ref().map(|sandbox| sandbox.id()))
-            .await?;
+        let removed = remove_recorded(
+            &*self.source,
+            &self.identity,
+            &self.workspace_id,
+            state.sandbox.as_ref().map(|live| live.sandbox.id()),
+        )
+        .await?;
         state.sandbox = None;
         state.released = true;
-        Ok(removed)
+        Ok(!removed.is_empty())
     }
 }
 
@@ -269,8 +286,8 @@ mod tests {
     use std::time::Duration;
 
     use sandbox_driver::{
-        Capabilities, Capability, EventContext, Isolation, ProviderKind, SandboxProvider,
-        SandboxState, SandboxStatus,
+        Capabilities, Capability, Error as DriverError, EventContext, Isolation, ProviderKind,
+        SandboxProvider, SandboxState, SandboxStatus,
     };
     use tokio::sync::Notify;
     use tokio::time::timeout;

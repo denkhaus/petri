@@ -117,6 +117,13 @@ pub struct ReleaseReport {
 }
 
 impl ReleaseReport {
+    /// Include the teardown results of another resource owner.
+    pub fn merge(&mut self, other: Self) {
+        self.released.extend(other.released);
+        self.kept.extend(other.kept);
+        self.problems.extend(other.problems);
+    }
+
     #[must_use]
     pub fn released(mut self, what: impl Into<String>) -> Self {
         self.released.push(what.into());

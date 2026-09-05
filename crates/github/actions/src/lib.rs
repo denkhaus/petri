@@ -52,3 +52,22 @@ pub use results::{ResultsServiceCap, ToolCacheCap};
 pub use run::RunStep;
 pub use source::{GitActionSource, default_cache_dir};
 pub use workflow::WorkflowCallStep;
+
+/// Register the GitHub step kinds emitted by the frontend.
+pub fn register(runtime: runtime::Runtime) -> runtime::Runtime {
+    runtime
+        .step(RunStep)
+        .step(ActionStep)
+        .step(DockerActionStep)
+        .step(DeferredActionStep)
+        .step(DeferredActionResultStep)
+        .step(DeferredActionPublishStep)
+        .step(DeferredActionPostStep)
+        .step(CheckoutStep)
+        .step(BackgroundStartStep)
+        .step(BackgroundCompleteStep)
+        .step(BackgroundPublishStep)
+        .step(BackgroundWaitStep)
+        .step(BackgroundCancelStep)
+        .step(WorkflowCallStep)
+}

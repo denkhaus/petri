@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use runtime::Runtime;
 
-use crate::resource::{LeaseState, ResourceLedger, ResourceStore};
+use crate::resource::{ResourceLedger, ResourceStore};
 use crate::{ResourceError, SandboxLeaseId, StoreError, hold_run_lease};
 
 /// What prune did to one run.
@@ -76,15 +76,6 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
         .collect();
     let mut report = PruneReport::default();
     for (lease, workspace) in candidates {
-        let state = store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .resolve(lease)
-            .map(|record| record.state)?;
-        if state == LeaseState::Deleted {
-            report.clean.push(lease);
-            continue;
-        }
         match router.delete_recorded(lease, &workspace).await {
             Ok(ids) if ids.is_empty() => report.clean.push(lease),
             Ok(ids) => report
@@ -93,5 +84,6 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
             Err(error) => report.problems.push((lease, error.to_string())),
         }
     }
+    router.shutdown().await;
     Ok(report)
 }

@@ -229,22 +229,7 @@ pub(crate) fn runtime(dir: &Path) -> Runtime {
     let mut options = RunOptions::new(dir);
     options.grace = Duration::from_secs(1);
     options.retention = Retention::Never;
-    Runtime::standard()
-        .options(options)
-        .step(github_actions::RunStep)
-        .step(github_actions::ActionStep)
-        .step(github_actions::DockerActionStep)
-        .step(github_actions::DeferredActionStep)
-        .step(github_actions::DeferredActionResultStep)
-        .step(github_actions::DeferredActionPublishStep)
-        .step(github_actions::DeferredActionPostStep)
-        .step(github_actions::CheckoutStep)
-        .step(github_actions::BackgroundStartStep)
-        .step(github_actions::BackgroundCompleteStep)
-        .step(github_actions::BackgroundPublishStep)
-        .step(github_actions::BackgroundWaitStep)
-        .step(github_actions::BackgroundCancelStep)
-        .step(github_actions::WorkflowCallStep)
+    github_actions::register(Runtime::standard().options(options))
         // The distribution's token-less stance, so batteries test the shipped
         // semantics: `github.token` resolves to the empty string — the toolkit
         // treats it as "no auth" and reads anonymously — never a missing

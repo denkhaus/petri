@@ -405,22 +405,7 @@ async fn run_one(
     let store = github_objects::default_store_dir();
     let tool_cache = github_objects::tool_cache_dir(&store);
     let _ = fs::create_dir_all(&tool_cache);
-    let rt = Runtime::standard()
-        .options(options)
-        .step(github_actions::RunStep)
-        .step(github_actions::ActionStep)
-        .step(github_actions::DockerActionStep)
-        .step(github_actions::DeferredActionStep)
-        .step(github_actions::DeferredActionResultStep)
-        .step(github_actions::DeferredActionPublishStep)
-        .step(github_actions::DeferredActionPostStep)
-        .step(github_actions::CheckoutStep)
-        .step(github_actions::BackgroundStartStep)
-        .step(github_actions::BackgroundCompleteStep)
-        .step(github_actions::BackgroundPublishStep)
-        .step(github_actions::BackgroundWaitStep)
-        .step(github_actions::BackgroundCancelStep)
-        .step(github_actions::WorkflowCallStep)
+    let rt = github_actions::register(Runtime::standard().options(options))
         .capability(ActionSourceCap(source.clone()))
         .capability(ActionManifestSourceCap(source))
         .capability(github_actions::ToolCacheCap(tool_cache))

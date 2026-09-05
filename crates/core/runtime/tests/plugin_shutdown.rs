@@ -2,11 +2,89 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
-use executor::{AcquireContext, Executor as _, Retention, ScopeOutcome, ScopeSpec};
-use ir::{RunStatus, ScopeId};
+use executor::{AcquireContext, ExecEnv, Executor as _, Retention, ScopeOutcome, ScopeSpec};
+use ir::{GraphBuilder, Outcome, RunStatus, ScopeId, Value};
+use runtime::steps::{Step, StepCtx};
 use runtime::{RunOptions, Runtime};
 use testkit::RunDir;
+
+struct CaptureEnvironment(Arc<OnceLock<Arc<dyn ExecEnv>>>);
+
+#[test]
+fn a_rejected_resume_does_not_provision_run_services() {
+    let directory = RunDir::new("rejected-resume-services");
+    let runtime = Runtime::standard()
+        .options(RunOptions::new(directory.path()))
+        .run_services(|_, _| panic!("a rejected resume must not start run services"));
+    // No external start can reproduce this core record.
+    let log = engine::EventLog::try_from_records(engine::LOG_VERSION, vec![engine::EventRecord {
+        seq:    0,
+        source: engine::EventSource::Core,
+        event:  engine::Event::ExecutionStarted(engine::EngineStart::default()),
+    }])
+    .expect("structurally valid log");
+    assert!(
+        runtime
+            .resume_driver(GraphBuilder::new().build(), log)
+            .is_err()
+    );
+}
+
+#[async_trait::async_trait]
+impl Step for CaptureEnvironment {
+    const NAME: &'static str = "test/capture-environment";
+    type Config = ();
+
+    async fn run(&self, (): (), ctx: StepCtx) -> Outcome {
+        ctx.env
+            .write_file(Path::new("retained"), b"kept")
+            .await
+            .expect("retained file");
+        assert!(self.0.set(ctx.env).is_ok());
+        Outcome::success(Value::Null)
+    }
+}
+
+#[tokio::test]
+async fn standalone_and_resumed_drivers_close_their_plugins_before_returning() {
+    for resumed in [false, true] {
+        let directory = RunDir::new("standalone-plugin-finish");
+        let mut options = RunOptions::new(directory.path());
+        options.retention = Retention::Always;
+        let environment = Arc::new(OnceLock::new());
+        let runtime = Runtime::standard()
+            .step(CaptureEnvironment(environment.clone()))
+            .options(options);
+        let mut graph = GraphBuilder::new();
+        graph.add_step("capture", ScopeId::new(0), CaptureEnvironment::NAME);
+        let graph = graph.build();
+        let report = if resumed {
+            runtime
+                .resume_driver(graph, engine::EventLog::new())
+                .expect("resumed driver")
+                .0
+                .run()
+                .await
+        } else {
+            runtime.run(graph).await.expect("standalone run")
+        };
+        assert_eq!(report.status, RunStatus::Success);
+        assert!(
+            environment
+                .get()
+                .expect("captured environment")
+                .read_file(Path::new("retained"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(directory.workspace().join("retained")).expect("retained file"),
+            b"kept"
+        );
+    }
+}
 
 #[tokio::test]
 async fn run_finish_closes_its_plugin_and_preserves_other_runs_and_retained_files() {
@@ -47,7 +125,7 @@ async fn run_finish_closes_its_plugin_and_preserves_other_runs_and_retained_file
         Some(b"kept".to_vec())
     );
 
-    first.finish_with_status(RunStatus::Success).await;
+    first.finish().await;
 
     // Keep the old router and environment references alive: drop alone cannot
     // close this transport. The run must explicitly await plugin shutdown.
@@ -68,5 +146,5 @@ async fn run_finish_closes_its_plugin_and_preserves_other_runs_and_retained_file
             .await
             .is_clean()
     );
-    second.finish_with_status(RunStatus::Success).await;
+    second.finish().await;
 }

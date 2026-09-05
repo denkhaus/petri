@@ -36,14 +36,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use executor::{EnvError, ReleaseReport, Retention, SandboxLeaseId, ScopeOutcome};
-use sandbox_driver::{Error as DriverError, Sandbox, SandboxFilter, SandboxId, SandboxSpec};
+use sandbox_driver::{
+    Error as DriverError, Sandbox, SandboxFilter, SandboxId, SandboxProvider, SandboxSpec,
+};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::task::JoinSet;
 
 use crate::plugin::ProviderSource;
-use crate::run::{RunIdentity, WORKSPACE_LABEL};
+use crate::run::{LEASE_LABEL, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
 use crate::{BACKEND, acquire_failed};
 
 /// Where a lease's sandbox stands, durably.
@@ -189,9 +191,9 @@ impl LeaseLedger for MemoryLedger {
 }
 
 /// The live handle a lease currently has.
-struct LiveSandbox {
-    sandbox:    Arc<dyn Sandbox>,
-    generation: u64,
+pub(crate) struct LiveSandbox {
+    pub(crate) sandbox:    Arc<dyn Sandbox>,
+    pub(crate) generation: u64,
 }
 
 /// Per-lease state, serialized by one lock so allocation and recovery for
@@ -492,10 +494,24 @@ impl SandboxLeaseManager {
         let provider = provider.clone();
         let manager = self.clone();
         let created = tokio::spawn(async move {
-            let sandbox = provider
-                .create(&spec, None)
-                .await
-                .map_err(|error| acquire_failed(&error))?;
+            let sandbox = match provider.create(&spec, None).await {
+                Ok(sandbox) => sandbox,
+                Err(error) => {
+                    if standalone {
+                        let report = manager
+                            .release_locked(lease, Retention::Never, ScopeOutcome::Failed, slot)
+                            .await;
+                        for problem in report.problems {
+                            tracing::warn!(
+                                lease = lease.raw(),
+                                problem,
+                                "failed sandbox create cleanup"
+                            );
+                        }
+                    }
+                    return Err(acquire_failed(&error));
+                }
+            };
             let acquired = AcquiredSandbox {
                 manager: manager.clone(),
                 lease,
@@ -538,8 +554,7 @@ impl SandboxLeaseManager {
         if pending == Some(PendingIntent::Delete) {
             // The invocation meant to delete it and died before the
             // provider confirmed; finish that, and the lease is gone.
-            provider
-                .delete(id, None)
+            delete_sandbox(provider, id)
                 .await
                 .map_err(|error| acquire_failed(&error))?;
             self.ledger
@@ -653,19 +668,31 @@ impl SandboxLeaseManager {
             live.as_ref()
                 .map(|live| SmolStr::new(live.sandbox.id().as_str()))
         });
-        let Some(resource_id) = resource_id else {
-            // Reserved but never created: nothing on the provider to end.
+        if resource_id.is_none() && record.fingerprint.is_none() {
+            // No allocation was attempted, so no provider cleanup is needed.
             return report;
-        };
-        let id = match SandboxId::try_new(resource_id.as_str()) {
-            Ok(id) => id,
-            Err(error) => return report.problem(error.to_string()),
-        };
-        let (provider, _) = match self.source.current().await {
+        }
+        let (provider, generation) = match self.source.current().await {
             Ok(current) => current,
             Err(error) => return report.problem(format!("sandbox provider unavailable: {error}")),
         };
-        let keep = retention.keeps(outcome);
+        let id = match resource_id {
+            Some(resource_id) => match SandboxId::try_new(resource_id.as_str()) {
+                Ok(id) => id,
+                Err(error) => return report.problem(error.to_string()),
+            },
+            None => match self.find_allocated(&*provider, lease).await {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    return match self.ledger.deleted(lease) {
+                        Ok(()) => report,
+                        Err(error) => report.problem(error.to_string()),
+                    };
+                }
+                Err(error) => return report.problem(error.to_string()),
+            },
+        };
+        let keep = record.pending != Some(PendingIntent::Delete) && retention.keeps(outcome);
         let intent = if keep {
             PendingIntent::Stop
         } else {
@@ -676,10 +703,9 @@ impl SandboxLeaseManager {
         }
         if keep {
             let outcome = match live {
-                Some(live) => live.sandbox.stop().await,
-                None => match provider.attach(&id, None).await {
+                Some(live) if live.generation == generation => live.sandbox.stop().await,
+                _ => match provider.attach(&id, None).await {
                     Ok(sandbox) => sandbox.stop().await,
-                    Err(DriverError::NotFound { .. }) => Ok(()),
                     Err(error) => Err(error),
                 },
             };
@@ -693,7 +719,7 @@ impl SandboxLeaseManager {
                 Err(error) => report.problem(format!("sandbox {id} stop failed: {error}")),
             }
         } else {
-            match provider.delete(&id, None).await {
+            match delete_sandbox(&*provider, &id).await {
                 Ok(()) => {
                     if let Err(error) = self.ledger.deleted(lease) {
                         return report.problem(error.to_string());
@@ -702,6 +728,37 @@ impl SandboxLeaseManager {
                 }
                 Err(error) => report.problem(format!("sandbox {id} delete failed: {error}")),
             }
+        }
+    }
+
+    /// A create may have reached the provider without returning an id.
+    async fn find_allocated(
+        &self,
+        provider: &dyn SandboxProvider,
+        lease: SandboxLeaseId,
+    ) -> Result<Option<SandboxId>, EnvError> {
+        let mut filter = SandboxFilter::default();
+        filter.labels.insert(
+            RUN_LABEL.to_owned(),
+            self.identity.run_id().await?.to_string(),
+        );
+        filter
+            .labels
+            .insert(LEASE_LABEL.to_owned(), lease.raw().to_string());
+        let mut matches = provider
+            .list(&filter)
+            .await
+            .map_err(|error| acquire_failed(&error))?;
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop().map(|status| status.id)),
+            count => Err(EnvError::backend(
+                BACKEND,
+                "release",
+                format!(
+                    "{count} sandboxes belong to lease {lease}; Petri does not choose one arbitrarily"
+                ),
+            )),
         }
     }
 
@@ -746,17 +803,26 @@ impl SandboxLeaseManager {
             .pending(lease, PendingIntent::Delete)
             .map_err(|error| Self::ledger_failed(&error))?;
         for id in &ids {
-            match provider.delete(id, None).await {
-                Ok(()) | Err(DriverError::NotFound { .. }) => {}
-                Err(error) => {
-                    return Err(EnvError::backend(BACKEND, "prune", error.to_string()));
-                }
-            }
+            delete_sandbox(&*provider, id)
+                .await
+                .map_err(|error| EnvError::backend(BACKEND, "prune", error.to_string()))?;
         }
         self.ledger
             .deleted(lease)
             .map_err(|error| Self::ledger_failed(&error))?;
         Ok(ids)
+    }
+}
+
+/// Deletion is complete when the resource is already absent, including after
+/// an interrupted delete whose confirmation never reached the ledger.
+pub(crate) async fn delete_sandbox(
+    provider: &dyn SandboxProvider,
+    id: &SandboxId,
+) -> sandbox_driver::Result<()> {
+    match provider.delete(id, None).await {
+        Ok(()) | Err(DriverError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
