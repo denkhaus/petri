@@ -3,15 +3,29 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use driver::{CANCEL_FORCED, RunConfig};
+use driver::{CANCEL_FORCED, EventObserver, RunConfig};
+use engine::{EngineState, Event, EventRecord};
 use executor::{MapSecrets, Retention};
 use ir::{CancelScopeId, GraphBuilder, RunStatus, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
 use support::*;
+use tokio::sync::Notify;
 use tokio::time;
+
+struct WedgedStarted(Notify);
+
+#[async_trait::async_trait]
+impl EventObserver for WedgedStarted {
+    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+        if matches!(record.event, Event::StepProgress { .. }) {
+            self.0.notify_one();
+        }
+    }
+}
 
 /// A script that backgrounds a grandchild, ticks a heartbeat file, and then
 /// waits forever. If the group is signalled as a unit, the heartbeat stops.
@@ -174,6 +188,7 @@ async fn a_wedged_step_kind_cannot_wedge_the_run() {
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_millis(300))
         .with_retention(Retention::Never);
+    let started = Arc::new(WedgedStarted(Notify::new()));
     let driver = host_driver_full(
         graph,
         &dir,
@@ -183,12 +198,16 @@ async fn a_wedged_step_kind_cannot_wedge_the_run() {
             ..config
         },
         runners_with_wedged(),
-    );
+    )
+    .observe(started.clone());
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
-    // Let the step get going, then cancel it and watch it refuse.
-    time::sleep(Duration::from_millis(200)).await;
+    // The wedged runner logs before waiting for control. Cancel only after
+    // that event, regardless of how long its environment takes to acquire.
+    time::timeout(Duration::from_secs(10), started.0.notified())
+        .await
+        .expect("the wedged runner started");
     handle.cancel(CancelScopeId::ROOT).await;
 
     let report = time::timeout(Duration::from_secs(10), run)
