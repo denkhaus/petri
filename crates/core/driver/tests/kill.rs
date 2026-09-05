@@ -91,13 +91,20 @@ async fn cleanup_runs_after_a_cancel() {
 }
 
 /// §6 driver test 2, first half: cleanup-grace expiry feeds `KillRequested`.
-/// The cleanup ignores TERM, and the grace between TERM and KILL is set long,
-/// so only an immediate `SIGKILL` — no ladder, no grace wait — explains the
-/// timing.
+/// The running process ignores TERM, and its TERM grace exceeds the root
+/// cleanup grace. Waiting for its ready marker before cancel makes timer
+/// expiry independent of how long a new cleanup process takes to start.
 #[tokio::test]
 async fn cleanup_grace_expiry_feeds_kill() {
     let dir = RunDir::new("cleanup-grace-kill");
-    let graph = cleanup_graph("trap '' TERM; echo x > cleanup-started; sleep 300");
+    let mut builder = GraphBuilder::new();
+    add_script(
+        &mut builder,
+        "work",
+        ScopeId::new(0),
+        "trap '' TERM; echo ready > ready; sleep 300",
+    );
+    let graph = builder.build();
     let config = RunConfig::new(dir.path())
         .with_grace(Duration::from_secs(10))
         .with_cleanup_grace(Duration::from_secs(2))
@@ -118,13 +125,9 @@ async fn cleanup_grace_expiry_feeds_kill() {
     let elapsed = cancelled_at.elapsed();
 
     assert_eq!(report.status, RunStatus::Cancelled);
-    assert!(
-        workspace.join("cleanup-started").exists(),
-        "the cancel admitted the cleanup before the kill ended it"
-    );
-    assert_eq!(status_of(&report, "cleanup").as_deref(), Some("cancelled"));
+    assert_eq!(status_of(&report, "work").as_deref(), Some("cancelled"));
     assert_eq!(
-        output_of(&report, "cleanup")["cancel_escalation"],
+        output_of(&report, "work")["cancel_escalation"],
         json!("sigkill"),
         "Control::Kill went straight to SIGKILL"
     );
