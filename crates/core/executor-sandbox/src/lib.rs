@@ -1,14 +1,10 @@
 //! Petri executors over the sandbox-driver provider family.
 //!
-//! Two shapes share the [`Executor`] interface. [`SandboxExecutor`] realizes a
-//! container scope on a sandbox-driver provider reached over the JSON-RPC
-//! plugin protocol — Docker or Daytona: the provider owns process
-//! execution, the filesystem, one-shot containers, and teardown, and this
-//! crate maps a [`ScopeSpec`] onto a `SandboxSpec` and keys the sandbox by
-//! its durable lease. [`HostExecutor`] keeps the host backend native — real
-//! processes in a workspace directory, with the process-group sentinel and
-//! crash fence that a bare host process needs and a container does not.
-//! [`RoutingExecutor`] sends each scope to the one its runtime target needs.
+//! [`SandboxExecutor`] maps scopes and durable leases to Host, Docker, or
+//! Daytona sandboxes over the JSON-RPC plugin protocol. Providers own process
+//! execution, files, one-shot containers, and cleanup. [`RoutingExecutor`]
+//! selects the provider from runtime options and the scope's target.
+//! [`HostExecutor`] is a convenience wrapper for standalone Host execution.
 //!
 //! No provider crate is linked here: every provider is a plugin process
 //! ([`plugin`]), which is the path a third-party provider must take, so
@@ -21,7 +17,6 @@ mod backend;
 #[cfg(test)]
 mod daytona_tests;
 mod env;
-mod files;
 mod host;
 pub mod lease;
 pub mod plugin;
@@ -41,6 +36,7 @@ use executor::{
 use ir::{ContainerOptions, RuntimeTarget};
 use sandbox_driver::{
     Sandbox, SandboxKind, SandboxProvider, SandboxSource, SandboxSpec, SnapshotId,
+    WorkspaceOwnership,
 };
 use sandbox_driver_daytona_config::{
     DaytonaProviderConfig, DockerExecutionTarget, NestedDockerConfig,
@@ -59,6 +55,7 @@ pub use crate::plugin::{
     FixedProvider, PluginError, PluginSettings, PluginSupervisor, ProviderSource,
 };
 pub use crate::routing::{CONTAINER_KIND, RoutingExecutor};
+use crate::run::workspace_dir;
 pub use crate::run::{LEASE_LABEL, RUN_ID_FILE, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
 use crate::snapshots::{RunnerSnapshot, RunnerSnapshots};
 
@@ -72,6 +69,14 @@ const DOCKER_HOST_ALIAS: &str = "host.docker.internal";
 const BACKEND: &str = "sandbox";
 
 pub(crate) fn acquire_failed(error: &sandbox_driver::Error) -> EnvError {
+    if let sandbox_driver::Error::Provider(error) = error
+        && error.provider.as_str() == "host"
+        && error.code.as_deref() == Some("fence_leaked")
+    {
+        return EnvError::FenceLeaked {
+            detail: error.message.clone(),
+        };
+    }
     EnvError::backend(BACKEND, "acquire", error.to_string())
 }
 
@@ -166,7 +171,10 @@ impl SandboxExecutor {
             env_overrides.extend(options.env.clone());
         }
         let workspace = sandbox.working_directory().to_owned();
+        let host = self.options.backend == SandboxBackend::Host
+            && matches!(scope.runtime.target, RuntimeTarget::HostProcess);
         let env = SandboxEnv {
+            host,
             sandbox: sandbox.clone(),
             workspace: workspace.clone(),
             ambient,
@@ -183,6 +191,7 @@ impl SandboxExecutor {
             env: scope.env.clone(),
         };
         let teardown = SandboxTeardown {
+            host,
             sandbox: acquired.into_sandbox(),
             lease,
             standalone,
@@ -204,6 +213,30 @@ impl SandboxExecutor {
         ctx: &AcquireContext,
         provider: &dyn SandboxProvider,
     ) -> Result<SandboxSpec, EnvError> {
+        if self.options.backend == SandboxBackend::Host
+            && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
+        {
+            if !scope.services.is_empty() {
+                return Err(EnvError::backend(
+                    "host",
+                    "acquire",
+                    "services require a containerized job; set container: or select the docker backend",
+                ));
+            }
+            let workspace = workspace_dir(self.identity.run_dir(), scope.workspace_id.as_str());
+            let mut spec = SandboxSpec::new(SandboxSource::HostDirectory)
+                .name(name)
+                .working_directory(workspace.to_string_lossy());
+            spec.workspace_ownership = Some(WorkspaceOwnership::Managed);
+            spec.labels.extend(labels.iter().cloned());
+            spec.env.extend(
+                scope
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string())),
+            );
+            return Ok(spec);
+        }
         if self.options.backend != SandboxBackend::Daytona {
             if self.options.backend == SandboxBackend::Docker
                 && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
@@ -463,6 +496,7 @@ fn docker_provider_config(
 /// What release needs: the lease the environment held, and whether this
 /// executor alone owns it.
 pub(crate) struct SandboxTeardown {
+    host:       bool,
     sandbox:    Arc<dyn Sandbox>,
     lease:      SandboxLeaseId,
     /// No coordinator named the lease: the sandbox ends with the scope.
@@ -472,6 +506,7 @@ pub(crate) struct SandboxTeardown {
 impl fmt::Debug for SandboxTeardown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SandboxTeardown")
+            .field("host", &self.host)
             .field("sandbox", &self.sandbox.id())
             .field("lease", &self.lease)
             .field("standalone", &self.standalone)

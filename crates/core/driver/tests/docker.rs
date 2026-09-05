@@ -8,11 +8,12 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use driver::RunConfig;
-use executor::{Executor, Retention};
-use executor_sandbox::RoutingExecutor;
+use executor::{Executor, Retention, SandboxLeaseId};
+use executor_sandbox::{LeaseLedger, LeaseState, MemoryLedger, RoutingExecutor};
 use ir::{GraphBuilder, RunStatus, RuntimeSpec, ScopeId, StepRef, validate};
 use serde_json::json;
 use steps::PROCESS_KIND;
@@ -356,6 +357,8 @@ async fn an_abandoned_acquire_leaves_no_container() {
     loop {
         let dir = RunDir::new(&format!("docker-abandon-{timeout_ms}"));
         let executor = RoutingExecutor::local(dir.path().to_path_buf(), Retention::Never);
+        let ledger = Arc::new(MemoryLedger::default());
+        executor.set_ledger(ledger.clone());
         let prefix = executor
             .container_prefix()
             .await
@@ -379,27 +382,25 @@ async fn an_abandoned_acquire_leaves_no_container() {
                 true
             }
             Err(_elapsed) => {
-                // A create still in flight after the drop lands and is deleted
-                // on arrival, by the abandoned task on this same executor. Wait
-                // until nothing of the scope is on the daemon and stays that
-                // way for a moment — a create that was already sent shows up
-                // within that window — so the reconcile below sees a settled
-                // daemon, as a fresh process after a crash would.
-                let deadline = Instant::now() + Duration::from_secs(15);
-                let mut empty_checks = 0;
-                while empty_checks < 5 {
-                    let leftovers = list_containers(&prefix).await;
-                    if leftovers.is_empty() {
-                        empty_checks += 1;
-                    } else {
-                        empty_checks = 0;
+                // Wait for the owned cleanup's confirmation. An empty daemon
+                // listing alone does not prove a delayed create has settled.
+                time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let record =
+                            LeaseLedger::lookup(&*ledger, SandboxLeaseId::new(0)).expect("ledger");
+                        if record.is_none_or(|record| record.state == LeaseState::Deleted) {
+                            break;
+                        }
+                        time::sleep(Duration::from_millis(25)).await;
                     }
-                    assert!(
-                        Instant::now() < deadline,
-                        "an acquire abandoned at {timeout_ms}ms leaked: {leftovers:?}"
-                    );
-                    time::sleep(Duration::from_millis(200)).await;
-                }
+                })
+                .await
+                .expect("an abandoned acquisition settles its deletion");
+                let leftovers = list_containers(&prefix).await;
+                assert!(
+                    leftovers.is_empty(),
+                    "an acquire abandoned at {timeout_ms}ms leaked: {leftovers:?}"
+                );
                 false
             }
         };

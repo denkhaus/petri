@@ -6,7 +6,7 @@ use executor::{
     AcquireContext, ContainerRunner, Executor as _, OneShotContainer, Retention, SandboxLeaseId,
     ScopeOutcome, ScopeSpec, WorkspaceId,
 };
-use executor_sandbox::{LeaseLedger, MemoryLedger, RoutingExecutor};
+use executor_sandbox::{MemoryLedger, PluginSettings, PluginSupervisor, RoutingExecutor};
 use ir::ScopeId;
 use testkit::{RunDir, container_id, is_docker_ready, list_containers, recorded_run_id};
 
@@ -37,8 +37,6 @@ async fn inherited_host_scopes_share_the_helper_and_keep_their_own_env() {
     let router = RoutingExecutor::local(dir.path(), Retention::Always);
     let lease = SandboxLeaseId::new(7);
     let ledger = Arc::new(MemoryLedger::default());
-    ledger.allocating(lease, "host", "host").expect("record");
-    ledger.live(lease, "shared").expect("record");
     router.set_ledger(ledger);
     let ctx = AcquireContext::bare().with_lease(lease);
     let mut parent_spec =
@@ -94,11 +92,15 @@ async fn inherited_host_scopes_share_the_helper_and_keep_their_own_env() {
 #[tokio::test]
 async fn releasing_a_host_lease_needs_no_container_provider() {
     let dir = RunDir::new("host-actions-no-plugin");
-    let router = RoutingExecutor::local_with_dev(dir.path(), Retention::Never, false);
+    let unavailable =
+        PluginSettings::at_path("docker", dir.path().join("no-docker-plugin")).expect("settings");
+    let router = RoutingExecutor::with_provider_source(
+        Arc::new(PluginSupervisor::new(unavailable)),
+        dir.path(),
+        Retention::Never,
+    );
     let ledger = Arc::new(MemoryLedger::default());
     let lease = SandboxLeaseId::new(0);
-    ledger.allocating(lease, "host", "host").expect("record");
-    ledger.live(lease, "scope-0").expect("record");
     router.set_ledger(ledger);
     let scope = ScopeSpec::new(ScopeId::new(0), "scope-0");
     let env = router
@@ -113,5 +115,5 @@ async fn releasing_a_host_lease_needs_no_container_provider() {
     );
     let report = router.release_lease(lease, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
-    assert!(!dir.path().join(executor_sandbox::RUN_ID_FILE).exists());
+    assert!(dir.path().join(executor_sandbox::RUN_ID_FILE).is_file());
 }

@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fmt};
@@ -68,6 +68,16 @@ fn forwarded_env(kind: &str) -> Vec<&'static str> {
     // turning logging up expects to see the plugin's side of a call.
     let mut vars = vec!["PATH", "HOME", "RUST_LOG"];
     match kind {
+        "host" => vars.extend([
+            "USER",
+            "SHELL",
+            "LANG",
+            "TERM",
+            "TMPDIR",
+            "GOPATH",
+            "CARGO_HOME",
+            "NVM_DIR",
+        ]),
         "docker" => vars.extend([
             "DOCKER_HOST",
             "DOCKER_TLS_VERIFY",
@@ -211,6 +221,17 @@ impl PluginSettings {
         Ok(settings)
     }
 
+    /// Sets the run-owned Host registry and includes it in recovery identity.
+    #[must_use]
+    pub fn with_host_registry(mut self, directory: &Path) -> Self {
+        self.env.insert(
+            "SANDBOX_DRIVER_HOST_REGISTRY".to_owned(),
+            directory.to_string_lossy().into_owned(),
+        );
+        self.fingerprint = fingerprint_for(self.kind.as_str(), &self.env);
+        self
+    }
+
     pub fn kind(&self) -> &ProviderKind {
         &self.kind
     }
@@ -304,6 +325,7 @@ fn docker_host_is_local(docker_host: &str) -> bool {
 fn fingerprint_for(kind: &str, env: &BTreeMap<String, String>) -> String {
     let value = |name: &str| env.get(name).map_or("", String::as_str);
     match kind {
+        "host" => format!("host:{}", value("SANDBOX_DRIVER_HOST_REGISTRY")),
         "docker" => {
             let endpoint = match value("DOCKER_HOST").trim() {
                 "" => "default",

@@ -26,12 +26,49 @@ done
 unset PETRI_SANDBOX_PLUGIN_DEV
 "$work/petri" --version
 
+verify_plugin() {
+  local kind=$1
+  local workflow=$2
+  local success="$work/$kind-success.log"
+  local tampered="$work/$kind-tampered.log"
+  if ! "$work/petri" run --format native --run-dir "$work/$kind-run" "$workflow" > "$success" 2>&1; then
+    cat "$success" >&2
+    exit 1
+  fi
+  grep -q 'release-plugin-ok' "$success"
+  # Preserve the executable shape so a loader error cannot mask verification.
+  cp "$work/sandbox-driver-$kind" "$work/$kind.original"
+  printf '\n' >> "$work/sandbox-driver-$kind"
+  if "$work/petri" run --format native --run-dir "$work/$kind-tampered" "$workflow" > "$tampered" 2>&1; then
+    echo "The release accepted a modified $kind plugin." >&2
+    exit 1
+  fi
+  if ! grep -qi 'sha256\|checksum' "$tampered"; then
+    cat "$tampered" >&2
+    echo "The modified $kind plugin failed for a reason other than checksum verification." >&2
+    exit 1
+  fi
+  mv "$work/$kind.original" "$work/sandbox-driver-$kind"
+}
+
+cat > "$work/host.yml" <<'WORKFLOW'
+scopes:
+  main:
+    runtime: host
+nodes:
+  smoke:
+    scope: main
+    shell: sh
+    run: echo release-plugin-ok
+WORKFLOW
+verify_plugin host "$work/host.yml"
+
 if ! docker info >/dev/null 2>&1; then
   if [[ ${PETRI_REQUIRE_DOCKER:-} == 1 ]]; then
     echo 'Docker is required for the release execution checks.' >&2
     exit 1
   fi
-  echo 'Archive checks passed; Docker execution checks skipped (daemon unavailable).'
+  echo 'Archive and Host execution checks passed; Docker execution checks skipped (daemon unavailable).'
   exit 0
 fi
 
@@ -46,21 +83,5 @@ nodes:
     run: echo release-plugin-ok
 WORKFLOW
 
-if ! "$work/petri" run --format native --run-dir "$work/run" "$work/smoke.yml" > "$work/success.log" 2>&1; then
-  cat "$work/success.log" >&2
-  exit 1
-fi
-grep -q 'release-plugin-ok' "$work/success.log"
-# A modified executable must fail verification before launch. Appending one
-# byte preserves its executable shape, so a loader error cannot mask the check.
-printf '\n' >> "$work/sandbox-driver-docker"
-if "$work/petri" run --format native --run-dir "$work/tampered" "$work/smoke.yml" > "$work/tampered.log" 2>&1; then
-  echo 'The release accepted a modified plugin.' >&2
-  exit 1
-fi
-if ! grep -qi 'sha256\|checksum' "$work/tampered.log"; then
-  cat "$work/tampered.log" >&2
-  echo 'The modified plugin failed for a reason other than checksum verification.' >&2
-  exit 1
-fi
-echo 'Release archive, pinned execution, and tamper checks passed.'
+verify_plugin docker "$work/smoke.yml"
+echo 'Release archive, pinned Host and Docker execution, and tamper checks passed.'

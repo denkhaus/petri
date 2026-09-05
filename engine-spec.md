@@ -583,8 +583,9 @@ values do not change the scope environment.
 owns cleanup; remote sandboxes outlive workers by design), so the `Executor`
 contract carries one more rule: when `acquire` returns, no process from a
 previous acquisition of that scope can still mutate the workspace or be
-observed as this environment's status. The host executor (the native host module of `executor-sandbox`) implements it
-with generation-scoped `groups/<generation>/` records and a publication handshake
+observed as this environment's status. The Host plugin implements it with
+`host-registry/<resource>/groups/<generation>/` records under the run directory
+and a publication handshake
 (the sentinel durably records its pgid, then checks a `fenced` marker, only
 then spawns the workload; the fencer writes markers before reading records) —
 and while anything of a discovered group lives, the group's own in-group
@@ -593,8 +594,8 @@ signals a bare recorded pgid** — it can be recycled to an innocent — so a gr
 that never drains fails the acquire with the typed `FenceLeaked` error, and the
 scope's firings fail routably; cleanup belongs to the operator or host policy
 (an identity-bound kill via Linux `pidfd` is an optional platform upgrade,
-never a requirement). **Container scopes are keyed by lease, not by
-environment.** A container sandbox lives as long as the durable sandbox lease
+never a requirement). **Sandbox scopes are keyed by lease, not by
+environment.** A sandbox lives as long as the durable sandbox lease
 that names its workspace (`SandboxLeaseId`, allocated by the coordinator per
 `{invocation, scope}`); `EnvironmentId` is one execution's in-process handle on
 that sandbox and names no container. The lease manager keeps one live handle
@@ -610,8 +611,7 @@ error, never an arbitrary choice. A fresh create happens only when
 reconciliation finds no match. The run id is recorded in the run dir
 (`sandbox-run-id`) before the run's first container exists, so any executor
 over the same run dir computes the same labels. Every provider is reached
-through sandbox-driver's JSON-RPC plugin, host and Docker alike (the host
-process backend stays native until its sentinel fence is ported): a plugin
+through sandbox-driver's JSON-RPC plugin, including Host, Docker, and Daytona: a plugin
 process that dies fails every in-flight call routably, is never asked to
 replay an ambiguous call, and is relaunched single-flight by the next call, and
 a generation change forces the recovery fence before any holder resumes. The
@@ -626,8 +626,14 @@ covers the workspace only: side effects outside it may have happened in the
 crashed attempt and happen again — resume is **at-least-once for external side
 effects**, exactly-once only for the log and the workspace fence.
 
-Host executor: workspace per scope instance under the run dir; retention
-default keep-on-failure (`always|on_failure|never`). Container executor
+Host plugin: one sandbox per lease and a workspace under the run directory;
+retention defaults to keep-on-failure (`always|on_failure|never`). Petri passes
+its private registry directory to the plugin and includes the canonical path
+in the provider fingerprint. The provider owns the registry, process groups,
+and workspace lifecycle. Petri explicitly marks its workspace as managed;
+other callers' designated directories remain untouched by delete. Stopped
+sandboxes can be attached and pruned after a plugin restart. Successful stop
+removes drained generation records. Container executor
 (`executor-sandbox` over a sandbox-driver plugin, Docker or Daytona): one sandbox
 per lease — pull if-not-present, an init process, **the workspace inside the
 sandbox** (Docker: a volume the sandbox owns at `/workspace`; nothing is bound
@@ -744,6 +750,10 @@ is in the log and replay reproduces it. After a Kill the core emits no further
 including ones already politely cancelling — and arms a zero-slack hard
 deadline as the backstop for a step kind that ignores it.
 
+For every plugin exec and one-shot, the plugin registers stop tokens before
+opening the data channel. Petri forwards cancellation only after that channel
+is accepted, so an immediate TERM or KILL cannot overtake exec registration.
+
 **Process StepKind:** `bash -eo pipefail -c <run>` (or `sh`); env may contain
 secret refs; no step-level timeout (node budget governs). Outcome mapping: 0 →
 `Success`; N≠0 with `soft_fail` match → `PartialSuccess{underlying:
@@ -763,15 +773,15 @@ with a **sentinel** supervisor — the group leader, which runs the workload as 
 member of the same group, reports its exit status out of band, closes its
 inherited copies of the stdout/stderr pipes after the spawn (so the pipes reach
 EOF when the workload exits), ignores `SIGTERM` so the polite ladder passes
-through it, and stays alive until scope release. While the sentinel lives the
-group is never empty, so the kernel cannot recycle the pgid; the executor owns
+through it, and stays alive until the sandbox lease stops. While the sentinel lives the
+group is never empty, so the kernel cannot recycle the pgid; the Host provider owns
 the sentinel's unreaped handle, so even a killed sentinel pins the id as a
-zombie. Release sends one `killpg(SIGKILL)` **while the id is still pinned**,
+zombie. Sandbox stop sends one `killpg(SIGKILL)` **while the id is still pinned**,
 reaps the sentinel, then performs only **non-signalling** bounded observation
 of group death (procfs on Linux, libproc on macOS) — never a signal after the
 reap frees the id, and never an `ESRCH` probe, which a zombie leader defeats. A
 group that outlives the deadline is a report entry, and no zombie outlives
-release. All other signalling stays `killpg` only. Docker: `docker kill` reaches PID 1 only —
+a successful stop. All other signalling stays `killpg` only. Docker: `docker kill` reaches PID 1 only —
 step-level signalling is `docker exec <c> kill -TERM -<PGID>` (**no `--`
 separator**: busybox `kill` rejects it and a rejected signal is a silent one;
 this corrects the original handoff text). The in-container wrapper records the

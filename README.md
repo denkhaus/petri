@@ -7,7 +7,7 @@ explicit routing, plus the pure state machine that executes it.
 crates/core/ir         the vocabulary: graph, ids, expressions, values, validation
 crates/core/engine     the sans-IO state machine: apply(state, event) -> (state, commands)
 crates/core/executor   the environment interface; executor-sandbox implements it
-crates/core/executor-sandbox  the executors: native host processes, and containers on sandbox-driver providers, reached through their plugins
+crates/core/executor-sandbox  scopes and leases over Host, Docker, and Daytona plugins
 crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
 crates/core/driver     the IO loop between the pure core and real processes
 crates/core/execution  run, invocation, and execution coordination; durable local store
@@ -128,13 +128,22 @@ crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wai
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 ```
 
-Container scopes reach Docker through the `sandbox-driver-docker` plugin, an
-executable Petri launches and talks JSON-RPC to; no provider crate is linked in.
-`mise run plugins:build` installs the plugin from the sandbox-driver revision the
-workspace pins under `target/plugins/bin`, and the test tasks point
-`PETRI_SANDBOX_DOCKER_PLUGIN` at it. Docker tests skip with a message when the
-plugin is missing or no daemon is reachable, so `mise run test` is green on a
-machine without one.
+Host and container scopes use the `sandbox-driver-host` and
+`sandbox-driver-docker` plugins. Petri launches them and communicates over
+JSON-RPC; no provider crate is linked in. `mise run plugins:build` installs
+both from the pinned revision under `target/plugins/bin`. The development
+and test tasks select those binaries. Docker tests skip when no daemon is
+reachable; Host execution requires its plugin and no daemon.
+
+The Host plugin keeps private records under `<run_dir>/host-registry`.
+It owns each lease's workspace and process groups. After a plugin crash,
+recovery fences old work before reuse and never signals saved process ids.
+Retention keeps or deletes the workspace with its sandbox; `petri sandbox
+prune` deletes retained Host resources through a fresh plugin.
+
+Host jobs inherit `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`,
+`TMPDIR`, `GOPATH`, `CARGO_HOME`, and `NVM_DIR`. Pass other values and secrets
+explicitly through workflow environment settings.
 
 `petri run --backend host|docker|daytona` selects the execution backend.
 Host is the default. Docker runs process jobs in a pinned slim runner image.
@@ -161,9 +170,9 @@ been run against the hosted preview service.
 
 Release archives bundle the Docker, Host, and Daytona plugin executables from
 the pinned revision. Petri embeds their SHA-256 digests at release build time.
-`scripts/release-verify.sh` checks the archive, runs a container workflow without
-development mode, and verifies rejection of a modified plugin. The CI, nightly,
-and release jobs use a read-only sandbox-driver deploy key from the
+`scripts/release-verify.sh` checks the archive, runs Host and Docker workflows
+without development mode, and verifies rejection of modified plugins. The CI,
+nightly, and release jobs use a read-only sandbox-driver deploy key from the
 `sandbox-driver-read` environment.
 
 `mise run test:remote` transfers an artifact through a separate Docker daemon
@@ -674,8 +683,7 @@ What the audit found and changed:
   what was released and kept as text rather than as `container_removed` /
   `workspace_removed` booleans that would grow a field per executor.
 - **Already right when the audit ran:** the executors live outside the interface
-  crate (today `executor-sandbox`: the native host executor and the sandbox-driver
-  container executor over the plugin protocol), each with a private teardown record the interface carries
+  crate (`executor-sandbox` over the provider plugins), with a private teardown record the interface carries
   as an opaque `Teardown` trait object and hands back untouched; the output pump
   lives in the interface crate because every executor needs it and the line cap
   must be decided once.

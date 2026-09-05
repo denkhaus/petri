@@ -42,6 +42,7 @@ const MKDIR_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One live sandbox, handed to step kinds as their spawn capability.
 pub(crate) struct SandboxEnv {
+    pub(crate) host:         bool,
     pub(crate) sandbox:      Arc<dyn Sandbox>,
     /// The workspace as the sandbox sees it: its working directory.
     pub(crate) workspace:    String,
@@ -247,8 +248,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     fn shares_host_filesystem(&self) -> bool {
-        // A sandbox owns its workspace; nothing of Petri's machine is in it.
-        false
+        self.host
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {

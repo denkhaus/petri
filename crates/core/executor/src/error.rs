@@ -45,11 +45,8 @@ pub enum EnvError {
     /// to an innocent; the no-innocent-signal invariant is absolute). The
     /// scope's firings fail routably through the ordinary acquire-failure
     /// path; cleanup belongs to the operator or host policy.
-    #[error("prior work from generation {generation} survived the fence: {detail}")]
-    FenceLeaked {
-        generation: SmolStr,
-        detail:     String,
-    },
+    #[error("prior work survived the fence: {detail}")]
+    FenceLeaked { detail: String },
     #[error("the environment is gone")]
     Gone,
     #[error("this sandbox cannot reach services on Petri's machine")]

@@ -12,12 +12,12 @@ if [[ $# -gt 1 ]]; then
   exit 2
 fi
 install_root="$root/target/plugins"
-packages=(sandbox-driver-docker-plugin)
+packages=(sandbox-driver-host-plugin sandbox-driver-docker-plugin)
 target_args=()
 if [[ $# -eq 1 ]]; then
   install_root="$root/target/$1/plugins"
   target_args=(--target "$1")
-  packages+=(sandbox-driver-host-plugin sandbox-driver-daytona-plugin)
+  packages+=(sandbox-driver-daytona-plugin)
 fi
 manifest="$root/Cargo.toml"
 url="$(grep -E '^sandbox-driver = \{ git = "' "$manifest" | sed -E 's/.*git = "([^"]+)".*/\1/')"

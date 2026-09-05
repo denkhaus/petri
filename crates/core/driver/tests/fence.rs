@@ -8,43 +8,30 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use executor::{EnvError, Executor as _, ExitStatus, ProcessSpec, ScopeOutcome, ScopeSpec};
+use executor::{Executor as _, ExitStatus, ProcessSpec, Retention, ScopeOutcome, ScopeSpec};
 use executor_sandbox::HostExecutor;
 use ir::ScopeId;
 use support::*;
-use tokio::process::Command;
 use tokio::time;
 
 fn spec() -> ScopeSpec {
     ScopeSpec::new(ScopeId::new(0), "scope-0")
 }
 
-/// The environment's group records: beside the workspace, under the
-/// environment's own name.
-fn groups_root(dir: &RunDir) -> PathBuf {
-    dir.path()
-        .join("scopes")
-        .join("scope-0")
-        .join("groups")
-        .join("scope-0")
-}
-
-/// The generation dirs currently under the scope, sorted by name.
+/// Process generations are durable provider records, separate from workspaces.
 fn generations(dir: &RunDir) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = fs::read_dir(groups_root(dir))
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                .map(|e| e.path())
-                .collect()
-        })
-        .unwrap_or_default();
-    dirs.sort();
-    dirs
+    let mut generations = Vec::new();
+    if let Ok(resources) = fs::read_dir(dir.path().join("host-registry")) {
+        for resource in resources.flatten() {
+            if let Ok(entries) = fs::read_dir(resource.path().join("groups")) {
+                generations.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        }
+    }
+    generations.sort();
+    generations
 }
 
 async fn settles(path: &Path) -> bool {
@@ -85,8 +72,9 @@ async fn reacquire_fences_the_survivor_and_isolates_status() {
         .expect("spawn");
     let heartbeat = dir.workspace().join("heartbeat");
     assert!(wait_for_file(&heartbeat, Duration::from_secs(10)).await);
-    // `env`, `crashed` and the process handles are deliberately never released:
-    // the driver process died.
+    // Drop the router without releasing its environment. Its plugin dies,
+    // while the sentinel and workload retain their own process group.
+    drop(crashed);
 
     let fresh = HostExecutor::new(dir.path());
     let env2 = fresh
@@ -114,104 +102,17 @@ async fn reacquire_fences_the_survivor_and_isolates_status() {
     fresh.release(env2, ScopeOutcome::Succeeded).await;
 }
 
-/// The publication race, from the sentinel's side: a generation fenced between
-/// OS spawn and publication never starts its workload — the sentinel publishes,
-/// meets the marker at its check, and exits.
-#[tokio::test]
-async fn a_prefenced_generation_never_starts_the_workload() {
-    let dir = RunDir::new("fence-prefenced");
-    let executor = HostExecutor::new(dir.path());
-    let env = executor
-        .acquire(&spec(), &executor::AcquireContext::bare())
-        .await
-        .expect("acquire");
-
-    let gen_dirs = generations(&dir);
-    assert_eq!(gen_dirs.len(), 1, "one generation per acquisition");
-    fs::write(gen_dirs[0].join("fenced"), b"").expect("the marker");
-
-    let mut process = env
-        .exec()
-        .spawn(ProcessSpec::new("sh", &[
-            "-c",
-            "echo started > started; sleep 300",
-        ]))
-        .await
-        .expect("spawn");
-    // The group ends on its own — the sentinel exited at its check — and the
-    // workload never ran.
-    let status = time::timeout(Duration::from_secs(10), process.wait())
-        .await
-        .expect("the group ends without outside help")
-        .expect("wait");
-    assert_eq!(status, ExitStatus::signalled(SIGKILL));
-    assert!(
-        !dir.workspace().join("started").exists(),
-        "a fenced generation can never start a workload"
-    );
-    executor.release(env, ScopeOutcome::Succeeded).await;
-}
-
-/// SIGKILL's number without linking libc into this test crate.
-const SIGKILL: i32 = 9;
-
-/// A group whose in-group kill mechanism is gone — a dead sentinel with a
-/// surviving workload, or a recorded pgid that now belongs to someone else
-/// entirely (the fencer cannot tell, which is the point): acquire fails with
-/// the typed leak error and **no signal is sent**.
-#[tokio::test]
-async fn an_unkillable_group_fails_acquire_without_a_signal() {
-    let dir = RunDir::new("fence-leak");
-    // A live process group with no sentinel and no watcher: nothing inside it
-    // will ever honor the marker.
-    let mut rogue = Command::new("sh");
-    rogue
-        .arg("-c")
-        .arg("while :; do echo tick >> rogue-heartbeat; sleep 0.05; done")
-        .current_dir(dir.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let mut rogue = rogue.spawn().expect("spawn");
-    let pgid = rogue.id().expect("pid").cast_signed();
-    let heartbeat = dir.path().join("rogue-heartbeat");
-    assert!(wait_for_file(&heartbeat, Duration::from_secs(10)).await);
-
-    let fake = groups_root(&dir).join("gone");
-    fs::create_dir_all(&fake).expect("fake generation");
-    fs::write(fake.join("0.group"), format!("{pgid}\n")).expect("record");
-
-    let executor = HostExecutor::new(dir.path()).with_fence_drain(Duration::from_millis(300));
-    match executor
-        .acquire(&spec(), &executor::AcquireContext::bare())
-        .await
-    {
-        Err(EnvError::FenceLeaked { generation, .. }) => {
-            assert_eq!(generation, "gone");
-        }
-        Ok(_) => panic!("acquire succeeded over a leaked group"),
-        Err(other) => panic!("expected the typed leak error, got {other}"),
-    }
-
-    // The decisive half: nothing was signalled. The rogue group still beats.
-    let before = file_len(&heartbeat);
-    time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        file_len(&heartbeat) > before,
-        "no signal is ever sent to a bare recorded pgid"
-    );
-    let _ = rogue.kill().await;
-}
+// Publication ordering and the no-innocent-signal case live in the provider's
+// real-plugin recovery tests, where their process records are owned.
 
 /// Fencing is idempotent: acquire, release, acquire again — with work spawned
 /// in between — and every fence over the dead generations is a no-op.
 #[tokio::test]
 async fn fencing_twice_is_a_noop() {
     let dir = RunDir::new("fence-idempotent");
-    let executor = HostExecutor::new(dir.path());
+    let executor = HostExecutor::new(dir.path()).with_retention(Retention::Always);
 
-    for round in 0..3 {
+    for _round in 0..3 {
         let env = executor
             .acquire(&spec(), &executor::AcquireContext::bare())
             .await
@@ -225,8 +126,8 @@ async fn fencing_twice_is_a_noop() {
         executor.release(env, ScopeOutcome::Succeeded).await;
         assert_eq!(
             generations(&dir).len(),
-            round + 1,
-            "one generation dir per acquisition"
+            0,
+            "stop removes drained generations after fencing"
         );
     }
 }

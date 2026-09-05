@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 
 use execution::prune::prune;
 use execution::{
@@ -203,4 +204,71 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
     );
     coordinator.finish().await;
     assert!(prune(&runtime).await.unwrap().is_clean());
+}
+
+#[tokio::test]
+async fn a_failed_host_scope_is_retained_and_pruned_through_a_fresh_plugin() {
+    let directory = RunDir::new("host-retention-prune");
+    let mut options = RunOptions::new(directory.path());
+    options.retention = Retention::OnFailure;
+    let runtime = Runtime::standard().options(options.clone());
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("coordinator");
+    let mut graph = GraphBuilder::new();
+    graph.add_node(
+        "fail",
+        ScopeId::new(0),
+        StepRef::new(
+            "process",
+            serde_json::json!({ "run": "echo retained > proof; exit 1", "shell": "sh" }),
+        ),
+    );
+    let graph = coordinator.register_graph(&graph.build()).expect("graph");
+    let result = coordinator
+        .run_root(graph, BTreeMap::new())
+        .await
+        .expect("run");
+    coordinator.finish().await;
+    assert_eq!(result.status, RunStatus::Failed);
+    let store = execution::ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+        .expect("resources");
+    let record = store.records().next().expect("host lease");
+    assert_eq!(record.provider.as_str(), "host");
+    assert_eq!(record.state, execution::LeaseState::Stopped);
+    assert!(
+        record
+            .resource_id
+            .as_ref()
+            .expect("provider id")
+            .starts_with("host-")
+    );
+    let workspace = directory
+        .path()
+        .join("scopes")
+        .join(record.workspace.as_str())
+        .join("work");
+    assert_eq!(
+        fs::read_to_string(workspace.join("proof")).expect("retained proof"),
+        "retained\n"
+    );
+    let fresh = Runtime::standard().options(options);
+    let report = prune(&fresh)
+        .await
+        .expect("prune through a new Host plugin");
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(report.deleted.len(), 1);
+    assert!(
+        !workspace.exists(),
+        "provider deletion removes its managed workspace"
+    );
+    let store = execution::ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+        .expect("resources");
+    assert_eq!(
+        store.records().next().expect("tombstone").state,
+        execution::LeaseState::Deleted
+    );
 }

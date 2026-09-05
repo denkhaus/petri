@@ -513,10 +513,9 @@ impl Runtime {
         self.secrets.masker()
     }
 
-    /// The routing executor over the run dir: native host processes, and the
-    /// local Docker daemon for container scopes. It takes its identity from the
-    /// run dir, so a resumed run's executors reach the crashed run's
-    /// environments.
+    /// The plugin router selected by the runtime's sandbox options. It takes
+    /// its identity from the run dir, so a resumed run reaches the crashed
+    /// run's sandboxes.
     fn default_executor(&self) -> Arc<dyn Executor> {
         self.default_executor_for(&self.options.run_dir)
     }

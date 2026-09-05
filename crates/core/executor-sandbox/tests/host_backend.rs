@@ -1,4 +1,4 @@
-//! The native host executor: spawn, output, exit status, environment, and the
+//! The Host plugin: spawn, output, exit status, environment, and the
 //! cancellation ladder, with no daemon.
 
 use std::path::Path;

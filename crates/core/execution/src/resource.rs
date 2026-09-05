@@ -57,8 +57,7 @@ impl SandboxResourceRecord {
     /// retention applied by its owning invocation.
     pub fn needs_release(&self) -> bool {
         self.state != LeaseState::Deleted
-            && (self.provider == HOST_PROVIDER
-                || self.pending.is_some()
+            && (self.pending.is_some()
                 || self.state == LeaseState::Live
                 || (self.state == LeaseState::Allocating && self.fingerprint.is_some()))
     }
@@ -178,8 +177,7 @@ impl ResourceStore {
 
     /// The lease of `allocation`, reserved on first use. `provider` is the
     /// kind the scope's runtime target names; the sandbox lease manager
-    /// records the real one, with its fingerprint, when it allocates. A host
-    /// lease is live from the start: its workspace is a directory.
+    /// records the real one, with its fingerprint, when it allocates.
     pub fn ensure_record(
         &mut self,
         allocation: SandboxAllocationKey,
@@ -198,18 +196,13 @@ impl ResourceStore {
             return Ok(record);
         }
         let lease = SandboxLeaseId::new(self.next_lease);
-        let host = provider == HOST_PROVIDER;
         let record = SandboxResourceRecord {
             lease,
             allocation,
             provider,
-            resource_id: host.then(|| SmolStr::new(workspace.as_str())),
+            resource_id: None,
             workspace,
-            state: if host {
-                LeaseState::Live
-            } else {
-                LeaseState::Allocating
-            },
+            state: LeaseState::Allocating,
             pending: None,
             fingerprint: None,
         };

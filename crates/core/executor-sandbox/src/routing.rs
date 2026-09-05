@@ -1,7 +1,6 @@
 //! An [`Executor`] that routes each scope to the backend its runtime target
-//! needs: a host process to the native [`HostExecutor`], a container to the
-//! [`SandboxExecutor`] over the Docker plugin. It is the composition the
-//! runtime registers for a run.
+//! needs, using [`SandboxExecutor`] over the Host, Docker, or Daytona plugin.
+//! It is the composition the runtime registers for a run.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,14 +13,14 @@ use executor::{
 };
 use ir::RuntimeTarget;
 use sandbox_driver::SandboxId;
+use tokio::fs;
 use tokio::sync::OnceCell;
 
 use crate::actions::{ActionHost, ActionHostRunner};
-use crate::host::HostTeardown;
 use crate::lease::{LeaseLedger, MemoryLedger};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSupervisor, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
-use crate::{HostExecutor, SandboxBackend, SandboxExecutor, SandboxOptions, SandboxTeardown};
+use crate::{SandboxBackend, SandboxExecutor, SandboxOptions, SandboxTeardown};
 
 /// The provider kind container scopes go to.
 pub const CONTAINER_KIND: &str = "docker";
@@ -46,8 +45,7 @@ struct ProviderConfig {
     host_address: Result<Option<String>, String>,
 }
 
-/// Routes scopes to the native host executor or the container
-/// [`SandboxExecutor`] by runtime target.
+/// Routes scopes to one [`SandboxExecutor`] per provider kind.
 ///
 /// A host-process scope runs as real processes on this machine, with the
 /// sentinel and crash fence a bare process needs; a container scope runs on
@@ -55,7 +53,7 @@ struct ProviderConfig {
 /// on the first container scope, so a host-only run never touches a daemon,
 /// and a container scope fails routably at acquire when it cannot be.
 pub struct RoutingExecutor {
-    host:         HostExecutor,
+    host:         OnceCell<Result<Arc<SandboxExecutor>, String>>,
     source:       ContainerSource,
     provider:     OnceLock<Result<ProviderConfig, String>>,
     container:    OnceCell<Result<Arc<SandboxExecutor>, String>>,
@@ -69,8 +67,7 @@ pub struct RoutingExecutor {
 }
 
 impl RoutingExecutor {
-    /// A router over this machine: the native host executor, and the Docker
-    /// plugin launched on the first container scope. The standard runtime's
+    /// Host and Docker plugins, launched on first use. The standard runtime's
     /// default.
     pub fn local(run_dir: impl Into<PathBuf>, retention: Retention) -> Self {
         Self::with_options(run_dir, retention, SandboxOptions::default())
@@ -117,7 +114,7 @@ impl RoutingExecutor {
     fn over(run_dir: impl Into<PathBuf>, retention: Retention, source: ContainerSource) -> Self {
         let run_dir = run_dir.into();
         Self {
-            host: HostExecutor::new(run_dir.clone()).with_retention(retention),
+            host: OnceCell::new(),
             source,
             provider: OnceLock::new(),
             container: OnceCell::new(),
@@ -182,6 +179,53 @@ impl RoutingExecutor {
             .map_err(|message| EnvError::backend(self.plugin_kind(), "configure", message.clone()))
     }
 
+    async fn host(&self) -> Result<Arc<SandboxExecutor>, EnvError> {
+        self.host
+            .get_or_init(|| async {
+                let directory = self.identity.run_dir().join("host-registry");
+                fs::create_dir_all(&directory)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let directory = fs::canonicalize(directory)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let settings = PluginSettings::from_env("host", self.options.plugin_dev)
+                    .map_err(|e| e.to_string())?
+                    .with_host_registry(&directory);
+                let ledger = self
+                    .ledger
+                    .get()
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(MemoryLedger::default()));
+                Ok(Arc::new(SandboxExecutor::new(
+                    Arc::new(PluginSupervisor::new(settings)),
+                    ledger,
+                    self.identity.clone(),
+                    self.retention,
+                    Some("127.0.0.1".to_owned()),
+                    self.options.clone(),
+                )))
+            })
+            .await
+            .clone()
+            .map_err(|message| EnvError::backend("host", "configure", message))
+    }
+
+    async fn executor_for_record(
+        &self,
+        lease: SandboxLeaseId,
+    ) -> Result<Arc<SandboxExecutor>, EnvError> {
+        if let Some(ledger) = self.ledger.get() {
+            let record = ledger
+                .lookup(lease)
+                .map_err(|e| EnvError::backend("sandbox", "lookup", e.to_string()))?;
+            if record.is_some_and(|record| record.provider.as_deref() == Some("host")) {
+                return self.host().await;
+            }
+        }
+        self.container().await
+    }
+
     /// The container executor, built on first use. A configuration error
     /// is remembered: every container scope then fails routably with it.
     async fn container(&self) -> Result<Arc<SandboxExecutor>, EnvError> {
@@ -204,7 +248,7 @@ impl RoutingExecutor {
             })
             .await
             .clone()
-            .map_err(|message| EnvError::backend(CONTAINER_KIND, "acquire", message))
+            .map_err(|message| EnvError::backend(self.plugin_kind(), "acquire", message))
     }
 
     /// The name prefix every sandbox this run owns starts with,
@@ -283,19 +327,7 @@ impl RoutingExecutor {
         outcome: ScopeOutcome,
     ) -> ReleaseReport {
         let mut report = self.release_action_hosts(ActionOwner::Lease(lease)).await;
-        // A host lease's resource id is a workspace id, not a provider id.
-        // Its only provider resources are the action hosts just released.
-        if let Some(ledger) = self.ledger.get() {
-            match ledger.lookup(lease) {
-                Ok(Some(record)) if record.provider.as_deref() == Some("host") => return report,
-                Err(error) => return report.problem(error.to_string()),
-                _ => {}
-            }
-        }
-        // The lease may be a container lease this process never acquired —
-        // a resumed run whose invocation finished from replay — so the
-        // container side is built here if it was not yet.
-        match self.container().await {
+        match self.executor_for_record(lease).await {
             Ok(container) => {
                 let ended = container
                     .manager()
@@ -322,7 +354,7 @@ impl RoutingExecutor {
         lease: SandboxLeaseId,
         workspace_id: &str,
     ) -> Result<Vec<SandboxId>, EnvError> {
-        self.container()
+        self.executor_for_record(lease)
             .await?
             .manager()
             .delete_recorded(lease, workspace_id)
@@ -349,7 +381,7 @@ impl Executor for RoutingExecutor {
                 if let Ok(host) = &action_host {
                     host.prepare().await;
                 }
-                let handle = self.host.acquire(scope, ctx).await?;
+                let handle = self.host().await?.acquire(scope, ctx).await?;
                 match action_host {
                     Ok(host) => {
                         Ok(handle.with_runner(Arc::new(ActionHostRunner::new(host, scope))))
@@ -367,23 +399,22 @@ impl Executor for RoutingExecutor {
     /// Release goes back to the backend whose teardown record the handle
     /// carries: the handle itself says which acquired it.
     async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
-        if env.teardown::<SandboxTeardown>().is_some() {
-            return match self.container.get() {
-                Some(Ok(container)) => container.release(env, outcome).await,
-                _ => ReleaseReport::default()
-                    .problem("a container environment has no container executor to release it"),
-            };
-        }
-        if env.teardown::<HostTeardown>().is_none() {
-            return ReleaseReport::default().problem(
-                "no backend of this router acquired this environment; nothing was released",
-            );
-        }
-        // A standalone host scope's action host goes with the scope; a
-        // coordinator-owned one goes with its lease, at `release_lease`.
-        let scope = env.scope();
-        let ended = self.release_action_hosts(ActionOwner::Scope(scope)).await;
-        let mut report = self.host.release(env, outcome).await;
+        let Some(teardown) = env.teardown::<SandboxTeardown>() else {
+            return ReleaseReport::default()
+                .problem("no backend of this router acquired this environment");
+        };
+        let executor = if teardown.host {
+            self.host.get()
+        } else {
+            self.container.get()
+        };
+        let ended = self
+            .release_action_hosts(ActionOwner::Scope(env.scope()))
+            .await;
+        let mut report = match executor {
+            Some(Ok(executor)) => executor.release(env, outcome).await,
+            _ => ReleaseReport::default().problem("the environment has no executor to release it"),
+        };
         report.released.extend(ended.released);
         report.kept.extend(ended.kept);
         report.problems.extend(ended.problems);

@@ -1,7 +1,7 @@
 //! The same native cycle as `native_e2e`, driven through a `RoutingExecutor`
 //! whose container side is never touched: proof that the whole driver and
-//! coordinator stack runs a graph over the router and the native host
-//! executor, with byte-identical replay, and no plugin launched.
+//! coordinator stack runs a graph over the router and the Host plugin,
+//! with byte-identical replay and no container provider launched.
 
 use std::{env, fs, process};
 

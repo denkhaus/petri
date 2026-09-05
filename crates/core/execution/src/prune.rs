@@ -8,8 +8,8 @@
 //! record's provider fingerprint against the plugin it launches (a changed
 //! daemon or account is a configuration error, never a delete on another
 //! backend), writes the delete intent before the provider call, and leaves
-//! a tombstone after. Host workspaces are directories under the run dir and
-//! are not this command's business.
+//! a tombstone after. Each provider deletes its sandbox's managed workspace,
+//! including Host workspaces under the run directory.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use runtime::Runtime;
 
 use crate::resource::{LeaseState, ResourceLedger, ResourceStore};
-use crate::{HOST_PROVIDER, ResourceError, SandboxLeaseId, StoreError, hold_run_lease};
+use crate::{ResourceError, SandboxLeaseId, StoreError, hold_run_lease};
 
 /// What prune did to one run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,7 +72,6 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .records()
-        .filter(|record| record.provider != HOST_PROVIDER)
         .map(|record| (record.lease, record.workspace.as_str().to_owned()))
         .collect();
     let mut report = PruneReport::default();

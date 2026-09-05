@@ -20,6 +20,8 @@ run = "bin/style-guides prepare"
 
 [tasks.dev]
 description = "Build and run the Petri CLI"
+depends = ["plugins:build"]
+env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
 run = "cargo run --locked -p petri-cli --"
 
 [tasks."plugins:build"]
@@ -42,7 +44,7 @@ run = "cargo clippy --locked --workspace --all-targets --all-features -- -D warn
 [tasks.test]
 description = "Run all Rust tests with Nextest and Cargo doctests"
 depends = ["plugins:build"]
-env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker" }
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
 run = [
   "cargo nextest run --locked --workspace --all-targets --all-features --no-tests=pass",
   "cargo test --locked --workspace --all-features --doc",
@@ -51,13 +53,13 @@ run = [
 [tasks."test:release"]
 description = "Run all Rust tests in release mode"
 depends = ["plugins:build"]
-env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_PLUGIN_DEV = "1" }
+env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host", PETRI_SANDBOX_PLUGIN_DEV = "1" }
 run = "cargo nextest run --locked --release --workspace --all-targets --all-features --no-tests=pass"
 
 [tasks."test:remote"]
 description = "Transfer artifacts through an isolated Docker daemon with no host filesystem mounts"
 depends = ["plugins:build"]
-env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker" }
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
 run = "scripts/test-remote-docker.sh"
 
 [tasks."build:release"]

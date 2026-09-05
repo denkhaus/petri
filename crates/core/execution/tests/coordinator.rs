@@ -9,6 +9,7 @@ use execution::{
     InvocationRequest, JsonlEngineLog, Middleware, MiddlewareError, RouteCall, RouteNext,
     SandboxBinding, SandboxMode, SecretBindings, decode_coordinator_log,
 };
+use executor::Retention;
 use ir::{
     EdgeTransition, GraphBuilder, Outcome, ResultProjection, RunStatus, Scope, ScopeId, Status,
     StepRef,
@@ -129,7 +130,11 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
 async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     let directory = RunDir::new("coordinator-pending-routing-fold");
     let middleware: Vec<Arc<dyn Middleware>> = vec![Arc::new(RequireFoldBeforeRoute)];
-    let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
+    // This fixture truncates a completed run's logs to model a crash. Keep
+    // its workspace so the fixture does not also model confirmed deletion.
+    let mut options = RunOptions::new(directory.path());
+    options.retention = Retention::Always;
+    let runtime = Runtime::standard().options(options);
     let mut coordinator = Coordinator::create(
         runtime.prepare_run(directory.path()),
         middleware.clone(),

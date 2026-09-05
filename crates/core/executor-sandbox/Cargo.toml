@@ -22,7 +22,6 @@ sandbox-driver-protocol.workspace = true
 sandbox-driver-docker-config.workspace = true
 sandbox-driver-daytona-config.workspace = true
 async-trait.workspace = true
-libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

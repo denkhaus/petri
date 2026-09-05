@@ -100,7 +100,7 @@ async fn an_aborted_steps_process_tree_dies_at_release() {
         report
             .releases
             .iter()
-            .any(|r| r.released_any("process group")),
+            .any(|r| r.is_clean() && r.kept_any("sandbox")),
         "release reported killing the group: {:?}",
         report.releases
     );
@@ -144,7 +144,7 @@ async fn a_natural_exits_survivor_dies_at_release() {
         report
             .releases
             .iter()
-            .any(|r| r.released_any("process group") && r.kept_any("workspace")),
+            .any(|r| r.is_clean() && r.kept_any("sandbox")),
         "the group was killed even though the workspace was kept: {:?}",
         report.releases
     );
@@ -201,7 +201,7 @@ async fn the_sentinel_pins_the_group_until_release() {
     let report = executor.release(env, ScopeOutcome::Succeeded).await;
     let elapsed = released_at.elapsed();
     assert!(
-        report.released_any("process group"),
+        report.released_any("sandbox"),
         "release reported the group: {report:?}"
     );
     assert!(report.is_clean(), "{report:?}");

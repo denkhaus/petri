@@ -246,7 +246,7 @@ enum Command {
 enum SandboxCommand {
     /// Delete every sandbox a finished or abandoned run still holds on its
     /// provider, and record each as gone. Refuses a run a live process
-    /// holds. Host workspaces under the run dir are not touched.
+    /// holds. Deleting a sandbox also deletes its managed workspace.
     Prune {
         /// The run's directory.
         #[arg(long)]
