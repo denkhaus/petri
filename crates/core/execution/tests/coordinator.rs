@@ -208,9 +208,11 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
 
 #[derive(Deserialize)]
 struct InvokeConfig {
-    graph:   GraphDigest,
+    graph:              GraphDigest,
     #[serde(default)]
-    inherit: bool,
+    inherit:            bool,
+    #[serde(default)]
+    detach_after_start: bool,
 }
 
 struct InvokeStep;
@@ -246,6 +248,14 @@ impl Step for InvokeStep {
             Ok(handle) => handle,
             Err(error) => return Outcome::failure(error.to_string()),
         };
+        if config.detach_after_start {
+            let started = match ctx.require_capability::<TestStarted>() {
+                Ok(started) => started,
+                Err(error) => return error.into(),
+            };
+            started.0.notified().await;
+            return Outcome::success(serde_json::Value::Null);
+        }
         let result = handle.result().await;
         match result.status {
             RunStatus::Success => Outcome::success(result.output),
@@ -278,6 +288,53 @@ impl Step for BarrierStep {
             Err(error) => return error.into(),
         };
         barrier.0.wait().await;
+        Outcome::success(serde_json::Value::Null)
+    }
+}
+
+#[derive(Default)]
+struct SiblingOrder {
+    first_started:  Notify,
+    second_started: Notify,
+    release_second: Notify,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SiblingPhase {
+    First,
+    Second,
+    AwaitFirst,
+    ReleaseSecond,
+}
+
+struct OrderedSiblingStep;
+
+#[async_trait::async_trait]
+impl Step for OrderedSiblingStep {
+    const NAME: &'static str = "test/ordered-sibling";
+    type Config = SiblingPhase;
+
+    async fn run(&self, phase: SiblingPhase, mut ctx: StepCtx) -> Outcome {
+        let order = match ctx.require_capability::<Arc<SiblingOrder>>() {
+            Ok(order) => order,
+            Err(error) => return error.into(),
+        };
+        match phase {
+            SiblingPhase::First => {
+                order.first_started.notify_one();
+                order.second_started.notified().await;
+            }
+            SiblingPhase::Second => {
+                order.second_started.notify_one();
+                tokio::select! {
+                    () = order.release_second.notified() => {}
+                    _ = ctx.control.recv() => return Outcome::cancelled(),
+                }
+            }
+            SiblingPhase::AwaitFirst => order.first_started.notified().await,
+            SiblingPhase::ReleaseSecond => order.release_second.notify_one(),
+        }
         Outcome::success(serde_json::Value::Null)
     }
 }
@@ -501,6 +558,90 @@ async fn sibling_nested_invocations_run_in_parallel() {
 }
 
 #[tokio::test]
+async fn a_sibling_result_reaches_the_parent_while_another_sibling_is_running() {
+    let directory = RunDir::new("coordinator-sibling-results");
+    let runtime = Runtime::standard()
+        .step(InvokeStep)
+        .step(OrderedSiblingStep)
+        .capability(Arc::new(SiblingOrder::default()))
+        .options(RunOptions::new(directory.path()));
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator starts");
+
+    let mut children = Vec::new();
+    for phase in ["first", "second"] {
+        let mut child = GraphBuilder::new();
+        child.add_node(
+            phase,
+            ScopeId::new(0),
+            StepRef::new(OrderedSiblingStep::NAME, serde_json::json!(phase)),
+        );
+        children.push(
+            coordinator
+                .register_graph(&child.build())
+                .expect("child registers"),
+        );
+    }
+    let mut parent = GraphBuilder::new();
+    let first = parent.add_node(
+        "first",
+        ScopeId::new(0),
+        StepRef::new(InvokeStep::NAME, serde_json::json!({"graph": children[0]})),
+    );
+    let await_first = parent.add_node(
+        "await-first",
+        ScopeId::new(0),
+        StepRef::new(OrderedSiblingStep::NAME, serde_json::json!("await_first")),
+    );
+    let second = parent.add_node(
+        "second",
+        ScopeId::new(0),
+        StepRef::new(InvokeStep::NAME, serde_json::json!({"graph": children[1]})),
+    );
+    let release_second = parent.add_node(
+        "release-second",
+        ScopeId::new(0),
+        StepRef::new(
+            OrderedSiblingStep::NAME,
+            serde_json::json!("release_second"),
+        ),
+    );
+    // The second call begins inside the first child's execution. It can only
+    // finish after the first result reaches the parent and releases it.
+    parent.link(await_first, second);
+    parent.link(first, release_second);
+    let parent = coordinator
+        .register_graph(&parent.build())
+        .expect("parent registers");
+    let result = timeout(
+        Duration::from_secs(5),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the parent receives the first result while the second child waits")
+    .expect("the invocation tree runs");
+
+    assert_eq!(result.status, RunStatus::Success);
+    let invocations = &coordinator.store().state().invocations;
+    assert_eq!(invocations.len(), 3);
+    for invocation in invocations.values() {
+        assert!(
+            !invocation.cancelled,
+            "sibling completion is not cancellation"
+        );
+        assert_eq!(
+            invocation.result.as_ref().expect("finished").status,
+            RunStatus::Success
+        );
+    }
+    coordinator.finish().await;
+}
+
+#[tokio::test]
 async fn cancelling_the_root_cancels_an_active_nested_invocation() {
     let directory = RunDir::new("coordinator-cancel-nested");
     let started = Arc::new(Notify::new());
@@ -550,6 +691,223 @@ async fn cancelling_the_root_cancels_an_active_nested_invocation() {
             .invocations
             .values()
             .all(|invocation| invocation.cancelled)
+    );
+    coordinator.finish().await;
+}
+
+#[tokio::test]
+async fn completing_a_parent_cancels_each_descendant_once() {
+    let directory = RunDir::new("coordinator-descendant-cancel");
+    let runtime = Runtime::standard()
+        .step(InvokeStep)
+        .step(WaitForCancelStep)
+        .capability(TestStarted(Arc::new(Notify::new())))
+        .options(RunOptions::new(directory.path()));
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator starts");
+    let mut grandchild = GraphBuilder::new();
+    grandchild.add_step("wait", ScopeId::new(0), WaitForCancelStep::NAME);
+    let grandchild = coordinator
+        .register_graph(&grandchild.build())
+        .expect("grandchild registers");
+    let mut child = GraphBuilder::new();
+    child.add_node(
+        "invoke",
+        ScopeId::new(0),
+        StepRef::new(InvokeStep::NAME, serde_json::json!({"graph": grandchild})),
+    );
+    let child = coordinator
+        .register_graph(&child.build())
+        .expect("child registers");
+    let mut parent = GraphBuilder::new();
+    parent.add_node(
+        "detach",
+        ScopeId::new(0),
+        StepRef::new(
+            InvokeStep::NAME,
+            serde_json::json!({"graph": child, "detach_after_start": true}),
+        ),
+    );
+    let parent = coordinator
+        .register_graph(&parent.build())
+        .expect("parent registers");
+    timeout(
+        Duration::from_secs(5),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the descendants settle")
+    .expect("the run succeeds");
+    for id in [1, 2] {
+        let invocation = &coordinator.store().state().invocations[&InvocationId::new(id)];
+        let execution = invocation
+            .result
+            .as_ref()
+            .expect("descendant settled")
+            .final_execution;
+        let path = coordinator
+            .store()
+            .execution_dir(InvocationId::new(id), execution)
+            .join("events.jsonl");
+        let log = execution::read_engine_log(&path)
+            .expect("descendant engine log")
+            .log;
+        assert_eq!(
+            log.events()
+                .filter(|event| matches!(
+                    event, Event::CancelRequested { scope } if *scope == ir::CancelScopeId::ROOT
+                ))
+                .count(),
+            1,
+            "each descendant receives one polite cancellation"
+        );
+        assert!(
+            !log.events()
+                .any(|event| matches!(event, Event::KillRequested { .. })),
+            "finishing ancestors must not escalate cancellation"
+        );
+    }
+    coordinator.finish().await;
+}
+
+#[tokio::test]
+async fn a_terminal_parent_replay_settles_its_unfinished_declared_child() {
+    assert_terminal_parent_recovers_child(false).await;
+}
+
+#[tokio::test]
+async fn recovering_a_cancelled_child_does_not_escalate_its_cancellation() {
+    assert_terminal_parent_recovers_child(true).await;
+}
+
+async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
+    let directory = RunDir::new("coordinator-terminal-parent-recovery");
+    let mut options = RunOptions::new(directory.path());
+    options.retention = Retention::Always;
+    let runtime = Runtime::standard()
+        .step(InvokeStep)
+        .step(WaitForCancelStep)
+        .capability(TestStarted(Arc::new(Notify::new())))
+        .options(options);
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator starts");
+    let mut child = GraphBuilder::new();
+    child.add_step("wait", ScopeId::new(0), WaitForCancelStep::NAME);
+    let child = coordinator
+        .register_graph(&child.build())
+        .expect("child registers");
+    let mut parent = GraphBuilder::new();
+    parent.add_node(
+        "detach",
+        ScopeId::new(0),
+        StepRef::new(
+            InvokeStep::NAME,
+            serde_json::json!({"graph": child, "detach_after_start": true}),
+        ),
+    );
+    let parent = coordinator
+        .register_graph(&parent.build())
+        .expect("parent registers");
+    timeout(
+        Duration::from_secs(5),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the parent settles its child")
+    .expect("the initial run succeeds");
+    coordinator.finish().await;
+
+    // Model a crash after the parent driver finished, before its coordinator
+    // cancelled the child. The terminal parent log cannot reissue the call.
+    let lifecycle_path = directory.path().join("coordinator.jsonl");
+    let lifecycle = decode_coordinator_log(
+        &lifecycle_path,
+        &fs::read(&lifecycle_path).expect("coordinator log"),
+    )
+    .expect("coordinator log decodes");
+    let mut prefix = Vec::new();
+    for record in lifecycle.records {
+        let cancellation = matches!(
+            record.event,
+            CoordinatorEvent::InvocationCancelRequested { .. }
+        );
+        if cancellation && !cancel_recorded {
+            break;
+        }
+        serde_json::to_writer(&mut prefix, &record).expect("record encodes");
+        prefix.push(b'\n');
+        if cancellation {
+            break;
+        }
+    }
+    fs::write(&lifecycle_path, prefix).expect("coordinator prefix");
+    let child_events = directory
+        .path()
+        .join("invocations/0000000000000001/executions/0000000000000001/events.jsonl");
+    let events = fs::read_to_string(&child_events).expect("child engine log");
+    let mut lines = events.lines();
+    let mut prefix = format!("{}\n", lines.next().expect("engine header"));
+    for line in lines {
+        let record: EventRecord = serde_json::from_str(line).expect("engine record");
+        let cancellation = matches!(record.event, Event::CancelRequested { .. });
+        if cancellation && !cancel_recorded {
+            break;
+        }
+        prefix.push_str(line);
+        prefix.push('\n');
+        if cancellation {
+            break;
+        }
+    }
+    fs::write(&child_events, prefix).expect("child engine prefix");
+
+    let (mut coordinator, _) = Coordinator::resume(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator resumes");
+    let result = timeout(
+        Duration::from_secs(5),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the terminal replay settles its durable child")
+    .expect("the replay succeeds");
+    assert_eq!(result.status, RunStatus::Success);
+    let child = &coordinator.store().state().invocations[&InvocationId::new(1)];
+    assert!(child.cancelled);
+    assert_eq!(
+        child.result.as_ref().expect("child settled").status,
+        RunStatus::Cancelled
+    );
+    let log = execution::read_engine_log(&child_events)
+        .expect("recovered child log")
+        .log;
+    assert_eq!(
+        log.events()
+            .filter(|event| matches!(event, Event::CancelRequested { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        !log.events()
+            .any(|event| matches!(event, Event::KillRequested { .. })),
+        "recovery preserves polite cancellation"
+    );
+    let report = coordinator.take_root_report().expect("root report");
+    assert_eq!(
+        report.state.history().len(),
+        1,
+        "the parent call was not reissued"
     );
     coordinator.finish().await;
 }

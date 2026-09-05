@@ -690,6 +690,12 @@ impl Driver {
                 for command in resume.commands {
                     self.dispatch(command);
                 }
+                // Like retry and step timers, cleanup gets its full grace
+                // after a crash. Rearm it without feeding a second cancel,
+                // which would escalate the restored run to a hard kill.
+                if self.engine.is_cancelled() && !self.engine.is_finished() {
+                    self.arm_cleanup_timer();
+                }
             }
         }
 
@@ -883,11 +889,15 @@ impl Driver {
         self.feed(Event::CancelRequested {
             scope: ir::CancelScopeId::ROOT,
         });
+        self.arm_cleanup_timer();
+    }
+
+    fn arm_cleanup_timer(&mut self) {
         let grace = self.config.cleanup_grace;
         tracing::info!(
             live_firing_count = self.tasks.len(),
             cleanup_grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
-            "run cancel requested"
+            "cleanup grace timer armed"
         );
         let tx = self.tx.clone();
         self.cleanup_timer = Some(tokio::spawn(async move {

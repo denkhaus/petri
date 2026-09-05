@@ -710,6 +710,90 @@ async fn the_synthesized_cancel_routes_and_cleanup_redispatches() {
     assert_replay_identical(&graph, &resumed);
 }
 
+#[tokio::test]
+async fn resumed_cleanup_gets_a_fresh_grace_without_a_second_cancel() {
+    let dir = RunDir::new("resume-cleanup-grace");
+    let work_marker = dir.path().join("work-ready");
+    let cleanup_marker = dir.path().join("cleanup-ready");
+    let mut builder = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let work = builder.add_node(
+        "work",
+        scope,
+        StepRef::new(WAITING, json!({ "marker": work_marker })),
+    );
+    let cleanup = builder.add_node(
+        "cleanup",
+        scope,
+        StepRef::new(WAITING, json!({ "marker": cleanup_marker })),
+    );
+    builder.node_mut(cleanup).run_on_cancel = true;
+    builder.link(work, cleanup);
+    let graph = builder.build();
+    let registry = || {
+        registry_with(Arc::new(WaitingStep {
+            runs: Arc::new(AtomicUsize::new(0)),
+            hard: false,
+        }))
+    };
+    let driver = host_driver_full(
+        graph.clone(),
+        &dir,
+        executor::MapSecrets::empty(),
+        RunConfig::new(dir.path()),
+        registry(),
+    );
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+    assert!(wait_for_file(&work_marker, Duration::from_secs(10)).await);
+    handle.cancel(ir::CancelScopeId::ROOT).await;
+    assert!(wait_for_file(&cleanup_marker, Duration::from_secs(10)).await);
+    handle.cancel(ir::CancelScopeId::ROOT).await;
+    let original = run.await.expect("the original run finishes");
+
+    // Crash while cleanup is live, before the original run's hard kill.
+    let cut = seq_of(&original.state.log, |record| {
+        matches!(record.event, Event::KillRequested { .. })
+    });
+    let grace = Duration::from_millis(500);
+    let (driver, info) = Driver::resume(
+        graph.clone(),
+        original.state.log.prefix(cut),
+        Arc::new(executor_sandbox::HostExecutor::new(dir.path())),
+        registry(),
+        Arc::new(executor::MapSecrets::empty()),
+        RunConfig::new(dir.path()).with_cleanup_grace(grace),
+    )
+    .expect("the cancelled log resumes");
+    assert_eq!(info.redispatched, vec![firing_of(&original, "cleanup")]);
+    let started = time::Instant::now();
+    let report = time::timeout(Duration::from_secs(10), driver.run())
+        .await
+        .expect("cleanup grace still expires after resume");
+    assert!(
+        started.elapsed() >= grace,
+        "resume preserves polite cleanup"
+    );
+    assert_eq!(report.status, RunStatus::Cancelled);
+    let count = |kill| {
+        report
+            .state
+            .log
+            .events()
+            .filter(|event| {
+                if kill {
+                    matches!(event, Event::KillRequested { .. })
+                } else {
+                    matches!(event, Event::CancelRequested { .. })
+                }
+            })
+            .count()
+    };
+    assert_eq!(count(false), 1, "resume does not inject another cancel");
+    assert_eq!(count(true), 1, "the rearmed timer supplies the hard kill");
+    assert_replay_identical(&graph, &report);
+}
+
 /// An executor stub that counts acquisitions and delegates to the host.
 struct CountingExecutor {
     inner:    executor_sandbox::HostExecutor,

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
 use driver::{SandboxAssignment, ScopeLeases};
-use engine::{EngineExit, EngineStart, EntryPoint, MiddlewareKey};
+use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
 use executor_sandbox::CONTAINER_KIND;
 use ir::{
     Control, FailureClass, FailureInfo, FiringId, Graph, ResultProjection, RunStatus, RuntimeSpec,
@@ -14,6 +14,7 @@ use ir::{
 use runtime::RunRuntime;
 use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::{JoinError, JoinSet};
 
 use crate::client::StartRequest;
 use crate::host::EVENTS_FILE;
@@ -77,6 +78,8 @@ pub enum CoordinatorError {
         execution: ExecutionId,
         message:   String,
     },
+    #[error("execution task failed: {0}")]
+    ExecutionTask(#[from] JoinError),
     #[error("a resolved secret appears in durable invocation data")]
     SecretInDurableData,
     #[error("could not inspect durable invocation data: {0}")]
@@ -100,6 +103,22 @@ enum StartOutcome {
         invocation: InvocationId,
         is_new:     bool,
     },
+}
+
+struct PreparedExecution {
+    driver:            driver::Driver,
+    pipeline:          Arc<MiddlewarePipeline>,
+    cancel_before_run: bool,
+}
+
+/// A driver has stopped; its invocation can finish after its descendants
+/// settle.
+struct CompletedExecution {
+    invocation:       InvocationId,
+    execution:        ExecutionId,
+    graph:            Arc<Graph>,
+    report:           driver::ExecutionReport,
+    middleware_state: MiddlewareState,
 }
 
 /// A coordinator failure rendered for the invoking step.
@@ -336,24 +355,28 @@ impl Coordinator {
                 .exit
                 .clone()
                 .ok_or(CoordinatorError::MissingExit(execution))?;
-            let (report, _) = self
-                .run_execution(
-                    InvocationId::ROOT,
-                    execution,
-                    &declaration.start,
-                    declaration.middleware_state,
-                    registered,
-                )
-                .await?;
+            let PreparedExecution { driver, .. } = self.prepare_execution(
+                InvocationId::ROOT,
+                execution,
+                &declaration.start,
+                declaration.middleware_state,
+                &registered,
+            )?;
+            let report = driver.run().await;
+            Self::check_report(execution, &report)?;
             if report.exit != recorded {
                 return Err(CoordinatorError::ConflictingExit { execution });
             }
             self.last_root_report = Some(report);
+            let settled = self.run_invocations().await;
+            self.active.clear();
+            self.active_handles.clear();
+            settled?;
             return Ok(result);
         }
-        self.active.insert(InvocationId::ROOT);
-        let result = self.run_invocation(InvocationId::ROOT).await;
-        self.active.remove(&InvocationId::ROOT);
+        let result = self.run_invocations().await;
+        self.active.clear();
+        self.active_handles.clear();
         let result = result?;
         if self.store.state().run_status.is_none() {
             self.append(CoordinatorEvent::RunFinished {
@@ -434,89 +457,235 @@ impl Coordinator {
         }
     }
 
-    async fn run_invocation(
+    /// Service every execution from one loop. A request can come from any live
+    /// driver, so scheduling it must not make it a child of another sibling.
+    async fn run_invocations(&mut self) -> Result<InvocationResult, CoordinatorError> {
+        let mut running = JoinSet::new();
+        let result = self.drive_invocations(&mut running).await;
+        // On an error, wait for the aborted driver futures to drop before
+        // the caller continues with run cleanup.
+        running.shutdown().await;
+        result
+    }
+
+    async fn drive_invocations(
         &mut self,
-        invocation: InvocationId,
+        running: &mut JoinSet<CompletedExecution>,
     ) -> Result<InvocationResult, CoordinatorError> {
-        if let Some(result) = self.store.state().invocations[&invocation].result.clone() {
-            return Ok(result);
-        }
-        if self.store.state().invocations[&invocation]
-            .executions
-            .is_empty()
+        let mut completed = BTreeMap::new();
+        if self.store.state().invocations[&InvocationId::ROOT]
+            .result
+            .is_some()
         {
-            self.declare_first_execution(invocation)?;
+            self.settle_descendants(InvocationId::ROOT, running).await?;
+        } else {
+            self.start_invocation(InvocationId::ROOT, running)?;
         }
 
         loop {
-            let execution = *self.store.state().invocations[&invocation]
-                .executions
-                .last()
-                .ok_or(CoordinatorError::MissingExecution(invocation))?;
-            if let Some(status) = self.statuses.get(&invocation) {
-                status.send_replace(InvocationStatus::Running { execution });
+            if self.active.is_empty()
+                && let Some(result) = self.store.state().invocations[&InvocationId::ROOT]
+                    .result
+                    .clone()
+            {
+                return Ok(result);
             }
-            let declaration = self.store.state().executions[&execution]
+            tokio::select! {
+                result = running.join_next(), if !running.is_empty() => {
+                    let done = result.expect("the execution set is not empty")?;
+                    self.active_handles.remove(&done.execution);
+                    Self::check_report(done.execution, &done.report)?;
+                    self.settle_descendants(done.invocation, running).await?;
+                    completed.insert(done.invocation, done);
+                }
+                request = self.start_rx.recv() => {
+                    if let Some(request) = request
+                        && let Some(invocation) = self.handle_start(request).await?
+                    {
+                        self.start_invocation(invocation, running)?;
+                    }
+                }
+                cancelled = self.cancel_rx.recv() => {
+                    if let Some(cancelled) = cancelled {
+                        self.handle_cancel(cancelled).await?;
+                    }
+                }
+                request = self.control_rx.recv() => {
+                    if let Some(request) = request {
+                        self.handle_control(request);
+                    }
+                }
+            }
+
+            // Finishing a descendant can make a waiting parent ready too.
+            while let Some(invocation) = completed.keys().copied().find(|invocation| {
+                !self.active.iter().any(|candidate| {
+                    candidate != invocation && self.is_descendant_or_same(*candidate, *invocation)
+                })
+            }) {
+                let done = completed.remove(&invocation).expect("completed invocation");
+                self.complete_execution(done, running).await?;
+            }
+        }
+    }
+
+    /// A terminal replay need not reissue its old calls. Settle all durable
+    /// descendants before releasing the parent's resources or restarting it.
+    async fn settle_descendants(
+        &mut self,
+        invocation: InvocationId,
+        running: &mut JoinSet<CompletedExecution>,
+    ) -> Result<(), CoordinatorError> {
+        let descendants: Vec<_> = self
+            .store
+            .state()
+            .invocations
+            .iter()
+            .filter_map(|(candidate, state)| {
+                (*candidate != invocation
+                    && state.result.is_none()
+                    && self.is_descendant_or_same(*candidate, invocation))
+                .then_some((*candidate, state.cancelled))
+            })
+            .collect();
+        let uncancelled = descendants
+            .iter()
+            .copied()
+            .filter(|(_, cancelled)| !cancelled)
+            .collect();
+        self.cancel_invocations(uncancelled).await?;
+        for (descendant, _) in descendants {
+            self.start_invocation(descendant, running)?;
+        }
+        Ok(())
+    }
+
+    fn start_invocation(
+        &mut self,
+        invocation: InvocationId,
+        running: &mut JoinSet<CompletedExecution>,
+    ) -> Result<(), CoordinatorError> {
+        let state = &self.store.state().invocations[&invocation];
+        if state.result.is_some() || self.active.contains(&invocation) {
+            return Ok(());
+        }
+        if state.executions.is_empty() {
+            self.declare_first_execution(invocation)?;
+        }
+        let execution = *self.store.state().invocations[&invocation]
+            .executions
+            .last()
+            .ok_or(CoordinatorError::MissingExecution(invocation))?;
+        if let Some(status) = self.statuses.get(&invocation) {
+            status.send_replace(InvocationStatus::Running { execution });
+        }
+        let declaration = self.store.state().executions[&execution]
+            .declaration
+            .clone();
+        let graph = self.store.load_graph(
+            self.store.state().invocations[&invocation]
                 .declaration
-                .clone();
-            let graph = self.store.load_graph(
-                self.store.state().invocations[&invocation]
-                    .declaration
-                    .graph,
-            )?;
-            let (report, middleware_state) = self
-                .run_execution(
-                    invocation,
-                    execution,
-                    &declaration.start,
-                    declaration.middleware_state.clone(),
-                    graph.clone(),
-                )
-                .await?;
-            let exit = report.exit.clone();
-
-            if let Some(recorded) = &self.store.state().executions[&execution].exit {
-                if recorded != &exit {
-                    return Err(CoordinatorError::ConflictingExit { execution });
-                }
-            } else {
-                self.append(CoordinatorEvent::ExecutionFinished {
-                    execution,
-                    exit: exit.clone(),
-                })?;
+                .graph,
+        )?;
+        let PreparedExecution {
+            driver,
+            pipeline,
+            cancel_before_run,
+        } = self.prepare_execution(
+            invocation,
+            execution,
+            &declaration.start,
+            declaration.middleware_state,
+            &graph,
+        )?;
+        let handle = driver.handle();
+        self.active.insert(invocation);
+        self.active_handles
+            .insert(execution, (invocation, handle.clone()));
+        running.spawn(async move {
+            if cancel_before_run {
+                handle.cancel(ir::CancelScopeId::ROOT).await;
             }
+            let report = driver.run().await;
+            CompletedExecution {
+                invocation,
+                execution,
+                graph,
+                report,
+                middleware_state: pipeline.checkpoint(),
+            }
+        });
+        Ok(())
+    }
 
-            match exit {
-                EngineExit::Restart { target, .. } => {
-                    if self.store.state().successor_of(execution).is_none() {
-                        self.declare_successor(
-                            invocation,
-                            execution,
-                            target,
-                            report.state.prior_firings(),
-                            middleware_state,
-                        )?;
-                    }
-                }
-                EngineExit::Terminal { status } => {
-                    let result = project_result(execution, status, &graph, &report.state);
-                    self.refuse_secret(&result)?;
-                    self.append(CoordinatorEvent::InvocationFinished {
+    async fn complete_execution(
+        &mut self,
+        done: CompletedExecution,
+        running: &mut JoinSet<CompletedExecution>,
+    ) -> Result<(), CoordinatorError> {
+        let CompletedExecution {
+            invocation,
+            execution,
+            graph,
+            report,
+            middleware_state,
+        } = done;
+        let exit = report.exit.clone();
+        if let Some(recorded) = &self.store.state().executions[&execution].exit {
+            if recorded != &exit {
+                return Err(CoordinatorError::ConflictingExit { execution });
+            }
+        } else {
+            self.append(CoordinatorEvent::ExecutionFinished {
+                execution,
+                exit: exit.clone(),
+            })?;
+        }
+        self.active.remove(&invocation);
+        match exit {
+            EngineExit::Restart { target, .. } => {
+                if self.store.state().successor_of(execution).is_none() {
+                    self.declare_successor(
                         invocation,
-                        result: result.clone(),
-                    })?;
-                    self.release_invocation_leases(invocation, result.status)
-                        .await;
-                    if let Some(sender) = self.statuses.get(&invocation) {
-                        sender.send_replace(InvocationStatus::Finished(result.clone()));
-                    }
-                    if invocation == InvocationId::ROOT {
-                        self.last_root_report = Some(report);
-                    }
-                    return Ok(result);
+                        execution,
+                        target,
+                        report.state.prior_firings(),
+                        middleware_state,
+                    )?;
+                }
+                self.start_invocation(invocation, running)?;
+            }
+            EngineExit::Terminal { status } => {
+                let result = project_result(execution, status, &graph, &report.state);
+                self.refuse_secret(&result)?;
+                self.append(CoordinatorEvent::InvocationFinished {
+                    invocation,
+                    result: result.clone(),
+                })?;
+                self.release_invocation_leases(invocation, result.status)
+                    .await;
+                if let Some(sender) = self.statuses.get(&invocation) {
+                    sender.send_replace(InvocationStatus::Finished(result));
+                }
+                if invocation == InvocationId::ROOT {
+                    self.last_root_report = Some(report);
                 }
             }
         }
+        Ok(())
+    }
+
+    fn check_report(
+        execution: ExecutionId,
+        report: &driver::ExecutionReport,
+    ) -> Result<(), CoordinatorError> {
+        if let Some(error) = report.observer_errors.first() {
+            return Err(CoordinatorError::EventWriter {
+                execution,
+                message: error.to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn declare_first_execution(
@@ -571,18 +740,19 @@ impl Coordinator {
         Ok(execution)
     }
 
-    async fn run_execution(
+    fn prepare_execution(
         &mut self,
         invocation: InvocationId,
         execution: ExecutionId,
         start: &EngineStart,
         middleware_state: MiddlewareState,
-        graph: Arc<Graph>,
-    ) -> Result<(driver::ExecutionReport, MiddlewareState), CoordinatorError> {
+        graph: &Graph,
+    ) -> Result<PreparedExecution, CoordinatorError> {
+        let mut cancel_before_run = self.store.state().invocations[&invocation].cancelled;
         let directory = self.store.create_execution_dir(invocation, execution)?;
         let events = directory.join(EVENTS_FILE);
         let secrets = self.invocation_secrets(invocation);
-        let sandbox = self.prepare_sandbox(invocation, &graph)?;
+        let sandbox = self.prepare_sandbox(invocation, graph)?;
         let pipeline = Arc::new(
             MiddlewarePipeline::new(
                 invocation,
@@ -607,6 +777,15 @@ impl Coordinator {
                 > 0
         {
             let decoded = read_engine_log(&events)?;
+            // Replaying an existing root cancellation already restores it.
+            // Sending it again would ask the driver to escalate to a kill.
+            cancel_before_run &= !decoded.log.events().any(|event| {
+                matches!(
+                    event,
+                    Event::CancelRequested { scope } | Event::KillRequested { scope }
+                        if *scope == ir::CancelScopeId::ROOT
+                )
+            });
             if decoded.torn {
                 let file = OpenOptions::new()
                     .write(true)
@@ -624,7 +803,7 @@ impl Coordinator {
                     })?;
             }
             if !pipeline.is_empty() {
-                rebuild_middleware(&pipeline, &graph, &decoded.log).map_err(|error| {
+                rebuild_middleware(&pipeline, graph, &decoded.log).map_err(|error| {
                     CoordinatorError::EventWriter {
                         execution,
                         message: error.to_string(),
@@ -671,66 +850,11 @@ impl Coordinator {
                 observer.clone(),
             )));
         }
-        let handle = driver.handle();
-        self.active_handles
-            .insert(execution, (invocation, handle.clone()));
-        if self.store.state().invocations[&invocation].cancelled {
-            handle.cancel(ir::CancelScopeId::ROOT).await;
-        }
-        let mut running = Box::pin(driver.run());
-        let report = loop {
-            tokio::select! {
-                report = &mut running => break report,
-                request = self.start_rx.recv() => {
-                    if let Some(request) = request
-                        && let Some(child) = self.handle_start(request).await
-                    {
-                            self.active.insert(child);
-                            let cancel = self.cancel_tx.clone();
-                            let mut child_running = Box::pin(self.run_invocation(child));
-                            let parent_report = tokio::select! {
-                                report = &mut running => {
-                                    let _ = cancel.send(child);
-                                    (&mut child_running).await.map(|_| Some(report))
-                                }
-                                result = &mut child_running => {
-                                    result.map(|_| None)
-                                }
-                            };
-                            drop(child_running);
-                            self.active.remove(&child);
-                            let parent_report = match parent_report {
-                                Ok(report) => report,
-                                Err(error) => {
-                                    self.active_handles.remove(&execution);
-                                    return Err(error);
-                                }
-                            };
-                            if let Some(report) = parent_report {
-                                break report;
-                            }
-                    }
-                }
-                cancelled = self.cancel_rx.recv() => {
-                    if let Some(cancelled) = cancelled {
-                        self.handle_cancel(cancelled).await?;
-                    }
-                }
-                request = self.control_rx.recv() => {
-                    if let Some(request) = request {
-                        self.handle_control(request);
-                    }
-                }
-            }
-        };
-        self.active_handles.remove(&execution);
-        if let Some(error) = report.observer_errors.first() {
-            return Err(CoordinatorError::EventWriter {
-                execution,
-                message: error.to_string(),
-            });
-        }
-        Ok((report, pipeline.checkpoint()))
+        Ok(PreparedExecution {
+            driver,
+            pipeline,
+            cancel_before_run,
+        })
     }
 
     fn invocation_secrets(&self, invocation: InvocationId) -> Arc<dyn executor::SecretProvider> {
@@ -815,7 +939,17 @@ impl Coordinator {
             .ok_or(CoordinatorError::NoInheritableSandbox)
     }
 
-    async fn handle_start(&mut self, request: StartRequest) -> Option<InvocationId> {
+    async fn handle_start(
+        &mut self,
+        request: StartRequest,
+    ) -> Result<Option<InvocationId>, CoordinatorError> {
+        // A completed driver cannot own a new child. Requests whose callers
+        // disappeared can still be queued when that driver's report arrives.
+        if request.reply.is_closed() || !self.active_handles.contains_key(&request.parent) {
+            let _ = request.reply.send(Err(InvokeError::CoordinatorUnavailable));
+            return Ok(None);
+        }
+
         let key = ParentCallKey {
             parent:  request.parent,
             firing:  request.request.site.firing,
@@ -825,7 +959,7 @@ impl Coordinator {
         match self.resolve_start(&request, &key).await {
             Err(error) => {
                 let _ = request.reply.send(Err(error));
-                None
+                Ok(None)
             }
             Ok(StartOutcome::Requeue { previous }) => {
                 // The request re-enters the queue once the superseded attempt
@@ -847,7 +981,7 @@ impl Coordinator {
                         }
                     }
                 });
-                (!self.active.contains(&previous)).then_some(previous)
+                Ok((!self.active.contains(&previous)).then_some(previous))
             }
             Ok(StartOutcome::Attach { invocation, is_new }) => {
                 let sender = self.statuses.entry(invocation).or_insert_with(|| {
@@ -861,11 +995,19 @@ impl Coordinator {
                     InvocationHandle::new(invocation, sender.subscribe(), self.cancel_tx.clone());
                 let reply_delivered = request.reply.send(Ok(handle)).is_ok();
                 let incomplete = self.store.state().invocations[&invocation].result.is_none();
-                if !reply_delivered && incomplete {
-                    let _ = self.cancel_tx.send(invocation);
+                let parent = self.store.state().executions[&request.parent]
+                    .declaration
+                    .invocation;
+                if incomplete
+                    && !self.store.state().invocations[&invocation].cancelled
+                    && (!reply_delivered || self.store.state().invocations[&parent].cancelled)
+                {
+                    self.cancel_invocations(vec![(invocation, false)]).await?;
                 }
-                (incomplete && !self.active.contains(&invocation) && (is_new || reply_delivered))
-                    .then_some(invocation)
+                Ok((incomplete
+                    && !self.active.contains(&invocation)
+                    && (is_new || reply_delivered))
+                    .then_some(invocation))
             }
         }
     }
@@ -977,6 +1119,13 @@ impl Coordinator {
                     .then_some((*candidate, state.cancelled))
             })
             .collect();
+        self.cancel_invocations(affected).await
+    }
+
+    async fn cancel_invocations(
+        &mut self,
+        affected: Vec<(InvocationId, bool)>,
+    ) -> Result<(), CoordinatorError> {
         for (invocation, already_cancelled) in &affected {
             if !already_cancelled {
                 self.append(CoordinatorEvent::InvocationCancelRequested {

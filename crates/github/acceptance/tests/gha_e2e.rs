@@ -666,7 +666,11 @@ jobs:
     let lines = log_lines(&report);
     assert!(lines.contains(&"building 1".to_string()), "{lines:?}");
     assert!(lines.contains(&"building 2".to_string()), "{lines:?}");
-    assert!(lines.contains(&"fanned=success".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"fanned=success".to_string()),
+        "logs: {lines:?}\nhistory: {:#?}",
+        report.state.history()
+    );
 }
 
 /// Secrets cross the call boundary by name only: an explicit `secrets:` block
