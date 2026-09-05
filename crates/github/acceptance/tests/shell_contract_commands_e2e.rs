@@ -62,6 +62,8 @@ fn record_output(report: &RunReportPlus, name: &str) -> serde_json::Value {
 /// One bash step emitting every `::` command the runner knows, then a step
 /// reading what `set-output` left. The command sink runs in the petri process
 /// whatever the executor, so the host is the representative environment.
+/// Stderr runs in its own step: independent pipes can deliver a later write
+/// while stdout's `stop-commands` interval is still being processed.
 const COMMANDS_WORKFLOW: &str = r#"
 on: push
 jobs:
@@ -95,10 +97,11 @@ jobs:
           echo "::warning::line one%0Aline two%0D100%25"
           echo "::set-output name=k::v-out"
           echo "::save-state name=s::v-state"
-          echo "::error::on stderr" >&2
           echo "   ::notice::indented"
           echo "::unknown-command::stays"
           echo "prefix ::error::not at start"
+      - run: |
+          echo "::error::on stderr" >&2
       - run: echo "k=${{ steps.emit.outputs.k }} echoed=${{ steps.emit.outputs.echoed }} quiet=${{ steps.emit.outputs.quiet }} ignored=[${{ steps.emit.outputs.ignored }}]"
 "#;
 
