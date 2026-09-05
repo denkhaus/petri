@@ -262,6 +262,12 @@ pub enum Event {
     CancelRequested {
         scope: CancelScopeId,
     },
+    /// Cancel one declared node group, including spliced descendants. An
+    /// unknown node or a node without a group is a logged no-op. This never
+    /// marks the root cancelled.
+    CancelGroupRequested {
+        node: NodeId,
+    },
     /// External kill, the forced tier. Tokens drop, nothing routes, nothing is
     /// admitted — `run_on_cancel` included — and every live firing in the
     /// closure gets `Control::Kill`, already-cancelling ones included. In

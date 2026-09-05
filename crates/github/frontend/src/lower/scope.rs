@@ -47,8 +47,8 @@ impl<'a> Lowering<'_, 'a> {
         // Default environment GitHub gives every step, from the run parameters.
         let site = self.base_site(job);
         let github = |this: &mut Self, key: &str| -> ExprOrValue {
+            let ctx = this.parameter("github");
             let t = this.b.exprs();
-            let ctx = t.var("github");
             let k = t.lit(key);
             let v = t.call("get_ci", vec![ctx, k]);
             let s = t.call("loose_string", vec![v]);
@@ -93,8 +93,8 @@ impl<'a> Lowering<'_, 'a> {
         // empty-string value here would *override* a container image's own
         // (the runner images name their populated `/opt/hostedtoolcache`).
         for key in ["os", "arch", "name"] {
+            let ctx = self.parameter("runner");
             let t = self.b.exprs();
-            let ctx = t.var("runner");
             let k = t.lit(key);
             let v = t.call("get_ci", vec![ctx, k]);
             let s = t.call("loose_string", vec![v]);
@@ -231,9 +231,9 @@ impl<'a> Lowering<'_, 'a> {
     }
 
     /// A per-scope text — a container image, a registry username: literal, or
-    /// an expression over the static contexts (the frame's known `inputs` and
-    /// the checkout's `github` identity, never `matrix`: every leg shares the
-    /// scope). `None` reports the specific rejection.
+    /// an expression over the static contexts (the workflow's known `inputs`
+    /// and the checkout's `github` identity, never `matrix`: every leg
+    /// shares the scope). `None` reports the specific rejection.
     fn static_scope_text(&mut self, text: &str, span: Span, what: &str) -> Option<String> {
         if !text.contains("${{") {
             return Some(text.to_string());
@@ -616,12 +616,12 @@ impl<'a> Lowering<'_, 'a> {
         spec.requirements.push(SmolStr::new(label));
     }
 
-    /// Whether `name` is an input only a caller can provide: this frame is the
-    /// file itself (not an inlined callee), `on.workflow_call` declares the
+    /// Whether `name` is an input only a caller can provide: the workflow runs
+    /// directly (without a caller), `on.workflow_call` declares the
     /// input with no default, and no `workflow_dispatch` declaration offers a
     /// standalone way to run the file with it.
     fn is_callee_only_input(&self, name: &str) -> bool {
-        if self.frames[self.current].call.is_some() {
+        if self.is_invocation {
             return false;
         }
         let lowered = name.to_lowercase();

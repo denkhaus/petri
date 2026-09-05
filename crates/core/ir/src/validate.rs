@@ -31,6 +31,16 @@ pub enum ValidationError<S = Live> {
     },
     #[error("node {node} refers to unknown scope {scope}")]
     UnknownScope { node: NodeId<S>, scope: ScopeId<S> },
+    #[error("node {node} names invalid cancellation group anchor {anchor}")]
+    InvalidCancelGroup {
+        node:   NodeId<S>,
+        anchor: NodeId<S>,
+    },
+    #[error("cancellation group {anchor} crosses the expansion boundary at node {node}")]
+    CancelGroupCrossesExpansion {
+        node:   NodeId<S>,
+        anchor: NodeId<S>,
+    },
     #[error("edge {edge} on node {from} points at unknown node {to}")]
     UnknownTarget {
         from: NodeId<S>,
@@ -166,6 +176,8 @@ impl<S> ValidationError<S> {
             Self::NodeIdMismatch { .. } => "validate.node_id_mismatch",
             Self::ScopeIdMismatch { .. } => "validate.scope_id_mismatch",
             Self::UnknownScope { .. } => "validate.unknown_scope",
+            Self::InvalidCancelGroup { .. } => "validate.invalid_cancel_group",
+            Self::CancelGroupCrossesExpansion { .. } => "validate.cancel_group_expansion",
             Self::UnknownTarget { .. } => "validate.unknown_target",
             Self::UnknownStepKind { .. } => "step.unknown_kind",
             // Deliberately not the step's own `class`: the code is a
@@ -208,6 +220,8 @@ impl<S> ValidationError<S> {
                 ValidationLocation::Scope(ScopeId::new(*index as u32))
             }
             Self::UnknownScope { node, .. }
+            | Self::InvalidCancelGroup { node, .. }
+            | Self::CancelGroupCrossesExpansion { node, .. }
             | Self::UnknownStepKind { node, .. }
             | Self::BadStepConfig { node, .. }
             | Self::AlwaysNotLast { node, .. }
@@ -249,6 +263,8 @@ impl<S> ValidationError<S> {
         match self {
             Self::NodeIdMismatch { index, .. } => Some(NodeId::new(*index as u32)),
             Self::UnknownScope { node, .. }
+            | Self::InvalidCancelGroup { node, .. }
+            | Self::CancelGroupCrossesExpansion { node, .. }
             | Self::UnknownStepKind { node, .. }
             | Self::BadStepConfig { node, .. }
             | Self::AlwaysNotLast { node, .. }
@@ -502,6 +518,16 @@ fn check_structure<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>
             errors.push(ValidationError::UnknownScope {
                 node:  node.id,
                 scope: node.scope,
+            });
+        }
+        if let Some(anchor) = node.cancel_group
+            && !graph.node(anchor).is_some_and(|target| {
+                target.cancel_group == Some(anchor) && target.scope == node.scope
+            })
+        {
+            errors.push(ValidationError::InvalidCancelGroup {
+                node: node.id,
+                anchor,
             });
         }
         for edge in node.routing.edges() {
@@ -853,6 +879,15 @@ pub fn loop_reachable<S>(graph: &GraphBody<S>) -> BTreeSet<NodeId<S>> {
 
 fn check_expansions<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>>) {
     for node in &graph.nodes {
+        if matches!(
+            &node.expand,
+            Some(Expansion::ForEach {
+                target: ExpandTarget::Node,
+                ..
+            })
+        ) {
+            check_cancel_group_region(graph, node.id, &HashSet::from([node.id]), errors);
+        }
         let Some(Expansion::ForEach {
             target: ExpandTarget::Subgraph { entry, exit },
             ..
@@ -896,6 +931,7 @@ fn check_expansions<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>
             });
             continue;
         }
+        check_cancel_group_region(graph, node.id, &region, errors);
 
         // Postdominance: no node inside the region may finish the region without
         // reaching the exit, so every non-exit member must have somewhere to go.
@@ -932,6 +968,28 @@ fn check_expansions<S>(graph: &GraphBody<S>, errors: &mut Vec<ValidationError<S>
             }
         }
     }
+}
+
+fn check_cancel_group_region<S>(
+    graph: &GraphBody<S>,
+    expansion: NodeId<S>,
+    region: &HashSet<NodeId<S>>,
+    errors: &mut Vec<ValidationError<S>>,
+) {
+    let crossing: BTreeSet<_> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.cancel_group
+                .filter(|anchor| region.contains(anchor) != region.contains(&node.id))
+        })
+        .collect();
+    errors.extend(crossing.into_iter().map(|anchor| {
+        ValidationError::CancelGroupCrossesExpansion {
+            node: expansion,
+            anchor,
+        }
+    }));
 }
 
 // ── Invariant 8 ───────────────────────────────────────────────────────────

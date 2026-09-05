@@ -418,8 +418,14 @@ impl EngineState {
             cancelled: false,
             killed:    false,
         });
+        let nodes = graph
+            .nodes
+            .iter()
+            .filter(|node| node.cancel_group.is_some())
+            .map(|node| node.id)
+            .collect();
         let node_runtime = vec![NodeRuntime::declared(); graph.nodes.len()];
-        Self {
+        let mut state = Self {
             graph,
             log: EventLog::new(),
             pending: BTreeMap::new(),
@@ -452,7 +458,9 @@ impl EngineState {
             restart_intent: None,
             cancelled: false,
             errors: Vec::new(),
-        }
+        };
+        state.add_cancel_groups(CancelScopeId::ROOT, &nodes);
+        state
     }
 
     // ── Read-only views ────────────────────────────────────────────────────
@@ -988,6 +996,23 @@ impl EngineState {
         });
         if let Some(p) = self.cancel_scopes.get_mut(&parent) {
             p.children.push(id);
+        }
+    }
+
+    /// Give each declared group its own child of the containing scope.
+    pub(crate) fn add_cancel_groups(&mut self, parent: CancelScopeId, nodes: &BTreeSet<NodeId>) {
+        let mut groups: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
+        for id in nodes {
+            if let Some(anchor) = self.graph.node(*id).and_then(|node| node.cancel_group) {
+                groups.entry(anchor).or_default().insert(*id);
+            }
+        }
+        for members in groups.into_values() {
+            let scope = self.next_cancel_scope_id();
+            for id in &members {
+                self.node_runtime[id.index()].cancel_scope = scope;
+            }
+            self.add_cancel_scope(scope, parent, members);
         }
     }
 

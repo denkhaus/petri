@@ -13,6 +13,9 @@ specific code and a hint. `gha.*` codes are malformed-file errors (a missing
 
 ## Supported
 
+Status functions are valid only in `if:`, `pre-if:`, and `post-if:` conditions.
+Other expression positions reject them with `gha.status_function_position`.
+
 **Workflow structure.** `jobs`, `needs`, job and step `if:` with the status
 functions (`success`, `failure`, `always`, `cancelled` — cleanup steps really run
 after a cancel), `env` at workflow/job/step level, `defaults.run`, job `outputs`,
@@ -67,6 +70,13 @@ as JavaScript actions' phases; `with:` inputs with declared defaults; step ids
 and `steps.<id>.outputs`. A missing required action input warns and runs, as
 GitHub's runner does.
 
+**Targeted cancellation.** `cancel: id` gracefully stops one earlier background
+step and waits for it to finish. It publishes deferred outputs and environment
+changes. The target records `cancelled`, while the cancel control succeeds and
+the job continues. The control always runs and does not support `if:`. Matrix
+legs have separate cancellation groups. Cancellation reaches children of a
+background composite action. Repeated cancellation of completed work is safe.
+
 **Background steps.** `background: true` works on `run:` and `uses:` steps,
 including JavaScript, Docker, and composite actions. `wait: <id>`,
 `wait: [ids]`, `wait-all:`, and `parallel:` join background work. An implicit
@@ -107,18 +117,21 @@ against a base) sees what it expects rather than the scratch clone's
 **Reusable workflows.** A `uses:` job calls another workflow — local
 (`./.github/workflows/x.yml`, or GitHub's `$/` same-repository shorthand) or
 pinned remote (`owner/repo/.github/workflows/x.yml@ref`, fetched through the
-action source) — and the callee's jobs inline under the call's name, each with
-its own scope and placement. Typed inputs (`string`, `boolean`, `number`,
+action source). The compiler registers the callee as a child graph. Each call
+runs through the invocation coordinator with isolated sandboxes and its own
+job scopes and placement. Typed inputs (`string`, `boolean`, `number`,
 `choice`, `environment`) validate statically where the value is literal and
 coerce with the engine's builtins where it is not; `required` and declared
 defaults are enforced; unknown `with:` keys and undeclared secrets are errors,
-as on GitHub. `secrets: inherit` and explicit `secrets:` maps are pure renames
-at lowering — no value, and no ungranted name, crosses the boundary; the log
-never sees either. `GITHUB_TOKEN` crosses every boundary unmapped, as on
+as on GitHub. `secrets: inherit` and explicit `secrets:` maps grant access by
+name. The coordinator persists bindings; secret values stay out of the graph
+and log. `GITHUB_TOKEN` crosses every boundary unmapped, as on
 GitHub. `workflow_call.outputs` lower over the `jobs.*` context and surface to
 the caller as `needs.<call>.outputs.*`; a skipped call skips the whole callee,
 `always()` jobs included; a matrix on the call fans the entire callee out per
-leg, `with:` evaluated per leg. Calls nest to GitHub's depth limit with cycle
+leg, `with:` evaluated per leg. A child can expand its own job matrix.
+Cancellation and matrix fail-fast propagate to child invocations. Calls nest
+to GitHub's depth limit with cycle
 diagnostics. `workflow_dispatch` inputs — and a reusable file run directly —
 bind `inputs` from the run's parameters (`github.event.inputs`) through the
 same typed model.
@@ -289,13 +302,11 @@ workflow counts in brackets rank the pressure.
 | Code | Feature | Shape of the plan |
 |---|---|---|
 | `runs_on.expression` | `runs-on` the lowering cannot resolve | `matrix`, `inputs` and the checkout's `github` identity resolve per leg (above); what remains reads `needs`, an input the call site computes at run time, or a matrix that stays dynamic under those contexts. |
-| `workflow_call.matrix` | A matrix inside a matrix workflow call | The engine expands one region at a time; clones cannot expand again. Nested expansion is an engine feature to design, not a frontend gap. |
 | `container.expression` | A container or service value the static contexts cannot resolve [0] | `inputs` and the checkout's `github` identity resolve at lowering (above); what remains reads `matrix` (per-scope values cannot vary per leg), a run-time context, or a dynamic input. |
 | `container.credentials` | A registry password that is not a `${{ secrets.* }}` reference [0] | Only a secret name may cross into the graph; a computed password would need a resolution seam inside acquire. |
 | `container.option` | A `container.options` or `services.<id>.options` flag with no typed mapping [1] | The job container takes `-e`, `--user`, `--dns`, `--cap-add`, `--privileged` and `--platform`; a service takes those but `--platform`, plus `--entrypoint` and the `--health-*` flags. Anything else is rejected at lowering, naming the flag, rather than dropped. The corpus hit is `--entrypoint` on a job container, which the scope container cannot honor: it runs the executor's own init and steps go through `docker exec`. A flag to add gets a typed field on `ir::ContainerOptions` or `ir::ServiceOptions` and a mapping in the sandbox adapter. |
 | `container.ports`, `container.volumes`, `services.secret_env`, `services.volumes` | Container and service corners [0] | Job-container port mappings and volumes name runner-machine resources to map; secret-valued service env needs a resolution point inside acquire. |
 | `timeout.expression`, `continue_on_error.expression`, `strategy.fail_fast.expression`, `strategy.max_parallel.expression`, `strategy.job_total.dynamic`, `env.expression` | Expression-valued control fields [0] | Evaluate at lowering where the value is static, reject the rest. Step-level `continue-on-error` expressions resolve at firing now; the code remains for the job level and degenerate values. |
-| `step.cancel` | Cancel one or more background steps [0] | The engine needs a targeted control path or a scope for each background branch. |
 | `step.wait_composite` | A background wait inside a composite action [0] | Composite actions cannot start background steps. A composite wait would need to address background state owned by its calling job. Put the wait in the calling job. |
 | `job_context` | `job.container` / `job.services` in an expression [0] | Service containers run (above), but their ids, networks and host port mappings are run-time facts the expression environment does not carry yet. Reach a service by its name and declared ports. |
 | `yaml.multiline_flow` | YAML reader gap [0] | The residual shape: a flow *item* line at or left of its block parent's indentation. A closer-only line there — the shape the corpus actually had — is re-indented and accepted, and anchors and aliases resolve since the reader grew its own loader. |

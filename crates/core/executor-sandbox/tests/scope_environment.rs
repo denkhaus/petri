@@ -1,6 +1,8 @@
 //! Each holder of a shared sandbox keeps its own scope environment.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Duration;
 
 use executor::{
     AcquireContext, ExecEnv, Executor, ProcessSpec, Retention, SandboxLeaseId, ScopeOutcome,
@@ -9,6 +11,7 @@ use executor::{
 use executor_sandbox::RoutingExecutor;
 use ir::{RuntimeSpec, RuntimeTarget, ScopeId};
 use testkit::{RunDir, is_docker_ready};
+use tokio::time::timeout;
 
 async fn values(env: &dyn ExecEnv) -> String {
     let spec = ProcessSpec::new("sh", &[
@@ -54,8 +57,43 @@ async fn inherited_holders_keep_scope_options_and_process_environment_precedence
     let lease = SandboxLeaseId::new(0);
     let ctx = AcquireContext::bare().with_lease(lease);
     let parent = router.acquire(&parent, &ctx).await.expect("parent");
+    let mut waiting = parent
+        .exec()
+        .spawn(ProcessSpec::new("sh", &[
+            "-c",
+            "echo waiting; while [ ! -f child-ready ]; do sleep 0.05; done",
+        ]))
+        .await
+        .expect("parent process");
+    let mut waiting_lines = waiting.lines().expect("parent output");
+    assert_eq!(
+        timeout(Duration::from_secs(10), waiting_lines.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .line,
+        "waiting"
+    );
+    let name = testkit::sandbox_name(dir.path(), lease.raw());
+    let sandbox_id = testkit::container_id(&name).await.expect("parent sandbox");
     let child = router.acquire(&child, &ctx).await.expect("child");
+    assert_eq!(
+        testkit::container_id(&name).await.as_deref(),
+        Some(sandbox_id.as_str())
+    );
     let child_env = child.exec();
+    child_env
+        .write_file(Path::new("child-ready"), b"ready")
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_secs(10), waiting.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_success(),
+        "child acquisition must not stop the parent's process"
+    );
     assert_eq!(
         child_env.ambient_env("SCOPE_VALUE").as_deref(),
         Some("child")

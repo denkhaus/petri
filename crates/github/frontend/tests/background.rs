@@ -120,8 +120,28 @@ jobs:
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "unsupported.step.cancel")
+            .any(|diagnostic| diagnostic.message.contains("`cancel: later`"))
     );
+}
+
+#[test]
+fn cancel_requires_one_earlier_background_id_and_has_no_condition() {
+    for control in [
+        "cancel: ''",
+        "cancel: [worker]",
+        "cancel: missing",
+        "cancel: worker\n        if: always()",
+    ] {
+        let text = format!(
+            "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - id: worker\n        background: true\n        run: sleep 1\n      - {control}\n"
+        );
+        assert!(
+            diagnostics(&text)
+                .iter()
+                .any(|diagnostic| diagnostic.code == "gha.bad_step"),
+            "{text}"
+        );
+    }
 }
 
 #[test]

@@ -141,6 +141,8 @@ pub(crate) struct Step<'a> {
     pub wait:              Option<Vec<String>>,
     /// Join every background step not published by an earlier wait.
     pub wait_all:          bool,
+    /// The earlier background node stopped and joined by this control step.
+    pub cancel:            Option<String>,
 }
 
 impl Step<'_> {
@@ -152,8 +154,8 @@ impl Step<'_> {
         }
     }
 
-    pub(crate) fn is_wait(&self) -> bool {
-        self.wait.is_some() || self.wait_all
+    pub(crate) fn is_control(&self) -> bool {
+        self.wait.is_some() || self.wait_all || self.cancel.is_some()
     }
 }
 
@@ -495,6 +497,7 @@ fn read_job<'a>(id: &str, node: Node<'a>, diags: &mut Diagnostics) -> Option<Job
                         background:        false,
                         wait:              Some(targets),
                         wait_all:          false,
+                        cancel:            None,
                     });
                 }
             }
@@ -764,14 +767,18 @@ fn read_step_as<'a>(
             true
         }
     };
-    if let Some(cancel) = m.get("cancel") {
-        diags.unsupported(
-            "step.cancel",
-            cancel.span(),
-            "a `cancel` background control step",
-            "targeted background cancellation needs an engine control path; use `wait` or `wait-all` for now",
-        );
-    }
+    let cancel = m.get("cancel").and_then(|value| {
+        if let Some(id) = value.as_str().filter(|id| !id.is_empty()) {
+            Some(id.to_string())
+        } else {
+            diags.error(
+                "gha.bad_step",
+                value.span(),
+                "`cancel` must name one non-empty step id",
+            );
+            None
+        }
+    });
     if let Some(parallel) = m.get("parallel") {
         let message = if allow_background {
             "nested `parallel` groups are not supported"
@@ -782,7 +789,7 @@ fn read_step_as<'a>(
     }
     let control =
         wait.is_some() || wait_all || m.contains_key("cancel") || m.contains_key("parallel");
-    if !allow_background && (wait.is_some() || wait_all) {
+    if !allow_background && (wait.is_some() || wait_all || cancel.is_some()) {
         diags.unsupported(
             "step.wait_composite",
             node.span(),
@@ -876,6 +883,7 @@ fn read_step_as<'a>(
         background,
         wait,
         wait_all,
+        cancel,
     })
 }
 
@@ -896,22 +904,24 @@ fn resolve_wait_targets(job: &str, steps: &mut [Step<'_>], diags: &mut Diagnosti
             }
             continue;
         }
-        let Some(targets) = &mut step.wait else {
-            continue;
+        let control = if step.cancel.is_some() {
+            "cancel"
+        } else {
+            "wait"
         };
         let known = if step.implicit_id.starts_with("parallel-") {
             &background_nodes
         } else {
             &background_ids
         };
-        for target in targets {
+        for target in step.cancel.iter_mut().chain(step.wait.iter_mut().flatten()) {
             match known.get(target) {
                 Some(node_name) => target.clone_from(node_name),
                 None => diags.error(
                     "gha.bad_step",
                     step.span.clone(),
                     format!(
-                        "`wait: {target}` in job `{job}` does not name an earlier background step"
+                        "`{control}: {target}` in job `{job}` does not name an earlier background step"
                     ),
                 ),
             }

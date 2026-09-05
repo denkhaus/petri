@@ -54,6 +54,12 @@ depends = ["plugins:build"]
 env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_PLUGIN_DEV = "1" }
 run = "cargo nextest run --locked --release --workspace --all-targets --all-features --no-tests=pass"
 
+[tasks."test:remote"]
+description = "Transfer artifacts through an isolated Docker daemon with no host filesystem mounts"
+depends = ["plugins:build"]
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker" }
+run = "scripts/test-remote-docker.sh"
+
 [tasks."build:release"]
 description = "Build the workspace in release mode"
 run = "cargo build --locked --workspace --release"
@@ -84,6 +90,7 @@ depends = [
   "check:release-build",
   "check:actions",
   "check:whitespace",
+  "test:remote",
 ]
 
 [tasks."check:nightly"]

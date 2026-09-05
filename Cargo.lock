@@ -1139,6 +1139,7 @@ dependencies = [
  "sandbox-driver-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "smol_str",
  "thiserror",
  "tokio",
@@ -1247,6 +1248,7 @@ name = "petri-github-acceptance"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "petri-execution",
  "petri-frontend",
  "petri-frontend-gha",
  "petri-github-actions",
@@ -1265,6 +1267,8 @@ name = "petri-github-actions"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "petri-driver",
+ "petri-execution",
  "petri-executor",
  "petri-frontend",
  "petri-frontend-gha",

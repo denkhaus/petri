@@ -22,11 +22,11 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `actions/download-artifact` | 400 |
 | `actions/checkout` | 184 |
 | `actions/setup-python` | 173 |
-| `actions/github-script` | 170 |
+| `actions/github-script` | 169 |
 | `actions/cache/restore` | 147 |
-| `actions/cache` | 140 |
+| `actions/cache` | 139 |
 | `Swatinem/rust-cache` | 138 |
-| `actions/setup-node` | 129 |
+| `actions/setup-node` | 128 |
 | `actions/cache/save` | 106 |
 | `PyO3/maturin-action` | 88 |
 | `astral-sh/setup-uv` | 75 |
@@ -59,7 +59,7 @@ Which actions the runner meets most. `uses:` references across all workflows; a 
 | `gr2m/create-or-update-pull-request-action` | 7 |
 | `pnpm/action-setup` | 7 |
 
-170 distinct actions (266 distinct pinned refs).
+168 distinct actions (264 distinct pinned refs).
 
 ## Unsupported features, by in-scope workflows affected
 
@@ -157,7 +157,7 @@ None. Every workflow either lowered or was rejected with a specific code.
 | cli/cli | `issue-triage.lock.yml` | warnings | 226 | — |
 | cli/cli | `lint.yml` | warnings | 18 | — |
 | cli/cli | `triage-issues.yml` | warnings | 64 | — |
-| cli/cli | `triage-pull-requests.yml` | warnings | 59 | — |
+| cli/cli | `triage-pull-requests.yml` | warnings | 45 | — |
 | cli/cli | `triage-scheduled-tasks.yml` | warnings | 22 | — |
 | denoland/deno | `cargo_publish.generated.yml` | warnings | 14 | — |
 | denoland/deno | `ci.generated.yml` | out of scope | — | — |

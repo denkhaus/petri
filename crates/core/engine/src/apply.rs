@@ -127,6 +127,15 @@ fn step(
         } => on_retry_elapsed(state, firing, next_attempt, cmds),
         Event::NodeExpanded { node, splice } => on_node_expanded(state, node, splice, queue),
         Event::CancelRequested { scope } => on_cancel(state, scope, cmds),
+        Event::CancelGroupRequested { node } => {
+            if state
+                .graph
+                .node(node)
+                .is_some_and(|node| node.cancel_group.is_some())
+            {
+                on_cancel(state, state.cancel_scope_of(node), cmds);
+            }
+        }
         Event::KillRequested { scope } => on_kill(state, scope, cmds),
         Event::ControlRequested { firing, ctl } => on_control_requested(state, firing, ctl, cmds),
     }
@@ -1588,6 +1597,9 @@ fn expand(
             let mut clone = source.clone();
             clone.id = remap[old];
             clone.name = SmolStr::new(format!("{}#{index}", source.name));
+            clone.cancel_group = source
+                .cancel_group
+                .map(|anchor| remap.get(&anchor).copied().unwrap_or(anchor));
             // Clones never expand again; that is what makes expansion terminate.
             clone.expand = None;
             for group in &mut clone.routing.groups {

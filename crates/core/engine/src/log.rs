@@ -31,7 +31,10 @@ use crate::event::Event;
 /// v6 → v7: execution starts, admission, and resolved routing became durable
 /// command/event round trips; applied routes and execution exits joined the
 /// vocabulary. Standing policy, no migrator.
-pub const LOG_VERSION: u32 = 7;
+///
+/// v7 → v8: nodes can declare independent cancellation groups, and
+/// `CancelGroupRequested` records targeted cancellation. No migrator.
+pub const LOG_VERSION: u32 = 8;
 
 /// Where an event came from.
 ///

@@ -53,7 +53,7 @@ impl<'a> Lowering<'_, 'a> {
     /// Resolve `owner/repo@ref` to its commit, once per reference. The
     /// manifest stays a run-time lookup.
     fn resolve_remote(&mut self, name: &str) -> Result<PinnedAction, ResolveFailure> {
-        if let Some(cached) = self.resolved.get(name) {
+        if let Some(cached) = self.resolved.borrow().get(name) {
             return cached.clone();
         }
         let source_failure = |e: ActionSourceError| match e {
@@ -66,7 +66,9 @@ impl<'a> Lowering<'_, 'a> {
                 .map_err(|e| ResolveFailure::Failed(e.into()))
                 .and_then(|reference| source.resolve(&reference).map_err(source_failure)),
         };
-        self.resolved.insert(name.to_string(), result.clone());
+        self.resolved
+            .borrow_mut()
+            .insert(name.to_string(), result.clone());
         result
     }
 
@@ -648,8 +650,8 @@ impl<'a> Lowering<'_, 'a> {
         let node_name = format!("{}{SEP}{}", site.job_id, step.node_name());
 
         let source = {
+            let petri = self.parameter(REPO_PARAM_CONTEXT);
             let t = self.b.exprs();
-            let petri = t.var(REPO_PARAM_CONTEXT);
             let key = t.lit(REPO_PARAM_KEY);
             t.call("get_ci", vec![petri, key])
         };
@@ -664,8 +666,8 @@ impl<'a> Lowering<'_, 'a> {
         // repository.
         for key in ["ref", "repository", "server_url"] {
             let value = {
+                let github = self.parameter("github");
                 let t = self.b.exprs();
-                let github = t.var("github");
                 let k = t.lit(key);
                 t.call("get_ci", vec![github, k])
             };
@@ -1019,7 +1021,7 @@ impl<'a> Lowering<'_, 'a> {
         } = context;
         let action = match composite::classify(reference) {
             Uses::Local(local) => {
-                let result = match &self.frames[self.current].source {
+                let result = match &self.source {
                     CalleeSource::Remote { pinned } => pinned
                         .at_repository_path(&local)
                         .map(ActionLocation::Pinned),
@@ -1074,6 +1076,7 @@ impl<'a> Lowering<'_, 'a> {
         config.insert("event".into(), self.event_config());
         config.insert("matrix".into(), json!(site.matrix));
         config.insert("in_expansion".into(), json!(site.in_expansion));
+        config.insert("invocation".into(), json!(site.invocation));
         if site.matrix || site.in_expansion {
             // The same `index` binding the publisher's `node_record` reads;
             // the step needs it to name its materialized result node.

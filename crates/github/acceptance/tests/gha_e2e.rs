@@ -512,7 +512,7 @@ jobs:
 // ── Reusable workflows ────────────────────────────────────────────────────
 
 /// A local workflow call, end to end: inputs bind, the callee's jobs run in
-/// order under the call's prefix, outputs map through `workflow_call.outputs`,
+/// order in a child invocation, outputs map through `workflow_call.outputs`,
 /// and the caller's dependent reads them as `needs.<call>.outputs.*`.
 #[tokio::test]
 async fn a_workflow_call_runs_end_to_end() {
@@ -697,7 +697,7 @@ jobs:
 ";
     let files = files(&[(".github/workflows/inner.yml", callee)]);
     let graph = lower_ok_with(caller, &files);
-    let encoded = serde_json::to_string(&graph).unwrap();
+    let encoded = serde_json::to_string(&(&graph.graph, &graph.children)).unwrap();
     assert!(
         !encoded.contains("REAL_KEY_VALUE"),
         "no secret value in the graph"
@@ -1240,6 +1240,196 @@ fn assert_step_env_config_lines(report: &RunReportPlus) {
 }
 
 // ── Background steps ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn cancelling_a_background_step_publishes_effects_and_the_job_continues() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: monitor
+        name: Monitor
+        background: true
+        run: |
+          echo "value=ready" >> "$GITHUB_OUTPUT"
+          echo "MONITOR_VALUE=ready" >> "$GITHUB_ENV"
+          touch monitor-ready
+          sleep 60
+      - id: sibling
+        background: true
+        run: |
+          while [ ! -f foreground-continued ]; do sleep 0.01; done
+          echo sibling-finished
+      - run: while [ ! -f monitor-ready ]; do sleep 0.01; done
+      - cancel: monitor
+      - run: |
+          echo "after=[${{ steps.monitor.outcome }}][${{ steps.monitor.conclusion }}][${{ steps.monitor.outputs.value }}][$MONITOR_VALUE]"
+          touch foreground-continued
+      - wait: sibling
+"#,
+    );
+    let report = run_host(graph, "background-cancel").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(
+        lines.contains(&"Cancelling background step(s): Monitor".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"after=[cancelled][cancelled][ready][ready]".to_string()),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"sibling-finished".to_string()), "{lines:?}");
+}
+
+#[tokio::test]
+async fn background_cancel_is_isolated_per_matrix_leg() {
+    let graph = lower_ok(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - id: monitor
+        background: true
+        run: |
+          touch ready
+          sleep 60
+      - run: while [ ! -f ready ]; do sleep 0.01; done
+      - cancel: monitor
+      - run: echo "leg=${{ matrix.n }}:${{ steps.monitor.outcome }}"
+"#,
+    );
+    let report = run_host(graph, "background-cancel-matrix").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    for leg in [1, 2] {
+        assert!(lines.contains(&format!("leg={leg}:cancelled")), "{lines:?}");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_deferred_background_composite_reaches_its_live_children() {
+    let workflow = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p .github/actions/monitor
+          cat > .github/actions/monitor/action.yml <<'ACTION'
+          name: Monitor
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: |
+                  touch ready
+                  sleep 60
+              - shell: bash
+                run: echo must-not-run
+          ACTION
+      - id: monitor
+        background: true
+        uses: ./.github/actions/monitor
+      - run: while [ ! -f ready ]; do sleep 0.01; done
+      - cancel: monitor
+      - run: echo "after=${{ steps.monitor.outcome }}"
+"#;
+    let report = run_host(lower_ok(workflow), "background-cancel-composite").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let lines = log_lines(&report);
+    assert!(lines.contains(&"after=cancelled".to_string()), "{lines:?}");
+    assert!(!lines.contains(&"must-not-run".to_string()), "{lines:?}");
+}
+
+#[tokio::test]
+async fn cancelling_a_finished_or_skipped_background_step_is_harmless() {
+    let workflow = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: finished
+        background: true
+        run: echo "value=done" >> "$GITHUB_OUTPUT"
+      - wait: finished
+      - cancel: finished
+      - id: skipped
+        if: false
+        background: true
+        run: echo must-not-run
+      - wait: skipped
+      - cancel: skipped
+      - cancel: finished
+      - run: echo "after=[${{ steps.finished.outcome }}][${{ steps.finished.outputs.value }}][${{ steps.skipped.outcome }}]"
+"#;
+    let report = run_host(lower_ok(workflow), "background-cancel-settled").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(log_lines(&report).contains(&"after=[success][done][]".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_container_process_can_be_cancelled_without_stopping_the_job() {
+    if !testkit::is_docker_ready().await {
+        return;
+    }
+    let workflow = format!(
+        r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    container: {RUNNER_IMAGE_2404}
+    steps:
+      - id: monitor
+        background: true
+        run: |
+          touch ready
+          sleep 60
+      - run: while [ ! -f ready ]; do sleep 0.01; done
+      - cancel: monitor
+      - run: echo "after=${{{{ steps.monitor.outcome }}}}"
+"#
+    );
+    let report = run_host(lower_ok(&workflow), "background-cancel-boxed").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(log_lines(&report).contains(&"after=cancelled".to_string()));
+}
 
 #[tokio::test]
 async fn background_results_and_environment_publish_at_the_wait() {

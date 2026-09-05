@@ -277,6 +277,24 @@ pub struct RunHandle {
 }
 
 impl RunHandle {
+    /// Request polite cancellation of the group containing a named node.
+    /// Returns false when the node has no group or the driver has stopped.
+    pub async fn cancel_group(&self, node: impl Into<SmolStr>) -> bool {
+        let (ack, accepted) = oneshot::channel();
+        if self
+            .tx
+            .send(Signal::CancelGroup {
+                node: node.into(),
+                ack,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        accepted.await.unwrap_or(false)
+    }
+
     /// Cancel a scope. `CancelScopeId::ROOT` cancels the whole run.
     pub async fn cancel(&self, scope: ir::CancelScopeId) {
         let _ = self
@@ -309,6 +327,10 @@ impl RunHandle {
 
 /// Everything that reaches the loop, through one channel, in arrival order.
 enum Signal {
+    CancelGroup {
+        node: SmolStr,
+        ack:  oneshot::Sender<bool>,
+    },
     /// An event from outside the run entirely, such as an operator cancelling.
     Inject(Event),
     /// A host delivers a value into a firing, and wants to know how it landed.
@@ -656,6 +678,7 @@ impl Driver {
         )
     )]
     pub async fn run(mut self) -> ExecutionReport {
+        self.caps = self.caps.with(self.handle());
         match self.resume.take() {
             None => self.feed(Event::ExecutionStarted(self.start.clone())),
             Some(resume) => {
@@ -764,6 +787,19 @@ impl Driver {
 
     async fn on_signal(&mut self, signal: Signal) {
         match signal {
+            Signal::CancelGroup { node, ack } => {
+                let target = self
+                    .engine
+                    .graph()
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.name == node && candidate.cancel_group.is_some())
+                    .map(|node| node.id);
+                if let Some(node) = target {
+                    self.feed(Event::CancelGroupRequested { node });
+                }
+                let _ = ack.send(target.is_some());
+            }
             Signal::Inject(Event::CancelRequested { scope })
                 if scope == ir::CancelScopeId::ROOT =>
             {
@@ -1287,14 +1323,15 @@ impl Driver {
         let Some(definition) = self.engine.graph().scope(scope) else {
             return self.override_runtime(spec);
         };
-        // Scope env is resolved once, against the run parameters and nothing else:
-        // it cannot depend on a firing.
-        let empty_run = RunContext::new();
+        // Scope env reads parameters and the execution's initial context.
+        // Later context updates and firing-local values cannot change it.
+        let mut initial_context = RunContext::new();
+        initial_context.merge(&self.start.context);
         let mut params_only = StaticCtx::new();
         for (key, value) in &self.engine.graph().params {
             params_only.set(key, value.clone());
         }
-        let env_context = EvalEnv::new(&Value::Null, &empty_run, &params_only);
+        let env_context = EvalEnv::new(&Value::Null, &initial_context, &params_only);
         let resolve = |entries: &BTreeMap<SmolStr, ExprOrValue>| -> BTreeMap<SmolStr, SmolStr> {
             let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
             for (key, value) in entries {

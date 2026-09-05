@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fs};
 
+use execution::host::{self, HostRun};
 use frontend::NoFiles;
 use frontend_gha::load_with;
 use github_actions::{
     ActionManifestSourceCap, ActionRef, ActionSourceCap, ActionStep, ActionTreeSource,
-    BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep,
-    GitActionSource, RunStep,
+    BackgroundCancelStep, BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep,
+    BackgroundWaitStep, GitActionSource, RunStep,
 };
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{Graph, RunStatus};
@@ -213,24 +214,34 @@ fn fixture_reusable_workflow(base: &Path) {
         r"
 on:
   workflow_call:
+    outputs:
+      message:
+        value: ${{ jobs.inner.outputs.message }}
 jobs:
   inner:
     runs-on: ubuntu-latest
+    outputs:
+      message: ${{ steps.action.outputs.message }}
     steps:
-      - uses: ./.github/actions/inner
+      - id: action
+        uses: ./.github/actions/inner
 ",
     )
     .expect("the called workflow is written");
     fs::write(
         dir.join(".github/actions/inner/action.yml"),
-        r"
+        r#"
 name: Inner
+outputs:
+  message:
+    value: ${{ steps.emit.outputs.message }}
 runs:
   using: composite
   steps:
-    - shell: bash
-      run: echo remote-workflow-local-action
-",
+    - id: emit
+      shell: bash
+      run: echo message=remote-workflow-local-action >> "$GITHUB_OUTPUT"
+"#,
     )
     .expect("the local action is written");
     git(&dir, &["init", "-q"]);
@@ -284,6 +295,8 @@ fn runtime(dir: &Path, source: &Arc<GitActionSource>) -> Runtime {
         .step(BackgroundCompleteStep)
         .step(BackgroundPublishStep)
         .step(BackgroundWaitStep)
+        .step(BackgroundCancelStep)
+        .step(github_actions::WorkflowCallStep)
         .capability(ActionSourceCap(trees))
         .capability(ActionManifestSourceCap(manifests))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", FIXTURE_TOKEN)]))
@@ -585,6 +598,11 @@ on: push
 jobs:
   call:
     uses: acme/reusable/.github/workflows/called.yml@v1
+  after:
+    needs: call
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ needs.call.outputs.message }}
 ";
     let lowered = load_with(
         ".github/workflows/reusable.yml",
@@ -596,10 +614,13 @@ jobs:
         eprintln!("{diagnostic}");
     }
     let graph = with_params(lowered.graph.expect("the workflow lowers"));
-    let report = runtime(dir, &source)
-        .run(graph)
-        .await
-        .expect("replay is byte-identical");
+    let report = host::run_configured(
+        &runtime(dir, &source),
+        HostRun::new(graph).with_children(lowered.children),
+        |_, _| {},
+    )
+    .await
+    .expect("replay is byte-identical");
     let lines = testkit::log_lines(&report);
     assert_eq!(
         report.status,

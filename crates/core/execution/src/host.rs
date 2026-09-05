@@ -104,6 +104,12 @@ pub struct HostRun {
     pub observers: Vec<Arc<dyn ExecutionObserver>>,
 }
 
+impl From<Graph> for HostRun {
+    fn from(graph: Graph) -> Self {
+        Self::new(graph)
+    }
+}
+
 impl HostRun {
     /// A root graph alone: no children, no observers.
     pub fn new(graph: Graph) -> Self {

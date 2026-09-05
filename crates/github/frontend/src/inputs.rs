@@ -19,10 +19,10 @@ use ir::{ExprId, ExprTable, Value};
 use crate::exprs::{ExprSite, LoweredScalar, Site, escape_sentinel_text, lower_scalar};
 use crate::model::{InputDecl, InputType};
 
-/// One frame's bound inputs: the expressions the `inputs` context resolves to,
-/// and the subset whose values are already known at lowering — literal `with:`
-/// values and declared defaults — which the per-leg `runs-on` resolver may
-/// read.
+/// One workflow's bound inputs: the expressions the `inputs` context resolves
+/// to, and the subset whose values are already known at lowering — literal
+/// `with:` values and declared defaults — which the per-leg `runs-on` resolver
+/// may read.
 #[derive(Default)]
 pub(crate) struct BoundInputs {
     pub exprs:   BTreeMap<String, ExprId>,

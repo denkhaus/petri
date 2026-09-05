@@ -124,7 +124,7 @@ fn any_of<S>(table: &mut ExprTable<S>, terms: Vec<ExprId<S>>) -> ExprId<S> {
 /// `Inherit` is the root and `secrets: inherit`; `Explicit` is a call's
 /// `secrets:` block, where a declared-but-not-provided optional secret reads as
 /// the empty string (as on GitHub) and an undeclared name is a diagnostic.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) enum SecretMap {
     /// Names pass through unchanged.
     #[default]
@@ -168,9 +168,21 @@ pub(crate) enum ExprSite {
     Job,
 }
 
+/// Status functions suppress the implicit `success()` guard in conditions.
+pub(crate) fn names_status_function(ast: &Expr) -> bool {
+    ast.calls().iter().any(|name| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "success" | "failure" | "cancelled" | "always"
+        )
+    })
+}
+
 /// Where an expression sits.
 #[derive(Clone)]
 pub(crate) struct Site {
+    /// Run parameters come from the caller's invocation context.
+    pub invocation:        bool,
     pub job_id:            String,
     /// `job/step` names of the steps before this one in the job, in order.
     pub earlier_steps:     Vec<String>,
@@ -213,6 +225,7 @@ pub(crate) struct Site {
 impl Site {
     pub(crate) fn new(job_id: &str) -> Self {
         Self {
+            invocation:        false,
             job_id:            job_id.to_string(),
             earlier_steps:     Vec::new(),
             step_names:        BTreeMap::new(),
@@ -235,6 +248,16 @@ impl Site {
     /// The site's node names take the `#index` clone suffix.
     pub(crate) fn expanded(&self) -> bool {
         self.matrix || self.in_expansion
+    }
+
+    pub(crate) fn parameter(table: &mut ExprTable, name: &str, invocation: bool) -> ExprId {
+        if invocation {
+            let kv = table.var("kv");
+            let parameters = table.field(kv, "parameters");
+            table.field(parameters, name)
+        } else {
+            table.var(name)
+        }
     }
 
     /// The run-context record for a node of this job, as an expression: static
@@ -450,7 +473,9 @@ impl Roots for GhaRoots<'_> {
     fn root(&mut self, name: &str, table: &mut ExprTable) -> Option<ExprId> {
         let lowered = name.to_lowercase();
         match lowered.as_str() {
-            n if PARAM_CONTEXTS.contains(&n) => Some(table.var(n)),
+            n if PARAM_CONTEXTS.contains(&n) => {
+                Some(Site::parameter(table, n, self.site.invocation))
+            }
             "env" => Some(table.var("env")),
             "matrix" => {
                 if self.site.matrix {
@@ -638,7 +663,7 @@ impl Roots for GhaRoots<'_> {
                 Some(found.unwrap_or_else(|| table.lit(Value::Null)))
             }
             // Inside `on.workflow_call.outputs` values: `jobs.<id>.outputs.*` and
-            // `jobs.<id>.result` read the (inlined) job's done record, exactly as
+            // `jobs.<id>.result` read the job's done record, exactly as
             // `needs.*` does.
             "jobs" if self.site.callee_jobs.is_some() => {
                 let callee_jobs = self
@@ -1036,6 +1061,14 @@ pub(crate) fn lower_scalar(
                     return Err(());
                 }
             };
+            if names_status_function(&ast) {
+                diags.error(
+                    "gha.status_function_position",
+                    span.clone(),
+                    "status functions are allowed only in `if:`, `pre-if:` and `post-if:` conditions",
+                );
+                return Err(());
+            }
             // A bare `env.NAME` alone in its segment becomes the env sentinel:
             // the step substitutes it at spawn from the environment its
             // process receives, so `GITHUB_ENV` appends from earlier steps

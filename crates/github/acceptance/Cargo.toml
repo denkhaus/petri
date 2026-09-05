@@ -23,6 +23,7 @@ serde_json = { workspace = true }
 smol_str = { workspace = true }
 
 [dev-dependencies]
+execution = { workspace = true }
 async-trait = { workspace = true }
 runtime = { workspace = true }
 github-actions = { workspace = true }

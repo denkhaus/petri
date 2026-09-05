@@ -23,7 +23,7 @@ use crate::{expr_lower, exprs};
 
 /// The matrix's static legs: the matrix through the same expansion the engine
 /// runs at firing time, evaluated now. A value carrying an expression resolves
-/// against the same static contexts `runs-on` reads — the frame's known
+/// against the same static contexts `runs-on` reads — the workflow's known
 /// `inputs` and the checkout's `github` identity — so a matrix axis guarded on
 /// the repository is as static as a literal one. `None` when a value stays
 /// unknown before the run: the legs are then dynamic.
@@ -151,7 +151,7 @@ fn dynamic_input(text: &str, span: &Span) -> Option<Failure> {
 }
 
 /// Evaluate one compiled expression over the static contexts: the leg's
-/// `matrix`, the frame's `inputs`, and the checkout's `github` identity.
+/// `matrix`, the workflow's `inputs`, and the checkout's `github` identity.
 fn eval_static(
     table: &ExprTable,
     id: ExprId,
@@ -179,7 +179,7 @@ struct Entry {
 }
 
 /// The contexts a `runs-on` expression may read before the run: the leg's
-/// `matrix`, the frame's `inputs`, and the checkout's `github` identity.
+/// `matrix`, the workflow's `inputs`, and the checkout's `github` identity.
 struct StaticContexts;
 
 impl Roots for StaticContexts {
@@ -201,11 +201,11 @@ impl Roots for ScopeContexts {
     }
 }
 
-/// One scalar resolved against the frame's static `inputs` and the checkout's
-/// `github` identity — the resolution a per-scope value gets (a container
-/// image, a registry username). `matrix` is deliberately out of reach, and a
-/// run-time input's placeholder fails as [`Failure::DynamicInput`] rather than
-/// leaking into the value.
+/// One scalar resolved against the workflow's static `inputs` and the
+/// checkout's `github` identity — the resolution a per-scope value gets (a
+/// container image, a registry username). `matrix` is deliberately out of
+/// reach, and a run-time input's placeholder fails as [`Failure::DynamicInput`]
+/// rather than leaking into the value.
 pub(crate) fn static_scalar(
     text: &str,
     span: &Span,
@@ -289,7 +289,7 @@ fn compile_with(
 
 impl Compiled {
     /// The labels one leg resolves to, each with the span of the position that
-    /// produced it. `inputs` is the frame's statically-known values, with
+    /// produced it. `inputs` is the workflow's statically-known values, with
     /// [`DYNAMIC_MARK`] placeholders standing in for run-time ones — a label
     /// that absorbed a placeholder names its input instead of placing — and
     /// `github` is the checkout's declared identity.

@@ -28,10 +28,12 @@ mod results;
 mod run;
 mod session;
 mod source;
+mod workflow;
 
 pub use action::{ActionSourceCap, ActionStep, ActionTreeSource};
 pub use background::{
-    BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep, BackgroundWaitStep,
+    BackgroundCancelStep, BackgroundCompleteStep, BackgroundPublishStep, BackgroundStartStep,
+    BackgroundWaitStep,
 };
 pub use checkout::CheckoutStep;
 pub use deferred::{
@@ -41,11 +43,12 @@ pub use deferred::{
 pub use docker::DockerActionStep;
 pub use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
 pub use frontend_gha::{
-    ACTION_KIND, ActionSource, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND,
-    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND, DEFERRED_ACTION_KIND,
-    DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND, DEFERRED_ACTION_RESULT_KIND,
-    DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
+    ACTION_KIND, ActionSource, BACKGROUND_CANCEL_KIND, BACKGROUND_COMPLETE_KIND,
+    BACKGROUND_PUBLISH_KIND, BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, CHECKOUT_KIND,
+    DEFERRED_ACTION_KIND, DEFERRED_ACTION_POST_KIND, DEFERRED_ACTION_PUBLISH_KIND,
+    DEFERRED_ACTION_RESULT_KIND, DOCKER_ACTION_KIND, RUN_KIND, STATE_OUTPUT_KEY,
 };
 pub use results::{ResultsServiceCap, ToolCacheCap};
 pub use run::RunStep;
 pub use source::{GitActionSource, default_cache_dir};
+pub use workflow::WorkflowCallStep;

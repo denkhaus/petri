@@ -38,7 +38,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env::{self, consts};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fs, process};
 
@@ -48,18 +48,22 @@ use acceptance::runs::{
     self, FirstFailure, RunRecord, RunResult, StepIdentity, battery_image, expected_from_log,
     expected_reason, identity_of, runs_report, step_identities,
 };
-use acceptance::{Class, has_corpus, lower_one, workflows};
+use acceptance::{Artifact, Class, has_corpus, lower_one, workflows};
+use execution::host::{self, HostRun};
+use execution::{
+    CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver, InvocationId,
+};
 use frontend_gha::identity;
-use github_actions::{ActionSource, ActionSourceCap, ActionTreeSource, GitActionSource};
+use github_actions::{ActionManifestSourceCap, ActionSource, ActionSourceCap, GitActionSource};
 use runtime::driver::ExecutionReport;
-use runtime::engine::{Event, FIRING_ENV_CLASS};
+use runtime::engine::{EngineState, Event, EventRecord, FIRING_ENV_CLASS};
 use runtime::executor::sandbox::RUN_ID_FILE;
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{self, Graph};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinSet;
 use tokio::time;
 
@@ -106,7 +110,6 @@ async fn corpus_run_sweep() {
 
     let source = Arc::new(GitActionSource::new(root.join(".actions-cache")));
     let manifests: Arc<dyn ActionSource> = source.clone();
-    let trees: Arc<dyn ActionTreeSource> = source;
 
     let filter = env::var("PETRI_SWEEP_FILTER").unwrap_or_default();
     let jobs = usize::try_from(env_num("PETRI_SWEEP_JOBS", 4))
@@ -131,7 +134,7 @@ async fn corpus_run_sweep() {
     // callee-only, broken upstream) leave the denominator exactly as REPORT.md
     // leaves them.
     let mut records: Vec<RunRecord> = Vec::new();
-    let mut queue: Vec<(usize, Graph, bool)> = Vec::new();
+    let mut queue: Vec<(usize, Artifact, bool)> = Vec::new();
     for (repo, repo_root, file) in workflows(&root) {
         let (outcome, graph) = lower_one(&repo, &repo_root, &file, Some(&manifests));
         if outcome.is_out_of_scope() || outcome.is_broken_upstream() || outcome.is_callee_only() {
@@ -147,16 +150,18 @@ async fn corpus_run_sweep() {
                 features: outcome.unsupported_features(),
             },
         };
-        if let (Class::Clean | Class::Warnings, Some(mut graph)) = (outcome.class, graph) {
-            prepare(
-                &mut graph,
-                &repo,
-                &outcome.file,
-                pins.get(&repo).map(String::as_str),
-                &repo_root,
-                platform.as_deref(),
-                runner_arch,
-            );
+        if let (Class::Clean | Class::Warnings, Some(mut artifact)) = (outcome.class, graph) {
+            artifact.map_graphs(|graph| {
+                prepare(
+                    graph,
+                    &repo,
+                    &outcome.file,
+                    pins.get(&repo).map(String::as_str),
+                    &repo_root,
+                    platform.as_deref(),
+                    runner_arch,
+                );
+            });
             // A reusable file run standalone has no caller to supply its
             // declared inputs; a firing-environment failure there is
             // caller-coupled, not a gap. (The word in the file is the signal:
@@ -174,13 +179,13 @@ async fn corpus_run_sweep() {
                     .map_or("0000000000000000000000000000000000000000", String::as_str);
                 let branch = default_branch(&repo_root).unwrap_or_else(|| "main".to_string());
                 if let Some((name, payload)) = runs::simulated_event(&text, &repo, sha, &branch)
-                    && let Some(github) = graph.params.get_mut("github")
+                    && let Some(github) = artifact.graph.params.get_mut("github")
                 {
                     github["event_name"] = json!(name);
                     github["event"] = payload;
                 }
             }
-            queue.push((records.len(), graph, caller_coupled));
+            queue.push((records.len(), artifact, caller_coupled));
         }
         records.push(record);
     }
@@ -199,12 +204,12 @@ async fn corpus_run_sweep() {
         // would stall spawning on the permits, and the first progress line
         // waited until nearly the whole sweep had finished.
         let semaphore = semaphore.clone();
-        let trees = trees.clone();
+        let source = source.clone();
         let repo = records[slot].repo.clone();
         let file = records[slot].file.clone();
         set.spawn(async move {
             let _permit = semaphore.acquire_owned().await.expect("semaphore open");
-            let result = run_one(&repo, &file, graph, trees, timeout, caller_coupled).await;
+            let result = run_one(&repo, &file, graph, source, timeout, caller_coupled).await;
             (slot, result)
         });
     }
@@ -363,16 +368,15 @@ fn default_branch(repo_root: &Path) -> Option<String> {
 async fn run_one(
     repo: &str,
     file: &str,
-    graph: Graph,
-    trees: Arc<dyn ActionTreeSource>,
+    artifact: Artifact,
+    source: Arc<GitActionSource>,
     timeout: Duration,
     caller_coupled: bool,
 ) -> RunResult {
-    let identities = step_identities(&graph);
-    let stub_consumers = runs::stubbed_output_consumers(&graph);
-    let dispatch_refs = runs::dispatch_ref_checkouts(&graph);
-    let empty_inputs = runs::empty_input_steps(&graph);
-    let scripts = runs::stashed_scripts(&graph);
+    let failures = Arc::new(SweepFailures {
+        caller_coupled,
+        ..Default::default()
+    });
     let label: String = format!("{repo}-{file}")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -415,21 +419,34 @@ async fn run_one(
         .step(github_actions::BackgroundCompleteStep)
         .step(github_actions::BackgroundPublishStep)
         .step(github_actions::BackgroundWaitStep)
-        .capability(ActionSourceCap(trees))
+        .step(github_actions::BackgroundCancelStep)
+        .step(github_actions::WorkflowCallStep)
+        .capability(ActionSourceCap(source.clone()))
+        .capability(ActionManifestSourceCap(source))
         .capability(github_actions::ToolCacheCap(tool_cache))
         .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", &sweep_token())]));
     let rt = support::with_object_service(rt, Some(github_objects::cache_dir(&store)));
 
-    let driver = rt.driver(graph);
-    let handle = driver.handle();
-    let mut run = tokio::spawn(driver.run());
+    let (handle_tx, handle_rx) = oneshot::channel();
+    let graphs = HostRun::new(artifact.graph)
+        .with_children(artifact.children)
+        .observe(failures.clone());
+    let mut run = tokio::spawn(async move {
+        host::run_configured(&rt, graphs, |handle, _| {
+            let _ = handle_tx.send(handle);
+        })
+        .await
+    });
+    let handle = handle_rx
+        .await
+        .expect("the host initializes its coordinator");
 
     let outcome = tokio::select! {
-        joined = &mut run => Finished::Ran(Box::new(joined.expect("the driver task never panics"))),
+        joined = &mut run => Finished::Ran(Box::new(joined.expect("the coordinator task never panics").expect("the coordinator finishes"))),
         () = time::sleep(timeout) => {
-            handle.cancel(ir::CancelScopeId::ROOT).await;
+            handle.cancel_root();
             if let Ok(joined) = time::timeout(Duration::from_secs(90), &mut run).await {
-                let _ = joined.expect("the driver task never panics");
+                let _ = joined.expect("the coordinator task never panics").expect("the coordinator finishes");
                 Finished::TimedOut
             } else {
                 // The cancel did not bring the run down. Abandon the task and
@@ -447,15 +464,13 @@ async fn run_one(
         Finished::TimedOut => RunResult::TimedOut { wedged: false },
         Finished::Ran(report) => match report.status {
             ir::RunStatus::Success => RunResult::Pass,
-            _ => first_failure(
-                &report,
-                &identities,
-                caller_coupled,
-                &stub_consumers,
-                &dispatch_refs,
-                &empty_inputs,
-                &scripts,
-            ),
+            _ => failures
+                .failed_children
+                .lock()
+                .expect("child failures lock")
+                .first()
+                .cloned()
+                .unwrap_or_else(|| classify_failure(&report.state, caller_coupled)),
         },
     };
     let _ = fs::remove_dir_all(&dir);
@@ -468,9 +483,82 @@ enum Finished {
     Wedged,
 }
 
+fn classify_failure(state: &EngineState, caller_coupled: bool) -> RunResult {
+    let graph = state.graph();
+    first_failure(
+        state,
+        &step_identities(graph),
+        caller_coupled,
+        &runs::stubbed_output_consumers(graph),
+        &runs::dispatch_ref_checkouts(graph),
+        &runs::empty_input_steps(graph),
+        &runs::stashed_scripts(graph),
+    )
+}
+
+#[derive(Default)]
+struct SweepFailures {
+    caller_coupled:  bool,
+    pending:         Mutex<BTreeMap<ExecutionId, RunResult>>,
+    failed_children: Mutex<Vec<RunResult>>,
+}
+
+#[async_trait::async_trait]
+impl ExecutionObserver for SweepFailures {
+    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
+        if matches!(&record.event, Event::StepFinished { firing, outcome, .. } if outcome.status.is_failure() && state.history().last().is_some_and(|finished| finished.firing == *firing))
+        {
+            self.pending
+                .lock()
+                .expect("execution failures lock")
+                .entry(execution)
+                .or_insert_with(|| classify_failure(state, self.caller_coupled));
+        }
+    }
+    fn on_lifecycle(&self, record: &CoordinatorRecord) {
+        if let CoordinatorEvent::InvocationFinished { invocation, result } = &record.event
+            && *invocation != InvocationId::ROOT
+            && result.status == ir::RunStatus::Failed
+            && let Some(failure) = self
+                .pending
+                .lock()
+                .expect("execution failures lock")
+                .remove(&result.final_execution)
+        {
+            self.failed_children
+                .lock()
+                .expect("child failures lock")
+                .push(failure);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_sweep_failure_names_the_failed_child_step() {
+    let child = "on:\n  workflow_call: {}\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 7\n";
+    let caller = "on: push\njobs:\n  call:\n    uses: ./.github/workflows/child.yml\n";
+    let files = support::files(&[(".github/workflows/child.yml", child)]);
+    let failures = Arc::new(SweepFailures::default());
+    let report = support::run_host(
+        support::lower_ok_with(caller, &files).observe(failures.clone()),
+        "sweep-child-failure",
+    )
+    .await;
+    assert_eq!(report.status, ir::RunStatus::Failed);
+    let failures = failures
+        .failed_children
+        .lock()
+        .expect("child failures lock");
+    let RunResult::Fail(failure) = &failures[0] else {
+        panic!("the child failed")
+    };
+    assert_eq!(failure.node, "work/step-1");
+    assert!(failure.message.contains('7'), "{}", failure.message);
+}
+
 /// The run's first failing record, read against the graph's step identities.
 fn first_failure(
-    report: &ExecutionReport,
+    state: &EngineState,
     identities: &BTreeMap<String, StepIdentity>,
     caller_coupled: bool,
     stub_consumers: &BTreeSet<String>,
@@ -478,7 +566,7 @@ fn first_failure(
     empty_inputs: &BTreeSet<String>,
     scripts: &[(String, Option<String>)],
 ) -> RunResult {
-    for record in report.state.history() {
+    for record in state.history() {
         if !record.outcome.status.is_failure() {
             continue;
         }
@@ -489,7 +577,7 @@ fn first_failure(
         let identity = identity_of(identities, &record.name)
             .cloned()
             .unwrap_or_else(|| StepIdentity::Other(record.name.to_string()));
-        let lines = step_log(report, record.firing);
+        let lines = step_log(state, record.firing);
         let tail = display_tail(&lines);
         let expected = expected_reason(&identity, &class, !sweep_token().is_empty())
             .or_else(|| expected_from_log(&identity, &lines))
@@ -538,18 +626,16 @@ fn first_failure(
     }
     // No failing record: the run failed on engine errors alone — name them,
     // or the report can only shrug.
-    let errors: Vec<String> = report
-        .state
-        .errors()
-        .iter()
-        .map(|e| format!("{e}"))
-        .collect();
+    let errors: Vec<String> = state.errors().iter().map(|e| format!("{e}")).collect();
     RunResult::Fail(FirstFailure {
         node:     "(run)".to_string(),
         step:     "(run)".to_string(),
         class:    String::new(),
         message:  if errors.is_empty() {
-            format!("run ended {:?} with no failing record", report.status)
+            format!(
+                "run ended {:?} with no failing record",
+                state.folded_status()
+            )
         } else {
             format!("engine error: {}", errors.join(" | "))
         },
@@ -565,9 +651,8 @@ fn first_failure(
     clippy::print_stderr,
     reason = "`PETRI_SWEEP_LOG` asks for the failing step's log on stderr; a test binary has no other sink"
 )]
-fn step_log(report: &ExecutionReport, firing: ir::FiringId) -> Vec<String> {
-    let lines: Vec<String> = report
-        .state
+fn step_log(state: &EngineState, firing: ir::FiringId) -> Vec<String> {
+    let lines: Vec<String> = state
         .log
         .events()
         .filter_map(|e| match e {

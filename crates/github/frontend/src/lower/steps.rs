@@ -383,8 +383,8 @@ impl<'a> Lowering<'_, 'a> {
 
     /// `github.event`, for `GITHUB_EVENT_PATH`.
     pub(super) fn event_config(&mut self) -> Value {
+        let github = self.parameter("github");
         let t = self.b.exprs();
-        let github = t.var("github");
         let key = t.lit("event");
         let event = t.call("get_ci", vec![github, key]);
         json!({ EXPR_PLACEHOLDER_KEY: event.raw() })

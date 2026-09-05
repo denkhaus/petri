@@ -65,6 +65,10 @@ pub const BACKGROUND_START_KIND: &str = "github/background_start";
 pub const BACKGROUND_PUBLISH_KIND: &str = "github/background_publish";
 /// A wait control step that folds the included background conclusions.
 pub const BACKGROUND_WAIT_KIND: &str = "github/background_wait";
+/// Request cancellation of a background branch before publishing its result.
+pub const BACKGROUND_CANCEL_KIND: &str = "github/background_cancel";
+/// One isolated invocation of a reusable workflow.
+pub const WORKFLOW_CALL_KIND: &str = "github/workflow_call";
 
 /// The run-parameter context and key naming the run's repository root:
 /// the host fills `petri.repo`, and a [`CHECKOUT_KIND`] node's config reads

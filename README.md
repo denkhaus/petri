@@ -136,6 +136,17 @@ workspace pins under `target/plugins/bin`, and the test tasks point
 plugin is missing or no daemon is reachable, so `mise run test` is green on a
 machine without one.
 
+Release archives bundle the Docker, Host, and Daytona plugin executables from
+the pinned revision. Petri embeds their SHA-256 digests at release build time.
+`scripts/release-verify.sh` checks the archive, runs a container workflow without
+development mode, and verifies rejection of a modified plugin. The CI, nightly,
+and release jobs use a read-only sandbox-driver deploy key from the
+`sandbox-driver-read` environment.
+
+`mise run test:remote` transfers an artifact through a separate Docker daemon
+with no host filesystem mounts. `mise run check` includes this test. Set
+`PETRI_REQUIRE_DOCKER=1` to require Docker instead of skipping unavailable tests.
+
 `mise run test` runs all of them with Nextest, then runs the maintained doctests
 with Cargo.
 
@@ -538,8 +549,10 @@ in brackets.
    `wait-all`, and `parallel` add explicit joins, and an implicit wait joins
    remaining work before post-action cleanup. A private environment channel
    defers outputs, `GITHUB_ENV`, and `GITHUB_PATH` until the join publishes the
-   step. Targeted `cancel` remains rejected as `unsupported.step.cancel`
-   because the engine has no per-background control path.
+   step. `cancel: id` stops that branch through an engine cancellation group,
+   joins it, and publishes its effects. The target records `cancelled`; the
+   cancel control succeeds and the foreground job continues. Matrix legs and
+   deferred composite actions preserve their cancellation boundaries.
 
 7. **Action manifests resolve when their steps run** — resolved. Remote
    references still pin at lowering, but local and pinned manifests use one
@@ -567,8 +580,9 @@ cross-run semantics stay with the multi-run driver layer (D2). Windows and macOS
 runners are out of scope (`runs_on.windows`, `runs_on.macos`): the local executor
 emulates Linux runners only. The declared support matrix is
 `crates/github/SUPPORT.md`, held in sync with the corpus report by a harness test.
-Common enough to shrink the rejection set next: `workflow_call` (92 workflows) and
-`runs-on` expressions (47).
+Reusable workflows now run as child invocations, including a call matrix with
+a job matrix inside the child. Remaining `runs-on` expression limits are listed
+in the support matrix.
 
 ### What the core may know
 

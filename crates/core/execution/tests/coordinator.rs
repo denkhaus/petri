@@ -403,6 +403,51 @@ async fn a_step_can_run_a_registered_nested_invocation() {
 }
 
 #[tokio::test]
+async fn an_inherited_child_cannot_declare_a_different_container() {
+    let directory = RunDir::new("coordinator-inherited-container-mismatch");
+    let runtime = Runtime::standard()
+        .step(InvokeStep)
+        .options(RunOptions::new(directory.path()));
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .unwrap();
+    let mut child = GraphBuilder::bare();
+    let mut child_scope = Scope::new(ScopeId::new(0));
+    child_scope.runtime = ir::RuntimeSpec::container("alpine:3.20");
+    let child_scope = child.add_scope(child_scope);
+    child.add_step("must-not-run", child_scope, "noop");
+    let child = coordinator.register_graph(&child.build()).unwrap();
+    let mut parent = GraphBuilder::new();
+    parent.add_node(
+        "invoke",
+        ScopeId::new(0),
+        StepRef::new(
+            InvokeStep::NAME,
+            serde_json::json!({"graph": child, "inherit": true}),
+        ),
+    );
+    let parent = coordinator.register_graph(&parent.build()).unwrap();
+    let result = coordinator.run_root(parent, BTreeMap::new()).await.unwrap();
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        coordinator.store().state().invocations.len(),
+        1,
+        "the invalid child is refused before declaration"
+    );
+    let events = fs::read_to_string(
+        directory
+            .path()
+            .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl"),
+    )
+    .unwrap();
+    assert!(events.contains("declares a different container"));
+    coordinator.finish().await;
+}
+
+#[tokio::test]
 async fn sibling_nested_invocations_run_in_parallel() {
     let directory = RunDir::new("coordinator-parallel-nested");
     let runtime = Runtime::standard()

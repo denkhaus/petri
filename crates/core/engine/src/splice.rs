@@ -719,6 +719,7 @@ pub(crate) fn apply_prepared_splice(
         prepared.parent_scope,
         batch_nodes.clone(),
     );
+    state.add_cancel_groups(prepared.cancel_scope, &batch_nodes);
 
     let mut retracted = Vec::new();
     for effect in &prepared.effects {
@@ -884,6 +885,7 @@ fn remap_node(
         budget,
         retry,
         run_on_cancel,
+        cancel_group,
         tolerates_failure,
         splice_policy,
         meta,
@@ -904,6 +906,7 @@ fn remap_node(
     node.budget = *budget;
     node.retry = retry.clone();
     node.run_on_cancel = *run_on_cancel;
+    node.cancel_group = cancel_group.map(|id| NodeId::new(node_base + id.raw()));
     node.tolerates_failure = *tolerates_failure;
     node.splice_policy = *splice_policy;
     node.meta = meta.clone();

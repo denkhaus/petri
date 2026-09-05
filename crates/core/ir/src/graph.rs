@@ -585,6 +585,12 @@ pub struct Node<S = Live> {
     /// whatever its gates say. Kill admits nothing, flag or no flag.
     #[serde(default)]
     pub run_on_cancel:     bool,
+    /// Nodes with the same anchor form an independently cancellable group.
+    /// The anchor names itself. Expansions remap the anchor with the nodes,
+    /// so each clone has its own group. Outcome splices inherit their owner's
+    /// cancellation scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_group:      Option<NodeId<S>>,
     /// This node's failure is control flow, not a run failure: under
     /// [`Completion::AnyFailure`] the status fold passes over a failed record
     /// here, and a failed clone does not trigger its splice's fail-fast cancel.
@@ -621,6 +627,7 @@ impl<S> Node<S> {
             budget: Budget::once(),
             retry: RetryPolicy::none(),
             run_on_cancel: false,
+            cancel_group: None,
             tolerates_failure: false,
             splice_policy: SplicePolicy::Deny,
             meta: Value::Null,

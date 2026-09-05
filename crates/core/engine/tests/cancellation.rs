@@ -20,6 +20,151 @@ use ir::{
 use serde_json::json;
 use support::{Harness, NOOP};
 
+#[test]
+fn cancelling_one_expanded_group_preserves_the_other_clone() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let work = b.add_step("work", scope, NOOP);
+    b.node_mut(work).cancel_group = Some(work);
+    let items = b.exprs().lit(json!([1, 2]));
+    parallel_for_each(&mut b, work, items, ExpandTarget::Node, None, false);
+    let graph = b.build();
+    validate(&graph).expect("valid expansion");
+    let mut h = Harness::new(graph);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    let starts = h.take_starts();
+    let first = h
+        .state
+        .graph()
+        .nodes
+        .iter()
+        .find(|node| node.name == "work#0")
+        .unwrap()
+        .id;
+    h.feed(Event::CancelGroupRequested { node: first });
+    let controls: Vec<_> = h
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::DeliverControl {
+                firing,
+                ctl: Control::Cancel,
+            } => Some(*firing),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(controls, vec![
+        starts.iter().find(|(_, name)| name == "work#0").unwrap().0
+    ]);
+    for (firing, name) in starts {
+        h.finish(
+            firing,
+            if name == "work#0" {
+                Outcome::cancelled()
+            } else {
+                Outcome::success(Value::Null)
+            },
+        );
+    }
+    assert_eq!(h.status_of("work#1").as_deref(), Some("success"));
+    h.verify_replay();
+}
+
+#[test]
+fn a_cancellation_group_cannot_cross_an_expansion_boundary() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let work = b.add_step("work", scope, NOOP);
+    let after = b.add_step("after", scope, NOOP);
+    b.link(work, after);
+    b.node_mut(work).cancel_group = Some(work);
+    b.node_mut(after).cancel_group = Some(work);
+    let items = b.exprs().lit(json!([1, 2]));
+    parallel_for_each(&mut b, work, items, ExpandTarget::Node, None, false);
+    assert!(
+        validate(&b.build())
+            .unwrap_err()
+            .iter()
+            .any(|error| error.code() == "validate.cancel_group_expansion")
+    );
+}
+
+#[test]
+fn targeted_cancellation_stops_a_group_and_preserves_other_branches() {
+    let mut b = GraphBuilder::new();
+    let scope = ir::ScopeId::new(0);
+    let start = b.add_step("start", scope, NOOP);
+    let worker = b.add_step("worker", scope, NOOP);
+    let pending = b.add_step("pending", scope, NOOP);
+    let sibling = b.add_step("sibling", scope, NOOP);
+    b.node_mut(worker).cancel_group = Some(worker);
+    b.node_mut(pending).cancel_group = Some(worker);
+    b.fan_out(start, &[worker, sibling]);
+    b.link(worker, pending);
+    let graph = b.build();
+    validate(&graph).expect("valid groups");
+    let mut h = Harness::new(graph);
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    let start = h.take_starts()[0].0;
+    h.finish(start, Outcome::success(Value::Null));
+    let running = h.take_starts();
+    h.feed(Event::CancelGroupRequested { node: worker });
+    let controls: Vec<_> = h
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::DeliverControl {
+                firing,
+                ctl: Control::Cancel,
+            } => Some(*firing),
+            _ => None,
+        })
+        .collect();
+    let worker_firing = running.iter().find(|(_, name)| name == "worker").unwrap().0;
+    assert_eq!(controls, vec![worker_firing]);
+    assert!(!h.state.is_cancelled());
+    for (firing, name) in running {
+        h.finish(
+            firing,
+            if name == "worker" {
+                Outcome::cancelled()
+            } else {
+                Outcome::success(Value::Null)
+            },
+        );
+    }
+    assert_eq!(h.start_count("pending"), 0);
+    assert_eq!(h.status_of("pending").as_deref(), Some("cancelled"));
+    assert_eq!(h.status_of("sibling").as_deref(), Some("success"));
+    h.verify_replay();
+}
+
+#[test]
+fn targeted_cancellation_settles_retry_backoff_without_another_attempt() {
+    let mut b = GraphBuilder::new();
+    let worker = b.add_step("worker", ir::ScopeId::new(0), NOOP);
+    let after = b.add_step("after", ir::ScopeId::new(0), NOOP);
+    b.node_mut(after).run_on_cancel = true;
+    b.link(worker, after);
+    b.node_mut(worker).cancel_group = Some(worker);
+    b.node_mut(worker).retry = RetryPolicy::attempts(2);
+    let mut h = Harness::new(b.build());
+    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    let firing = h.take_starts()[0].0;
+    h.finish(firing, Outcome::failure("retry"));
+    h.feed(Event::CancelGroupRequested { node: worker });
+    h.feed(Event::RetryElapsed {
+        firing,
+        next_attempt: Attempt::new(2),
+    });
+    assert_eq!(h.start_count("worker"), 1);
+    assert_eq!(h.status_of("worker").as_deref(), Some("cancelled"));
+    assert!(h.state.errors().is_empty(), "{:?}", h.state.errors());
+    let after = h.take_starts()[0].0;
+    h.finish(after, Outcome::success(Value::Null));
+    h.verify_replay();
+}
+
 /// Cancelling the root scope cancels every live firing and drops every token.
 #[test]
 fn cancelling_the_root_scope_stops_the_run() {

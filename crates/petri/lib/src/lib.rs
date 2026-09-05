@@ -147,6 +147,8 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
         .step(github::BackgroundCompleteStep)
         .step(github::BackgroundPublishStep)
         .step(github::BackgroundWaitStep)
+        .step(github::BackgroundCancelStep)
+        .step(github::WorkflowCallStep)
         .capability(github::ActionSourceCap(trees))
         .capability(github::ActionManifestSourceCap(manifests))
         .capability(github::ToolCacheCap(tool_cache))

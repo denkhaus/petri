@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use execution::{
-    CallSite, CoordinatorInvocationClient, GraphDigest, InvocationClient, InvocationHandle,
-    InvocationRequest, InvocationResult, SandboxMode, SecretBindings,
+    CallSite, CoordinatorInvocationClient, GraphDigest, InvocationClient, InvocationRequest,
+    SandboxMode, SecretBindings,
 };
 use frontend_fabro::kinds::{StageOutcome, WORKFLOW_KIND};
 use frontend_fabro::{Policy, condition};
@@ -117,34 +117,6 @@ impl StopCondition {
     }
 }
 
-async fn child_result(
-    handle: &mut InvocationHandle,
-    control: &mut mpsc::Receiver<Control>,
-) -> Option<InvocationResult> {
-    enum Event {
-        Result(InvocationResult),
-        Deliver,
-        Cancel,
-    }
-    loop {
-        let event = tokio::select! {
-            result = handle.result() => Event::Result(result),
-            ctl = control.recv() => match ctl {
-                Some(Control::Deliver(_)) => Event::Deliver,
-                _ => Event::Cancel,
-            },
-        };
-        match event {
-            Event::Result(result) => return Some(result),
-            Event::Deliver => {}
-            Event::Cancel => {
-                handle.cancel().await;
-                return None;
-            }
-        }
-    }
-}
-
 async fn wait_interval(duration: Duration, control: &mut mpsc::Receiver<Control>) -> bool {
     let sleep = time::sleep(duration);
     tokio::pin!(sleep);
@@ -204,7 +176,7 @@ impl Step for WorkflowStep {
                 Ok(handle) => handle,
                 Err(error) => return fail(error.to_string(), "invocation"),
             };
-            let Some(result) = child_result(&mut handle, &mut ctx.control).await else {
+            let Some(result) = handle.result_with_control(&mut ctx.control).await else {
                 return Outcome::cancelled();
             };
             last_status = result.status;

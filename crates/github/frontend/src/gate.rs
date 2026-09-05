@@ -41,7 +41,7 @@ use frontend::expr::lower::literal_value;
 use frontend::expr::{BinaryOp, Expr, UnaryOp};
 use ir::expr::builtins::loose;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
-use ir::{ExprTable, Value};
+use ir::{ExprId, ExprTable, Value};
 use serde_json::json;
 
 use crate::exprs::{ExprSite, Sentinel, Site, literal_hashfiles_patterns, lower_expr};
@@ -492,7 +492,19 @@ fn engine_leaf(
     table: &mut ExprTable,
     diags: &mut Diagnostics,
 ) -> Option<Gate> {
-    let lowered = lower_expr(ast, site, ExprSite::Step, span, table, diags)?;
+    condition_expr(ast, site, ExprSite::Step, span, table, diags).map(Gate::expr)
+}
+
+/// Lower a condition evaluated by the engine, rejecting unresolved sentinels.
+pub(crate) fn condition_expr(
+    ast: &Expr,
+    site: &Site,
+    at: ExprSite,
+    span: &Span,
+    table: &mut ExprTable,
+    diags: &mut Diagnostics,
+) -> Option<ExprId> {
+    let lowered = lower_expr(ast, site, at, span, table, diags)?;
     for kind in Sentinel::ALL {
         let Some(diagnostic) = kind.gate_diagnostic() else {
             continue;
@@ -508,7 +520,7 @@ fn engine_leaf(
         );
         return None;
     }
-    Some(Gate::expr(lowered.id))
+    Some(lowered.id)
 }
 
 #[cfg(test)]

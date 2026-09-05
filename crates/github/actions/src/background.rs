@@ -1,5 +1,6 @@
 //! Join-time publication for GitHub background steps.
 
+use driver::RunHandle;
 use ir::{FailureClass, FailureInfo, LogStream, Outcome, Status, Value};
 use serde::{Deserialize, Serialize};
 use steps::{Step, StepCtx};
@@ -7,6 +8,45 @@ use steps::{Step, StepCtx};
 use crate::session::{initialize_background, publish_background};
 
 const BACKGROUND_CLASS: FailureClass = FailureClass::new_static("background_step");
+
+/// Requests cancellation before the ordinary join publishes the result.
+pub struct BackgroundCancelStep;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelConfig {
+    target: String,
+    name:   String,
+}
+
+#[async_trait::async_trait]
+impl Step for BackgroundCancelStep {
+    const NAME: &'static str = frontend_gha::BACKGROUND_CANCEL_KIND;
+    type Config = CancelConfig;
+
+    async fn run(&self, config: Self::Config, ctx: StepCtx) -> Outcome {
+        let handle = match ctx.require_capability::<RunHandle>() {
+            Ok(handle) => handle,
+            Err(failure) => return failure.into(),
+        };
+        ctx.log(
+            LogStream::Stdout,
+            format!("Cancelling background step(s): {}", config.name),
+        )
+        .await;
+        if handle.cancel_group(config.target).await {
+            Outcome::success(Value::Null)
+        } else {
+            Outcome::new(
+                Status::Failure(
+                    FailureInfo::new("the background cancellation group is unavailable")
+                        .with_class(BACKGROUND_CLASS),
+                ),
+                Value::Null,
+            )
+        }
+    }
+}
 
 /// Snapshots the foreground job environment before the branch and foreground
 /// fan out. This makes the launch point deterministic under task scheduling.
@@ -96,6 +136,10 @@ pub struct BackgroundWaitStep;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WaitConfig {
+    /// A cancel joins and publishes effects without merging the verdict into
+    /// the foreground job result, as GitHub's cancel control does.
+    #[serde(default)]
+    cancel:            bool,
     #[serde(default)]
     targets:           Vec<WaitTarget>,
     #[serde(default)]
@@ -117,6 +161,9 @@ impl Step for BackgroundWaitStep {
     type Config = WaitConfig;
 
     async fn run(&self, config: Self::Config, ctx: StepCtx) -> Outcome {
+        if config.cancel {
+            return Outcome::success(Value::Null);
+        }
         let mut failed = false;
         let mut cancelled = false;
         for target in &config.targets {

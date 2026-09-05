@@ -9,6 +9,7 @@ permissions: {}
 jobs:
   build:
     name: build (${{ matrix.target }})
+    environment: sandbox-driver-read
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -29,6 +30,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure private dependency access
+        uses: ./.github/actions/sandbox-driver-access
+        with:
+          deploy-key: ${{ secrets.SANDBOX_DRIVER_DEPLOY_KEY }}
+
       - name: Install locked tools
         uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
@@ -42,6 +48,13 @@ jobs:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: mise run release "$RELEASE_TARGET" "$RELEASE_VERSION"
 
+      - name: Verify release archive
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+          PETRI_REQUIRE_DOCKER: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: scripts/release-verify.sh "dist-release/petri-${RELEASE_VERSION}-${RELEASE_TARGET}.tar.gz"
+
       - name: Upload release archive
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -50,6 +63,10 @@ jobs:
             dist-release/*.tar.gz
             dist-release/*.sha256
           if-no-files-found: error
+
+      - name: Remove dependency credential
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/petri-sandbox-driver/key"
 
   publish:
     name: draft release

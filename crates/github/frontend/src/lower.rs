@@ -1,41 +1,38 @@
-//! Workflow → HIR, per spec §12.
-//!
-//! This file is the pass's shape: [`Lowering`] and the plan it walks —
-//! [`Frame`]s and [`Entry`]s — plus the [`lower`] driver and the pieces every
-//! stage shares. The stages live in the submodules: [`frames`] flattens the
-//! call graph and binds each frame's context, [`jobs`] builds each job's
-//! bracket, body and edges, [`scope`] decides where a job runs and what its
-//! steps see, [`steps`] lowers `run:` steps and their gates, and [`uses`]
-//! resolves and lowers `uses:` steps.
+//! Workflow graphs and their shared lowering passes. Reusable workflows
+//! compile to registered child graphs; composite actions remain step
+//! composition.
 
 mod deferred;
-mod frames;
 mod jobs;
 mod scope;
 mod steps;
 mod uses;
+mod workflows;
 
-use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::mem;
 
 pub use deferred::{DeferredActionPlan, PlannedDeferredAction, plan_deferred_action};
 use frontend::FileSource;
-use frontend::diag::{Diagnostic, Diagnostics, Lowered, Span};
+use frontend::diag::{Diagnostics, Lowered, Span};
 use frontend::expr::lower::builtin;
 use frontend::expr::{self, parse};
 use frontend::yaml::Node;
 use ir::{BinOp, ExprId, ExprOrValue, GraphBuilder, NodeId, ScopeId, Value};
 
-use self::frames::plan;
 use self::uses::ResolveFailure;
+use self::workflows::Compiler;
 use crate::action::{ActionLocation, ActionSource, Phase, PinnedAction};
 use crate::call::{self, CalleeSource};
 use crate::composite::{DockerAction, NodeAction};
-use crate::exprs::{ExprSite, LoweredScalar, SEP, SecretMap, Site, lower_scalar};
+use crate::exprs::{
+    ExprSite, LoweredScalar, SEP, SecretMap, Site, lower_scalar, names_status_function,
+};
 use crate::model::{Job, Step, Workflow};
 use crate::runners::RunnerMap;
-use crate::{identity, runs_on};
+use crate::{gate, runs_on};
+
+type ActionResolutions = RefCell<HashMap<String, Result<PinnedAction, ResolveFailure>>>;
 
 struct JobNodes {
     scope:  ScopeId,
@@ -50,8 +47,9 @@ pub(crate) struct Lowering<'w, 'a> {
     b:                   GraphBuilder,
     diags:               Diagnostics,
     wf:                  &'w Workflow<'a>,
-    /// The planned frames — the root workflow and each inlined callee.
-    frames:              Vec<Frame<'w, 'a>>,
+    source:              CalleeSource,
+    context:             WorkflowContext,
+    is_invocation:       bool,
     files:               &'w dyn FileSource,
     /// Where `uses: owner/repo@ref` actions come from. `None` rejects them.
     actions:             Option<&'w dyn ActionSource>,
@@ -62,7 +60,7 @@ pub(crate) struct Lowering<'w, 'a> {
     substitute_checkout: bool,
     /// Remote actions resolved so far, by reference as written: the pin, or
     /// why not. A reference used by several steps resolves once.
-    resolved:            HashMap<String, Result<PinnedAction, ResolveFailure>>,
+    resolved:            &'w ActionResolutions,
     jobs:                HashMap<String, JobNodes>,
     spans:               HashMap<NodeId, Span>,
     /// The job in flight's per-leg `runs-on` resolutions: what each matrix leg
@@ -74,11 +72,6 @@ pub(crate) struct Lowering<'w, 'a> {
     /// origin remote where one exists — which placement guards evaluate
     /// against ([`crate::identity`]).
     github_identity:     Value,
-    /// One context per frame — the root workflow and each inlined callee —
-    /// bound top-down before any node exists ([`Lowering::bind_frame`]).
-    frame_ctx:           Vec<FrameCtx>,
-    /// The frame whose workflow `self.wf` currently is ([`Lowering::enter`]).
-    current:             usize,
     mode:                LoweringMode,
 }
 
@@ -90,6 +83,7 @@ struct RuntimeSite {
     in_expansion: bool,
     needs:        BTreeMap<String, String>,
     depth:        usize,
+    invocation:   bool,
 }
 
 enum LoweringMode {
@@ -103,66 +97,12 @@ enum LoweringMode {
     },
 }
 
-/// One workflow being lowered: the root, or a callee inlined under a call job.
-struct Frame<'w, 'a> {
-    wf:           &'w Workflow<'a>,
-    /// Where this workflow's text came from — its own `./` references resolve
-    /// against this.
-    source:       CalleeSource,
-    /// `""` at the root; the call job's materialized id for a callee frame, so
-    /// every node of the frame lives under `prefix/…`.
-    prefix:       String,
-    /// The call that brought the frame in: (caller frame, its entry index).
-    call:         Option<CallEdge>,
-    /// The frame sits inside a matrix call's expansion region: node names take
-    /// `#index` suffixes, and further expansion heads cannot nest.
-    in_expansion: bool,
-    /// Callees below the root. Planning stops at [`call::MAX_DEPTH`] — the
-    /// resolver already reported the cycle or the too-deep nest.
-    depth:        usize,
-}
-
-#[derive(Clone, Copy)]
-struct CallEdge {
-    caller: usize,
-    entry:  usize,
-}
-
-/// One materialized job of the flat plan: which frame it belongs to, the job
-/// with its id and `needs` prefixed (borrowed as-is at the root, where there is
-/// no prefix), and whether it is a workflow call.
-struct Entry<'w, 'a> {
-    frame: usize,
-    job:   Cow<'w, Job<'a>>,
-    kind:  EntryKind,
-}
-
-enum EntryKind {
-    Job,
-    /// A `uses:` job whose callee resolved: the frame its jobs were planned
-    /// into.
-    Call {
-        callee: usize,
-    },
-}
-
-/// The lowered context a frame's jobs read, bound once, top-down. The frame's
-/// static facts (prefix, expansion-ness) stay on [`Frame`].
+/// Input expressions and the static placement facts for this workflow.
 #[derive(Default)]
-struct FrameCtx {
-    /// The `inputs` context: a call's bound `with:`, or the root's typed
-    /// run-parameter reads.
+struct WorkflowContext {
     inputs:        Option<BTreeMap<String, ExprId>>,
-    /// The subset of `inputs` whose values are known at lowering — what the
-    /// per-leg `runs-on` resolver may read.
     static_inputs: BTreeMap<String, Value>,
-    /// How `secrets.*` names map to the provider's.
     secrets:       SecretMap,
-    /// Inside a callee: the call's `start` node, ANDed into every job gate of
-    /// the frame — when the call was skipped, nothing of the callee runs.
-    call_start:    Option<String>,
-    /// Inside a callee: the call's exit join, which every job's `done` feeds.
-    exit:          Option<NodeId>,
 }
 
 /// A `uses:` step that contributes standalone nodes — a JavaScript action or a
@@ -255,96 +195,22 @@ fn lower_internal(
     mut diags: Diagnostics,
     mode: LoweringMode,
 ) -> Lowered {
-    // Reusable workflows first: every callee fetched, parsed and cycle-checked
-    // before a single node exists, so the passes below never fetch a workflow.
     let calls = call::resolve(wf, files, actions, &mut diags);
+    if diags.has_errors() {
+        return Lowered::rejected(diags);
+    }
     let models = calls.models();
-    let mut frames: Vec<Frame<'_, '_>> = vec![Frame {
-        wf,
-        source: CalleeSource::Root,
-        prefix: String::new(),
-        call: None,
-        in_expansion: false,
-        depth: 0,
-    }];
-    let mut entries: Vec<Entry<'_, '_>> = Vec::new();
-    plan(&mut frames, &mut entries, &calls, &models, &mut diags);
-
-    let mut lw = Lowering {
-        b: GraphBuilder::bare(),
-        diags,
-        wf,
-        frame_ctx: frames.iter().map(|_| FrameCtx::default()).collect(),
-        frames,
+    let resolved = ActionResolutions::default();
+    let compiler = Compiler::new(
+        &calls,
+        &models,
         files,
         actions,
         runners,
         substitute_checkout,
-        resolved: HashMap::new(),
-        jobs: HashMap::new(),
-        spans: HashMap::new(),
-        leg_runs_on: None,
-        github_identity: identity::github_context(identity::repository_slug(files).as_deref()),
-        current: 0,
-        mode,
-    };
-
-    // Frame contexts top-down: a caller's inputs bind before its callee reads
-    // them, and `plan` orders parents before children.
-    for i in 0..lw.frames.len() {
-        lw.bind_frame(i, &entries);
-    }
-    // Every job's scope and gate first, so `needs` can wire to them in any order.
-    for e in &entries {
-        lw.enter(e.frame);
-        match e.kind {
-            EntryKind::Job => lw.job_shell(&e.job),
-            EntryKind::Call { callee } => lw.call_shell(e, callee),
-        }
-    }
-    for e in &entries {
-        lw.enter(e.frame);
-        match e.kind {
-            EntryKind::Job => lw.job_body(&e.job),
-            EntryKind::Call { callee } => lw.call_body(e, callee),
-        }
-    }
-    // Edge wiring reads each entry's own frame index; no `enter` needed.
-    for e in &entries {
-        lw.job_edges(e, &entries);
-    }
-
-    if lw.diags.has_errors() {
-        return Lowered::rejected(lw.diags);
-    }
-    let builder = mem::replace(&mut lw.b, GraphBuilder::bare());
-    let mut graph = builder.build();
-    graph.normalize_loop_heads();
-    let report = ir::check(&graph);
-    for error in &report.errors {
-        let span = error
-            .primary_node()
-            .and_then(|node| lw.spans.get(&node).cloned())
-            .unwrap_or_else(|| lw.wf.span.clone());
-        let mut d = Diagnostic::error(error.code(), span, error.to_string());
-        if let Some(hint) = error.hint() {
-            d = d.with_hint(hint);
-        }
-        lw.diags.push(d);
-    }
-    for warning in &report.warnings {
-        let span = lw
-            .spans
-            .get(&warning.primary_node())
-            .cloned()
-            .unwrap_or_else(|| lw.wf.span.clone());
-        let mut d = Diagnostic::warning(warning.code(), span, warning.to_string());
-        if let Some(hint) = warning.hint() {
-            d = d.with_hint(hint);
-        }
-        lw.diags.push(d);
-    }
-    Lowered::from_parts(graph, lw.diags)
+        &resolved,
+    );
+    compiler.lower_root(wf, diags, mode)
 }
 
 impl<'a> Lowering<'_, 'a> {
@@ -368,18 +234,15 @@ impl<'a> Lowering<'_, 'a> {
     }
 
     /// The job's site, as its own `env:`, `if:` and `outputs:` see it: `needs`
-    /// known, matrix-ness known, the frame's inputs and secret map in scope, no
-    /// steps yet. The `needs.*` context keys are the names as written — the
-    /// frame prefix is stripped — while the values keep the prefixed node
-    /// names.
+    /// known, matrix-ness known, the workflow's inputs and secret map in scope,
+    /// and no steps yet. `needs.*` keys name jobs in this workflow.
     fn base_site(&self, job: &Job<'a>) -> Site {
-        let ctx = &self.frame_ctx[self.current];
-        let frame = &self.frames[self.current];
+        let ctx = &self.context;
         let mut site = Site::new(&job.id);
         site.matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
         site.workflow_inputs.clone_from(&ctx.inputs);
         site.secrets = ctx.secrets.clone();
-        site.in_expansion = frame.in_expansion;
+        site.invocation = self.is_invocation;
         if let Some(runtime) = self.runtime_site()
             && runtime.job_id == job.id
         {
@@ -388,23 +251,17 @@ impl<'a> Lowering<'_, 'a> {
             site.needs.clone_from(&runtime.needs);
             site.start_node.clone_from(&runtime.start_node);
         }
-        let strip = format!("{}{SEP}", frame.prefix);
         for (need, _) in &job.needs {
-            let key = if frame.prefix.is_empty() {
-                need.clone()
-            } else {
-                need.strip_prefix(&strip).unwrap_or(need).to_string()
-            };
-            site.needs.insert(key, format!("{need}{SEP}done"));
+            site.needs.insert(need.clone(), format!("{need}{SEP}done"));
         }
         site
     }
 
-    /// The frame's `inputs` as the placement resolver may read them: values
+    /// The workflow's `inputs` as the placement resolver may read them: values
     /// known at lowering, with a marked placeholder for each run-time one so a
     /// label that absorbs it names its input instead of placing.
     pub(crate) fn placement_inputs(&self) -> Value {
-        let ctx = &self.frame_ctx[self.current];
+        let ctx = &self.context;
         let mut inputs = serde_json::Map::new();
         if let Some(bound) = &ctx.inputs {
             for name in bound.keys() {
@@ -418,10 +275,8 @@ impl<'a> Lowering<'_, 'a> {
         Value::Object(inputs)
     }
 
-    /// Make `frame` the one whose workflow the job passes read.
-    fn enter(&mut self, frame: usize) {
-        self.current = frame;
-        self.wf = self.frames[frame].wf;
+    fn parameter(&mut self, name: &str) -> ExprId {
+        Site::parameter(self.b.exprs(), name, self.is_invocation)
     }
 
     /// An `if:`: absent means `success()`; present is evaluated with GitHub's
@@ -479,21 +334,19 @@ impl<'a> Lowering<'_, 'a> {
         at: ExprSite,
         span: Span,
     ) -> Option<ExprId> {
-        let uses_status_function = parse(source).is_ok_and(|ast| names_status_function(&ast));
-        let lowered = lower_scalar(
-            &format!("${{{{ {source} }}}}"),
-            span,
-            site,
-            at,
-            false,
-            self.b.exprs(),
-            &mut self.diags,
-        )?;
-        let expr = match lowered {
-            LoweredScalar::Expr(id) => id,
-            LoweredScalar::Literal(v) => self.b.exprs().lit(v),
-            LoweredScalar::Secret(_) => return None,
+        let ast = match parse(source) {
+            Ok(ast) => ast,
+            Err(error) => {
+                self.diags.error(
+                    "expr.parse",
+                    span,
+                    format!("could not parse condition: {error}"),
+                );
+                return None;
+            }
         };
+        let uses_status_function = names_status_function(&ast);
+        let expr = gate::condition_expr(&ast, site, at, &span, self.b.exprs(), &mut self.diags)?;
         let truthy = builtin(self.b.exprs(), "loose_truthy", vec![expr]).ok()?;
         if uses_status_function {
             Some(truthy)
@@ -584,15 +437,4 @@ fn if_expr_source(text: &str) -> Result<String, IfTemplateError> {
         },
         Err(_) => Err(IfTemplateError::Unterminated),
     }
-}
-
-/// The status functions — GitHub's rule that a condition naming one does not
-/// get `success() &&` in front, encoded once for the eager and lazy paths.
-const STATUS_FUNCTIONS: &[&str] = &["success", "failure", "cancelled", "always"];
-
-/// Whether the expression calls any status function.
-fn names_status_function(ast: &expr::Expr) -> bool {
-    ast.calls()
-        .iter()
-        .any(|c| STATUS_FUNCTIONS.contains(&c.to_lowercase().as_str()))
 }

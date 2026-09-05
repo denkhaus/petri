@@ -313,6 +313,22 @@ impl SandboxLeaseManager {
                 self.check_fingerprint(request.lease, &record)?;
                 let matches = list_by_label(&*provider, &workspace_label).await?;
                 match matches.len() {
+                    0 if record.pending == Some(PendingIntent::Delete) => {
+                        // Delete completed before its confirmation was durable.
+                        // The missing resource is the requested result, so
+                        // finish the tombstone rather than report a lost lease.
+                        self.ledger
+                            .deleted(request.lease)
+                            .map_err(|error| Self::ledger_failed(&error))?;
+                        return Err(EnvError::backend(
+                            BACKEND,
+                            "acquire",
+                            format!(
+                                "sandbox lease {} was deleted; its workspace is gone",
+                                request.lease
+                            ),
+                        ));
+                    }
                     0 if record.state == LeaseState::Allocating => {
                         // The record was reserved but no resource exists:
                         // the create never happened or never completed.
@@ -528,6 +544,9 @@ impl SandboxLeaseManager {
             ));
         }
         tracing::info!(lease = lease.raw(), sandbox = %id, "fencing a recorded sandbox");
+        self.ledger
+            .pending(lease, PendingIntent::Stop)
+            .map_err(|error| Self::ledger_failed(&error))?;
         sandbox
             .stop()
             .await

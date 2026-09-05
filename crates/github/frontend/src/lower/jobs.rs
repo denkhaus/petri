@@ -10,21 +10,23 @@ use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::{BinOp, ExpandTarget, ExprId, JoinPolicy, NodeId, Scope, ScopeId, StepRef, Value};
 use serde_json::{Map, json};
 
-use super::{ActionContext, ActionPlan, Entry, EnvValue, JobNodes, Lowering, scalar_text};
+use super::workflows::CallPlan;
+use super::{ActionContext, ActionPlan, EnvValue, JobNodes, Lowering, scalar_text};
 use crate::action::{
-    self, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND, BACKGROUND_START_KIND,
-    BACKGROUND_WAIT_KIND, Phase,
+    self, BACKGROUND_CANCEL_KIND, BACKGROUND_COMPLETE_KIND, BACKGROUND_PUBLISH_KIND,
+    BACKGROUND_START_KIND, BACKGROUND_WAIT_KIND, Phase, REPO_PARAM_CONTEXT, WORKFLOW_CALL_KIND,
 };
 use crate::call::CalleeSource;
 use crate::composite::{self, Uses};
 use crate::exprs::{
-    ExprSite, LoweredScalar, SEP, Site, any_status, config_value, lower_scalar, result_priority,
-    status_fold, whole_value_secret,
+    ExprSite, LoweredScalar, SEP, Site, any_status, conclusion_tag, config_value, lower_scalar,
+    result_priority, status_fold, whole_value_secret,
 };
 use crate::model::{Defaults, Job, Step};
 use crate::{expr_lower, runs_on};
 
 struct BackgroundBranch {
+    worker:          String,
     completion:      NodeId,
     completion_name: String,
     public_name:     String,
@@ -34,23 +36,7 @@ struct BackgroundBranch {
     waiters:         Vec<NodeId>,
 }
 
-impl<'w, 'a> Lowering<'w, 'a> {
-    /// Inside a called workflow, every job gate carries the call's own
-    /// admission: when the call was skipped or cancelled, nothing of the
-    /// callee runs — not even `if: always()` — exactly as on GitHub.
-    fn wrap_call_admission(&mut self, gate: Option<ExprId>, site: &Site) -> Option<ExprId> {
-        let Some(call_start) = self.frame_ctx[self.current].call_start.clone() else {
-            return gate;
-        };
-        let gate = gate?;
-        let t = self.b.exprs();
-        let record = site.need_record(t, &call_start);
-        let status = t.field(record, "status");
-        let ok = t.lit("success");
-        let admitted = t.binary(BinOp::Eq, status, ok);
-        Some(t.binary(BinOp::And, admitted, gate))
-    }
-
+impl<'a> Lowering<'_, 'a> {
     pub(super) fn job_shell(&mut self, job: &Job<'a>) {
         let matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
         let scope = self.scope_for(job);
@@ -117,99 +103,125 @@ impl<'w, 'a> Lowering<'w, 'a> {
         });
     }
 
-    /// A workflow call's bracket: `start` (the caller-side gate, and the
-    /// expansion head when the call has a matrix), `exit` (the join every
-    /// callee job's `done` feeds), and `done` (the fold dependents read, shaped
-    /// exactly like a job's so `needs.<call>.outputs.*` works unchanged). The
-    /// callee's jobs land between `start` and `exit`, so a matrix call expands
-    /// the whole inlined workflow per leg.
-    pub(super) fn call_shell(&mut self, e: &Entry<'w, 'a>, callee: usize) {
-        let job = &e.job;
-        let matrix = job.strategy.as_ref().is_some_and(|s| s.matrix.is_some());
-        // The bracket's own scope: all three nodes are engine-side noops.
+    /// A call uses one invocation step and the ordinary job-summary collector.
+    pub(super) fn call_shell(&mut self, job: &Job<'a>, source: &CalleeSource) {
+        let matrix = job
+            .strategy
+            .as_ref()
+            .is_some_and(|strategy| strategy.matrix.is_some());
         let scope = self.b.add_scope(Scope::new(ScopeId::new(0)));
-        let cancelled = self.scope_cancelled_config();
         let start = self.b.add_node(
             &format!("{}{SEP}start", job.id),
             scope,
-            StepRef::new(
-                "noop",
-                json!({ "job": job.id, "phase": "start", "cancelled": cancelled }),
-            ),
+            StepRef::new(WORKFLOW_CALL_KIND, Value::Null),
         );
-        if !matrix {
-            self.b.node_mut(start).run_on_cancel = true;
-        }
-        // What the call is, preserved on its start: the reference as written,
-        // and the commit it pinned to.
-        let call = job.call.as_ref().expect("a call entry");
-        let mut target = Map::new();
-        target.insert("uses".into(), json!(call.uses.0));
-        if let CalleeSource::Remote { pinned } = &self.frames[callee].source {
-            target.insert("sha".into(), json!(pinned.sha()));
-        }
-        self.b.set_meta(start, json!({ "call": target }));
-        self.spans.insert(start, job.span.clone());
-
-        let exit = self.b.add_node(
-            &format!("{}{SEP}exit", job.id),
-            scope,
-            StepRef::new("noop", Value::Null),
-        );
-        self.b.node_mut(exit).run_on_cancel = true;
-        self.spans.insert(exit, job.span.clone());
+        self.b.node_mut(start).run_on_cancel = !matrix;
         let done = self.b.add_node(
             &format!("{}{SEP}done", job.id),
             scope,
             StepRef::new("noop", Value::Null),
         );
         self.b.node_mut(done).run_on_cancel = true;
+        let call = job.call.as_ref().expect("a workflow call");
+        let mut target = Map::new();
+        target.insert("uses".into(), json!(call.uses.0));
+        if let CalleeSource::Remote { pinned } = source {
+            target.insert("sha".into(), json!(pinned.sha()));
+        }
+        self.b.set_meta(start, json!({"call":target}));
+        self.spans.insert(start, job.span.clone());
         self.spans.insert(done, job.span.clone());
         self.jobs.insert(job.id.clone(), JobNodes {
             scope,
             start,
             done,
-            last: exit,
+            last: start,
             matrix,
         });
-        self.frame_ctx[callee].exit = Some(exit);
     }
 
-    /// The call's behavior: the caller-side gate on `start`, the summary the
-    /// `exit` join carries into `done` — the callee jobs' combined result
-    /// (GitHub's call conclusion) plus the declared `workflow_call.outputs`,
-    /// evaluated when every callee job of the leg is complete — and the matrix
-    /// expansion over the whole bracket.
-    pub(super) fn call_body(&mut self, e: &Entry<'w, 'a>, callee: usize) {
-        let job = &e.job;
-        let Some((start, done, exit)) = self.jobs.get(&job.id).map(|j| (j.start, j.done, j.last))
-        else {
-            return;
-        };
+    pub(super) fn call_body(&mut self, job: &Job<'a>, plan: CallPlan) {
+        let (start, done) = self
+            .jobs
+            .get(&job.id)
+            .map(|nodes| (nodes.start, nodes.done))
+            .expect("call shell exists");
         let mut site = self.base_site(job);
         let items = self.apply_strategy(job, &mut site);
-        let gate = self.condition(job.condition, &site, ExprSite::Job, job.span.clone());
-        let gate = self.wrap_call_admission(gate, &site);
-        if let Some(gate) = gate {
+        if let Some(gate) = self.condition(job.condition, &site, ExprSite::Job, job.span.clone()) {
             self.b.set_precondition(start, gate);
         }
+        let inputs = plan
+            .inputs
+            .exprs
+            .into_iter()
+            .map(|(name, id)| (name, json!({EXPR_PLACEHOLDER_KEY:id.raw()})))
+            .collect::<Map<_, _>>();
+        let mut parameters = Map::new();
+        for name in ["github", "runner", "vars"]
+            .into_iter()
+            .chain(plan.child.needs_repo.then_some(REPO_PARAM_CONTEXT))
+        {
+            let id = self.parameter(name);
+            parameters.insert(name.into(), json!({EXPR_PLACEHOLDER_KEY:id.raw()}));
+        }
+        self.b.node_mut(start).step = StepRef::new(
+            WORKFLOW_CALL_KIND,
+            json!({
+                "graph": plan.child.digest,
+                "context": {"inputs":inputs, "parameters":parameters},
+                "secrets":plan.secrets,
+            }),
+        );
+        let t = self.b.exprs();
+        let output = t.var("output");
+        let projected = t.field(output, "result");
+        let status = t.var("status");
+        let status = conclusion_tag(t, status);
+        let result = t.call("default", vec![projected, status]);
+        let outputs = t.field(output, "outputs");
+        let empty = t.lit(json!({}));
+        let outputs = t.call("default", vec![outputs, empty]);
+        let index = if site.matrix {
+            t.var("index")
+        } else {
+            t.lit(0)
+        };
+        let summary = t.object(vec![
+            ("result", result),
+            ("outputs", outputs),
+            ("index", index),
+        ]);
+        self.b
+            .select(start, vec![ir::Arm::always(done).with_map(summary)]);
+        let fold = self.done_config();
+        self.b.node_mut(done).step = StepRef::new("noop", fold);
+        if let Some(items) = items {
+            ir::parallel_for_each(
+                &mut self.b,
+                start,
+                items,
+                ExpandTarget::Node,
+                site.max_parallel,
+                site.fail_fast,
+            );
+        }
+    }
 
-        // The callee's jobs, by their prefixed done nodes; the exit's site reads
-        // them — suffix-aware inside a matrix call — through the `jobs` context
-        // and the result terms below. The callee frame's expansion flag already
-        // includes the call's own matrix.
-        let callee_wf = self.frames[callee].wf;
-        let mut exit_site = Site::new(&job.id);
-        exit_site.in_expansion = self.frames[callee].in_expansion;
-        exit_site.workflow_inputs = self.frame_ctx[callee].inputs.clone();
+    /// The child projects its job results and declared workflow outputs.
+    pub(super) fn workflow_summary(&mut self) -> NodeId {
+        let scope = self.b.add_scope(Scope::new(ScopeId::new(0)));
+        let mut exit_site = Site::new("__workflow-summary");
+        exit_site.workflow_inputs.clone_from(&self.context.inputs);
+        exit_site.secrets = self.context.secrets.clone();
+        exit_site.invocation = true;
         exit_site.callee_jobs = Some(
-            callee_wf
+            self.wf
                 .jobs
                 .iter()
-                .map(|j| (j.id.clone(), format!("{}{SEP}{}{SEP}done", job.id, j.id)))
+                .map(|job| (job.id.clone(), format!("{}{SEP}done", job.id)))
                 .collect(),
         );
-
         // Each callee job's folded result, read once; the `any_*` terms below
         // compare these shared reads against their tags. Results are already
         // folded per job ('failure'/'cancelled'/'success'/'skipped').
@@ -236,43 +248,20 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let any_success = any(t, "success");
         let result = result_priority(t, any_failure, any_cancelled, any_success);
 
-        // Declared outputs, lowered over the `jobs.*` context.
-        let outputs = match &callee_wf.call {
+        let outputs = match &self.wf.call {
             Some(interface) => self.lower_outputs(&interface.outputs, &exit_site, ExprSite::Job),
             None => Vec::new(),
         };
-        let expanded = exit_site.in_expansion;
-        let summary = self.summary_object(result, &outputs, expanded);
-        self.b
-            .select(exit, vec![ir::Arm::always(done).with_map(summary)]);
-        let fold = self.done_config();
-        self.b.node_mut(done).step = StepRef::new("noop", fold);
-
-        // Scheduling: the callee's rootless jobs begin when the call does.
-        let roots: Vec<NodeId> = callee_wf
-            .jobs
-            .iter()
-            .filter(|j| j.needs.is_empty())
-            .filter_map(|j| {
-                self.jobs
-                    .get(&format!("{}{SEP}{}", job.id, j.id))
-                    .map(|n| n.start)
-            })
-            .collect();
-        if !roots.is_empty() {
-            self.b.fan_out(start, &roots);
-        }
-
-        if let Some(items) = items {
-            ir::parallel_for_each(
-                &mut self.b,
-                start,
-                items,
-                ExpandTarget::Subgraph { entry: start, exit },
-                site.max_parallel,
-                site.fail_fast,
-            );
-        }
+        let outputs = self.b.exprs().object(
+            outputs
+                .iter()
+                .map(|(name, id)| (name.as_str(), *id))
+                .collect(),
+        );
+        let summary = self.b.add_node("__workflow-summary", scope, StepRef::new("noop",json!({"result":{EXPR_PLACEHOLDER_KEY:result.raw()}, "outputs":{EXPR_PLACEHOLDER_KEY:outputs.raw()}})));
+        self.b.node_mut(summary).run_on_cancel = true;
+        self.b.graph_mut().result = ir::ResultProjection::NodeOutput(summary);
+        summary
     }
 
     /// `strategy:` onto the site — `fail-fast`, `max-parallel`, the static leg
@@ -360,10 +349,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
         let matrix_items = self.apply_strategy(job, &mut site);
         let job_environment = self.job_environment_channel(&site);
 
-        // The gate: needs + the job's own if — and, inside a called workflow,
-        // the call's own admission.
+        // The gate combines needs with the job's own condition.
         let gate = self.condition(job.condition, &site, ExprSite::Job, job.span.clone());
-        let gate = self.wrap_call_admission(gate, &site);
         if let Some(gate) = gate {
             self.b.set_precondition(start, gate);
         }
@@ -433,8 +420,21 @@ impl<'w, 'a> Lowering<'w, 'a> {
             }
         }
         for (step, plan) in job.steps.iter().zip(&plans) {
-            if step.is_wait() {
-                let targets = if step.wait_all {
+            if step.is_control() {
+                let targets = if let Some(target) = &step.cancel {
+                    if let Some(branch) = backgrounds.get(target) {
+                        let cancel = self.cancel_background(job, step, scope, &site, branch);
+                        self.chain_node(
+                            &mut routes,
+                            &mut previous,
+                            &mut chain,
+                            &mut names_so_far,
+                            &mut site,
+                            cancel,
+                        );
+                    }
+                    vec![target.clone()]
+                } else if step.wait_all {
                     background_order
                         .iter()
                         .filter(|name| {
@@ -547,6 +547,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 background:        false,
                 wait:              None,
                 wait_all:          true,
+                cancel:            None,
             };
             self.background_wait(
                 job,
@@ -685,19 +686,19 @@ impl<'w, 'a> Lowering<'w, 'a> {
         }
     }
 
-    /// `done` → each dependent's `start`, within the entry's own frame — and,
+    /// `done` → each dependent's `start`, within this workflow — and,
     /// inside a called workflow, → the call's exit join, which counts every
     /// callee job.
-    pub(super) fn job_edges(&mut self, e: &Entry<'w, 'a>, entries: &[Entry<'w, 'a>]) {
-        let job = &e.job;
+    pub(super) fn job_edges(&mut self, job: &Job<'a>, summary: Option<NodeId>) {
         let Some(done) = self.jobs.get(&job.id).map(|j| j.done) else {
             return;
         };
-        let mut targets: Vec<NodeId> = entries
+        let mut targets: Vec<NodeId> = self
+            .wf
+            .jobs
             .iter()
-            .filter(|other| other.frame == e.frame)
-            .filter(|other| other.job.needs.iter().any(|(n, _)| n == &job.id))
-            .filter_map(|other| self.jobs.get(&other.job.id).map(|j| j.start))
+            .filter(|other| other.needs.iter().any(|(n, _)| n == &job.id))
+            .filter_map(|other| self.jobs.get(&other.id).map(|j| j.start))
             .collect();
         for (need, span) in &job.needs {
             if !self.jobs.contains_key(need) {
@@ -708,8 +709,8 @@ impl<'w, 'a> Lowering<'w, 'a> {
                 );
             }
         }
-        if let Some(exit) = self.frame_ctx[e.frame].exit {
-            targets.push(exit);
+        if let Some(summary) = summary {
+            targets.push(summary);
         }
         if !targets.is_empty() {
             self.b.fan_out(done, &targets);
@@ -785,6 +786,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
         chain.push(start);
         for id in nodes {
             let node = self.b.node_mut(*id);
+            node.cancel_group = Some(nodes[0]);
             node.run_on_cancel = true;
             node.tolerates_failure = true;
             if node.name == public_name {
@@ -852,6 +854,7 @@ impl<'w, 'a> Lowering<'w, 'a> {
             .push(completion);
 
         backgrounds.insert(step.node_name(), BackgroundBranch {
+            worker: node_names[0].clone(),
             completion,
             completion_name,
             public_name,
@@ -870,6 +873,35 @@ impl<'w, 'a> Lowering<'w, 'a> {
             return site.node_status(self.b.exprs(), name);
         }
         status_fold(self.b.exprs(), names, site.expanded())
+    }
+
+    fn cancel_background(
+        &mut self,
+        job: &Job<'a>,
+        step: &Step<'a>,
+        scope: ScopeId,
+        site: &Site,
+        branch: &BackgroundBranch,
+    ) -> NodeId {
+        let target = if site.expanded() {
+            let prefix = self.b.exprs().lit(format!("{}#", branch.worker));
+            let index = self.b.exprs().var("index");
+            let name = self.b.exprs().binary(BinOp::Add, prefix, index);
+            json!({ EXPR_PLACEHOLDER_KEY: name.raw() })
+        } else {
+            json!(branch.worker)
+        };
+        let id = self.b.add_node(
+            &format!("{}{SEP}__background-cancel-{}", job.id, step.node_name()),
+            scope,
+            StepRef::new(
+                BACKGROUND_CANCEL_KIND,
+                json!({ "target": target, "name": branch.display }),
+            ),
+        );
+        self.b.node_mut(id).run_on_cancel = true;
+        self.spans.insert(id, step.span.clone());
+        id
     }
 
     fn background_display(&mut self, step: &Step<'a>, site: &Site) -> Value {
@@ -1008,6 +1040,9 @@ impl<'w, 'a> Lowering<'w, 'a> {
 
         let mut config = Map::new();
         config.insert("targets".into(), Value::Array(verdicts));
+        if step.cancel.is_some() {
+            config.insert("cancel".into(), Value::Bool(true));
+        }
         if let Some(value) = self.soft_fail_value(step.continue_on_error, site, false) {
             config.insert("continue_on_error".into(), value);
         }

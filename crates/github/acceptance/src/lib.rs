@@ -13,10 +13,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, DirEntry};
-use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{io, mem};
 
 use frontend::{CompileInputs, Diagnostic, DirFiles, Frontend as _, Severity};
 use frontend_gha::action::{ActionRef, ActionSourceError, PinnedAction};
@@ -24,6 +24,57 @@ use frontend_gha::{ActionSource, GitHubActions, RunnerMap};
 use smol_str::SmolStr;
 
 pub mod runs;
+
+/// A root workflow and every reusable workflow it may invoke.
+pub struct Artifact {
+    pub graph:    ir::Graph,
+    pub children: Vec<ir::Graph>,
+}
+
+impl Artifact {
+    /// Transform every graph, then update each call to the child's new digest.
+    /// The frontend guarantees an acyclic graph of registered calls.
+    pub fn map_graphs(&mut self, mut transform: impl FnMut(&mut ir::Graph)) {
+        let mut pending: BTreeMap<_, _> = mem::take(&mut self.children)
+            .into_iter()
+            .map(|graph| (frontend::graph_digest(&graph), graph))
+            .collect();
+        let mut rewritten = BTreeMap::new();
+        rewrite_calls(
+            &mut self.graph,
+            &mut pending,
+            &mut rewritten,
+            &mut transform,
+        );
+        self.children = rewritten.into_values().map(|(_, graph)| graph).collect();
+    }
+}
+
+fn rewrite_calls(
+    graph: &mut ir::Graph,
+    pending: &mut BTreeMap<String, ir::Graph>,
+    rewritten: &mut BTreeMap<String, (String, ir::Graph)>,
+    transform: &mut impl FnMut(&mut ir::Graph),
+) {
+    for node in &mut graph.body.nodes {
+        if node.step.kind.as_ref() != frontend_gha::WORKFLOW_CALL_KIND {
+            continue;
+        }
+        let digest = node.step.config["graph"]
+            .as_str()
+            .expect("a workflow call names its graph")
+            .to_owned();
+        if !rewritten.contains_key(&digest) {
+            let mut child = pending
+                .remove(&digest)
+                .expect("the frontend registered an acyclic child graph");
+            rewrite_calls(&mut child, pending, rewritten, transform);
+            rewritten.insert(digest.clone(), (frontend::graph_digest(&child), child));
+        }
+        node.step.config["graph"] = ir::Value::String(rewritten[&digest].0.clone());
+    }
+    transform(graph);
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -356,7 +407,7 @@ pub fn lower_one(
     repo_root: &Path,
     file: &Path,
     actions: Option<&Arc<dyn ActionSource>>,
-) -> (Outcome, Option<ir::Graph>) {
+) -> (Outcome, Option<Artifact>) {
     let rel = file
         .strip_prefix(repo_root)
         .unwrap_or(file)
@@ -441,11 +492,19 @@ pub fn lower_one(
                     repo: repo.to_string(),
                     file: rel,
                     class,
-                    nodes: lowered.graph.as_ref().map_or(0, |g| g.nodes.len()),
+                    nodes: lowered
+                        .graph
+                        .iter()
+                        .chain(&lowered.children)
+                        .map(|g| g.nodes.len())
+                        .sum(),
                     diagnostics,
                     panic: None,
                 },
-                lowered.graph,
+                lowered.graph.map(|graph| Artifact {
+                    graph,
+                    children: lowered.children,
+                }),
             )
         }
     }

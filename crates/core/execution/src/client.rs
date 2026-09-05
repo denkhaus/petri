@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ir::Value;
+use ir::{Control, Value};
 use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -79,6 +79,26 @@ impl InvocationHandle {
                 .changed()
                 .await
                 .expect("the coordinator keeps invocation status open until Finished");
+        }
+    }
+
+    /// Wait for the child, forwarding a parent cancellation or kill. Steering
+    /// deliveries do not complete the call. `None` means cancellation was
+    /// requested; the coordinator still owns the child's shutdown.
+    pub async fn result_with_control(
+        &mut self,
+        control: &mut mpsc::Receiver<Control>,
+    ) -> Option<InvocationResult> {
+        loop {
+            tokio::select! {
+                result = self.result() => return Some(result),
+                message = control.recv() => {
+                    if !matches!(message, Some(Control::Deliver(_))) {
+                        self.cancel().await;
+                        return None;
+                    }
+                },
+            }
         }
     }
 

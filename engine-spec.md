@@ -86,6 +86,7 @@ pub struct Node {
     pub budget: Budget,                    // max_firings (counts generations), timeout (per attempt)
     pub retry: RetryPolicy,
     pub run_on_cancel: bool,               // §5: may fire inside a cancelled scope
+    pub cancel_group: Option<NodeId>,      // §5: independent group, identified by its anchor
     pub splice_policy: SplicePolicy,       // §5.1: Deny (default) | Append | Replace{scope}
     pub meta: Value,                       // opaque, host-facing; the core never reads it
     pub expand: Option<Expansion>,         // HIR only
@@ -216,6 +217,17 @@ accumulator. Generations distinguish iterations; budgets cap runaway loops.
 **Cancel scopes** — dynamic sets of firings cancellable as a unit: the run
 root, each splice, job-level cancel-on-failure. Stopping has two tiers, Cancel
 and Kill — the workflow-level analogue of `SIGTERM` and `SIGKILL`.
+
+**Declared cancellation groups.** `Node.cancel_group` names an anchor node. The
+anchor names itself, and every member uses the same resource scope. A group
+cannot cross an expansion boundary. Each group gets a child cancellation scope;
+expansion remaps the anchor so each matrix leg gets a separate group. Dynamic
+splices remain children of their owner's cancellation scope.
+
+`Event::CancelGroupRequested { node }` politely cancels the named node's group
+and its descendants. Unknown nodes and nodes without a group are logged no-ops.
+This event does not mark the root cancelled. `RunHandle::cancel_group` exposes
+the request by node name and is available as a driver-provided step capability.
 
 **Cancel** (`Event::CancelRequested { scope }`) asks the scope to stop:
 
@@ -415,10 +427,14 @@ offending request never reaches the log.
 Events: `ExecutionStarted(EngineStart)`, `Admitted`, `RoutingResolved`,
 `RouteApplied`, `TokenEmitted`, `StepStarted{firing, attempt}`,
 `StepProgress`, `StepFinished{firing, attempt, outcome}`, `RetryElapsed`,
-`NodeExpanded`, `CancelRequested{scope}`, `KillRequested{scope}`,
+`NodeExpanded`, `CancelRequested{scope}`, `CancelGroupRequested{node}`,
+`KillRequested{scope}`,
 `ControlRequested{firing, ctl}`. Commands: `StartStep(ResolvedFiring)`,
 `DeliverControl`, `ScheduleRetry`, `ExpandNode` (reserved), `AcquireScope`,
 `ReleaseScope`, `Admit`, `ResolveRouting`, `FinishExecution`.
+
+Event log version 8 adds declared cancellation groups and targeted cancellation.
+Earlier log versions are rejected; there is no migration.
 
 Every execution start and attempt start uses `Admit` → `Admitted`. Every final
 firing outcome, including a terminal node with no groups, uses one
@@ -558,6 +574,10 @@ refcounting tears a job down between consecutive steps — rejected). **Release
 is irreversible;** re-entry acquires a fresh environment (the §8 lint is the
 static counterpart). Acquire failure fails every pending firing in the scope
 instance with class `env_acquire` via ordinary `StepFinished` events.
+
+Scope environment expressions read graph parameters and the execution's initial
+context (`EngineStart.context` as `kv`). Later context updates and firing-local
+values do not change the scope environment.
 
 **`acquire` fences prior work.** A driver crash kills no running step (release
 owns cleanup; remote sandboxes outlive workers by design), so the `Executor`

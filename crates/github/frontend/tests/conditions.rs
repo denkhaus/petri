@@ -31,6 +31,54 @@ jobs:
       - run: echo go
 ";
 
+#[test]
+fn status_functions_are_rejected_outside_conditions() {
+    for function in ["success", "FAILURE", "cancelled", "always"] {
+        let expression = format!("${{{{ {function}() }}}}");
+        for field in [
+            format!("env:\n      STATUS: {expression}"),
+            format!("outputs:\n      status: {expression}"),
+        ] {
+            let text = format!(
+                "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    {field}\n    steps:\n      - run: echo ok\n"
+            );
+            assert!(
+                diagnostics(&text)
+                    .iter()
+                    .any(|d| d.code == "gha.status_function_position"),
+                "{text}"
+            );
+        }
+        let text = format!(
+            "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo {expression}\n"
+        );
+        assert!(
+            diagnostics(&text)
+                .iter()
+                .any(|d| d.code == "gha.status_function_position"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn status_functions_remain_valid_in_job_and_step_conditions() {
+    lower_ok(
+        r"
+on: push
+jobs:
+  test:
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - if: success() || failure()
+        run: echo ok
+      - if: always() && env.TEST != 'no'
+        run: echo lazy
+",
+    );
+}
+
 fn rebase_precondition(graph: &ir::Graph) -> ir::ExprId {
     graph
         .nodes

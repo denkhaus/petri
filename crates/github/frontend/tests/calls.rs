@@ -58,45 +58,44 @@ jobs:
 "#;
 
 #[test]
-fn a_local_call_inlines_the_callee_under_the_call_job() {
+fn a_local_call_registers_the_callee_as_a_child_graph() {
     let files = files(&[(".github/workflows/build.yml", CALLEE)]);
-    let graph = lower_ok_with(CALLER, &files);
-    let names: Vec<&str> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
-    // The call bracket, the inlined jobs under the call's prefix, and the
-    // caller's own job all coexist.
-    for wanted in [
-        "release/start",
-        "release/exit",
-        "release/done",
-        "release/build/start",
-        "release/build/pack",
-        "release/build/done",
-        "release/check/start",
-        "release/check/step-1",
-        "release/check/done",
-        "announce/start",
-        "announce/step-1",
-    ] {
-        assert!(names.contains(&wanted), "missing {wanted} in {names:?}");
-    }
-    // The call is preserved on its start.
+    let lowered = frontend_gha::load(".github/workflows/test.yml", CALLER, &files);
+    let graph = lowered.graph.expect("a graph");
     let start = graph
         .nodes
         .iter()
         .find(|n| n.name == "release/start")
         .unwrap();
+    assert_eq!(start.step.kind.as_ref(), frontend_gha::WORKFLOW_CALL_KIND);
     assert_eq!(
         start.meta["call"]["uses"],
         json!("./.github/workflows/build.yml")
     );
-    // Each inlined job keeps its own scope and placement.
-    let build = graph
+    assert!(!graph.nodes.iter().any(|n| n.name.contains("build/")));
+    assert_eq!(lowered.children.len(), 1);
+    let child = &lowered.children[0];
+    assert_eq!(start.step.config["graph"], frontend::graph_digest(child));
+    for name in [
+        "build/start",
+        "build/pack",
+        "build/done",
+        "check/start",
+        "check/step-1",
+        "check/done",
+        "__workflow-summary",
+    ] {
+        assert!(child.nodes.iter().any(|n| n.name == name), "missing {name}");
+    }
+    assert!(matches!(child.result, ir::ResultProjection::NodeOutput(_)));
+    let build = child
         .nodes
         .iter()
-        .find(|n| n.name == "release/build/start")
+        .find(|n| n.name == "build/start")
         .unwrap();
-    let scope = graph.scope(build.scope).unwrap();
-    assert_eq!(scope.runtime.requirements, ["ubuntu-latest"]);
+    assert_eq!(child.scope(build.scope).unwrap().runtime.requirements, [
+        "ubuntu-latest"
+    ]);
 }
 
 #[test]
@@ -125,6 +124,30 @@ jobs:
         !diags.iter().any(|d| d.severity == Severity::Error),
         "{diags:?}"
     );
+}
+
+#[test]
+fn calls_share_a_graph_when_only_runtime_input_values_differ() {
+    let caller = r"
+on: push
+jobs:
+  one:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: one
+  two:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: two
+";
+    let files = files(&[(".github/workflows/build.yml", CALLEE)]);
+    let lowered = frontend_gha::load(".github/workflows/test.yml", caller, &files);
+    assert!(
+        lowered.graph.is_some(),
+        "{:?}",
+        lowered.diagnostics.into_vec()
+    );
+    assert_eq!(lowered.children.len(), 1);
 }
 
 /// A reusable file loaded on its own binds `inputs` from run parameters, so it
@@ -227,10 +250,9 @@ fn call_cycles_and_depth_are_diagnostics() {
     );
 }
 
-/// A matrix on the call expands the whole inlined workflow per leg; a matrix
-/// inside a matrix call cannot nest, and says so.
+/// Caller and callee matrices expand in separate executions.
 #[test]
-fn a_matrix_call_expands_and_nesting_is_rejected() {
+fn caller_and_callee_matrices_expand_independently() {
     let callee = r#"
 on:
   workflow_call:
@@ -283,12 +305,25 @@ jobs:
     uses: ./.github/workflows/nested.yml
 "#;
     let nested_files = files(&[(".github/workflows/nested.yml", nested_callee)]);
-    let diags = diagnostics_with(caller, &nested_files);
+    let lowered = frontend_gha::load(".github/workflows/test.yml", caller, &nested_files);
+    let graph = lowered.graph.expect("the nested matrices lower");
     assert!(
-        diags
+        graph
+            .nodes
             .iter()
-            .any(|d| d.code == "unsupported.workflow_call.matrix"),
-        "{diags:?}"
+            .find(|n| n.name == "fan/start")
+            .unwrap()
+            .expand
+            .is_some()
+    );
+    assert!(
+        lowered.children[0]
+            .nodes
+            .iter()
+            .find(|n| n.name == "build/start")
+            .unwrap()
+            .expand
+            .is_some()
     );
 }
 
@@ -321,22 +356,33 @@ jobs:
     uses: ./.github/workflows/build.yml
 ";
     let call_files = files(&[(".github/workflows/build.yml", callee)]);
-    let graph = lower_ok_with(caller, &call_files);
+    let lowered = frontend_gha::load(".github/workflows/test.yml", caller, &call_files);
+    let graph = lowered.graph.expect("a graph");
     let requirements = |job: &str| {
-        let start = graph
+        let call = graph
             .nodes
             .iter()
             .find(|n| n.name == format!("{job}/start"))
             .unwrap();
-        graph
+        let child = lowered
+            .children
+            .iter()
+            .find(|child| call.step.config["graph"] == frontend::graph_digest(child))
+            .unwrap();
+        let start = child
+            .nodes
+            .iter()
+            .find(|n| n.name == "build/start")
+            .unwrap();
+        child
             .scope(start.scope)
             .unwrap()
             .runtime
             .requirements
             .clone()
     };
-    assert_eq!(requirements("fast/build"), ["depot-ubuntu-22.04-16"]);
-    assert_eq!(requirements("default/build"), ["ubuntu-slim"]);
+    assert_eq!(requirements("fast"), ["depot-ubuntu-22.04-16"]);
+    assert_eq!(requirements("default"), ["ubuntu-slim"]);
 
     // A computed value cannot place, and the rejection names the input.
     let dynamic = r#"
@@ -417,7 +463,7 @@ jobs:
     );
 }
 
-/// A remote call resolves through the action source: pinned, fetched, inlined —
+/// A remote call resolves through the action source: pinned and compiled —
 /// and the pin lands on the call's start meta.
 #[test]
 #[expect(
@@ -441,5 +487,10 @@ fn a_remote_call_resolves_through_the_action_source() {
     let graph = lowered.graph.expect("a graph");
     let start = graph.nodes.iter().find(|n| n.name == "j/start").unwrap();
     assert_eq!(start.meta["call"]["sha"], json!(sha));
-    assert!(graph.nodes.iter().any(|n| n.name == "j/build/step-1"));
+    assert!(
+        lowered.children[0]
+            .nodes
+            .iter()
+            .any(|n| n.name == "build/step-1")
+    );
 }

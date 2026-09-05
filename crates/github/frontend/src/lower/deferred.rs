@@ -27,6 +27,8 @@ use crate::runners::RunnerMap;
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeferredActionPlan {
+    #[serde(default)]
+    pub invocation:        bool,
     pub action:            ActionLocation,
     pub job_id:            String,
     pub start_node:        String,
@@ -114,6 +116,7 @@ pub fn plan_deferred_action(
         in_expansion: request.in_expansion,
         needs:        request.needs.clone(),
         depth:        request.depth,
+        invocation:   request.invocation,
     };
     let Lowered {
         graph,

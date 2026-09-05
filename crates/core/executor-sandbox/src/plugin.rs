@@ -58,10 +58,9 @@ pub const PLUGIN_PREFIX: &str = "sandbox-driver";
 /// Turns unpinned plugins on for every kind.
 pub const DEV_MODE_VAR: &str = "PETRI_SANDBOX_PLUGIN_DEV";
 
-/// The SHA-256 pins compiled into this build, one per plugin kind and
-/// target triple. Empty until Petri bundles a sandbox-driver release; every
-/// launch before that is a dev-mode launch.
-const PINNED_PLUGINS: &[(&str, &str, &str)] = &[];
+// Generated from the release bundle's plugin binaries. Ordinary development
+// builds have no pins and use the explicit override or development policy.
+include!(concat!(env!("OUT_DIR"), "/plugin_pins.rs"));
 
 /// What the plugin process inherits, per kind. Everything else is scrubbed.
 fn forwarded_env(kind: &str) -> Vec<&'static str> {

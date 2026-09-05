@@ -148,3 +148,59 @@ async fn invocation_finish_releases_its_host_action_sandbox() {
     assert!(testkit::list_containers(&prefix).await.is_empty());
     coordinator.finish().await;
 }
+
+#[tokio::test]
+async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
+    if !is_docker_ready().await {
+        return;
+    }
+    let directory = RunDir::new("coordinator-container-restart");
+    let mut options = RunOptions::new(directory.path());
+    options.retention = Retention::Always;
+    let runtime = Runtime::standard().options(options);
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .unwrap();
+    let mut graph = GraphBuilder::bare();
+    let mut scope = Scope::new(ScopeId::new(0));
+    scope.runtime = RuntimeSpec::container("alpine:3.20");
+    let scope = graph.add_scope(scope);
+    let start = graph.add_node(
+        "before",
+        scope,
+        StepRef::new(
+            "process",
+            serde_json::json!({
+                "run": "printf '%s' \"$HOSTNAME\" > before", "shell": "sh",
+            }),
+        ),
+    );
+    let after = graph.add_node(
+        "after",
+        scope,
+        StepRef::new(
+            "process",
+            serde_json::json!({
+                "run": "test \"$(cat before)\" = \"$HOSTNAME\"", "shell": "sh",
+            }),
+        ),
+    );
+    graph.mark_entry(start);
+    graph.link(start, after);
+    graph.node_mut(start).routing.groups[0].arms[0].transition = ir::EdgeTransition::Restart;
+    let graph = coordinator.register_graph(&graph.build()).unwrap();
+    let result = coordinator.run_root(graph, BTreeMap::new()).await.unwrap();
+    assert_eq!(result.status, RunStatus::Success);
+    assert_eq!(result.final_execution.raw(), 1);
+    let records = execution::ResourceStore::load(directory.path().join("resources")).unwrap();
+    assert_eq!(
+        records.records().count(),
+        1,
+        "both executions share one lease"
+    );
+    coordinator.finish().await;
+    assert!(prune(&runtime).await.unwrap().is_clean());
+}
