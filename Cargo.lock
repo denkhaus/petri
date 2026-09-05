@@ -437,10 +437,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
+name = "futures-macro"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-core",
+ "futures-macro",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
+]
 
 [[package]]
 name = "generic-array"
@@ -1135,6 +1165,7 @@ dependencies = [
  "petri-ir",
  "petri-testkit",
  "sandbox-driver",
+ "sandbox-driver-daytona-config",
  "sandbox-driver-docker-config",
  "sandbox-driver-protocol",
  "serde",
@@ -1249,6 +1280,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "petri-execution",
+ "petri-executor-sandbox",
  "petri-frontend",
  "petri-frontend-gha",
  "petri-github-actions",
@@ -1609,7 +1641,7 @@ dependencies = [
 [[package]]
 name = "sandbox-driver"
 version = "0.1.0"
-source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=49bbb099cb93a7377b18b3dbabee9d477fe46216#49bbb099cb93a7377b18b3dbabee9d477fe46216"
+source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a1fb1a60e7b29d22b9850859518d4dcddde8f766#a1fb1a60e7b29d22b9850859518d4dcddde8f766"
 dependencies = [
  "async-trait",
  "globset",
@@ -1623,9 +1655,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandbox-driver-daytona-config"
+version = "0.1.0"
+source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a1fb1a60e7b29d22b9850859518d4dcddde8f766#a1fb1a60e7b29d22b9850859518d4dcddde8f766"
+dependencies = [
+ "sandbox-driver-docker-config",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sandbox-driver-docker-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=49bbb099cb93a7377b18b3dbabee9d477fe46216#49bbb099cb93a7377b18b3dbabee9d477fe46216"
+source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a1fb1a60e7b29d22b9850859518d4dcddde8f766#a1fb1a60e7b29d22b9850859518d4dcddde8f766"
 dependencies = [
  "serde",
  "serde_json",
@@ -1634,7 +1676,7 @@ dependencies = [
 [[package]]
 name = "sandbox-driver-protocol"
 version = "0.1.0"
-source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=49bbb099cb93a7377b18b3dbabee9d477fe46216#49bbb099cb93a7377b18b3dbabee9d477fe46216"
+source = "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a1fb1a60e7b29d22b9850859518d4dcddde8f766#a1fb1a60e7b29d22b9850859518d4dcddde8f766"
 dependencies = [
  "async-trait",
  "base64",
@@ -1742,6 +1784,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
@@ -1919,6 +1967,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

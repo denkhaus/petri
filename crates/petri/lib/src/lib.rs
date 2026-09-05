@@ -37,7 +37,9 @@ use std::{env, fs, thread};
 
 pub use execution::{self, host};
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
-pub use runtime::{RunOptions, Runtime, driver, engine, ir};
+pub use runtime::{
+    DaytonaResources, RunOptions, Runtime, SandboxBackend, SandboxOptions, driver, engine, ir,
+};
 
 /// The executor interface, with the sandbox-driver adapter as a submodule.
 pub mod executor {

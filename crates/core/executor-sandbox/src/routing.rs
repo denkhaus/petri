@@ -21,7 +21,7 @@ use crate::host::HostTeardown;
 use crate::lease::{LeaseLedger, MemoryLedger};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSupervisor, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
-use crate::{HostExecutor, SandboxExecutor, SandboxTeardown};
+use crate::{HostExecutor, SandboxBackend, SandboxExecutor, SandboxOptions, SandboxTeardown};
 
 /// The provider kind container scopes go to.
 pub const CONTAINER_KIND: &str = "docker";
@@ -36,14 +36,14 @@ enum ActionOwner {
 /// How the container side is built: from this process's environment, or
 /// from a provider a test handed in.
 enum ContainerSource {
-    Env { dev: Option<bool> },
+    Env,
     Fixed(Arc<dyn ProviderSource>),
 }
 
 /// One settings snapshot and one supervised process for the entire router.
 struct ProviderConfig {
     source:       Arc<dyn ProviderSource>,
-    host_address: Result<String, String>,
+    host_address: Result<Option<String>, String>,
 }
 
 /// Routes scopes to the native host executor or the container
@@ -65,6 +65,7 @@ pub struct RoutingExecutor {
     ledger:       OnceLock<Arc<dyn LeaseLedger>>,
     identity:     Arc<RunIdentity>,
     retention:    Retention,
+    options:      SandboxOptions,
 }
 
 impl RoutingExecutor {
@@ -72,13 +73,26 @@ impl RoutingExecutor {
     /// plugin launched on the first container scope. The standard runtime's
     /// default.
     pub fn local(run_dir: impl Into<PathBuf>, retention: Retention) -> Self {
-        Self::over(run_dir, retention, ContainerSource::Env { dev: None })
+        Self::with_options(run_dir, retention, SandboxOptions::default())
     }
 
     /// [`RoutingExecutor::local`] with the plugin dev-mode decision made by
     /// the caller (the CLI's `--sandbox-plugin-dev`).
     pub fn local_with_dev(run_dir: impl Into<PathBuf>, retention: Retention, dev: bool) -> Self {
-        Self::over(run_dir, retention, ContainerSource::Env { dev: Some(dev) })
+        Self::with_options(run_dir, retention, SandboxOptions {
+            plugin_dev: Some(dev),
+            ..Default::default()
+        })
+    }
+
+    pub fn with_options(
+        run_dir: impl Into<PathBuf>,
+        retention: Retention,
+        options: SandboxOptions,
+    ) -> Self {
+        let mut router = Self::over(run_dir, retention, ContainerSource::Env);
+        router.options = options;
+        router
     }
 
     /// A router whose container scopes go to `source`: tests over a fake
@@ -111,6 +125,7 @@ impl RoutingExecutor {
             ledger: OnceLock::new(),
             identity: Arc::new(RunIdentity::new(run_dir)),
             retention,
+            options: SandboxOptions::default(),
         }
     }
 
@@ -125,16 +140,37 @@ impl RoutingExecutor {
         &self.identity
     }
 
+    /// Provider identity for the lease reservation, before resource creation.
+    pub fn provider_kind_for(&self, runtime: &ir::RuntimeSpec) -> &str {
+        if self.options.backend == SandboxBackend::Host
+            && matches!(runtime.target, RuntimeTarget::HostProcess)
+        {
+            return "host";
+        }
+        match &self.source {
+            ContainerSource::Fixed(source) => source.kind(),
+            ContainerSource::Env => self.plugin_kind(),
+        }
+    }
+
+    fn plugin_kind(&self) -> &'static str {
+        match self.options.backend {
+            SandboxBackend::Host | SandboxBackend::Docker => "docker",
+            SandboxBackend::Daytona => "daytona",
+        }
+    }
+
     fn provider(&self) -> Result<&ProviderConfig, EnvError> {
         self.provider
             .get_or_init(|| match &self.source {
                 ContainerSource::Fixed(source) => Ok(ProviderConfig {
                     source:       source.clone(),
-                    host_address: Ok(crate::DOCKER_HOST_ALIAS.to_owned()),
+                    host_address: Ok(Some(crate::DOCKER_HOST_ALIAS.to_owned())),
                 }),
-                ContainerSource::Env { dev } => {
-                    let settings = PluginSettings::from_env(CONTAINER_KIND, *dev)
-                        .map_err(|error| error.to_string())?;
+                ContainerSource::Env => {
+                    let settings =
+                        PluginSettings::from_env(self.plugin_kind(), self.options.plugin_dev)
+                            .map_err(|error| error.to_string())?;
                     let host_address = settings.host_address().map_err(|error| error.to_string());
                     Ok(ProviderConfig {
                         source: Arc::new(PluginSupervisor::new(settings)),
@@ -143,7 +179,7 @@ impl RoutingExecutor {
                 }
             })
             .as_ref()
-            .map_err(|message| EnvError::backend(CONTAINER_KIND, "configure", message.clone()))
+            .map_err(|message| EnvError::backend(self.plugin_kind(), "configure", message.clone()))
     }
 
     /// The container executor, built on first use. A configuration error
@@ -163,6 +199,7 @@ impl RoutingExecutor {
                     Arc::clone(&self.identity),
                     self.retention,
                     host_address,
+                    self.options.clone(),
                 )))
             })
             .await
@@ -185,7 +222,9 @@ impl RoutingExecutor {
         let host_address = provider
             .host_address
             .as_ref()
-            .map_err(|message| EnvError::backend(CONTAINER_KIND, "configure", message.clone()))?;
+            .map_err(|message| EnvError::backend(CONTAINER_KIND, "configure", message.clone()))?
+            .as_ref()
+            .ok_or(EnvError::HostUnreachable)?;
         let key = (owner, scope.workspace_id.clone());
         let mut hosts = self
             .action_hosts
@@ -298,6 +337,9 @@ impl Executor for RoutingExecutor {
         scope: &ScopeSpec,
         ctx: &AcquireContext,
     ) -> Result<EnvHandle, EnvError> {
+        if self.options.backend != SandboxBackend::Host {
+            return self.container().await?.acquire(scope, ctx).await;
+        }
         match scope.runtime.target {
             RuntimeTarget::HostProcess => {
                 let owner = ctx

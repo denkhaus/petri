@@ -181,7 +181,8 @@ impl Fixture {
             ledger.clone(),
             Arc::new(RunIdentity::new(dir.path().to_path_buf())),
             Retention::Always,
-            crate::DOCKER_HOST_ALIAS.to_owned(),
+            Some(crate::DOCKER_HOST_ALIAS.to_owned()),
+            crate::SandboxOptions::default(),
         ));
         Self {
             _dir: dir,

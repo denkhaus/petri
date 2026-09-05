@@ -23,6 +23,7 @@ serde_json = { workspace = true }
 smol_str = { workspace = true }
 
 [dev-dependencies]
+executor-sandbox.workspace = true
 execution = { workspace = true }
 async-trait = { workspace = true }
 runtime = { workspace = true }

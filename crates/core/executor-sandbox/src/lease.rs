@@ -257,11 +257,15 @@ impl SandboxLeaseManager {
     /// as the lease's state requires, and counting the caller as a holder.
     /// `build_spec` produces the create spec, given the labels every Petri
     /// sandbox carries.
-    pub(crate) async fn acquire(
+    pub(crate) async fn acquire<Fut>(
         self: &Arc<Self>,
         request: LeaseRequest<'_>,
-        build_spec: impl FnOnce(&[(String, String)]) -> Result<SandboxSpec, EnvError>,
-    ) -> Result<AcquiredSandbox, EnvError> {
+        build_spec: impl FnOnce(Vec<(String, String)>, Arc<dyn sandbox_driver::SandboxProvider>) -> Fut
+        + Send,
+    ) -> Result<AcquiredSandbox, EnvError>
+    where
+        Fut: Future<Output = Result<SandboxSpec, EnvError>> + Send,
+    {
         // An owned guard: a create hands it to its task, so an acquire that
         // is dropped mid-create still keeps the lease locked until the
         // create has settled one way or the other.
@@ -466,21 +470,25 @@ impl SandboxLeaseManager {
     /// still completes, with the lease locked until it has. The task
     /// returns an acquisition guard. Dropping either the task's unread
     /// result or later environment initialization releases that holder.
-    async fn create(
+    async fn create<Fut>(
         self: &Arc<Self>,
         provider: &Arc<dyn sandbox_driver::SandboxProvider>,
         request: &LeaseRequest<'_>,
         labels: &[(String, String)],
-        build_spec: impl FnOnce(&[(String, String)]) -> Result<SandboxSpec, EnvError>,
+        build_spec: impl FnOnce(Vec<(String, String)>, Arc<dyn sandbox_driver::SandboxProvider>) -> Fut
+        + Send,
         mut slot: OwnedMutexGuard<LeaseSlot>,
         generation: u64,
-    ) -> Result<AcquiredSandbox, EnvError> {
+    ) -> Result<AcquiredSandbox, EnvError>
+    where
+        Fut: Future<Output = Result<SandboxSpec, EnvError>> + Send,
+    {
         let lease = request.lease;
         let standalone = request.standalone;
         self.ledger
             .allocating(lease, self.source.kind(), self.source.fingerprint())
             .map_err(|error| Self::ledger_failed(&error))?;
-        let spec = build_spec(labels)?;
+        let spec = build_spec(labels.to_vec(), provider.clone()).await?;
         let provider = provider.clone();
         let manager = self.clone();
         let created = tokio::spawn(async move {

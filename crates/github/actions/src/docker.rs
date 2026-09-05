@@ -191,8 +191,11 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
     );
     env.insert(SmolStr::new("GITHUB_ACTION_REF"), SmolStr::new(git_ref));
     // The results backend, reached through the runner's guaranteed host alias.
-    if let Some(results) = ctx.capability::<crate::ResultsServiceCap>() {
-        for (key, value) in results.env(runner.host_address()) {
+    if let (Some(results), Ok(address)) = (
+        ctx.capability::<crate::ResultsServiceCap>(),
+        runner.host_address(),
+    ) {
+        for (key, value) in results.env(address) {
             env.insert(key, value);
         }
     }

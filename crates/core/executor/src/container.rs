@@ -146,7 +146,8 @@ pub trait ContainerRunner: Send + Sync {
     /// How a one-shot container reaches the driver's machine — the container
     /// side of [`crate::ExecEnv::host_address`]. The provider guarantees the
     /// answer resolves inside the containers it runs (`--add-host` at create).
-    fn host_address(&self) -> &str;
+    /// No callback route returns [`EnvError::HostUnreachable`].
+    fn host_address(&self) -> Result<&str, EnvError>;
 
     /// Pull or build the image as needed, then run the container. The exit
     /// status is the container's own.

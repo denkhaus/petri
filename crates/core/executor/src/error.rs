@@ -52,12 +52,16 @@ pub enum EnvError {
     },
     #[error("the environment is gone")]
     Gone,
+    #[error("this sandbox cannot reach services on Petri's machine")]
+    HostUnreachable,
 }
 
 impl EnvError {
     /// The failure class recorded when acquiring an environment fails, so a bad
     /// image or a down daemon routes like any other failure.
     pub const ACQUIRE_CLASS: ir::FailureClass = ir::FailureClass::new_static("env_acquire");
+    pub const HOST_UNREACHABLE_CLASS: ir::FailureClass =
+        ir::FailureClass::new_static("host_unreachable");
 
     /// A fixed discriminant, for diagnostics that may not carry the error
     /// itself. A `Backend` message is the backing system's own stderr — a
@@ -73,6 +77,7 @@ impl EnvError {
             Self::Backend { .. } => "backend",
             Self::FenceLeaked { .. } => "fence_leaked",
             Self::Gone => "gone",
+            Self::HostUnreachable => "host_unreachable",
         }
     }
 

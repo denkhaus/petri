@@ -30,7 +30,7 @@ use execution::{CoordinatorHandle, host, prune as sandbox_prune};
 use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, CompileInputs, Lowered};
 use runtime::ir::{Graph, RunStatus};
-use runtime::{LoadError, RunOptions, Runtime};
+use runtime::{DaytonaResources, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
 use tokio::signal;
 use tracing::field::{Empty, display};
 
@@ -132,6 +132,52 @@ impl FileArgs {
     }
 }
 
+#[derive(Args)]
+struct ProviderArgs {
+    /// Where workflow processes run: host, docker, or daytona.
+    #[arg(long, default_value = "host")]
+    backend:            SandboxBackend,
+    /// Allow plugins without a pinned checksum. Debug builds allow them by
+    /// default.
+    #[arg(long)]
+    sandbox_plugin_dev: bool,
+}
+
+impl ProviderArgs {
+    fn options(self) -> SandboxOptions {
+        SandboxOptions {
+            backend: self.backend,
+            plugin_dev: self.sandbox_plugin_dev.then_some(true),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Args)]
+struct RunnerArgs {
+    /// Override a placement label's runner image. Repeatable; later values win.
+    #[arg(long = "runner-image", value_name = "LABEL=IMAGE", value_parser = runner_image)]
+    images:            Vec<(String, String)>,
+    /// CPUs in a Daytona runner snapshot (minimum 2).
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..))]
+    daytona_cpus:      u32,
+    /// Memory in a Daytona runner snapshot, in MiB (minimum 4096).
+    #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u64).range(4096..))]
+    daytona_memory_mb: u64,
+    /// Disk in a Daytona runner snapshot, in MiB (minimum 4096).
+    #[arg(long, default_value_t = 20480, value_parser = clap::value_parser!(u64).range(4096..))]
+    daytona_disk_mb:   u64,
+}
+
+fn runner_image(value: &str) -> Result<(String, String), String> {
+    match value.split_once('=') {
+        Some((label, image)) if !label.trim().is_empty() && !image.trim().is_empty() => {
+            Ok((label.to_owned(), image.to_owned()))
+        }
+        _ => Err("expected LABEL=IMAGE with a nonempty label and image".to_owned()),
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Parse, lower and validate a workflow file; print diagnostics.
@@ -153,32 +199,30 @@ enum Command {
     /// Run a workflow file to completion.
     Run {
         #[command(flatten)]
-        target:             FileArgs,
+        target:       FileArgs,
         /// Where workspaces, logs and `events.json` go. Defaults to a fresh
         /// directory under the system temp dir, printed at start.
         #[arg(long)]
-        run_dir:            Option<PathBuf>,
+        run_dir:      Option<PathBuf>,
         /// Do not echo step output.
         #[arg(long)]
-        quiet:              bool,
+        quiet:        bool,
         /// Answer a step's question — a human gate — from the terminal:
         /// the question is printed and one line is read from stdin.
         #[arg(long, conflicts_with = "auto_approve")]
-        interactive:        bool,
+        interactive:  bool,
         /// Answer every step's question with its default choice.
         #[arg(long)]
-        auto_approve:       bool,
+        auto_approve: bool,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
         /// choice.
         #[arg(long)]
-        dry_run:            bool,
-        /// Allow a sandbox plugin whose checksum this build does not pin —
-        /// a locally built `sandbox-driver-docker`, say. Debug builds
-        /// allow one by default; release builds require this flag or
-        /// `PETRI_SANDBOX_PLUGIN_DEV=1`.
-        #[arg(long)]
-        sandbox_plugin_dev: bool,
+        dry_run:      bool,
+        #[command(flatten)]
+        provider:     ProviderArgs,
+        #[command(flatten)]
+        runner:       RunnerArgs,
     },
     /// Sandboxes a run holds on its provider.
     #[command(subcommand)]
@@ -206,10 +250,9 @@ enum SandboxCommand {
     Prune {
         /// The run's directory.
         #[arg(long)]
-        run_dir:            PathBuf,
-        /// Allow a sandbox plugin whose checksum this build does not pin.
-        #[arg(long)]
-        sandbox_plugin_dev: bool,
+        run_dir:  PathBuf,
+        #[command(flatten)]
+        provider: ProviderArgs,
     },
 }
 
@@ -242,13 +285,20 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             interactive,
             auto_approve,
             dry_run,
-            sandbox_plugin_dev,
+            provider,
+            runner,
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
             let mut options = RunOptions::new(&run_dir);
             options.echo = !quiet;
-            options.sandbox_plugin_dev = sandbox_plugin_dev.then_some(true);
+            options.sandbox = provider.options();
+            options.sandbox.runner_images = runner.images.into_iter().collect();
+            options.sandbox.daytona_resources = DaytonaResources {
+                cpu_cores: runner.daytona_cpus,
+                memory_mb: runner.daytona_memory_mb,
+                disk_mb:   runner.daytona_disk_mb,
+            };
             let mode = match (interactive, auto_approve) {
                 (true, _) => Some(Mode::Interactive),
                 (_, true) => Some(Mode::AutoApprove),
@@ -268,12 +318,9 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             .await
         }
         Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
-        Command::Sandbox(SandboxCommand::Prune {
-            run_dir,
-            sandbox_plugin_dev,
-        }) => {
+        Command::Sandbox(SandboxCommand::Prune { run_dir, provider }) => {
             let mut options = RunOptions::new(&run_dir);
-            options.sandbox_plugin_dev = sandbox_plugin_dev.then_some(true);
+            options.sandbox = provider.options();
             prune(&make(RuntimeMode::Real).options(options)).await
         }
     }

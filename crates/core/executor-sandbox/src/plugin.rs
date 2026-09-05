@@ -222,7 +222,7 @@ impl PluginSettings {
     /// The host name or address a sandbox of this provider uses to reach
     /// services Petri runs on this machine. A local Docker daemon has a
     /// known alias; a remote one needs the operator to say.
-    pub fn host_address(&self) -> Result<String, PluginError> {
+    pub fn host_address(&self) -> Result<Option<String>, PluginError> {
         infer_host_address(
             self.kind.as_str(),
             self.host_address.as_deref(),
@@ -276,12 +276,14 @@ fn infer_host_address(
     kind: &str,
     configured: Option<&str>,
     docker_host: &str,
-) -> Result<String, PluginError> {
+) -> Result<Option<String>, PluginError> {
     if let Some(address) = configured {
-        return Ok(address.to_owned());
+        return Ok(Some(address.to_owned()));
     }
     match kind {
-        "docker" if docker_host_is_local(docker_host) => Ok(DOCKER_HOST_ALIAS.to_owned()),
+        "host" => Ok(Some("127.0.0.1".to_owned())),
+        "daytona" => Ok(None),
+        "docker" if docker_host_is_local(docker_host) => Ok(Some(DOCKER_HOST_ALIAS.to_owned())),
         "docker" => Err(PluginError::RemoteDaemonNeedsHostAddress {
             docker_host: docker_host.trim().to_owned(),
         }),
@@ -602,7 +604,7 @@ mod tests {
             "npipe:////./pipe/docker_engine",
         ] {
             let address = infer_host_address("docker", None, local).expect("inferred");
-            assert_eq!(address, DOCKER_HOST_ALIAS, "for `{local}`");
+            assert_eq!(address.as_deref(), Some(DOCKER_HOST_ALIAS), "for `{local}`");
         }
     }
 
@@ -626,17 +628,13 @@ mod tests {
     fn a_configured_address_wins_everywhere() {
         let address = infer_host_address("docker", Some("petri.internal"), "tcp://10.0.0.5:2376")
             .expect("configured");
-        assert_eq!(address, "petri.internal");
+        assert_eq!(address.as_deref(), Some("petri.internal"));
         let address = infer_host_address("daytona", Some("203.0.113.7"), "").expect("configured");
-        assert_eq!(address, "203.0.113.7");
+        assert_eq!(address.as_deref(), Some("203.0.113.7"));
     }
 
     #[test]
     fn a_remote_only_provider_never_guesses() {
-        let error = infer_host_address("daytona", None, "").expect_err("no guess");
-        assert!(matches!(
-            error,
-            PluginError::RemoteDaemonNeedsHostAddress { .. }
-        ));
+        assert_eq!(infer_host_address("daytona", None, "").unwrap(), None);
     }
 }

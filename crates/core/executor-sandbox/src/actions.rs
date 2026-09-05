@@ -247,8 +247,8 @@ impl ContainerRunner for ActionHostRunner {
         CONTAINER_WORKSPACE
     }
 
-    fn host_address(&self) -> &str {
-        &self.host.host_address
+    fn host_address(&self) -> Result<&str, EnvError> {
+        Ok(&self.host.host_address)
     }
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
@@ -256,7 +256,7 @@ impl ContainerRunner for ActionHostRunner {
         let runner = OneShotRunner {
             sandbox,
             workspace: CONTAINER_WORKSPACE.to_owned(),
-            host_address: self.host.host_address.clone(),
+            host_address: Some(self.host.host_address.clone()),
             env: self.env.clone(),
         };
         runner.run(spec).await

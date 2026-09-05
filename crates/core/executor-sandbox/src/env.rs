@@ -52,7 +52,7 @@ pub(crate) struct SandboxEnv {
     pub(crate) env:          BTreeMap<SmolStr, SmolStr>,
     pub(crate) grace:        Duration,
     /// How a process in the sandbox reaches services on Petri's machine.
-    pub(crate) host_address: String,
+    pub(crate) host_address: Option<String>,
 }
 
 /// Maps a finished `run_streaming` to the executor's exit status. The
@@ -233,8 +233,10 @@ impl ExecEnv for SandboxEnv {
         &self.workspace
     }
 
-    fn host_address(&self) -> &str {
-        &self.host_address
+    fn host_address(&self) -> Result<&str, EnvError> {
+        self.host_address
+            .as_deref()
+            .ok_or(EnvError::HostUnreachable)
     }
 
     fn ambient_env(&self, name: &str) -> Option<String> {
@@ -350,7 +352,7 @@ impl ProcessHandle for SandboxProcess {
 pub(crate) struct OneShotRunner {
     pub(crate) sandbox:      Arc<dyn Sandbox>,
     pub(crate) workspace:    String,
-    pub(crate) host_address: String,
+    pub(crate) host_address: Option<String>,
     /// The scope's env, under the spec's own.
     pub(crate) env:          BTreeMap<SmolStr, SmolStr>,
 }
@@ -361,8 +363,10 @@ impl ContainerRunner for OneShotRunner {
         &self.workspace
     }
 
-    fn host_address(&self) -> &str {
-        &self.host_address
+    fn host_address(&self) -> Result<&str, EnvError> {
+        self.host_address
+            .as_deref()
+            .ok_or(EnvError::HostUnreachable)
     }
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {

@@ -628,7 +628,7 @@ effects**, exactly-once only for the log and the workspace fence.
 
 Host executor: workspace per scope instance under the run dir; retention
 default keep-on-failure (`always|on_failure|never`). Container executor
-(`executor-sandbox` over a sandbox-driver plugin, Docker today): one sandbox
+(`executor-sandbox` over a sandbox-driver plugin, Docker or Daytona): one sandbox
 per lease — pull if-not-present, an init process, **the workspace inside the
 sandbox** (Docker: a volume the sandbox owns at `/workspace`; nothing is bound
 from Petri's machine, so a remote daemon works and file I/O goes through the
@@ -644,6 +644,20 @@ deletes it. `petri sandbox prune` deletes kept sandboxes later, through the
 same pending-delete record state, and leaves a `deleted` tombstone while the
 run directory exists. Image contract: must provide `/bin/sh`, `env`, and
 `setsid` (busybox/util-linux both do).
+Backend selection belongs to `RunOptions.sandbox`, separate from a graph's
+runtime target. Docker maps process targets to a pinned runner container.
+Daytona maps a process target to a runner VM and a container target to a job
+container inside that VM. The VM owns the job, sidecars, and one-shot action
+containers; stopping it ends all of them. The VM workspace is shared with
+nested containers inside the VM, with no bind from Petri's machine. Runner
+snapshot names include the selected image and resource allocation. Concurrent
+scopes share preparation; later runs reuse the named snapshot. Petri disables
+automatic VM lifecycle timers. Lease release keeps or deletes the VM, while
+shared runner snapshots remain available. A stopped VM can be attached without
+contacting its Docker daemon; start refreshes the private preview connection.
+A provider without a route to Petri reports `host_unreachable`; actions omit
+ObjectService variables until an advertised address is configured.
+
 Services require a containerized job: declared `services` become sidecar
 containers on a per-scope network reached by alias, and a bare host process
 that declares services fails at acquire with `env_acquire`, the message naming

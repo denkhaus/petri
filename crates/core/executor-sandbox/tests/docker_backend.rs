@@ -215,7 +215,7 @@ async fn the_ambient_environment_is_read_at_acquire() {
     let env = handle.exec();
     let path = env.ambient_env("PATH").expect("the image has a PATH");
     assert!(path.contains("/bin"), "{path}");
-    assert_eq!(env.host_address(), "host.docker.internal");
+    assert_eq!(env.host_address().unwrap(), "host.docker.internal");
     let report = executor.release(handle, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
 }
@@ -451,7 +451,7 @@ async fn a_one_shot_action_container_shares_the_workspace() {
         .container_runner()
         .expect("a container scope binds a one-shot runner");
     assert_eq!(runner.workspace_path(), "/workspace");
-    assert_eq!(runner.host_address(), "host.docker.internal");
+    assert_eq!(runner.host_address().unwrap(), "host.docker.internal");
 
     // The job writes a file the action reads; the action writes one the
     // job reads: one workspace volume, shared both ways.

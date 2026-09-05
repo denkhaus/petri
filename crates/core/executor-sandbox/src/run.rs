@@ -43,7 +43,7 @@ pub struct RunIdentity {
 }
 
 impl RunIdentity {
-    pub(crate) fn new(run_dir: PathBuf) -> Self {
+    pub fn new(run_dir: PathBuf) -> Self {
         Self {
             run_dir,
             run_id: OnceCell::new(),

@@ -2,7 +2,7 @@
 //!
 //! Two shapes share the [`Executor`] interface. [`SandboxExecutor`] realizes a
 //! container scope on a sandbox-driver provider reached over the JSON-RPC
-//! plugin protocol — Docker today, Daytona next: the provider owns process
+//! plugin protocol — Docker or Daytona: the provider owns process
 //! execution, the filesystem, one-shot containers, and teardown, and this
 //! crate maps a [`ScopeSpec`] onto a `SandboxSpec` and keys the sandbox by
 //! its durable lease. [`HostExecutor`] keeps the host backend native — real
@@ -17,6 +17,9 @@
 #[cfg(test)]
 mod acquire_tests;
 mod actions;
+mod backend;
+#[cfg(test)]
+mod daytona_tests;
 mod env;
 mod files;
 mod host;
@@ -24,20 +27,28 @@ pub mod lease;
 pub mod plugin;
 mod routing;
 mod run;
+mod snapshots;
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use executor::{
     AcquireContext, EnvError, EnvHandle, Executor, ReleaseReport, Retention, SandboxLeaseId,
     ScopeOutcome, ScopeSpec,
 };
-use ir::RuntimeTarget;
-use sandbox_driver::{Sandbox, SandboxSource, SandboxSpec};
+use ir::{ContainerOptions, RuntimeTarget};
+use sandbox_driver::{
+    Sandbox, SandboxKind, SandboxProvider, SandboxSource, SandboxSpec, SnapshotId,
+};
+use sandbox_driver_daytona_config::{
+    DaytonaProviderConfig, DockerExecutionTarget, NestedDockerConfig,
+};
 use sandbox_driver_docker_config::{DockerProviderConfig, Health, RegistryAuth, Sidecar};
 use smol_str::SmolStr;
 
+pub use crate::backend::{DaytonaResources, SandboxBackend, SandboxOptions};
 use crate::env::{OneShotRunner, SandboxEnv};
 pub use crate::host::HostExecutor;
 pub use crate::lease::{
@@ -49,6 +60,7 @@ pub use crate::plugin::{
 };
 pub use crate::routing::{CONTAINER_KIND, RoutingExecutor};
 pub use crate::run::{LEASE_LABEL, RUN_ID_FILE, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
+use crate::snapshots::{RunnerSnapshot, RunnerSnapshots};
 
 /// The container path every scope's workspace lives at.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
@@ -71,7 +83,9 @@ pub struct SandboxExecutor {
     manager:      Arc<SandboxLeaseManager>,
     identity:     Arc<RunIdentity>,
     retention:    Retention,
-    host_address: String,
+    host_address: Option<String>,
+    options:      SandboxOptions,
+    snapshots:    RunnerSnapshots,
 }
 
 impl SandboxExecutor {
@@ -82,13 +96,16 @@ impl SandboxExecutor {
         ledger: Arc<dyn LeaseLedger>,
         identity: Arc<RunIdentity>,
         retention: Retention,
-        host_address: String,
+        host_address: Option<String>,
+        options: SandboxOptions,
     ) -> Self {
         Self {
             manager: Arc::new(SandboxLeaseManager::new(source, ledger, identity.clone())),
             identity,
             retention,
             host_address,
+            options,
+            snapshots: RunnerSnapshots::default(),
         }
     }
 
@@ -122,7 +139,10 @@ impl SandboxExecutor {
                     workspace_id: scope.workspace_id.as_str(),
                     standalone,
                 },
-                |labels| build_spec(scope, labels, &name, ctx),
+                |labels, provider| async move {
+                    self.build_spec(scope, &labels, &name, ctx, &*provider)
+                        .await
+                },
             )
             .await?;
         let sandbox = acquired.sandbox();
@@ -175,6 +195,121 @@ impl SandboxExecutor {
         )
         .with_runner(Arc::new(runner)))
     }
+
+    async fn build_spec(
+        &self,
+        scope: &ScopeSpec,
+        labels: &[(String, String)],
+        name: &str,
+        ctx: &AcquireContext,
+        provider: &dyn SandboxProvider,
+    ) -> Result<SandboxSpec, EnvError> {
+        if self.options.backend != SandboxBackend::Daytona {
+            if self.options.backend == SandboxBackend::Docker
+                && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
+            {
+                let mut runner = scope.clone();
+                runner.runtime.target = RuntimeTarget::Container {
+                    image:       self.options.runner_image(&scope.runtime)?.into(),
+                    options:     ContainerOptions::default(),
+                    credentials: None,
+                };
+                return build_spec(&runner, labels, name, ctx);
+            }
+            return build_spec(scope, labels, name, ctx);
+        }
+        let image = self.options.runner_image(&scope.runtime)?;
+        let snapshot = RunnerSnapshot::new(&image, self.options.daytona_resources.validated()?);
+        let mut spec = build_daytona_spec(scope, ctx, snapshot.id.clone())?;
+        spec.name = Some(name.to_owned());
+        spec.labels.extend(labels.iter().cloned());
+        let snapshots = provider.snapshots().ok_or_else(|| {
+            EnvError::backend(
+                "daytona",
+                "snapshot",
+                "the provider does not support runner snapshots",
+            )
+        })?;
+        self.snapshots.ensure(snapshots, &snapshot).await?;
+        Ok(spec)
+    }
+}
+
+fn build_daytona_spec(
+    scope: &ScopeSpec,
+    ctx: &AcquireContext,
+    snapshot: SnapshotId,
+) -> Result<SandboxSpec, EnvError> {
+    let (target, image, user, options) = match &scope.runtime.target {
+        RuntimeTarget::HostProcess => {
+            if !scope.services.is_empty() {
+                return Err(EnvError::backend(
+                    "daytona",
+                    "acquire",
+                    "services require a container job",
+                ));
+            }
+            (
+                DockerExecutionTarget::VirtualMachine,
+                "alpine:3.20".to_owned(),
+                None,
+                DockerProviderConfig::default(),
+            )
+        }
+        RuntimeTarget::Container {
+            image,
+            options,
+            credentials,
+        } => {
+            let mut config = docker_provider_config(
+                registry_auth(credentials.as_ref(), ctx)?,
+                sidecars(scope, ctx)?,
+                options,
+            );
+            // A Daytona job cannot use the local Docker daemon's host alias.
+            config.extra_hosts.clear();
+            (
+                DockerExecutionTarget::Container,
+                image.to_string(),
+                options.user.as_ref().map(ToString::to_string),
+                config,
+            )
+        }
+    };
+    let mut spec = SandboxSpec::new(SandboxSource::Snapshot { id: snapshot })
+        .sandbox_kind(SandboxKind::VirtualMachine)
+        .working_directory(CONTAINER_WORKSPACE);
+    spec.user = Some("root".to_owned());
+    spec.public = Some(false);
+    spec.timers.auto_stop_after_idle = Some(Duration::ZERO);
+    spec.timers.auto_pause_after_idle = Some(Duration::ZERO);
+    spec.timers.auto_delete_after_stop = Some(Duration::ZERO);
+    spec.timers.ttl = Some(Duration::ZERO);
+    spec.env.extend(
+        scope
+            .env
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string())),
+    );
+    if let RuntimeTarget::Container { options, .. } = &scope.runtime.target {
+        spec.env.extend(
+            options
+                .env
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        );
+    }
+    spec.provider_config = DaytonaProviderConfig {
+        docker: Some(NestedDockerConfig {
+            image,
+            target,
+            user,
+            options,
+        }),
+        ..Default::default()
+    }
+    .into_value();
+    Ok(spec)
 }
 
 /// Maps a container scope to a `SandboxSpec`: the workspace inside the

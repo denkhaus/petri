@@ -262,8 +262,12 @@ the next. Entries are immutable per `(key, version)` as on GitHub; lookups
 match the exact key then each restore key as a prefix, newest first.
 **GitHub's branch scoping is deliberately ignored locally**: one machine, one
 store. Upload and download flow across jobs, host and containerized alike
-(containers reach the service through `host.docker.internal`, which the
-executor guarantees); nothing leaves the machine, and cross-**run** artifact
+(local Docker containers use `host.docker.internal`; remote Docker requires
+`PETRI_SANDBOX_DOCKER_HOST_ADDRESS`). Daytona has no inferred callback route.
+Ordinary JavaScript and Docker actions run without ObjectService variables;
+artifact and cache actions need `PETRI_SANDBOX_DAYTONA_HOST_ADDRESS` to name
+an address reachable from the VM. Hosted Daytona execution remains an ignored,
+credential-dependent verification gate. Cross-**run** artifact
 reads (`download-artifact` with `run-id:`) go to the real REST API and need
 real credentials. The tool cache is persistent too: host jobs get
 `RUNNER_TOOL_CACHE` pointed at `<store>/toolcache/<os>` (per-OS, since the

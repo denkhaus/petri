@@ -19,7 +19,7 @@ use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
-use executor_sandbox::{LeaseLedger, RoutingExecutor};
+use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
 use frontend::{CompileInputs, DirFiles, Frontend, Lowered, Span};
 use ir::{Graph, RunStatus};
 use tracing::field::Empty;
@@ -43,9 +43,7 @@ pub struct RunOptions {
     /// Replay the log after the run and fail on any divergence. The determinism
     /// canary; on by default.
     pub verify_replay:       bool,
-    /// Whether an unpinned sandbox plugin may run: `Some` decides, `None`
-    /// leaves it to `PETRI_SANDBOX_PLUGIN_DEV` and the build profile.
-    pub sandbox_plugin_dev:  Option<bool>,
+    pub sandbox:             SandboxOptions,
 }
 
 impl RunOptions {
@@ -58,7 +56,7 @@ impl RunOptions {
             retention:           Retention::default(),
             echo:                false,
             verify_replay:       true,
-            sandbox_plugin_dev:  None,
+            sandbox:             SandboxOptions::default(),
         }
     }
 }
@@ -536,10 +534,11 @@ impl Runtime {
     }
 
     fn default_router_for(&self, run_dir: &Path) -> Arc<RoutingExecutor> {
-        Arc::new(match self.options.sandbox_plugin_dev {
-            Some(dev) => RoutingExecutor::local_with_dev(run_dir, self.options.retention, dev),
-            None => RoutingExecutor::local(run_dir, self.options.retention),
-        })
+        Arc::new(RoutingExecutor::with_options(
+            run_dir,
+            self.options.retention,
+            self.options.sandbox.clone(),
+        ))
     }
 }
 

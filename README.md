@@ -136,6 +136,29 @@ workspace pins under `target/plugins/bin`, and the test tasks point
 plugin is missing or no daemon is reachable, so `mise run test` is green on a
 machine without one.
 
+`petri run --backend host|docker|daytona` selects the execution backend.
+Host is the default. Docker runs process jobs in a pinned slim runner image.
+Daytona runs them in a VM with nested Docker; container jobs, services, and
+Docker actions stay inside that VM. `--runner-image LABEL=IMAGE` overrides a
+runner label. Docker defaults cover Ubuntu 22.04, 24.04, and 26.04. Daytona's
+published Docker-in-Docker default covers Ubuntu 24.04 and `ubuntu-latest`;
+other labels need an override. Unknown or conflicting labels fail at acquire.
+
+Daytona reads its credentials from `DAYTONA_API_KEY` or `DAYTONA_JWT_TOKEN`
+and the SDK's endpoint and organization variables. `--daytona-cpus`,
+`--daytona-memory-mb`, and `--daytona-disk-mb` default to 2, 4096, and 20480.
+Runner snapshots are named by image and resources, prepared once per run,
+and reused across runs. Snapshot preparation has a 15-minute deadline.
+Petri disables automatic VM stop, pause, deletion, and TTL timers; lease
+release and prune control cleanup. Shared runner snapshots remain available.
+
+Daytona has no inferred route to Petri's ObjectService. Ordinary JavaScript
+and Docker actions still run, with the service variables omitted. Artifact
+and cache actions need `PETRI_SANDBOX_DAYTONA_HOST_ADDRESS` set to a name or
+address reachable from the VM. Local transport and adapter tests pass;
+the ignored live Daytona workflow test requires credentials and has not yet
+been run against the hosted preview service.
+
 Release archives bundle the Docker, Host, and Daytona plugin executables from
 the pinned revision. Petri embeds their SHA-256 digests at release build time.
 `scripts/release-verify.sh` checks the archive, runs a container workflow without

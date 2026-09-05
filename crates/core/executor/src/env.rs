@@ -246,15 +246,10 @@ pub trait ExecEnv: Send + Sync {
     /// host half of a URL for a service the driver runs beside the workspace.
     /// One fact, answered where it is known: a host process uses loopback; a
     /// containerized environment answers with the alias its executor
-    /// guaranteed resolvable at create (`host.docker.internal`).
-    #[expect(
-        clippy::unnecessary_literal_bound,
-        reason = "this is the trait's signature, not one implementation: an executor whose \
-                  host address is computed at acquire returns a borrow of itself, which \
-                  `&'static str` would forbid"
-    )]
-    fn host_address(&self) -> &str {
-        "127.0.0.1"
+    /// guaranteed resolvable at create (`host.docker.internal`). A remote
+    /// sandbox without a route returns [`EnvError::HostUnreachable`].
+    fn host_address(&self) -> Result<&str, EnvError> {
+        Ok("127.0.0.1")
     }
 
     /// One variable of the environment a process spawned here starts from,

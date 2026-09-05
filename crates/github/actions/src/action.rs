@@ -139,8 +139,11 @@ async fn execute(config: ActionConfig, ctx: StepCtx) -> Result<Outcome, StepFail
     env.insert(SmolStr::new("GITHUB_ACTION_REF"), literal(git_ref));
     // The results backend, when the host stood one up — actions only, the
     // visibility GitHub gives the runtime token.
-    if let Some(results) = ctx.capability::<crate::ResultsServiceCap>() {
-        for (key, value) in results.env(ctx.env.host_address()) {
+    if let (Some(results), Ok(address)) = (
+        ctx.capability::<crate::ResultsServiceCap>(),
+        ctx.env.host_address(),
+    ) {
+        for (key, value) in results.env(address) {
             env.insert(key, literal(value.to_string()));
         }
     }

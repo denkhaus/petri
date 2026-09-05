@@ -1103,10 +1103,13 @@ impl Coordinator {
         runtime: &RuntimeSpec,
     ) -> Result<crate::SandboxLeaseId, CoordinatorError> {
         let workspace = executor::WorkspaceId::scoped(Some(&invocation.workspace_prefix()), scope);
-        let provider = match runtime.target {
-            RuntimeTarget::HostProcess => HOST_PROVIDER,
-            RuntimeTarget::Container { .. } => CONTAINER_KIND,
-        };
+        let provider = self.runtime.sandbox_router().map_or_else(
+            || match runtime.target {
+                RuntimeTarget::HostProcess => HOST_PROVIDER,
+                RuntimeTarget::Container { .. } => CONTAINER_KIND,
+            },
+            |router| router.provider_kind_for(runtime),
+        );
         let lease = self
             .resources()
             .ensure_record(
