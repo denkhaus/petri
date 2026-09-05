@@ -535,6 +535,11 @@ pub trait ProviderSource: Send + Sync {
 
     /// The provider kind, as recorded on leases.
     fn kind(&self) -> &str;
+
+    /// The configured region for sandbox and snapshot placement.
+    fn region(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -558,6 +563,14 @@ impl ProviderSource for PluginSupervisor {
 
     fn kind(&self) -> &str {
         self.settings.kind.as_str()
+    }
+
+    fn region(&self) -> Option<&str> {
+        self.settings
+            .env
+            .get("DAYTONA_TARGET")
+            .map(String::as_str)
+            .filter(|region| !region.is_empty())
     }
 }
 
@@ -599,6 +612,18 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn the_source_region_uses_the_environment_captured_for_its_plugin() {
+        let settings = PluginSettings::from_lookup("daytona", Some(true), |name| {
+            (name == "DAYTONA_TARGET").then(|| "us-central-1".into())
+        })
+        .unwrap();
+        let source = PluginSupervisor::new(settings);
+        assert_eq!(source.region(), Some("us-central-1"));
+        let settings = PluginSettings::from_lookup("daytona", Some(true), |_| None).unwrap();
+        assert_eq!(PluginSupervisor::new(settings).region(), None);
+    }
 
     #[test]
     fn launch_failures_keep_the_cause_in_the_acquire_diagnostic() {

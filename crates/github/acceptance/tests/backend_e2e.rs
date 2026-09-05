@@ -12,7 +12,7 @@ use executor_sandbox::{
 };
 use runtime::executor::Retention;
 use runtime::ir::RunStatus;
-use runtime::{DaytonaSandboxKind, SandboxBackend, SandboxOptions};
+use runtime::{DaytonaResources, DaytonaSandboxKind, SandboxBackend, SandboxOptions};
 use support::*;
 use testkit::{RunDir, is_docker_ready};
 
@@ -127,9 +127,29 @@ async fn ordinary_actions_run_without_advertising_an_unreachable_results_service
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires DAYTONA_API_KEY and the Daytona plugin; creates billable container sandboxes"]
+#[ignore = "requires DAYTONA_API_KEY and the Daytona plugin; creates billable sandboxes"]
 async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_actions() {
     env::var("DAYTONA_API_KEY").expect("live gate requires DAYTONA_API_KEY");
+    let kind = env::var("PETRI_TEST_DAYTONA_KIND")
+        .unwrap_or_else(|_| "container".to_owned())
+        .parse::<DaytonaSandboxKind>()
+        .expect("PETRI_TEST_DAYTONA_KIND must be vm or container");
+    let mut resources = DaytonaResources::default();
+    if let Ok(value) = env::var("PETRI_TEST_DAYTONA_CPUS") {
+        resources.cpu_cores = value
+            .parse()
+            .expect("PETRI_TEST_DAYTONA_CPUS is an integer");
+    }
+    if let Ok(value) = env::var("PETRI_TEST_DAYTONA_MEMORY_MB") {
+        resources.memory_mb = value
+            .parse()
+            .expect("PETRI_TEST_DAYTONA_MEMORY_MB is an integer");
+    }
+    if let Ok(value) = env::var("PETRI_TEST_DAYTONA_DISK_MB") {
+        resources.disk_mb = value
+            .parse()
+            .expect("PETRI_TEST_DAYTONA_DISK_MB is an integer");
+    }
     for container in [false, true] {
         let dir = RunDir::new(if container {
             "daytona-container-actions"
@@ -139,7 +159,8 @@ async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_acti
         let rt = runtime(dir.path());
         let mut options = rt.run_options().clone();
         options.sandbox.backend = SandboxBackend::Daytona;
-        options.sandbox.daytona_kind = DaytonaSandboxKind::Container;
+        options.sandbox.daytona_kind = kind;
+        options.sandbox.daytona_resources = resources;
         let rt = with_object_service(rt.options(options), None);
         let report = rt
             .run(with_params(lower_ok(&workflow(container))))

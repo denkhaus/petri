@@ -253,6 +253,7 @@ impl SandboxExecutor {
             &image,
             self.options.daytona_resources.validated()?,
             self.options.daytona_kind.sandbox_kind(),
+            self.manager.source().region(),
         );
         let mut spec = build_daytona_spec(scope, ctx, &snapshot)?;
         spec.name = Some(name.to_owned());

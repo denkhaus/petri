@@ -22,8 +22,13 @@ pub(crate) struct RunnerSnapshot {
 }
 
 impl RunnerSnapshot {
-    pub(crate) fn new(image: &str, resources: Resources, kind: SandboxKind) -> Self {
-        let identity = serde_json::to_vec(&(image, resources, kind))
+    pub(crate) fn new(
+        image: &str,
+        resources: Resources,
+        kind: SandboxKind,
+        region: Option<&str>,
+    ) -> Self {
+        let identity = serde_json::to_vec(&(image, resources, kind, region))
             .expect("runner snapshot identity is serializable");
         let digest = format!("{:x}", Sha256::digest(identity));
         let name = format!("petri-runner-{}", &digest[..48]);
@@ -33,6 +38,7 @@ impl RunnerSnapshot {
         spec.name = Some(name.clone());
         spec.resources = resources;
         spec.sandbox_kind = Some(kind);
+        spec.region = region.map(str::to_owned);
         Self {
             id: SnapshotId::try_new(name).expect("generated snapshot name is valid"),
             spec,
@@ -40,24 +46,31 @@ impl RunnerSnapshot {
     }
 
     pub(crate) fn sandbox_spec(&self) -> SandboxSpec {
-        SandboxSpec::new(SandboxSource::Snapshot {
+        let mut spec = SandboxSpec::new(SandboxSource::Snapshot {
             id: self.id.clone(),
         })
         .sandbox_kind(
             self.spec
                 .sandbox_kind
                 .expect("runner snapshots have a kind"),
-        )
+        );
+        spec.region.clone_from(&self.spec.region);
+        spec
     }
 
     fn validate_status(&self, status: &SnapshotStatus) -> Result<(), EnvError> {
         if status.sandbox_kind != self.spec.sandbox_kind
             || status.resources != Some(self.spec.resources)
+            || self
+                .spec
+                .region
+                .as_ref()
+                .is_some_and(|region| !status.regions.contains(region))
         {
             return Err(EnvError::backend(
                 "daytona",
                 "snapshot",
-                "the named runner snapshot has a different kind or resource allocation",
+                "the named runner snapshot has a different kind, resource allocation, or region",
             ));
         }
         Ok(())
@@ -188,6 +201,7 @@ mod tests {
             let mut status = SnapshotStatus::new(id.clone(), SnapshotState::Active);
             status.sandbox_kind = spec.sandbox_kind;
             status.resources = Some(spec.resources);
+            status.regions = spec.region.iter().cloned().collect();
             *self.status.lock().unwrap() = Some(status);
             yield_now().await;
             if self.lose_create_reply {
@@ -240,6 +254,7 @@ mod tests {
             "runner:dind-pinned",
             DaytonaResources::default().validated().unwrap(),
             SandboxKind::VirtualMachine,
+            None,
         )
     }
 
@@ -315,15 +330,21 @@ mod tests {
             "runner:new-pin",
             old.spec.resources,
             SandboxKind::VirtualMachine,
+            None,
         );
         let mut resources = old.spec.resources;
         resources.cpu_cores = Some(4);
-        let new_size =
-            RunnerSnapshot::new("runner:dind-pinned", resources, SandboxKind::VirtualMachine);
+        let new_size = RunnerSnapshot::new(
+            "runner:dind-pinned",
+            resources,
+            SandboxKind::VirtualMachine,
+            None,
+        );
         let container = RunnerSnapshot::new(
             "runner:dind-pinned",
             old.spec.resources,
             SandboxKind::Container,
+            None,
         );
         assert_ne!(old.id, new_image.id);
         assert_ne!(old.id, new_size.id);
@@ -333,5 +354,33 @@ mod tests {
         status.resources = Some(old.spec.resources);
         container.validate_status(&status).unwrap();
         assert!(old.validate_status(&status).is_err());
+    }
+
+    #[tokio::test]
+    async fn runner_snapshots_and_sandboxes_use_the_selected_region() {
+        let resources = request().spec.resources;
+        let us = RunnerSnapshot::new(
+            "runner:dind-pinned",
+            resources,
+            SandboxKind::VirtualMachine,
+            Some("us-central-1"),
+        );
+        let eu = RunnerSnapshot::new(
+            "runner:dind-pinned",
+            resources,
+            SandboxKind::VirtualMachine,
+            Some("eu"),
+        );
+        assert_ne!(us.id, eu.id, "regions cannot reuse a runner snapshot");
+        assert_eq!(us.sandbox_spec().region.as_deref(), Some("us-central-1"));
+        let snapshots = Snapshots::default();
+        RunnerSnapshots::default()
+            .ensure(&snapshots, &us)
+            .await
+            .unwrap();
+        let status = snapshots.get(&us.id).await.unwrap();
+        assert_eq!(status.regions, ["us-central-1"]);
+        us.validate_status(&status).unwrap();
+        assert!(eu.validate_status(&status).is_err());
     }
 }

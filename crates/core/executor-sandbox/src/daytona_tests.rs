@@ -14,6 +14,7 @@ fn snapshot() -> RunnerSnapshot {
         "pinned-runner",
         Resources::default(),
         SandboxKind::VirtualMachine,
+        None,
     )
 }
 
@@ -23,6 +24,7 @@ fn container_offering_supports_process_and_nested_container_jobs() {
         "pinned-runner",
         Resources::default(),
         SandboxKind::Container,
+        None,
     );
     for container_job in [false, true] {
         let mut scope = ScopeSpec::new(ScopeId::new(1), "job");
