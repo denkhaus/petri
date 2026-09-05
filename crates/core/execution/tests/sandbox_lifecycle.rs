@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::time::Duration;
 
+use execution::host::EVENTS_FILE;
 use execution::prune::prune;
 use execution::{
     CallSite, Coordinator, CoordinatorInvocationClient, CoordinatorOptions, GraphDigest,
@@ -11,6 +13,7 @@ use ir::{GraphBuilder, Outcome, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef}
 use runtime::steps::{Step, StepCtx};
 use runtime::{RunOptions, Runtime};
 use testkit::{RunDir, container_id, container_is_running, is_docker_ready, sandbox_name};
+use tokio::time::timeout;
 
 struct HandleChildFailure;
 
@@ -193,7 +196,28 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
     graph.link(start, after);
     graph.node_mut(start).routing.groups[0].arms[0].transition = ir::EdgeTransition::Restart;
     let graph = coordinator.register_graph(&graph.build()).unwrap();
-    let result = coordinator.run_root(graph, BTreeMap::new()).await.unwrap();
+    let result = timeout(
+        Duration::from_secs(60),
+        coordinator.run_root(graph, BTreeMap::new()),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        let logs = [0, 1].map(|index| {
+            let path = coordinator
+                .store()
+                .execution_dir(
+                    execution::InvocationId::ROOT,
+                    execution::ExecutionId::new(index),
+                )
+                .join(EVENTS_FILE);
+            fs::read_to_string(path)
+        });
+        panic!(
+            "restart did not finish; coordinator: {:?}; execution logs: {logs:?}",
+            coordinator.store().state()
+        )
+    })
+    .unwrap();
     assert_eq!(result.status, RunStatus::Success);
     assert_eq!(result.final_execution.raw(), 1);
     let records = execution::ResourceStore::load(directory.path().join("resources")).unwrap();
@@ -202,8 +226,16 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
         1,
         "both executions share one lease"
     );
-    coordinator.finish().await;
-    assert!(prune(&runtime).await.unwrap().is_clean());
+    timeout(Duration::from_secs(60), coordinator.finish())
+        .await
+        .expect("coordinator shutdown did not finish");
+    assert!(
+        timeout(Duration::from_secs(60), prune(&runtime))
+            .await
+            .expect("retained sandbox prune did not finish")
+            .unwrap()
+            .is_clean()
+    );
 }
 
 #[tokio::test]
