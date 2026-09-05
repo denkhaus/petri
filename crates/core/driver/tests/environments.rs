@@ -14,6 +14,7 @@ use serde_json::json;
 use steps::{NOOP_KIND, NoopStep, PROCESS_KIND, Registry};
 use support::*;
 use tokio::sync::{Semaphore, mpsc};
+use tokio::task::yield_now;
 use tokio::time;
 
 /// An executor that reports each acquire, then waits for a test permit before
@@ -95,6 +96,33 @@ fn delayed_driver(
         config,
     );
     (driver, starts, gate, active, maximum)
+}
+
+#[tokio::test]
+async fn aborting_the_driver_stops_its_pending_acquire() {
+    let dir = RunDir::new("abort-during-acquire");
+    let mut graph = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    graph.add_step("waiting", scope, NOOP_KIND);
+    let (driver, mut starts, _gate, active, _) =
+        delayed_driver(graph.build(), &dir, RunConfig::new(dir.path()));
+    let run = tokio::spawn(driver.run());
+    assert_eq!(
+        time::timeout(Duration::from_secs(1), starts.recv())
+            .await
+            .expect("scope acquisition started"),
+        Some(scope)
+    );
+
+    run.abort();
+    assert!(matches!(run.await, Err(error) if error.is_cancelled()));
+    time::timeout(Duration::from_secs(1), async {
+        while active.load(Ordering::SeqCst) != 0 {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("the driver's pending acquire was dropped");
 }
 
 #[tokio::test]

@@ -24,31 +24,36 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::store::write_atomically_with;
-use crate::{SandboxAllocationKey, SandboxLeaseId};
+use crate::{ExecutionId, SandboxAllocationKey, SandboxLeaseId};
 
 /// The provider kind a host-process scope's lease records: its workspace
 /// is a directory under the run dir, governed by the run's retention.
 pub const HOST_PROVIDER: &str = "host";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxResourceRecord {
-    pub lease:       SandboxLeaseId,
-    pub allocation:  SandboxAllocationKey,
+    pub lease:         SandboxLeaseId,
+    pub allocation:    SandboxAllocationKey,
     /// The provider kind: [`HOST_PROVIDER`], or the sandbox plugin kind the
     /// lease manager recorded at allocation.
-    pub provider:    SmolStr,
+    pub provider:      SmolStr,
     /// The provider's own id for the resource, once it exists.
     #[serde(default)]
-    pub resource_id: Option<SmolStr>,
-    pub workspace:   WorkspaceId,
+    pub resource_id:   Option<SmolStr>,
+    pub workspace:     WorkspaceId,
+    /// The declaration must match on every acquisition, including restarts.
+    pub runtime:       ir::RuntimeSpec,
+    /// The execution whose durable log first introduced a dynamic scope.
+    /// Provenance for recovery validation; never part of allocation identity.
+    pub introduced_by: Option<ExecutionId>,
     #[serde(default)]
-    pub state:       LeaseState,
+    pub state:         LeaseState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending:     Option<PendingIntent>,
+    pub pending:       Option<PendingIntent>,
     /// The non-secret fingerprint of the backend the resource lives on: the
     /// daemon or endpoint, and the account or target. Never credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<SmolStr>,
+    pub fingerprint:   Option<SmolStr>,
 }
 
 impl SandboxResourceRecord {
@@ -135,7 +140,7 @@ impl ResourceStore {
                 return Err(ResourceError::DuplicateLease(record.lease));
             }
             if by_allocation
-                .insert(record.allocation, record.lease)
+                .insert(record.allocation.clone(), record.lease)
                 .is_some()
             {
                 return Err(ResourceError::DuplicateAllocation(record.allocation));
@@ -152,6 +157,31 @@ impl ResourceStore {
 
     pub fn records(&self) -> impl Iterator<Item = &SandboxResourceRecord> {
         self.by_lease.values()
+    }
+
+    /// Reserve a stable scope identity. A dynamic scope's workspace follows
+    /// its lease, since its live ScopeId can change after an execution restart.
+    pub(crate) fn reserve_scope(
+        &mut self,
+        allocation: SandboxAllocationKey,
+        provider: &str,
+        runtime: ir::RuntimeSpec,
+        introduced_by: Option<ExecutionId>,
+    ) -> Result<&SandboxResourceRecord, ResourceError> {
+        let workspace = if let Some(lease) = self.by_allocation.get(&allocation) {
+            self.resolve(*lease)?.workspace.clone()
+        } else {
+            match &allocation.scope {
+                engine::ScopeIdentity::Declared(scope) => {
+                    WorkspaceId::scoped(Some(&allocation.invocation.workspace_prefix()), *scope)
+                }
+                engine::ScopeIdentity::Spliced(_) => WorkspaceId::new(format!(
+                    "invocation-{}-lease-{}",
+                    allocation.invocation, self.next_lease,
+                )),
+            }
+        };
+        self.ensure_record(allocation, provider, workspace, runtime, introduced_by)
     }
 
     /// The record of `lease`, tombstones included: replay of a historical
@@ -183,6 +213,8 @@ impl ResourceStore {
         allocation: SandboxAllocationKey,
         provider: impl Into<SmolStr>,
         workspace: WorkspaceId,
+        runtime: ir::RuntimeSpec,
+        introduced_by: Option<ExecutionId>,
     ) -> Result<&SandboxResourceRecord, ResourceError> {
         let provider = provider.into();
         if let Some(lease) = self.by_allocation.get(&allocation).copied() {
@@ -190,7 +222,7 @@ impl ResourceStore {
                 .by_lease
                 .get(&lease)
                 .expect("both resource indexes are written together");
-            if record.workspace != workspace {
+            if record.workspace != workspace || record.runtime != runtime {
                 return Err(ResourceError::AllocationMismatch(allocation));
             }
             return Ok(record);
@@ -198,10 +230,12 @@ impl ResourceStore {
         let lease = SandboxLeaseId::new(self.next_lease);
         let record = SandboxResourceRecord {
             lease,
-            allocation,
+            allocation: allocation.clone(),
             provider,
             resource_id: None,
             workspace,
+            runtime,
+            introduced_by,
             state: LeaseState::Allocating,
             pending: None,
             fingerprint: None,

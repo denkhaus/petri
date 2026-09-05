@@ -357,10 +357,12 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
             .ensure_record(
                 SandboxAllocationKey {
                     invocation: InvocationId::ROOT,
-                    scope:      scope.id,
+                    scope:      engine::ScopeIdentity::Declared(scope.id),
                 },
                 "host",
                 scope.workspace_id.clone(),
+                scope.runtime.clone(),
+                None,
             )
             .expect("host reservation")
             .lease;

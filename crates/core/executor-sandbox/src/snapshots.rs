@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use executor::EnvError;
 use sandbox_driver::{
-    Error, Resources, SandboxKind, SnapshotId, SnapshotProvider, SnapshotSource, SnapshotSpec,
-    SnapshotState, SnapshotStatus,
+    Error, Resources, SandboxKind, SandboxSource, SandboxSpec, SnapshotId, SnapshotProvider,
+    SnapshotSource, SnapshotSpec, SnapshotState, SnapshotStatus,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
@@ -22,8 +22,8 @@ pub(crate) struct RunnerSnapshot {
 }
 
 impl RunnerSnapshot {
-    pub(crate) fn new(image: &str, resources: Resources) -> Self {
-        let identity = serde_json::to_vec(&(image, resources))
+    pub(crate) fn new(image: &str, resources: Resources, kind: SandboxKind) -> Self {
+        let identity = serde_json::to_vec(&(image, resources, kind))
             .expect("runner snapshot identity is serializable");
         let digest = format!("{:x}", Sha256::digest(identity));
         let name = format!("petri-runner-{}", &digest[..48]);
@@ -32,15 +32,26 @@ impl RunnerSnapshot {
         });
         spec.name = Some(name.clone());
         spec.resources = resources;
-        spec.sandbox_kind = Some(SandboxKind::VirtualMachine);
+        spec.sandbox_kind = Some(kind);
         Self {
             id: SnapshotId::try_new(name).expect("generated snapshot name is valid"),
             spec,
         }
     }
 
+    pub(crate) fn sandbox_spec(&self) -> SandboxSpec {
+        SandboxSpec::new(SandboxSource::Snapshot {
+            id: self.id.clone(),
+        })
+        .sandbox_kind(
+            self.spec
+                .sandbox_kind
+                .expect("runner snapshots have a kind"),
+        )
+    }
+
     fn validate_status(&self, status: &SnapshotStatus) -> Result<(), EnvError> {
-        if status.sandbox_kind != Some(SandboxKind::VirtualMachine)
+        if status.sandbox_kind != self.spec.sandbox_kind
             || status.resources != Some(self.spec.resources)
         {
             return Err(EnvError::backend(
@@ -228,6 +239,7 @@ mod tests {
         RunnerSnapshot::new(
             "runner:dind-pinned",
             DaytonaResources::default().validated().unwrap(),
+            SandboxKind::VirtualMachine,
         )
     }
 
@@ -297,13 +309,29 @@ mod tests {
     }
 
     #[test]
-    fn image_and_resource_changes_select_a_new_snapshot() {
+    fn image_resource_and_kind_changes_select_a_new_snapshot() {
         let old = request();
-        let new_image = RunnerSnapshot::new("runner:new-pin", old.spec.resources);
+        let new_image = RunnerSnapshot::new(
+            "runner:new-pin",
+            old.spec.resources,
+            SandboxKind::VirtualMachine,
+        );
         let mut resources = old.spec.resources;
         resources.cpu_cores = Some(4);
-        let new_size = RunnerSnapshot::new("runner:dind-pinned", resources);
+        let new_size =
+            RunnerSnapshot::new("runner:dind-pinned", resources, SandboxKind::VirtualMachine);
+        let container = RunnerSnapshot::new(
+            "runner:dind-pinned",
+            old.spec.resources,
+            SandboxKind::Container,
+        );
         assert_ne!(old.id, new_image.id);
         assert_ne!(old.id, new_size.id);
+        assert_ne!(old.id, container.id);
+        let mut status = SnapshotStatus::new(container.id.clone(), SnapshotState::Active);
+        status.sandbox_kind = Some(SandboxKind::Container);
+        status.resources = Some(old.spec.resources);
+        container.validate_status(&status).unwrap();
+        assert!(old.validate_status(&status).is_err());
     }
 }

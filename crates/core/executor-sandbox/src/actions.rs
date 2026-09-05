@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use crate::env::OneShotRunner;
 use crate::lease::{LiveSandbox, delete_sandbox};
 use crate::plugin::ProviderSource;
-use crate::run::{RUN_LABEL, RunIdentity, scope_dir};
+use crate::run::{RUN_LABEL, RunIdentity, scope_dir, write_record};
 use crate::{BACKEND, CONTAINER_WORKSPACE, DOCKER_HOST_ALIAS, acquire_failed};
 
 pub(crate) const ACTIONS_LABEL: &str = "petri.actions";
@@ -57,14 +57,21 @@ pub(crate) async fn remove_recorded(
     known: Option<&SandboxId>,
 ) -> Result<Vec<SandboxId>, EnvError> {
     let marker = marker_path(identity.run_dir(), workspace_id);
-    if known.is_none() {
-        match fs::read(&marker).await {
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(EnvError::workspace("read", marker.display(), error)),
+    let fingerprint = match fs::read_to_string(&marker).await {
+        Ok(fingerprint) => fingerprint,
+        Err(error) if error.kind() == ErrorKind::NotFound && known.is_none() => {
+            return Ok(Vec::new());
         }
-    }
+        Err(error) => return Err(EnvError::workspace("read", marker.display(), error)),
+    };
     let (provider, _) = source.current().await?;
+    if fingerprint != source.fingerprint() {
+        return Err(EnvError::backend(
+            BACKEND,
+            "one-shot",
+            "the action host's recorded Docker provider fingerprint differs from the configured provider",
+        ));
+    }
     let ids = if let Some(id) = known {
         vec![id.clone()]
     } else {
@@ -150,14 +157,7 @@ impl ActionHost {
         let run_id = self.identity.run_id().await?;
         let prefix = self.identity.container_prefix().await?;
         let marker = self.marker();
-        if let Some(parent) = marker.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|error| EnvError::workspace("create", parent.display(), error))?;
-        }
-        fs::write(&marker, b"")
-            .await
-            .map_err(|error| EnvError::workspace("write", marker.display(), error))?;
+        write_record(marker, self.source.fingerprint().as_bytes().to_vec()).await?;
         let image = env::var(IMAGE_VAR)
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -245,16 +245,22 @@ impl ActionHost {
 
 /// Each scope retains its own environment, even when the action host is shared.
 pub(crate) struct ActionHostRunner {
-    host: Arc<ActionHost>,
+    host: Result<Arc<ActionHost>, String>,
     env:  BTreeMap<SmolStr, SmolStr>,
 }
 
 impl ActionHostRunner {
-    pub(crate) fn new(host: Arc<ActionHost>, scope: &ScopeSpec) -> Self {
+    pub(crate) fn new(host: Result<Arc<ActionHost>, EnvError>, scope: &ScopeSpec) -> Self {
         Self {
-            host,
-            env: scope.env.clone(),
+            host: host.map_err(|error| error.to_string()),
+            env:  scope.env.clone(),
         }
+    }
+
+    fn host(&self) -> Result<&Arc<ActionHost>, EnvError> {
+        self.host
+            .as_ref()
+            .map_err(|message| EnvError::backend(BACKEND, "one-shot", message.clone()))
     }
 }
 
@@ -265,15 +271,16 @@ impl ContainerRunner for ActionHostRunner {
     }
 
     fn host_address(&self) -> Result<&str, EnvError> {
-        Ok(&self.host.host_address)
+        Ok(&self.host()?.host_address)
     }
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
-        let sandbox = self.host.sandbox().await?;
+        let host = self.host()?;
+        let sandbox = host.sandbox().await?;
         let runner = OneShotRunner {
             sandbox,
             workspace: CONTAINER_WORKSPACE.to_owned(),
-            host_address: Some(self.host.host_address.clone()),
+            host_address: Some(host.host_address.clone()),
             env: self.env.clone(),
         };
         runner.run(spec).await
@@ -351,6 +358,46 @@ mod tests {
                 Vec::new()
             })
         }
+    }
+
+    #[tokio::test]
+    async fn a_changed_action_provider_preserves_the_resource_and_marker() {
+        let dir = testkit::RunDir::new("action-host-changed-provider");
+        let identity = RunIdentity::new(dir.path().to_path_buf());
+        let provider = Arc::new(DelayedProvider {
+            kind:         ProviderKind::try_new("docker").expect("kind"),
+            capabilities: Capabilities::minimal(Isolation::Container),
+            creating:     Notify::new(),
+            complete:     Notify::new(),
+            exists:       AtomicBool::new(true),
+        });
+        let source = FixedProvider::new(provider.clone());
+        let marker = marker_path(dir.path(), "scope-0");
+        fs::create_dir_all(marker.parent().unwrap()).await.unwrap();
+        fs::write(&marker, "docker:original-provider")
+            .await
+            .unwrap();
+        let id = SandboxId::try_new("late-host").unwrap();
+        for known in [None, Some(&id)] {
+            let error = remove_recorded(&source, &identity, "scope-0", known)
+                .await
+                .expect_err("changed provider must not touch the resource");
+            assert!(error.to_string().contains("fingerprint"), "{error}");
+            assert!(provider.exists.load(Ordering::SeqCst));
+            assert_eq!(
+                fs::read_to_string(&marker).await.unwrap(),
+                "docker:original-provider"
+            );
+        }
+        fs::write(&marker, source.fingerprint()).await.unwrap();
+        assert_eq!(
+            remove_recorded(&source, &identity, "scope-0", None)
+                .await
+                .unwrap(),
+            [id]
+        );
+        assert!(!provider.exists.load(Ordering::SeqCst));
+        assert!(!marker.exists());
     }
 
     #[tokio::test]

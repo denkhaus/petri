@@ -41,8 +41,9 @@ enum ContainerSource {
 
 /// One settings snapshot and one supervised process for the entire router.
 struct ProviderConfig {
-    source:       Arc<dyn ProviderSource>,
-    host_address: Result<Option<String>, String>,
+    source:                  Arc<dyn ProviderSource>,
+    host_address:            Result<Option<String>, String>,
+    supports_host_workspace: bool,
 }
 
 /// Routes scopes to one [`SandboxExecutor`] per provider kind.
@@ -180,17 +181,20 @@ impl RoutingExecutor {
         self.provider
             .get_or_init(|| match &self.source {
                 ContainerSource::Fixed(source) => Ok(ProviderConfig {
-                    source:       source.clone(),
-                    host_address: Ok(Some(crate::DOCKER_HOST_ALIAS.to_owned())),
+                    source:                  source.clone(),
+                    host_address:            Ok(Some(crate::DOCKER_HOST_ALIAS.to_owned())),
+                    supports_host_workspace: true,
                 }),
                 ContainerSource::Env => {
                     let settings =
                         PluginSettings::from_env(self.plugin_kind(), self.options.plugin_dev)
                             .map_err(|error| error.to_string())?;
                     let host_address = settings.host_address().map_err(|error| error.to_string());
+                    let supports_host_workspace = settings.supports_host_workspace();
                     Ok(ProviderConfig {
                         source: Arc::new(PluginSupervisor::new(settings)),
                         host_address,
+                        supports_host_workspace,
                     })
                 }
             })
@@ -282,6 +286,14 @@ impl RoutingExecutor {
         scope: &ScopeSpec,
     ) -> Result<Arc<ActionHost>, EnvError> {
         let provider = self.provider()?;
+        if !provider.supports_host_workspace {
+            return Err(EnvError::backend(
+                CONTAINER_KIND,
+                "one-shot",
+                "Docker actions in Host jobs require a local Docker daemon to mount their workspace; \
+                 use --backend docker for a remote daemon",
+            ));
+        }
         let host_address = provider
             .host_address
             .as_ref()
@@ -346,6 +358,11 @@ impl RoutingExecutor {
         outcome: ScopeOutcome,
     ) -> ReleaseReport {
         let mut report = self.release_action_hosts(ActionOwner::Lease(lease)).await;
+        if !report.is_clean() {
+            // The action host can still have this workspace mounted. Keep its
+            // owning lease intact so release or prune can retry safely.
+            return report;
+        }
         match self.executor_for_record(lease).await {
             Ok(container) => {
                 let ended = container
@@ -416,15 +433,7 @@ impl Executor for RoutingExecutor {
                     host.prepare().await;
                 }
                 let handle = self.host().await?.acquire(scope, ctx).await?;
-                match action_host {
-                    Ok(host) => {
-                        Ok(handle.with_runner(Arc::new(ActionHostRunner::new(host, scope))))
-                    }
-                    Err(error) => {
-                        tracing::debug!(error = %error, "no container plugin for host-scope actions");
-                        Ok(handle)
-                    }
-                }
+                Ok(handle.with_runner(Arc::new(ActionHostRunner::new(action_host, scope))))
             }
             RuntimeTarget::Container { .. } => self.container().await?.acquire(scope, ctx).await,
         }
@@ -442,13 +451,20 @@ impl Executor for RoutingExecutor {
         } else {
             self.container.get()
         };
+        let Some(Ok(executor)) = executor else {
+            return ReleaseReport::default()
+                .problem("the environment has no executor to release it");
+        };
         let ended = self
             .release_action_hosts(ActionOwner::Scope(env.scope()))
             .await;
-        let mut report = match executor {
-            Some(Ok(executor)) => executor.release(env, outcome).await,
-            _ => ReleaseReport::default().problem("the environment has no executor to release it"),
-        };
+        if !ended.is_clean() {
+            // End the holder but retain its workspace while an action host
+            // can still mount it. A later acquire/release can retry cleanup.
+            executor.manager().release_holder(teardown.lease).await;
+            return ended;
+        }
+        let mut report = executor.release(env, outcome).await;
         report.merge(ended);
         report
     }

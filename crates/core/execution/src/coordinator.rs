@@ -1,20 +1,21 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
-use driver::{SandboxAssignment, ScopeLeases};
+use driver::{EventObserver as _, SandboxAssignment, ScopeLease, ScopeLeaseAllocator, ScopeLeases};
 use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
-use executor_sandbox::CONTAINER_KIND;
+use executor_sandbox::{CONTAINER_KIND, RoutingExecutor};
 use ir::{
-    Control, FailureClass, FailureInfo, FiringId, Graph, ResultProjection, RunStatus, RuntimeSpec,
+    Control, FailureClass, FailureInfo, FiringId, Graph, ResultProjection, RunStatus,
     RuntimeTarget, ScopeId, Value,
 };
 use runtime::RunRuntime;
 use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::{JoinError, JoinSet, spawn_blocking};
 
 use crate::client::StartRequest;
 use crate::host::EVENTS_FILE;
@@ -121,6 +122,88 @@ struct CompletedExecution {
     middleware_state: MiddlewareState,
 }
 
+type ExecutionLeases = Arc<Mutex<BTreeMap<ScopeId, crate::SandboxLeaseId>>>;
+
+/// The coordinator delegates reservation to each execution's acquire tasks.
+/// The shared resource store still serializes lease ID allocation and writes.
+struct InvocationLeaseAllocator {
+    invocation: InvocationId,
+    execution:  ExecutionId,
+    resources:  Arc<Mutex<ResourceStore>>,
+    acquired:   ExecutionLeases,
+    router:     Option<Arc<RoutingExecutor>>,
+    writer:     Arc<JsonlEngineLog>,
+}
+
+impl fmt::Debug for InvocationLeaseAllocator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvocationLeaseAllocator")
+            .field("invocation", &self.invocation)
+            .field("execution", &self.execution)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl ScopeLeaseAllocator for InvocationLeaseAllocator {
+    async fn reserve(
+        &self,
+        identity: engine::ScopeIdentity,
+        spec: &executor::ScopeSpec,
+    ) -> Result<ScopeLease, executor::EnvError> {
+        let error = |error: &dyn fmt::Display| {
+            executor::EnvError::backend("coordinator", "reserve lease", error.to_string())
+        };
+        let introduced_by =
+            matches!(identity, engine::ScopeIdentity::Spliced(_)).then_some(self.execution);
+        // The scope's introducing outcome must be durable before its lease.
+        // This queues a sync behind all records already observed by the driver.
+        if introduced_by.is_some() {
+            self.writer
+                .finish()
+                .await
+                .map_err(|source| error(&source))?;
+        }
+        let provider = self
+            .router
+            .as_ref()
+            .map_or_else(
+                || match spec.runtime.target {
+                    RuntimeTarget::HostProcess => HOST_PROVIDER,
+                    RuntimeTarget::Container { .. } => CONTAINER_KIND,
+                },
+                |router| router.provider_kind_for(&spec.runtime),
+            )
+            .to_owned();
+        let allocation = SandboxAllocationKey {
+            invocation: self.invocation,
+            scope:      identity,
+        };
+        let resources = self.resources.clone();
+        let runtime = spec.runtime.clone();
+        let assignment = spawn_blocking(move || {
+            let mut resources = resources.lock().unwrap_or_else(PoisonError::into_inner);
+            let record = resources.reserve_scope(allocation, &provider, runtime, introduced_by)?;
+            if record.state == crate::LeaseState::Deleted {
+                return Err(ResourceError::DeletedLease(record.lease));
+            }
+            Ok(ScopeLease {
+                lease:     record.lease,
+                workspace: record.workspace.clone(),
+            })
+        })
+        .await
+        .map_err(|source| error(&source))?
+        .map_err(|source| error(&source))?;
+        self.acquired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(spec.id, assignment.lease);
+        Ok(assignment)
+    }
+}
+
 /// A coordinator failure rendered for the invoking step.
 fn invoke_error(error: impl fmt::Display) -> InvokeError {
     InvokeError::Coordinator(SmolStr::new(error.to_string()))
@@ -195,6 +278,9 @@ pub struct Coordinator {
     /// The durable lease records, shared with the executor's lease manager
     /// as its ledger.
     resources:        Arc<Mutex<ResourceStore>>,
+    execution_leases: BTreeMap<ExecutionId, ExecutionLeases>,
+    #[cfg(test)]
+    release_gate:     Option<Arc<tests::ReleaseGate>>,
 }
 
 impl Coordinator {
@@ -271,6 +357,9 @@ impl Coordinator {
             middleware,
             last_root_report: None,
             resources,
+            execution_leases: BTreeMap::new(),
+            #[cfg(test)]
+            release_gate: None,
         }
     }
 
@@ -445,32 +534,65 @@ impl Coordinator {
     /// Release the leases `invocation` allocated, now that it has finished.
     /// An inherited invocation allocated none: its caller's lease outlives
     /// it.
-    async fn release_invocation_leases(&self, invocation: InvocationId, status: RunStatus) {
+    fn release_invocation_leases(
+        &mut self,
+        invocation: InvocationId,
+        status: RunStatus,
+        releasing: &mut JoinSet<InvocationId>,
+    ) {
         let owned: Vec<crate::SandboxLeaseId> = self
             .resources()
             .records()
             .filter(|record| record.allocation.invocation == invocation && record.needs_release())
             .map(|record| record.lease)
             .collect();
-        for lease in owned {
-            self.release_lease(lease, status).await;
-        }
+        let router = self.runtime.sandbox_router().cloned();
+        #[cfg(test)]
+        let gate = self.release_gate.take();
+        releasing.spawn(async move {
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.started.notify_one();
+                gate.complete.notified().await;
+            }
+            if let Some(router) = router {
+                let outcome = if status == RunStatus::Success {
+                    executor::ScopeOutcome::Succeeded
+                } else {
+                    executor::ScopeOutcome::Failed
+                };
+                for lease in owned {
+                    let report = router.release_lease(lease, outcome).await;
+                    for problem in report.problems {
+                        tracing::warn!(
+                            lease = lease.raw(),
+                            problem,
+                            "sandbox lease release problem"
+                        );
+                    }
+                }
+            }
+            invocation
+        });
     }
 
     /// Service every execution from one loop. A request can come from any live
     /// driver, so scheduling it must not make it a child of another sibling.
     async fn run_invocations(&mut self) -> Result<InvocationResult, CoordinatorError> {
         let mut running = JoinSet::new();
-        let result = self.drive_invocations(&mut running).await;
+        let mut releasing = JoinSet::new();
+        let result = self.drive_invocations(&mut running, &mut releasing).await;
         // On an error, wait for the aborted driver futures to drop before
         // the caller continues with run cleanup.
         running.shutdown().await;
+        releasing.shutdown().await;
         result
     }
 
     async fn drive_invocations(
         &mut self,
         running: &mut JoinSet<CompletedExecution>,
+        releasing: &mut JoinSet<InvocationId>,
     ) -> Result<InvocationResult, CoordinatorError> {
         let mut completed = BTreeMap::new();
         if self.store.state().invocations[&InvocationId::ROOT]
@@ -494,9 +616,19 @@ impl Coordinator {
                 result = running.join_next(), if !running.is_empty() => {
                     let done = result.expect("the execution set is not empty")?;
                     self.active_handles.remove(&done.execution);
+                    self.execution_leases.remove(&done.execution);
                     Self::check_report(done.execution, &done.report)?;
                     self.settle_descendants(done.invocation, running).await?;
                     completed.insert(done.invocation, done);
+                }
+                result = releasing.join_next(), if !releasing.is_empty() => {
+                    let invocation = result.expect("the release set is not empty")?;
+                    self.active.remove(&invocation);
+                    if let Some(sender) = self.statuses.get(&invocation) {
+                        let result = self.store.state().invocations[&invocation].result.clone()
+                            .expect("release follows the durable invocation result");
+                        sender.send_replace(InvocationStatus::Finished(result));
+                    }
                 }
                 request = self.start_rx.recv() => {
                     if let Some(request) = request
@@ -524,7 +656,7 @@ impl Coordinator {
                 })
             }) {
                 let done = completed.remove(&invocation).expect("completed invocation");
-                self.complete_execution(done, running).await?;
+                self.complete_execution(done, running, releasing)?;
             }
         }
     }
@@ -618,10 +750,11 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn complete_execution(
+    fn complete_execution(
         &mut self,
         done: CompletedExecution,
         running: &mut JoinSet<CompletedExecution>,
+        releasing: &mut JoinSet<InvocationId>,
     ) -> Result<(), CoordinatorError> {
         let CompletedExecution {
             invocation,
@@ -641,15 +774,22 @@ impl Coordinator {
                 exit: exit.clone(),
             })?;
         }
-        self.active.remove(&invocation);
         match exit {
             EngineExit::Restart { target, .. } => {
+                self.active.remove(&invocation);
                 if self.store.state().successor_of(execution).is_none() {
                     self.declare_successor(
                         invocation,
                         execution,
                         target,
-                        report.state.prior_firings(),
+                        // Only the registered graph survives a restart.
+                        // Dynamic NodeIds can be reused by different splices.
+                        report
+                            .state
+                            .prior_firings()
+                            .into_iter()
+                            .filter(|(node, _)| graph.node(*node).is_some())
+                            .collect(),
                         middleware_state,
                     )?;
                 }
@@ -662,11 +802,7 @@ impl Coordinator {
                     invocation,
                     result: result.clone(),
                 })?;
-                self.release_invocation_leases(invocation, result.status)
-                    .await;
-                if let Some(sender) = self.statuses.get(&invocation) {
-                    sender.send_replace(InvocationStatus::Finished(result));
-                }
+                self.release_invocation_leases(invocation, result.status, releasing);
                 if invocation == InvocationId::ROOT {
                     self.last_root_report = Some(report);
                 }
@@ -752,7 +888,6 @@ impl Coordinator {
         let directory = self.store.create_execution_dir(invocation, execution)?;
         let events = directory.join(EVENTS_FILE);
         let secrets = self.invocation_secrets(invocation);
-        let sandbox = self.prepare_sandbox(invocation, graph)?;
         let pipeline = Arc::new(
             MiddlewarePipeline::new(
                 invocation,
@@ -811,6 +946,8 @@ impl Coordinator {
                 })?;
             }
             let high_water = decoded.log.len() as u64;
+            let writer = Arc::new(JsonlEngineLog::append(&events, high_water)?);
+            let sandbox = self.prepare_sandbox(invocation, execution, writer.clone())?;
             let (driver, _) = self.runtime.resume_driver(
                 (*graph).clone(),
                 decoded.log,
@@ -820,12 +957,10 @@ impl Coordinator {
                 sandbox,
                 secrets,
             )?;
-            (
-                driver.with_engine_start(start.clone()),
-                Arc::new(JsonlEngineLog::append(&events, high_water)?),
-            )
+            (driver.with_engine_start(start.clone()), writer)
         } else {
             let writer = Arc::new(JsonlEngineLog::create(&events)?);
+            let sandbox = self.prepare_sandbox(invocation, execution, writer.clone())?;
             let driver = self.runtime.driver(
                 (*graph).clone(),
                 start.clone(),
@@ -876,20 +1011,21 @@ impl Coordinator {
     }
 
     /// Where an execution's scopes run. An isolated invocation owns one
-    /// lease per scope of its graph, reserved here before any executor sees
+    /// lease per stable scope identity, reserved before any executor sees
     /// it; an inherited one runs every scope in its caller's sandbox — the
     /// caller's workspace, the caller's runtime target, one shared lease.
     fn prepare_sandbox(
         &mut self,
         invocation: InvocationId,
-        graph: &Graph,
+        execution: ExecutionId,
+        writer: Arc<JsonlEngineLog>,
     ) -> Result<SandboxAssignment, CoordinatorError> {
         match self.store.state().invocations[&invocation]
             .declaration
             .sandbox
         {
             SandboxBinding::Inherited { lease } => {
-                let (workspace, allocation) = {
+                let (workspace, runtime) = {
                     let resources = self.resources();
                     let record = resources
                         .resolve_usable(lease)
@@ -899,9 +1035,8 @@ impl Coordinator {
                             }
                             other => other.into(),
                         })?;
-                    (record.workspace.clone(), record.allocation)
+                    (record.workspace.clone(), record.runtime.clone())
                 };
-                let runtime = self.scope_runtime(allocation.invocation, allocation.scope)?;
                 Ok(SandboxAssignment {
                     workspace_override: Some(workspace),
                     runtime_override:   Some(runtime),
@@ -909,34 +1044,23 @@ impl Coordinator {
                 })
             }
             SandboxBinding::Isolated => {
-                let mut leases = BTreeMap::new();
-                for scope in &graph.scopes {
-                    let lease = self.ensure_local_lease(invocation, scope.id, &scope.runtime)?;
-                    leases.insert(scope.id, lease);
-                }
+                let acquired = Arc::new(Mutex::new(BTreeMap::new()));
+                self.execution_leases.insert(execution, acquired.clone());
+                let allocator = InvocationLeaseAllocator {
+                    invocation,
+                    execution,
+                    resources: self.resources.clone(),
+                    acquired,
+                    router: self.runtime.sandbox_router().cloned(),
+                    writer,
+                };
                 Ok(SandboxAssignment {
                     workspace_override: None,
                     runtime_override:   None,
-                    leases:             ScopeLeases::Each(leases),
+                    leases:             ScopeLeases::Owned(Arc::new(allocator)),
                 })
             }
         }
-    }
-
-    /// The runtime target of `scope` in `invocation`'s graph.
-    fn scope_runtime(
-        &mut self,
-        invocation: InvocationId,
-        scope: ScopeId,
-    ) -> Result<RuntimeSpec, CoordinatorError> {
-        let digest = self.store.state().invocations[&invocation]
-            .declaration
-            .graph;
-        let graph = self.store.load_graph(digest)?;
-        graph
-            .scope(scope)
-            .map(|declared| declared.runtime.clone())
-            .ok_or(CoordinatorError::NoInheritableSandbox)
     }
 
     async fn handle_start(
@@ -1183,9 +1307,8 @@ impl Coordinator {
 
     /// Resolve `SandboxMode::Inherit` for a new child. The call key pins the
     /// parent invocation, and the caller names its own scope, so no engine log
-    /// is read. The claimed scope must be declared by the parent's graph
-    /// before it can mint a durable lease: `validate_resources` refuses a
-    /// lease for an unknown scope on the next resume.
+    /// is read. The driver registers every acquired scope, including dynamic
+    /// ones, before a step can invoke a child.
     fn inherited_binding(
         &mut self,
         call: &ParentCallKey,
@@ -1206,8 +1329,18 @@ impl Coordinator {
             self.resources().resolve_usable(lease)?;
             return Ok(SandboxBinding::Inherited { lease });
         }
-        let runtime = self.scope_runtime(parent_invocation, scope)?;
-        let lease = self.ensure_local_lease(parent_invocation, scope, &runtime)?;
+        let lease = self
+            .execution_leases
+            .get(&call.parent)
+            .and_then(|leases| {
+                leases
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&scope)
+                    .copied()
+            })
+            .ok_or(CoordinatorError::NoInheritableSandbox)?;
+        self.resources().resolve_usable(lease)?;
         Ok(SandboxBinding::Inherited { lease })
     }
 
@@ -1221,13 +1354,10 @@ impl Coordinator {
         lease: crate::SandboxLeaseId,
         child: GraphDigest,
     ) -> Result<(), InvokeError> {
-        let allocation = self
+        let parent = self
             .resources()
             .resolve(lease)
-            .map(|record| record.allocation)
-            .map_err(invoke_error)?;
-        let parent = self
-            .scope_runtime(allocation.invocation, allocation.scope)
+            .map(|record| record.runtime.clone())
             .map_err(invoke_error)?;
         let graph = self.store.load_graph(child).map_err(invoke_error)?;
         for scope in &graph.scopes {
@@ -1238,36 +1368,6 @@ impl Coordinator {
             }
         }
         Ok(())
-    }
-
-    /// Reserve the durable lease for one invocation-owned scope, if it has
-    /// none yet. The record's workspace composes exactly as the driver
-    /// composes the workspace it will acquire; the provider kind is the one
-    /// the scope's target names, until the lease manager records the real
-    /// one at allocation.
-    fn ensure_local_lease(
-        &mut self,
-        invocation: InvocationId,
-        scope: ScopeId,
-        runtime: &RuntimeSpec,
-    ) -> Result<crate::SandboxLeaseId, CoordinatorError> {
-        let workspace = executor::WorkspaceId::scoped(Some(&invocation.workspace_prefix()), scope);
-        let provider = self.runtime.sandbox_router().map_or_else(
-            || match runtime.target {
-                RuntimeTarget::HostProcess => HOST_PROVIDER,
-                RuntimeTarget::Container { .. } => CONTAINER_KIND,
-            },
-            |router| router.provider_kind_for(runtime),
-        );
-        let lease = self
-            .resources()
-            .ensure_record(
-                SandboxAllocationKey { invocation, scope },
-                provider,
-                workspace,
-            )?
-            .lease;
-        Ok(lease)
     }
 
     fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, CoordinatorError> {
@@ -1295,7 +1395,11 @@ fn validate_resources(
     store: &mut CoordinatorStore,
     resources: &ResourceStore,
 ) -> Result<(), CoordinatorError> {
+    let mut replayed = BTreeMap::new();
     for record in resources.records() {
+        let invalid = || CoordinatorError::InvalidResource {
+            lease: record.lease,
+        };
         let Some(invocation) = store.state().invocations.get(&record.allocation.invocation) else {
             return Err(CoordinatorError::InvalidResource {
                 lease: record.lease,
@@ -1308,14 +1412,45 @@ fn validate_resources(
         }
         let digest = invocation.declaration.graph;
         let graph = store.load_graph(digest)?;
-        if !graph
-            .scopes
-            .iter()
-            .any(|scope| scope.id == record.allocation.scope)
-        {
-            return Err(CoordinatorError::InvalidResource {
-                lease: record.lease,
-            });
+        match &record.allocation.scope {
+            engine::ScopeIdentity::Declared(scope) => {
+                if record.introduced_by.is_some()
+                    || graph
+                        .scope(*scope)
+                        .is_none_or(|scope| scope.runtime != record.runtime)
+                {
+                    return Err(invalid());
+                }
+            }
+            identity @ engine::ScopeIdentity::Spliced(_) => {
+                let execution = record.introduced_by.ok_or_else(invalid)?;
+                if store
+                    .state()
+                    .executions
+                    .get(&execution)
+                    .is_none_or(|execution| {
+                        execution.declaration.invocation != record.allocation.invocation
+                    })
+                {
+                    return Err(invalid());
+                }
+                if let Entry::Vacant(entry) = replayed.entry(execution) {
+                    let events = store
+                        .execution_dir(record.allocation.invocation, execution)
+                        .join(EVENTS_FILE);
+                    let log = read_engine_log(&events)?;
+                    let point =
+                        engine::resume((*graph).clone(), &log.log).map_err(|_| invalid())?;
+                    entry.insert(point.state);
+                }
+                let state = &replayed[&execution];
+                if !state.graph().scopes.iter().any(|scope| {
+                    state.scope_identity(scope.id).as_ref() == Some(identity)
+                        && scope.runtime == record.runtime
+                }) {
+                    return Err(invalid());
+                }
+            }
         }
     }
     Ok(())
@@ -1399,3 +1534,7 @@ fn rebuild_middleware(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "coordinator_tests.rs"]
+mod tests;

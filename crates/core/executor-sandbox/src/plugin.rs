@@ -40,12 +40,12 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::{env, fmt};
 
 use executor::EnvError;
-use sandbox_driver::{HealthStatus, ProviderKind, SandboxProvider};
+use sandbox_driver::{HealthStatus, ProviderHealth, ProviderKind, SandboxProvider};
 use sandbox_driver_protocol::PluginProvider;
 use sandbox_driver_protocol::discovery::{PluginConfig, launch_plugin};
 use tokio::sync::Mutex;
@@ -240,6 +240,26 @@ impl PluginSettings {
         &self.fingerprint
     }
 
+    fn effective_fingerprint(&self, health: &ProviderHealth) -> Result<String, PluginError> {
+        let identity = health
+            .identity
+            .as_deref()
+            .filter(|id| !id.trim().is_empty());
+        if self.kind.as_str() == "daytona" && identity.is_none() {
+            return Err(PluginError::Unhealthy {
+                kind:    self.kind.to_string(),
+                status:  "without a verified resource identity",
+                message: "the Daytona plugin must report its effective organization before \
+                    sandbox resources can be created or recovered"
+                    .to_owned(),
+            });
+        }
+        Ok(match identity {
+            Some(identity) => format!("{}:{identity}", self.fingerprint),
+            None => self.fingerprint.clone(),
+        })
+    }
+
     /// The host name or address a sandbox of this provider uses to reach
     /// services Petri runs on this machine. A local Docker daemon has a
     /// known alias; a remote one needs the operator to say.
@@ -249,6 +269,12 @@ impl PluginSettings {
             self.host_address.as_deref(),
             self.env.get("DOCKER_HOST").map_or("", String::as_str),
         )
+    }
+
+    /// Host action workspaces can only be mounted by a local Docker daemon.
+    pub(crate) fn supports_host_workspace(&self) -> bool {
+        self.kind.as_str() == "docker"
+            && docker_host_is_local(self.env.get("DOCKER_HOST").map_or("", String::as_str))
     }
 
     /// The executable, in resolution order: explicit path, the release
@@ -358,9 +384,12 @@ impl PluginGeneration {
 
 /// Owns the plugin process for one provider kind.
 pub struct PluginSupervisor {
-    settings: PluginSettings,
-    current:  Mutex<Option<Arc<PluginGeneration>>>,
-    next:     AtomicU64,
+    settings:    PluginSettings,
+    current:     Mutex<Option<Arc<PluginGeneration>>>,
+    next:        AtomicU64,
+    /// Filled only after the provider verifies its resource namespace. Later
+    /// generations must still address the same namespace.
+    fingerprint: OnceLock<String>,
 }
 
 impl PluginSupervisor {
@@ -369,6 +398,7 @@ impl PluginSupervisor {
             settings,
             current: Mutex::new(None),
             next: AtomicU64::new(1),
+            fingerprint: OnceLock::new(),
         }
     }
 
@@ -449,6 +479,26 @@ impl PluginSupervisor {
                 message,
             });
         }
+        let fingerprint = match self.settings.effective_fingerprint(&health) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let _ = launch.provider.shutdown().await;
+                return Err(error);
+            }
+        };
+        if let Some(previous) = self.fingerprint.get() {
+            if previous != &fingerprint {
+                let _ = launch.provider.shutdown().await;
+                return Err(PluginError::Unhealthy {
+                    kind,
+                    status: "with a changed resource identity",
+                    message: "the plugin's effective backend changed between generations"
+                        .to_owned(),
+                });
+            }
+        } else {
+            let _ = self.fingerprint.set(fingerprint);
+        }
         Ok(Arc::new(PluginGeneration {
             provider: Arc::new(launch.provider),
             generation,
@@ -479,7 +529,8 @@ pub trait ProviderSource: Send + Sync {
     /// Sources backed by a caller-owned provider have no process to stop.
     async fn shutdown(&self) {}
 
-    /// The non-secret backend fingerprint every lease records.
+    /// The non-secret backend fingerprint every lease records. Call
+    /// `current` first, so a plugin can verify its effective namespace.
     fn fingerprint(&self) -> &str;
 
     /// The provider kind, as recorded on leases.
@@ -500,7 +551,9 @@ impl ProviderSource for PluginSupervisor {
     }
 
     fn fingerprint(&self) -> &str {
-        self.settings.fingerprint()
+        self.fingerprint
+            .get()
+            .map_or_else(|| self.settings.fingerprint(), String::as_str)
     }
 
     fn kind(&self) -> &str {
@@ -580,6 +633,42 @@ mod tests {
             })
             .collect();
         assert_eq!(fingerprints.len(), endpoints.len());
+    }
+
+    #[test]
+    fn daytona_key_rotation_preserves_identity_but_an_account_change_does_not() {
+        let settings_for = |key: &str| {
+            PluginSettings::from_lookup("daytona", Some(true), |name| {
+                (name == "DAYTONA_API_KEY").then(|| OsString::from(key))
+            })
+            .expect("API-key-only settings")
+        };
+        let mut health = ProviderHealth::new(HealthStatus::Ok);
+        health.identity = Some("organization:first".to_owned());
+        let original = settings_for("original-private-key")
+            .effective_fingerprint(&health)
+            .expect("verified organization");
+        let rotated = settings_for("rotated-private-key")
+            .effective_fingerprint(&health)
+            .expect("rotated key in the same organization");
+        assert_eq!(original, rotated);
+        assert!(!original.contains("private-key"));
+        health.identity = Some("organization:second".to_owned());
+        let other = settings_for("other-private-key")
+            .effective_fingerprint(&health)
+            .expect("verified other organization");
+        assert_ne!(original, other);
+    }
+
+    #[test]
+    fn daytona_requires_verified_identity_before_recovery() {
+        let settings =
+            PluginSettings::from_lookup("daytona", Some(true), |_| None).expect("settings");
+        assert!(
+            settings
+                .effective_fingerprint(&ProviderHealth::new(HealthStatus::Ok))
+                .is_err()
+        );
     }
 
     #[test]

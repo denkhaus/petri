@@ -31,6 +31,7 @@ use sandbox_driver::{
 use smol_str::SmolStr;
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::BACKEND;
@@ -97,8 +98,9 @@ fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxPr
     let (line_tx, line_rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
     let (stdout_writer, stdout_reader) = duplex(OUTPUT_PIPE_CAPACITY);
     let (stderr_writer, stderr_reader) = duplex(OUTPUT_PIPE_CAPACITY);
-    tokio::spawn(pump(stdout_reader, ir::LogStream::Stdout, line_tx.clone()));
-    tokio::spawn(pump(stderr_reader, ir::LogStream::Stderr, line_tx));
+    let mut workers = JoinSet::new();
+    workers.spawn(pump(stdout_reader, ir::LogStream::Stdout, line_tx.clone()));
+    workers.spawn(pump(stderr_reader, ir::LogStream::Stderr, line_tx));
 
     let term = CancellationToken::new();
     let kill = CancellationToken::new();
@@ -132,7 +134,7 @@ fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxPr
         retained_output_limit: Some(0),
     };
 
-    tokio::spawn(async move {
+    workers.spawn(async move {
         let outcome: Result<ExecStreamingResult, DriverError> = match &job {
             Job::Exec(spec) => sandbox.exec().run_streaming(spec, controls).await,
             Job::OneShot(spec) => match sandbox.one_shot() {
@@ -167,6 +169,7 @@ fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxPr
         kill,
         status: status_rx,
         cached: None,
+        workers,
     }
 }
 
@@ -300,12 +303,22 @@ impl ExecEnv for SandboxEnv {
 /// The process handle a step drives: its output, its stdin, its wait, and the
 /// two raw stop signals the step's ladder fires.
 struct SandboxProcess {
-    lines:  Option<LineStream>,
-    stdin:  Option<StdinWriter>,
-    term:   CancellationToken,
-    kill:   CancellationToken,
-    status: watch::Receiver<Option<Result<ExitStatus, String>>>,
-    cached: Option<ExitStatus>,
+    lines:   Option<LineStream>,
+    stdin:   Option<StdinWriter>,
+    term:    CancellationToken,
+    kill:    CancellationToken,
+    status:  watch::Receiver<Option<Result<ExitStatus, String>>>,
+    cached:  Option<ExitStatus>,
+    workers: JoinSet<()>,
+}
+
+impl Drop for SandboxProcess {
+    fn drop(&mut self) {
+        // Aborting the RPC drops its stream cancellation guard. Scope release
+        // remains the fence for remote work; local pumps cannot outlive their
+        // process handle while waiting on output or a slow provider.
+        self.workers.abort_all();
+    }
 }
 
 #[async_trait]

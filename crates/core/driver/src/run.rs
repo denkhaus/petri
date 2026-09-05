@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
+use std::fmt::Debug;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio::time;
 use tracing::Instrument as _;
 
@@ -109,31 +110,38 @@ pub struct RunConfig {
 }
 
 /// Which durable lease each scope of an execution acquires its sandbox under.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub enum ScopeLeases {
     /// No coordinator: every sandbox is the scope's own.
     #[default]
     None,
-    /// One lease per scope of the graph, from the invocation that owns them.
-    Each(BTreeMap<ScopeId, SandboxLeaseId>),
+    /// Reserve invocation-owned leases as original or dynamic scopes acquire.
+    Owned(Arc<dyn ScopeLeaseAllocator>),
     /// One inherited lease for every scope: the caller's sandbox.
     Shared(SandboxLeaseId),
 }
 
-impl ScopeLeases {
-    pub fn lease_for(&self, scope: ScopeId) -> Option<SandboxLeaseId> {
-        match self {
-            Self::None => None,
-            Self::Each(leases) => leases.get(&scope).copied(),
-            Self::Shared(lease) => Some(*lease),
-        }
-    }
+/// Durable lease and workspace chosen before an executor acquires a scope.
+pub struct ScopeLease {
+    pub lease:     SandboxLeaseId,
+    pub workspace: WorkspaceId,
+}
+
+/// The coordinator's resource authority. Allocation completes durably before
+/// a scope can expose its sandbox to a step.
+#[async_trait::async_trait]
+pub trait ScopeLeaseAllocator: Debug + Send + Sync {
+    async fn reserve(
+        &self,
+        identity: engine::ScopeIdentity,
+        spec: &ScopeSpec,
+    ) -> Result<ScopeLease, EnvError>;
 }
 
 /// Everything a coordinator decides about where an execution's scopes run:
 /// the inherited workspace and runtime target, and the leases. `Default` is
 /// what a bare driver gets: the graph's own targets, no leases.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct SandboxAssignment {
     pub workspace_override: Option<WorkspaceId>,
     pub runtime_override:   Option<RuntimeSpec>,
@@ -382,14 +390,14 @@ enum Signal {
 /// the narrow gap between `Executor::acquire` completing and the driver taking
 /// ownership of its result.
 struct AcquiredScope {
-    executor: Arc<dyn Executor>,
-    handle:   Option<EnvHandle>,
+    abandoned: mpsc::UnboundedSender<EnvHandle>,
+    handle:    Option<EnvHandle>,
 }
 
 impl AcquiredScope {
-    fn new(executor: Arc<dyn Executor>, handle: EnvHandle) -> Self {
+    fn new(handle: EnvHandle, abandoned: mpsc::UnboundedSender<EnvHandle>) -> Self {
         Self {
-            executor,
+            abandoned,
             handle: Some(handle),
         }
     }
@@ -406,12 +414,7 @@ impl Drop for AcquiredScope {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        let executor = self.executor.clone();
-        if let Ok(runtime) = Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = executor.release(handle, ScopeOutcome::Succeeded).await;
-            });
-        }
+        let _ = self.abandoned.send(handle);
     }
 }
 
@@ -437,9 +440,10 @@ struct Task {
     /// the firing ends the receiver drops, pending sends fail, and their
     /// acks resolve `NotLive`.
     forwards: mpsc::UnboundedSender<Forward>,
-    join:     JoinHandle<()>,
-    timeout:  Option<JoinHandle<()>>,
-    deadline: Option<JoinHandle<()>>,
+    /// Owns the runner, its control and progress forwarders, and its timers.
+    /// Dropping the firing aborts them all; a normal finish also joins them.
+    workers:  JoinSet<()>,
+    deadline: Option<AbortHandle>,
     reason:   Option<CancelReason>,
 }
 
@@ -448,8 +452,9 @@ struct Task {
 /// each guard untouched while the run executes and awaits
 /// [`RunGuard::teardown`] before the report, so a service whose teardown joins
 /// a thread never blocks a Tokio worker from `Drop`. A driver that never
-/// finishes — a dropped `run` future — falls back to plain drop, so a guard's
-/// `Drop` stays its safety net.
+/// finishes — a dropped `run` future — tears guards down after its aborted
+/// tasks and environments when the runtime remains available. A guard's
+/// `Drop` stays its safety net when the runtime is already gone.
 #[async_trait::async_trait]
 pub trait RunGuard: Send + Sync {
     /// Explicit async teardown. The default just drops `self`, so a guard
@@ -459,7 +464,7 @@ pub trait RunGuard: Send + Sync {
 
 struct ScopeAcquire {
     id:   u64,
-    join: JoinHandle<()>,
+    join: AbortHandle,
 }
 
 pub struct Driver {
@@ -473,7 +478,9 @@ pub struct Driver {
     config:           RunConfig,
     envs:             HashMap<ScopeId, EnvHandle>,
     acquires:         HashMap<ScopeId, ScopeAcquire>,
-    acquire_drains:   Vec<JoinHandle<()>>,
+    /// Acquisition, decision, retry, and signal tasks share the driver's
+    /// lifetime. Completed tasks are reaped by the run loop.
+    background:       JoinSet<()>,
     next_acquire_id:  u64,
     acquire_failures: HashMap<ScopeId, String>,
     pending_starts:   HashMap<ScopeId, Vec<ResolvedFiring>>,
@@ -489,15 +496,91 @@ pub struct Driver {
     /// Per-run host services riding this run's lifetime: held untouched until
     /// the run ends, when their teardown is awaited.
     run_guards:       Vec<Box<dyn RunGuard>>,
+    guard_teardown:   Option<JoinHandle<()>>,
     releases:         Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
-    cleanup_timer:    Option<JoinHandle<()>>,
-    decision_tasks:   HashMap<DecisionId, JoinHandle<()>>,
+    cleanup_timer:    Option<AbortHandle>,
+    decision_tasks:   HashMap<DecisionId, AbortHandle>,
     start:            EngineStart,
     /// Set by [`Driver::resume`]; consumed at the top of [`Driver::run`].
     resume:           Option<PendingResume>,
     tx:               mpsc::Sender<Signal>,
     rx:               mpsc::Receiver<Signal>,
+    /// An acquire aborted after completing transfers its environment here.
+    /// The queue holds at most one result per unfinished acquire task and is
+    /// drained by the run loop and after all acquires have been joined.
+    abandoned_tx:     mpsc::UnboundedSender<EnvHandle>,
+    abandoned_rx:     mpsc::UnboundedReceiver<EnvHandle>,
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        // Abort before scheduling cleanup: even if its first poll is delayed,
+        // runners must no longer start work or retain the run's services.
+        self.background.abort_all();
+        for task in self.tasks.values_mut() {
+            task.workers.abort_all();
+        }
+        self.rx.close();
+        let (_, empty) = mpsc::channel(1);
+        let mut signals = mem::replace(&mut self.rx, empty);
+
+        let mut background = mem::take(&mut self.background);
+        let tasks = mem::take(&mut self.tasks);
+        let mut envs: Vec<_> = mem::take(&mut self.envs).into_values().collect();
+        let releases = mem::take(&mut self.releases);
+        let guards = mem::take(&mut self.run_guards);
+        let guard_teardown = self.guard_teardown.take();
+        let (_, empty) = mpsc::unbounded_channel();
+        let mut abandoned = mem::replace(&mut self.abandoned_rx, empty);
+        if background.is_empty()
+            && tasks.is_empty()
+            && envs.is_empty()
+            && releases.is_empty()
+            && guards.is_empty()
+            && guard_teardown.is_none()
+            && abandoned.is_empty()
+            && signals.is_empty()
+        {
+            return;
+        }
+        let executor = self.executor.clone();
+        if let Ok(runtime) = Handle::try_current() {
+            // Drop cannot await. This is the safety net for an abandoned run;
+            // normal completion joins tasks and releases resources in `run`.
+            runtime.spawn(async move {
+                background.shutdown().await;
+                for (_, mut task) in tasks {
+                    task.workers.shutdown().await;
+                }
+                while let Ok(signal) = signals.try_recv() {
+                    if let Signal::AcquireFinished {
+                        result: Ok(acquired),
+                        ..
+                    } = signal
+                    {
+                        envs.push(acquired.into_handle());
+                    }
+                }
+                drop(signals);
+                while let Ok(handle) = abandoned.try_recv() {
+                    envs.push(handle);
+                }
+                for env in envs {
+                    let _ = executor.release(env, ScopeOutcome::Failed).await;
+                }
+                for release in releases {
+                    let _ = release.await;
+                }
+                for guard in guards {
+                    guard.teardown().await;
+                }
+                if let Some(teardown) = guard_teardown {
+                    let _ = teardown.await;
+                }
+            });
+        }
+    }
 }
 
 /// A stop's outcome: `status`, with the escalation that ended the step in the
@@ -580,6 +663,7 @@ impl Driver {
         let sink =
             Arc::new(LogSink::new(&config.run_dir, secrets.masker()).with_echo(config.echo_logs));
         let (tx, rx) = mpsc::channel(SIGNAL_CHANNEL_CAPACITY);
+        let (abandoned_tx, abandoned_rx) = mpsc::unbounded_channel();
         Self {
             engine,
             executor,
@@ -591,7 +675,7 @@ impl Driver {
             config,
             envs: HashMap::new(),
             acquires: HashMap::new(),
-            acquire_drains: Vec::new(),
+            background: JoinSet::new(),
             next_acquire_id: 0,
             acquire_failures: HashMap::new(),
             pending_starts: HashMap::new(),
@@ -603,6 +687,7 @@ impl Driver {
             caps: Capabilities::default(),
             observers: Vec::new(),
             run_guards: Vec::new(),
+            guard_teardown: None,
             releases: Vec::new(),
             cleanup_timer: None,
             decision_tasks: HashMap::new(),
@@ -610,6 +695,8 @@ impl Driver {
             resume: None,
             tx,
             rx,
+            abandoned_tx,
+            abandoned_rx,
         }
     }
 
@@ -637,8 +724,8 @@ impl Driver {
 
     /// Hold a per-run host service for this run's lifetime. The driver never
     /// looks inside; when the run ends it awaits the guard's
-    /// [`RunGuard::teardown`], and a driver dropped mid-run drops the guard
-    /// instead.
+    /// [`RunGuard::teardown`]. Dropping the driver mid-run schedules the same
+    /// teardown after its steps and environments have stopped.
     #[must_use]
     pub fn with_run_guard(mut self, guard: Box<dyn RunGuard>) -> Self {
         self.run_guards.push(guard);
@@ -700,7 +787,22 @@ impl Driver {
         }
 
         while !self.engine.is_finished() {
-            let Some(signal) = self.rx.recv().await else {
+            let signal = tokio::select! {
+                signal = self.rx.recv() => signal,
+                Some(handle) = self.abandoned_rx.recv() => {
+                    self.spawn_release(handle, ScopeOutcome::Failed);
+                    continue;
+                }
+                joined = self.background.join_next(), if !self.background.is_empty() => {
+                    if let Some(Err(error)) = joined
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(error = ?error, "driver background task failed");
+                    }
+                    continue;
+                }
+            };
+            let Some(signal) = signal else {
                 break;
             };
             self.on_signal(signal).await;
@@ -715,12 +817,16 @@ impl Driver {
             timer.abort();
         }
 
+        for task in self.tasks.values_mut() {
+            task.workers.shutdown().await;
+        }
+        self.tasks.clear();
         self.finish_acquires().await;
 
         // Release is best effort and never fails the run, but the run should not
         // report back before the environments are actually gone.
         let mut releases = Vec::new();
-        for handle in mem::take(&mut self.releases) {
+        while let Some(handle) = self.releases.last_mut() {
             match handle.await {
                 Ok(report) => {
                     if !report.is_clean() {
@@ -735,6 +841,7 @@ impl Driver {
                 }
                 Err(error) => tracing::warn!(error = ?error, "environment release task panicked"),
             }
+            self.releases.pop();
         }
 
         // Every record has been handed over; what remains is the observers'
@@ -750,8 +857,17 @@ impl Driver {
         // Per-run services come down before the report: teardown can be real
         // work — a listener thread joining — so it is awaited here instead of
         // blocking a worker from the guards' `Drop`.
-        for guard in mem::take(&mut self.run_guards) {
-            guard.teardown().await;
+        if !self.run_guards.is_empty() {
+            let guards = mem::take(&mut self.run_guards);
+            self.guard_teardown = Some(tokio::spawn(async move {
+                for guard in guards {
+                    guard.teardown().await;
+                }
+            }));
+            if let Some(teardown) = self.guard_teardown.as_mut() {
+                let _ = teardown.await;
+            }
+            self.guard_teardown.take();
         }
 
         // The run's own failures, which no caller reads: reported once here,
@@ -778,7 +894,7 @@ impl Driver {
         ExecutionReport {
             exit,
             status,
-            state: self.engine,
+            state: mem::replace(&mut self.engine, EngineState::new(Graph::new())),
             releases,
             observer_errors,
         }
@@ -824,7 +940,7 @@ impl Driver {
                 firing,
                 attempt,
                 outcome,
-            } => self.finish(firing, attempt, outcome),
+            } => self.finish(firing, attempt, outcome).await,
             Signal::Timeout { firing, attempt } => self.on_timeout(firing, attempt),
             Signal::RetryDue {
                 firing,
@@ -900,7 +1016,7 @@ impl Driver {
             "cleanup grace timer armed"
         );
         let tx = self.tx.clone();
-        self.cleanup_timer = Some(tokio::spawn(async move {
+        self.cleanup_timer = Some(self.background.spawn(async move {
             time::sleep(grace).await;
             let _ = tx
                 .send(Signal::Inject(Event::KillRequested {
@@ -927,7 +1043,7 @@ impl Driver {
         }
     }
 
-    fn track_decision(&mut self, decision_id: DecisionId, task: JoinHandle<()>) {
+    fn track_decision(&mut self, decision_id: DecisionId, task: AbortHandle) {
         if let Some(previous) = self.decision_tasks.insert(decision_id, task) {
             previous.abort();
         }
@@ -936,10 +1052,10 @@ impl Driver {
     /// Queue a synchronously resolved decision on the signal channel. A full
     /// channel falls back to a task that awaits capacity; decisions are
     /// validated by id, so relative order between them carries no meaning.
-    fn send_decision_signal(&self, signal: Signal) {
+    fn send_decision_signal(&mut self, signal: Signal) {
         if let Err(mpsc::error::TrySendError::Full(signal)) = self.tx.try_send(signal) {
             let tx = self.tx.clone();
-            tokio::spawn(async move {
+            self.background.spawn(async move {
                 let _ = tx.send(signal).await;
             });
         }
@@ -1040,7 +1156,7 @@ impl Driver {
                 let resolver = self.decisions.clone();
                 let tx = self.tx.clone();
                 let task =
-                    tokio::spawn(async move {
+                    self.background.spawn(async move {
                         let resolution = resolver.admit(request).await.unwrap_or_else(|error| {
                             AdmissionResolution {
                                 decision: Admission::Block {
@@ -1078,7 +1194,7 @@ impl Driver {
                 let resolver = self.decisions.clone();
                 let tx = self.tx.clone();
                 let task =
-                    tokio::spawn(async move {
+                    self.background.spawn(async move {
                         let group_ids: Vec<u32> =
                             request.groups.iter().map(|group| group.group).collect();
                         let resolution = resolver.route(request).await.unwrap_or_else(|error| {
@@ -1134,7 +1250,7 @@ impl Driver {
                     "retry scheduled"
                 );
                 let tx = self.tx.clone();
-                tokio::spawn(async move {
+                self.background.spawn(async move {
                     time::sleep(delay).await;
                     let _ = tx
                         .send(Signal::RetryDue {
@@ -1192,7 +1308,7 @@ impl Driver {
     /// code path for both tiers, the tier read from the replayed state. The
     /// finish rides the signal channel like every step result, so its place in
     /// the log is its arrival order.
-    fn finish_instead_of_resuming(&self, firing: FiringId, attempt: Attempt, node: NodeId) {
+    fn finish_instead_of_resuming(&mut self, firing: FiringId, attempt: Attempt, node: NodeId) {
         let escalation = if self.engine.is_node_killed(node) {
             &KILLED_BEFORE_RESUME
         } else {
@@ -1200,7 +1316,7 @@ impl Driver {
         };
         let outcome = escalation_outcome(Status::Cancelled, escalation);
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.background.spawn(async move {
             let _ = tx
                 .send(Signal::Finished {
                     firing,
@@ -1217,27 +1333,62 @@ impl Driver {
         if self.envs.contains_key(&scope) || self.acquires.contains_key(&scope) {
             return;
         }
-        let spec = self.scope_spec(scope);
+        let mut spec = self.scope_spec(scope);
         let mut ctx = AcquireContext::new(self.secrets.clone(), self.progress.clone());
-        if let Some(lease) = self.config.scope_leases.lease_for(scope) {
-            ctx = ctx.with_lease(lease);
-        }
+        let leases = self.config.scope_leases.clone();
+        let identity = self.engine.scope_identity(scope);
+        let inherited_mismatch = self
+            .config
+            .runtime_override
+            .as_ref()
+            .zip(self.engine.graph().scope(scope))
+            .is_some_and(|(inherited, declared)| {
+                matches!(declared.runtime.target, ir::RuntimeTarget::Container { .. })
+                    && declared.runtime.target != inherited.target
+            });
         let executor = self.executor.clone();
+        let abandoned = self.abandoned_tx.clone();
         let tx = self.tx.clone();
         let id = self.next_acquire_id;
         self.next_acquire_id = self
             .next_acquire_id
             .checked_add(1)
             .expect("a run cannot start 2^64 scope acquisitions");
-        let join = tokio::spawn(async move {
-            let result = executor
-                .acquire(&spec, &ctx)
-                .await
-                .map(|handle| AcquiredScope::new(executor, handle))
-                // The deliberate render point: the failure becomes
-                // `FailureInfo.message`, a rendered projection, so the whole
-                // source chain is flattened into it here.
-                .map_err(|error| render_chain(&error));
+        let join = self.background.spawn(async move {
+            let result = async {
+                if inherited_mismatch {
+                    return Err(EnvError::backend(
+                        "coordinator",
+                        "acquire inherited scope",
+                        "scope declares a different container from its inherited sandbox",
+                    ));
+                }
+                match leases {
+                    ScopeLeases::None => {}
+                    ScopeLeases::Shared(lease) => ctx = ctx.with_lease(lease),
+                    ScopeLeases::Owned(allocator) => {
+                        let identity = identity.ok_or_else(|| {
+                            EnvError::backend(
+                                "coordinator",
+                                "reserve lease",
+                                "scope has no declared identity",
+                            )
+                        })?;
+                        let assignment = allocator.reserve(identity, &spec).await?;
+                        ctx = ctx.with_lease(assignment.lease);
+                        spec.workspace_id = assignment.workspace;
+                    }
+                }
+                executor
+                    .acquire(&spec, &ctx)
+                    .await
+                    .map(|handle| AcquiredScope::new(handle, abandoned))
+            }
+            .await
+            // The deliberate render point: the failure becomes
+            // `FailureInfo.message`, a rendered projection, so the whole
+            // source chain is flattened into it here.
+            .map_err(|error| render_chain(&error));
             let _ = tx.send(Signal::AcquireFinished { scope, id, result }).await;
         });
         self.acquires.insert(scope, ScopeAcquire { id, join });
@@ -1277,7 +1428,6 @@ impl Driver {
     fn release(&mut self, scope: ScopeId) {
         if let Some(acquire) = self.acquires.remove(&scope) {
             acquire.join.abort();
-            self.acquire_drains.push(acquire.join);
         }
         if let Some(handle) = self.envs.remove(&scope) {
             self.release_handle(scope, handle);
@@ -1290,6 +1440,10 @@ impl Driver {
         } else {
             ScopeOutcome::Succeeded
         };
+        self.spawn_release(handle, outcome);
+    }
+
+    fn spawn_release(&mut self, handle: EnvHandle, outcome: ScopeOutcome) {
         let executor = self.executor.clone();
         self.releases.push(tokio::spawn(async move {
             executor.release(handle, outcome).await
@@ -1300,14 +1454,8 @@ impl Driver {
     /// with scope release. Waiting for the aborted tasks guarantees no acquire
     /// can send another result after the channel is drained.
     async fn finish_acquires(&mut self) {
-        let mut drains = mem::take(&mut self.acquire_drains);
-        for (_, acquire) in mem::take(&mut self.acquires) {
-            acquire.join.abort();
-            drains.push(acquire.join);
-        }
-        for drain in drains {
-            let _ = drain.await;
-        }
+        self.background.shutdown().await;
+        self.acquires.clear();
         while let Ok(signal) = self.rx.try_recv() {
             if let Signal::AcquireFinished {
                 scope,
@@ -1317,6 +1465,9 @@ impl Driver {
             {
                 self.release_handle(scope, acquired.into_handle());
             }
+        }
+        while let Ok(handle) = self.abandoned_rx.try_recv() {
+            self.spawn_release(handle, ScopeOutcome::Failed);
         }
     }
 
@@ -1405,7 +1556,7 @@ impl Driver {
                 Value::Null,
             );
             let tx = self.tx.clone();
-            tokio::spawn(async move {
+            self.background.spawn(async move {
                 let _ = tx
                     .send(Signal::Finished {
                         firing,
@@ -1464,7 +1615,8 @@ impl Driver {
         // concurrent host caller, plus the driver's own ack-less stop signals —
         // a handful per escalation, never per unit of work.
         let (forward_tx, mut forward_rx) = mpsc::unbounded_channel::<Forward>();
-        tokio::spawn(async move {
+        let mut workers = JoinSet::new();
+        workers.spawn(async move {
             while let Some(forward) = forward_rx.recv().await {
                 let disposition = match control_tx.send(forward.ctl).await {
                     Ok(()) => DeliverDisposition::Delivered,
@@ -1477,8 +1629,23 @@ impl Driver {
         });
 
         let progress_tx = self.tx.clone();
-        tokio::spawn(async move {
-            while let Some(event) = log_rx.recv().await {
+        let (runner_returned, mut close_logs) = oneshot::channel();
+        let (logs_drained, drained) = oneshot::channel();
+        workers.spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    event = log_rx.recv() => event,
+                    _ = &mut close_logs, if !log_rx.is_closed() => {
+                        // The runner can leave log sender clones in host
+                        // services. Stop accepting new output, but preserve
+                        // every event it queued before returning.
+                        log_rx.close();
+                        continue;
+                    }
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 if progress_tx
                     .send(Signal::Progress { firing, event })
                     .await
@@ -1487,6 +1654,7 @@ impl Driver {
                     return;
                 }
             }
+            let _ = logs_drained.send(());
         });
 
         let ctx = StepCtx {
@@ -1503,9 +1671,11 @@ impl Driver {
             control: control_rx,
         };
         let done_tx = self.tx.clone();
-        let join = tokio::spawn(
+        workers.spawn(
             async move {
                 let outcome = runner.run(ctx).await;
+                let _ = runner_returned.send(());
+                let _ = drained.await;
                 let _ = done_tx
                     .send(Signal::Finished {
                         firing,
@@ -1518,15 +1688,14 @@ impl Driver {
         );
 
         // The per-attempt timeout. `Budget.timeout` is per attempt, not per firing.
-        let mut timeout = None;
         if let Some(limit) = self.engine.graph().node(node).map(|n| n.budget.timeout)
             && !limit.is_zero()
         {
             let tx = self.tx.clone();
-            timeout = Some(tokio::spawn(async move {
+            workers.spawn(async move {
                 time::sleep(limit).await;
                 let _ = tx.send(Signal::Timeout { firing, attempt }).await;
-            }));
+            });
         }
 
         self.tasks.insert(firing, Task {
@@ -1535,8 +1704,7 @@ impl Driver {
             attempt,
             span,
             forwards: forward_tx,
-            join,
-            timeout,
+            workers,
             deadline: None,
             reason: None,
         });
@@ -1554,7 +1722,7 @@ impl Driver {
             Value::Null,
         );
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.background.spawn(async move {
             let _ = tx
                 .send(Signal::Finished {
                     firing,
@@ -1606,7 +1774,7 @@ impl Driver {
             };
             let attempt = task.attempt;
             let tx = self.tx.clone();
-            task.deadline = Some(tokio::spawn(async move {
+            task.deadline = Some(task.workers.spawn(async move {
                 time::sleep(limit).await;
                 let _ = tx.send(Signal::HardDeadline { firing, attempt }).await;
             }));
@@ -1647,7 +1815,7 @@ impl Driver {
         let attempt = resolved.attempt();
         let outcome = Outcome::new(Status::Cancelled, Value::Null);
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.background.spawn(async move {
             let _ = tx
                 .send(Signal::Finished {
                     firing,
@@ -1777,7 +1945,7 @@ impl Driver {
     }
 
     async fn on_hard_deadline(&mut self, firing: FiringId, attempt: Attempt) {
-        let Some(task) = self.tasks.get(&firing) else {
+        let Some(task) = self.tasks.get_mut(&firing) else {
             return;
         };
         if task.attempt != attempt {
@@ -1793,7 +1961,7 @@ impl Driver {
             "step did not return after cancel"
         );
         // The step ignored its cancel. Stop waiting for it.
-        task.join.abort();
+        task.workers.abort_all();
 
         let status = match reason {
             CancelReason::TimedOut => Status::TimedOut,
@@ -1808,21 +1976,18 @@ impl Driver {
                 "the step did not return after Control::Cancel; the driver stopped waiting",
             )
             .await;
-        self.finish(firing, attempt, escalation_outcome(status, &CANCEL_FORCED));
+        self.finish(firing, attempt, escalation_outcome(status, &CANCEL_FORCED))
+            .await;
     }
 
-    fn finish(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
+    async fn finish(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
         // A firing finished from `fail_now` or from resume's direct finish has no
         // task, and so no step span: those events belong to the run instead.
+        if let Some(task) = self.tasks.get_mut(&firing) {
+            task.workers.shutdown().await;
+        }
         let (reason, span) = match self.tasks.remove(&firing) {
             Some(task) => {
-                if let Some(timer) = task.timeout {
-                    timer.abort();
-                }
-                if let Some(deadline) = task.deadline {
-                    deadline.abort();
-                }
-                task.join.abort();
                 if outcome.status.is_failure() {
                     self.scope_failed.insert(task.scope);
                 }
@@ -1973,5 +2138,243 @@ fn resolve_secret_refs(value: Value, secrets: &dyn SecretProvider) -> Result<Val
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         other => Ok(other),
+    }
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use std::future::pending;
+    use std::sync::mpsc as sync_mpsc;
+
+    use executor::MapSecrets;
+    use executor_sandbox::HostExecutor;
+    use testkit::RunDir;
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    struct GatedRelease {
+        host:    HostExecutor,
+        started: Notify,
+        gate:    Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for GatedRelease {
+        async fn acquire(
+            &self,
+            spec: &ScopeSpec,
+            ctx: &AcquireContext,
+        ) -> Result<EnvHandle, EnvError> {
+            self.host.acquire(spec, ctx).await
+        }
+
+        async fn release(&self, env: EnvHandle, outcome: ScopeOutcome) -> ReleaseReport {
+            assert_eq!(
+                outcome,
+                ScopeOutcome::Failed,
+                "abandoned work is not success"
+            );
+            self.started.notify_one();
+            self.gate.notified().await;
+            self.host.release(env, outcome).await
+        }
+    }
+
+    struct Finished(oneshot::Sender<()>);
+
+    #[async_trait::async_trait]
+    impl RunGuard for Finished {
+        async fn teardown(self: Box<Self>) {
+            let _ = self.0.send(());
+        }
+    }
+
+    struct PausedDrop {
+        started: Arc<Notify>,
+        gate:    sync_mpsc::Receiver<()>,
+    }
+
+    impl Drop for PausedDrop {
+        fn drop(&mut self) {
+            self.started.notify_one();
+            // Hold destruction open so the test can cancel its join in flight.
+            let _ = self.gate.recv_timeout(Duration::from_secs(10));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_finish_still_joins_the_worker_before_services() {
+        let dir = RunDir::new("driver-finish-join-drop");
+        let (finished, mut finish) = oneshot::channel();
+        let mut driver = Driver::new(
+            Graph::new(),
+            Arc::new(HostExecutor::new(dir.path())),
+            Registry::new(),
+            Arc::new(MapSecrets::empty()),
+            RunConfig::new(dir.path()),
+        )
+        .with_run_guard(Box::new(Finished(finished)));
+        let dropping = Arc::new(Notify::new());
+        let (release, gate) = sync_mpsc::channel();
+        let paused = PausedDrop {
+            started: dropping.clone(),
+            gate,
+        };
+        let mut workers = JoinSet::new();
+        let (started, start) = oneshot::channel();
+        workers.spawn(async move {
+            let _paused = paused;
+            let _ = started.send(());
+            pending::<()>().await;
+        });
+        start.await.expect("worker started");
+        let (forwards, _forwarded) = mpsc::unbounded_channel();
+        let firing = FiringId::new(1);
+        let attempt = Attempt::new(1);
+        driver.tasks.insert(firing, Task {
+            name: "paused".into(),
+            scope: ScopeId::new(0),
+            attempt,
+            span: tracing::Span::none(),
+            forwards,
+            workers,
+            deadline: None,
+            reason: None,
+        });
+        let mut finishing = Box::pin(driver.finish(
+            firing,
+            attempt,
+            Outcome::new(Status::Cancelled, Value::Null),
+        ));
+        time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                () = dropping.notified() => {},
+                () = &mut finishing => panic!("worker drop must finish first"),
+            }
+        })
+        .await
+        .expect("finish is joining the worker");
+        drop(finishing);
+        drop(driver);
+        assert!(
+            time::timeout(Duration::from_millis(50), &mut finish)
+                .await
+                .is_err(),
+            "services must wait for a finish interrupted during worker shutdown"
+        );
+        release.send(()).expect("release the worker destructor");
+        time::timeout(Duration::from_secs(10), finish)
+            .await
+            .expect("cleanup finished")
+            .expect("guard teardown ran");
+    }
+
+    struct PausedTeardown {
+        started: Arc<Notify>,
+        gate:    Arc<Notify>,
+        done:    oneshot::Sender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl RunGuard for PausedTeardown {
+        async fn teardown(self: Box<Self>) {
+            self.started.notify_one();
+            self.gate.notified().await;
+            let _ = self.done.send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn aborting_during_guard_teardown_completes_every_guard() {
+        let dir = RunDir::new("driver-guard-teardown-drop");
+        let started = Arc::new(Notify::new());
+        let gate = Arc::new(Notify::new());
+        let (first, first_done) = oneshot::channel();
+        let (last, last_done) = oneshot::channel();
+        let driver = Driver::new(
+            Graph::new(),
+            Arc::new(HostExecutor::new(dir.path())),
+            Registry::new(),
+            Arc::new(MapSecrets::empty()),
+            RunConfig::new(dir.path()),
+        )
+        .with_run_guard(Box::new(PausedTeardown {
+            started: started.clone(),
+            gate:    gate.clone(),
+            done:    first,
+        }))
+        .with_run_guard(Box::new(Finished(last)));
+        let run = tokio::spawn(driver.run());
+        time::timeout(Duration::from_secs(10), started.notified())
+            .await
+            .expect("guard teardown started");
+        run.abort();
+        assert!(matches!(run.await, Err(error) if error.is_cancelled()));
+        gate.notify_one();
+        time::timeout(Duration::from_secs(10), async {
+            first_done.await.expect("active guard teardown completed");
+            last_done.await.expect("remaining guard teardown completed");
+        })
+        .await
+        .expect("every guard completed");
+    }
+
+    #[tokio::test]
+    async fn an_aborted_acquires_completed_result_is_released_before_services() {
+        let dir = RunDir::new("driver-acquire-handoff-drop");
+        let executor = Arc::new(GatedRelease {
+            host:    HostExecutor::new(dir.path()).with_retention(Retention::OnFailure),
+            started: Notify::new(),
+            gate:    Notify::new(),
+        });
+        let env = executor
+            .acquire(
+                &ScopeSpec::new(ScopeId::new(0), "scope-0"),
+                &AcquireContext::bare(),
+            )
+            .await
+            .expect("acquire");
+        let (finished, mut finish) = oneshot::channel();
+        let mut driver = Driver::new(
+            Graph::new(),
+            executor.clone(),
+            Registry::new(),
+            Arc::new(MapSecrets::empty()),
+            RunConfig::new(dir.path()),
+        )
+        .with_run_guard(Box::new(Finished(finished)));
+        let acquired = AcquiredScope::new(env, driver.abandoned_tx.clone());
+        // Reproduce an acquire that completed but has not handed its result
+        // to the signal channel. Aborting drops the result after Driver::drop
+        // has already closed that channel and scheduled its cleanup.
+        let (started, start) = oneshot::channel();
+        driver.background.spawn(async move {
+            let _acquired = acquired;
+            let _ = started.send(());
+            pending::<()>().await;
+        });
+        start
+            .await
+            .expect("the acquired result belongs to the task");
+        drop(driver);
+        time::timeout(Duration::from_secs(1), executor.started.notified())
+            .await
+            .expect("the abandoned acquire's result is released");
+        assert!(
+            time::timeout(Duration::from_millis(50), &mut finish)
+                .await
+                .is_err(),
+            "services must stay alive while the abandoned result is released"
+        );
+        executor.gate.notify_one();
+        time::timeout(Duration::from_secs(10), finish)
+            .await
+            .expect("cleanup finished")
+            .expect("guard teardown ran");
+        assert!(
+            dir.workspace().exists(),
+            "failure retention preserves the workspace"
+        );
     }
 }

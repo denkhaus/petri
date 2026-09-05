@@ -30,7 +30,10 @@ use execution::{CoordinatorHandle, host, prune as sandbox_prune};
 use runtime::engine::{self, EventLog};
 use runtime::frontend::{self, CompileInputs, Lowered};
 use runtime::ir::{Graph, RunStatus};
-use runtime::{DaytonaResources, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
+use runtime::{
+    DaytonaResources, DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend,
+    SandboxOptions,
+};
 use tokio::signal;
 use tracing::field::{Empty, display};
 
@@ -155,6 +158,9 @@ impl ProviderArgs {
 
 #[derive(Args)]
 struct RunnerArgs {
+    /// Daytona offering for the runner: vm or container.
+    #[arg(long, default_value = "vm")]
+    daytona_kind:      DaytonaSandboxKind,
     /// Override a placement label's runner image. Repeatable; later values win.
     #[arg(long = "runner-image", value_name = "LABEL=IMAGE", value_parser = runner_image)]
     images:            Vec<(String, String)>,
@@ -294,6 +300,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             options.echo = !quiet;
             options.sandbox = provider.options();
             options.sandbox.runner_images = runner.images.into_iter().collect();
+            options.sandbox.daytona_kind = runner.daytona_kind;
             options.sandbox.daytona_resources = DaytonaResources {
                 cpu_cores: runner.daytona_cpus,
                 memory_mb: runner.daytona_memory_mb,

@@ -3,21 +3,56 @@ use std::time::Duration;
 
 use executor::{AcquireContext, MapSecrets, NoProgress, ScopeSpec, ServiceSpec};
 use ir::{ContainerOptions, RegistryCredentials, RuntimeSpec, RuntimeTarget, ScopeId};
-use sandbox_driver::{Resources, SandboxKind, SandboxSource, SnapshotId};
+use sandbox_driver::{Resources, SandboxKind, SandboxSource};
 use sandbox_driver_daytona_config::{DaytonaProviderConfig, DockerExecutionTarget};
 
 use crate::build_daytona_spec;
+use crate::snapshots::RunnerSnapshot;
 
-fn snapshot() -> SnapshotId {
-    SnapshotId::try_new("pinned-runner").unwrap()
+fn snapshot() -> RunnerSnapshot {
+    RunnerSnapshot::new(
+        "pinned-runner",
+        Resources::default(),
+        SandboxKind::VirtualMachine,
+    )
+}
+
+#[test]
+fn container_offering_supports_process_and_nested_container_jobs() {
+    let snapshot = RunnerSnapshot::new(
+        "pinned-runner",
+        Resources::default(),
+        SandboxKind::Container,
+    );
+    for container_job in [false, true] {
+        let mut scope = ScopeSpec::new(ScopeId::new(1), "job");
+        if container_job {
+            scope.runtime.target = RuntimeTarget::Container {
+                image:       "alpine:3.20".into(),
+                options:     ContainerOptions::default(),
+                credentials: None,
+            };
+        }
+        let spec = build_daytona_spec(&scope, &AcquireContext::bare(), &snapshot).unwrap();
+        assert_eq!(spec.sandbox_kind, Some(SandboxKind::Container));
+        let config: DaytonaProviderConfig = serde_json::from_value(spec.provider_config).unwrap();
+        assert_eq!(
+            config.docker.unwrap().target,
+            if container_job {
+                DockerExecutionTarget::Container
+            } else {
+                DockerExecutionTarget::VirtualMachine
+            }
+        );
+    }
 }
 
 #[test]
 fn a_process_target_uses_the_vm_and_disables_automatic_stops_and_deletion() {
     let scope = ScopeSpec::new(ScopeId::new(1), "job");
-    let spec = build_daytona_spec(&scope, &AcquireContext::bare(), snapshot()).unwrap();
+    let spec = build_daytona_spec(&scope, &AcquireContext::bare(), &snapshot()).unwrap();
     spec.validate().unwrap();
-    assert!(matches!(&spec.source, SandboxSource::Snapshot { id } if id == &snapshot()));
+    assert!(matches!(&spec.source, SandboxSource::Snapshot { id } if id == &snapshot().id));
     assert_eq!(spec.sandbox_kind, Some(SandboxKind::VirtualMachine));
     assert_eq!(
         spec.resources,
@@ -32,6 +67,7 @@ fn a_process_target_uses_the_vm_and_disables_automatic_stops_and_deletion() {
     let config: DaytonaProviderConfig = serde_json::from_value(spec.provider_config).unwrap();
     let docker = config.docker.unwrap();
     assert_eq!(docker.target, DockerExecutionTarget::VirtualMachine);
+    assert!(docker.image.is_empty());
     assert!(docker.options.binds.is_empty());
 }
 
@@ -63,7 +99,7 @@ fn container_jobs_keep_options_services_and_credentials_inside_the_vm() {
         )])),
         Arc::new(NoProgress),
     );
-    let spec = build_daytona_spec(&scope, &ctx, snapshot()).unwrap();
+    let spec = build_daytona_spec(&scope, &ctx, &snapshot()).unwrap();
     assert_eq!(spec.env["SCOPE_VALUE"], "container");
     assert_eq!(
         spec.user.as_deref(),
@@ -90,5 +126,5 @@ fn container_jobs_keep_options_services_and_credentials_inside_the_vm() {
 fn a_vm_process_target_with_sidecars_fails_before_snapshot_preparation() {
     let scope = ScopeSpec::new(ScopeId::new(1), "job")
         .with_services(vec![ServiceSpec::new("db", "postgres:16")]);
-    assert!(build_daytona_spec(&scope, &AcquireContext::bare(), snapshot()).is_err());
+    assert!(build_daytona_spec(&scope, &AcquireContext::bare(), &snapshot()).is_err());
 }

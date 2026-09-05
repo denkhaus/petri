@@ -661,9 +661,6 @@ impl SandboxLeaseManager {
         if record.state == LeaseState::Deleted {
             return report;
         }
-        if let Err(error) = self.check_fingerprint(lease, &record) {
-            return report.problem(error.to_string());
-        }
         let resource_id = record.resource_id.clone().or_else(|| {
             live.as_ref()
                 .map(|live| SmolStr::new(live.sandbox.id().as_str()))
@@ -676,6 +673,9 @@ impl SandboxLeaseManager {
             Ok(current) => current,
             Err(error) => return report.problem(format!("sandbox provider unavailable: {error}")),
         };
+        if let Err(error) = self.check_fingerprint(lease, &record) {
+            return report.problem(error.to_string());
+        }
         let id = match resource_id {
             Some(resource_id) => match SandboxId::try_new(resource_id.as_str()) {
                 Ok(id) => id,
@@ -788,8 +788,8 @@ impl SandboxLeaseManager {
         if record.state == LeaseState::Deleted {
             return Ok(Vec::new());
         }
-        self.check_fingerprint(lease, &record)?;
         let (provider, _) = self.source.current().await?;
+        self.check_fingerprint(lease, &record)?;
         let ids = if let Some(resource_id) = record.resource_id {
             vec![
                 SandboxId::try_new(resource_id.as_str())
@@ -877,4 +877,143 @@ async fn list_by_label(
         .await
         .map_err(|error| acquire_failed(&error))?;
     Ok(matches.into_iter().map(|status| status.id).collect())
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use sandbox_driver::{Capabilities, EventContext, Isolation, ProviderKind, SandboxStatus};
+    use testkit::RunDir;
+
+    use super::*;
+
+    struct UntouchedProvider {
+        kind:         ProviderKind,
+        capabilities: Capabilities,
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxProvider for UntouchedProvider {
+        fn kind(&self) -> &ProviderKind {
+            &self.kind
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.capabilities
+        }
+        async fn create(
+            &self,
+            _: &SandboxSpec,
+            _: Option<EventContext>,
+        ) -> sandbox_driver::Result<Arc<dyn Sandbox>> {
+            panic!("a changed account must not create resources during recovery")
+        }
+        async fn attach(
+            &self,
+            _: &SandboxId,
+            _: Option<EventContext>,
+        ) -> sandbox_driver::Result<Arc<dyn Sandbox>> {
+            panic!("a changed account must not attach or mutate recorded resources")
+        }
+        async fn list(&self, _: &SandboxFilter) -> sandbox_driver::Result<Vec<SandboxStatus>> {
+            panic!("a changed account must not search for recorded resources")
+        }
+    }
+
+    struct VerifiedSource {
+        provider: Arc<UntouchedProvider>,
+        verified: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderSource for VerifiedSource {
+        async fn current(&self) -> Result<(Arc<dyn SandboxProvider>, u64), EnvError> {
+            self.verified.store(true, Ordering::SeqCst);
+            Ok((self.provider.clone(), 1))
+        }
+        fn fingerprint(&self) -> &str {
+            if self.verified.load(Ordering::SeqCst) {
+                "daytona:::organization:other"
+            } else {
+                "daytona:::"
+            }
+        }
+        #[expect(
+            clippy::unnecessary_literal_bound,
+            reason = "the trait fixes the signature"
+        )]
+        fn kind(&self) -> &str {
+            "daytona"
+        }
+    }
+
+    fn manager(dir: &RunDir) -> (SandboxLeaseManager, Arc<MemoryLedger>) {
+        let ledger = Arc::new(MemoryLedger::default());
+        ledger
+            .allocating(SandboxLeaseId::new(0), "daytona", "daytona:::")
+            .expect("allocation");
+        ledger
+            .live(SandboxLeaseId::new(0), "existing-resource")
+            .expect("live record");
+        let source = Arc::new(VerifiedSource {
+            provider: Arc::new(UntouchedProvider {
+                kind:         ProviderKind::try_new("daytona").expect("kind"),
+                capabilities: Capabilities::minimal(Isolation::Vm),
+            }),
+            verified: AtomicBool::new(false),
+        });
+        (
+            SandboxLeaseManager::new(
+                source,
+                ledger.clone(),
+                Arc::new(RunIdentity::new(dir.path().to_path_buf())),
+            ),
+            ledger,
+        )
+    }
+
+    #[tokio::test]
+    async fn release_verifies_account_identity_before_stop_or_delete() {
+        for retention in [Retention::Always, Retention::Never] {
+            let dir = RunDir::new("release-provider-identity");
+            let (manager, ledger) = manager(&dir);
+            let report = manager
+                .release_lease(SandboxLeaseId::new(0), retention, ScopeOutcome::Succeeded)
+                .await;
+            assert!(!report.is_clean());
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|problem| problem.contains("organization:other"))
+            );
+            assert_eq!(
+                ledger
+                    .lookup(SandboxLeaseId::new(0))
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                LeaseState::Live
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_verifies_account_identity_before_deleting() {
+        let dir = RunDir::new("prune-provider-identity");
+        let (manager, ledger) = manager(&dir);
+        let error = manager
+            .delete_recorded(SandboxLeaseId::new(0), "workspace")
+            .await
+            .expect_err("different account");
+        assert!(error.to_string().contains("organization:other"));
+        assert_eq!(
+            ledger
+                .lookup(SandboxLeaseId::new(0))
+                .unwrap()
+                .unwrap()
+                .state,
+            LeaseState::Live
+        );
+    }
 }

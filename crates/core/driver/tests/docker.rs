@@ -253,12 +253,10 @@ async fn a_new_executor_over_the_run_dir_fences_the_crashed_container() {
         return;
     }
     let dir = RunDir::new("docker-fence");
-    // The beater runs in its own session: an aborted driver still lets the
-    // orphaned step task stop its own process group as the channels close, so a
-    // detached beater is what a dead *process* leaves behind — only a
-    // sandbox-level fence can end it. With `done` already in the workspace the
-    // step measures the heartbeat instead of beating: two sizes half a second
-    // apart, equal only if the beater is dead.
+    // A process crash skips the driver's Drop and scope release. Start the
+    // old workload directly through the executor so that abandoning it leaves
+    // that same resource state. A separate session keeps the heartbeat alive
+    // when the plugin closes its exec stream.
     let graph = docker_graph(
         "beat",
         r#"
@@ -277,17 +275,31 @@ sleep 300
             .with_retention(retention)
     };
 
-    let (driver, prefix) =
-        docker_driver_named(graph.clone(), &dir, config(Retention::Always)).await;
+    let crashed = RoutingExecutor::local(dir.path(), Retention::Always);
+    let prefix = crashed.container_prefix().await.expect("record the run id");
+    let spec = executor::ScopeSpec::new(ScopeId::new(0), "scope-0")
+        .with_runtime(RuntimeSpec::container(IMAGE));
+    let env = crashed
+        .acquire(&spec, &executor::AcquireContext::bare())
+        .await
+        .expect("acquire the crashed run's sandbox");
+    let process = env
+        .exec()
+        .spawn(executor::ProcessSpec::new("sh", &[
+            "-c",
+            "setsid sh -c 'while :; do echo tick >> heartbeat; sleep 0.05; done' & sleep 300",
+        ]))
+        .await
+        .expect("start the crashed run's workload");
     let sandbox = sandbox_name(dir.path(), 0);
-    let run = tokio::spawn(driver.run());
     assert!(
         wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(60)).await,
         "the step never started inside the container"
     );
-    // The crash: the driver is gone, release never runs, the container beats on.
-    run.abort();
-    let _ = run.await;
+    // Deliberately skip release, which a driver abort now performs.
+    drop(process);
+    drop(env);
+    drop(crashed);
     let crashed_id = container_id(&sandbox)
         .await
         .expect("the crashed run's container outlives its driver");

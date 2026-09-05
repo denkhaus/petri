@@ -34,17 +34,14 @@ use executor::{
     ScopeOutcome, ScopeSpec,
 };
 use ir::{ContainerOptions, RuntimeTarget};
-use sandbox_driver::{
-    Sandbox, SandboxKind, SandboxProvider, SandboxSource, SandboxSpec, SnapshotId,
-    WorkspaceOwnership,
-};
+use sandbox_driver::{Sandbox, SandboxProvider, SandboxSource, SandboxSpec, WorkspaceOwnership};
 use sandbox_driver_daytona_config::{
     DaytonaProviderConfig, DockerExecutionTarget, NestedDockerConfig,
 };
 use sandbox_driver_docker_config::{DockerProviderConfig, Health, RegistryAuth, Sidecar};
 use smol_str::SmolStr;
 
-pub use crate::backend::{DaytonaResources, SandboxBackend, SandboxOptions};
+pub use crate::backend::{DaytonaResources, DaytonaSandboxKind, SandboxBackend, SandboxOptions};
 use crate::env::{OneShotRunner, SandboxEnv};
 pub use crate::host::HostExecutor;
 pub use crate::lease::{
@@ -252,8 +249,12 @@ impl SandboxExecutor {
             return build_spec(scope, labels, name, ctx);
         }
         let image = self.options.runner_image(&scope.runtime)?;
-        let snapshot = RunnerSnapshot::new(&image, self.options.daytona_resources.validated()?);
-        let mut spec = build_daytona_spec(scope, ctx, snapshot.id.clone())?;
+        let snapshot = RunnerSnapshot::new(
+            &image,
+            self.options.daytona_resources.validated()?,
+            self.options.daytona_kind.sandbox_kind(),
+        );
+        let mut spec = build_daytona_spec(scope, ctx, &snapshot)?;
         spec.name = Some(name.to_owned());
         spec.labels.extend(labels.iter().cloned());
         let snapshots = provider.snapshots().ok_or_else(|| {
@@ -271,7 +272,7 @@ impl SandboxExecutor {
 fn build_daytona_spec(
     scope: &ScopeSpec,
     ctx: &AcquireContext,
-    snapshot: SnapshotId,
+    snapshot: &RunnerSnapshot,
 ) -> Result<SandboxSpec, EnvError> {
     let (target, image, user, options) = match &scope.runtime.target {
         RuntimeTarget::HostProcess => {
@@ -284,7 +285,7 @@ fn build_daytona_spec(
             }
             (
                 DockerExecutionTarget::VirtualMachine,
-                "alpine:3.20".to_owned(),
+                String::new(),
                 None,
                 DockerProviderConfig::default(),
             )
@@ -309,8 +310,8 @@ fn build_daytona_spec(
             )
         }
     };
-    let mut spec = SandboxSpec::new(SandboxSource::Snapshot { id: snapshot })
-        .sandbox_kind(SandboxKind::VirtualMachine)
+    let mut spec = snapshot
+        .sandbox_spec()
         .working_directory(CONTAINER_WORKSPACE);
     spec.user = Some("root".to_owned());
     spec.public = Some(false);

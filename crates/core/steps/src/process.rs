@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::Map;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio::time;
 
 use crate::ctx::{Step, StepCtx, StepFailure};
@@ -246,17 +247,16 @@ pub async fn run_resolved(
 
     // Log capture runs on its own task and keeps going through cancellation, so a
     // cancelled step's final output is not lost.
-    let mut drain = None;
+    let mut drain = JoinSet::new();
     if let Some(lines) = handle.lines() {
-        drain = Some(tokio::spawn(forward_lines(lines, ctx.logs.clone())));
+        drain.spawn(forward_lines(lines, ctx.logs.clone()));
     }
 
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
 
-    if let Some(drain) = drain {
-        let _ = time::timeout(DRAIN_LIMIT, drain).await;
-    }
+    let _ = time::timeout(DRAIN_LIMIT, drain.join_next()).await;
+    drain.shutdown().await;
 
     let output = match read_outputs(&*ctx.env, &output_rel_path).await {
         Ok(output) => output,

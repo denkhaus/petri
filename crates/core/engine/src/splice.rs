@@ -689,6 +689,7 @@ pub(crate) fn apply_prepared_splice(
     prepared: PreparedSplice,
     queue: &mut VecDeque<Event>,
 ) {
+    let scopes = prepared.scopes.iter().map(|scope| scope.id).collect();
     for expr in prepared.exprs {
         state.graph.body.exprs.push(expr);
     }
@@ -738,6 +739,7 @@ pub(crate) fn apply_prepared_splice(
         batch,
         owner: prepared.owner,
         nodes: batch_nodes,
+        scopes,
         cancel_scope: prepared.cancel_scope,
         origin: prepared.origin,
         policy: prepared.policy,

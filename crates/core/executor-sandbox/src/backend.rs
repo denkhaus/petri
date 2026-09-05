@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use executor::EnvError;
 use ir::RuntimeSpec;
-use sandbox_driver::Resources;
+use sandbox_driver::{Resources, SandboxKind};
 
 const RUNNER_PIN: &str = "b253b0b6004f";
 const DEFAULT_LABEL: &str = "ubuntu-24.04";
@@ -19,7 +19,7 @@ pub enum SandboxBackend {
     Host,
     /// Docker runner images for process targets and job images for containers.
     Docker,
-    /// A Daytona VM, with a nested job container when requested.
+    /// A Daytona sandbox, with a nested job container when requested.
     Daytona,
 }
 
@@ -57,8 +57,41 @@ pub struct SandboxOptions {
     /// `start-docker`, and Python 3. Empty requirements use `ubuntu-24.04`.
     pub runner_images:     BTreeMap<String, String>,
     pub daytona_resources: DaytonaResources,
+    /// The outer Daytona sandbox. Workflow `container:` selects a nested job.
+    pub daytona_kind:      DaytonaSandboxKind,
     /// `None` leaves development mode to the environment and build profile.
     pub plugin_dev:        Option<bool>,
+}
+
+/// The Daytona offering that hosts a workflow runner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DaytonaSandboxKind {
+    Container,
+    #[default]
+    VirtualMachine,
+}
+
+impl DaytonaSandboxKind {
+    pub(crate) fn sandbox_kind(self) -> SandboxKind {
+        match self {
+            Self::Container => SandboxKind::Container,
+            Self::VirtualMachine => SandboxKind::VirtualMachine,
+        }
+    }
+}
+
+impl FromStr for DaytonaSandboxKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "container" => Ok(Self::Container),
+            "vm" => Ok(Self::VirtualMachine),
+            _ => Err(format!(
+                "unknown Daytona sandbox kind {value:?}; expected container or vm"
+            )),
+        }
+    }
 }
 
 /// Snapshot allocation. Include these values in the snapshot identity:

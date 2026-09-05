@@ -132,6 +132,16 @@ plugin, set the variable yourself. A plugin this build does not pin runs only in
 dev mode, which debug builds turn on; a release build needs
 `PETRI_SANDBOX_PLUGIN_DEV=1` or `--sandbox-plugin-dev`.
 
+To build plugins from the sibling sandbox-driver checkout during coordinated
+development, use:
+
+```sh
+SANDBOX_DRIVER_SOURCE=../sandbox-driver mise run plugins:build
+```
+
+Both local and pinned Git builds install the provider packages directly.
+Each package builds its same-named plugin executable.
+
 Nextest is the normal test runner. `mise run test` also uses Cargo to run
 doctests, which Nextest does not run.
 

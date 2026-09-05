@@ -99,10 +99,12 @@ impl Fixture {
             .ensure_record(
                 SandboxAllocationKey {
                     invocation: InvocationId::ROOT,
-                    scope:      scope.id,
+                    scope:      engine::ScopeIdentity::Declared(scope.id),
                 },
                 "docker",
                 scope.workspace_id.clone(),
+                scope.runtime.clone(),
+                None,
             )
             .expect("the initial lease is reserved");
         Self { directory, scope }

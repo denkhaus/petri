@@ -161,12 +161,25 @@ pub struct AppliedSplice {
     pub owner:             NodeId,
     /// Every node the batch added, for admission control and cancellation.
     pub nodes:             BTreeSet<NodeId>,
+    /// Resource scopes this batch introduced, in fragment order.
+    pub scopes:            Vec<ScopeId>,
     pub cancel_scope:      CancelScopeId,
     pub origin:            SpliceOrigin,
     pub policy:            BatchPolicy,
     pub effects:           Vec<SpliceEffect>,
     /// Firings currently occupying this batch's admission slots.
     pub(crate) live_count: u32,
+}
+
+/// Invocation-stable identity of a resource scope. Dynamic identities use
+/// the producer's ancestry, not execution-local node or scope allocations.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ScopeIdentity {
+    Declared(ScopeId),
+    /// Alternating producer node and producer-local batch ordinals, followed
+    /// by the scope's local ordinal. The first node is an original graph ID;
+    /// subsequent nodes are offsets within their parent's splice batch.
+    Spliced(Vec<u32>),
 }
 
 impl AppliedSplice {
@@ -585,6 +598,45 @@ impl EngineState {
 
     pub fn splices(&self) -> &[AppliedSplice] {
         &self.splices
+    }
+
+    /// Resolve a live scope to the same identity after replay or restart,
+    /// even when independent producers splice in a different order.
+    pub fn scope_identity(&self, scope: ScopeId) -> Option<ScopeIdentity> {
+        self.graph.scope(scope)?;
+        let Some((mut batch, local)) = self.splices.iter().find_map(|batch| {
+            batch
+                .scopes
+                .iter()
+                .position(|candidate| *candidate == scope)
+                .map(|local| (batch, local))
+        }) else {
+            return Some(ScopeIdentity::Declared(scope));
+        };
+        let mut path = vec![u32::try_from(local).expect("scope IDs fit u32")];
+        loop {
+            let preceding = &self.splices[..batch.batch.0 as usize];
+            let ordinal = preceding
+                .iter()
+                .filter(|prior| prior.owner == batch.owner)
+                .count();
+            path.push(u32::try_from(ordinal).expect("splice batch IDs fit u32"));
+            let parent = preceding.iter().find_map(|parent| {
+                parent
+                    .nodes
+                    .iter()
+                    .position(|node| *node == batch.owner)
+                    .map(|local| (parent, local))
+            });
+            let Some((parent, local)) = parent else {
+                path.push(batch.owner.raw());
+                break;
+            };
+            path.push(u32::try_from(local).expect("node IDs fit u32"));
+            batch = parent;
+        }
+        path.reverse();
+        Some(ScopeIdentity::Spliced(path))
     }
 
     /// Nodes replaced by expansion clones.

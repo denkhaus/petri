@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use ir::{Attempt, FiringId, ScopeId};
+use ir::{Attempt, FiringId};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smol_str::SmolStr;
@@ -87,10 +87,10 @@ pub struct CallSite {
 }
 
 /// Stable reconciliation key for one invocation-owned graph scope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SandboxAllocationKey {
     pub invocation: InvocationId,
-    pub scope:      ScopeId,
+    pub scope:      engine::ScopeIdentity,
 }
 
 /// SHA-256 of the exact persisted graph bytes.

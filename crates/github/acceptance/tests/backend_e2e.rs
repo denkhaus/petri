@@ -12,7 +12,7 @@ use executor_sandbox::{
 };
 use runtime::executor::Retention;
 use runtime::ir::RunStatus;
-use runtime::{SandboxBackend, SandboxOptions};
+use runtime::{DaytonaSandboxKind, SandboxBackend, SandboxOptions};
 use support::*;
 use testkit::{RunDir, is_docker_ready};
 
@@ -127,7 +127,7 @@ async fn ordinary_actions_run_without_advertising_an_unreachable_results_service
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires DAYTONA_API_KEY and the Daytona plugin; creates billable VMs"]
+#[ignore = "requires DAYTONA_API_KEY and the Daytona plugin; creates billable container sandboxes"]
 async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_actions() {
     env::var("DAYTONA_API_KEY").expect("live gate requires DAYTONA_API_KEY");
     for container in [false, true] {
@@ -139,6 +139,7 @@ async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_acti
         let rt = runtime(dir.path());
         let mut options = rt.run_options().clone();
         options.sandbox.backend = SandboxBackend::Daytona;
+        options.sandbox.daytona_kind = DaytonaSandboxKind::Container;
         let rt = with_object_service(rt.options(options), None);
         let report = rt
             .run(with_params(lower_ok(&workflow(container))))

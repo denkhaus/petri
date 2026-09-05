@@ -7,7 +7,9 @@ use smol_str::SmolStr;
 
 use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseId};
 
-pub const COORDINATOR_FORMAT_VERSION: u32 = 1;
+/// Version 2 records stable dynamic scope identities and their runtime and
+/// execution provenance in the resource ledger.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 2;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

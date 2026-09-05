@@ -21,6 +21,48 @@ fn scope() -> ScopeSpec {
 }
 
 #[tokio::test]
+async fn dropping_a_process_closes_its_output_without_releasing_the_scope() {
+    let dir = RunDir::new("host-process-drop");
+    let executor = HostExecutor::new(dir.path());
+    let handle = executor
+        .acquire(&scope(), &AcquireContext::bare())
+        .await
+        .expect("acquire");
+    let mut process = handle
+        .exec()
+        .spawn(ProcessSpec::new("bash", &["-c", "echo ready; sleep 300"]))
+        .await
+        .expect("spawn");
+    let mut lines = process.lines().expect("lines");
+    let ready = timeout(Duration::from_secs(10), lines.recv())
+        .await
+        .expect("the process started")
+        .expect("the process wrote a line");
+    assert_eq!(ready.line, "ready");
+
+    drop(process);
+    assert!(
+        timeout(Duration::from_secs(1), lines.recv())
+            .await
+            .expect("the abandoned process's pumps were stopped")
+            .is_none()
+    );
+    // The process owns its helpers independently of the reusable scope.
+    let mut next = handle
+        .exec()
+        .spawn(ProcessSpec::new("true", &[]))
+        .await
+        .expect("the scope still accepts work");
+    assert!(next.wait().await.expect("wait").is_success());
+    assert!(
+        executor
+            .release(handle, ScopeOutcome::Succeeded)
+            .await
+            .is_clean()
+    );
+}
+
+#[tokio::test]
 async fn a_step_runs_and_reports_its_exit_code() {
     let dir = RunDir::new("host-exit-code");
     let executor = HostExecutor::new(dir.path());
