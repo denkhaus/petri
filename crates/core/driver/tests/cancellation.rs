@@ -103,8 +103,7 @@ async fn a_step_that_honours_term_still_reports_cancelled() {
 
     let script = r#"
 trap 'echo cleaned > cleaned.txt; echo "graceful=yes" > "$CI_OUTPUT"; exit 0' TERM
-echo ready > ready
-sleep 300 &
+sh -c 'echo ready > ready; exec sleep 300' &
 wait
 "#;
     let driver = host_driver_with(

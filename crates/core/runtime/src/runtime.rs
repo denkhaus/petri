@@ -660,6 +660,9 @@ impl RunRuntime {
         for guard in mem::take(&mut self.guards) {
             guard.teardown().await;
         }
+        if let Some(router) = &self.router {
+            router.shutdown().await;
+        }
         let outcome = if status == RunStatus::Success {
             executor::ScopeOutcome::Succeeded
         } else {

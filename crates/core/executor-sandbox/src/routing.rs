@@ -137,6 +137,25 @@ impl RoutingExecutor {
         &self.identity
     }
 
+    /// Stop plugins created by this router after its run's leases settle.
+    /// A supplied container source belongs to its caller and can be shared.
+    /// Durable sandbox records and retained workspaces remain available.
+    pub async fn shutdown(&self) {
+        let host = async {
+            if let Some(Ok(executor)) = self.host.get() {
+                executor.manager().source().shutdown().await;
+            }
+        };
+        let container = async {
+            if matches!(self.source, ContainerSource::Env)
+                && let Some(Ok(provider)) = self.provider.get()
+            {
+                provider.source.shutdown().await;
+            }
+        };
+        tokio::join!(host, container);
+    }
+
     /// Provider identity for the lease reservation, before resource creation.
     pub fn provider_kind_for(&self, runtime: &ir::RuntimeSpec) -> &str {
         if self.options.backend == SandboxBackend::Host

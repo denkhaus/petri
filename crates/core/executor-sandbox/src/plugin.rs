@@ -475,6 +475,10 @@ pub trait ProviderSource: Send + Sync {
     /// generation change means every handle from before it is dead.
     async fn current(&self) -> Result<(Arc<dyn SandboxProvider>, u64), EnvError>;
 
+    /// Stop and await the process this source owns, after all users finish.
+    /// Sources backed by a caller-owned provider have no process to stop.
+    async fn shutdown(&self) {}
+
     /// The non-secret backend fingerprint every lease records.
     fn fingerprint(&self) -> &str;
 
@@ -489,6 +493,10 @@ impl ProviderSource for PluginSupervisor {
         let provider: Arc<dyn SandboxProvider> =
             Arc::clone(&generation.provider) as Arc<dyn SandboxProvider>;
         Ok((provider, generation.generation))
+    }
+
+    async fn shutdown(&self) {
+        Self::shutdown(self).await;
     }
 
     fn fingerprint(&self) -> &str {
