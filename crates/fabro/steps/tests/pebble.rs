@@ -272,10 +272,16 @@ async fn model_failure_keeps_prior_usage_and_known_cost() {
 #[test]
 fn backend_selection_inherits_and_accepts_stylesheets() {
     for source in [
+        r#"digraph T { start [shape=Mdiamond]; a [backend="api", prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
         r#"digraph T { graph [backend="api"]; start [shape=Mdiamond]; a [prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
         r#"digraph T { graph [model_stylesheet="* { backend: api; }"]; start [shape=Mdiamond]; a [prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
     ] {
         let result = frontend_fabro::load("test.fabro", source, &NoFiles, &CompileInputs::new());
+        assert!(
+            result.diagnostics.iter().next().is_none(),
+            "backend selection must not warn: {:?}",
+            result.diagnostics
+        );
         let graph = result
             .graph
             .unwrap_or_else(|| panic!("lowering failed: {:?}", result.diagnostics));

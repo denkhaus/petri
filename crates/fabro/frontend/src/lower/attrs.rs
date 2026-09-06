@@ -85,6 +85,7 @@ pub(super) const LAYOUT: &[&str] = &[
 pub(super) const GRAPH: &[&str] = &[
     "goal",
     "label",
+    "backend",
     "model_stylesheet",
     "default_max_retries",
     "retry_target",
@@ -122,6 +123,7 @@ pub(super) const NODE: &[&str] = &[
     "label",
     "shape",
     "type",
+    "backend",
     "prompt",
     "script",
     "language",
@@ -171,7 +173,6 @@ pub(super) const NODE_IGNORED: &[(&str, &str)] = &[
     ),
     ("max_tokens", "the ACP agent owns its token limit"),
     ("speed", "the ACP agent owns its speed setting"),
-    ("backend", "the ACP command selects its backend"),
     (
         "project_memory",
         "project memory is not implemented in phase one",
