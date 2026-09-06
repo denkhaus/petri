@@ -4,8 +4,8 @@
 
 | Result (of the 32 Fabro workflows) | Count | Share |
 |---|---|---|
-| lowered clean | 19 | 59% |
-| lowered with warnings | 12 | 37% |
+| lowered clean | 16 | 50% |
+| lowered with warnings | 15 | 46% |
 | rejected with a specific `unsupported.*` code | 1 | 3% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
@@ -31,6 +31,15 @@
 | `ignored.project_memory` | 5 |
 | `ignored.stall_timeout` | 1 |
 | `ignored.thread_id` | 2 |
+| `ignored.workflow_toml.environments` | 2 |
+| `ignored.workflow_toml.run.artifacts` | 1 |
+| `ignored.workflow_toml.run.checkpoint` | 1 |
+| `ignored.workflow_toml.run.clone` | 1 |
+| `ignored.workflow_toml.run.environment` | 2 |
+| `ignored.workflow_toml.run.integrations` | 6 |
+| `ignored.workflow_toml.run.model.fallbacks` | 1 |
+| `ignored.workflow_toml.run.pull_request` | 3 |
+| `ignored.workflow_toml.run.run_branch` | 1 |
 | `info.budget.default` | 20 |
 
 ## Every file
@@ -39,18 +48,18 @@
 |---|---|---|---|
 | `.fabro/workflows/card-game-fast/workflow.fabro` | warnings | 7 | `info.budget.default` |
 | `.fabro/workflows/card-game/workflow.fabro` | warnings | 21 | `info.budget.default` |
-| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `deprecated.on_failure.succeed`, `fabro.internal_context`, `ignored.project_memory`, `ignored.stall_timeout` |
+| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `deprecated.on_failure.succeed`, `fabro.internal_context`, `ignored.project_memory`, `ignored.stall_timeout`, `ignored.workflow_toml.environments`, `ignored.workflow_toml.run.artifacts`, `ignored.workflow_toml.run.checkpoint`, `ignored.workflow_toml.run.clone`, `ignored.workflow_toml.run.environment`, `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.model.fallbacks`, `ignored.workflow_toml.run.pull_request`, `ignored.workflow_toml.run.run_branch` |
 | `.fabro/workflows/context-demo/workflow.fabro` | clean | 3 |  |
-| `.fabro/workflows/daytona-medium/workflow.fabro` | warnings | 4 | `info.budget.default` |
-| `.fabro/workflows/gh-list/workflow.fabro` | clean | 4 |  |
-| `.fabro/workflows/gh-triage/workflow.fabro` | clean | 3 |  |
+| `.fabro/workflows/daytona-medium/workflow.fabro` | warnings | 4 | `ignored.workflow_toml.environments`, `ignored.workflow_toml.run.environment`, `info.budget.default` |
+| `.fabro/workflows/gh-list/workflow.fabro` | warnings | 4 | `ignored.workflow_toml.run.integrations` |
+| `.fabro/workflows/gh-triage/workflow.fabro` | warnings | 3 | `ignored.workflow_toml.run.integrations` |
 | `.fabro/workflows/goal/workflow.fabro` | warnings | 7 | `ignored.thread_id` |
 | `.fabro/workflows/hello/workflow.fabro` | clean | 3 |  |
-| `.fabro/workflows/implement-issue/workflow.fabro` | warnings | 4 | `info.budget.default` |
+| `.fabro/workflows/implement-issue/workflow.fabro` | warnings | 4 | `ignored.workflow_toml.run.integrations`, `info.budget.default` |
 | `.fabro/workflows/implement-plan/workflow.fabro` | warnings | 12 | `info.budget.default` |
 | `.fabro/workflows/interview/workflow.fabro` | clean | 8 |  |
-| `.fabro/workflows/patch-cves/workflow.fabro` | clean | 3 |  |
-| `.fabro/workflows/pr-simplify/workflow.fabro` | unsupported | 0 | `unsupported.template.unbound_input` |
+| `.fabro/workflows/patch-cves/workflow.fabro` | warnings | 3 | `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.pull_request` |
+| `.fabro/workflows/pr-simplify/workflow.fabro` | unsupported | 0 | `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.pull_request`, `unsupported.template.unbound_input` |
 | `.fabro/workflows/sleeper/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/smoke/workflow.fabro` | warnings | 9 | `info.budget.default` |
 | `.fabro/workflows/solitaire-fast/workflow.fabro` | warnings | 7 | `info.budget.default` |

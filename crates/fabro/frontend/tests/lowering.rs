@@ -654,6 +654,132 @@ fn file_references_and_workflow_toml_defaults_resolve_through_the_file_source() 
     );
 }
 
+/// Every `workflow.toml` section is diagnosed. Platform-only sections warn
+/// with why, a requirement the standalone runner cannot meet is an
+/// `unsupported.workflow_toml.*` error, and a key Fabro's own parser refuses
+/// is an error with Fabro's rename hint.
+#[test]
+fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
+    let diags = |toml: &str| {
+        let files = files(&[("wf/workflow.toml", toml)]);
+        frontend_fabro::load(
+            "wf/workflow.fabro",
+            &dot(r#"
+                a [shape=parallelogram, script="true"]
+                start -> a -> exit
+            "#),
+            &files,
+            &CompileInputs::new(),
+        )
+        .diagnostics
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+    };
+    let codes = |toml: &str| {
+        let mut out: Vec<String> = diags(toml).iter().map(|d| d.code.to_string()).collect();
+        out.sort();
+        out.dedup();
+        out
+    };
+
+    // The code-review bundle's platform-only sections: warnings, and the
+    // graph still lowers.
+    let platform_only = diags(
+        "_version = 1\n[workflow]\ngraph = \"workflow.fabro\"\n[run]\ngoal = \"g\"\n\
+         [run.inputs]\nmode = \"changes\"\n[run.clone]\ndepth = 1\n[run.run_branch]\n\
+         enabled = false\n[run.pull_request]\nenabled = false\n[run.model.fallbacks]\n\
+         \"m\" = [\"p:m\"]\n[run.model]\nprovider = \"openai\"\n[run.environment]\n\
+         id = \"review\"\n[run.integrations.github.permissions]\npull_requests = \"write\"\n\
+         [run.checkpoint]\nexclude_globs = []\n[run.artifacts]\ninclude = []\n\
+         [run.execution]\nmode = \"normal\"\n[run.agent]\nfabro_tools = true\n\
+         [environments.review]\nprovider = \"docker\"\n",
+    );
+    assert!(
+        platform_only.iter().all(|d| !d.is_error()),
+        "platform-only sections are warnings: {platform_only:#?}"
+    );
+    let platform_codes: Vec<String> = platform_only.iter().map(|d| d.code.to_string()).collect();
+    for code in [
+        "ignored.workflow_toml.run.goal",
+        "ignored.workflow_toml.run.clone",
+        "ignored.workflow_toml.run.run_branch",
+        "ignored.workflow_toml.run.pull_request",
+        "ignored.workflow_toml.run.model.fallbacks",
+        "ignored.workflow_toml.run.model",
+        "ignored.workflow_toml.run.environment",
+        "ignored.workflow_toml.run.integrations",
+        "ignored.workflow_toml.run.checkpoint",
+        "ignored.workflow_toml.run.artifacts",
+        "ignored.workflow_toml.run.execution",
+        "ignored.workflow_toml.run.agent.fabro_tools",
+        "ignored.workflow_toml.environments",
+    ] {
+        assert!(
+            platform_codes.contains(&code.to_string()),
+            "{code} in {platform_codes:?}"
+        );
+    }
+    assert!(
+        platform_only
+            .iter()
+            .all(|d| d.message.contains("is ignored: ")),
+        "each warning says why: {platform_only:#?}"
+    );
+
+    // Requirements the standalone runner cannot meet: specific errors.
+    assert_eq!(codes("[run.prepare]\nsteps = [{ script = \"make\" }]\n"), [
+        "unsupported.workflow_toml.run.prepare"
+    ]);
+    assert_eq!(
+        codes("[[run.hooks]]\nevent = \"stage.completed\"\ncommand = \"true\"\n"),
+        ["unsupported.workflow_toml.run.hooks"]
+    );
+    assert_eq!(
+        codes("[run.agent.mcps.files]\ntype = \"stdio\"\ncommand = \"mcp\"\n"),
+        ["unsupported.workflow_toml.run.agent.mcps"]
+    );
+    // An empty hook list or MCP table asks for nothing.
+    assert!(codes("[run]\nhooks = []\n[run.agent.mcps]\n").is_empty());
+
+    // Keys Fabro's parser refuses, with its rename hint.
+    let legacy = diags("version = 1\n[vars]\nmode = \"x\"\n[llm]\nmodel = \"m\"\n");
+    let hints: Vec<(String, Option<String>)> = legacy
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| (d.code.to_string(), d.hint.clone()))
+        .collect();
+    assert!(
+        hints.contains(&(
+            "unsupported.workflow_toml.key".to_string(),
+            Some("rename to `_version`".to_string())
+        )),
+        "{hints:?}"
+    );
+    assert!(
+        hints.contains(&(
+            "unsupported.workflow_toml.key".to_string(),
+            Some("rename to `[run.inputs]`".to_string())
+        )),
+        "{hints:?}"
+    );
+    assert!(
+        hints.contains(&(
+            "unsupported.workflow_toml.key".to_string(),
+            Some("rename to `[run.model]`".to_string())
+        )),
+        "{hints:?}"
+    );
+    assert_eq!(codes("_version = 2\n"), [
+        "unsupported.workflow_toml.version"
+    ]);
+    assert_eq!(codes("[run]\nnot_a_key = 1\n"), [
+        "unsupported.workflow_toml.key"
+    ]);
+    // A clean file is clean.
+    assert!(codes("_version = 1\n[workflow]\ngraph = \"workflow.fabro\"\n").is_empty());
+}
+
 #[test]
 fn structural_mistakes_are_specific_errors() {
     let id_only = lower_ok("digraph G { start; exit; start -> exit }");

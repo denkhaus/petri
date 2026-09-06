@@ -25,6 +25,7 @@ mod support;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -911,7 +912,7 @@ async fn milestone_a_smoke_run_without_fabro_on_path() {
         return;
     };
     // `fabro` really is unreachable under this PATH.
-    let probe = std::process::Command::new("fabro")
+    let probe = Command::new("fabro")
         .env_clear()
         .env("PATH", &path)
         .arg("--version")

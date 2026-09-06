@@ -130,33 +130,44 @@ Top-level keys are `_version`, `project`, `workflow`, `environments`, `run`,
 `deny_unknown_fields`. Precedence, highest first: CLI overrides, `workflow.toml`,
 `.fabro/project.toml`, `~/.fabro/settings.toml`, server defaults, built-in
 defaults. `[run.inputs]` replaces wholesale across layers; `--input` wins per
-key. Petri reads only `[run.inputs]` today.
+key.
 
-| Section and options | Effect in Fabro | Petri disposition |
+Petri acts on `[run.inputs]` and `[workflow] graph`. Every other section is
+diagnosed at load (`crates/fabro/frontend/src/lower/mod.rs`,
+`read_workflow_toml`) under the readiness plan's item 1 rule: a platform-only
+option that has no effect warns (`ignored.workflow_toml.<section>`, with why);
+a feature essential to the requested work fails with a specific
+`unsupported.workflow_toml.<section>` error before any node runs; a key Fabro's
+own parser refuses is `unsupported.workflow_toml.key` with Fabro's rename
+hint. Nothing is dropped silently. The disposition column below is what
+`petri check` and `petri run` do today; "tracked" names the task that
+implements the option, at which point its diagnostic goes away.
+
+| Section and options | Effect in Fabro | Petri disposition today |
 |---|---|---|
-| `_version` (`1`) | schema version | supported: parsed, must be 1 (task 7 adds the check) |
+| `_version` (`1`) | schema version | supported: any other value is `unsupported.workflow_toml.version`; the legacy `version` key is `unsupported.workflow_toml.key` |
 | `[workflow]` `name`, `description`, `graph`, `metadata` | `graph` names the entry point | supported: `graph` selects the file; the rest is metadata |
-| `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | `goal`: tracked (task 7); `working_dir`, `metadata`: platform-only, warn |
+| `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | warn `ignored.workflow_toml.run.goal` (tracked, task 7: the graph `goal` attribute is used today), `run.working_dir`, `run.metadata` (platform-only) |
 | `[run.inputs]` | `{{ inputs.* }}` defaults | supported |
-| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | tracked (task 7 for defaults, task 12 for `speed`) |
-| `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | tracked (task 12); used by code-review and security-review |
-| `[run.prepare]` `steps[].script`/`command`/`env`, `timeout` (default 5m) | runs before the first node | tracked (task 7) |
-| `[run.execution]` `mode` (`normal`, `dry_run`), `approval` (`prompt`, `auto`) | dry run and auto approve | supported through `--dry-run` and `--auto-approve`; file form tracked (task 7) |
-| `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | tracked (task 4): map `local` to host, `docker` to the Docker plugin, `daytona` to the Daytona plugin; `env` with `{{ secrets.* }}` needs a secret source; `network`, `lifecycle`, `labels` warn as platform-only |
-| `[run.agent]` `fabro_tools` | run-management tools for agents | explicit exclusion: platform-only, warn when `true` |
-| `[run.agent.mcps.<name>]` `id` or `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled` | MCP servers | tracked (task 13) |
-| `[[run.hooks]]` `id`, `name`, `event`, `matcher`, `blocking`, `timeout`, `sandbox`, and one of `script`/`command`, `url`+`headers`+`tls`, `prompt`+`model`, `agent="enabled"`+`prompt`+`model`+`max_tool_rounds` | local hooks | tracked (task 8); `checkpoint_saved` is an accepted difference (warn, do not run) |
-| `[run.checkpoint]` `exclude_globs`, `skip_git_hooks`, `commit_timeout` | Git checkpoints | explicit exclusion: platform Git; warn |
-| `[run.clone]` `enabled`, `depth` | server clone depth | explicit exclusion: the standalone runner uses the given checkout; warn |
-| `[run.run_branch]`, `[run.meta_branch]` `enabled`, `push` | Git branches | explicit exclusion: platform Git; warn |
-| `[run.pull_request]` `enabled`, `draft`, `auto_merge`, `merge_strategy` | PR creation | explicit exclusion: platform publication; warn |
-| `[run.artifacts]` `include` | artifact upload globs | explicit exclusion for upload; local retention keeps the files (task 4) |
-| `[run.integrations.github]` `permissions`, `additional_repositories` | minted `GITHUB_TOKEN` | explicit exclusion: the run inherits the ambient token or none; fail with a specific diagnostic when a required permission would be the only token source |
-| `[run.git.author]` `name`, `email` | checkpoint commit identity | explicit exclusion; warn |
-| `[run.notifications.<name>]`, `[run.interviews]` `provider`, `slack.channel` | Slack | explicit exclusion; warn |
-| `[run.scm]` | manifest metadata | explicit exclusion; warn |
-| `[project]`, `[cli.*]`, `[server.*]`, `[llm.*]` | inert in a workflow file | accepted but inert; warn when present |
-| Rejected legacy top-level keys (`version`, `vars`, `setup`, `sandbox`, `hooks`, `mcp_servers`, `llm.model`, ...) | hard error with a rename hint | Petri must reject them too (task 7) |
+| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | warn `ignored.workflow_toml.run.model` (tracked: task 7 for defaults, task 12 for `speed`) |
+| `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | warn `ignored.workflow_toml.run.model.fallbacks` (tracked, task 12); used by code-review and security-review |
+| `[run.prepare]` `steps[].script`/`command`/`env`, `timeout` (default 5m) | runs before the first node | error `unsupported.workflow_toml.run.prepare` (tracked, task 7): the nodes would start without their setup |
+| `[run.execution]` `mode` (`normal`, `dry_run`), `approval` (`prompt`, `auto`) | dry run and auto approve | warn `ignored.workflow_toml.run.execution`: `--dry-run` and `--auto-approve` are the command-line forms; the file form is tracked (task 7) |
+| `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | warn `ignored.workflow_toml.run.environment` and `ignored.workflow_toml.environments` (tracked, task 7: map `local` to host, `docker` to the Docker plugin, `daytona` to the Daytona plugin; `env` with `{{ secrets.* }}` needs a secret source; `network`, `lifecycle`, `labels` stay platform-only warnings) |
+| `[run.agent]` `fabro_tools` | run-management tools for agents | explicit exclusion: platform-only, warn `ignored.workflow_toml.run.agent.fabro_tools` when `true` |
+| `[run.agent.mcps.<name>]` `id` or `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled` | MCP servers | error `unsupported.workflow_toml.run.agent.mcps` (tracked, task 13) |
+| `[[run.hooks]]` `id`, `name`, `event`, `matcher`, `blocking`, `timeout`, `sandbox`, and one of `script`/`command`, `url`+`headers`+`tls`, `prompt`+`model`, `agent="enabled"`+`prompt`+`model`+`max_tool_rounds` | local hooks | error `unsupported.workflow_toml.run.hooks` (tracked, task 8): a configured hook is never skipped silently; `checkpoint_saved` stays an accepted difference (warn, do not run) once hooks land |
+| `[run.checkpoint]` `exclude_globs`, `skip_git_hooks`, `commit_timeout` | Git checkpoints | explicit exclusion: platform Git; warn `ignored.workflow_toml.run.checkpoint` |
+| `[run.clone]` `enabled`, `depth` | server clone depth | explicit exclusion: the standalone runner uses the given checkout; warn `ignored.workflow_toml.run.clone` |
+| `[run.run_branch]`, `[run.meta_branch]` `enabled`, `push` | Git branches | explicit exclusion: platform Git; warn `ignored.workflow_toml.run.run_branch` / `run.meta_branch` |
+| `[run.pull_request]` `enabled`, `draft`, `auto_merge`, `merge_strategy` | PR creation | explicit exclusion: platform publication; warn `ignored.workflow_toml.run.pull_request` |
+| `[run.artifacts]` `include` | artifact upload globs | explicit exclusion for upload; local retention keeps the files; warn `ignored.workflow_toml.run.artifacts` |
+| `[run.integrations.github]` `permissions`, `additional_repositories` | minted `GITHUB_TOKEN` | explicit exclusion: the run inherits the ambient token or none; warn `ignored.workflow_toml.run.integrations`. A bundle whose work needs the minted token (fix-ci) is blocked on a stand-in, task 17 |
+| `[run.git.author]` `name`, `email` | checkpoint commit identity | explicit exclusion; warn `ignored.workflow_toml.run.git` |
+| `[run.notifications.<name>]`, `[run.interviews]` `provider`, `slack.channel` | Slack | explicit exclusion; warn `ignored.workflow_toml.run.notifications` / `run.interviews` |
+| `[run.scm]` | manifest metadata | explicit exclusion; warn `ignored.workflow_toml.run.scm` |
+| `[project]`, `[cli.*]`, `[server.*]`, `[llm.*]` | inert in a workflow file | accepted but inert; warn `ignored.workflow_toml.<section>`; the legacy `[llm]` keys (`provider`, `model`, `temperature`, `max_tokens`, `fallbacks`, `fallback`) are `unsupported.workflow_toml.key` with the `[run.model]` hint, as in Fabro |
+| Rejected legacy top-level keys (`version`, `vars`, `setup`, `sandbox`, `hooks`, `mcp_servers`, ...) and unknown `[run]` keys | hard error with a rename hint | `unsupported.workflow_toml.key` with Fabro's rename hint |
 
 Per-bundle `workflow.toml` use is recorded under `workflow_config.platform_only_sections`
 in the lock file.

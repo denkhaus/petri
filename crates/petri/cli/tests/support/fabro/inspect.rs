@@ -3,6 +3,7 @@
 //! logs itself: what the command prints is what a user or an embedding host
 //! can see.
 
+use std::env;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -17,7 +18,7 @@ use serde_json::Value;
 /// Panics when the command fails or prints something other than JSON: the
 /// run directory is not a finished run, which the caller asserts first.
 pub(crate) fn inspect(run_dir: &Path) -> Value {
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+    let path = env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
     let output = Command::new(env!("CARGO_BIN_EXE_petri"))
         .env_clear()
         .env("PATH", path)

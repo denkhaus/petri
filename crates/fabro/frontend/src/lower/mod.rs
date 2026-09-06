@@ -197,7 +197,7 @@ fn lower_nested(
     stack: Vec<String>,
 ) -> Lowered {
     let mut template = Context::new(inputs);
-    read_input_defaults(file, files, &mut template, &mut diags);
+    read_workflow_toml(file, files, &mut template, &mut diags);
 
     let mut b = GraphBuilder::bare();
     let scope = b.add_scope(Scope::new(ScopeId::new(0)));
@@ -321,9 +321,13 @@ fn lower_nested(
     Lowered::with_children(graph, children, diags)
 }
 
-/// `workflow.toml` beside the workflow: `[run.inputs]` holds the defaults an
-/// input takes when the host supplies none.
-fn read_input_defaults(
+/// `workflow.toml` beside the workflow. Petri acts on `[run.inputs]` (the
+/// defaults an input takes when the host supplies none) and the host resolves
+/// `[workflow] graph`. Every other section is diagnosed here, never dropped
+/// silently: a platform-only or not-yet-applied section warns with why, an
+/// unsupported requirement is an `unsupported.workflow_toml.*` error, and a
+/// key Fabro's own parser refuses is an error with Fabro's rename hint.
+fn read_workflow_toml(
     file: &str,
     files: &dyn FileSource,
     template: &mut Context,
@@ -349,49 +353,251 @@ fn read_input_defaults(
             return;
         }
     };
-    if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
-        for (section, why) in RUN_SECTIONS_IGNORED {
-            if run.contains_key(*section) {
-                diags.warning(
-                    &format!("ignored.workflow_toml.run.{section}"),
-                    Span::file(&path),
-                    format!("`[run.{section}]` in `{path}` is ignored: {why}"),
-                );
-            }
-        }
-        if let Some(model) = run.get("model").and_then(toml::Value::as_table)
-            && model.contains_key("fallbacks")
-        {
-            diags.warning(
-                "ignored.workflow_toml.run.model.fallbacks",
-                Span::file(&path),
-                format!(
-                    "`[run.model.fallbacks]` in `{path}` is ignored: the standalone runner does \
-                     not implement model fallback yet; each node runs on its own model"
-                ),
+    let span = Span::file(&path);
+    for key in value.keys() {
+        if !WORKFLOW_TOML_TOP_LEVEL.contains(&key.as_str()) {
+            let hint = workflow_toml_rename_hint(key)
+                .unwrap_or("remove it; Fabro's settings schema has no such key");
+            diags.unsupported(
+                "workflow_toml.key",
+                span.clone(),
+                format!("`{key}` in `{path}` is not a key Fabro's `workflow.toml` accepts"),
+                hint,
             );
         }
     }
-    let Some(inputs) = value
-        .get("run")
-        .and_then(|run| run.get("inputs"))
-        .and_then(toml::Value::as_table)
-    else {
-        return;
-    };
-    for (name, value) in inputs {
-        let json = serde_json::to_value(value).unwrap_or(Value::Null);
-        template.default_input(name, json);
+    if let Some(version) = value.get("_version").and_then(toml::Value::as_integer)
+        && version != i64::from(WORKFLOW_TOML_VERSION)
+    {
+        diags.unsupported(
+            "workflow_toml.version",
+            span.clone(),
+            format!(
+                "`_version = {version}` in `{path}` is not the settings schema version this \
+                 build reads ({WORKFLOW_TOML_VERSION})"
+            ),
+            "set `_version = 1`",
+        );
+    }
+    for (section, why) in WORKFLOW_TOML_INERT {
+        if value.contains_key(*section) {
+            diags.warning(
+                &format!("ignored.workflow_toml.{section}"),
+                span.clone(),
+                format!("`[{section}]` in `{path}` is ignored: {why}"),
+            );
+        }
+    }
+    if let Some(llm) = value.get("llm").and_then(toml::Value::as_table) {
+        for key in WORKFLOW_TOML_LEGACY_LLM_KEYS {
+            if llm.contains_key(*key) {
+                diags.unsupported(
+                    "workflow_toml.key",
+                    span.clone(),
+                    format!("`llm.{key}` in `{path}` is a legacy key Fabro refuses"),
+                    "rename to `[run.model]`",
+                );
+            }
+        }
+    }
+    if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
+        read_run_table(run, &path, &span, template, diags);
     }
 }
 
+/// The `[run]` table of `workflow.toml`.
+fn read_run_table(
+    run: &toml::Table,
+    path: &str,
+    span: &Span,
+    template: &mut Context,
+    diags: &mut Diagnostics,
+) {
+    for (key, item) in run {
+        match key.as_str() {
+            "inputs" => {
+                if let Some(inputs) = item.as_table() {
+                    for (name, value) in inputs {
+                        let json = serde_json::to_value(value).unwrap_or(Value::Null);
+                        template.default_input(name, json);
+                    }
+                }
+            }
+            "model" => {
+                let Some(model) = item.as_table() else {
+                    continue;
+                };
+                if model.contains_key("fallbacks") {
+                    diags.warning(
+                        "ignored.workflow_toml.run.model.fallbacks",
+                        span.clone(),
+                        format!(
+                            "`[run.model.fallbacks]` in `{path}` is ignored: the standalone \
+                             runner does not implement model fallback yet; each node runs on \
+                             its own model"
+                        ),
+                    );
+                }
+                if model.keys().any(|key| key != "fallbacks") {
+                    diags.warning(
+                        "ignored.workflow_toml.run.model",
+                        span.clone(),
+                        format!(
+                            "`[run.model]` in `{path}` is ignored: the default model, provider \
+                             and request controls are not applied yet; set `model` and \
+                             `provider` on the node or the graph"
+                        ),
+                    );
+                }
+            }
+            "agent" => {
+                let Some(agent) = item.as_table() else {
+                    continue;
+                };
+                if agent.get("fabro_tools").and_then(toml::Value::as_bool) == Some(true) {
+                    diags.warning(
+                        "ignored.workflow_toml.run.agent.fabro_tools",
+                        span.clone(),
+                        format!(
+                            "`fabro_tools = true` in `{path}` is ignored: run-management tools \
+                             are a Fabro platform facility; agents get the sandbox tools only"
+                        ),
+                    );
+                }
+                if agent
+                    .get("mcps")
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|mcps| !mcps.is_empty())
+                {
+                    diags.unsupported(
+                        "workflow_toml.run.agent.mcps",
+                        span.clone(),
+                        format!(
+                            "`[run.agent.mcps]` in `{path}` configures MCP servers, which the \
+                             standalone runner does not start yet"
+                        ),
+                        "remove the servers, or wait for MCP support (readiness item 9b)",
+                    );
+                }
+            }
+            "hooks" => {
+                if item.as_array().is_some_and(|hooks| !hooks.is_empty()) {
+                    diags.unsupported(
+                        "workflow_toml.run.hooks",
+                        span.clone(),
+                        format!(
+                            "`[[run.hooks]]` in `{path}` configures hooks, which the standalone \
+                             runner does not run yet; a configured hook is never skipped silently"
+                        ),
+                        "remove the hooks, or wait for the local hook system (readiness item 5)",
+                    );
+                }
+            }
+            "prepare" => diags.unsupported(
+                "workflow_toml.run.prepare",
+                span.clone(),
+                format!(
+                    "`[run.prepare]` in `{path}` names setup steps, which the standalone runner \
+                     does not run yet; the nodes would start without them"
+                ),
+                "run the steps as the first command node, or wait for readiness item 4",
+            ),
+            other => match RUN_SECTIONS_IGNORED
+                .iter()
+                .find(|(section, _)| *section == other)
+            {
+                Some((section, why)) => diags.warning(
+                    &format!("ignored.workflow_toml.run.{section}"),
+                    span.clone(),
+                    format!("`[run.{section}]` in `{path}` is ignored: {why}"),
+                ),
+                None => diags.unsupported(
+                    "workflow_toml.key",
+                    span.clone(),
+                    format!("`run.{other}` in `{path}` is not a key Fabro's `[run]` table accepts"),
+                    "remove it; Fabro's settings schema has no such key",
+                ),
+            },
+        }
+    }
+}
+
+/// The settings schema version this build reads, Fabro's `_version`.
+const WORKFLOW_TOML_VERSION: u32 = 1;
+
+/// The top-level keys Fabro's settings parser accepts; anything else is a
+/// hard error there and here.
+const WORKFLOW_TOML_TOP_LEVEL: &[&str] = &[
+    "_version",
+    "project",
+    "workflow",
+    "environments",
+    "run",
+    "cli",
+    "server",
+    "llm",
+];
+
+/// Legacy `[llm]` keys Fabro refuses with a rename hint.
+const WORKFLOW_TOML_LEGACY_LLM_KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "temperature",
+    "max_tokens",
+    "fallbacks",
+    "fallback",
+];
+
+/// Top-level sections that are accepted in a workflow file but carry nothing
+/// the standalone runner acts on.
+const WORKFLOW_TOML_INERT: &[(&str, &str)] = &[
+    (
+        "project",
+        "project settings belong to `.fabro/project.toml`; the standalone runner reads none",
+    ),
+    (
+        "environments",
+        "named environments are not applied yet; every scope runs on the `--backend` the run \
+         was given",
+    ),
+    (
+        "cli",
+        "Fabro CLI settings do not apply to the standalone runner",
+    ),
+    (
+        "server",
+        "Fabro server settings do not apply to the standalone runner",
+    ),
+    (
+        "llm",
+        "the provider catalog comes from the distribution and `PETRI_LLM_CATALOG`, not from \
+         the workflow file",
+    ),
+];
+
 /// `[run.*]` sections of `workflow.toml` the standalone runner reads but does
-/// not act on, each with why. `[run.inputs]` is the one it acts on.
+/// not act on, each with why. `[run.inputs]` is the one it acts on;
+/// `[run.model]`, `[run.agent]`, `[run.hooks]` and `[run.prepare]` have
+/// their own diagnostics.
 const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
+    (
+        "goal",
+        "the run goal is not read from the file yet; the graph's `goal` attribute is used",
+    ),
+    (
+        "working_dir",
+        "the working directory is the sandbox workspace the run was given",
+    ),
+    ("metadata", "run metadata is a Fabro platform record"),
+    (
+        "execution",
+        "`mode` and `approval` are taken from the command line: `--dry-run` and \
+         `--auto-approve`",
+    ),
     (
         "environment",
         "the standalone runner runs every scope on the `--backend` it was given; a named \
-         environment's image and resources are not applied yet",
+         environment's image, resources and `env` are not applied yet",
     ),
     (
         "clone",
@@ -403,12 +609,21 @@ const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
         "the standalone runner performs no Git operations of its own",
     ),
     (
+        "meta_branch",
+        "the standalone runner performs no Git operations of its own",
+    ),
+    (
         "pull_request",
         "the standalone runner performs no Git operations of its own",
     ),
     (
+        "git",
+        "the standalone runner performs no Git operations of its own",
+    ),
+    (
         "integrations",
-        "platform integrations are supplied by an embedding host, not the standalone runner",
+        "platform integrations are supplied by an embedding host, not the standalone runner; \
+         the run inherits the ambient `GITHUB_TOKEN` or none",
     ),
     (
         "checkpoint",
@@ -418,8 +633,53 @@ const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
         "artifacts",
         "artifact selection is not implemented yet; the whole retained workspace is the result",
     ),
-    ("prepare", "`[run.prepare]` is not implemented yet"),
+    (
+        "notifications",
+        "notification routes are a Fabro platform facility",
+    ),
+    (
+        "interviews",
+        "interview routing is a Fabro platform facility; the host's interviewer answers",
+    ),
+    ("scm", "SCM metadata is a Fabro platform record"),
 ];
+
+/// Fabro's rename hint for a top-level key its parser refuses.
+fn workflow_toml_rename_hint(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "version" => "rename to `_version`",
+        "goal" | "goal_file" | "work_dir" | "directory" => "move to `[run]`",
+        "graph" => "move to `[workflow]`",
+        "labels" => "move to `[run.metadata]`",
+        "vars" => "rename to `[run.inputs]`",
+        "setup" => "rename to `[run.prepare]`",
+        "sandbox" => "rename to `[run.environment]` and `[environments.<slug>]`",
+        "checkpoint" => "move under `[run.checkpoint]`",
+        "pull_request" => "move under `[run.pull_request]`",
+        "artifacts" => "move under `[run.artifacts]`",
+        "hooks" => "move under `[[run.hooks]]`",
+        "mcp_servers" => "move under `[run.agent.mcps.<name>]`",
+        "exec" => "rename to `[cli.exec]`",
+        "api" => "rename to `[server.api]`",
+        "web" => "rename to `[server.web]`",
+        "artifact_storage" => "rename to `[server.artifacts]`",
+        "storage_dir" | "data_dir" => "rename to `[server.storage] root`",
+        "max_concurrent_runs" => "rename to `[server.scheduler]`",
+        "fabro" => "rename to `[project]`",
+        "git" => "split into `[run.git]` and `[server.integrations.github]`",
+        "github" => {
+            "split into `[server.integrations.github]` and `[run.integrations.github.permissions]`"
+        }
+        "slack" => "move under `[server.integrations.slack]`",
+        "log" => "rename to `[server.logging]` or `[cli.logging]`",
+        "prevent_idle_sleep" => "rename to `[cli.exec] prevent_idle_sleep`",
+        "verbose" => "rename to `[cli.output] verbosity`",
+        "upgrade_check" => "rename to `[cli.updates] check`",
+        "dry_run" => "rename to `[run.execution] mode = \"dry_run\"`",
+        "auto_approve" => "rename to `[run.execution] approval = \"auto\"`",
+        _ => return None,
+    })
+}
 
 fn placeholder(id: ExprId) -> Value {
     json!({ EXPR_PLACEHOLDER_KEY: id.raw() })

@@ -126,7 +126,7 @@ crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
-crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the terminal smoke run
+crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
 crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
@@ -212,8 +212,9 @@ document (`inspect_format_version`) with the run status, the root invocation
 and its final execution, every invocation with its parent call and children,
 every execution in order with its own derived run context (`kv` plus the
 node-instance records: status, output, generation, attempts), the final firing
-history, every attempt including retries, and every applied route. Secret
-values stay masked or as `$secret` references. An interrupted run is reported
+history, every attempt including retries, every applied route, and the
+interview receipt (`interviews`, from `<run-dir>/interviews.json`) when the run
+had an interviewer. Secret values stay masked or as `$secret` references. An interrupted run is reported
 as incomplete with the reasons (exit 1); a corrupt, truncated-then-terminated,
 diverging, or unsupported-version log is an error (exit 2), never a final
 snapshot. The field contract is
