@@ -177,7 +177,7 @@ Pebble, and lithos-llm from the `sandbox-driver-read` environment. See
 [private dependency setup](DEVELOPING.md#private-dependencies).
 
 Fabro agent nodes can use Pebble directly as a Rust library. Set
-`backend="pebble"` and `model="provider/model"` on the node, or set graph
+`backend="api"` and `model="provider/model"` on the node, or set graph
 `backend` and `default_model`. The `petri` distribution reads provider
 credentials from its environment. ACP remains the default. See
 [native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope

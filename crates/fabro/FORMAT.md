@@ -181,12 +181,12 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
   `backend="acp"` is the default. It starts the Agent Client Protocol command
   from `acp.command` / `acp.config` (node, graph, then `PETRI_ACP_COMMAND`). The
   ACP command owns model selection; model settings are observer metadata.
-  `backend="pebble"` runs the Pebble Rust library in Petri. `model` (or graph
+  `backend="api"` runs the Pebble Rust library in Petri. `model` (or graph
   `default_model`) is required. `provider` (or `default_provider`) qualifies the
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
-  options directly on a Pebble node is an error.
+  options directly on an API node is an error.
 - **`fabro/human`** asks through the core `Question` event and routes on the
   delivered answer. `petri run --interactive` answers from the terminal,
   `--auto-approve` takes the first choice; a `sensitive=true` gate's free text
@@ -200,7 +200,7 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
 
 ```dot
 digraph change {
-  graph [backend="pebble", default_model="anthropic/claude-sonnet-4.6"]
+  graph [backend="api", default_model="anthropic/claude-sonnet-4.6"]
   start [shape=Mdiamond]
   implement [prompt="Fix the failing tests, then run the test suite."]
   exit [shape=Msquare]

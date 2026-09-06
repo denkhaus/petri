@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 fn graph(extra: &str) -> Graph {
     let source = format!(
         r#"digraph T {{
-        graph [backend="pebble", default_model="test/model"]
+        graph [backend="api", default_model="test/model"]
         start [shape=Mdiamond]
         a [prompt="Make the change and verify it" {extra}]
         exit [shape=Msquare]
@@ -349,8 +349,8 @@ async fn model_failure_keeps_prior_usage_and_known_cost() {
 #[test]
 fn backend_selection_inherits_and_accepts_stylesheets() {
     for source in [
-        r#"digraph T { graph [backend="pebble"]; start [shape=Mdiamond]; a [prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
-        r#"digraph T { graph [model_stylesheet="* { backend: pebble; }"]; start [shape=Mdiamond]; a [prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
+        r#"digraph T { graph [backend="api"]; start [shape=Mdiamond]; a [prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
+        r#"digraph T { graph [model_stylesheet="* { backend: api; }"]; start [shape=Mdiamond]; a [prompt="hello"]; exit [shape=Msquare]; start -> a -> exit; }"#,
     ] {
         let result = frontend_fabro::load("test.fabro", source, &NoFiles, &CompileInputs::new());
         let graph = result
@@ -362,7 +362,7 @@ fn backend_selection_inherits_and_accepts_stylesheets() {
             .iter()
             .find(|node| node.name == "a")
             .expect("agent");
-        assert_eq!(node.step.config["backend"], "pebble");
+        assert_eq!(node.step.config["backend"], "api");
     }
     let invalid = frontend_fabro::load(
         "test.fabro",
@@ -578,7 +578,7 @@ fn mixed_backends_inherit_only_their_own_configuration() {
     let source = r#"digraph T {
         graph [acp.command="agent-command", default_model="test/model"]
         start [shape=Mdiamond]
-        native [backend="pebble", prompt="native"]
+        native [backend="api", prompt="native"]
         external [prompt="ACP"]
         exit [shape=Msquare]
         start -> native -> external -> exit
@@ -597,7 +597,7 @@ fn mixed_backends_inherit_only_their_own_configuration() {
         .iter()
         .find(|node| node.name == "external")
         .expect("external");
-    assert_eq!(native.step.config["backend"], "pebble");
+    assert_eq!(native.step.config["backend"], "api");
     assert!(native.step.config.get("acp").is_none());
     assert_eq!(external.step.config["acp"]["command"], "agent-command");
 }

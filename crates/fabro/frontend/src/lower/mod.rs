@@ -993,11 +993,11 @@ impl Ctx<'_> {
             .text("backend")
             .or_else(|| workflow.attrs.text("backend"))
         {
-            if !matches!(backend.as_str(), "acp" | "pebble") {
+            if !matches!(backend.as_str(), "acp" | "api") {
                 self.diags.error(
                     "fabro.bad_backend",
                     node.attrs.span_of("backend", &node.span),
-                    "agent backend must be acp or pebble",
+                    "agent backend must be acp or api",
                 );
             }
             config.insert("backend".into(), Value::String(backend));
@@ -1035,12 +1035,12 @@ impl Ctx<'_> {
                 Value::from(retries.min(i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX))),
             );
         }
-        if config.get("backend").and_then(Value::as_str) == Some("pebble") {
+        if config.get("backend").and_then(Value::as_str) == Some("api") {
             if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
                 self.diags.error(
                     "fabro.backend_options",
                     node.span.clone(),
-                    "a Pebble node cannot set acp.command or acp.config",
+                    "an API node cannot set acp.command or acp.config",
                 );
             }
         } else {

@@ -56,7 +56,7 @@ impl NativeSession {
         if config.acp.is_some() {
             return Err(AgentError::failed(
                 "bad_config",
-                "backend=pebble cannot use acp configuration",
+                "backend=api cannot use acp configuration",
             ));
         }
         let model = config
@@ -64,10 +64,7 @@ impl NativeSession {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
-                AgentError::failed(
-                    "bad_config",
-                    "backend=pebble requires model or default_model",
-                )
+                AgentError::failed("bad_config", "backend=api requires model or default_model")
             })?;
         let selector = config.provider.as_ref().map_or_else(
             || model.to_owned(),

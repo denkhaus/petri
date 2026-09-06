@@ -20,7 +20,7 @@ use crate::pebble::NativeSession;
 pub enum AgentBackend {
     #[default]
     Acp,
-    Pebble,
+    Api,
 }
 
 pub(crate) enum Session {
@@ -59,7 +59,7 @@ impl From<AcpError> for AgentError {
 impl Session {
     pub(crate) async fn open(config: &AgentConfig, ctx: &mut StepCtx) -> Result<Self, AgentError> {
         match config.backend {
-            AgentBackend::Pebble => NativeSession::open(config, ctx)
+            AgentBackend::Api => NativeSession::open(config, ctx)
                 .await
                 .map(|session| Self::Pebble(Box::new(session))),
             AgentBackend::Acp => {
