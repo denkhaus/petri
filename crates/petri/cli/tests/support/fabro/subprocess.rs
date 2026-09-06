@@ -103,16 +103,20 @@ impl RunOutput {
             .collect()
     }
 
-    /// The echoed output lines of one node (`<node> | <line>` on stdout),
-    /// joined.
+    /// The echoed output lines of one node (`[<node>#<firing>] <line>` on
+    /// stderr), joined.
     pub(crate) fn echoed(&self, node: &str) -> String {
-        let prefix = format!("{node} | ");
+        let prefix = format!("[{node}#");
         let mut text = String::new();
-        for line in self.stdout().lines() {
-            if let Some(rest) = line.strip_prefix(&prefix) {
-                text.push_str(rest);
-                text.push('\n');
-            }
+        for line in self.stderr().lines() {
+            let Some(rest) = line.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some(end) = rest.find("] ") else {
+                continue;
+            };
+            text.push_str(&rest[end + 2..]);
+            text.push('\n');
         }
         text
     }
