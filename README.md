@@ -20,7 +20,7 @@ crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP, nested workflow, and the stub registry
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, nested workflow, and the stub registry
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
@@ -172,8 +172,16 @@ Release archives bundle the Docker, Host, and Daytona plugin executables from
 the pinned revision. Petri embeds their SHA-256 digests at release build time.
 `scripts/release-verify.sh` checks the archive, runs Host and Docker workflows
 without development mode, and verifies rejection of modified plugins. The CI,
-nightly, and release jobs use a read-only sandbox-driver deploy key from the
-`sandbox-driver-read` environment.
+nightly, and release jobs use separate read-only deploy keys for sandbox-driver,
+Pebble, and lithos-llm from the `sandbox-driver-read` environment. See
+[private dependency setup](DEVELOPING.md#private-dependencies).
+
+Fabro agent nodes can use Pebble directly as a Rust library. Set
+`backend="pebble"` and `model="provider/model"` on the node, or set graph
+`backend` and `default_model`. The `petri` distribution reads provider
+credentials from its environment. ACP remains the default. See
+[native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
+requirements, client injection, events, and accounting.
 
 `mise run test:remote` transfers an artifact through a separate Docker daemon
 with no host filesystem mounts. `mise run check` includes this test. Set

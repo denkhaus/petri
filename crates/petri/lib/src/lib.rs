@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 pub use execution::{self, host};
+use fabro_steps::pebble::PebbleClient;
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 pub use runtime::{
     DaytonaResources, DaytonaSandboxKind, RunOptions, Runtime, SandboxBackend, SandboxOptions,
@@ -137,6 +138,13 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
                 .with_runners(runners)
                 .with_checkout_substitution(substitute_checkout),
         );
+    let runtime = match lithos_llm::Client::from_env() {
+        Ok(build) => runtime.capability(PebbleClient(build.client)),
+        Err(error) => {
+            tracing::warn!(error = %error, "native Pebble client unavailable");
+            runtime
+        }
+    };
     github::register(fabro(runtime))
         .capability(github::ActionSourceCap(trees))
         .capability(github::ActionManifestSourceCap(manifests))

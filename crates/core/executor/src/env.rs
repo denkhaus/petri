@@ -27,10 +27,41 @@ pub struct ProcessSpec {
     pub program: SmolStr,
     pub args:    Vec<SmolStr>,
     pub env:     BTreeMap<SmolStr, SmolStr>,
-    /// Relative to the workspace root.
+    /// Relative paths start at the workspace root; absolute paths are
+    /// scope-local.
     pub cwd:     Option<PathBuf>,
     /// What the process reads on standard input. The default is nothing.
     pub stdin:   StdinMode,
+    /// Select line logs or lossless byte chunks.
+    pub output:  OutputMode,
+}
+
+/// How a process delivers output. Only the selected receiver is available.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Text lines with the executor's standard line cap.
+    #[default]
+    Lines,
+    /// Unmodified bytes, with bounded buffering and backpressure.
+    Bytes,
+}
+
+/// An unmodified chunk from one process stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputChunk {
+    pub stream: ir::LogStream,
+    pub bytes:  Vec<u8>,
+}
+
+/// Lossless output. Consumers must drain this while waiting for exit.
+pub type ByteStream = mpsc::Receiver<OutputChunk>;
+
+/// One workspace directory entry. Paths are relative to the listed directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub path:   String,
+    pub is_dir: bool,
+    pub size:   Option<u64>,
 }
 
 /// Where a process's standard input comes from.
@@ -55,7 +86,14 @@ impl ProcessSpec {
             env:     BTreeMap::new(),
             cwd:     None,
             stdin:   StdinMode::Null,
+            output:  OutputMode::Lines,
         }
+    }
+
+    #[must_use]
+    pub fn with_output(mut self, output: OutputMode) -> Self {
+        self.output = output;
+        self
     }
 
     #[must_use]
@@ -85,6 +123,7 @@ impl fmt::Debug for ProcessSpec {
             .field("env", &self.env.len())
             .field("cwd", &self.cwd)
             .field("stdin", &self.stdin)
+            .field("output", &self.output)
             .finish()
     }
 }
@@ -182,6 +221,12 @@ pub trait ProcessHandle: Send {
     /// `None`.
     fn lines(&mut self) -> Option<LineStream>;
 
+    /// Takes the byte stream once, when spawned with [`OutputMode::Bytes`].
+    /// Implementations without byte capture must reject that spawn mode.
+    fn bytes(&mut self) -> Option<ByteStream> {
+        None
+    }
+
     /// The writing end of the process's standard input, when the spec asked
     /// for [`StdinMode::Piped`]. Available once; dropping it closes the pipe.
     fn stdin(&mut self) -> Option<StdinWriter> {
@@ -240,6 +285,22 @@ pub trait ExecEnv: Send + Sync {
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError>;
 
     /// How long a step gets between `SIGTERM` and `SIGKILL`.
+    /// Lists entries in the execution scope without following directory
+    /// symlinks. A depth of one lists immediate children; zero returns no
+    /// entries.
+    async fn list_directory(
+        &self,
+        path: &Path,
+        depth: usize,
+    ) -> Result<Vec<DirectoryEntry>, EnvError> {
+        let _ = (path, depth);
+        Err(EnvError::backend(
+            "environment",
+            "list_directory",
+            "directory listing is unsupported",
+        ))
+    }
+
     fn grace(&self) -> Duration;
 
     /// How a process in *this* environment reaches the driver's machine — the

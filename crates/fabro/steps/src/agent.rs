@@ -1,27 +1,22 @@
-//! `fabro/agent`: one agent turn over the Agent Client Protocol.
-//!
-//! The agent is the subprocess `acp.command` or `acp.config` names (the node's,
-//! else the graph's, else `PETRI_ACP_COMMAND`), spawned inside the scope
-//! environment. The step assembles the prompt — goal, a fidelity preamble
-//! over the run context, the node's prompt, the output contract — runs one
-//! turn, parses the routing directive in the response, validates
-//! `output_schema` with up to `output_retries` repair turns inside the
-//! attempt, forwards steering deliveries, and reports usage where the agent
-//! sends it. `model`, `provider` and `reasoning_effort` are observer metadata
-//! in phase one: the ACP command owns model selection.
+//! `fabro/agent`: ACP or native Pebble, with shared prompt assembly,
+//! output validation, repair turns, and routing.
 
+pub(crate) mod backend;
 use std::env;
 use std::time::Instant;
 
+pub use backend::AgentBackend;
+use backend::{AgentError, Session};
 use frontend_fabro::Policy;
 use frontend_fabro::kinds::{AGENT_KIND, GOAL_CHECK_NODE, MAX_OUTPUT_RETRIES, StageOutcome};
 use ir::{LogStream, Metrics, Outcome, StepKindId, Value};
+use pebble_coding_agent::ShutdownReason;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
-use crate::acp::{AcpError, AgentCommand, Client};
+use crate::acp::AgentCommand;
 use crate::directive::{self, Directive, DirectiveError};
 use crate::outcome::Stage;
 
@@ -36,6 +31,8 @@ const PREAMBLE_EXCERPT: usize = 600;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
+    #[serde(default)]
+    pub backend:          AgentBackend,
     pub label:            String,
     pub node:             String,
     #[serde(default)]
@@ -211,125 +208,106 @@ impl Step for AgentStep {
                 "bad_config",
             );
         }
-        let command = match config.command() {
-            Ok(command) => command,
-            Err(message) => return fail(message, "acp_unconfigured"),
-        };
         let contract = match config.contract() {
             Ok(contract) => contract,
             Err(message) => return fail(message, "bad_config"),
         };
-        if config.model.is_some() || config.provider.is_some() || config.reasoning_effort.is_some()
-        {
-            tracing::warn!(
-                node = %config.node,
-                model = config.model.as_deref(),
-                provider = config.provider.as_deref(),
-                reasoning_effort = config.reasoning_effort.as_deref(),
-                "the ACP agent command owns model selection; `model`, `provider` and \
-                 `reasoning_effort` are observer metadata in phase one"
-            );
-        }
-
         let started = Instant::now();
-        let mut client = match Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone()).await {
-            Ok(client) => client,
-            Err(error) => return fail(error.to_string(), "spawn_failed"),
+        let mut session = match Session::open(&config, &mut ctx).await {
+            Ok(session) => session,
+            Err(AgentError::Cancelled) => return Outcome::cancelled(),
+            Err(AgentError::Failed { class, message }) => return fail(message, &class),
         };
-        let grace = ctx.env.grace();
-        let cwd = ctx.env.workspace_path().to_string();
-        if let Err(error) = client.open_session(&cwd).await {
-            client.terminate(grace).await;
-            return match error {
-                AcpError::Cancelled => Outcome::cancelled(),
-                other => fail(other.to_string(), "acp_protocol"),
-            };
-        }
+        let mut turns = 0;
+        let result = run_session(&config, &contract, &mut ctx, &mut session, &mut turns).await;
+        let reason = match &result {
+            Ok(_) => ShutdownReason::Completed,
+            Err(AgentError::Cancelled) => ShutdownReason::Cancelled,
+            Err(_) => ShutdownReason::Error,
+        };
+        let shutdown = session.shutdown(reason, ctx.env.grace()).await;
+        let result = match result {
+            Ok(stage) => shutdown.map(|()| stage),
+            Err(error) => Err(error),
+        };
+        let mut outcome = match result {
+            Ok(stage) => stage.into_outcome(&config.node),
+            Err(AgentError::Cancelled) => Outcome::cancelled(),
+            Err(AgentError::Failed { class, message }) => fail(message, &class),
+        };
+        outcome.metrics = Metrics {
+            duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            custom: session.metrics(turns),
+            ..Metrics::default()
+        };
+        outcome
+    }
+}
 
-        let mut prompt = config.assemble(&contract);
-        let mut repairs = 0_u64;
-        let mut turn_count = 0_u64;
-        let (outcome, text) = loop {
-            let turn = match client.prompt(&prompt, &mut ctx.control, grace).await {
-                Ok(turn) => turn,
-                Err(AcpError::Cancelled) => {
-                    client.terminate(grace).await;
-                    return Outcome::cancelled();
-                }
-                Err(AcpError::StopReason(reason)) => {
-                    client.terminate(grace).await;
-                    return fail(
-                        format!("the agent stopped with `{reason}`"),
-                        &format!("stop_reason:{reason}"),
-                    );
-                }
-                Err(error) => {
-                    client.terminate(grace).await;
-                    return fail(error.to_string(), "acp_protocol");
-                }
-            };
-            ctx.log(LogStream::Stdout, turn.text.clone()).await;
-            let text = turn.text;
-            turn_count += 1;
-            match validate(&contract, &text) {
-                Ok(parsed) => break (parsed, text),
-                Err(problem) if repairs < config.output_retries => {
-                    repairs += 1;
-                    ctx.log(
+async fn run_session(
+    config: &AgentConfig,
+    contract: &Contract,
+    ctx: &mut StepCtx,
+    session: &mut Session,
+    turn_count: &mut u64,
+) -> Result<Stage, AgentError> {
+    let mut prompt = config.assemble(contract);
+    let mut repairs = 0_u64;
+    let (outcome, text) = loop {
+        let text = session
+            .prompt(&prompt, &mut ctx.control, ctx.env.grace())
+            .await?;
+        ctx.log(LogStream::Stdout, text.clone()).await;
+        *turn_count += 1;
+        match validate(contract, &text) {
+            Ok(parsed) => break (parsed, text),
+            Err(problem) if repairs < config.output_retries => {
+                repairs += 1;
+                ctx.log(
                         LogStream::Stderr,
                         format!("the response does not meet the output contract ({problem}); repair turn {repairs}"),
                     )
                     .await;
-                    prompt = format!(
-                        "Your previous response did not satisfy the output contract: {problem}\n\
+                prompt = format!(
+                    "Your previous response did not satisfy the output contract: {problem}\n\
                          Reply again with only the required JSON object."
-                    );
-                }
-                Err(problem) => {
-                    client.terminate(grace).await;
-                    return fail(
-                        format!(
-                            "the response did not meet the output contract after {repairs} repair turn(s): {problem}"
-                        ),
-                        "bad_output",
-                    );
-                }
+                );
             }
-        };
-        client.terminate(grace).await;
-
-        let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
-        stage.output.insert("text".into(), json!(text));
-        stage.output.insert("turns".into(), json!(turn_count));
-        stage.context_updates.insert(
-            SmolStr::new(format!("response.{}", config.node)),
-            json!(text),
-        );
-        stage
-            .context_updates
-            .insert(SmolStr::new("last_response"), json!(text));
-        stage
-            .context_updates
-            .insert(SmolStr::new("last_stage"), json!(config.node));
-        match outcome {
-            Parsed::Directive(directive) => directive.apply_to(&mut stage),
-            Parsed::Structured(value) => {
-                stage.output.insert("structured".into(), value.clone());
-                stage
-                    .context_updates
-                    .insert(SmolStr::new(format!("output.{}", config.node)), value);
+            Err(problem) => {
+                return Err(AgentError::failed(
+                    "bad_output",
+                    format!(
+                        "the response did not meet the output contract after {repairs} repair turn(s): {problem}"
+                    ),
+                ));
             }
-            Parsed::Plain => {}
         }
-        let mut result = stage.into_outcome(&config.node);
-        let mut metrics = Metrics::default()
-            .with_duration_ms(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
-        metrics
-            .custom
-            .insert(SmolStr::new("acp.turns"), json!(turn_count));
-        result.metrics = metrics;
-        result
+    };
+
+    let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
+    stage.output.insert("text".into(), json!(text));
+    stage.output.insert("turns".into(), json!(turn_count));
+    stage.context_updates.insert(
+        SmolStr::new(format!("response.{}", config.node)),
+        json!(text),
+    );
+    stage
+        .context_updates
+        .insert(SmolStr::new("last_response"), json!(text));
+    stage
+        .context_updates
+        .insert(SmolStr::new("last_stage"), json!(config.node));
+    match outcome {
+        Parsed::Directive(directive) => directive.apply_to(&mut stage),
+        Parsed::Structured(value) => {
+            stage.output.insert("structured".into(), value.clone());
+            stage
+                .context_updates
+                .insert(SmolStr::new(format!("output.{}", config.node)), value);
+        }
+        Parsed::Plain => {}
     }
+    Ok(stage)
 }
 
 /// What a validated response yields.

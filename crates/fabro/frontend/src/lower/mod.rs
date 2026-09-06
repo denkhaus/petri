@@ -988,6 +988,20 @@ impl Ctx<'_> {
         ) {
             config.insert("prompt".into(), Value::String(prompt));
         }
+        if let Some(backend) = node
+            .attrs
+            .text("backend")
+            .or_else(|| workflow.attrs.text("backend"))
+        {
+            if !matches!(backend.as_str(), "acp" | "pebble") {
+                self.diags.error(
+                    "fabro.bad_backend",
+                    node.attrs.span_of("backend", &node.span),
+                    "agent backend must be acp or pebble",
+                );
+            }
+            config.insert("backend".into(), Value::String(backend));
+        }
         for key in ["model", "provider", "reasoning_effort"] {
             if let Some(value) = node.attrs.text(key) {
                 config.insert(key.into(), Value::String(value));
@@ -1021,7 +1035,17 @@ impl Ctx<'_> {
                 Value::from(retries.min(i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX))),
             );
         }
-        self.acp(node, workflow, &mut config);
+        if config.get("backend").and_then(Value::as_str) == Some("pebble") {
+            if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
+                self.diags.error(
+                    "fabro.backend_options",
+                    node.span.clone(),
+                    "a Pebble node cannot set acp.command or acp.config",
+                );
+            }
+        } else {
+            self.acp(node, workflow, &mut config);
+        }
         let nodes = self.b.exprs().var("nodes");
         config.insert("nodes".into(), placeholder(nodes));
         Value::Object(config)

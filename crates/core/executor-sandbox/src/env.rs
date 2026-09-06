@@ -21,15 +21,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
-    ContainerImage, ContainerRunner, EnvError, ExecEnv, ExitStatus, LineStream, OneShotContainer,
-    ProcessHandle, ProcessSpec, Sig, StdinMode, StdinWriter,
+    ByteStream, ContainerImage, ContainerRunner, DirectoryEntry, EnvError, ExecEnv, ExitStatus,
+    LineStream, OneShotContainer, OutputChunk, OutputMode, ProcessHandle, ProcessSpec, Sig,
+    StdinMode, StdinWriter,
 };
 use sandbox_driver::{
     Error as DriverError, ExecControls, ExecSpec, ExecStreamingResult, OneShotImage, OneShotSpec,
     OutputStream, Sandbox, StdinSource, Termination,
 };
 use smol_str::SmolStr;
-use tokio::io::{AsyncWriteExt, duplex};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -97,7 +98,12 @@ enum Job {
 
 /// Runs `job` in an owned task with the interface's line pumps on its
 /// output and the step's stop tokens on its controls.
-fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxProcess {
+fn spawn_streamed(
+    sandbox: Arc<dyn Sandbox>,
+    job: Job,
+    stdin: bool,
+    output: OutputMode,
+) -> SandboxProcess {
     // Stdin: a piped step gets a writer whose read half streams into the
     // command for its whole life.
     let stdin_writer = stdin.then(|| {
@@ -112,8 +118,23 @@ fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxPr
     let (stdout_writer, stdout_reader) = duplex(OUTPUT_PIPE_CAPACITY);
     let (stderr_writer, stderr_reader) = duplex(OUTPUT_PIPE_CAPACITY);
     let mut workers = JoinSet::new();
-    workers.spawn(pump(stdout_reader, ir::LogStream::Stdout, line_tx.clone()));
-    workers.spawn(pump(stderr_reader, ir::LogStream::Stderr, line_tx));
+    let (byte_tx, byte_rx) = mpsc::channel(16);
+    let (lines, bytes) = match output {
+        OutputMode::Lines => {
+            workers.spawn(pump(stdout_reader, ir::LogStream::Stdout, line_tx.clone()));
+            workers.spawn(pump(stderr_reader, ir::LogStream::Stderr, line_tx));
+            (Some(line_rx), None)
+        }
+        OutputMode::Bytes => {
+            workers.spawn(pump_bytes(
+                stdout_reader,
+                ir::LogStream::Stdout,
+                byte_tx.clone(),
+            ));
+            workers.spawn(pump_bytes(stderr_reader, ir::LogStream::Stderr, byte_tx));
+            (None, Some(byte_rx))
+        }
+    };
 
     let term = CancellationToken::new();
     let kill = CancellationToken::new();
@@ -172,13 +193,42 @@ fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxPr
     });
 
     SandboxProcess {
-        lines: Some(line_rx),
+        lines,
+        bytes,
         stdin: stdin_writer.map(|(writer, _)| writer),
         term,
         kill,
         status: status_rx,
         cached: None,
         workers,
+    }
+}
+
+/// The duplex reader cannot fail independently of its writer. A closed
+/// receiver ends the pump; dropping the process owns remote cancellation.
+async fn pump_bytes(
+    mut reader: impl AsyncRead + Unpin,
+    stream: ir::LogStream,
+    sender: mpsc::Sender<OutputChunk>,
+) {
+    let mut buffer = vec![0; 16 * 1024];
+    loop {
+        let Ok(length) = reader.read(&mut buffer).await else {
+            return;
+        };
+        if length == 0 {
+            return;
+        }
+        if sender
+            .send(OutputChunk {
+                stream,
+                bytes: buffer[..length].to_vec(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
     }
 }
 
@@ -239,6 +289,7 @@ impl ExecEnv for SandboxEnv {
             self.sandbox.clone(),
             Job::Exec(exec_spec),
             stdin,
+            spec.output,
         )))
     }
 
@@ -304,6 +355,32 @@ impl ExecEnv for SandboxEnv {
             .map_err(|error| facet_error("write", &error))
     }
 
+    async fn list_directory(
+        &self,
+        path: &Path,
+        depth: usize,
+    ) -> Result<Vec<DirectoryEntry>, EnvError> {
+        self.sandbox
+            .fs()
+            .list_dir(&path.to_string_lossy(), depth)
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| DirectoryEntry {
+                        path:   entry.path,
+                        is_dir: entry.kind == sandbox_driver::FileKind::Directory,
+                        size:   if entry.kind == sandbox_driver::FileKind::File {
+                            entry.size
+                        } else {
+                            None
+                        },
+                    })
+                    .collect()
+            })
+            .map_err(|error| facet_error("list_directory", &error))
+    }
+
     fn grace(&self) -> Duration {
         self.grace
     }
@@ -313,6 +390,7 @@ impl ExecEnv for SandboxEnv {
 /// two raw stop signals the step's ladder fires.
 struct SandboxProcess {
     lines:   Option<LineStream>,
+    bytes:   Option<ByteStream>,
     stdin:   Option<StdinWriter>,
     term:    CancellationToken,
     kill:    CancellationToken,
@@ -334,6 +412,10 @@ impl Drop for SandboxProcess {
 impl ProcessHandle for SandboxProcess {
     fn lines(&mut self) -> Option<LineStream> {
         self.lines.take()
+    }
+
+    fn bytes(&mut self) -> Option<ByteStream> {
+        self.bytes.take()
     }
 
     fn stdin(&mut self) -> Option<StdinWriter> {
@@ -436,6 +518,7 @@ impl ContainerRunner for OneShotRunner {
             self.sandbox.clone(),
             Job::OneShot(one_shot),
             false,
+            OutputMode::Lines,
         )))
     }
 }

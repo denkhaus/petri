@@ -7,7 +7,8 @@
 use ir::StepKindId;
 use serde::{Deserialize, Serialize};
 
-/// An agent or prompt node (`box`, `tab`): one turn of an agent over ACP.
+/// An agent or prompt node (`box`, `tab`): one turn of an agent over ACP or
+/// native Pebble.
 pub const AGENT_KIND: StepKindId = StepKindId::new_static("fabro/agent");
 /// A command node (`parallelogram`, or any node with a `script`).
 pub const COMMAND_KIND: StepKindId = StepKindId::new_static("fabro/command");

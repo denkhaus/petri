@@ -1,0 +1,470 @@
+//! Pebble tools act through the firing's execution scope, never host paths.
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use executor::{ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig};
+use globset::{GlobBuilder, GlobMatcher};
+use ir::LogStream;
+use pebble_coding_agent::environment::{
+    DirEntry, EnvResult, Environment, EnvironmentError, EnvironmentErrorKind, ExecOutcome,
+    ExecRequest, ExecResult, GrepOptions,
+};
+use pebble_coding_agent::events::CommandTermination;
+use pebble_coding_agent::tools::{OutputCaptureStats, OutputStream};
+use tokio::task::JoinSet;
+use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
+
+use super::capture::Capture;
+
+/// Adapts the execution scope supplied by Petri to Pebble's coding tools.
+/// Bash, find, and grep must be available inside the scope. Uses ripgrep
+/// when present.
+pub struct PebbleEnvironment {
+    env:        Arc<dyn ExecEnv>,
+    cancel:     CancellationToken,
+    kill:       CancellationToken,
+    platform:   String,
+    os_version: String,
+    ripgrep:    bool,
+}
+
+impl PebbleEnvironment {
+    /// Probes the scope, including remote scopes, before building a session.
+    pub async fn prepare(
+        env: Arc<dyn ExecEnv>,
+        cancel: CancellationToken,
+        kill: CancellationToken,
+    ) -> EnvResult<Self> {
+        let mut adapter = Self {
+            env,
+            cancel,
+            kill,
+            platform: "unknown".into(),
+            os_version: "unknown".into(),
+            ripgrep: false,
+        };
+        let result = adapter
+            .command(
+                "command -v bash >/dev/null && command -v find >/dev/null && command -v grep >/dev/null || { echo 'Pebble requires Bash, find, and grep in the execution scope' >&2; exit 127; }; uname -s && uname -r; if command -v rg >/dev/null; then printf rg; fi",
+            )
+            .await?;
+        let mut lines = result.lines();
+        adapter.platform = match lines.next() {
+            Some("Darwin") => "darwin",
+            Some("Linux") => "linux",
+            _ => "unknown",
+        }
+        .into();
+        adapter.os_version = format!("{} {}", adapter.platform, lines.next().unwrap_or("unknown"));
+        adapter.ripgrep = lines.next() == Some("rg");
+        Ok(adapter)
+    }
+
+    fn path(&self, path: &str) -> PathBuf {
+        // Path joining is lexical. It does not inspect Petri's host filesystem.
+        Path::new(self.env.workspace_path()).join(path)
+    }
+
+    async fn command(&self, command: &str) -> EnvResult<String> {
+        let outcome = self
+            .exec(ExecRequest {
+                timeout_ms: Some(30_000),
+                output_bytes_cap: Some(4 * 1024 * 1024),
+                ..ExecRequest::new(command)
+            })
+            .await?;
+        if !outcome.result.is_success() {
+            return Err(error(
+                EnvironmentErrorKind::Io,
+                format!("Scope command failed: {}", outcome.result.stderr.trim()),
+            ));
+        }
+        if outcome.output_capture().omitted_bytes != 0 {
+            return Err(error(
+                EnvironmentErrorKind::Io,
+                "Scope command output exceeded 4 MiB",
+            ));
+        }
+        Ok(outcome.result.stdout)
+    }
+}
+
+#[async_trait]
+impl Environment for PebbleEnvironment {
+    fn working_directory(&self) -> &str {
+        self.env.workspace_path()
+    }
+    fn platform(&self) -> &str {
+        &self.platform
+    }
+    fn os_version(&self) -> String {
+        self.os_version.clone()
+    }
+
+    async fn read_file_bytes(&self, path: &str) -> EnvResult<Vec<u8>> {
+        self.env
+            .read_file(&self.path(path))
+            .await
+            .map_err(io_error)?
+            .ok_or_else(|| {
+                error(
+                    EnvironmentErrorKind::NotFound,
+                    format!("File not found: {path}"),
+                )
+            })
+    }
+
+    async fn write_file(&self, path: &str, content: &str) -> EnvResult<()> {
+        self.env
+            .write_file(&self.path(path), content.as_bytes())
+            .await
+            .map_err(io_error)
+    }
+
+    async fn rename_file(&self, source: &str, destination: &str) -> EnvResult<()> {
+        let source = quote(&self.path(source).to_string_lossy());
+        let destination_path = self.path(destination);
+        let destination = quote(&destination_path.to_string_lossy());
+        let parent = quote(
+            &destination_path
+                .parent()
+                .unwrap_or(Path::new("/"))
+                .to_string_lossy(),
+        );
+        self.command(&format!("if [[ {source} -ef {destination} ]]; then exit 0; fi\nif [[ -d {source} || -d {destination} ]]; then echo 'rename_file requires file paths' >&2; exit 1; fi\nmkdir -p -- {parent} && mv -f -- {source} {destination}")).await?;
+        Ok(())
+    }
+
+    async fn delete_file(&self, path: &str) -> EnvResult<()> {
+        self.command(&format!(
+            "rm -- {}",
+            quote(&self.path(path).to_string_lossy())
+        ))
+        .await?;
+        Ok(())
+    }
+
+    async fn file_exists(&self, path: &str) -> EnvResult<bool> {
+        Ok(self
+            .command(&format!(
+                "if [[ -e {} ]]; then printf yes; else printf no; fi",
+                quote(&self.path(path).to_string_lossy())
+            ))
+            .await?
+            == "yes")
+    }
+
+    async fn list_directory(&self, path: &str, depth: Option<usize>) -> EnvResult<Vec<DirEntry>> {
+        let mut entries = self
+            .env
+            .list_directory(&self.path(path), depth.unwrap_or(1))
+            .await
+            .map_err(io_error)?;
+        // Compare path segments so children directly follow their parent.
+        entries.sort_by(|a, b| a.path.split('/').cmp(b.path.split('/')));
+        Ok(entries
+            .into_iter()
+            .map(|entry| DirEntry {
+                name:   entry.path,
+                is_dir: entry.is_dir,
+                size:   entry.size,
+            })
+            .collect())
+    }
+
+    async fn grep(
+        &self,
+        pattern: &str,
+        path: &str,
+        options: &GrepOptions,
+    ) -> EnvResult<Vec<String>> {
+        if options.max_results == Some(0) {
+            return Ok(Vec::new());
+        }
+        let mut command = if self.ripgrep {
+            "rg --no-config --no-ignore-parent --line-number --with-filename --color never"
+        } else {
+            "grep -rnHI"
+        }
+        .to_owned();
+        if options.case_insensitive {
+            command.push_str(" -i");
+        }
+        if let Some(glob) = &options.glob_filter {
+            let option = if self.ripgrep { "--glob" } else { "--include" };
+            let _ = write!(command, " {option} {}", quote(glob));
+        }
+        if let Some(limit) = options.max_results {
+            let _ = write!(command, " -m {limit}");
+        }
+        let _ = write!(
+            command,
+            " -- {} {}\nstatus=$?; if [[ $status == 1 ]]; then exit 0; else exit \"$status\"; fi",
+            quote(pattern),
+            quote(&self.path(path).to_string_lossy())
+        );
+        let text = self.command(&command).await?;
+        Ok(text
+            .lines()
+            .take(options.max_results.unwrap_or(usize::MAX))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    async fn glob(&self, pattern: &str, path: Option<&str>) -> EnvResult<Vec<String>> {
+        let matcher = compile_glob(pattern)?;
+        let base = self.path(path.unwrap_or("."));
+        let base_argument = quote(&base.to_string_lossy());
+        let paths = self.command(&format!("if [[ ! -e {base_argument} ]]; then exit 0; fi; find {base_argument} -type f -print0")).await?;
+        let mut matches = paths
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .filter(|path| {
+                Path::new(path)
+                    .strip_prefix(&base)
+                    .is_ok_and(|relative| matcher.is_match(relative))
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        matches.sort();
+        Ok(matches)
+    }
+
+    async fn exec(&self, request: ExecRequest<'_>) -> EnvResult<ExecOutcome> {
+        let started = Instant::now();
+        let cancel = request.cancel_token.clone().unwrap_or_default();
+        let spec = ProcessSpec::new("bash", &["-c", request.command])
+            .with_output(OutputMode::Bytes)
+            .with_cwd(request.working_dir.map(|path| self.path(path)))
+            .with_env(
+                request
+                    .env_vars
+                    .into_iter()
+                    .flat_map(|vars| vars.iter())
+                    .map(|(k, v)| (k.as_str().into(), v.as_str().into()))
+                    .collect(),
+            );
+        if cancel.is_cancelled() || self.cancel.is_cancelled() || self.kill.is_cancelled() {
+            return Ok(empty_stopped(CommandTermination::Cancelled, started));
+        }
+        let deadline = sleep(Duration::from_millis(
+            request.timeout_ms.unwrap_or(u64::MAX),
+        ));
+        tokio::pin!(deadline);
+        let mut process = tokio::select! {
+            biased;
+            () = self.kill.cancelled() => return Ok(empty_stopped(CommandTermination::Cancelled, started)),
+            () = self.cancel.cancelled() => return Ok(empty_stopped(CommandTermination::Cancelled, started)),
+            () = cancel.cancelled() => return Ok(empty_stopped(CommandTermination::Cancelled, started)),
+            () = &mut deadline, if request.timeout_ms.is_some() => return Ok(empty_stopped(CommandTermination::TimedOut, started)),
+            process = self.env.spawn(spec) => process.map_err(|e| error(EnvironmentErrorKind::Spawn, e.to_string()))?,
+        };
+        let Some(mut bytes) = process.bytes() else {
+            let _ = process.signal(Sig::Kill).await;
+            let _ = process.wait().await;
+            return Err(error(
+                EnvironmentErrorKind::Unsupported,
+                "Executor does not provide raw process output",
+            ));
+        };
+        let mut drains = JoinSet::new();
+        let failed = CancellationToken::new();
+        let drain_failed = failed.clone();
+        let stop_writes = CancellationToken::new();
+        let drain_stop = stop_writes.clone();
+        let writer = request.output_writer;
+        let cap = request.output_bytes_cap;
+        drains.spawn(async move {
+            let mut stdout = Capture::new(cap);
+            let mut stderr = Capture::new(cap);
+            let mut write_error = None;
+            while let Some(chunk) = bytes.recv().await {
+                let (capture, stream) = match chunk.stream {
+                    LogStream::Stdout => (&mut stdout, OutputStream::Stdout),
+                    LogStream::Stderr => (&mut stderr, OutputStream::Stderr),
+                };
+                if let Some(writer) = &writer && write_error.is_none() {
+                    let result = tokio::select! {
+                        biased;
+                        () = drain_stop.cancelled() => Err(error(EnvironmentErrorKind::Io, "Output capture cancelled before all bytes were stored")),
+                        result = timeout(Duration::from_secs(5), writer.append(stream, &chunk.bytes)) => match result {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(cause)) => Err(error(EnvironmentErrorKind::Io, format!("Output capture failed: {cause}"))),
+                            Err(_) => Err(error(EnvironmentErrorKind::Io, "Output capture write timed out")),
+                        },
+                    };
+                    if let Err(cause) = result { write_error = Some(cause); drain_failed.cancel(); }
+                }
+                capture.push(&chunk.bytes);
+            }
+            match write_error { Some(error) => Err(error), None => Ok((stdout, stderr)) }
+        });
+        let (mut termination, mut status) = tokio::select! {
+            biased;
+            () = self.kill.cancelled() => (CommandTermination::Cancelled, None),
+            () = self.cancel.cancelled() => (CommandTermination::Cancelled, None),
+            () = cancel.cancelled() => (CommandTermination::Cancelled, None),
+            () = &mut deadline, if request.timeout_ms.is_some() => (CommandTermination::TimedOut, None),
+            () = failed.cancelled() => (CommandTermination::Cancelled, None),
+            status = process.wait() => (CommandTermination::Exited, Some(status.map_err(io_error)?)),
+        };
+        if status.is_none() {
+            stop_writes.cancel();
+            stop(process.as_mut(), self.env.grace(), &self.kill).await?;
+        }
+        let capture = if status.is_some() {
+            tokio::select! {
+                result = drains.join_next() => result,
+                () = async {
+                    tokio::select! {
+                        () = self.kill.cancelled() => {},
+                        () = self.cancel.cancelled() => {},
+                        () = cancel.cancelled() => {},
+                        () = &mut deadline, if request.timeout_ms.is_some() => { termination = CommandTermination::TimedOut; },
+                    }
+                } => {
+                    if termination != CommandTermination::TimedOut { termination = CommandTermination::Cancelled; }
+                    status = None;
+                    stop_writes.cancel();
+                    stop(process.as_mut(), self.env.grace(), &self.kill).await?;
+                    drains.join_next().await
+                }
+            }
+        } else {
+            drains.join_next().await
+        };
+        let (stdout, stderr) = capture
+            .ok_or_else(|| error(EnvironmentErrorKind::Io, "Output capture task missing"))?
+            .map_err(|cause| {
+                error(
+                    EnvironmentErrorKind::Io,
+                    format!("Output capture task failed: {cause}"),
+                )
+            })??;
+        let (stdout, stdout_capture) = stdout.finish();
+        let (stderr, stderr_capture) = stderr.finish();
+        Ok(ExecOutcome {
+            result: ExecResult {
+                stdout,
+                stderr,
+                exit_code: status.and_then(|status| status.code),
+                termination,
+                duration_ms: elapsed_ms(started.elapsed()),
+            },
+            streams_separated: true,
+            stdout_capture,
+            stderr_capture,
+        })
+    }
+}
+
+async fn stop(
+    process: &mut dyn ProcessHandle,
+    grace: Duration,
+    kill: &CancellationToken,
+) -> EnvResult<()> {
+    if !kill.is_cancelled() {
+        process.signal(Sig::Term).await.map_err(io_error)?;
+        tokio::select! {
+            result = process.wait() => return result.map(|_| ()).map_err(io_error),
+            () = sleep(grace) => {},
+            () = kill.cancelled() => {},
+        }
+    }
+    process.signal(Sig::Kill).await.map_err(io_error)?;
+    timeout(Duration::from_secs(5), process.wait())
+        .await
+        .map_err(|_| {
+            error(
+                EnvironmentErrorKind::Io,
+                "Process did not stop after SIGKILL",
+            )
+        })?
+        .map(|_| ())
+        .map_err(io_error)
+}
+
+fn empty_stopped(termination: CommandTermination, started: Instant) -> ExecOutcome {
+    ExecOutcome {
+        result:            ExecResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            termination,
+            duration_ms: elapsed_ms(started.elapsed()),
+        },
+        streams_separated: true,
+        stdout_capture:    OutputCaptureStats::complete(0),
+        stderr_capture:    OutputCaptureStats::complete(0),
+    }
+}
+
+fn compile_glob(pattern: &str) -> EnvResult<GlobMatcher> {
+    let invalid = |message: &str| {
+        error(
+            EnvironmentErrorKind::InvalidInput,
+            format!("Invalid glob {pattern:?}: {message}"),
+        )
+    };
+    if pattern.is_empty() {
+        return Err(invalid("pattern cannot be empty"));
+    }
+    if pattern.starts_with('/') || pattern.as_bytes().get(1) == Some(&b':') {
+        return Err(invalid("pattern must be relative"));
+    }
+    if pattern.contains('\\') {
+        return Err(invalid("use / as the path separator"));
+    }
+    if pattern.ends_with('/') {
+        return Err(invalid("pattern must name files, not end with /"));
+    }
+    if pattern.split('/').any(|part| part == "..") {
+        return Err(invalid("pattern cannot traverse a parent directory"));
+    }
+    let mut in_class = false;
+    for character in pattern.chars() {
+        match character {
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '/' | '*' | '?' if in_class => {
+                return Err(invalid(
+                    "character classes cannot contain separators or wildcards",
+                ));
+            }
+            _ => {}
+        }
+    }
+    if in_class {
+        return Err(invalid("unclosed character class"));
+    }
+    if pattern
+        .split('/')
+        .any(|part| part.contains("**") && part != "**")
+    {
+        return Err(invalid("** must be a whole path segment"));
+    }
+    GlobBuilder::new(pattern.trim_start_matches("./"))
+        .literal_separator(true)
+        .backslash_escape(false)
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|cause| invalid(&cause.to_string()))
+}
+
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+fn error(kind: EnvironmentErrorKind, message: impl Into<String>) -> EnvironmentError {
+    EnvironmentError::new(kind, message)
+}
+fn io_error(cause: executor::EnvError) -> EnvironmentError {
+    EnvironmentError::with_source(EnvironmentErrorKind::Io, cause.to_string(), cause)
+}
+pub(super) fn elapsed_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}

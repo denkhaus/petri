@@ -24,8 +24,8 @@ mod secrets;
 
 pub use container::{CONTAINER_RUNTIME_CLASS, ContainerImage, ContainerRunner, OneShotContainer};
 pub use env::{
-    ExecEnv, ExitStatus, LineStream, LogLine, ProcessHandle, ProcessSpec, Sig, StdinMode,
-    StdinWriter, oversized_read,
+    ByteStream, DirectoryEntry, ExecEnv, ExitStatus, LineStream, LogLine, OutputChunk, OutputMode,
+    ProcessHandle, ProcessSpec, Sig, StdinMode, StdinWriter, oversized_read,
 };
 pub use error::{EnvError, ReleaseReport};
 pub use progress::{NoProgress, Progress, ProgressSink};

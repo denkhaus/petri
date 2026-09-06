@@ -35,7 +35,7 @@ Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
 | `Mdiamond` start | `noop`, the entry | |
 | `Msquare` exit | `noop`; `Completion::TerminalNode(exit)` | |
 | `diamond` conditional | `noop` | |
-| `box` agent, `tab` prompt | `fabro/agent` | prompt, goal, fidelity, model metadata, `output_schema`, `output_retries`, `acp` |
+| `box` agent, `tab` prompt | `fabro/agent` | prompt, goal, fidelity, `backend`, model settings, `output_schema`, `output_retries`, `acp` |
 | `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema` |
 | `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive` |
 | `component` parallel | `noop` with one routing group per branch, or a `for_each` expansion (below) | |
@@ -174,14 +174,19 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
   `output_schema="routing"` reads the last JSON object of the output as the
   routing directive (`outcome`, `preferred_next_label`, `suggested_next_ids`,
   `context_updates`, `failure_reason`).
-- **`fabro/agent`** runs one turn of the Agent Client Protocol agent named by
-  `acp.command` / `acp.config` (node, then graph, then `PETRI_ACP_COMMAND`),
-  assembles the prompt from the goal, a compact preamble over earlier stages and
-  the node's prompt, reads the routing directive from the response, validates
-  `output_schema` with `output_retries` repair turns inside the attempt, and
-  forwards steering deliveries as follow-up prompts. `model`, `provider` and
-  `reasoning_effort` are observer metadata in phase one; the ACP command owns
-  model selection.
+- **`fabro/agent`** assembles the prompt from the goal, earlier stages, and the
+  node's prompt. Both backends share routing, `output_schema` validation,
+  `output_retries` repair turns, and steering deliveries. Each attempt starts a
+  fresh agent session. Repair turns keep that session's history.
+  `backend="acp"` is the default. It starts the Agent Client Protocol command
+  from `acp.command` / `acp.config` (node, graph, then `PETRI_ACP_COMMAND`). The
+  ACP command owns model selection; model settings are observer metadata.
+  `backend="pebble"` runs the Pebble Rust library in Petri. `model` (or graph
+  `default_model`) is required. `provider` (or `default_provider`) qualifies the
+  model selector, and `reasoning_effort` configures the actual model request.
+  The node's backend overrides the graph's backend; model stylesheets can also
+  select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
+  options directly on a Pebble node is an error.
 - **`fabro/human`** asks through the core `Question` event and routes on the
   delivered answer. `petri run --interactive` answers from the terminal,
   `--auto-approve` takes the first choice; a `sensitive=true` gate's free text
@@ -190,6 +195,52 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
 - **`fabro/workflow`** is the nested invocation above.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
   gate takes its first choice, as Fabro's `--dry-run` does.
+
+## Native Pebble
+
+```dot
+digraph change {
+  graph [backend="pebble", default_model="anthropic/claude-sonnet-4.6"]
+  start [shape=Mdiamond]
+  implement [prompt="Fix the failing tests, then run the test suite."]
+  exit [shape=Msquare]
+  start -> implement -> exit
+}
+```
+
+The `petri` distribution supplies a lithos-llm client with the built-in model
+catalog and environment credentials, such as `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY`. It enables Anthropic, OpenAI, Gemini, and OpenAI-compatible
+adapters. Applications that use `fabro_steps::register` directly must provide
+`fabro_steps::pebble::PebbleClient(client)` through `Runtime::capability`.
+The application owns the client's catalog, credentials, and retry middleware.
+
+Tools use the firing's `ExecEnv`. Commands run as `bash -c` inside the scope;
+files use the scope's filesystem. Bash, find, grep, and the usual file utilities
+must be available there. Content search uses ripgrep when available and grep
+otherwise. Searches fail explicitly when their captured output exceeds 4 MiB.
+The backend reads workspace `AGENTS.md` and discovers workspace skills in
+`.agents/skills` and `.pebble/skills`. Tools have full access within the scope's
+policy. Petri's sandbox owns process isolation. This integration does not
+install interactive approvals, subagents, or a full-output artifact store.
+
+`Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
+follow-up. Cancellation settles the active prompt and shuts down its session.
+Kill stops active tool processes immediately. A driver hard abort can discard
+an unsettled prompt report; scope release remains responsible for cleanup.
+
+Pebble events appear as `StepEvent::Custom` with `kind="pebble"`, firing,
+attempt, scope, node, and the original event envelope. The envelope preserves
+stream sequence, session, parent session, and tool-call identifiers. Petri's
+secret masker applies before forwarding. These events use Petri's existing
+log pipeline; the integration does not checkpoint or resume Pebble sessions.
+
+Attempt metrics include `pebble.prompts`, `pebble.usage` (five disjoint token
+buckets), `pebble.cost_usd_micros`, `pebble.inference_ms`, and `pebble.tool_ms`.
+They sum all settled prompt reports, including repair turns, failed prompts,
+and cancellation. Cost is a known subtotal: null means no response reported a
+cost. These metrics exclude compaction and model calls made inside tools.
+ACP continues to report `acp.turns`.
 
 ## Refused
 

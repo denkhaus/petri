@@ -1,0 +1,23 @@
+name: Read private dependencies
+description: Configure read-only deploy keys for the pinned private Rust dependencies
+inputs:
+  sandbox-driver-key:
+    description: Read-only deploy key for lithoscomputer/sandbox-driver
+    required: true
+  pebble-key:
+    description: Read-only deploy key for lithoscomputer/pebble
+    required: true
+  lithos-llm-key:
+    description: Read-only deploy key for lithoscomputer/lithos-llm
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Configure dependency access
+      shell: bash
+      env:
+        SANDBOX_DRIVER_DEPLOY_KEY: ${{ inputs.sandbox-driver-key }}
+        PEBBLE_DEPLOY_KEY: ${{ inputs.pebble-key }}
+        LITHOS_LLM_DEPLOY_KEY: ${{ inputs.lithos-llm-key }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/setup.sh"

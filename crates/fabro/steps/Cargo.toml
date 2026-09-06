@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Fabro step kinds: command, wait, human, agent over ACP, nested workflow, and the stub registry that simulates them all."
+description = "Fabro step kinds: command, wait, human, agent over ACP or native Pebble, nested workflow, and the stub registry that simulates them all."
 publish = false
 
 [lints]
@@ -15,6 +15,10 @@ workspace = true
 name = "fabro_steps"
 
 [dependencies]
+pebble-coding-agent = { workspace = true }
+lithos-llm = { workspace = true, features = ["runtime"] }
+tokio-util = { workspace = true }
+globset = { workspace = true }
 ir = { workspace = true }
 executor = { workspace = true }
 execution = { workspace = true }
@@ -33,4 +37,5 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+pebble-coding-agent = { workspace = true, features = ["test-util"] }
 testkit = { workspace = true }

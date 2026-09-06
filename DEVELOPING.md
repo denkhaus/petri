@@ -25,6 +25,30 @@ scripts/corpus-fetch-actions.sh
 The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 `--repin` during a routine fetch.
 
+## Private dependencies
+
+The workspace pins sandbox-driver, Pebble, and lithos-llm by Git revision.
+Local Cargo builds use your Git SSH credentials. Each account needs read access
+to all three repositories. Use a local, untracked Cargo `[patch]` config when
+working across sibling checkouts; commit a pushed revision in `Cargo.toml` and
+regenerate `Cargo.lock` before sharing the integration.
+
+CI, nightly, and release workflows use `.github/actions/private-dependencies`.
+The `sandbox-driver-read` GitHub environment must contain these secrets:
+
+- `SANDBOX_DRIVER_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/sandbox-driver`.
+- `PEBBLE_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/pebble`.
+- `LITHOS_LLM_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/lithos-llm`.
+
+Use a different key pair for each repository. The action selects each key with
+an SSH host alias and checks GitHub's pinned host key. Each workflow removes
+the temporary credentials when its job finishes.
+
+Native Pebble tests use a scripted model and real execution scopes. They need
+no provider credentials. `crates/fabro/steps/tests/pebble.rs` covers tool
+execution, output repair, model selection, accounting, steering, cancellation,
+raw output storage, and the Pebble environment contract on Host and Docker.
+
 ## Common tasks
 
 | Command | Purpose |

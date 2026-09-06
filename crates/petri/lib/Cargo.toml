@@ -11,6 +11,7 @@ publish = false
 workspace = true
 
 [dependencies]
+lithos-llm = { workspace = true, features = ["runtime", "builtin-catalog", "environment-credentials", "openai", "anthropic", "gemini", "openai-compatible"] }
 runtime = { workspace = true }
 execution = { workspace = true }
 frontend-gha = { workspace = true }

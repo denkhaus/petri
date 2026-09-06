@@ -14,6 +14,7 @@ pub mod command;
 pub mod directive;
 pub mod human;
 mod outcome;
+pub mod pebble;
 mod stub;
 pub mod wait;
 pub mod workflow;

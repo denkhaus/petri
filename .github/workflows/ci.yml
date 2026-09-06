@@ -43,9 +43,11 @@ jobs:
           persist-credentials: false
 
       - name: Configure private dependency access
-        uses: ./.github/actions/sandbox-driver-access
+        uses: ./.github/actions/private-dependencies
         with:
-          deploy-key: ${{ secrets.SANDBOX_DRIVER_DEPLOY_KEY }}
+          sandbox-driver-key: ${{ secrets.SANDBOX_DRIVER_DEPLOY_KEY }}
+          pebble-key: ${{ secrets.PEBBLE_DEPLOY_KEY }}
+          lithos-llm-key: ${{ secrets.LITHOS_LLM_DEPLOY_KEY }}
 
       - name: Free disk space for Rust and Docker
         if: runner.os == 'Linux'
@@ -115,6 +117,6 @@ jobs:
           fi
           echo "clean"
 
-      - name: Remove dependency credential
+      - name: Remove dependency credentials
         if: always()
-        run: rm -f -- "$RUNNER_TEMP/petri-sandbox-driver/key"
+        run: rm -rf -- "$RUNNER_TEMP/petri-dependencies"

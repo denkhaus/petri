@@ -237,6 +237,7 @@ pub async fn run_resolved(
         env,
         cwd: working_dir,
         stdin: StdinMode::Null,
+        output: executor::OutputMode::Lines,
     };
 
     let mut handle = ctx
