@@ -21,6 +21,7 @@ a run will execute.
 | `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint. `petri check` given no inputs at all downgrades it to the warning `fabro.unbound_input` and leaves the text unrendered, so a file validates before its inputs exist; a run is always strict |
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
+| other `[run.*]` sections in `workflow.toml` | read and reported: `[run.model.fallbacks]`, `[run.environment]`, `[run.clone]`, `[run.run_branch]`, `[run.pull_request]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]` and `[run.prepare]` each warn `ignored.workflow_toml.run.<section>` with why the standalone runner does not act on them yet |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
 | `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
 | `import` | `unsupported.import` (later phase) |
@@ -188,9 +189,15 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
   options directly on an API node is an error.
 - **`fabro/human`** asks through the core `Question` event and routes on the
-  delivered answer. `petri run --interactive` answers from the terminal,
-  `--auto-approve` takes the first choice; a `sensitive=true` gate's free text
-  crosses as a `$secret` reference.
+  delivered answer. The host's interviewer answers: `petri run --interactive`
+  from the terminal, `--auto-approve` with the first choice,
+  `--interview-script <file>` from a script (see the README's terminal path
+  section). A `question_type="multi_select"` answer names several choices;
+  the first routes, and `human.gate.selected` / `human.gate.label` record every
+  selected key and label joined by `,` and `, `, as Fabro does. A
+  `sensitive=true` gate's free text crosses as a `$secret` reference, which is
+  a Petri extension. An answer marked `cancelled` (the interviewer failed, or
+  the wait was cancelled) fails the gate closed with class `interrupted`.
 - **`fabro/wait`** sleeps, cancel-aware.
 - **`fabro/workflow`** is the nested invocation above.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
@@ -226,7 +233,9 @@ install interactive approvals or subagents. Tool output is bounded by Pebble's
 capture and preview limits. Omitted bytes are discarded and cannot be retrieved.
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
-follow-up. Cancellation settles the active prompt and shuts down its session.
+follow-up. A delivered core `Answer` naming one of the session's open
+questions answers it instead (below). Cancellation settles the active prompt
+and shuts down its session.
 Kill stops active tool processes immediately. A driver hard abort can discard
 an unsettled prompt report; scope release remains responsible for cleanup.
 
@@ -235,6 +244,17 @@ attempt, scope, node, and the original event envelope. The envelope preserves
 stream sequence, session, parent session, and tool-call identifiers. Petri's
 secret masker applies before forwarding. These events use Petri's existing
 log pipeline; the integration does not checkpoint or resume Pebble sessions.
+
+The session's question tool (`request_user_input` for GPT-5.6 and GPT-6,
+`AskUserQuestion` for Claude) reaches the same interviewer a human gate does.
+Petri implements Pebble's `HumanInputProvider`: each question in a batch
+becomes a core `Question` on the step's progress channel, with id
+`<node>#<firing>/agent/<session>/<tool call>/<index>`, `kind`
+`multiple_choice` or `multi_select`, the harness's `option_N` keys, and
+`freeform` set as Pebble allows. The delivered answer's choices (or free
+text) go back to Pebble as that question's answers; a cancelled answer or a
+cancelled prompt goes back as `cancelled`. The interview receipt records
+these questions beside the workflow's own gates.
 
 Attempt metrics include `pebble.prompts`, `pebble.usage` (five disjoint token
 buckets), `pebble.cost_usd_micros`, `pebble.inference_ms`, and `pebble.tool_ms`.

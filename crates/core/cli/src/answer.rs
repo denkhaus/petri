@@ -47,19 +47,20 @@
 //! and consumption are one step under one lock, so concurrent questions cannot
 //! consume the same use of an entry.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
-use std::thread;
 use std::time::Duration;
+use std::{fs, thread};
 
 use execution::{InterviewError, InterviewReply, InterviewRequest, Interviewer};
 use runtime::steps::{Answer, Question, QuestionOption};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 /// The script format this module reads.
@@ -121,7 +122,7 @@ impl Interviewer for AutoApproveInterviewer {
 /// left there is nothing to wait for. Input that names no offered choice on a
 /// question without free text is re-prompted, three times, then fails.
 pub struct TerminalInterviewer {
-    lines:    tokio::sync::Mutex<mpsc::UnboundedReceiver<io::Result<String>>>,
+    lines:    AsyncMutex<mpsc::UnboundedReceiver<io::Result<String>>>,
     terminal: bool,
 }
 
@@ -154,7 +155,7 @@ impl TerminalInterviewer {
                 }
             })?;
         Ok(Self {
-            lines: tokio::sync::Mutex::new(receiver),
+            lines: AsyncMutex::new(receiver),
             terminal,
         })
     }
@@ -387,7 +388,10 @@ impl Matcher {
                 .is_none_or(|p| p == request.invocation_path)
             && self.occurrence.is_none_or(|o| o == request.occurrence)
             && self.ask.is_none_or(|a| a == request.ask)
-            && self.kind.as_ref().is_none_or(|k| Some(k) == q.kind.as_ref())
+            && self
+                .kind
+                .as_ref()
+                .is_none_or(|k| Some(k) == q.kind.as_ref())
             && self.text.as_deref().is_none_or(|t| t == q.text)
             && self
                 .text_contains
@@ -460,7 +464,7 @@ pub enum ScriptError {
 impl ScriptedInterviewer {
     pub fn load(path: &Path) -> Result<Self, ScriptError> {
         let name = path.display().to_string();
-        let text = std::fs::read_to_string(path).map_err(|source| ScriptError::Read {
+        let text = fs::read_to_string(path).map_err(|source| ScriptError::Read {
             path: name.clone(),
             source,
         })?;
@@ -482,12 +486,12 @@ impl ScriptedInterviewer {
                 script.version
             ));
         }
-        let mut seen = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         for entry in &script.entries {
             if entry.id.trim().is_empty() {
                 return Err("an entry has an empty id".to_owned());
             }
-            if seen.insert(entry.id.clone(), ()).is_some() {
+            if !seen.insert(entry.id.clone()) {
                 return Err(format!("entry id `{}` is used twice", entry.id));
             }
             if entry.count == 0 {
@@ -509,7 +513,7 @@ impl ScriptedInterviewer {
             .collect();
         Ok(Self {
             entries: script.entries,
-            uses: Mutex::new(uses),
+            uses:    Mutex::new(uses),
         })
     }
 
@@ -608,8 +612,9 @@ impl ScriptedInterviewer {
                 }
             }
             Action::Invalid { value } => InterviewReply::Answered(Answer::choice(value)),
-            Action::Cancel => InterviewReply::Cancelled,
-            Action::Withhold => InterviewReply::Cancelled,
+            // `Withhold` waits for the cancel token in `reply`; by the time it
+            // acts, the interview is over.
+            Action::Cancel | Action::Withhold => InterviewReply::Cancelled,
         }
     }
 }
@@ -624,7 +629,7 @@ impl Interviewer for ScriptedInterviewer {
         let entry = &self.entries[index];
         if let Some(delay) = entry.delay_ms {
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_millis(delay)) => {},
+                () = sleep(Duration::from_millis(delay)) => {},
                 () = cancel.cancelled() => return InterviewReply::Cancelled,
             }
         }
@@ -679,6 +684,7 @@ impl Interviewer for ScriptedInterviewer {
 mod tests {
     use execution::{ExecutionId, InvocationId};
     use runtime::ir::{Attempt, FiringId};
+    use tokio::time::timeout;
 
     use super::*;
 
@@ -710,7 +716,7 @@ mod tests {
         }
     }
 
-    fn script(entries: Value) -> ScriptedInterviewer {
+    fn script(entries: &Value) -> ScriptedInterviewer {
         let script: InterviewScript =
             serde_json::from_value(json!({ "version": 1, "entries": entries })).unwrap();
         ScriptedInterviewer::new(script).unwrap()
@@ -718,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_scripted_choice_answers_by_key_or_label() {
-        let interviewer = script(json!([
+        let interviewer = script(&json!([
             { "id": "gate", "match": { "node": "gate" }, "action": { "kind": "choice", "value": "no" } }
         ]));
         let reply = interviewer
@@ -736,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_ambiguous_and_exhausted_questions_fail() {
-        let interviewer = script(json!([
+        let interviewer = script(&json!([
             { "id": "a", "match": { "node": "gate" }, "action": { "kind": "choice", "value": "Y" } },
             { "id": "b", "match": { "kind": "yes_no" }, "action": { "kind": "choice", "value": "Y" } }
         ]));
@@ -754,15 +760,21 @@ mod tests {
             )
             .await;
         assert!(matches!(unexpected, InterviewReply::Failed(_)));
-        let once = script(json!([
+        let once = script(&json!([
             { "id": "a", "match": { "node": "gate" }, "action": { "kind": "choice", "value": "Y" } }
         ]));
         let first = once
-            .reply(request("gate", None, &[("Y", "Yes")]), CancellationToken::new())
+            .reply(
+                request("gate", None, &[("Y", "Yes")]),
+                CancellationToken::new(),
+            )
             .await;
         assert!(matches!(first, InterviewReply::Answered(_)));
         let second = once
-            .reply(request("gate", None, &[("Y", "Yes")]), CancellationToken::new())
+            .reply(
+                request("gate", None, &[("Y", "Yes")]),
+                CancellationToken::new(),
+            )
             .await;
         let InterviewReply::Failed(error) = second else {
             panic!("exhausted");
@@ -772,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn unused_required_entries_fail_at_finish() {
-        let interviewer = script(json!([
+        let interviewer = script(&json!([
             { "id": "a", "match": { "node": "gate" }, "action": { "kind": "choice", "value": "Y" } },
             { "id": "b", "match": { "node": "other" }, "required": false, "action": { "kind": "cancel" } }
         ]));
@@ -783,14 +795,14 @@ mod tests {
 
     #[tokio::test]
     async fn withhold_waits_for_cancellation() {
-        let interviewer = script(json!([
+        let interviewer = script(&json!([
             { "id": "a", "match": { "node": "gate" }, "action": { "kind": "withhold" } }
         ]));
         let cancel = CancellationToken::new();
         let pending = interviewer.reply(request("gate", None, &[("Y", "Yes")]), cancel.clone());
         tokio::pin!(pending);
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut pending)
+            timeout(Duration::from_millis(50), &mut pending)
                 .await
                 .is_err()
         );
@@ -802,22 +814,31 @@ mod tests {
     fn terminal_input_parses_each_presentation() {
         let yes_no = request("g", Some("yes_no"), &[("Y", "[Y] Yes"), ("N", "[N] No")]);
         assert_eq!(
-            TerminalInterviewer::parse(&yes_no.question, "").unwrap().choice,
+            TerminalInterviewer::parse(&yes_no.question, "")
+                .unwrap()
+                .choice,
             Some("Y".into())
         );
         assert_eq!(
-            TerminalInterviewer::parse(&yes_no.question, "no").unwrap().choice,
+            TerminalInterviewer::parse(&yes_no.question, "no")
+                .unwrap()
+                .choice,
             Some("N".into())
         );
         assert!(TerminalInterviewer::parse(&yes_no.question, "maybe").is_err());
-        let multi = request("g", Some("multi_select"), &[("A", "Apples"), ("B", "Bread")]);
+        let multi = request("g", Some("multi_select"), &[
+            ("A", "Apples"),
+            ("B", "Bread"),
+        ]);
         let picked = TerminalInterviewer::parse(&multi.question, "a, bread").unwrap();
         assert_eq!(picked.choices, vec!["A".to_owned(), "B".to_owned()]);
         assert_eq!(picked.choice.as_deref(), Some("A"));
         let mut free = request("g", Some("freeform"), &[]);
         free.question.freeform = true;
         assert_eq!(
-            TerminalInterviewer::parse(&free.question, "ship it").unwrap().text,
+            TerminalInterviewer::parse(&free.question, "ship it")
+                .unwrap()
+                .text,
             Some(json!("ship it"))
         );
     }

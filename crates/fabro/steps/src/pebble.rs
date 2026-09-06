@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use environment::{PebbleEnvironment, elapsed_ms};
-use questions::AgentQuestions;
 use executor::Masker;
 use ir::{Attempt, Control, FiringId, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
@@ -20,6 +19,7 @@ use pebble_coding_agent::events::{
 };
 use pebble_coding_agent::extensions::Redactor;
 use pebble_coding_agent::{CodingAgent, CodingAgentOptions, PromptReport, ShutdownReason};
+use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::StepCtx;

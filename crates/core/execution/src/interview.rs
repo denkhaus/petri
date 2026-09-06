@@ -52,6 +52,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -63,6 +64,7 @@ use serde_json::{Value, json};
 use smol_str::SmolStr;
 use steps::{Answer, Question};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -323,10 +325,10 @@ impl InterviewDispatcher {
         let tasks = {
             let mut state = inner.state();
             state.closed = true;
-            std::mem::take(&mut state.tasks)
+            mem::take(&mut state.tasks)
         };
         for task in tasks {
-            match tokio::time::timeout(SHUTDOWN_PATIENCE, task).await {
+            match timeout(SHUTDOWN_PATIENCE, task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => inner
                     .state()
@@ -347,9 +349,9 @@ impl InterviewDispatcher {
         };
         let mut state = inner.state();
         InterviewReceipt {
-            version:   RECEIPT_VERSION,
-            questions: std::mem::take(&mut state.records),
-            errors:    std::mem::take(&mut state.errors),
+            version: RECEIPT_VERSION,
+            questions: mem::take(&mut state.records),
+            errors: mem::take(&mut state.errors),
             script,
         }
     }
@@ -385,10 +387,9 @@ impl Inner {
         let (request, cancel) = {
             let mut state = self.state();
             if state.closed {
-                state.errors.push(format!(
-                    "question `{}` arrived after shutdown",
-                    question.id
-                ));
+                state
+                    .errors
+                    .push(format!("question `{}` arrived after shutdown", question.id));
                 return;
             }
             let key = (execution, question.id.clone());
@@ -545,9 +546,7 @@ impl Inner {
                             text:    Some(json!({ "$secret": name })),
                         };
                         record.delivery = Delivery::Withheld;
-                        let _ = handle
-                            .deliver(key.0, firing, cancelled(&question.id))
-                            .await;
+                        let _ = handle.deliver(key.0, firing, cancelled(&question.id)).await;
                         self.state().records.push(record);
                         return;
                     }

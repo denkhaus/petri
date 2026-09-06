@@ -34,11 +34,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use std::{env, fs, thread};
+use std::{env, fs, io, thread};
 
 pub use execution::{self, host};
 use fabro_steps::pebble::PebbleClient;
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
+use lithos_llm::catalog::{Catalog, CatalogError};
+use lithos_llm::client::ClientBuildError;
+use lithos_llm::credentials::EnvironmentCredentials;
 pub use runtime::{
     DaytonaResources, DaytonaSandboxKind, RunOptions, Runtime, SandboxBackend, SandboxOptions,
     driver, engine, ir,
@@ -202,12 +205,12 @@ pub enum LlmClientError {
     ReadLayer {
         path:   PathBuf,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
     #[error("the model catalog is invalid")]
-    Catalog(#[source] lithos_llm::catalog::CatalogError),
+    Catalog(#[source] CatalogError),
     #[error("the model client could not be built")]
-    Client(#[source] lithos_llm::client::ClientBuildError),
+    Client(#[source] ClientBuildError),
 }
 
 /// The model client native Pebble sessions use, configured the way this
@@ -221,7 +224,7 @@ pub enum LlmClientError {
 /// environment only; a harness sets them on the child it launches and leaves
 /// the developer's shell alone.
 pub fn llm_client() -> Result<lithos_llm::Client, LlmClientError> {
-    let mut catalog = lithos_llm::catalog::Catalog::builder().with_builtin();
+    let mut catalog = Catalog::builder().with_builtin();
     if let Some(layers) = env::var_os(LLM_CATALOG_ENV) {
         for path in env::split_paths(&layers).filter(|p| !p.as_os_str().is_empty()) {
             let text = fs::read_to_string(&path).map_err(|source| LlmClientError::ReadLayer {
@@ -236,7 +239,7 @@ pub fn llm_client() -> Result<lithos_llm::Client, LlmClientError> {
     let catalog = catalog.build().map_err(LlmClientError::Catalog)?;
     let mut builder = lithos_llm::Client::builder()
         .catalog(catalog)
-        .credentials(lithos_llm::credentials::EnvironmentCredentials::conventional());
+        .credentials(EnvironmentCredentials::conventional());
     if let Ok(providers) = env::var(LLM_PROVIDERS_ENV) {
         let enabled: Vec<String> = providers
             .split(',')

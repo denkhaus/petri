@@ -75,18 +75,18 @@ impl Question {
 pub struct Answer {
     /// The question answered, when the host says which.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question: Option<String>,
+    pub question:  Option<String>,
     /// A chosen option, by key or by label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub choice:   Option<String>,
+    pub choice:    Option<String>,
     /// Several chosen options, by key or by label: a `multi_select`
     /// question's answer. A step that routes on one choice takes the first;
     /// what it records of the rest is its own contract.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub choices:  Vec<String>,
+    pub choices:   Vec<String>,
     /// Free text, or a `{"$secret": "answer:<id>"}` reference to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text:     Option<Value>,
+    pub text:      Option<Value>,
     /// The host ended the interview without an answer: the interviewer
     /// failed, or the wait was cancelled. A step treats it as an interrupted
     /// gate and fails closed. Distinct from a negative choice, which is an
@@ -98,10 +98,10 @@ pub struct Answer {
 impl Answer {
     pub fn choice(key: &str) -> Self {
         Self {
-            question: None,
-            choice:   Some(key.to_string()),
-            choices:  Vec::new(),
-            text:     None,
+            question:  None,
+            choice:    Some(key.to_string()),
+            choices:   Vec::new(),
+            text:      None,
             cancelled: false,
         }
     }
@@ -123,19 +123,19 @@ impl Answer {
         let choices: Vec<String> = keys.into_iter().map(Into::into).collect();
         Self {
             question: None,
-            choice:   choices.first().cloned(),
+            choice: choices.first().cloned(),
             choices,
-            text:     None,
+            text: None,
             cancelled: false,
         }
     }
 
     pub fn text(text: impl Into<Value>) -> Self {
         Self {
-            question: None,
-            choice:   None,
-            choices:  Vec::new(),
-            text:     Some(text.into()),
+            question:  None,
+            choice:    None,
+            choices:   Vec::new(),
+            text:      Some(text.into()),
             cancelled: false,
         }
     }
@@ -159,10 +159,10 @@ impl Answer {
         }
         match value {
             Value::String(s) => Some(Self {
-                question: None,
-                choice:   Some(s.clone()),
-                choices:  Vec::new(),
-                text:     Some(Value::String(s.clone())),
+                question:  None,
+                choice:    Some(s.clone()),
+                choices:   Vec::new(),
+                text:      Some(Value::String(s.clone())),
                 cancelled: false,
             }),
             Value::Object(_) => serde_json::from_value(value.clone()).ok(),
@@ -210,10 +210,10 @@ mod tests {
         assert_eq!(
             Answer::from_value(&json!("no")),
             Some(Answer {
-                question: None,
-                choice:   Some("no".into()),
-                choices:  Vec::new(),
-                text:     Some(json!("no")),
+                question:  None,
+                choice:    Some("no".into()),
+                choices:   Vec::new(),
+                text:      Some(json!("no")),
                 cancelled: false,
             })
         );

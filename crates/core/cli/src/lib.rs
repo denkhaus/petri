@@ -209,21 +209,21 @@ enum Command {
     /// Run a workflow file to completion.
     Run {
         #[command(flatten)]
-        target:       FileArgs,
+        target:           FileArgs,
         /// Where workspaces, logs and `events.json` go. Defaults to a fresh
         /// directory under the system temp dir, printed at start.
         #[arg(long)]
-        run_dir:      Option<PathBuf>,
+        run_dir:          Option<PathBuf>,
         /// Do not echo step output.
         #[arg(long)]
-        quiet:        bool,
+        quiet:            bool,
         /// Answer a step's question — a human gate — from the terminal:
         /// the question is printed and one line is read from stdin.
         #[arg(long, conflicts_with_all = ["auto_approve", "interview_script"])]
-        interactive:  bool,
+        interactive:      bool,
         /// Answer every step's question with its default choice.
         #[arg(long, conflicts_with = "interview_script")]
-        auto_approve: bool,
+        auto_approve:     bool,
         /// Answer every step's question from a JSON interview script, and
         /// fail the run when a question matches no entry or a required entry
         /// goes unused. See `cli::answer` for the format.
@@ -233,16 +233,16 @@ enum Command {
         /// Defaults to what the workflow's format declares (Fabro: always;
         /// other formats: on-failure).
         #[arg(long, value_name = "POLICY")]
-        retain:       Option<Retain>,
+        retain:           Option<Retain>,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
         /// choice.
         #[arg(long)]
-        dry_run:      bool,
+        dry_run:          bool,
         #[command(flatten)]
-        provider:     ProviderArgs,
+        provider:         ProviderArgs,
         #[command(flatten)]
-        runner:       RunnerArgs,
+        runner:           RunnerArgs,
     },
     /// Sandboxes a run holds on its provider.
     #[command(subcommand)]
@@ -379,7 +379,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 (_, true, None) => Some(Answers::AutoApprove),
                 _ => None,
             };
-            run(&rt.options(options), &target, &run_dir, answers).await
+            Box::pin(run(&rt.options(options), &target, &run_dir, answers)).await
         }
         Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
         Command::Sandbox(SandboxCommand::Prune { run_dir, provider }) => {

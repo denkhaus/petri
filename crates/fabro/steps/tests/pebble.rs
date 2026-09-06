@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fabro_steps::pebble::PebbleClient;
@@ -14,11 +14,12 @@ use pebble_coding_agent::environment::{Environment, ExecRequest};
 use pebble_coding_agent::test_support::{
     EnvironmentContract, ScriptedCall, scripted_client, text_response, tool_call_response,
 };
-use runtime::driver::{DeliverDisposition, EventObserver, ExecutionReport};
-use runtime::engine::{EngineState, Event, EventRecord};
+use runtime::driver::{DeliverDisposition, EventObserver, ExecutionReport, RunHandle};
+use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
 use runtime::executor::sandbox::HostExecutor;
 use runtime::executor::{AcquireContext, Executor, Retention, ScopeOutcome, ScopeSpec};
 use runtime::frontend::{CompileInputs, NoFiles};
+use runtime::steps::{Answer, Question};
 use runtime::{RunOptions, Runtime};
 use serde_json::{Value, json};
 use smol_str::SmolStr;
@@ -534,9 +535,9 @@ fn mixed_backends_inherit_only_their_own_configuration() {
 /// Answers the first core `Question` it sees with `answer`, through the run
 /// handle: the smallest stand-in for the host's interview dispatcher.
 struct GateAnswerer {
-    handle: std::sync::Mutex<Option<runtime::driver::RunHandle>>,
-    answer: runtime::steps::Answer,
-    asked:  std::sync::Mutex<Vec<runtime::steps::Question>>,
+    handle: Mutex<Option<RunHandle>>,
+    answer: Answer,
+    asked:  Mutex<Vec<Question>>,
 }
 
 impl EventObserver for GateAnswerer {
@@ -544,7 +545,7 @@ impl EventObserver for GateAnswerer {
         let Event::StepProgress { firing, ev } = &record.event else {
             return;
         };
-        let Some(question) = runtime::steps::Question::from_event(ev) else {
+        let Some(question) = Question::from_event(ev) else {
             return;
         };
         self.asked
@@ -580,15 +581,15 @@ async fn an_agent_question_rides_the_core_question_protocol() {
     ]);
     let rt = runtime(&dir, client);
     let answerer = Arc::new(GateAnswerer {
-        handle: std::sync::Mutex::new(None),
-        answer: runtime::steps::Answer::choice("option_2"),
-        asked:  std::sync::Mutex::new(Vec::new()),
+        handle: Mutex::new(None),
+        answer: Answer::choice("option_2"),
+        asked:  Mutex::new(Vec::new()),
     });
     let graph = graph("");
     let driver = rt.driver(graph.clone()).observe(answerer.clone());
     *answerer.handle.lock().expect("not poisoned") = Some(driver.handle());
     let report = rt
-        .run_verified(graph, |_| Ok::<_, runtime::engine::ReplayMismatch>(driver))
+        .run_verified(graph, |_| Ok::<_, ReplayMismatch>(driver))
         .await
         .expect("replay is byte-identical");
     assert_eq!(

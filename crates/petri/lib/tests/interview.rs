@@ -3,6 +3,7 @@
 //! masking, a failing interviewer, cancellation, and the receipt.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,13 +13,17 @@ use petri::execution::{
     InterviewRequest, Interviewer, ReplyRecord,
 };
 use petri::executor::Retention;
-use petri::frontend::CompileInputs;
+use petri::frontend::{CompileInputs, Lowered};
 use petri::ir::RunStatus;
 use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
 use testkit::RunDir;
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+/// What a test interviewer replies for one node's question.
+type Reply = Box<dyn Fn(&InterviewRequest) -> InterviewReply + Send + Sync>;
 
 fn runtime(dir: &RunDir) -> Runtime {
     let mut options = RunOptions::new(dir.path());
@@ -28,29 +33,32 @@ fn runtime(dir: &RunDir) -> Runtime {
     petri::runtime().options(options)
 }
 
-fn lower(rt: &Runtime, dir: &RunDir, text: &str) -> petri::frontend::Lowered {
+fn lower(rt: &Runtime, dir: &RunDir, text: &str) -> Lowered {
     let path = dir.path().join("wf.fabro");
-    std::fs::write(&path, text).expect("write the workflow");
+    fs::write(&path, text).expect("write the workflow");
     rt.check(&path, None, None, &CompileInputs::new())
         .expect("loads")
 }
 
-/// A test interviewer: answers by node name, in the order the closures say.
+/// A test interviewer: answers by node name.
 struct ByNode {
-    answers: BTreeMap<&'static str, Box<dyn Fn(&InterviewRequest) -> InterviewReply + Send + Sync>>,
+    answers: BTreeMap<&'static str, Reply>,
     seen:    Mutex<Vec<InterviewRequest>>,
-    /// Hold the reply to this node until the other node was seen.
+    /// Hold the reply to the first node until the second was asked.
     after:   Option<(&'static str, &'static str)>,
 }
 
 #[async_trait::async_trait]
 impl Interviewer for ByNode {
     async fn reply(&self, request: InterviewRequest, cancel: CancellationToken) -> InterviewReply {
-        self.seen.lock().expect("not poisoned").push(request.clone());
+        self.seen
+            .lock()
+            .expect("not poisoned")
+            .push(request.clone());
         if let Some((held, until)) = self.after
             && request.node == held
         {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 if self
                     .seen
@@ -62,10 +70,10 @@ impl Interviewer for ByNode {
                     break;
                 }
                 tokio::select! {
-                    () = tokio::time::sleep(Duration::from_millis(5)) => {},
+                    () = sleep(Duration::from_millis(5)) => {},
                     () = cancel.cancelled() => return InterviewReply::Cancelled,
                 }
-                assert!(tokio::time::Instant::now() < deadline, "`{until}` never asked");
+                assert!(Instant::now() < deadline, "`{until}` never asked");
             }
         }
         match self.answers.get(request.node.as_str()) {
@@ -80,7 +88,7 @@ impl Interviewer for ByNode {
 
 async fn run(
     rt: &Runtime,
-    lowered: petri::frontend::Lowered,
+    lowered: Lowered,
     interviewer: Arc<dyn Interviewer>,
 ) -> (driver::ExecutionReport, InterviewReceipt) {
     let dispatcher = InterviewDispatcher::new(interviewer);
@@ -130,12 +138,15 @@ async fn parallel_gates_are_answered_out_of_order_and_each_answer_lands_on_its_o
     let dir = RunDir::new("interview-parallel");
     let rt = runtime(&dir);
     let lowered = lower(&rt, &dir, TWO_GATES);
-    let mut answers: BTreeMap<
-        &'static str,
-        Box<dyn Fn(&InterviewRequest) -> InterviewReply + Send + Sync>,
-    > = BTreeMap::new();
-    answers.insert("a", Box::new(|_| InterviewReply::Answered(Answer::choice("N"))));
-    answers.insert("b", Box::new(|_| InterviewReply::Answered(Answer::choice("Y"))));
+    let mut answers: BTreeMap<&'static str, Reply> = BTreeMap::new();
+    answers.insert(
+        "a",
+        Box::new(|_| InterviewReply::Answered(Answer::choice("N"))),
+    );
+    answers.insert(
+        "b",
+        Box::new(|_| InterviewReply::Answered(Answer::choice("Y"))),
+    );
     let interviewer = Arc::new(ByNode {
         answers,
         seen: Mutex::new(Vec::new()),
@@ -143,7 +154,12 @@ async fn parallel_gates_are_answered_out_of_order_and_each_answer_lands_on_its_o
         after: Some(("a", "b")),
     });
     let (report, receipt) = run(&rt, lowered, interviewer.clone()).await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let ran: Vec<_> = report
         .state
         .history()
@@ -182,10 +198,7 @@ async fn a_sensitive_answer_is_registered_first_and_recorded_only_as_its_referen
     let dir = RunDir::new("interview-sensitive");
     let rt = runtime(&dir);
     let lowered = lower(&rt, &dir, SENSITIVE_GATE);
-    let mut answers: BTreeMap<
-        &'static str,
-        Box<dyn Fn(&InterviewRequest) -> InterviewReply + Send + Sync>,
-    > = BTreeMap::new();
+    let mut answers: BTreeMap<&'static str, Reply> = BTreeMap::new();
     answers.insert(
         "gate",
         Box::new(|_| InterviewReply::Answered(Answer::text("hunter2-secret-value"))),
@@ -196,18 +209,29 @@ async fn a_sensitive_answer_is_registered_first_and_recorded_only_as_its_referen
         after: None,
     });
     let (report, receipt) = run(&rt, lowered, interviewer).await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     assert!(receipt.is_clean(), "{:?}", receipt.errors);
     let record = &receipt.questions[0];
     assert!(record.sensitive);
     let ReplyRecord::Answered { text, .. } = &record.reply else {
         panic!("answered: {:?}", record.reply);
     };
-    assert_eq!(*text, Some(json!({ "$secret": format!("answer:{}", record.question) })));
+    assert_eq!(
+        *text,
+        Some(json!({ "$secret": format!("answer:{}", record.question) }))
+    );
     let rendered = serde_json::to_string(&receipt).expect("encodes");
     assert!(!rendered.contains("hunter2"), "{rendered}");
     let log = serde_json::to_string(&report.state.log).expect("encodes");
-    assert!(!log.contains("hunter2"), "the plaintext never enters the log");
+    assert!(
+        !log.contains("hunter2"),
+        "the plaintext never enters the log"
+    );
     let context = serde_json::to_string(report.state.run_context().kv.as_ref()).expect("encodes");
     assert!(!context.contains("hunter2"), "{context}");
 }
@@ -243,7 +267,10 @@ async fn an_interviewer_failure_fails_the_gate_closed_and_reaches_the_receipt() 
         "{:?}",
         receipt.errors
     );
-    assert!(matches!(receipt.questions[0].reply, ReplyRecord::Failed { .. }));
+    assert!(matches!(
+        receipt.questions[0].reply,
+        ReplyRecord::Failed { .. }
+    ));
     assert_eq!(receipt.questions[0].delivery, Delivery::Delivered);
     let ran: Vec<_> = report
         .state
@@ -254,44 +281,49 @@ async fn an_interviewer_failure_fails_the_gate_closed_and_reaches_the_receipt() 
     assert!(!ran.contains(&"yes") && !ran.contains(&"no"), "{ran:?}");
 }
 
+/// Never answers; keeps the cancel token so the test can see it fire.
+struct Silent(Arc<Mutex<Option<CancellationToken>>>);
+
+#[async_trait::async_trait]
+impl Interviewer for Silent {
+    async fn reply(&self, _request: InterviewRequest, cancel: CancellationToken) -> InterviewReply {
+        *self.0.lock().expect("not poisoned") = Some(cancel.clone());
+        cancel.cancelled().await;
+        InterviewReply::Cancelled
+    }
+}
+
 #[tokio::test]
 async fn a_cancelled_run_ends_the_pending_wait_and_shutdown_leaves_no_task_behind() {
     let dir = RunDir::new("interview-cancel");
     let rt = runtime(&dir);
     let lowered = lower(&rt, &dir, ONE_GATE);
-    /// Never answers; keeps the cancel token so the test can see it fire.
-    struct Silent(Arc<Mutex<Option<CancellationToken>>>);
-    #[async_trait::async_trait]
-    impl Interviewer for Silent {
-        async fn reply(
-            &self,
-            _request: InterviewRequest,
-            cancel: CancellationToken,
-        ) -> InterviewReply {
-            *self.0.lock().expect("not poisoned") = Some(cancel.clone());
-            cancel.cancelled().await;
-            InterviewReply::Cancelled
-        }
-    }
-    let token = Arc::new(Mutex::new(None));
+    let token: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
     let dispatcher = InterviewDispatcher::new(Arc::new(Silent(token.clone())));
     let host_run = HostRun::new(lowered.graph.expect("lowers"))
         .with_children(lowered.children)
         .observe(Arc::new(dispatcher.clone()));
+    let asked = token.clone();
     let mut cancel = None;
     let report = host::run_configured(&rt, host_run, |handle, secrets| {
         dispatcher.wire(handle.clone(), secrets);
+        // Cancel once the question has reached the interviewer, the way a
+        // person does at the prompt.
         cancel = Some(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while asked.lock().expect("not poisoned").is_none() {
+                assert!(Instant::now() < deadline, "the gate never asked");
+                sleep(Duration::from_millis(10)).await;
+            }
             handle.cancel_root();
         }));
     })
     .await
     .expect("the run completes");
     if let Some(cancel) = cancel {
-        let _ = cancel.await;
+        cancel.await.expect("the cancel task");
     }
-    let receipt = tokio::time::timeout(Duration::from_secs(10), dispatcher.shutdown())
+    let receipt = timeout(Duration::from_secs(10), dispatcher.shutdown())
         .await
         .expect("shutdown is bounded");
     assert_eq!(report.status, RunStatus::Cancelled);

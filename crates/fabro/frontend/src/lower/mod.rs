@@ -418,10 +418,7 @@ const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
         "artifacts",
         "artifact selection is not implemented yet; the whole retained workspace is the result",
     ),
-    (
-        "prepare",
-        "`[run.prepare]` is not implemented yet",
-    ),
+    ("prepare", "`[run.prepare]` is not implemented yet"),
 ];
 
 fn placeholder(id: ExprId) -> Value {
