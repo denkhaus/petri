@@ -44,6 +44,13 @@ jobs:
         with:
           deploy-key: ${{ secrets.SANDBOX_DRIVER_DEPLOY_KEY }}
 
+      - name: Free disk space for Rust and Docker
+        if: runner.os == 'Linux'
+        run: |
+          # Hosted runner SDKs that this Rust workspace does not use.
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Install locked tools
         uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
