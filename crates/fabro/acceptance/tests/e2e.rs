@@ -2,7 +2,8 @@
 //! executor, replay verified byte for byte by the runtime.
 //!
 //! `gh-list` runs its two command nodes against a stub `gh` on `PATH`;
-//! `hello` runs its agent node against the fake ACP agent Fabro ships; a
+//! `hello` runs its agent node against the fake ACP agent Fabro ships (packaged
+//! under `testdata/`); a
 //! `for_each` fan-out expands over items a real command produced, under stub
 //! agents; a `selection="random"` node routes on a recorded draw. Corpus
 //! tests skip when the corpus is not fetched.
@@ -147,16 +148,14 @@ async fn gh_list_runs_its_commands_against_a_stub_gh() {
     );
 }
 
-fn fake_acp_agent(dir: &Path, root: &Path) -> Option<PathBuf> {
-    let source =
-        fs::read_to_string(root.join("lib/components/fabro-acp/src/test_support.rs")).ok()?;
-    let start = source.find("pub fn fake_acp_agent_script()")?;
-    let body = &source[start..];
-    let open = body.find("r#\"")? + 3;
-    let close = body[open..].find("\"#")? + open;
+/// The fake ACP agent Fabro ships, from the packaged test data.
+fn fake_acp_agent(dir: &Path) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/fake_acp_agent.py");
+    let script =
+        fs::read_to_string(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
     let path = dir.join("fake_acp_agent.py");
-    fs::write(&path, &body[open..close]).expect("write the fake agent");
-    Some(path)
+    fs::write(&path, script).expect("write the fake agent");
+    path
 }
 
 #[tokio::test]
@@ -165,7 +164,7 @@ async fn hello_runs_its_agent_against_the_fake_acp_agent() {
         return;
     };
     let dir = fresh_run_dir("fabro-e2e-hello");
-    let agent = fake_acp_agent(&dir, &root).expect("the fake agent ships with the corpus");
+    let agent = fake_acp_agent(&dir);
     let (outcome, graph) = lower_one(&root, ".fabro/workflows/hello/workflow.fabro");
     let artifact = graph.unwrap_or_else(|| panic!("hello lowers: {:?}", outcome.diagnostics));
     assert!(artifact.children.is_empty());

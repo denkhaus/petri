@@ -10,6 +10,14 @@ inputs:
   lithos-llm-key:
     description: Read-only deploy key for lithoscomputer/lithos-llm
     required: true
+  code-review-key:
+    description: Read-only deploy key for lithoscomputer/code-review, a Fabro black box bundle source
+    required: false
+    default: ""
+  factory-key:
+    description: Read-only deploy key for veniceai/factory, a Fabro black box bundle source
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -19,5 +27,7 @@ runs:
         SANDBOX_DRIVER_DEPLOY_KEY: ${{ inputs.sandbox-driver-key }}
         PEBBLE_DEPLOY_KEY: ${{ inputs.pebble-key }}
         LITHOS_LLM_DEPLOY_KEY: ${{ inputs.lithos-llm-key }}
+        CODE_REVIEW_DEPLOY_KEY: ${{ inputs.code-review-key }}
+        FACTORY_DEPLOY_KEY: ${{ inputs.factory-key }}
         ACTION_PATH: ${{ github.action_path }}
       run: bash "$ACTION_PATH/setup.sh"

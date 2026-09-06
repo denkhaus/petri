@@ -1,12 +1,11 @@
-//! `fabro/agent` against the fake ACP agent Fabro ships
-//! (`fabro-acp/src/test_support.rs` in the corpus checkout): initialize,
+//! `fabro/agent` against the fake ACP agent Fabro ships, packaged as test
+//! data in `crates/fabro/acceptance/testdata/fake_acp_agent.py`: initialize,
 //! session, one prompt turn, the response text captured, a routing directive
-//! read, permission requests answered, cancellation honoured. Skips when the
-//! corpus is not fetched.
+//! read, permission requests answered, cancellation honoured.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{env, fs};
 
 use fabro_steps::register;
 use frontend_fabro::load;
@@ -19,31 +18,13 @@ use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
 use tokio::time;
 
-fn corpus_script() -> Option<String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../corpus/fabro/lib/components/fabro-acp/src/test_support.rs");
-    let text = fs::read_to_string(path).ok()?;
-    let start = text.find("pub fn fake_acp_agent_script()")?;
-    let body = &text[start..];
-    let open = body.find("r#\"")? + 3;
-    let close = body[open..].find("\"#")? + open;
-    Some(body[open..close].to_string())
-}
-
-/// The fake agent, written where a run can execute it. `None` skips.
-#[expect(
-    clippy::print_stderr,
-    reason = "a skipped test says why on the runner's stderr"
-)]
+/// The fake agent, copied from the packaged test data to where a run can
+/// execute it.
 fn fake_agent(dir: &RunDir) -> Option<PathBuf> {
-    let Some(script) = corpus_script() else {
-        assert!(
-            !env::var("PETRI_REQUIRE_FABRO_CORPUS").is_ok_and(|v| !v.is_empty()),
-            "PETRI_REQUIRE_FABRO_CORPUS is set, but the Fabro corpus is not fetched"
-        );
-        eprintln!("skipping: Fabro corpus not fetched; run scripts/corpus-fetch-fabro.sh");
-        return None;
-    };
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../acceptance/testdata/fake_acp_agent.py");
+    let script =
+        fs::read_to_string(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
     let path = dir.path().join("fake_acp_agent.py");
     fs::write(&path, script).expect("write the fake agent");
     Some(path)

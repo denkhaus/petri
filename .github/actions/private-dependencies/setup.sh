@@ -15,7 +15,8 @@ printf '%s\n' "$SANDBOX_DRIVER_DEPLOY_KEY" > "$credentials/sandbox-driver"
 printf '%s\n' "$PEBBLE_DEPLOY_KEY" > "$credentials/pebble"
 printf '%s\n' "$LITHOS_LLM_DEPLOY_KEY" > "$credentials/lithos-llm"
 : > "$credentials/ssh_config"
-for repository in sandbox-driver pebble lithos-llm; do
+configure() {
+  local owner="$1" repository="$2"
   cat >> "$credentials/ssh_config" <<CONFIG
 Host petri-$repository
   HostName github.com
@@ -27,8 +28,21 @@ Host petri-$repository
   StrictHostKeyChecking yes
   UserKnownHostsFile "$ACTION_PATH/known_hosts"
 CONFIG
-  git config --global "url.ssh://git@petri-$repository/lithoscomputer/$repository.insteadOf" \
-    "ssh://git@github.com/lithoscomputer/$repository"
+  git config --global "url.ssh://git@petri-$repository/$owner/$repository.insteadOf" \
+    "ssh://git@github.com/$owner/$repository"
+}
+for repository in sandbox-driver pebble lithos-llm; do
+  configure lithoscomputer "$repository"
 done
+# The Fabro black box bundle sources (scripts/corpus-fetch-fabro-bundles.sh).
+# Optional: a job that does not fetch bundles leaves these keys empty.
+if [ -n "${CODE_REVIEW_DEPLOY_KEY:-}" ]; then
+  printf '%s\n' "$CODE_REVIEW_DEPLOY_KEY" > "$credentials/code-review"
+  configure lithoscomputer code-review
+fi
+if [ -n "${FACTORY_DEPLOY_KEY:-}" ]; then
+  printf '%s\n' "$FACTORY_DEPLOY_KEY" > "$credentials/factory"
+  configure veniceai factory
+fi
 printf -v ssh_command 'ssh -F %q' "$credentials/ssh_config"
 git config --global core.sshCommand "$ssh_command"
