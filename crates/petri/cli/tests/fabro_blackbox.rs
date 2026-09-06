@@ -16,6 +16,8 @@
 
 mod support;
 
+use std::fs;
+
 use serde_json::{Value, json};
 use support::fabro::{BranchEnvelope, Petri, RunObservation, RunOutput, Scenario};
 
@@ -29,7 +31,7 @@ const FINDING_B: &str = "render escapes the title twice";
 /// The report the pinned helper writes when both findings survive, as Fabro
 /// produced it (`fabro-reference/raw/report.md`).
 fn expected_report() -> String {
-    std::fs::read_to_string(Scenario::source_file(
+    fs::read_to_string(Scenario::source_file(
         SCENARIO,
         "fabro-reference/raw/report.md",
     ))
@@ -40,7 +42,7 @@ fn expected_report() -> String {
 /// normalized capture, without `command.output` (Petri's command output ends
 /// with a newline; the value is compared on its own).
 fn fabro_finder_envelopes() -> Vec<BranchEnvelope> {
-    let text = std::fs::read_to_string(Scenario::source_file(
+    let text = fs::read_to_string(Scenario::source_file(
         SCENARIO,
         "fabro-reference/normalized.json",
     ))
