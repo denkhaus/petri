@@ -5,6 +5,7 @@ mod coordinator;
 mod event;
 pub mod host;
 mod id;
+pub mod inspect;
 mod jsonl;
 mod middleware;
 mod observe;

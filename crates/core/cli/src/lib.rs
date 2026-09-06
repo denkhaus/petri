@@ -16,6 +16,7 @@
 //! has a special case for one format.
 
 mod answer;
+mod inspect;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -230,6 +231,16 @@ enum Command {
         #[command(flatten)]
         runner:       RunnerArgs,
     },
+    /// Reconstruct a run from its run directory's durable files and print
+    /// the result. Read-only: nothing starts, nothing is written.
+    Inspect {
+        /// The run's directory.
+        #[arg(long)]
+        run_dir: PathBuf,
+        /// Print the versioned JSON document instead of a summary.
+        #[arg(long)]
+        json:    bool,
+    },
     /// Sandboxes a run holds on its provider.
     #[command(subcommand)]
     Sandbox(SandboxCommand),
@@ -325,6 +336,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             .await
         }
         Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
+        Command::Inspect { run_dir, json } => inspect::inspect(&run_dir, json),
         Command::Sandbox(SandboxCommand::Prune { run_dir, provider }) => {
             let mut options = RunOptions::new(&run_dir);
             options.sandbox = provider.options();
