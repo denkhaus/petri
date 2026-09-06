@@ -63,7 +63,9 @@ Inputs: `helper` (absolute path to `helper/code_review.py`), `level` (`high`),
 
 Files:
 
-- `raw/events.jsonl`: `fabro events --json` for the scenario run.
+- `raw/events.jsonl`: `fabro events --json` for the scenario run. The
+  absolute working directory was replaced by `<WORKDIR>` after capture; it
+  appears only in the `sandbox.initialized` payload and the worker log.
 - `raw/find-parallel_results.json`, `raw/verify-parallel_results.json`: the
   `parallel_results.json` files `fabro dump` wrote for the two fan-outs.
 - `raw/report.md`: the helper's report as printed by the `report` node.

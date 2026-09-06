@@ -1,5 +1,5 @@
 2026-09-06T16:38:57.920899Z  INFO run{id=01M1VSCQ1K6XFYA967BEHRRQZP}: fabro_sandbox::sandbox: Sandbox ready provider="local" duration_ms=4
-2026-09-06T16:38:57.920971Z  INFO run{id=01M1VSCQ1K6XFYA967BEHRRQZP}: fabro_workflow::event::events: Sandbox initialized working_directory="/private/tmp/claude-501/-Users-bhelmkamp-p-lithoscomputer-petri/7f2bc636-6da5-472d-903a-97ec4268b0f5/scratchpad/fabro-scn/work" provider=local id="local:01M1VSCQ1K6XFYA967BEHRRQZP"
+2026-09-06T16:38:57.920971Z  INFO run{id=01M1VSCQ1K6XFYA967BEHRRQZP}: fabro_workflow::event::events: Sandbox initialized working_directory="<WORKDIR>" provider=local id="local:01M1VSCQ1K6XFYA967BEHRRQZP"
 2026-09-06T16:38:57.922408Z  INFO run{id=01M1VSCQ1K6XFYA967BEHRRQZP}: fabro_workflow::event::events: Workflow run started workflow="ParallelResults" run_id=01M1VSCQ1K6XFYA967BEHRRQZP
 2026-09-06T16:38:57.922430Z  INFO run{id=01M1VSCQ1K6XFYA967BEHRRQZP}: fabro_workflow::event::events: Run running
 2026-09-06T16:38:57.922461Z  INFO run{id=01M1VSCQ1K6XFYA967BEHRRQZP}: fabro_workflow::lifecycle::fidelity: Fidelity resolved node=start fidelity=compact source="default"
