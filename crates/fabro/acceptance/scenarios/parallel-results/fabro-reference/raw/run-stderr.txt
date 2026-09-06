@@ -1,0 +1,27 @@
+    Run: 01M1VSCQ1K6XFYA967BEHRRQZP
+    Sandbox: local (ready in 4ms)
+    ✓ start  0ms
+    ✓ setup  31ms
+    ✓ prepare  69ms
+    ✓ scope  5ms
+    ✓ merge_scope  40ms
+        ✓ finder_a  5ms
+        ✓ finder_b  6ms
+    ✓ Finders  7ms
+    ✓ Gather finder candidates  0ms
+    ✓ merge_find  41ms
+    ✓ Any candidates to verify?  0ms
+        ✓ verifier_a  5ms
+        ✓ verifier_b  9ms
+    ✓ Verify locations  11ms
+    ✓ Gather verdicts  1ms
+    ✓ merge_verify  42ms
+    ✓ tally  42ms
+    ✓ finalize  42ms
+    ✓ report  7ms
+    ✓ exit  0ms
+
+=== Run Result ===
+Run:       01M1VSCQ1K6XFYA967BEHRRQZP
+Status:    SUCCEEDED
+Duration:  0 seconds

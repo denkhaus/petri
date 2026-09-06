@@ -1,0 +1,24 @@
+[
+  {
+    "id": "a",
+    "index": 0,
+    "status": "succeeded",
+    "context_updates": {
+      "command.output": "{\"context_updates\":{\"output.finder\":{\"finding\":\"a\"}}}\n",
+      "output.finder": {
+        "finding": "a"
+      }
+    }
+  },
+  {
+    "id": "b",
+    "index": 1,
+    "status": "succeeded",
+    "context_updates": {
+      "command.output": "{\"context_updates\":{\"output.finder\":{\"finding\":\"b\"}}}\n",
+      "output.finder": {
+        "finding": "b"
+      }
+    }
+  }
+]

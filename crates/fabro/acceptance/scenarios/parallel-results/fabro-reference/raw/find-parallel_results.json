@@ -1,0 +1,38 @@
+[
+  {
+    "id": "finder_a",
+    "index": 0,
+    "status": "succeeded",
+    "context_updates": {
+      "command.output": "{\"context_updates\":{\"output.finder\":{\"candidates\":[{\"file\":\"src/pager.py\",\"line\":12,\"summary\":\"page_count drops the final partial page\",\"failure_scenario\":\"7 items with page size 3 reports 2 pages, so item 7 is unreachable\"}]}}}",
+      "output.finder": {
+        "candidates": [
+          {
+            "file": "src/pager.py",
+            "line": 12,
+            "summary": "page_count drops the final partial page",
+            "failure_scenario": "7 items with page size 3 reports 2 pages, so item 7 is unreachable"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "finder_b",
+    "index": 1,
+    "status": "succeeded",
+    "context_updates": {
+      "command.output": "{\"context_updates\":{\"output.finder\":{\"candidates\":[{\"file\":\"src/render.py\",\"line\":40,\"summary\":\"render escapes the title twice\",\"failure_scenario\":\"a title containing & renders as &amp;amp;\"}]}}}",
+      "output.finder": {
+        "candidates": [
+          {
+            "file": "src/render.py",
+            "line": 40,
+            "summary": "render escapes the title twice",
+            "failure_scenario": "a title containing & renders as &amp;amp;"
+          }
+        ]
+      }
+    }
+  }
+]

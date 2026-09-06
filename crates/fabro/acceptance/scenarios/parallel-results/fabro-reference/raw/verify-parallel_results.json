@@ -1,0 +1,36 @@
+[
+  {
+    "id": "verifier_a",
+    "index": 0,
+    "status": "succeeded",
+    "context_updates": {
+      "command.output": "{\"context_updates\":{\"output.verifier\":{\"verdicts\":[{\"index\":0,\"verdict\":\"CONFIRMED\",\"evidence\":\"page_count uses floor division\"}]}}}",
+      "output.verifier": {
+        "verdicts": [
+          {
+            "index": 0,
+            "verdict": "CONFIRMED",
+            "evidence": "page_count uses floor division"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "verifier_b",
+    "index": 1,
+    "status": "succeeded",
+    "context_updates": {
+      "command.output": "{\"context_updates\":{\"output.verifier\":{\"verdicts\":[{\"index\":0,\"verdict\":\"PLAUSIBLE\",\"evidence\":\"escape is called in two layers\"}]}}}",
+      "output.verifier": {
+        "verdicts": [
+          {
+            "index": 0,
+            "verdict": "PLAUSIBLE",
+            "evidence": "escape is called in two layers"
+          }
+        ]
+      }
+    }
+  }
+]
