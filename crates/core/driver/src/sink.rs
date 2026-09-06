@@ -27,7 +27,9 @@ impl LogSink {
         }
     }
 
-    /// Also write lines to this process's stdout.
+    /// Also write lines to this process's stderr, each prefixed with the
+    /// node instance and firing that produced it, so interleaved output from
+    /// parallel stages stays attributable.
     #[must_use]
     pub(crate) fn with_echo(mut self, echo: bool) -> Self {
         self.echo = echo;
@@ -41,9 +43,9 @@ impl LogSink {
     /// Mask a line and persist it. The masked line is what the caller should
     /// then hand to the core.
     #[expect(
-        clippy::print_stdout,
+        clippy::print_stderr,
         reason = "echoing step output to the user's terminal is the whole point of the \
-                  `echo` option, and the driver has no other stdout path"
+                  `echo` option; stderr keeps it clear of a command's own stdout"
     )]
     pub(crate) async fn record(
         &self,
@@ -64,7 +66,7 @@ impl LogSink {
             );
         }
         if self.echo {
-            println!("{node} | {masked}");
+            eprintln!("[{node}#{firing}] {}", bounded(&masked));
         }
         masked
     }
@@ -91,6 +93,18 @@ impl LogSink {
     /// appended.
     pub(crate) fn mask_value(&self, value: &Value) -> Value {
         self.masker.mask_value(value)
+    }
+}
+
+/// How much of one echoed line reaches the terminal. The log keeps the
+/// whole line; the terminal gets a bounded prefix and a marker.
+const ECHO_LINE_LIMIT: usize = 4096;
+
+/// A line cut to the echo limit at a character boundary.
+fn bounded(line: &str) -> String {
+    match line.char_indices().nth(ECHO_LINE_LIMIT) {
+        Some((end, _)) => format!("{}… [line truncated]", &line[..end]),
+        None => line.to_owned(),
     }
 }
 

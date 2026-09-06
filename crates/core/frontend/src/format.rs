@@ -59,6 +59,19 @@ impl CompileInputs {
 }
 
 /// A workflow format: text in, graph and diagnostics out.
+/// When a host keeps a run's workspaces after the run, as a format declares
+/// it. The host maps this onto its executor's retention policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceRetention {
+    /// Keep every workspace: after success, failure and cancellation.
+    Always,
+    /// Keep a workspace whose run failed; delete a successful run's.
+    #[default]
+    OnFailure,
+    /// Delete every workspace.
+    Never,
+}
+
 pub trait Frontend: Send + Sync {
     /// Short, stable, lower-case and unique: `gha`, `native`. What `--format`
     /// takes.
@@ -80,6 +93,14 @@ pub trait Frontend: Send + Sync {
         files: &dyn FileSource,
         inputs: &CompileInputs,
     ) -> Lowered;
+
+    /// What a standalone host does with a run's workspaces when the user did
+    /// not say. The default keeps a failed run's workspace and deletes a
+    /// successful one's; a format whose result *is* the workspace (Fabro)
+    /// keeps every workspace.
+    fn default_retention(&self) -> WorkspaceRetention {
+        WorkspaceRetention::OnFailure
+    }
 
     /// Run parameters a host owes this format when it has nothing better: fixed
     /// values, so lowering the same file twice yields the identical graph and a
