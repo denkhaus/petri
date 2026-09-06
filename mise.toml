@@ -50,6 +50,12 @@ run = [
   "cargo test --locked --workspace --all-features --doc",
 ]
 
+[tasks."test:fabro:blackbox"]
+description = "Run the Fabro black box scenarios on the shipped petri binary"
+depends = ["plugins:build"]
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
+run = "cargo nextest run --locked -p petri-cli --test fabro_blackbox --no-tests=fail"
+
 [tasks."test:release"]
 description = "Run all Rust tests in release mode"
 depends = ["plugins:build"]
