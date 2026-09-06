@@ -1,29 +1,28 @@
 {
-  "fabro_commit": "775b62b500c957fe319710fe34e6327ae1eb1bbf",
-  "fabro": {
-    "status": "success",
-    "path": [
-      {
-        "node": "start",
-        "outcome": "succeeded"
-      },
-      {
-        "node": "a",
-        "outcome": "failed"
-      },
-      {
-        "node": "recover",
-        "outcome": "succeeded"
-      },
-      {
-        "node": "exit",
-        "outcome": "succeeded"
-      }
-    ],
-    "context": {},
-    "executions": 1
+  "schema_version": 2,
+  "fabro_commit": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
+  "harness": {
+    "source": "fabro binary through the CLI and server API; see crates/fabro/oracle/harness/",
+    "realization": {
+      "a": "agent",
+      "recover": "agent",
+      "b": "agent"
+    }
   },
-  "departure": "deliberate departure: Fabro takes the explicit outcome=failed edge and only promotes an unmatched failure; Petri classifies once at the step boundary, so the failure is a partial success before routing and `b` is taken",
+  "fabro": {
+    "status": "rejected",
+    "rejected_by": "fabro validate",
+    "diagnostics": [
+      {
+        "rule": "on_failure_valid",
+        "severity": "Error",
+        "message": "Node 'a' has invalid on_failure value 'partially_succeed'",
+        "node_id": "a",
+        "fix": "Use one of: route, exit, succeed"
+      }
+    ]
+  },
+  "departure": "deliberate departure: the pinned Fabro's validator rejects on_failure=\"partially_succeed\" (its on_failure_valid rule accepts route, exit, succeed), so Fabro never runs this graph. Petri accepts the spelling as the honest form of Fabro's `succeed`: it classifies once at the step boundary, so the failure is a partial success before routing and `b` is taken. In Fabro's `succeed` form the explicit outcome=failed edge would still be taken; Petri's routing test for the shim covers that difference.",
   "petri": {
     "status": "success",
     "path": [

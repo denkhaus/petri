@@ -1,5 +1,5 @@
 {
   "name": "tier1_condition_lexical_tiebreak",
-  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  beta [prompt=\"x\"]\n  alpha [prompt=\"x\"]\n  start -> a\n  a -> beta [condition=\"outcome=succeeded\"]\n  a -> alpha [condition=\"outcome=succeeded\"]\n  beta -> exit\n  alpha -> exit\n\n}\n",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\"]\n  beta [prompt=\"x\"]\n  alpha [prompt=\"x\"]\n  start -> a\n  a -> beta [condition=\"outcome=succeeded\"]\n  a -> alpha [condition=\"outcome=succeeded\"]\n  a -> exit\n  beta -> exit\n  alpha -> exit\n\n}\n",
   "scripts": {}
 }

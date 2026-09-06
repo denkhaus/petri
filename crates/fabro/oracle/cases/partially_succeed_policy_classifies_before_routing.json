@@ -7,5 +7,5 @@
       "failure_reason": "boom"
     }
   },
-  "departure": "deliberate departure: Fabro takes the explicit outcome=failed edge and only promotes an unmatched failure; Petri classifies once at the step boundary, so the failure is a partial success before routing and `b` is taken"
+  "departure": "deliberate departure: the pinned Fabro's validator rejects on_failure=\"partially_succeed\" (its on_failure_valid rule accepts route, exit, succeed), so Fabro never runs this graph. Petri accepts the spelling as the honest form of Fabro's `succeed`: it classifies once at the step boundary, so the failure is a partial success before routing and `b` is taken. In Fabro's `succeed` form the explicit outcome=failed edge would still be taken; Petri's routing test for the shim covers that difference."
 }
