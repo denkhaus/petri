@@ -6,6 +6,7 @@ mod event;
 pub mod host;
 mod id;
 pub mod inspect;
+pub mod interview;
 mod jsonl;
 mod middleware;
 mod observe;
@@ -28,6 +29,10 @@ pub use event::{
 pub use id::{
     CallSite, ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxAllocationKey,
     SandboxLeaseId,
+};
+pub use interview::{
+    Delivery, InterviewDispatcher, InterviewError, InterviewReceipt, InterviewRecord,
+    InterviewReply, InterviewRequest, Interviewer, RECEIPT_FILE, RECEIPT_VERSION, ReplyRecord,
 };
 pub use middleware::{
     AdmitCall, AdmitNext, DecisionAddress, FoldEvent, Middleware, MiddlewareError,

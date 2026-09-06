@@ -1,16 +1,23 @@
-//! The Fabro black box harness: stage a scenario, run the shipped `petri`
-//! binary on it, and read what the run left behind.
+//! The Fabro black box harness: stage a scenario, start provider twins on
+//! loopback, run the shipped `petri` binary on it in an isolated environment
+//! with a scripted interviewer, and read what the run left behind.
 //!
 //! The harness never lowers a graph, registers a step, or touches engine
 //! state. It invokes public commands and reads their JSON and filesystem
-//! outputs. Later tasks extend it: task 4 adds the twin lifecycle and the
-//! scripted interviewer, task 17 the scenario matrix, task 18 the pinned
+//! outputs. Task 3 added the scenario staging, subprocess control, and run
+//! observation modules; task 4 added the twins, the isolated launcher, and the
+//! interview scripts. Task 17 adds the scenario matrix and task 18 the pinned
 //! Fabro adapter (`crates/fabro/acceptance/scenarios/*/fabro-reference/`
 //! already holds the first capture and its `capture.sh`).
 
+#![allow(dead_code, reason = "each test file uses the subset it needs")]
+
 pub(crate) mod bundle;
+pub(crate) mod interview;
+pub(crate) mod launch;
 pub(crate) mod observe;
 pub(crate) mod subprocess;
+pub(crate) mod twins;
 
 pub(crate) use bundle::Scenario;
 pub(crate) use observe::{BranchEnvelope, RunObservation};

@@ -349,6 +349,29 @@ fn read_input_defaults(
             return;
         }
     };
+    if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
+        for (section, why) in RUN_SECTIONS_IGNORED {
+            if run.contains_key(*section) {
+                diags.warning(
+                    &format!("ignored.workflow_toml.run.{section}"),
+                    Span::file(&path),
+                    format!("`[run.{section}]` in `{path}` is ignored: {why}"),
+                );
+            }
+        }
+        if let Some(model) = run.get("model").and_then(toml::Value::as_table)
+            && model.contains_key("fallbacks")
+        {
+            diags.warning(
+                "ignored.workflow_toml.run.model.fallbacks",
+                Span::file(&path),
+                format!(
+                    "`[run.model.fallbacks]` in `{path}` is ignored: the standalone runner does \
+                     not implement model fallback yet; each node runs on its own model"
+                ),
+            );
+        }
+    }
     let Some(inputs) = value
         .get("run")
         .and_then(|run| run.get("inputs"))
@@ -361,6 +384,42 @@ fn read_input_defaults(
         template.default_input(name, json);
     }
 }
+
+/// `[run.*]` sections of `workflow.toml` the standalone runner reads but does
+/// not act on, each with why. `[run.inputs]` is the one it acts on.
+const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
+    (
+        "environment",
+        "the standalone runner runs every scope on the `--backend` it was given; a named \
+         environment's image and resources are not applied yet",
+    ),
+    (
+        "clone",
+        "the standalone runner does not clone a repository; the workspace is what the run \
+         starts with",
+    ),
+    (
+        "run_branch",
+        "the standalone runner performs no Git operations of its own",
+    ),
+    (
+        "pull_request",
+        "the standalone runner performs no Git operations of its own",
+    ),
+    (
+        "integrations",
+        "platform integrations are supplied by an embedding host, not the standalone runner",
+    ),
+    (
+        "checkpoint",
+        "the standalone runner does not checkpoint the workspace; it retains it instead",
+    ),
+    (
+        "artifacts",
+        "artifact selection is not implemented yet; the whole retained workspace is the result",
+    ),
+    ("prepare", "`[run.prepare]` is not implemented yet"),
+];
 
 fn placeholder(id: ExprId) -> Value {
     json!({ EXPR_PLACEHOLDER_KEY: id.raw() })

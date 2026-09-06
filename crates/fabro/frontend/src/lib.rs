@@ -38,7 +38,9 @@ pub mod template;
 
 use std::path::{Component, Path, PathBuf};
 
-use frontend::{CompileInputs, Diagnostics, FileSource, Frontend, Lowered, NoFiles};
+use frontend::{
+    CompileInputs, Diagnostics, FileSource, Frontend, Lowered, NoFiles, WorkspaceRetention,
+};
 pub use lower::{
     FailurePolicy, Kind, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, Policy, shape_of,
 };
@@ -97,6 +99,13 @@ impl Frontend for Fabro {
         inputs: &CompileInputs,
     ) -> Lowered {
         load(file, text, files, inputs)
+    }
+
+    /// A Fabro run's result is the files its stages produced or changed, so a
+    /// standalone run keeps its workspace after success, failure and
+    /// cancellation; only an explicit `--retain never` deletes it.
+    fn default_retention(&self) -> WorkspaceRetention {
+        WorkspaceRetention::Always
     }
 
     /// The nearest ancestor holding a `.fabro` directory — the bundle root

@@ -15,7 +15,7 @@
 //! run parameters a run would otherwise have to hard-code — so no command here
 //! has a special case for one format.
 
-mod answer;
+pub mod answer;
 mod inspect;
 
 use std::error::Error;
@@ -24,12 +24,16 @@ use std::process::{self, ExitCode};
 use std::sync::Arc;
 use std::{env, fs};
 
-use answer::{Answerer, Mode};
-use clap::{Args, Parser, Subcommand};
+use answer::{AutoApproveInterviewer, ScriptedInterviewer, TerminalInterviewer};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use execution::host::HostRun;
-use execution::{CoordinatorHandle, host, prune as sandbox_prune};
+use execution::{
+    CoordinatorHandle, InterviewDispatcher, InterviewReceipt, Interviewer, LeaseState,
+    RECEIPT_FILE, ResourceStore, host, prune as sandbox_prune,
+};
 use runtime::engine::{self, EventLog};
-use runtime::frontend::{self, CompileInputs, Lowered};
+use runtime::executor::Retention;
+use runtime::frontend::{self, CompileInputs, Lowered, WorkspaceRetention};
 use runtime::ir::{Graph, RunStatus};
 use runtime::{
     DaytonaResources, DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend,
@@ -206,30 +210,40 @@ enum Command {
     /// Run a workflow file to completion.
     Run {
         #[command(flatten)]
-        target:       FileArgs,
+        target:           FileArgs,
         /// Where workspaces, logs and `events.json` go. Defaults to a fresh
         /// directory under the system temp dir, printed at start.
         #[arg(long)]
-        run_dir:      Option<PathBuf>,
+        run_dir:          Option<PathBuf>,
         /// Do not echo step output.
         #[arg(long)]
-        quiet:        bool,
+        quiet:            bool,
         /// Answer a step's question — a human gate — from the terminal:
         /// the question is printed and one line is read from stdin.
-        #[arg(long, conflicts_with = "auto_approve")]
-        interactive:  bool,
+        #[arg(long, conflicts_with_all = ["auto_approve", "interview_script"])]
+        interactive:      bool,
         /// Answer every step's question with its default choice.
-        #[arg(long)]
-        auto_approve: bool,
+        #[arg(long, conflicts_with = "interview_script")]
+        auto_approve:     bool,
+        /// Answer every step's question from a JSON interview script, and
+        /// fail the run when a question matches no entry or a required entry
+        /// goes unused. See `cli::answer` for the format.
+        #[arg(long, value_name = "FILE")]
+        interview_script: Option<PathBuf>,
+        /// When to keep the run's workspaces: always, on-failure, or never.
+        /// Defaults to what the workflow's format declares (Fabro: always;
+        /// other formats: on-failure).
+        #[arg(long, value_name = "POLICY")]
+        retain:           Option<Retain>,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
         /// choice.
         #[arg(long)]
-        dry_run:      bool,
+        dry_run:          bool,
         #[command(flatten)]
-        provider:     ProviderArgs,
+        provider:         ProviderArgs,
         #[command(flatten)]
-        runner:       RunnerArgs,
+        runner:           RunnerArgs,
     },
     /// Reconstruct a run from its run directory's durable files and print
     /// the result. Read-only: nothing starts, nothing is written.
@@ -273,6 +287,44 @@ enum SandboxCommand {
     },
 }
 
+/// `--retain`: when a run's workspaces survive it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Retain {
+    /// Keep every workspace: after success, failure and cancellation.
+    Always,
+    /// Keep a failed run's workspaces; delete a successful run's.
+    OnFailure,
+    /// Delete every workspace.
+    Never,
+}
+
+impl From<Retain> for Retention {
+    fn from(retain: Retain) -> Self {
+        match retain {
+            Retain::Always => Self::Always,
+            Retain::OnFailure => Self::OnFailure,
+            Retain::Never => Self::Never,
+        }
+    }
+}
+
+impl From<WorkspaceRetention> for Retain {
+    fn from(retention: WorkspaceRetention) -> Self {
+        match retention {
+            WorkspaceRetention::Always => Self::Always,
+            WorkspaceRetention::OnFailure => Self::OnFailure,
+            WorkspaceRetention::Never => Self::Never,
+        }
+    }
+}
+
+/// How `petri run` answers questions.
+enum Answers {
+    Interactive,
+    AutoApprove,
+    Scripted(PathBuf),
+}
+
 /// Which runtime a command wants from the factory it is handed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -301,14 +353,29 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             quiet,
             interactive,
             auto_approve,
+            interview_script,
+            retain,
             dry_run,
             provider,
             runner,
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
+            let runtime_mode = if dry_run {
+                RuntimeMode::DryRun
+            } else {
+                RuntimeMode::Real
+            };
+            let rt = make(runtime_mode);
             let mut options = RunOptions::new(&run_dir);
             options.echo = !quiet;
+            options.retention = retain
+                .or_else(|| {
+                    rt.frontend_for(&target.file, target.format.as_deref())
+                        .ok()
+                        .map(|frontend| frontend.default_retention().into())
+                })
+                .map_or(options.retention, Retention::from);
             options.sandbox = provider.options();
             options.sandbox.runner_images = runner.images.into_iter().collect();
             options.sandbox.daytona_kind = runner.daytona_kind;
@@ -317,23 +384,13 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 memory_mb: runner.daytona_memory_mb,
                 disk_mb:   runner.daytona_disk_mb,
             };
-            let mode = match (interactive, auto_approve) {
-                (true, _) => Some(Mode::Interactive),
-                (_, true) => Some(Mode::AutoApprove),
+            let answers = match (interactive, auto_approve, interview_script) {
+                (_, _, Some(script)) => Some(Answers::Scripted(script)),
+                (true, _, None) => Some(Answers::Interactive),
+                (_, true, None) => Some(Answers::AutoApprove),
                 _ => None,
             };
-            let runtime_mode = if dry_run {
-                RuntimeMode::DryRun
-            } else {
-                RuntimeMode::Real
-            };
-            run(
-                &make(runtime_mode).options(options),
-                &target,
-                &run_dir,
-                mode,
-            )
-            .await
+            Box::pin(run(&rt.options(options), &target, &run_dir, answers)).await
         }
         Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
         Command::Inspect { run_dir, json } => inspect::inspect(&run_dir, json),
@@ -505,7 +562,30 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
     skip_all,
     fields(workflow_file = %target.file.display(), status = Empty)
 )]
-async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path, answers: Option<Mode>) -> ExitCode {
+async fn run(
+    rt: &Runtime,
+    target: &FileArgs,
+    run_dir: &Path,
+    answers: Option<Answers>,
+) -> ExitCode {
+    let interviewer: Option<Arc<dyn Interviewer>> = match answers {
+        None => None,
+        Some(Answers::AutoApprove) => Some(Arc::new(AutoApproveInterviewer)),
+        Some(Answers::Interactive) => match TerminalInterviewer::start() {
+            Ok(terminal) => Some(Arc::new(terminal)),
+            Err(error) => {
+                eprintln!("error: could not read the terminal: {error}");
+                return ExitCode::from(2);
+            }
+        },
+        Some(Answers::Scripted(path)) => match ScriptedInterviewer::load(&path) {
+            Ok(script) => Some(Arc::new(script)),
+            Err(error) => {
+                eprintln!("error: {}", error_chain(&error));
+                return ExitCode::from(2);
+            }
+        },
+    };
     let lowered = match lowered_graph(rt, target, false, false) {
         Ok(lowered) => lowered,
         Err(code) => return code,
@@ -522,19 +602,28 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path, answers: Option<Mo
     eprintln!("run dir: {}", run_dir.display());
     let mut ctrl_c = None;
     let mut host_run = HostRun::new(graph).with_children(lowered.children);
-    let answerer = answers.map(|mode| Arc::new(Answerer::new(mode)));
-    if let Some(answerer) = &answerer {
-        host_run = host_run.observe(answerer.clone());
+    let dispatcher = interviewer.map(InterviewDispatcher::new);
+    if let Some(dispatcher) = &dispatcher {
+        host_run = host_run.observe(Arc::new(dispatcher.clone()));
     }
     let outcome = host::run_configured(rt, host_run, |handle, secrets| {
-        if let Some(answerer) = &answerer {
-            answerer.wire(handle.clone(), secrets);
+        if let Some(dispatcher) = &dispatcher {
+            dispatcher.wire(handle.clone(), secrets);
         }
         ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(handle)));
     })
     .await;
     if let Some(task) = ctrl_c {
         task.abort();
+    }
+    // The receipt is written whatever the run did: a failed run's interviews
+    // are evidence too.
+    let receipt = match &dispatcher {
+        Some(dispatcher) => Some(dispatcher.shutdown().await),
+        None => None,
+    };
+    if let Some(receipt) = &receipt {
+        write_receipt(run_dir, receipt);
     }
     let report = match outcome {
         Ok(report) => report,
@@ -559,13 +648,92 @@ async fn run(rt: &Runtime, target: &FileArgs, run_dir: &Path, answers: Option<Mo
     for record in report.state.history() {
         eprintln!("  {} {}", record.outcome.status.tag(), record.name);
     }
+    report_workspaces(run_dir, rt.run_options().retention);
     let status = report.status;
     tracing::Span::current().record("status", display(status));
     eprintln!("run: {status}");
+    if let Some(receipt) = &receipt
+        && !receipt.is_clean()
+    {
+        // The engine's status stands as persisted; the interview is what
+        // failed, and the exit code says so.
+        eprintln!(
+            "interview verification failed: {} problem(s); see {}",
+            receipt.errors.len(),
+            run_dir.join(RECEIPT_FILE).display()
+        );
+        for error in &receipt.errors {
+            eprintln!("  {error}");
+        }
+        return ExitCode::from(4);
+    }
     if status == RunStatus::Success {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Persist the interview receipt beside the run.
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI reports where the receipt went, and a failure to write it, on stderr"
+)]
+fn write_receipt(run_dir: &Path, receipt: &InterviewReceipt) {
+    let path = run_dir.join(RECEIPT_FILE);
+    match serde_json::to_vec_pretty(receipt) {
+        Ok(bytes) => {
+            if let Err(error) = fs::write(&path, bytes) {
+                eprintln!("warning: could not write {}: {error}", path.display());
+            } else if !receipt.questions.is_empty() || !receipt.errors.is_empty() {
+                eprintln!("interviews: {}", path.display());
+            }
+        }
+        Err(error) => eprintln!("warning: could not encode the interview receipt: {error}"),
+    }
+}
+
+/// Say where the retained workspaces are, or how to reach them. A host
+/// workspace is a directory under the run dir; a container's lives on its
+/// provider and is reached through the sandbox, or deleted with
+/// `petri sandbox prune`.
+#[expect(
+    clippy::print_stderr,
+    reason = "the retained workspace path is the run's result for the user, on stderr"
+)]
+fn report_workspaces(run_dir: &Path, retention: Retention) {
+    let store = match ResourceStore::load(run_dir.join(execution::RESOURCES_DIR)) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::debug!(error = %error, "no sandbox resource records to report");
+            return;
+        }
+    };
+    for record in store.records() {
+        match record.state {
+            LeaseState::Deleted => {}
+            LeaseState::Allocating | LeaseState::Live | LeaseState::Stopped => {
+                if record.provider == execution::HOST_PROVIDER {
+                    let path = run_dir
+                        .join("scopes")
+                        .join(record.workspace.as_str())
+                        .join("work");
+                    eprintln!("workspace: {}", path.display());
+                } else {
+                    eprintln!(
+                        "workspace: {} on {} sandbox {} (delete with `petri sandbox prune \
+                         --run-dir {}`)",
+                        record.workspace,
+                        record.provider,
+                        record.resource_id.as_deref().unwrap_or("?"),
+                        run_dir.display()
+                    );
+                }
+            }
+        }
+    }
+    if retention == Retention::Never {
+        tracing::debug!("workspaces deleted by retention policy");
     }
 }
 

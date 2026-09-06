@@ -126,6 +126,8 @@ crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
+crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the terminal smoke run
+crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
@@ -876,6 +878,97 @@ Still v2 in the design document: content caching, remote scope placement, and
 rejects old versions cleanly, `EngineState` serializes whole, `StepKind::fingerprint`
 defaults to `None`, and `Control` is `#[non_exhaustive]` (`Kill` was its first
 addition). Replay has landed; `engine::verify_replay` is the determinism canary.
+
+## The terminal path
+
+`petri run <workflow>` is the standalone runner: one invocation loads,
+validates and executes one root workflow with no server, database or UI. It
+prints the run dir first, then every step's output on stderr as
+`[<node>#<firing>] <line>` so interleaved output from parallel stages stays
+attributable (each line is masked and bounded; `--quiet` turns the echo off),
+then one `<status> <node>` line per finished node, the retained workspace
+paths, and `run: <status>`. The exit code is 0 for success, 1 for a failed or
+cancelled run, 2 for a usage error, 3 for a host error, and 4 when the run
+finished but its interview did not go as scripted.
+
+**Answering questions.** A `fabro/human` gate, and a native agent's question
+tool, ask through the core `Question` event; the host's `Interviewer` answers
+(`execution::Interviewer`, an open trait a product host implements too). The
+CLI ships three, one per option, and they exclude one another:
+
+- `--interactive` prints each question on stderr and reads one line from
+  stdin. Questions from parallel stages are serialized; a `yes_no` or
+  `confirmation` gate takes Enter as its default; a `multi_select` gate takes
+  comma-separated keys; a `freeform` gate takes text. EOF or three invalid
+  answers fail the gate closed.
+- `--auto-approve` takes the default choice, or empty text.
+- `--interview-script <file>` answers from a versioned JSON script and fails
+  the run when a question matches no entry, matches several, exhausts an
+  entry's `count`, or a required entry goes unused. It never falls back to the
+  terminal or to auto-approval.
+
+An interview script:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ship-it",
+      "match": { "node": "gate", "kind": "yes_no", "options": ["Y", "N"] },
+      "count": 1,
+      "action": { "kind": "choice", "value": "Y" }
+    }
+  ]
+}
+```
+
+`match` fields (all optional, all must hold): `node`, `invocation_path` (`/`
+for the root, `/<slot>` per nested call), `occurrence` (which distinct question
+of that node, 1-based), `ask` (which time the same question was asked, after a
+rejected answer), `kind`, `text`, `text_contains`, `options` (the offered keys
+in order), `default`, `freeform`, `sensitive`. Actions: `choice` (`value`),
+`choices` (`values`, for `multi_select`), `text` (`value`), `negative` (the
+`N`/`no` option), `invalid` (`value`, sent as a choice the step must reject),
+`cancel`, `withhold` (no reply until the question is cancelled). `delay_ms`
+waits before acting; `required: false` lets an entry go unused.
+
+**The receipt.** Every run with an interviewer writes
+`<run-dir>/interviews.json` (`execution::InterviewReceipt`, version 1): one
+record per question with its invocation, execution, firing, attempt, node,
+occurrence, ask, question id, kind, text, offered option keys, the reply
+(`answered` with `choice`/`choices`/`text`, `cancelled`, or `failed`), and
+how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
+`errors` list; and under `script`, a scripted interviewer's per-entry
+`consumed`/`remaining` counts. A sensitive answer appears only as its
+`{"$secret": "answer:<id>"}` reference. A non-empty `errors` list is exit
+code 4, whatever the engine status; the persisted run is not rewritten.
+
+**Retention.** `--retain always|on-failure|never` decides what happens to the
+run's workspaces at teardown. The default is the workflow format's: Fabro
+keeps every workspace (its result is the files), other formats keep a failed
+run's and delete a successful run's. The run reports each retained workspace:
+a host workspace as its path under the run dir, a container's as its sandbox
+and the `petri sandbox prune --run-dir <dir>` command that deletes it.
+
+**Provider configuration.** Native agents (`backend="api"`) use the
+distribution's `lithos-llm` client (`petri::llm_client`). Credentials are the
+provider library's conventional variables (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, and so on), read per request. `PETRI_LLM_CATALOG` names
+one or more catalog TOML files (path-separator delimited) layered over the
+built-in catalog, so a test or a gateway deployment redirects a provider:
+
+```toml
+schema_version = 1
+[providers.openai]
+base_url = "http://127.0.0.1:3000"
+```
+
+`PETRI_LLM_PROVIDERS` (comma-separated provider ids) narrows which providers
+may be routed to at all; a model on any other provider is unavailable. An
+unreadable or invalid layer leaves the client unbuilt and every native agent
+node failing with `pebble_unconfigured`, rather than reaching a live
+endpoint.
 
 ## Local run layout
 

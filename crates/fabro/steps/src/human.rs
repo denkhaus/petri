@@ -134,31 +134,62 @@ impl Step for HumanStep {
                     .await;
                 continue;
             }
+            if answer.cancelled {
+                // The host ended the interview: fail closed, as a cancel does.
+                return Stage::failed(
+                    "human interaction interrupted before an answer was provided",
+                    "interrupted",
+                    config.on_failure,
+                )
+                .into_outcome(&config.node);
+            }
             let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
-            let chosen = answer
-                .choice
-                .as_deref()
-                .and_then(|c| config.choice_for(c))
-                .or_else(|| {
-                    answer
-                        .text
-                        .as_ref()
-                        .and_then(Value::as_str)
-                        .and_then(|t| config.choice_for(t))
-                });
-            if let Some(choice) = chosen {
+            // A multi-select answer names several choices; as Fabro does, the
+            // first routes and every selected key and label is recorded.
+            let selected: Vec<&Choice> = if answer.choices.is_empty() {
+                answer
+                    .choice
+                    .as_deref()
+                    .and_then(|c| config.choice_for(c))
+                    .or_else(|| {
+                        answer
+                            .text
+                            .as_ref()
+                            .and_then(Value::as_str)
+                            .and_then(|t| config.choice_for(t))
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                answer
+                    .choices
+                    .iter()
+                    .filter_map(|c| config.choice_for(c))
+                    .collect()
+            };
+            if let Some(choice) = selected.first() {
                 let label = strip_accelerator(&choice.label).to_string();
                 stage.output.insert("preferred_label".into(), json!(label));
                 stage
                     .output
                     .insert("suggested_next_ids".into(), json!([choice.to]));
-                stage.output.insert("choice".into(), json!(choice.key));
+                let keys = selected
+                    .iter()
+                    .map(|c| c.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let labels = selected
+                    .iter()
+                    .map(|c| c.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                stage.output.insert("choice".into(), json!(keys));
                 stage
                     .context_updates
-                    .insert(SmolStr::new("human.gate.selected"), json!(choice.key));
+                    .insert(SmolStr::new("human.gate.selected"), json!(keys));
                 stage
                     .context_updates
-                    .insert(SmolStr::new("human.gate.label"), json!(choice.label));
+                    .insert(SmolStr::new("human.gate.label"), json!(labels));
             } else if let (Some(target), Some(text)) = (&config.freeform_target, &answer.text) {
                 // Free text: the value (or its `$secret` reference) as
                 // written, never resolved here.

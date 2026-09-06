@@ -38,7 +38,8 @@ pub struct RunOptions {
     /// cleanup is still running.
     pub cleanup_grace:       Duration,
     pub retention:           Retention,
-    /// Echo step output to this process's stdout.
+    /// Echo step output to this process's stderr, prefixed by node and
+    /// firing.
     pub echo:                bool,
     /// Replay the log after the run and fail on any divergence. The determinism
     /// canary; on by default.
