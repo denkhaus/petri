@@ -76,6 +76,19 @@ fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>)
     }
 }
 
+/// Retained bytes are deliberately omitted, but delivery to the line pumps
+/// must be complete before Petri can report the command's exit status.
+fn streaming_exit_status(streaming: &ExecStreamingResult) -> Result<ExitStatus, String> {
+    if streaming.stdout_capture.truncated || streaming.stderr_capture.truncated {
+        return Err("sandbox command output delivery was incomplete".to_owned());
+    }
+    Ok(exit_status(
+        streaming.result.termination,
+        streaming.result.exit_code,
+        streaming.result.signal,
+    ))
+}
+
 /// What one streamed job runs: a step's exec, or an action's container.
 enum Job {
     Exec(ExecSpec),
@@ -152,11 +165,7 @@ fn spawn_streamed(sandbox: Arc<dyn Sandbox>, job: Job, stdin: bool) -> SandboxPr
             let _ = writer.shutdown().await;
         }
         let status: Result<ExitStatus, String> = match outcome {
-            Ok(streaming) => Ok(exit_status(
-                streaming.result.termination,
-                streaming.result.exit_code,
-                streaming.result.signal,
-            )),
+            Ok(streaming) => streaming_exit_status(&streaming),
             Err(error) => Err(error.to_string()),
         };
         let _ = status_tx.send(Some(status));
@@ -428,5 +437,55 @@ impl ContainerRunner for OneShotRunner {
             Job::OneShot(one_shot),
             false,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sandbox_driver::{CaptureStats, ExecResult};
+
+    use super::*;
+
+    fn completed_command() -> ExecStreamingResult {
+        ExecStreamingResult::new(ExecResult::new(
+            Termination::Exited,
+            Some(0),
+            Duration::ZERO,
+        ))
+    }
+
+    #[test]
+    fn incomplete_stdout_or_stderr_fails_even_when_the_command_exits_zero() {
+        for stream in [OutputStream::Stdout, OutputStream::Stderr] {
+            let mut result = completed_command();
+            match stream {
+                OutputStream::Stdout => result.stdout_capture.truncated = true,
+                OutputStream::Stderr => result.stderr_capture.truncated = true,
+            }
+            let error = streaming_exit_status(&result).expect_err("incomplete delivery");
+            assert_eq!(error, "sandbox command output delivery was incomplete");
+        }
+    }
+
+    #[test]
+    fn output_delivered_without_a_retained_copy_keeps_the_exit_status() {
+        let mut result = completed_command();
+        let mut stats = CaptureStats::default();
+        stats.observed_bytes = 4096;
+        stats.omitted_bytes = 4096;
+        result.stdout_capture = stats;
+        result.stderr_capture = stats;
+        result.result.exit_code = Some(3);
+        let status = streaming_exit_status(&result).expect("complete delivery");
+        assert_eq!(status.code, Some(3));
+        assert_eq!(status.signal, None);
+    }
+
+    #[test]
+    fn complete_delivery_preserves_the_observed_signal() {
+        let mut result = completed_command();
+        result.result.signal = Some(Sig::Term.number());
+        let status = streaming_exit_status(&result).expect("complete delivery");
+        assert_eq!(status.signal, Some(Sig::Term.number()));
     }
 }
