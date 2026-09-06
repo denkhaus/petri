@@ -224,7 +224,7 @@ fn real_metadata() -> Value {
     serde_json::from_slice(&output.stdout).expect("cargo metadata is JSON")
 }
 
-fn package(name: &str, id: &str, source: Option<&str>, manifest: &str, deps: Value) -> Value {
+fn package(name: &str, id: &str, source: Option<&str>, manifest: &str, deps: &Value) -> Value {
     json!({
         "name": name,
         "id": id,
@@ -234,7 +234,7 @@ fn package(name: &str, id: &str, source: Option<&str>, manifest: &str, deps: Val
     })
 }
 
-fn node(id: &str, deps: Value) -> Value {
+fn node(id: &str, deps: &Value) -> Value {
     json!({ "id": id, "deps": deps })
 }
 
@@ -245,7 +245,7 @@ fn edge(name: &str, pkg: &str, kind: Option<&str>) -> Value {
 const PETRI_ROOT: &str = "/repo";
 const REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-fn petri_package(name: &str, deps: Value) -> Value {
+fn petri_package(name: &str, deps: &Value) -> Value {
     package(
         name,
         &format!("path+file://{PETRI_ROOT}/crates/x/{name}#{name}@0.1.0"),
@@ -265,7 +265,7 @@ fn a_direct_path_dependency_on_a_corpus_crate_is_caught() {
     let corpus = format!("{PETRI_ROOT}/crates/fabro/corpus/fabro/lib/components/fabro-workflow");
     let metadata = json!({
         "packages": [
-            petri_package("petri-fabro-acceptance", json!([
+            petri_package("petri-fabro-acceptance", &json!([
                 { "name": "fabro-workflow", "source": null, "req": "*", "kind": null, "path": corpus }
             ])),
             package(
@@ -273,11 +273,11 @@ fn a_direct_path_dependency_on_a_corpus_crate_is_caught() {
                 &format!("path+file://{corpus}#fabro-workflow@0.347.0"),
                 None,
                 &format!("{corpus}/Cargo.toml"),
-                json!([]),
+                &json!([]),
             ),
         ],
         "resolve": { "nodes": [
-            node(&petri_id("petri-fabro-acceptance"), json!([
+            node(&petri_id("petri-fabro-acceptance"), &json!([
                 edge("fabro_workflow", &format!("path+file://{corpus}#fabro-workflow@0.347.0"), None)
             ])),
         ] },
@@ -310,7 +310,7 @@ fn a_git_dependency_on_the_fabro_repository_is_caught() {
     let git_id = "git+https://github.com/fabro-sh/fabro?rev=abc#fabro-types@0.347.0";
     let metadata = json!({
         "packages": [
-            petri_package("petri-fabro-steps", json!([
+            petri_package("petri-fabro-steps", &json!([
                 { "name": "fabro-types", "source": "git+https://github.com/fabro-sh/fabro?rev=abc", "req": "*", "kind": null }
             ])),
             package(
@@ -318,11 +318,11 @@ fn a_git_dependency_on_the_fabro_repository_is_caught() {
                 git_id,
                 Some("git+https://github.com/fabro-sh/fabro?rev=abc#abc"),
                 "/home/u/.cargo/git/checkouts/fabro-1/abc/lib/foundation/fabro-types/Cargo.toml",
-                json!([]),
+                &json!([]),
             ),
         ],
         "resolve": { "nodes": [
-            node(&petri_id("petri-fabro-steps"), json!([edge("fabro_types", git_id, None)])),
+            node(&petri_id("petri-fabro-steps"), &json!([edge("fabro_types", git_id, None)])),
         ] },
     });
     let findings = forbidden_fabro_packages(&metadata);
@@ -348,18 +348,18 @@ fn a_transitive_dependency_is_caught_through_the_resolve_graph() {
     let fabro_id = format!("{REGISTRY}#fabro-core@0.347.0");
     let metadata = json!({
         "packages": [
-            petri_package("petri-x", json!([
+            petri_package("petri-x", &json!([
                 { "name": "some-crate", "source": REGISTRY, "req": "^1", "kind": null }
             ])),
-            package("some-crate", &some_id, Some(REGISTRY), "/home/u/.cargo/registry/src/some-crate-1.0.0/Cargo.toml", json!([
+            package("some-crate", &some_id, Some(REGISTRY), "/home/u/.cargo/registry/src/some-crate-1.0.0/Cargo.toml", &json!([
                 { "name": "fabro-core", "source": REGISTRY, "req": "*", "kind": null }
             ])),
-            package("fabro-core", &fabro_id, Some(REGISTRY), "/home/u/.cargo/registry/src/fabro-core-0.347.0/Cargo.toml", json!([])),
+            package("fabro-core", &fabro_id, Some(REGISTRY), "/home/u/.cargo/registry/src/fabro-core-0.347.0/Cargo.toml", &json!([])),
         ],
         "resolve": { "nodes": [
-            node(&petri_id("petri-x"), json!([edge("some_crate", &some_id, None)])),
-            node(&some_id, json!([edge("fabro_core", &fabro_id, None)])),
-            node(&fabro_id, json!([])),
+            node(&petri_id("petri-x"), &json!([edge("some_crate", &some_id, None)])),
+            node(&some_id, &json!([edge("fabro_core", &fabro_id, None)])),
+            node(&fabro_id, &json!([])),
         ] },
     });
     let findings = forbidden_fabro_packages(&metadata);
@@ -382,15 +382,15 @@ fn dev_and_build_dependencies_are_caught() {
     let support_id = format!("{REGISTRY}#fabro-build-support@0.347.0");
     let metadata = json!({
         "packages": [
-            petri_package("petri-y", json!([
+            petri_package("petri-y", &json!([
                 { "name": "fabro-acp", "source": REGISTRY, "req": "*", "kind": "dev" },
                 { "name": "fabro-build-support", "source": REGISTRY, "req": "*", "kind": "build" }
             ])),
-            package("fabro-acp", &acp_id, Some(REGISTRY), "/r/fabro-acp/Cargo.toml", json!([])),
-            package("fabro-build-support", &support_id, Some(REGISTRY), "/r/fabro-build-support/Cargo.toml", json!([])),
+            package("fabro-acp", &acp_id, Some(REGISTRY), "/r/fabro-acp/Cargo.toml", &json!([])),
+            package("fabro-build-support", &support_id, Some(REGISTRY), "/r/fabro-build-support/Cargo.toml", &json!([])),
         ],
         "resolve": { "nodes": [
-            node(&petri_id("petri-y"), json!([
+            node(&petri_id("petri-y"), &json!([
                 edge("fabro_acp", &acp_id, Some("dev")),
                 edge("fabro_build_support", &support_id, Some("build")),
             ])),
@@ -426,29 +426,29 @@ fn petri_fabro_crates_and_other_dependencies_are_allowed() {
         "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a56#sandbox-driver@0.1.0";
     let metadata = json!({
         "packages": [
-            petri_package("petri-fabro-steps", json!([
+            petri_package("petri-fabro-steps", &json!([
                 { "name": "pebble-coding-agent", "source": "git+ssh://git@github.com/lithoscomputer/pebble.git?rev=a2f", "req": "*", "kind": null },
                 { "name": "frontend-fabro", "source": null, "req": "*", "kind": null, "path": format!("{PETRI_ROOT}/crates/x/petri-frontend-fabro") }
             ])),
-            petri_package("petri-frontend-fabro", json!([])),
+            petri_package("petri-frontend-fabro", &json!([])),
             // A renamed dependency: cargo records the package name and the
             // alias separately.
-            petri_package("petri-fabro-acceptance", json!([
+            petri_package("petri-fabro-acceptance", &json!([
                 { "name": "petri-fabro-steps", "rename": "fabro-steps", "source": null, "req": "*", "kind": "dev", "path": format!("{PETRI_ROOT}/crates/x/petri-fabro-steps") }
             ])),
-            package("pebble-coding-agent", pebble_id, Some("git+ssh://git@github.com/lithoscomputer/pebble.git?rev=a2f#a2f"), "/home/u/.cargo/git/checkouts/pebble/a2f/Cargo.toml", json!([])),
-            package("sandbox-driver", driver_id, Some("git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a56#a56"), "/home/u/.cargo/git/checkouts/sandbox-driver/a56/Cargo.toml", json!([])),
+            package("pebble-coding-agent", pebble_id, Some("git+ssh://git@github.com/lithoscomputer/pebble.git?rev=a2f#a2f"), "/home/u/.cargo/git/checkouts/pebble/a2f/Cargo.toml", &json!([])),
+            package("sandbox-driver", driver_id, Some("git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a56#a56"), "/home/u/.cargo/git/checkouts/sandbox-driver/a56/Cargo.toml", &json!([])),
         ],
         "resolve": { "nodes": [
-            node(&petri_id("petri-fabro-steps"), json!([
+            node(&petri_id("petri-fabro-steps"), &json!([
                 edge("pebble_coding_agent", pebble_id, None),
                 edge("frontend_fabro", &petri_id("petri-frontend-fabro"), None),
             ])),
-            node(&petri_id("petri-fabro-acceptance"), json!([
+            node(&petri_id("petri-fabro-acceptance"), &json!([
                 edge("fabro_steps", &petri_id("petri-fabro-steps"), Some("dev")),
             ])),
-            node(pebble_id, json!([])),
-            node(driver_id, json!([])),
+            node(pebble_id, &json!([])),
+            node(driver_id, &json!([])),
         ] },
     });
     assert_eq!(forbidden_fabro_packages(&metadata), Vec::<String>::new());
