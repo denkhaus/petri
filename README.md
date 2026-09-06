@@ -21,7 +21,7 @@ crates/github/objects    the ObjectService: cache, artifacts, and tool-cache sto
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
 crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, nested workflow, and the stub registry
-crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps
+crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
 ```
@@ -128,7 +128,22 @@ crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` 
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
+crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
+crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
+
+### The Fabro compatibility contract
+
+`crates/fabro/acceptance/CONTRACT.md` freezes the Fabro reference revision
+(`crates/fabro/corpus-pin.txt`), the required workflow bundles
+(`crates/fabro/acceptance/bundles.lock.json`, materialized and verified by
+`scripts/corpus-fetch-fabro-bundles.sh`), the feature matrix for every
+construct and `workflow.toml` option those bundles use, and the accepted
+differences. Petri production code never links or launches Fabro. The parity
+harness in `crates/fabro/oracle/harness/` builds the pinned `fabro` binary from
+the fetched corpus and drives it as a subprocess through its CLI and server
+API; `scripts/oracle-regenerate.sh` uses it to refresh the oracle fixtures, and
+the routing test rejects a fixture from any other Fabro revision.
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over

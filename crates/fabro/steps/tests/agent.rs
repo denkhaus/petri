@@ -1,12 +1,11 @@
-//! `fabro/agent` against the fake ACP agent Fabro ships
-//! (`fabro-acp/src/test_support.rs` in the corpus checkout): initialize,
+//! `fabro/agent` against the fake ACP agent Fabro ships, packaged as test
+//! data in `crates/fabro/acceptance/testdata/fake_acp_agent.py`: initialize,
 //! session, one prompt turn, the response text captured, a routing directive
-//! read, permission requests answered, cancellation honoured. Skips when the
-//! corpus is not fetched.
+//! read, permission requests answered, cancellation honoured.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{env, fs};
 
 use fabro_steps::register;
 use frontend_fabro::load;
@@ -19,34 +18,16 @@ use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
 use tokio::time;
 
-fn corpus_script() -> Option<String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../corpus/fabro/lib/components/fabro-acp/src/test_support.rs");
-    let text = fs::read_to_string(path).ok()?;
-    let start = text.find("pub fn fake_acp_agent_script()")?;
-    let body = &text[start..];
-    let open = body.find("r#\"")? + 3;
-    let close = body[open..].find("\"#")? + open;
-    Some(body[open..close].to_string())
-}
-
-/// The fake agent, written where a run can execute it. `None` skips.
-#[expect(
-    clippy::print_stderr,
-    reason = "a skipped test says why on the runner's stderr"
-)]
-fn fake_agent(dir: &RunDir) -> Option<PathBuf> {
-    let Some(script) = corpus_script() else {
-        assert!(
-            !env::var("PETRI_REQUIRE_FABRO_CORPUS").is_ok_and(|v| !v.is_empty()),
-            "PETRI_REQUIRE_FABRO_CORPUS is set, but the Fabro corpus is not fetched"
-        );
-        eprintln!("skipping: Fabro corpus not fetched; run scripts/corpus-fetch-fabro.sh");
-        return None;
-    };
+/// The fake agent, copied from the packaged test data to where a run can
+/// execute it.
+fn fake_agent(dir: &RunDir) -> PathBuf {
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../acceptance/testdata/fake_acp_agent.py");
+    let script =
+        fs::read_to_string(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
     let path = dir.path().join("fake_acp_agent.py");
     fs::write(&path, script).expect("write the fake agent");
-    Some(path)
+    path
 }
 
 fn dot(body: &str) -> String {
@@ -107,9 +88,7 @@ async fn run(dir: &RunDir, graph: Graph) -> ExecutionReport {
 #[tokio::test]
 async fn a_turn_captures_the_agent_text() {
     let dir = RunDir::new("fabro-agent-turn");
-    let Some(agent) = fake_agent(&dir) else {
-        return;
-    };
+    let agent = fake_agent(&dir);
     let graph = lower(&agent_dot(&agent, ""));
     let report = run(&dir, graph).await;
     assert_eq!(
@@ -130,9 +109,7 @@ async fn a_turn_captures_the_agent_text() {
 #[tokio::test]
 async fn a_routing_directive_in_the_response_steers_the_edge() {
     let dir = RunDir::new("fabro-agent-directive");
-    let Some(agent) = fake_agent(&dir) else {
-        return;
-    };
+    let agent = fake_agent(&dir);
     // The fake agent echoes `steered:<prompt>` in `steer` mode on its second
     // prompt; the plain mode says a fixed text. Use a permission request to
     // prove the client answers requests mid-turn.
@@ -167,9 +144,7 @@ async fn a_routing_directive_in_the_response_steers_the_edge() {
 #[tokio::test]
 async fn an_agent_that_exits_early_fails_the_stage_routably() {
     let dir = RunDir::new("fabro-agent-early-exit");
-    let Some(agent) = fake_agent(&dir) else {
-        return;
-    };
+    let agent = fake_agent(&dir);
     let graph = lower(&dot(&format!(
         r#"
         graph [goal="G", acp.command="python3 {}"]
@@ -212,9 +187,7 @@ async fn an_unconfigured_agent_fails_with_a_specific_class() {
 #[tokio::test]
 async fn cancelling_a_turn_sends_session_cancel_and_stops_the_agent() {
     let dir = RunDir::new("fabro-agent-cancel");
-    let Some(agent) = fake_agent(&dir) else {
-        return;
-    };
+    let agent = fake_agent(&dir);
     let record = dir.path().join("cancel.txt");
     let graph = lower(&agent_dot(&agent, ""));
     let graph = with_env(graph, &[

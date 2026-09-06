@@ -4,6 +4,9 @@ Petri runs Fabro workflows: Graphviz DOT files (`*.fabro`, `*.dot`) in the
 subset Fabro accepts. This page says what each Fabro construct becomes in the
 engine's IR, and what is refused. Fabro's own documentation defines the
 language; `.ai/plans/done/fabro-frontend-phase-one.md` records the decisions.
+The reference Fabro revision, the required workflow bundles, the feature
+matrix, and the accepted differences are frozen in
+[`crates/fabro/acceptance/CONTRACT.md`](acceptance/CONTRACT.md).
 
 The rule throughout: **every construct lowers onto what the core has**. No
 engine semantics were added for Fabro. A construct that cannot lower is a
@@ -124,11 +127,18 @@ specific one wins:
   (`unsupported.on_failure.succeed`, `unsupported.auto_status`); rewrite the
   workflow to `partially_succeed` first.
 
-**Deliberate departure.** Fabro promotes a failed outcome only when no explicit
-route matches, so an `outcome=failed` edge on a `succeed` node is still taken.
-Petri classifies once, at the step boundary, before routing sees the outcome;
-an `outcome=failed` edge on a `partially_succeed` node is unreachable and gets
-the `fabro.unreachable_failure_edge` lint. Two behaviors want two nodes.
+**Deliberate departure (tracked defect, owned by task 7 of
+`.ai/plans/fabro-unified-task-list.md`).** Fabro promotes a failed outcome only
+when no explicit route matches, so an `outcome=failed` edge on a `succeed` node
+is still taken. Petri classifies once, at the step boundary, before routing sees
+the outcome; an `outcome=failed` edge on a `partially_succeed` node is
+unreachable and gets the `fabro.unreachable_failure_edge` lint. The pinned
+Fabro's validator also refuses the `partially_succeed` spelling itself (its
+`on_failure_valid` rule accepts `route`, `exit`, `succeed`), so the oracle
+case `partially_succeed_policy_classifies_before_routing` records a Fabro
+rejection beside Petri's result. The compatibility contract in
+`crates/fabro/acceptance/CONTRACT.md` lists this and the parallel-context
+departure as the two differences to retire.
 
 ### Goal gates and loops
 
