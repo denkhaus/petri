@@ -1418,6 +1418,7 @@ dependencies = [
  "smol_str",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

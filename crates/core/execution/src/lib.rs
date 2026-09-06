@@ -5,6 +5,7 @@ mod coordinator;
 mod event;
 pub mod host;
 mod id;
+pub mod interview;
 mod jsonl;
 mod middleware;
 mod observe;
@@ -23,6 +24,10 @@ pub use coordinator::{
 pub use event::{
     COORDINATOR_FORMAT_VERSION, CoordinatorEvent, CoordinatorRecord, InvocationResult,
     InvocationStatus, SandboxBinding, SandboxMode, SecretBinding, SecretBindings,
+};
+pub use interview::{
+    Delivery, InterviewDispatcher, InterviewError, InterviewReceipt, InterviewRecord,
+    InterviewReply, InterviewRequest, Interviewer, RECEIPT_FILE, RECEIPT_VERSION, ReplyRecord,
 };
 pub use id::{
     CallSite, ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxAllocationKey,

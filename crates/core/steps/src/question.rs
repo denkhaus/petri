@@ -79,6 +79,11 @@ pub struct Answer {
     /// A chosen option, by key or by label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice:   Option<String>,
+    /// Several chosen options, by key or by label: a `multi_select`
+    /// question's answer. A step that routes on one choice takes the first;
+    /// what it records of the rest is its own contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices:  Vec<String>,
     /// Free text, or a `{"$secret": "answer:<id>"}` reference to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text:     Option<Value>,
@@ -89,6 +94,19 @@ impl Answer {
         Self {
             question: None,
             choice:   Some(key.to_string()),
+            choices:  Vec::new(),
+            text:     None,
+        }
+    }
+
+    /// Several choices at once, for a `multi_select` question. The first is
+    /// also the `choice`, so a step that knows one choice still routes.
+    pub fn choices(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let choices: Vec<String> = keys.into_iter().map(Into::into).collect();
+        Self {
+            question: None,
+            choice:   choices.first().cloned(),
+            choices,
             text:     None,
         }
     }
@@ -97,6 +115,7 @@ impl Answer {
         Self {
             question: None,
             choice:   None,
+            choices:  Vec::new(),
             text:     Some(text.into()),
         }
     }
@@ -122,6 +141,7 @@ impl Answer {
             Value::String(s) => Some(Self {
                 question: None,
                 choice:   Some(s.clone()),
+                choices:  Vec::new(),
                 text:     Some(Value::String(s.clone())),
             }),
             Value::Object(_) => serde_json::from_value(value.clone()).ok(),
@@ -171,6 +191,7 @@ mod tests {
             Some(Answer {
                 question: None,
                 choice:   Some("no".into()),
+                choices:  Vec::new(),
                 text:     Some(json!("no")),
             })
         );
