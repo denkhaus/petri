@@ -1,7 +1,6 @@
 //! Native sessions against a scripted model and real Petri execution scopes.
 
 use std::collections::BTreeMap;
-use std::future::pending;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,11 +10,10 @@ use fabro_steps::pebble::environment::PebbleEnvironment;
 use fabro_steps::register;
 use ir::{CancelScopeId, Graph, RunStatus, ScopeId};
 use lithos_llm::types::ReasoningEffort;
-use pebble_coding_agent::environment::{Environment, EnvironmentErrorKind, ExecRequest};
+use pebble_coding_agent::environment::{Environment, ExecRequest};
 use pebble_coding_agent::test_support::{
     EnvironmentContract, ScriptedCall, scripted_client, text_response, tool_call_response,
 };
-use pebble_coding_agent::tools::{OutputStream, ToolArtifact, ToolError, ToolOutputWriter};
 use runtime::driver::{DeliverDisposition, EventObserver, ExecutionReport};
 use runtime::engine::{EngineState, Event, EventRecord};
 use runtime::executor::sandbox::HostExecutor;
@@ -27,7 +25,7 @@ use smol_str::SmolStr;
 use testkit::{RunDir, output_of};
 use tokio::fs;
 use tokio::process::Command;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -214,47 +212,9 @@ async fn cancellation_settles_the_prompt_and_preserves_usage() {
     assert_eq!(metrics(&report)["pebble.prompts"], 1);
 }
 
-#[derive(Default)]
-struct RecordedOutput {
-    stdout: Mutex<Vec<u8>>,
-    stderr: Mutex<Vec<u8>>,
-}
-
-#[async_trait::async_trait]
-impl ToolOutputWriter for RecordedOutput {
-    async fn append(&self, stream: OutputStream, bytes: &[u8]) -> Result<(), ToolError> {
-        match stream {
-            OutputStream::Stdout => self.stdout.lock().await.extend_from_slice(bytes),
-            OutputStream::Stderr => self.stderr.lock().await.extend_from_slice(bytes),
-            OutputStream::Result => panic!("process output has only two streams"),
-        }
-        Ok(())
-    }
-    async fn finish(&self) -> Result<Vec<ToolArtifact>, ToolError> {
-        panic!("the caller owns finish")
-    }
-}
-
-struct BrokenOutput {
-    pending: bool,
-}
-#[async_trait::async_trait]
-impl ToolOutputWriter for BrokenOutput {
-    async fn append(&self, _: OutputStream, _: &[u8]) -> Result<(), ToolError> {
-        if self.pending {
-            pending().await
-        } else {
-            Err(ToolError::execution("storage failed"))
-        }
-    }
-    async fn finish(&self) -> Result<Vec<ToolArtifact>, ToolError> {
-        panic!("the caller owns finish")
-    }
-}
-
 #[tokio::test]
-async fn full_output_preserves_bytes_and_storage_failure_stops_the_process() {
-    let dir = RunDir::new("pebble-output-storage");
+async fn oversized_process_output_keeps_bounded_head_and_tail() {
+    let dir = RunDir::new("pebble-output-capture");
     let executor = HostExecutor::new(dir.path());
     let scope = ScopeSpec::new(ScopeId::new(1), "pebble").with_grace(Duration::from_millis(50));
     let handle = executor
@@ -268,53 +228,16 @@ async fn full_output_preserves_bytes_and_storage_failure_stops_the_process() {
     )
     .await
     .expect("prepare");
-    let writer = Arc::new(RecordedOutput::default());
-    let outcome = environment.exec(ExecRequest { output_bytes_cap: Some(12), output_writer: Some(writer.clone()), ..ExecRequest::new("printf 'HEAD\\r\\n'; printf '%0200000d' 0; printf '\\000\\377TAIL'; printf 'err\\r\\n\\000\\377' >&2") }).await.expect("capture");
+    let outcome = environment.exec(ExecRequest { output_bytes_cap: Some(12), ..ExecRequest::new("printf 'HEAD\\r\\n'; printf '%0200000d' 0; printf '\\000\\377TAIL'; printf 'err\\r\\n\\000\\377' >&2") }).await.expect("capture");
     assert_eq!(outcome.stdout_capture.observed_bytes, 200_012);
     assert_eq!(outcome.stdout_capture.retained_bytes, 12);
-    let stdout = writer.stdout.lock().await;
-    assert_eq!(stdout.len(), 200_012);
-    assert!(stdout.starts_with(b"HEAD\r\n"));
-    assert!(stdout.ends_with(b"\0\xffTAIL"));
-    assert_eq!(*writer.stderr.lock().await, b"err\r\n\0\xff");
-    drop(stdout);
-    for pending in [false, true] {
-        let error = timeout(
-            Duration::from_secs(10),
-            environment.exec(ExecRequest {
-                timeout_ms: Some(200),
-                output_writer: Some(Arc::new(BrokenOutput { pending })),
-                ..ExecRequest::new("echo $$ > worker.pid; printf ready; while :; do :; done")
-            }),
-        )
-        .await
-        .expect("capture settles")
-        .expect_err("incomplete output must fail");
-        assert_eq!(error.kind(), EnvironmentErrorKind::Io);
-        let check = environment
-            .exec(ExecRequest::new(
-                "kill -0 \"$(cat worker.pid)\" 2>/dev/null",
-            ))
-            .await
-            .expect("probe");
-        assert!(
-            !check.result.is_success(),
-            "the failed writer's process was stopped"
-        );
-    }
-    // The process can exit before a writer settles; its exit must not disable
-    // the request's timeout while the last buffered chunk is still pending.
-    timeout(
-        Duration::from_secs(10),
-        environment.exec(ExecRequest {
-            timeout_ms: Some(200),
-            output_writer: Some(Arc::new(BrokenOutput { pending: true })),
-            ..ExecRequest::new("printf ready")
-        }),
-    )
-    .await
-    .expect("tail timeout settles")
-    .expect_err("unfinished storage");
+    assert_eq!(outcome.stdout_capture.omitted_bytes, 200_000);
+    assert_eq!(outcome.result.stdout, "HEAD\r\n\0\u{fffd}TAIL");
+    assert_eq!(outcome.result.stderr, "err\r\n\0\u{fffd}");
+    assert_eq!(outcome.stderr_capture.observed_bytes, 7);
+    assert_eq!(outcome.stderr_capture.retained_bytes, 7);
+    assert_eq!(outcome.stderr_capture.omitted_bytes, 0);
+    assert!(outcome.result.is_success(), "truncation is not a failure");
     assert!(
         executor
             .release(handle, ScopeOutcome::Succeeded)

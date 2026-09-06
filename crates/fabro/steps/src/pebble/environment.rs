@@ -14,7 +14,7 @@ use pebble_coding_agent::environment::{
     ExecRequest, ExecResult, GrepOptions,
 };
 use pebble_coding_agent::events::CommandTermination;
-use pebble_coding_agent::tools::{OutputCaptureStats, OutputStream};
+use pebble_coding_agent::tools::OutputCaptureStats;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -273,36 +273,17 @@ impl Environment for PebbleEnvironment {
             ));
         };
         let mut drains = JoinSet::new();
-        let failed = CancellationToken::new();
-        let drain_failed = failed.clone();
-        let stop_writes = CancellationToken::new();
-        let drain_stop = stop_writes.clone();
-        let writer = request.output_writer;
         let cap = request.output_bytes_cap;
         drains.spawn(async move {
             let mut stdout = Capture::new(cap);
             let mut stderr = Capture::new(cap);
-            let mut write_error = None;
             while let Some(chunk) = bytes.recv().await {
-                let (capture, stream) = match chunk.stream {
-                    LogStream::Stdout => (&mut stdout, OutputStream::Stdout),
-                    LogStream::Stderr => (&mut stderr, OutputStream::Stderr),
-                };
-                if let Some(writer) = &writer && write_error.is_none() {
-                    let result = tokio::select! {
-                        biased;
-                        () = drain_stop.cancelled() => Err(error(EnvironmentErrorKind::Io, "Output capture cancelled before all bytes were stored")),
-                        result = timeout(Duration::from_secs(5), writer.append(stream, &chunk.bytes)) => match result {
-                            Ok(Ok(())) => Ok(()),
-                            Ok(Err(cause)) => Err(error(EnvironmentErrorKind::Io, format!("Output capture failed: {cause}"))),
-                            Err(_) => Err(error(EnvironmentErrorKind::Io, "Output capture write timed out")),
-                        },
-                    };
-                    if let Err(cause) = result { write_error = Some(cause); drain_failed.cancel(); }
+                match chunk.stream {
+                    LogStream::Stdout => stdout.push(&chunk.bytes),
+                    LogStream::Stderr => stderr.push(&chunk.bytes),
                 }
-                capture.push(&chunk.bytes);
             }
-            match write_error { Some(error) => Err(error), None => Ok((stdout, stderr)) }
+            (stdout, stderr)
         });
         let (mut termination, mut status) = tokio::select! {
             biased;
@@ -310,11 +291,9 @@ impl Environment for PebbleEnvironment {
             () = self.cancel.cancelled() => (CommandTermination::Cancelled, None),
             () = cancel.cancelled() => (CommandTermination::Cancelled, None),
             () = &mut deadline, if request.timeout_ms.is_some() => (CommandTermination::TimedOut, None),
-            () = failed.cancelled() => (CommandTermination::Cancelled, None),
             status = process.wait() => (CommandTermination::Exited, Some(status.map_err(io_error)?)),
         };
         if status.is_none() {
-            stop_writes.cancel();
             stop(process.as_mut(), self.env.grace(), &self.kill).await?;
         }
         let capture = if status.is_some() {
@@ -330,7 +309,6 @@ impl Environment for PebbleEnvironment {
                 } => {
                     if termination != CommandTermination::TimedOut { termination = CommandTermination::Cancelled; }
                     status = None;
-                    stop_writes.cancel();
                     stop(process.as_mut(), self.env.grace(), &self.kill).await?;
                     drains.join_next().await
                 }
@@ -345,7 +323,7 @@ impl Environment for PebbleEnvironment {
                     EnvironmentErrorKind::Io,
                     format!("Output capture task failed: {cause}"),
                 )
-            })??;
+            })?;
         let (stdout, stdout_capture) = stdout.finish();
         let (stderr, stderr_capture) = stderr.finish();
         Ok(ExecOutcome {

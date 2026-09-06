@@ -47,7 +47,7 @@ the temporary credentials when its job finishes.
 Native Pebble tests use a scripted model and real execution scopes. They need
 no provider credentials. `crates/fabro/steps/tests/pebble.rs` covers tool
 execution, output repair, model selection, accounting, steering, cancellation,
-raw output storage, and the Pebble environment contract on Host and Docker.
+bounded output capture, and the Pebble environment contract on Host and Docker.
 
 ## Common tasks
 

@@ -222,7 +222,8 @@ otherwise. Searches fail explicitly when their captured output exceeds 4 MiB.
 The backend reads workspace `AGENTS.md` and discovers workspace skills in
 `.agents/skills` and `.pebble/skills`. Tools have full access within the scope's
 policy. Petri's sandbox owns process isolation. This integration does not
-install interactive approvals, subagents, or a full-output artifact store.
+install interactive approvals or subagents. Tool output is bounded by Pebble's
+capture and preview limits. Omitted bytes are discarded and cannot be retrieved.
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
 follow-up. Cancellation settles the active prompt and shuts down its session.

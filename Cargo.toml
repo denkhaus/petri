@@ -68,7 +68,7 @@ absolute_paths = "warn"
 
 [workspace.dependencies]
 # Native agent runtime, pinned with the prompt-report and session-scope APIs.
-pebble-coding-agent = { git = "ssh://git@github.com/lithoscomputer/pebble.git", rev = "7f12fdec920c2893da18a0eeee5b69f0e8365124" }
+pebble-coding-agent = { git = "ssh://git@github.com/lithoscomputer/pebble.git", rev = "a2fcdda6a1de13509cf82b459c347bde4e4db943" }
 lithos-llm = { git = "ssh://git@github.com/lithoscomputer/lithos-llm", rev = "4aab27d7d42e7f762a8b6a3871c3db86816b0721", default-features = false }
 globset = "0.4"
 ir = { package = "petri-ir", path = "crates/core/ir" }
