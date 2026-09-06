@@ -408,6 +408,12 @@ fn inspect_prints_a_summary_without_json() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.starts_with("run: success\n"), "{text}");
     assert!(text.contains("  success a gen 0 attempt 1\n"), "{text}");
+    assert!(
+        !text.contains("interviews:"),
+        "a run without an interviewer has no receipt line: {text}"
+    );
+    let (_, document) = inspect(&run_dir);
+    assert_eq!(document["interviews"], Value::Null);
 }
 
 #[test]
@@ -478,6 +484,21 @@ fn inspect_shows_a_sensitive_answer_as_a_secret_reference_only() {
             .as_str()
             .is_some_and(|name| name.starts_with("answer:gate#")),
         "{answer:#}"
+    );
+    // The interview receipt rides the same document, with the answer as its
+    // reference only.
+    let receipt = &document["interviews"];
+    assert_eq!(receipt["version"], Value::from(1), "{receipt:#}");
+    assert_eq!(receipt["errors"], Value::Array(Vec::new()), "{receipt:#}");
+    let question = &receipt["questions"][0];
+    assert_eq!(question["node"], Value::from("gate"));
+    assert_eq!(question["sensitive"], Value::from(true));
+    assert_eq!(question["delivery"], Value::from("delivered"));
+    assert!(
+        question["reply"]["text"]["$secret"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("answer:gate#")),
+        "{question:#}"
     );
     for file in snapshot(&run_dir).values() {
         assert!(

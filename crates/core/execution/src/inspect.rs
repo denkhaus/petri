@@ -41,6 +41,7 @@ use serde::Serialize;
 use smol_str::SmolStr;
 
 use crate::host::EVENTS_FILE;
+use crate::interview::{InterviewReceipt, RECEIPT_FILE};
 use crate::store::{execution_relative_dir, verify_graph_registry};
 use crate::{
     COORDINATOR_FILE, COORDINATOR_FORMAT_VERSION, CoordinatorState, EngineLogError, ExecutionId,
@@ -70,6 +71,14 @@ pub enum InspectError {
     },
     #[error("`{path}` is not run metadata: {source}")]
     BadMetadata {
+        path:   PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// `interviews.json` exists but is not an interview receipt this build
+    /// reads.
+    #[error("`{path}` is not an interview receipt: {source}")]
+    BadReceipt {
         path:   PathBuf,
         #[source]
         source: serde_json::Error,
@@ -127,6 +136,10 @@ pub struct RunInspection {
     /// Every execution, in id order, which is declaration order across the
     /// whole run.
     pub executions: Vec<ExecutionInspection>,
+    /// The interview receipt the host wrote beside the run
+    /// (`interviews.json`), or `null` when the run had no interviewer.
+    /// Sensitive answers appear only as `$secret` references.
+    pub interviews: Option<InterviewReceipt>,
 }
 
 /// Which execution speaks for the root invocation.
@@ -388,9 +401,10 @@ pub struct LiveInspection {
 /// missing or unreadable `run.json` or `coordinator.jsonl`, an unsupported
 /// format version, a complete record that does not decode, a coordinator
 /// log that does not replay, a registered graph that is missing or does not
-/// match its digest, an engine log with an undecodable record or version, or
-/// an engine log that diverges from its replay. An interrupted run is not an
-/// error; see [`RunInspection::incomplete`].
+/// match its digest, an engine log with an undecodable record or version, an
+/// engine log that diverges from its replay, or an `interviews.json` that is
+/// not a receipt. An interrupted run is not an error; see
+/// [`RunInspection::incomplete`].
 pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
     let metadata_path = run_dir.join(RUN_FILE);
     let bytes = fs::read(&metadata_path).map_err(|source| InspectError::Io {
@@ -451,6 +465,7 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
         .invocations
         .get(&root_id)
         .ok_or(StateError::UnknownInvocation(root_id))?;
+    let interviews = read_receipt(run_dir)?;
     Ok(RunInspection {
         inspect_format_version: INSPECT_FORMAT_VERSION,
         coordinator_format_version: metadata.format_version,
@@ -467,7 +482,29 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
         graphs: state.graphs.iter().copied().collect(),
         invocations,
         executions,
+        interviews,
     })
+}
+
+/// The interview receipt beside the run, when the host wrote one. A run
+/// without an interviewer writes none, so a missing file is not an error; a
+/// file that is not a receipt is.
+fn read_receipt(run_dir: &Path) -> Result<Option<InterviewReceipt>, InspectError> {
+    let path = run_dir.join(RECEIPT_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(InspectError::Io {
+                action: "read",
+                path,
+                source,
+            });
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| InspectError::BadReceipt { path, source })
 }
 
 /// Nested invocations keyed by the execution their call site lies in.

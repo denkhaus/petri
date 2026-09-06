@@ -6,13 +6,15 @@
 //! state. It invokes public commands and reads their JSON and filesystem
 //! outputs. Task 3 added the scenario staging, subprocess control, and run
 //! observation modules; task 4 added the twins, the isolated launcher, and the
-//! interview scripts. Task 17 adds the scenario matrix and task 18 the pinned
-//! Fabro adapter (`crates/fabro/acceptance/scenarios/*/fabro-reference/`
+//! interview scripts; task 5 routed every read of a finished run through
+//! `petri inspect --json`. Task 17 adds the scenario matrix and task 18 the
+//! pinned Fabro adapter (`crates/fabro/acceptance/scenarios/*/fabro-reference/`
 //! already holds the first capture and its `capture.sh`).
 
 #![allow(dead_code, reason = "each test file uses the subset it needs")]
 
 pub(crate) mod bundle;
+pub(crate) mod inspect;
 pub(crate) mod interview;
 pub(crate) mod launch;
 pub(crate) mod observe;

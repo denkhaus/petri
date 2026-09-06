@@ -1,6 +1,5 @@
 //! Subprocess control for the shipped `petri` binary.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -10,7 +9,6 @@ pub(crate) struct Petri {
     workflow: PathBuf,
     run_dir:  PathBuf,
     inputs:   Vec<(String, String)>,
-    args:     Vec<OsString>,
     timeout:  Duration,
 }
 
@@ -26,7 +24,6 @@ impl Petri {
             workflow: workflow.to_path_buf(),
             run_dir:  run_dir.to_path_buf(),
             inputs:   Vec::new(),
-            args:     Vec::new(),
             timeout:  Duration::from_secs(120),
         }
     }
@@ -35,14 +32,6 @@ impl Petri {
     #[must_use]
     pub(crate) fn input(mut self, key: &str, value: impl Into<String>) -> Self {
         self.inputs.push((key.to_string(), value.into()));
-        self
-    }
-
-    /// Any further `petri run` argument.
-    #[must_use]
-    #[expect(dead_code, reason = "task 4 passes launch and interviewer options")]
-    pub(crate) fn arg(mut self, arg: impl Into<OsString>) -> Self {
-        self.args.push(arg.into());
         self
     }
 
@@ -59,7 +48,7 @@ impl Petri {
         for (key, value) in &self.inputs {
             command.arg("--input").arg(format!("{key}={value}"));
         }
-        command.args(&self.args).arg(&self.workflow);
+        command.arg(&self.workflow);
         let output = run_with_timeout(command, self.timeout);
         RunOutput {
             run_dir: self.run_dir,

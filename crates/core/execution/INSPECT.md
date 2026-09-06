@@ -15,6 +15,8 @@ The command reads only these files:
 - `graphs/<digest>.json`: every registered graph, byte-exact.
 - `invocations/<invocation>/executions/<execution>/events.jsonl`: one engine
   log per execution.
+- `interviews.json`: the interview receipt the standalone host writes when
+  the run had an interviewer (`execution::InterviewReceipt`). Optional.
 
 It decodes them under the store's own rules and replays each engine log
 through `engine::replay`. The loaded log must be a byte-prefix of the log
@@ -38,7 +40,8 @@ after the source workflow file has changed or been deleted.
   `coordinator.jsonl`, an unsupported format version, a complete record that
   does not decode, a coordinator log that does not replay, a registered graph
   that is missing or does not match its digest, an engine log with an
-  undecodable record or version, or an engine log that diverges from replay.
+  undecodable record or version, an engine log that diverges from replay, or
+  an `interviews.json` that is not an interview receipt.
 
 The torn-line rule is the store's: only a final line that ends without a
 newline is dropped, and the file is left as found. A newline-terminated line
@@ -74,6 +77,7 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 | `graphs` | Every registered graph digest, sorted. |
 | `invocations` | Every invocation, in id order. The root is first. |
 | `executions` | Every execution, in id order, which is declaration order across the run. |
+| `interviews` | The interview receipt (`version`, `questions`, `errors`, `script`) as the host wrote it, or `null` when the run had no interviewer. Sensitive answers appear only as `$secret` references. |
 
 ### Invocation
 

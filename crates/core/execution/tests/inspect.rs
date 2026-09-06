@@ -12,8 +12,9 @@ use std::{fs, io};
 use execution::inspect::{InspectError, RunInspection, inspect_run};
 use execution::{
     COORDINATOR_FILE, CallSite, Coordinator, CoordinatorInvocationClient, CoordinatorOptions,
-    ExecutionId, GraphDigest, InvocationClient as _, InvocationId, InvocationRequest, RUN_FILE,
-    SandboxMode, SecretBindings, StoreError,
+    ExecutionId, GraphDigest, InterviewReceipt, InvocationClient as _, InvocationId,
+    InvocationRequest, RECEIPT_FILE, RECEIPT_VERSION, RUN_FILE, SandboxMode, SecretBindings,
+    StoreError,
 };
 use ir::{
     EdgeTransition, GraphBuilder, Outcome, RetryPolicy, RunStatus, Scope, ScopeId, StepRef, Value,
@@ -605,5 +606,33 @@ async fn the_document_serializes_with_its_version_first_class() {
     assert_eq!(
         json["executions"][0]["engine"]["attempts"][0]["final"],
         json!(true)
+    );
+    assert_eq!(
+        json["interviews"],
+        Value::Null,
+        "a run without an interviewer has no receipt"
+    );
+}
+
+#[tokio::test]
+async fn the_interview_receipt_is_read_back_as_written() {
+    let dir = finished_run("inspect-receipt").await;
+    let receipt = InterviewReceipt {
+        version:   RECEIPT_VERSION,
+        questions: Vec::new(),
+        errors:    vec!["scripted entry `never-asked` answered 0 of 1".to_owned()],
+        script:    Some(json!({ "entries": [] })),
+    };
+    let path = dir.path().join(RECEIPT_FILE);
+    fs::write(&path, serde_json::to_vec_pretty(&receipt).expect("encodes")).expect("writes");
+    let inspection = inspect_run(dir.path()).expect("inspects");
+    assert!(inspection.complete, "{:?}", inspection.incomplete);
+    assert_eq!(inspection.interviews, Some(receipt));
+
+    fs::write(&path, b"{\"version\": \"one\"}\n").expect("writes");
+    let error = inspect_run(dir.path()).expect_err("a bad receipt is an error");
+    assert!(
+        matches!(&error, InspectError::BadReceipt { path: bad, .. } if *bad == path),
+        "{error}"
     );
 }

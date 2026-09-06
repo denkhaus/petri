@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use support::fabro::interview;
-use support::fabro::launch::{Case, Launch};
+use support::fabro::launch::{Case, Launch, sanitized_path};
 use support::fabro::twins::{
     Provider, Twin, model, question_tool, requested_effort, scenario, shell_tool, text, tool_call,
 };
@@ -778,9 +778,8 @@ async fn interactive_input_answers_a_gate_from_the_terminal() {
     let workflow = case.workflow(GATE_ONLY, None);
     let finished = case
         .run_with(&workflow, &["--interactive"], Launch {
-            stdin:          Some("no\n".into()),
-            close_stdin:    false,
-            interrupt_when: None,
+            stdin: Some("no\n".into()),
+            ..Launch::default()
         })
         .await;
     finished.assert_code(0);
@@ -814,9 +813,9 @@ async fn interactive_eof_fails_the_gate_closed() {
     let workflow = case.workflow(GATE_ONLY, None);
     let finished = case
         .run_with(&workflow, &["--interactive"], Launch {
-            stdin:          Some(String::new()),
-            close_stdin:    true,
-            interrupt_when: None,
+            stdin: Some(String::new()),
+            close_stdin: true,
+            ..Launch::default()
         })
         .await;
     finished.assert_code(4);
@@ -891,6 +890,117 @@ async fn workflow_toml_inputs_bind_and_unsupported_sections_are_reported() {
         "{}",
         finished.stderr
     );
+}
+
+/// Readiness milestone A, the terminal smoke run as a test: the shipped
+/// binary, with no `fabro` reachable on `PATH` and nothing else from the
+/// developer's environment, performs a command, drives a scripted native
+/// agent through real tools, accepts a scripted human answer, and leaves the
+/// workspace files where the run said they are. Everything the run recorded
+/// is then read back through `petri inspect`, the public inspection surface.
+#[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped test says why on the runner's stderr"
+)]
+async fn milestone_a_smoke_run_without_fabro_on_path() {
+    let provider = Provider::OpenAi;
+    let mut case = Case::new("milestone-a");
+    let Some(path) = sanitized_path(&case.root) else {
+        eprintln!("skipping: a fabro executable lives in a system bin directory");
+        return;
+    };
+    // `fabro` really is unreachable under this PATH.
+    let probe = std::process::Command::new("fabro")
+        .env_clear()
+        .env("PATH", &path)
+        .arg("--version")
+        .output();
+    assert!(probe.is_err(), "fabro resolved under the sanitized PATH");
+
+    let twin = Twin::start(
+        provider,
+        &case.root.join("twins"),
+        edit_and_verify_scripts(provider, &case.credential),
+    )
+    .await;
+    case.redirect(&twin);
+    let workflow = case.workflow(&edit_and_verify(provider), None);
+    let script = interview::write(&case.root, "gate", &[interview::entry(
+        "hold-it",
+        "gate",
+        interview::negative(),
+    )]);
+    let finished = case
+        .run_with(
+            &workflow,
+            &["--interview-script", script.to_str().expect("utf-8 path")],
+            Launch {
+                path: Some(path),
+                ..Launch::default()
+            },
+        )
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+
+    // A command ran, an agent edited through real tools, a human answered,
+    // and the files are where the run said.
+    assert_eq!(finished.reported_workspaces(), vec![case.workspace()]);
+    assert_eq!(
+        fs::read_to_string(case.workspace().join("notes.txt")).expect("notes.txt"),
+        "draft\nreviewed\n"
+    );
+    assert_eq!(
+        fs::read_to_string(case.workspace().join("decision.txt")).expect("decision.txt"),
+        "held\n"
+    );
+    assert_eq!(twin.consumed(), ["append", "read-back", "answer"]);
+    assert_eq!(twin.unmatched(), 0);
+    let echoed = finished.echoed();
+    for (node, line) in [
+        ("prepare", "prepared"),
+        ("verify", "reviewed"),
+        ("hold", "held"),
+    ] {
+        assert!(
+            echoed.iter().any(|(n, l)| n == node && l == line),
+            "{node}: {echoed:?}"
+        );
+    }
+
+    // The public inspection surface carries the run, its context, and the
+    // interview receipt.
+    let document = finished.inspect();
+    assert_eq!(
+        document["complete"],
+        json!(true),
+        "{}",
+        document["incomplete"]
+    );
+    assert_eq!(document["status"], json!("success"));
+    let context = finished.final_context();
+    assert_eq!(context["human.gate.selected"], json!("N"));
+    assert_eq!(context["command.output"], json!("held\n"));
+    assert_eq!(
+        context["response.agent"],
+        json!("APPENDED: notes.txt now ends with reviewed.")
+    );
+    let receipt = &document["interviews"];
+    assert_eq!(receipt["version"], json!(1), "{receipt}");
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    assert_eq!(receipt["questions"][0]["node"], json!("gate"));
+    assert_eq!(receipt["questions"][0]["reply"]["choice"], json!("N"));
+    assert_eq!(receipt["questions"][0]["delivery"], json!("delivered"));
+    assert_eq!(receipt["script"]["entries"][0]["id"], json!("hold-it"));
+    assert_eq!(*receipt, finished.receipt(), "the document is the file");
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
 }
 
 /// Keep the workspace path formula in one place the tests can see.
@@ -972,9 +1082,12 @@ fn run_scenario(label: &str) -> (Scenario, RunOutput) {
 }
 
 fn finder_envelopes(observation: &RunObservation) -> Vec<BranchEnvelope> {
-    observation
-        .fan_in_output(&FINDERS)
-        .expect("the finder fan-in produced one envelope per branch, in branch order")
+    let envelopes = observation
+        .fan_in_output("find_join")
+        .expect("the finder fan-in produced a list of envelopes");
+    let ids: Vec<&str> = envelopes.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, FINDERS, "one envelope per branch, in branch order");
+    envelopes
 }
 
 /// Strip `command.output` so an envelope compares on the finding it carries.
@@ -1128,7 +1241,7 @@ fn contract_helper_merges_both_findings_into_the_report() {
         expected_report(),
         "{CONTRACT} the report is byte-identical to Fabro's"
     );
-    assert_eq!(observation.final_status(), Some("Success"));
+    assert_eq!(observation.final_status(), Some("success"));
     let history: Vec<String> = output
         .node_history()
         .into_iter()

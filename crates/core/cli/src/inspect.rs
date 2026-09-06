@@ -74,6 +74,14 @@ fn summary(inspection: &RunInspection) -> String {
             .final_execution
             .map_or_else(|| "none".to_owned(), |execution| execution.to_string()),
     );
+    if let Some(receipt) = &inspection.interviews {
+        let _ = writeln!(
+            out,
+            "interviews: {} question(s), {} error(s)",
+            receipt.questions.len(),
+            receipt.errors.len()
+        );
+    }
     for invocation in &inspection.invocations {
         let _ = writeln!(
             out,

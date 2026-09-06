@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::time::{Instant, sleep, timeout};
 
+use super::inspect;
 use super::twins::{Provider, Twin};
 
 /// How long one `petri run` may take before the harness kills it.
@@ -119,7 +120,11 @@ impl Case {
     ) -> Finished {
         let catalog = self.root.join("catalog.toml");
         fs::write(&catalog, self.layers.join("\n")).expect("write the catalog layer");
-        let path = env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        let path = launch
+            .path
+            .clone()
+            .or_else(|| env::var("PATH").ok())
+            .unwrap_or_else(|| "/usr/bin:/bin".into());
         let mut command = Command::new(env!("CARGO_BIN_EXE_petri"));
         command
             .env_clear()
@@ -255,6 +260,21 @@ pub(crate) struct Launch {
     /// Send SIGINT once this file exists: how a case cancels a run the way a
     /// person at the terminal does.
     pub(crate) interrupt_when: Option<PathBuf>,
+    /// The child's `PATH`. Defaults to the harness's own.
+    pub(crate) path:           Option<String>,
+}
+
+/// A `PATH` with an empty directory in front and only the system binaries
+/// behind it, so no `fabro` resolves. `None` when a `fabro` lives in one of
+/// those system directories, which the harness cannot sanitize.
+pub(crate) fn sanitized_path(root: &Path) -> Option<String> {
+    let empty = root.join("empty-bin");
+    fs::create_dir_all(&empty).expect("the empty bin dir");
+    let system = ["/usr/bin", "/bin"];
+    if system.iter().any(|d| Path::new(d).join("fabro").exists()) {
+        return None;
+    }
+    Some(format!("{}:{}", empty.display(), system.join(":")))
 }
 
 /// Kill a child's whole process group, then reap what `kill_on_drop` cannot.
@@ -314,28 +334,19 @@ impl Finished {
         serde_json::from_str(&text).expect("interviews.json is JSON")
     }
 
-    /// The final run context of the root invocation.
-    ///
-    /// SEAM: read from the run dir's persisted coordinator log until task 2's
-    /// `petri inspect` exposes it through the public command; replace this
-    /// body with a call to that command then.
+    /// The `petri inspect --json` document for this run.
+    pub(crate) fn inspect(&self) -> Value {
+        inspect::inspect(&self.run_dir)
+    }
+
+    /// The final run context of the root invocation, read through
+    /// `petri inspect`.
     pub(crate) fn final_context(&self) -> BTreeMap<String, Value> {
-        let path = self.run_dir.join("coordinator.jsonl");
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let mut context = None;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let record: Value = serde_json::from_str(line).expect("coordinator record");
-            let Some(finished) = record["event"].get("InvocationFinished") else {
-                continue;
-            };
-            if finished["invocation"] == 0 {
-                context = finished["result"]["context"]
-                    .as_object()
-                    .map(|map| map.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-            }
-        }
-        context.expect("the root invocation finished with a context")
+        let document = self.inspect();
+        inspect::root_context(&document)
+            .as_object()
+            .map(|map| map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .expect("the root invocation finished with a context")
     }
 
     /// The node names that finished, in completion order, from the CLI's

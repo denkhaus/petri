@@ -40,15 +40,6 @@ impl Scenario {
         Self { dir, root }
     }
 
-    /// The staged copy of the scenario directory.
-    #[expect(
-        dead_code,
-        reason = "task 17 stages fixture repositories beside the workflow"
-    )]
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// A file inside the staged copy.
     pub(crate) fn file(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
