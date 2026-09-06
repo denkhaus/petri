@@ -284,9 +284,8 @@ impl CoordinatorStore {
     }
 
     pub fn execution_dir(&self, invocation: InvocationId, execution: ExecutionId) -> PathBuf {
-        self.invocation_dir(invocation)
-            .join("executions")
-            .join(format!("{:016x}", execution.raw()))
+        self.root
+            .join(execution_relative_dir(invocation, execution))
     }
 
     pub fn create_execution_dir(
@@ -350,9 +349,19 @@ pub fn decode_coordinator_log(
     })
 }
 
+/// An execution's directory relative to the run directory: the one spelling
+/// of `invocations/<invocation>/executions/<execution>` the store and its
+/// read-only inspectors share.
+pub(crate) fn execution_relative_dir(invocation: InvocationId, execution: ExecutionId) -> PathBuf {
+    Path::new(INVOCATIONS_DIR)
+        .join(format!("{:016x}", invocation.raw()))
+        .join("executions")
+        .join(format!("{:016x}", execution.raw()))
+}
+
 /// Verify every registered graph and keep the decoded results, seeding the
 /// store's cache so the first `load_graph` does not repeat the work.
-fn verify_graph_registry(
+pub(crate) fn verify_graph_registry(
     root: &Path,
     state: &CoordinatorState,
 ) -> Result<BTreeMap<GraphDigest, Arc<Graph>>, StoreError> {
