@@ -124,6 +124,8 @@ crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripte
 crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
+crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
+crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 ```
@@ -182,6 +184,23 @@ Fabro agent nodes can use Pebble directly as a Rust library. Set
 credentials from its environment. ACP remains the default. See
 [native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
 requirements, client injection, events, and accounting.
+
+`petri inspect --run-dir <dir> [--json]` reconstructs a run from its run
+directory alone: `run.json`, `coordinator.jsonl`, the registered graphs, and
+each execution's `events.jsonl`, replayed through the engine. It never starts a
+step, contacts a provider, takes the run lease, or writes under the run
+directory, so it works after the process exits, after the source workflow is
+gone, and while another process holds the run. `--json` prints a versioned
+document (`inspect_format_version`) with the run status, the root invocation
+and its final execution, every invocation with its parent call and children,
+every execution in order with its own derived run context (`kv` plus the
+node-instance records: status, output, generation, attempts), the final firing
+history, every attempt including retries, and every applied route. Secret
+values stay masked or as `$secret` references. An interrupted run is reported
+as incomplete with the reasons (exit 1); a corrupt, truncated-then-terminated,
+diverging, or unsupported-version log is an error (exit 2), never a final
+snapshot. The field contract is
+[`crates/core/execution/INSPECT.md`](crates/core/execution/INSPECT.md).
 
 `mise run test:remote` transfers an artifact through a separate Docker daemon
 with no host filesystem mounts. `mise run check` includes this test. Set
@@ -847,7 +866,7 @@ addition). Replay has landed; `engine::verify_replay` is the determinism canary.
 
 The standalone host stores one root run as `Run → Invocation → Execution → Firing`.
 `coordinator.jsonl` records graph registrations, invocation calls, execution
-successors, and final results. Each execution keeps an independent v7 engine log.
+successors, and final results. Each execution keeps an independent engine log. `petri inspect` reads this layout back.
 
 ```text
 <run-dir>/
