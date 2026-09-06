@@ -45,9 +45,10 @@
 //!
 //! [`InterviewReply::Failed`] means the interviewer itself could not answer:
 //! a closed terminal, a fixture with no matching entry. The dispatcher records
-//! the error, delivers [`Control::Cancel`] so the gate fails closed, and the
-//! host surfaces the receipt's errors. Refusing is not an error: it is an
-//! ordinary [`InterviewReply::Answered`] naming the negative choice.
+//! the error, delivers [`Answer::cancelled`] so the step fails closed, and
+//! the host surfaces the receipt's errors. [`InterviewReply::Cancelled`]
+//! delivers the same. Refusing is not an error: it is an ordinary
+//! [`InterviewReply::Answered`] naming the negative choice.
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
@@ -488,29 +489,40 @@ impl Inner {
             () = cancel.cancelled() => None,
         };
         // Whatever the reply, this question is no longer pending. Whether it
-        // is still deliverable depends on why the token fired, if it did.
+        // is still deliverable depends on whether the token fired: the
+        // firing finished, or the dispatcher shut down.
         let was_live = self.state().live.remove(&key).is_some();
         let closed = self.shutdown.is_cancelled();
-        let late_delivery = if closed {
-            Delivery::Shutdown
-        } else {
-            Delivery::Late
-        };
-        let Some(reply) = reply else {
-            record.delivery = late_delivery;
-            self.state().records.push(record);
-            return;
-        };
-        if !was_live || closed {
-            record.reply = describe(&reply);
-            record.delivery = late_delivery;
-            self.state().errors.push(format!(
-                "a reply to `{}` arrived after its firing finished",
-                key.1
-            ));
+        if cancel.is_cancelled() || !was_live || closed {
+            record.delivery = if closed {
+                Delivery::Shutdown
+            } else {
+                Delivery::Late
+            };
+            match reply {
+                // The interviewer stopped when told to: the ordinary end of
+                // a question nobody could answer any more.
+                None | Some(InterviewReply::Cancelled) => {
+                    record.reply = ReplyRecord::Cancelled;
+                }
+                // An answer, or a failure, after the firing finished: not
+                // delivered, and worth a line in the receipt's errors.
+                Some(reply) => {
+                    record.reply = describe(&reply);
+                    self.state().errors.push(format!(
+                        "a reply to `{}` arrived after its firing finished",
+                        key.1
+                    ));
+                }
+            }
             self.state().records.push(record);
             return;
         }
+        let Some(reply) = reply else {
+            record.delivery = Delivery::Late;
+            self.state().records.push(record);
+            return;
+        };
         let control = match reply {
             InterviewReply::Answered(answer) => {
                 let mut answer = answer.for_question(&question.id);
@@ -533,7 +545,9 @@ impl Inner {
                             text:    Some(json!({ "$secret": name })),
                         };
                         record.delivery = Delivery::Withheld;
-                        let _ = handle.deliver(key.0, firing, Control::Cancel).await;
+                        let _ = handle
+                            .deliver(key.0, firing, cancelled(&question.id))
+                            .await;
                         self.state().records.push(record);
                         return;
                     }
@@ -548,7 +562,7 @@ impl Inner {
             }
             InterviewReply::Cancelled => {
                 record.reply = ReplyRecord::Cancelled;
-                Control::Cancel
+                cancelled(&question.id)
             }
             InterviewReply::Failed(error) => {
                 let rendered = chain(&error);
@@ -557,7 +571,7 @@ impl Inner {
                     question.id
                 ));
                 record.reply = ReplyRecord::Failed { error: rendered };
-                Control::Cancel
+                cancelled(&question.id)
             }
         };
         let disposition = handle.deliver(key.0, firing, control).await;
@@ -567,6 +581,13 @@ impl Inner {
         };
         self.state().records.push(record);
     }
+}
+
+/// The control that ends a question without an answer. The engine forwards
+/// only `Control::Deliver` from a host, so the "no answer" is itself an
+/// answer, marked cancelled; the step fails closed on it.
+fn cancelled(question: &str) -> Control {
+    Answer::cancelled().for_question(question).to_control()
 }
 
 fn describe(reply: &InterviewReply) -> ReplyRecord {

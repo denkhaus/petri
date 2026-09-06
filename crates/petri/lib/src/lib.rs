@@ -30,6 +30,7 @@
 //! # }
 //! ```
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -138,8 +139,8 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
                 .with_runners(runners)
                 .with_checkout_substitution(substitute_checkout),
         );
-    let runtime = match lithos_llm::Client::from_env() {
-        Ok(build) => runtime.capability(PebbleClient(build.client)),
+    let runtime = match llm_client() {
+        Ok(client) => runtime.capability(PebbleClient(client)),
         Err(error) => {
             tracing::warn!(error = %error, "native Pebble client unavailable");
             runtime
@@ -176,6 +177,80 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
             }
         })
         .secrets(secrets)
+}
+
+/// The environment variable naming extra catalog layers for the model client:
+/// one or more paths to `lithos-llm` catalog TOML files, separated by the
+/// platform's path separator, layered over the built-in catalog in order. A
+/// layer redirects a provider (`[providers.openai] base_url = "http://…"`),
+/// adds models, or changes their metadata. A path that cannot be read or does
+/// not parse is an error: the client is not built and every native agent node
+/// fails with `pebble_unconfigured`, rather than reaching a live provider.
+pub const LLM_CATALOG_ENV: &str = "PETRI_LLM_CATALOG";
+
+/// The environment variable naming which providers the model client may
+/// route to: provider ids separated by commas. Unset, every built-in provider
+/// with credentials is available. Set, a model on any other provider is
+/// unavailable, so a test that redirects `openai` and `anthropic` to loopback
+/// cannot reach a third provider by accident.
+pub const LLM_PROVIDERS_ENV: &str = "PETRI_LLM_PROVIDERS";
+
+/// Why the model client could not be built.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmClientError {
+    #[error("could not read the {LLM_CATALOG_ENV} layer `{path}`")]
+    ReadLayer {
+        path:   PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the model catalog is invalid")]
+    Catalog(#[source] lithos_llm::catalog::CatalogError),
+    #[error("the model client could not be built")]
+    Client(#[source] lithos_llm::client::ClientBuildError),
+}
+
+/// The model client native Pebble sessions use, configured the way this
+/// distribution documents.
+///
+/// Credentials come from `lithos-llm`'s conventional environment variables
+/// (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and so on), read per request, never
+/// at build time. Endpoints come from the built-in catalog, with
+/// [`LLM_CATALOG_ENV`] layers on top, and [`LLM_PROVIDERS_ENV`] narrows which
+/// providers are available at all. Both are read from this process's
+/// environment only; a harness sets them on the child it launches and leaves
+/// the developer's shell alone.
+pub fn llm_client() -> Result<lithos_llm::Client, LlmClientError> {
+    let mut catalog = lithos_llm::catalog::Catalog::builder().with_builtin();
+    if let Some(layers) = env::var_os(LLM_CATALOG_ENV) {
+        for path in env::split_paths(&layers).filter(|p| !p.as_os_str().is_empty()) {
+            let text = fs::read_to_string(&path).map_err(|source| LlmClientError::ReadLayer {
+                path: path.clone(),
+                source,
+            })?;
+            catalog = catalog
+                .toml_layer(path.display().to_string(), &text)
+                .map_err(LlmClientError::Catalog)?;
+        }
+    }
+    let catalog = catalog.build().map_err(LlmClientError::Catalog)?;
+    let mut builder = lithos_llm::Client::builder()
+        .catalog(catalog)
+        .credentials(lithos_llm::credentials::EnvironmentCredentials::conventional());
+    if let Ok(providers) = env::var(LLM_PROVIDERS_ENV) {
+        let enabled: Vec<String> = providers
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
+        builder = builder.enabled_providers(enabled);
+    }
+    let build = builder.build().map_err(LlmClientError::Client)?;
+    for issue in &build.issues {
+        tracing::debug!(provider = %issue.provider, cause = %issue.cause, "provider unavailable");
+    }
+    Ok(build.client)
 }
 
 /// The ObjectService as the driver's run guard: teardown is the service's

@@ -22,3 +22,12 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 testkit = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+# The provider twins the black box harness starts on loopback, pinned by
+# revision. Pebble's own CLI tests pin the same revision.
+twin-openai = { git = "https://github.com/lithoscomputer/twins", rev = "fedab8e6b9b8e2577bee7d93812a318d6adb4aa4" }
+twin-anthropic = { git = "https://github.com/lithoscomputer/twins", rev = "fedab8e6b9b8e2577bee7d93812a318d6adb4aa4" }
+# The twins export Axum routers; the harness serves them and captures request
+# bodies through a middleware layer.
+axum = "0.8"

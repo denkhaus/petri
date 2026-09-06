@@ -134,6 +134,15 @@ impl Step for HumanStep {
                     .await;
                 continue;
             }
+            if answer.cancelled {
+                // The host ended the interview: fail closed, as a cancel does.
+                return Stage::failed(
+                    "human interaction interrupted before an answer was provided",
+                    "interrupted",
+                    config.on_failure,
+                )
+                .into_outcome(&config.node);
+            }
             let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
             // A multi-select answer names several choices; as Fabro does, the
             // first routes and every selected key and label is recorded.

@@ -87,6 +87,12 @@ pub struct Answer {
     /// Free text, or a `{"$secret": "answer:<id>"}` reference to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text:     Option<Value>,
+    /// The host ended the interview without an answer: the interviewer
+    /// failed, or the wait was cancelled. A step treats it as an interrupted
+    /// gate and fails closed. Distinct from a negative choice, which is an
+    /// ordinary answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
 }
 
 impl Answer {
@@ -96,6 +102,18 @@ impl Answer {
             choice:   Some(key.to_string()),
             choices:  Vec::new(),
             text:     None,
+            cancelled: false,
+        }
+    }
+
+    /// The interview ended without an answer.
+    pub fn cancelled() -> Self {
+        Self {
+            question:  None,
+            choice:    None,
+            choices:   Vec::new(),
+            text:      None,
+            cancelled: true,
         }
     }
 
@@ -108,6 +126,7 @@ impl Answer {
             choice:   choices.first().cloned(),
             choices,
             text:     None,
+            cancelled: false,
         }
     }
 
@@ -117,6 +136,7 @@ impl Answer {
             choice:   None,
             choices:  Vec::new(),
             text:     Some(text.into()),
+            cancelled: false,
         }
     }
 
@@ -143,6 +163,7 @@ impl Answer {
                 choice:   Some(s.clone()),
                 choices:  Vec::new(),
                 text:     Some(Value::String(s.clone())),
+                cancelled: false,
             }),
             Value::Object(_) => serde_json::from_value(value.clone()).ok(),
             _ => None,
@@ -193,6 +214,7 @@ mod tests {
                 choice:   Some("no".into()),
                 choices:  Vec::new(),
                 text:     Some(json!("no")),
+                cancelled: false,
             })
         );
         assert_eq!(

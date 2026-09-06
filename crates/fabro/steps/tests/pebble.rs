@@ -530,3 +530,86 @@ fn mixed_backends_inherit_only_their_own_configuration() {
     assert!(native.step.config.get("acp").is_none());
     assert_eq!(external.step.config["acp"]["command"], "agent-command");
 }
+
+/// Answers the first core `Question` it sees with `answer`, through the run
+/// handle: the smallest stand-in for the host's interview dispatcher.
+struct GateAnswerer {
+    handle: std::sync::Mutex<Option<runtime::driver::RunHandle>>,
+    answer: runtime::steps::Answer,
+    asked:  std::sync::Mutex<Vec<runtime::steps::Question>>,
+}
+
+impl EventObserver for GateAnswerer {
+    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+        let Event::StepProgress { firing, ev } = &record.event else {
+            return;
+        };
+        let Some(question) = runtime::steps::Question::from_event(ev) else {
+            return;
+        };
+        self.asked
+            .lock()
+            .expect("not poisoned")
+            .push(question.clone());
+        let handle = self
+            .handle
+            .lock()
+            .expect("not poisoned")
+            .clone()
+            .expect("wired");
+        let answer = self.answer.clone().for_question(&question.id);
+        let firing = *firing;
+        tokio::spawn(async move {
+            handle.deliver(firing, answer.to_control()).await;
+        });
+    }
+}
+
+#[tokio::test]
+async fn an_agent_question_rides_the_core_question_protocol() {
+    let dir = RunDir::new("pebble-question");
+    // The test catalog's model runs the Anthropic harness, whose question
+    // tool is `AskUserQuestion`; the options become `option_1`, `option_2`.
+    let (client, provider) = scripted_client(vec![
+        ScriptedCall::response(tool_call_response(
+            "AskUserQuestion",
+            "ask",
+            json!({"questions":[{"question":"Which file?","header":"File","options":[{"label":"README"},{"label":"CHANGELOG"}],"multiSelect":false}]}),
+        )),
+        ScriptedCall::response(text_response("Editing CHANGELOG.")),
+    ]);
+    let rt = runtime(&dir, client);
+    let answerer = Arc::new(GateAnswerer {
+        handle: std::sync::Mutex::new(None),
+        answer: runtime::steps::Answer::choice("option_2"),
+        asked:  std::sync::Mutex::new(Vec::new()),
+    });
+    let graph = graph("");
+    let driver = rt.driver(graph.clone()).observe(answerer.clone());
+    *answerer.handle.lock().expect("not poisoned") = Some(driver.handle());
+    let report = rt
+        .run_verified(graph, |_| Ok::<_, runtime::engine::ReplayMismatch>(driver))
+        .await
+        .expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(output_of(&report, "a")["text"], "Editing CHANGELOG.");
+    let asked = answerer.asked.lock().expect("not poisoned").clone();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].id.starts_with("a#"), "{}", asked[0].id);
+    assert!(asked[0].id.contains("/agent/"), "{}", asked[0].id);
+    assert!(asked[0].id.ends_with("/ask/0"), "{}", asked[0].id);
+    assert_eq!(asked[0].kind.as_deref(), Some("multiple_choice"));
+    assert_eq!(asked[0].options.len(), 2);
+    assert_eq!(asked[0].options[1].key, "option_2");
+    assert!(asked[0].freeform);
+    let requests = serde_json::to_string(&provider.requests()).expect("requests");
+    assert!(
+        requests.contains("option_2"),
+        "the answer reaches the next model request: {requests}"
+    );
+}

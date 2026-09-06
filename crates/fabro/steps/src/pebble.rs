@@ -2,6 +2,7 @@
 
 mod capture;
 pub mod environment;
+pub mod questions;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use environment::{PebbleEnvironment, elapsed_ms};
+use questions::AgentQuestions;
 use executor::Masker;
 use ir::{Attempt, Control, FiringId, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
@@ -35,6 +37,7 @@ pub struct PebbleClient(pub Client);
 
 pub(crate) struct NativeSession {
     agent:           CodingAgent,
+    questions:       Arc<AgentQuestions>,
     cancel:          CancellationToken,
     kill:            CancellationToken,
     _cancel_on_drop: DropGuard,
@@ -94,7 +97,15 @@ impl NativeSession {
             node:    ctx.node.clone(),
         });
         let redactor = Arc::new(PetriRedactor(ctx.secrets.masker()));
+        // Agent questions ride the same progress and control channels a human
+        // gate uses, so the host's one interviewer answers both.
+        let questions = Arc::new(AgentQuestions::new(
+            ctx.logs.clone(),
+            ctx.node.clone(),
+            ctx.firing,
+        ));
         let env = ctx.env.clone();
+        let provider = questions.clone();
         let build = async {
             let environment = PebbleEnvironment::prepare(env, cancel.clone(), kill.clone())
                 .await
@@ -113,6 +124,7 @@ impl NativeSession {
                 .permission_level(PermissionLevel::Full)
                 .event_sink(sink)
                 .redactor(redactor)
+                .human_input(provider)
                 .build()
                 .await
                 .map_err(|e| AgentError::failed("pebble_config", e.to_string()))
@@ -125,7 +137,9 @@ impl NativeSession {
                 result = &mut build => break match result { Err(_) if cancel.is_cancelled() => return Err(AgentError::Cancelled), other => other? },
                 control = ctx.control.recv(), if !closed => {
                     match control {
-                        Some(Control::Deliver(value)) if !cancel.is_cancelled() => { if let Some(text) = steering_text(&value) { pending.push(text); } },
+                        Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
+                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { pending.push(text); }
+                        },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
                         None => { closed = true; cancel.cancel(); },
@@ -134,8 +148,10 @@ impl NativeSession {
                 }
             }
         };
+        questions.set_session(agent.snapshot().session_id());
         let mut session = Self {
             agent,
+            questions,
             cancel: cancel.clone(),
             kill: kill.clone(),
             _cancel_on_drop: guard,
@@ -161,6 +177,7 @@ impl NativeSession {
         control: &mut mpsc::Receiver<Control>,
     ) -> Result<String, AgentError> {
         let handle = self.agent.control_handle();
+        let questions = self.questions.clone();
         let cancel = self.cancel.clone();
         let kill = self.kill.clone();
         let report = {
@@ -172,7 +189,7 @@ impl NativeSession {
                     biased;
                     message = control.recv(), if !closed => match message {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if let Some(text) = steering_text(&value) { handle.queue_follow_up(text); }
+                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { handle.queue_follow_up(text); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
