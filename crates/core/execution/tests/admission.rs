@@ -638,7 +638,7 @@ impl Step for FloodStep {
 
 /// The literal ceiling: 9,999 children after the root are admitted and the
 /// 10,001st invocation is refused before its step runs. Every child is a
-/// durable invocation with its own execution log, so this takes a few
+/// durable invocation with its own execution log, so this takes about seven
 /// minutes; it runs in the extended gate.
 #[tokio::test]
 #[ignore = "declares 10,000 durable invocations; run in the extended gate"]
@@ -659,7 +659,7 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
         .register_graph(&noop_child())
         .expect("child registers");
     let mut parent = GraphBuilder::new();
-    parent.add_node(
+    let flood = parent.add_node(
         "flood",
         ScopeId::new(0),
         StepRef::new(
@@ -667,6 +667,7 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
             json!({ "graph": child, "count": MAX_INVOCATIONS }),
         ),
     );
+    parent.graph_mut().result = ir::ResultProjection::NodeOutput(flood);
     let parent = coordinator
         .register_graph(&parent.build())
         .expect("parent registers");

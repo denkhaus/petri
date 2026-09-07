@@ -82,6 +82,9 @@ impl Ctx<'_> {
             .filter(|node| self.kinds.get(&node.id) == Some(&Kind::Parallel))
             .collect();
         let mut done: HashSet<String> = HashSet::new();
+        // Each lowered parallel node's join, so an outer fork whose branch is
+        // an inner fork continues from where the inner branches converged.
+        let mut joins: HashMap<String, String> = HashMap::new();
         while !pending.is_empty() {
             let ready = pending.iter().position(|node| {
                 workflow.outgoing(&node.id).iter().all(|edge| {
@@ -103,7 +106,9 @@ impl Ctx<'_> {
                 return;
             };
             let node = pending.remove(position);
-            self.lower_parallel(node, workflow, exit, goal_check);
+            if let Some(join) = self.lower_parallel(node, workflow, exit, goal_check, &joins) {
+                joins.insert(node.id.clone(), join);
+            }
             done.insert(node.id.clone());
         }
     }
@@ -136,13 +141,16 @@ impl Ctx<'_> {
         );
     }
 
+    /// Lower one parallel node. Returns the workflow node its branches join
+    /// at, when it has one.
     fn lower_parallel(
         &mut self,
         node: &NodeDecl,
         workflow: &Workflow,
         exit: NodeId,
         goal_check: Option<NodeId>,
-    ) {
+        joins: &HashMap<String, String>,
+    ) -> Option<String> {
         let edges = workflow.outgoing(&node.id);
         for edge in &edges {
             if edge
@@ -163,13 +171,22 @@ impl Ctx<'_> {
                 node.span.clone(),
                 format!("parallel node `{}` has no branches", node.id),
             );
-            return;
+            return None;
         }
         let max_parallel = self.max_parallel(node);
         if let Some(source) = node.attrs.text("for_each") {
-            self.dynamic_branches(node, &edges, &source, max_parallel, workflow, exit, goal_check);
+            self.dynamic_branches(
+                node,
+                &edges,
+                &source,
+                max_parallel,
+                workflow,
+                exit,
+                goal_check,
+                joins,
+            )
         } else {
-            self.static_branches(node, &edges, max_parallel, workflow, exit, goal_check);
+            self.static_branches(node, &edges, max_parallel, workflow, exit, goal_check, joins)
         }
     }
 
@@ -239,11 +256,14 @@ impl Ctx<'_> {
         workflow: &Workflow,
         exit: NodeId,
         goal_check: Option<NodeId>,
-    ) -> Option<NodeId> {
+        joins: &HashMap<String, String>,
+    ) -> Option<(NodeId, String)> {
+        // A branch that is itself a parallel node continues from its own join.
+        let exit_of = |target: &str| joins.get(target).cloned().unwrap_or_else(|| target.to_owned());
         let mut common: Option<HashSet<String>> = None;
         for branch in branches {
             let targets: HashSet<String> = workflow
-                .outgoing(&branch.to)
+                .outgoing(&exit_of(&branch.to))
                 .into_iter()
                 .map(|edge| edge.to.clone())
                 .collect();
@@ -267,7 +287,7 @@ impl Ctx<'_> {
             return None;
         };
         for branch in branches {
-            for edge in workflow.outgoing(&branch.to) {
+            for edge in workflow.outgoing(&exit_of(&branch.to)) {
                 if edge.to != join {
                     self.diags.warning(
                         "fabro.parallel.branch_edge_ignored",
@@ -275,7 +295,7 @@ impl Ctx<'_> {
                         format!(
                             "`{} -> {}` is never taken: `{}` runs as a branch of `{}` and returns \
                              to the join `{join}`",
-                            edge.from, edge.to, edge.from, fork.id
+                            edge.from, edge.to, branch.to, fork.id
                         ),
                     );
                 }
@@ -283,7 +303,7 @@ impl Ctx<'_> {
         }
         let join_id = self.ids.get(&join).copied()?;
         if self.kinds.get(&join) == Some(&Kind::FanIn) {
-            return Some(join_id);
+            return Some((join_id, join));
         }
         let target = goal_check.filter(|_| join_id == exit).unwrap_or(join_id);
         let name = format!("{}.fan_in", fork.id);
@@ -314,7 +334,7 @@ impl Ctx<'_> {
         );
         self.b.set_join(collector, JoinPolicy::All);
         self.b.link(collector, target);
-        Some(collector)
+        Some((collector, join))
     }
 
     fn ordered_results(&mut self) -> ExprId {
@@ -326,6 +346,10 @@ impl Ctx<'_> {
         exprs.call("pluck", vec![sorted, value])
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one fork is described by exactly these facts"
+    )]
     fn static_branches(
         &mut self,
         fork: &NodeDecl,
@@ -334,7 +358,8 @@ impl Ctx<'_> {
         workflow: &Workflow,
         exit: NodeId,
         goal_check: Option<NodeId>,
-    ) {
+        joins: &HashMap<String, String>,
+    ) -> Option<String> {
         let mut ok = true;
         for edge in edges {
             let kind = self.kinds.get(&edge.to).copied();
@@ -352,15 +377,15 @@ impl Ctx<'_> {
             }
         }
         if !ok {
-            return;
+            return None;
         }
-        let Some(collector) = self.branch_collector(fork, edges, workflow, exit, goal_check)
-        else {
-            return;
-        };
+        let (collector, join) =
+            self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
         let fork_id = self.ids[&fork.id];
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut branch_nodes = Vec::with_capacity(edges.len());
+        // Every child graph first: a branch node is rewritten into its branch
+        // step only after every branch copied its target as lowered, so a
+        // duplicate target's child copies the stage and not a branch step.
+        let mut prepared = Vec::with_capacity(edges.len());
         for (index, edge) in edges.iter().enumerate() {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
             let target = self.ids[&edge.to];
@@ -369,6 +394,11 @@ impl Ctx<'_> {
             let Some(child) = self.branch_child(&edge.to, &region, Some((fork_id, index))) else {
                 continue;
             };
+            prepared.push((index, *edge, target, kind, region, child));
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut branch_nodes = Vec::with_capacity(prepared.len());
+        for (index, edge, target, kind, region, child) in prepared {
             let branch_node = if seen.insert(edge.to.as_str()) {
                 target
             } else {
@@ -386,6 +416,12 @@ impl Ctx<'_> {
                 self.spans.insert(duplicate, edge.to_span.clone());
                 duplicate
             };
+            // A nested fork's region now runs inside the child: its nodes
+            // stay in the parent graph without edges, so the inner join no
+            // longer feeds the outer one.
+            for dead in region.iter().skip(1) {
+                self.b.node_mut(*dead).routing = Routing::default();
+            }
             self.branch_step(
                 branch_node,
                 fork,
@@ -399,8 +435,13 @@ impl Ctx<'_> {
             branch_nodes.push(branch_node);
         }
         self.b.fan_out(fork_id, &branch_nodes);
+        Some(join)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one fork is described by exactly these facts"
+    )]
     fn dynamic_branches(
         &mut self,
         fork: &NodeDecl,
@@ -410,7 +451,8 @@ impl Ctx<'_> {
         workflow: &Workflow,
         exit: NodeId,
         goal_check: Option<NodeId>,
-    ) {
+        joins: &HashMap<String, String>,
+    ) -> Option<String> {
         let span = fork.attrs.span_of("for_each", &fork.span);
         let key = source
             .strip_prefix("context.")
@@ -423,7 +465,7 @@ impl Ctx<'_> {
                 span,
                 format!("`for_each` on `{}` must name a context key", fork.id),
             );
-            return;
+            return None;
         }
         if edges.len() != 1 {
             self.diags.error(
@@ -434,12 +476,10 @@ impl Ctx<'_> {
                     fork.id
                 ),
             );
-            return;
+            return None;
         }
         let template = edges[0];
-        let Some(target) = self.ids.get(&template.to).copied() else {
-            return;
-        };
+        let target = self.ids.get(&template.to).copied()?;
         let kind = self.kinds[&template.to];
         if !kind.is_llm() {
             self.diags.error(
@@ -450,7 +490,7 @@ impl Ctx<'_> {
                     template.to
                 ),
             );
-            return;
+            return None;
         }
         if workflow
             .node(&template.to)
@@ -461,15 +501,11 @@ impl Ctx<'_> {
                 template.to_span.clone(),
                 "nested `for_each` is not supported",
             );
-            return;
+            return None;
         }
-        let Some(collector) = self.branch_collector(fork, edges, workflow, exit, goal_check)
-        else {
-            return;
-        };
-        let Some(child) = self.branch_child(&template.to, &[target], None) else {
-            return;
-        };
+        let (collector, join) =
+            self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
+        let child = self.branch_child(&template.to, &[target], None)?;
         let fork_id = self.ids[&fork.id];
 
         // The parallel node evaluates the item array and hands it on. An
@@ -514,6 +550,7 @@ impl Ctx<'_> {
         );
         let input = self.b.exprs().var("input");
         ir::parallel_for_each(&mut self.b, target, input, ExpandTarget::Node, None, false);
+        Some(join)
     }
 
     /// The parent-graph nodes a branch child copies: the target alone, or a
