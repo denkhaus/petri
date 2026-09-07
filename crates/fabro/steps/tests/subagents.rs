@@ -4,10 +4,15 @@
 //! to the parent stage, the workflow's invocation ceiling never counts them,
 //! and cancellation, thread reuse and resume behave as the reference does.
 //!
-//! The scripted client answers calls in order and every session of a tree
-//! shares it, so each parent spawns and waits in one model turn: it then
-//! makes no request until the child has finished, and the script reads in
-//! delivery order.
+//! Every session of a tree answers from its own script:
+//! `support::routed_client` keys a child's script on the task its parent gave
+//! it, so the order in which the parent and its children reach the provider
+//! cannot hand an answer to the wrong session. A parent spawns in one turn and
+//! waits in the next. Pebble runs the tool calls of one round concurrently, so
+//! a `wait` beside the `spawn_agent` can run first, find no child, and return
+//! at once; a `wait` in its own turn always sees the child.
+
+mod support;
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -26,8 +31,8 @@ use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
 use lithos_llm::types::{ErrorKind, Request, Response, TokenCounts};
 use pebble_coding_agent::test_support::{
-    ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, client_from,
-    multi_tool_call_response, scripted_client, text_response, tool_call_response, with_usage,
+    ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, multi_tool_call_response,
+    scripted_client, text_response, tool_call_response, with_usage,
 };
 use runtime::driver::ExecutionReport;
 use runtime::engine::Event;
@@ -35,6 +40,7 @@ use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use smol_str::SmolStr;
+use support::routed_client;
 use testkit::{RunDir, output_of};
 use tokio::time::{sleep, timeout};
 
@@ -133,21 +139,31 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
-/// A parent turn that spawns `tasks` and waits for all of them.
-fn spawn_and_wait(tasks: &[&str]) -> Response {
-    let mut calls: Vec<(&str, &str, Value)> = tasks
-        .iter()
-        .enumerate()
-        .map(|(i, task)| {
-            (
-                "spawn_agent",
-                if i == 0 { "spawn" } else { "spawn-more" },
-                json!({ "task": task }),
-            )
-        })
-        .collect();
-    calls.push(("wait", "wait", json!({})));
-    multi_tool_call_response(calls)
+/// A parent turn that spawns `tasks`, one child each.
+fn spawn(tasks: &[&str]) -> Response {
+    let ids: Vec<String> = (0..tasks.len()).map(|i| format!("spawn-{i}")).collect();
+    multi_tool_call_response(
+        tasks
+            .iter()
+            .zip(&ids)
+            .map(|(task, id)| ("spawn_agent", id.as_str(), json!({ "task": task })))
+            .collect(),
+    )
+}
+
+/// A parent turn that waits for every child it spawned.
+fn wait_for_children() -> Response {
+    tool_call_response("wait", "wait", json!({}))
+}
+
+/// A session's script.
+fn script(calls: Vec<ScriptedCall>) -> ScriptedProvider {
+    ScriptedProvider::new(calls)
+}
+
+/// A session's script that ends in one text answer.
+fn answers(text: &str) -> ScriptedProvider {
+    script(vec![ScriptedCall::response(text_response(text))])
 }
 
 /// The tool names a request advertised.
@@ -173,16 +189,25 @@ fn question_tool(names: &[String]) -> Option<&String> {
 #[tokio::test]
 async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
     let dir = RunDir::new("subagents-delegate");
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: write child.txt"])),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "write",
-            json!({"command": "printf 'from child\\n' > child.txt && echo WROTE"}),
-        )),
-        ScriptedCall::response(text_response("Wrote child.txt.")),
-        ScriptedCall::response(text_response("The child wrote the file.")),
-    ]);
+    let task = "child: write child.txt";
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("The child wrote the file.")),
+        ]),
+        vec![(
+            task,
+            script(vec![
+                ScriptedCall::response(tool_call_response(
+                    "shell",
+                    "write",
+                    json!({"command": "printf 'from child\\n' > child.txt && echo WROTE"}),
+                )),
+                ScriptedCall::response(text_response("Wrote child.txt.")),
+            ]),
+        )],
+    );
     let report = runtime(dir.path(), client, Retention::Always)
         .run(graph(&one_agent(""), None))
         .await
@@ -199,9 +224,10 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
         "the child acted in the parent's workspace"
     );
     assert_eq!(output_of(&report, "a")["text"], "The child wrote the file.");
-    let requests = provider.requests();
-    assert_eq!(requests.len(), 4);
-    let wait_result = serde_json::to_string(&requests[3]).expect("request");
+    assert_eq!(provider.child(task).requests().len(), 2);
+    let requests = provider.root().requests();
+    assert_eq!(requests.len(), 3);
+    let wait_result = serde_json::to_string(&requests[2]).expect("request");
     assert!(
         wait_result.contains("Agent completed (success: true")
             && wait_result.contains("Wrote child.txt."),
@@ -262,7 +288,7 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
     // Accounting: the parent's own usage and the children's, reconstructed
     // from the events.
     let custom = metrics(&report, "a");
-    assert_eq!(custom["pebble.usage"]["input"], 20, "two parent messages");
+    assert_eq!(custom["pebble.usage"]["input"], 30, "three parent messages");
     let subagents = &custom[METRIC];
     assert_eq!(subagents["spawned"], 1);
     assert_eq!(subagents["completed"], 1);
@@ -299,21 +325,30 @@ async fn the_runs_tool_hooks_apply_inside_a_child() {
     let ws = workspace(&dir);
     fs::create_dir_all(&ws).expect("workspace");
     fs::write(ws.join("important.txt"), "precious\n").expect("seed");
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: clean up"])),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "destroy",
-            json!({"command": "rm -f important.txt && echo REMOVED"}),
-        )),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "safe",
-            json!({"command": "printf 'kept\\n' > safe.txt && echo SAFE"}),
-        )),
-        ScriptedCall::response(text_response("Cleaned up without deleting anything.")),
-        ScriptedCall::response(text_response("The child cleaned up.")),
-    ]);
+    let task = "child: clean up";
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("The child cleaned up.")),
+        ]),
+        vec![(
+            task,
+            script(vec![
+                ScriptedCall::response(tool_call_response(
+                    "shell",
+                    "destroy",
+                    json!({"command": "rm -f important.txt && echo REMOVED"}),
+                )),
+                ScriptedCall::response(tool_call_response(
+                    "shell",
+                    "safe",
+                    json!({"command": "printf 'kept\\n' > safe.txt && echo SAFE"}),
+                )),
+                ScriptedCall::response(text_response("Cleaned up without deleting anything.")),
+            ]),
+        )],
+    );
     let toml = r#"
 [[run.hooks]]
 name = "no-destruction"
@@ -346,21 +381,14 @@ script = "echo ran:$FABRO_NODE_ID >> tool-hooks.log"
         log.contains("ran:a"),
         "the post hook saw the child's call under the parent node: {log}"
     );
-    // The child's first request follows the parent's spawn; which of the
-    // parent's `wait` turn and the child's turn reaches the provider first
-    // is a scheduling race, so the block reason is looked for in any
-    // request rather than at a fixed position.
-    let requests: Vec<String> = provider
-        .requests()
-        .iter()
-        .map(|request| serde_json::to_string(request).expect("request"))
-        .collect();
+    let child = provider.child(task).requests();
+    assert_eq!(child.len(), 3);
+    let denial = serde_json::to_string(&child[1]).expect("request");
     assert!(
-        requests
-            .iter()
-            .any(|request| request.contains("destructive commands are not allowed")),
-        "the child saw the block reason: {requests:?}"
+        denial.contains("destructive commands are not allowed"),
+        "the child saw the block reason: {denial}"
     );
+    assert_eq!(provider.root().requests().len(), 3);
     assert_eq!(output_of(&report, "a")["text"], "The child cleaned up.");
 }
 
@@ -369,19 +397,22 @@ script = "echo ran:$FABRO_NODE_ID >> tool-hooks.log"
 #[tokio::test]
 async fn a_child_has_no_question_tool() {
     let dir = RunDir::new("subagents-questions");
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: look around"])),
-        ScriptedCall::response(text_response("Looked.")),
-        ScriptedCall::response(text_response("Done.")),
-    ]);
+    let task = "child: look around";
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("Done.")),
+        ]),
+        vec![(task, answers("Looked."))],
+    );
     let report = runtime(dir.path(), client, Retention::Never)
         .run(graph(&one_agent(""), None))
         .await
         .expect("replay");
     assert_eq!(report.status, RunStatus::Success);
-    let requests = provider.requests();
-    let parent = tool_names(&requests[0]);
-    let child = tool_names(&requests[1]);
+    let parent = tool_names(&provider.root().requests()[0]);
+    let child = tool_names(&provider.child(task).requests()[0]);
     let question = question_tool(&parent).expect("the root has a question tool");
     assert!(
         !child.contains(question),
@@ -410,23 +441,26 @@ async fn a_child_reads_the_project_documents_its_parent_read() {
     let ws = workspace(&dir);
     fs::create_dir_all(&ws).expect("workspace");
     fs::write(ws.join("AGENTS.md"), "Always sign notes with -- petri\n").expect("memory");
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: write a note"])),
-        ScriptedCall::response(text_response("Noted.")),
-        ScriptedCall::response(text_response("Done.")),
-    ]);
+    let task = "child: write a note";
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("Done.")),
+        ]),
+        vec![(task, answers("Noted."))],
+    );
     let report = runtime(dir.path(), client, Retention::Always)
         .run(graph(&one_agent(""), None))
         .await
         .expect("replay");
     assert_eq!(report.status, RunStatus::Success);
-    let requests = provider.requests();
-    let parent = serde_json::to_string(&requests[0]).expect("request");
+    let parent = serde_json::to_string(&provider.root().requests()[0]).expect("request");
     assert!(
         parent.contains("sign notes with -- petri"),
         "the root read AGENTS.md"
     );
-    let child = serde_json::to_string(&requests[1]).expect("request");
+    let child = serde_json::to_string(&provider.child(task).requests()[0]).expect("request");
     assert!(
         child.contains("sign notes with -- petri"),
         "the reference child reads the project documents too: {child}"
@@ -440,17 +474,22 @@ async fn a_child_reads_the_project_documents_its_parent_read() {
 #[tokio::test]
 async fn agent_children_do_not_consume_the_invocation_ceiling() {
     let dir = RunDir::new("subagents-ceiling");
-    let (client, _) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&[
-            "child alpha: report",
-            "child beta: report",
-            "child gamma: report",
-        ])),
-        ScriptedCall::response(text_response("Reporting.")),
-        ScriptedCall::response(text_response("Reporting.")),
-        ScriptedCall::response(text_response("Reporting.")),
-        ScriptedCall::response(text_response("All three reported.")),
-    ]);
+    let tasks = [
+        "child alpha: report",
+        "child beta: report",
+        "child gamma: report",
+    ];
+    let (client, _) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&tasks)),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("All three reported.")),
+        ]),
+        tasks
+            .iter()
+            .map(|task| (*task, answers("Reporting.")))
+            .collect(),
+    );
     let lowered = lower(&one_agent(""), None);
     let mut graph = lowered.graph.expect("lowers");
     // Fabro's ceiling is 10,000; one is the smallest the coordinator takes,
@@ -536,14 +575,21 @@ async fn a_spawn_over_the_open_session_bound_is_refused_and_the_stage_carries_on
 #[tokio::test]
 async fn a_childs_failure_reaches_the_parent_without_failing_the_stage() {
     let dir = RunDir::new("subagents-failure");
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: fail please"])),
-        ScriptedCall::Failure(ScriptedFailure::terminal(
-            ErrorKind::Authentication,
-            "the child's model fell over",
-        )),
-        ScriptedCall::response(text_response("The child failed.")),
-    ]);
+    let task = "child: fail please";
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("The child failed.")),
+        ]),
+        vec![(
+            task,
+            script(vec![ScriptedCall::Failure(ScriptedFailure::terminal(
+                ErrorKind::Authentication,
+                "the child's model fell over",
+            ))]),
+        )],
+    );
     let report = runtime(dir.path(), client, Retention::Never)
         .run(graph(&one_agent(""), None))
         .await
@@ -555,7 +601,7 @@ async fn a_childs_failure_reaches_the_parent_without_failing_the_stage() {
         report.state.errors()
     );
     assert_eq!(output_of(&report, "a")["text"], "The child failed.");
-    let requests = provider.requests();
+    let requests = provider.root().requests();
     let seen = serde_json::to_string(&requests[2]).expect("request");
     assert!(
         seen.contains("fell over"),
@@ -584,18 +630,36 @@ async fn a_childs_failure_reaches_the_parent_without_failing_the_stage() {
 #[tokio::test]
 async fn nested_delegation_reaches_a_grandchild_within_the_open_session_bound() {
     let dir = RunDir::new("subagents-nested");
-    let (client, _) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: delegate the write"])),
-        ScriptedCall::response(spawn_and_wait(&["grandchild: write deep.txt"])),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "write",
-            json!({"command": "printf 'deep\\n' > deep.txt && echo WROTE"}),
-        )),
-        ScriptedCall::response(text_response("Wrote deep.txt.")),
-        ScriptedCall::response(text_response("My child wrote deep.txt.")),
-        ScriptedCall::response(text_response("The grandchild wrote the file.")),
-    ]);
+    let child_task = "child: delegate the write";
+    let grandchild_task = "grandchild: write deep.txt";
+    let (client, _) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[child_task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("The grandchild wrote the file.")),
+        ]),
+        vec![
+            (
+                child_task,
+                script(vec![
+                    ScriptedCall::response(spawn(&[grandchild_task])),
+                    ScriptedCall::response(wait_for_children()),
+                    ScriptedCall::response(text_response("My child wrote deep.txt.")),
+                ]),
+            ),
+            (
+                grandchild_task,
+                script(vec![
+                    ScriptedCall::response(tool_call_response(
+                        "shell",
+                        "write",
+                        json!({"command": "printf 'deep\\n' > deep.txt && echo WROTE"}),
+                    )),
+                    ScriptedCall::response(text_response("Wrote deep.txt.")),
+                ]),
+            ),
+        ],
+    );
     let report = runtime(dir.path(), client, Retention::Always)
         .run(graph(&one_agent(""), None))
         .await
@@ -659,15 +723,25 @@ async fn cancelling_the_run_stops_every_descendant() {
         "touch '{}'; while true; do sleep 0.1; done # {marker}",
         waiting.display()
     );
-    let (client, _) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: wait forever"])),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "block",
-            json!({"command": command}),
-        )),
-        ScriptedCall::PendingOpen,
-    ]);
+    let task = "child: wait forever";
+    let (client, _) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::PendingOpen,
+        ]),
+        vec![(
+            task,
+            script(vec![
+                ScriptedCall::response(tool_call_response(
+                    "shell",
+                    "block",
+                    json!({"command": command}),
+                )),
+                ScriptedCall::PendingOpen,
+            ]),
+        )],
+    );
     let rt = runtime(dir.path(), client, Retention::Never);
     let driver = rt.driver(graph(&one_agent(""), None));
     let handle = driver.handle();
@@ -724,14 +798,20 @@ fn process_running(marker: &str) -> bool {
 #[tokio::test]
 async fn a_retained_thread_keeps_a_childs_result_for_the_next_node() {
     let dir = RunDir::new("subagents-thread");
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: find the answer"])),
-        ScriptedCall::response(text_response("The answer is 42.")),
-        ScriptedCall::response(text_response("Found it.")),
-        ScriptedCall::response(spawn_and_wait(&["child: confirm the answer"])),
-        ScriptedCall::response(text_response("Confirmed: 42.")),
-        ScriptedCall::response(text_response("Confirmed.")),
-    ]);
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&["child: find the answer"])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("Found it.")),
+            ScriptedCall::response(spawn(&["child: confirm the answer"])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("Confirmed.")),
+        ]),
+        vec![
+            ("child: find the answer", answers("The answer is 42.")),
+            ("child: confirm the answer", answers("Confirmed: 42.")),
+        ],
+    );
     let text = dot(
         r#"  a [prompt="Find the answer", fidelity="full", thread_id="t"]
   b [prompt="Confirm the answer", fidelity="full", thread_id="t"]
@@ -747,8 +827,8 @@ async fn a_retained_thread_keeps_a_childs_result_for_the_next_node() {
         "{:?}",
         report.state.errors()
     );
-    let requests = provider.requests();
-    assert_eq!(requests.len(), 6);
+    let requests = provider.root().requests();
+    assert_eq!(requests.len(), 6, "three turns per node, one session");
     let second_node = serde_json::to_string(&requests[3]).expect("request");
     assert!(
         second_node.contains("The answer is 42.") && second_node.contains("Confirm the answer"),
@@ -783,24 +863,43 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
         "printf 'partial\\n' > partial.txt; while [ ! -f '{}' ]; do sleep 0.05; done",
         gate.display()
     );
-    let (client, provider) = scripted_client(vec![
-        // The first run: the child writes and blocks; the run dies.
-        ScriptedCall::response(spawn_and_wait(&["child: write partial.txt"])),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "partial",
-            json!({"command": command}),
-        )),
-        // The resumed run: the stage starts over.
-        ScriptedCall::response(spawn_and_wait(&["child: write final.txt"])),
-        ScriptedCall::response(tool_call_response(
-            "shell",
-            "final",
-            json!({"command": "printf 'final\\n' > final.txt && echo WROTE"}),
-        )),
-        ScriptedCall::response(text_response("Wrote final.txt.")),
-        ScriptedCall::response(text_response("Finished after the restart.")),
-    ]);
+    // The root's script serves both runs: the first parent spawns and blocks
+    // in its wait; the resumed run's new session takes the rest.
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&["child: write partial.txt"])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(spawn(&["child: write final.txt"])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("Finished after the restart.")),
+        ]),
+        vec![
+            (
+                "child: write partial.txt",
+                script(vec![
+                    ScriptedCall::response(tool_call_response(
+                        "shell",
+                        "partial",
+                        json!({"command": command}),
+                    )),
+                    // The run dies with this child mid-tool; if anything of
+                    // it survived to ask again, it would hang here.
+                    ScriptedCall::PendingOpen,
+                ]),
+            ),
+            (
+                "child: write final.txt",
+                script(vec![
+                    ScriptedCall::response(tool_call_response(
+                        "shell",
+                        "final",
+                        json!({"command": "printf 'final\\n' > final.txt && echo WROTE"}),
+                    )),
+                    ScriptedCall::response(text_response("Wrote final.txt.")),
+                ]),
+            ),
+        ],
+    );
     let lowered = lower(&one_agent(""), None);
     let graph = lowered.graph.expect("lowers");
     let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
@@ -811,13 +910,18 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
         async move { host::run_configured(&rt, HostRun::new(graph), |_, _| {}).await }
     });
     timeout(Duration::from_secs(15), async {
-        while !workspace.join("partial.txt").exists() {
+        // The parent has asked twice (spawn, then wait) and the child is in
+        // its tool before the run dies.
+        while !(workspace.join("partial.txt").exists() && provider.root().requests().len() == 2) {
             sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("the child wrote its file");
-    assert_eq!(provider.requests().len(), 2);
+    .expect("the parent waits and the child wrote its file");
+    assert_eq!(
+        provider.child("child: write partial.txt").requests().len(),
+        1
+    );
     // The crash: the run's task is dropped with the child mid-tool.
     first.abort();
     let _ = first.await;
@@ -898,11 +1002,15 @@ async fn a_child_sees_the_skills_its_parent_discovered() {
     if skills_repository(&dir).is_none() {
         return;
     }
-    let (client, provider) = scripted_client(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: greet Ada"])),
-        ScriptedCall::response(text_response("Greeted.")),
-        ScriptedCall::response(text_response("Done.")),
-    ]);
+    let task = "child: greet Ada";
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("Done.")),
+        ]),
+        vec![(task, answers("Greeted."))],
+    );
     let mut options = RunOptions::new(dir.path());
     options.grace = Duration::from_millis(200);
     options.retention = Retention::Always;
@@ -915,19 +1023,19 @@ async fn a_child_sees_the_skills_its_parent_discovered() {
     );
     let report = rt.run(graph(&one_agent(""), None)).await.expect("replay");
     assert_eq!(report.status, RunStatus::Success);
-    let requests = provider.requests();
-    let parent = serde_json::to_string(&requests[0]).expect("request");
+    let root = provider.root().requests();
+    let parent = serde_json::to_string(&root[0]).expect("request");
     assert!(
         parent.contains("# Available Skills")
-            && tool_names(&requests[0]).iter().any(|n| n == "use_skill"),
+            && tool_names(&root[0]).iter().any(|n| n == "use_skill"),
         "the root discovered the repository's skills"
     );
-    let child = serde_json::to_string(&requests[1]).expect("request");
+    let first = &provider.child(task).requests()[0];
+    let child = serde_json::to_string(first).expect("request");
     assert!(
-        child.contains("# Available Skills")
-            && tool_names(&requests[1]).iter().any(|n| n == "use_skill"),
+        child.contains("# Available Skills") && tool_names(first).iter().any(|n| n == "use_skill"),
         "the reference child re-discovers the skills: tools {:?}",
-        tool_names(&requests[1])
+        tool_names(first)
     );
 }
 
@@ -963,14 +1071,13 @@ fn crossing(response: Response) -> ScriptedCall {
 #[tokio::test]
 async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_child() {
     let dir = RunDir::new("subagents-child-compaction");
-    let provider = ScriptedProvider::new(vec![
-        ScriptedCall::response(spawn_and_wait(&["child: do four things"])),
+    let task = "child: do four things";
+    let child = script(vec![
         shell("first", "echo FIRST_OUTPUT_MARKER"),
         shell("second", "echo second"),
         shell("third", "echo third"),
         shell("fourth", "echo fourth"),
         crossing(text_response("Four things done.")),
-        ScriptedCall::response(text_response("The child did four things.")),
     ])
     .completing(vec![ScriptedCompletion::response(with_usage(
         text_response("SUMMARY OF THE CHILD'S WORK"),
@@ -980,7 +1087,14 @@ async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_c
             ..TokenCounts::default()
         },
     ))]);
-    let (client, provider) = client_from(provider);
+    let (client, provider) = routed_client(
+        script(vec![
+            ScriptedCall::response(spawn(&[task])),
+            ScriptedCall::response(wait_for_children()),
+            ScriptedCall::response(text_response("The child did four things.")),
+        ]),
+        vec![(task, child)],
+    );
     let report = runtime(dir.path(), client, Retention::Never)
         .run(graph(&one_agent(""), None))
         .await
@@ -996,10 +1110,11 @@ async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_c
         "The child did four things."
     );
     assert_eq!(
-        provider.completion_count(),
+        provider.child(task).completion_count(),
         1,
         "one summary call, the child's"
     );
+    assert_eq!(provider.root().completion_count(), 0);
     let events = pebble_events(&report);
     let parent_session = events[0]["event"]["session_id"]
         .as_str()
@@ -1040,13 +1155,14 @@ async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_c
 #[tokio::test]
 async fn a_parent_still_delegates_after_its_own_compaction() {
     let dir = RunDir::new("subagents-parent-compaction");
-    let provider = ScriptedProvider::new(vec![
+    let task = "child: finish the work";
+    let root = script(vec![
         shell("first", "echo FIRST_OUTPUT_MARKER"),
         shell("second", "echo second"),
         shell("third", "echo third"),
         shell("fourth", "echo fourth"),
-        crossing(spawn_and_wait(&["child: finish the work"])),
-        ScriptedCall::response(text_response("Finished.")),
+        crossing(spawn(&[task])),
+        ScriptedCall::response(wait_for_children()),
         ScriptedCall::response(text_response("Delegated after compacting.")),
     ])
     .completing(vec![ScriptedCompletion::response(with_usage(
@@ -1057,7 +1173,7 @@ async fn a_parent_still_delegates_after_its_own_compaction() {
             ..TokenCounts::default()
         },
     ))]);
-    let (client, provider) = client_from(provider);
+    let (client, provider) = routed_client(root, vec![(task, answers("Finished."))]);
     let report = runtime(dir.path(), client, Retention::Never)
         .run(graph(&one_agent(""), None))
         .await
@@ -1072,8 +1188,13 @@ async fn a_parent_still_delegates_after_its_own_compaction() {
         output_of(&report, "a")["text"],
         "Delegated after compacting."
     );
-    assert_eq!(provider.completion_count(), 1, "the parent's summary call");
-    let requests = provider.requests();
+    assert_eq!(
+        provider.root().completion_count(),
+        1,
+        "the parent's summary call"
+    );
+    assert_eq!(provider.child(task).completion_count(), 0);
+    let requests = provider.root().requests();
     let last = serde_json::to_string(requests.last().expect("request")).expect("request");
     assert!(
         last.contains("SUMMARY OF THE FIRST EXCHANGE") && !last.contains("FIRST_OUTPUT_MARKER"),
