@@ -733,7 +733,7 @@ async fn the_workflow_runs_without_adapters_and_the_events_reconstruct_it() {
 
     // Every executed node's attempt has an observed duration.
     for name in ["prepare", "left", "right", "ship"] {
-        assert!(timeline.node(name).executed == Some(true));
+        assert_eq!(timeline.node(name).executed, Some(true));
         assert!(
             timeline.node(name).attempts.len() == 1,
             "{name}: {:?}",
