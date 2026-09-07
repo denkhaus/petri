@@ -38,6 +38,9 @@ pub(crate) struct Case {
     layers:                Vec<String>,
     providers:             Vec<&'static str>,
     plugin_link:           PathBuf,
+    /// The Docker plugin, linked per case, when the case runs on
+    /// `--backend docker`.
+    docker_link:           Option<PathBuf>,
 }
 
 impl Case {
@@ -69,7 +72,68 @@ impl Case {
             layers: Vec::new(),
             providers: Vec::new(),
             plugin_link,
+            docker_link: None,
         }
+    }
+
+    /// Run this case's workflows on `--backend docker` through the Docker
+    /// plugin `PETRI_SANDBOX_DOCKER_PLUGIN` names. The caller checks that a
+    /// daemon is reachable first (`testkit::is_docker_ready`).
+    pub(crate) fn docker(mut self) -> Self {
+        let plugin = env::var_os("PETRI_SANDBOX_DOCKER_PLUGIN")
+            .map(PathBuf::from)
+            .expect("PETRI_SANDBOX_DOCKER_PLUGIN names the Docker sandbox plugin");
+        let link = self.root.join("plugins").join("sandbox-driver-docker");
+        link_plugin(&plugin, &link);
+        self.docker_link = Some(link);
+        self
+    }
+
+    /// The environment every `petri` command of this case runs with.
+    fn command(&self, path: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_petri"));
+        command
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", self.root.join("home"))
+            // The system temp dir, not a per-case one: the sandbox plugin
+            // binds a Unix socket under it, and a long path exceeds the
+            // socket path limit.
+            .env("TMPDIR", env::temp_dir())
+            .env("PETRI_STORE", self.root.join("store"))
+            .env("PETRI_CACHE_DIR", self.root.join("cache"))
+            .env("PETRI_SANDBOX_HOST_PLUGIN", &self.plugin_link)
+            .env("PETRI_SANDBOX_PLUGIN_DEV", "1")
+            .env("PETRI_LOG", "warn");
+        if let Some(docker) = &self.docker_link {
+            command.env("PETRI_SANDBOX_DOCKER_PLUGIN", docker);
+        }
+        command
+    }
+
+    /// `petri sandbox prune --run-dir <run dir>`: the retrieval command a
+    /// container run reports. Returns the exit code and stderr.
+    pub(crate) async fn prune(&self) -> (Option<i32>, String) {
+        let path = env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        let mut command = self.command(&path);
+        command
+            .args(["sandbox", "prune", "--run-dir"])
+            .arg(&self.run_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if self.docker_link.is_some() {
+            command.args(["--backend", "docker"]);
+        }
+        let output = timeout(RUN_DEADLINE, command.output())
+            .await
+            .expect("prune finishes before the deadline")
+            .expect("petri sandbox prune runs");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
     }
 
     /// Point `provider` at `twin` for this case's runs.
@@ -126,22 +190,10 @@ impl Case {
             .clone()
             .or_else(|| env::var("PATH").ok())
             .unwrap_or_else(|| "/usr/bin:/bin".into());
-        let mut command = Command::new(env!("CARGO_BIN_EXE_petri"));
+        let mut command = self.command(&path);
         command
-            .env_clear()
-            .env("PATH", path)
-            .env("HOME", self.root.join("home"))
-            // The system temp dir, not a per-case one: the sandbox plugin
-            // binds a Unix socket under it, and a long path exceeds the
-            // socket path limit.
-            .env("TMPDIR", env::temp_dir())
-            .env("PETRI_STORE", self.root.join("store"))
-            .env("PETRI_CACHE_DIR", self.root.join("cache"))
             .env("PETRI_LLM_CATALOG", &catalog)
-            .env("PETRI_LLM_PROVIDERS", self.providers.join(","))
-            .env("PETRI_SANDBOX_HOST_PLUGIN", &self.plugin_link)
-            .env("PETRI_SANDBOX_PLUGIN_DEV", "1")
-            .env("PETRI_LOG", "warn");
+            .env("PETRI_LLM_PROVIDERS", self.providers.join(","));
         for (key, value) in &launch.env {
             command.env(key, value);
         }
@@ -154,8 +206,11 @@ impl Case {
             };
             command.env(variable, &self.credential);
         }
+        command.arg("run");
+        if self.docker_link.is_some() {
+            command.args(["--backend", "docker"]);
+        }
         command
-            .arg("run")
             .args(args)
             .arg("--run-dir")
             .arg(&self.run_dir)
@@ -210,27 +265,39 @@ impl Case {
                 }
             })
         });
-        let interrupt = launch.interrupt_when.map(|marker| {
-            tokio::spawn(async move {
-                let deadline = Instant::now() + RUN_DEADLINE;
-                while !marker.exists() {
-                    assert!(
-                        Instant::now() < deadline,
-                        "the interrupt marker {} never appeared",
-                        marker.display()
-                    );
-                    sleep(Duration::from_millis(50)).await;
-                }
-                #[cfg(unix)]
-                {
-                    let _ = Command::new("kill")
-                        .args(["-INT", &pid.to_string()])
-                        .stdin(Stdio::null())
-                        .status()
-                        .await;
-                }
-            })
-        });
+        let container_marker = launch
+            .interrupt_when_container_file
+            .map(|file| (self.run_dir.clone(), file));
+        let interrupt =
+            (launch.interrupt_when.is_some() || container_marker.is_some()).then(|| {
+                let marker = launch.interrupt_when;
+                tokio::spawn(async move {
+                    let deadline = Instant::now() + RUN_DEADLINE;
+                    loop {
+                        let appeared = match (&marker, &container_marker) {
+                            (Some(marker), _) => marker.exists(),
+                            (None, Some((run_dir, file))) => container_has(run_dir, file).await,
+                            (None, None) => true,
+                        };
+                        if appeared {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "the interrupt marker {marker:?} {container_marker:?} never appeared"
+                        );
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    #[cfg(unix)]
+                    {
+                        let _ = Command::new("kill")
+                            .args(["-INT", &pid.to_string()])
+                            .stdin(Stdio::null())
+                            .status()
+                            .await;
+                    }
+                })
+            });
         let mut stdout = child.stdout.take().expect("piped stdout");
         let mut stderr = child.stderr.take().expect("piped stderr");
         let drain = async {
@@ -287,22 +354,25 @@ fn link_plugin(plugin: &Path, link: &Path) {
 #[derive(Default)]
 pub(crate) struct Launch {
     /// Text written to the child's stdin, for `--interactive`.
-    pub(crate) stdin:          Option<String>,
+    pub(crate) stdin: Option<String>,
     /// Close stdin after writing it (EOF), instead of holding it open.
-    pub(crate) close_stdin:    bool,
+    pub(crate) close_stdin: bool,
     /// Send SIGINT once this file exists: how a case cancels a run the way a
     /// person at the terminal does.
     pub(crate) interrupt_when: Option<PathBuf>,
+    /// Send SIGINT once this file exists inside the run's container sandbox
+    /// (lease 0): the marker for a workspace the host cannot see.
+    pub(crate) interrupt_when_container_file: Option<String>,
     /// The child's `PATH`. Defaults to the harness's own.
-    pub(crate) path:           Option<String>,
+    pub(crate) path: Option<String>,
     /// Append lines to a file once a marker exists: how a case drives
     /// `--control` the way a person at the terminal would. Entries run in
     /// order on one task; each is (marker, file, text, delay after the
     /// previous entry, or after the marker for the first).
-    pub(crate) append_when:    Vec<(PathBuf, PathBuf, String, Duration)>,
+    pub(crate) append_when: Vec<(PathBuf, PathBuf, String, Duration)>,
     /// Extra environment variables for the child: what a case hands the run
     /// beyond the isolated baseline, such as a `PETRI_SECRET_*` value.
-    pub(crate) env:            Vec<(String, String)>,
+    pub(crate) env: Vec<(String, String)>,
 }
 
 /// A `PATH` with an empty directory in front and only the system binaries
@@ -316,6 +386,24 @@ pub(crate) fn sanitized_path(root: &Path) -> Option<String> {
         return None;
     }
     Some(format!("{}:{}", empty.display(), system.join(":")))
+}
+
+/// Whether the run's first container sandbox holds `file`: the run id is
+/// recorded under the run dir once the sandbox exists, and `docker cp` reads
+/// from a running or stopped container.
+async fn container_has(run_dir: &Path, file: &str) -> bool {
+    if !run_dir.join("sandbox-run-id").exists() {
+        return false;
+    }
+    let name = testkit::sandbox_name(run_dir, 0);
+    Command::new("docker")
+        .args(["cp", &format!("{name}:{file}"), "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
 }
 
 /// Kill a child's whole process group, then reap what `kill_on_drop` cannot.
@@ -412,16 +500,44 @@ impl Finished {
             .collect()
     }
 
-    /// Every echoed step line, `[node#firing] text`, as (node, text).
+    /// Every echoed step line, `[node#firing] text` or
+    /// `[invocation-N/node#firing] text`, as (node, text). The invocation
+    /// prefix is dropped here; [`Finished::echoed_tags`] keeps it.
     pub(crate) fn echoed(&self) -> Vec<(String, String)> {
+        self.echoed_tags()
+            .into_iter()
+            .map(|(tag, text)| {
+                let node = tag.rsplit('/').next().unwrap_or(&tag);
+                let node = node.split('#').next().unwrap_or(node);
+                (node.to_owned(), text)
+            })
+            .collect()
+    }
+
+    /// Every echoed step line as (tag, text), the tag as printed:
+    /// `node#firing`, or `invocation-N/node#firing` for a branch.
+    pub(crate) fn echoed_tags(&self) -> Vec<(String, String)> {
         self.stderr
             .lines()
             .filter_map(|line| {
                 let rest = line.strip_prefix('[')?;
                 let end = rest.find("] ")?;
-                let tag = &rest[..end];
-                let node = tag.split('#').next()?;
-                Some((node.to_owned(), rest[end + 2..].to_owned()))
+                Some((rest[..end].to_owned(), rest[end + 2..].to_owned()))
+            })
+            .collect()
+    }
+
+    /// The reported container sandboxes: `(workspace, provider, sandbox id)`
+    /// from `workspace: <ws> on <provider> sandbox <id> (delete with ...)`.
+    pub(crate) fn reported_sandboxes(&self) -> Vec<(String, String, String)> {
+        self.stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("workspace: "))
+            .filter_map(|rest| {
+                let (workspace, rest) = rest.split_once(" on ")?;
+                let (provider, rest) = rest.split_once(" sandbox ")?;
+                let (id, _) = rest.split_once(" (")?;
+                Some((workspace.to_owned(), provider.to_owned(), id.to_owned()))
             })
             .collect()
     }

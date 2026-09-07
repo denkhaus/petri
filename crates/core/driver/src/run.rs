@@ -879,10 +879,19 @@ impl Driver {
     }
 
     /// Whether this execution's terminal exit ends the run
-    /// ([`RunConfig::run_owner`]).
+    /// ([`RunConfig::run_owner`]). A child execution's echoed lines carry its
+    /// invocation in their tag, so interleaved branch output stays
+    /// attributable.
     #[must_use]
     pub fn with_run_owner(mut self, run_owner: bool) -> Self {
         self.config.run_owner = run_owner;
+        if !run_owner && let Some(prefix) = self.config.workspace_prefix.clone() {
+            self.sink = Arc::new(
+                LogSink::new(&self.config.run_dir, self.secrets.masker())
+                    .with_echo(self.config.echo_logs)
+                    .with_label(&prefix),
+            );
+        }
         self
     }
 
@@ -1724,6 +1733,22 @@ impl Driver {
                     delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                     "retry scheduled"
                 );
+                if let Some(node) = self
+                    .engine
+                    .firing_node(firing)
+                    .and_then(|id| self.engine.graph().node(id))
+                {
+                    self.sink.note(
+                        &node.name,
+                        firing.raw(),
+                        &format!(
+                            "retry: attempt {} of {} in {:.1}s",
+                            next_attempt.raw(),
+                            node.retry.max_attempts,
+                            delay.as_secs_f64()
+                        ),
+                    );
+                }
                 let tx = self.tx.clone();
                 self.background.spawn(async move {
                     time::sleep(delay).await;
