@@ -308,3 +308,53 @@ async fn random_selection_routes_on_a_recorded_draw() {
         "exactly one arm of the random group: {taken:?}"
     );
 }
+
+/// Two successive `for_each` fan-outs over 1,000 items each: 2,001 invocations,
+/// well under the run-wide ceiling of 10,000, every branch a durable child
+/// invocation. This takes minutes, so it runs in the extended gate.
+#[tokio::test]
+#[ignore = "declares 2,001 durable invocations; run in the extended gate"]
+async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
+    let text = r#"digraph T {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        plan [shape=parallelogram, output_schema="routing", script="python3 -c 'import json; print(json.dumps({\"context_updates\": {\"jobs\": [{\"name\": \"job-\" + str(i)} for i in range(1000)]}}))'"]
+        first [shape=component, for_each="context.jobs", max_parallel=32]
+        job [prompt="Do the job"]
+        first_join [shape=tripleoctagon]
+        second [shape=component, for_each="context.jobs", max_parallel=32]
+        again [prompt="Do the job again"]
+        second_join [shape=tripleoctagon]
+        start -> plan -> first -> job -> first_join -> second -> again -> second_join -> exit
+    }"#;
+    let lowered = load("forks.fabro", text, &NoFiles, &CompileInputs::new());
+    let graph = lowered
+        .graph
+        .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics));
+    let dir = fresh_run_dir("fabro-e2e-two-thousand");
+    let rt = commands_and_stubs(&dir);
+    let report = host::run_configured(
+        &rt,
+        HostRun::new(graph).with_children(lowered.children),
+        |_, _| {},
+    )
+    .await
+    .expect("the run completes");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let results = report
+        .state
+        .run_context()
+        .get("parallel.results")
+        .and_then(|v| v.as_array())
+        .expect("the second fork's results");
+    assert_eq!(results.len(), 1000);
+    assert_eq!(results[999]["item_label"], json!("job-999"));
+    assert_eq!(results[999]["index"], json!(999));
+    let inspection = execution::inspect::inspect_run(&dir).expect("inspects");
+    assert_eq!(inspection.invocations.len(), 2001, "the root and 2,000 branches");
+}

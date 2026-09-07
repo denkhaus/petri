@@ -4,21 +4,14 @@
 //! gates and agent questions, and an isolated environment that cannot reach
 //! a live provider.
 //!
-//! Task 3's parallel regression lives in this file too, under its own test
-//! functions and `support/fabro` modules. That regression comes from the
-//! readiness assessment: two command branches write distinct findings under the
-//! same context key, a fan-in joins them, and the pinned Conveyor
-//! `code_review.py` merges them. Petri `9cea20d` emits `{id, status, output}`
-//! per branch, so the helper sees no `context_updates` and reports zero
-//! findings.
-//!
-//! Two tests pin today's loss (`current_*`); they pass now and must be deleted
-//! by task 6. Two tests state the contract in
-//! `crates/fabro/acceptance/scenarios/parallel-results/CONTRACT.md`
-//! (`contract_*`); they are `#[should_panic]` on the exact contract marker, so
-//! they turn red the moment the fix lands and task 6 removes the attribute.
-//! An infrastructure failure panics with a different message and fails either
-//! way.
+//! The parallel regression from the readiness assessment lives in this file
+//! too: two command branches write distinct findings under the same context
+//! key, a fan-in joins them, and the pinned Conveyor `code_review.py` merges
+//! them. The `contract_*` tests state the contract in
+//! `crates/fabro/acceptance/scenarios/parallel-results/CONTRACT.md` and
+//! compare the envelopes with the capture from the pinned Fabro; the
+//! `for_each_*` and `a_failed_branch_*` tests take the same contract through
+//! dynamic branches answered by a twin.
 
 mod support;
 
@@ -1487,10 +1480,8 @@ use support::fabro::{BranchEnvelope, Petri, RunObservation, RunOutput, Scenario}
 
 const SCENARIO: &str = "parallel-results";
 const FINDERS: [&str; 2] = ["finder_a", "finder_b"];
-const CONTRACT: &str = "parallel result contract (task 6):";
+const CONTRACT: &str = "parallel result contract:";
 
-const FINDING_A: &str = "page_count drops the final partial page";
-const FINDING_B: &str = "render escapes the title twice";
 
 /// The report the pinned helper writes when both findings survive, as Fabro
 /// produced it (`fabro-reference/raw/report.md`).
@@ -1569,65 +1560,6 @@ fn without_command_output(mut envelope: BranchEnvelope) -> BranchEnvelope {
 }
 
 #[test]
-fn current_branch_envelopes_keep_both_branches_but_drop_their_context() {
-    let (_scenario, output) = run_scenario("current-envelopes");
-    let observation = RunObservation::load(&output.run_dir);
-    let envelopes = finder_envelopes(&observation);
-
-    // Both branches are preserved, in edge order, and each branch's own
-    // output still holds its finding.
-    assert_eq!(envelopes.len(), 2);
-    assert!(
-        envelopes[0]
-            .output
-            .as_ref()
-            .is_some_and(|o| o["stdout"].as_str().is_some_and(|s| s.contains(FINDING_A))),
-        "{:?}",
-        envelopes[0]
-    );
-    assert!(
-        envelopes[1]
-            .output
-            .as_ref()
-            .is_some_and(|o| o["stdout"].as_str().is_some_and(|s| s.contains(FINDING_B))),
-        "{:?}",
-        envelopes[1]
-    );
-    // Today's shape: Petri's status tag, no index, no context_updates. Task 6
-    // deletes this test when it makes the contract tests pass.
-    for envelope in &envelopes {
-        assert_eq!(envelope.status.as_deref(), Some("success"));
-        assert_eq!(envelope.index, None);
-        assert_eq!(envelope.context_updates, None);
-    }
-}
-
-#[test]
-fn current_helper_sees_no_findings() {
-    let (_scenario, output) = run_scenario("current-helper");
-    let observation = RunObservation::load(&output.run_dir);
-
-    assert!(
-        output
-            .echoed("merge_find")
-            .contains("Pooled 0 candidates into 0 locations"),
-        "{}",
-        output.stderr()
-    );
-    let context = observation.final_context();
-    assert_eq!(context["candidate_count"], json!(0));
-    assert_eq!(context["run_verify"], json!(false));
-    assert_eq!(context["reported"], json!(0));
-    let report = output.echoed("report");
-    assert!(report.contains("## Findings (0)"), "{report}");
-    assert!(
-        !report.contains(FINDING_A) && !report.contains(FINDING_B),
-        "{report}"
-    );
-}
-
-#[test]
-#[should_panic(expected = "parallel result contract (task 6):")]
 fn contract_branch_envelopes_carry_index_status_and_context_updates() {
     let (_scenario, output) = run_scenario("contract-envelopes");
     let observation = RunObservation::load(&output.run_dir);
@@ -1674,7 +1606,6 @@ fn contract_branch_envelopes_carry_index_status_and_context_updates() {
 }
 
 #[test]
-#[should_panic(expected = "parallel result contract (task 6):")]
 fn contract_helper_merges_both_findings_into_the_report() {
     let (_scenario, output) = run_scenario("contract-report");
     let observation = RunObservation::load(&output.run_dir);
@@ -2278,5 +2209,249 @@ async fn a_stalled_run_is_cancelled_by_the_watchdog() {
         "{}",
         finished.stderr
     );
+    finished.assert_no_leaked_processes().await;
+}
+
+// ── Dynamic branches through the twin ────────────────────────────────────────
+
+/// A `for_each` fan-out whose template is an API agent answered by the twin:
+/// each item's review reports a finding under the same context key.
+fn for_each_workflow(jobs: &str) -> String {
+    format!(
+        r#"digraph Dynamic {{
+    graph [backend="api"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    plan [shape=parallelogram, output_schema="routing", script="printf '%s' '{{\"context_updates\":{{\"jobs\":{jobs}}}}}'"]
+    fan [shape=component, for_each="context.jobs", max_parallel=3]
+    job [prompt="Review the item and report one finding.", model="{model}", provider="openai", output_schema="routing"]
+    join [shape=tripleoctagon]
+    report [shape=parallelogram, script="cat > results.json", stdin_source="context.parallel.results"]
+    start -> plan -> fan -> job -> join -> report -> exit
+}}"#,
+        model = model(Provider::OpenAi),
+    )
+}
+
+/// The twin's answer for one item: a routing directive that writes the item's
+/// name under `output.finder`. The item reaches the model as fenced JSON, so
+/// its `name` line is what the scenario matches. `delay_ms` holds the answer
+/// back, so the branch finishes after its siblings.
+fn finding_for(namespace: &str, item: &str, delay_ms: u64) -> Value {
+    let mut script = text(&format!(
+        r#"{{"outcome":"succeeded","context_updates":{{"output.finder":{{"found":"{item}"}}}}}}"#
+    ));
+    if delay_ms > 0 {
+        script["delay_before_headers_ms"] = json!(delay_ms);
+    }
+    scenario(
+        Provider::OpenAi,
+        namespace,
+        item,
+        model(Provider::OpenAi),
+        &format!(r#""name": "{item}""#),
+        script,
+    )
+}
+
+fn results_file(case: &Case) -> Vec<Value> {
+    let text = fs::read_to_string(case.workspace().join("results.json")).expect("results.json");
+    serde_json::from_str::<Value>(&text)
+        .expect("results.json is JSON")
+        .as_array()
+        .cloned()
+        .expect("one envelope per branch")
+}
+
+/// Three items under one key: every branch keeps its own value, the list
+/// follows item order even though the first item's answer arrives last, and
+/// nothing reaches the parent context.
+#[tokio::test]
+async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
+    let mut case = Case::new("for-each-many");
+    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![
+        finding_for(&case.credential, "alpha", 800),
+        finding_for(&case.credential, "beta", 0),
+        finding_for(&case.credential, "gamma", 0),
+    ])
+    .await;
+    case.redirect(&twin);
+    let workflow = case.workflow(
+        &for_each_workflow(r#"[{\"name\":\"alpha\"},{\"name\":\"beta\"},{\"name\":\"gamma\"}]"#),
+        None,
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    let results = results_file(&case);
+    assert_eq!(results.len(), 3, "{results:?}");
+    for (index, (envelope, item)) in results.iter().zip(["alpha", "beta", "gamma"]).enumerate() {
+        assert_eq!(envelope["id"], json!("job"), "{envelope}");
+        assert_eq!(envelope["index"], json!(index), "{envelope}");
+        assert_eq!(envelope["item_label"], json!(item), "{envelope}");
+        assert_eq!(envelope["status"], json!("succeeded"), "{envelope}");
+        assert_eq!(
+            envelope["context_updates"]["output.finder"]["found"],
+            json!(item),
+            "each branch keeps its own value: {envelope}"
+        );
+    }
+    let context = finished.final_context();
+    assert!(!context.contains_key("output.finder"), "{context:?}");
+    assert_eq!(context["parallel.branch_count"], json!(3));
+    // The delayed first item finished last; the list still follows item order.
+    let finished_jobs: Vec<String> = finished
+        .finished_nodes()
+        .into_iter()
+        .map(|(_, node)| node)
+        .filter(|node| node.starts_with("job#"))
+        .collect();
+    assert_eq!(finished_jobs.last().map(String::as_str), Some("job#0"), "{finished_jobs:?}");
+    let mut consumed = twin.consumed();
+    consumed.sort();
+    assert_eq!(consumed, ["alpha", "beta", "gamma"]);
+    assert_eq!(twin.unmatched(), 0);
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+/// One item is one branch.
+#[tokio::test]
+async fn a_for_each_over_one_item_is_one_branch() {
+    let mut case = Case::new("for-each-one");
+    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![finding_for(
+        &case.credential,
+        "solo",
+        0,
+    )])
+    .await;
+    case.redirect(&twin);
+    let workflow = case.workflow(&for_each_workflow(r#"[{\"name\":\"solo\"}]"#), None);
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    let results = results_file(&case);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["item_label"], json!("solo"));
+    assert_eq!(results[0]["index"], json!(0));
+    assert_eq!(results[0]["context_updates"]["output.finder"]["found"], json!("solo"));
+    assert_eq!(finished.final_context()["parallel.branch_count"], json!(1));
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+/// An empty list joins with no branches and calls no model.
+#[tokio::test]
+async fn an_empty_for_each_list_joins_without_calling_the_model() {
+    let mut case = Case::new("for-each-empty");
+    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), Vec::new()).await;
+    case.redirect(&twin);
+    let workflow = case.workflow(&for_each_workflow("[]"), None);
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(finished.status_line(), Some("success"), "{}", finished.stderr);
+    assert_eq!(results_file(&case), Vec::<Value>::new());
+    let context = finished.final_context();
+    assert_eq!(context["parallel.branch_count"], json!(0));
+    assert_eq!(context["parallel.results"], json!([]));
+    assert!(twin.requests().is_empty(), "no model call for no items");
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+/// A branch whose model call fails keeps its identity and reports a failed
+/// status with no stale success data; its sibling is unaffected and the
+/// fan-in joins partially.
+#[tokio::test]
+async fn a_failed_branch_keeps_its_identity_without_success_data() {
+    let mut case = Case::new("for-each-failed");
+    // No scenario for `beta`: its call is unmatched and its agent fails.
+    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![finding_for(
+        &case.credential,
+        "alpha",
+        0,
+    )])
+    .await;
+    case.redirect(&twin);
+    let workflow = case.workflow(
+        &for_each_workflow(r#"[{\"name\":\"alpha\"},{\"name\":\"beta\"}]"#),
+        None,
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    let results = results_file(&case);
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0]["status"], json!("succeeded"));
+    assert_eq!(results[0]["context_updates"]["output.finder"]["found"], json!("alpha"));
+    let failed = &results[1];
+    assert_eq!(failed["id"], json!("job"));
+    assert_eq!(failed["index"], json!(1));
+    assert_eq!(failed["item_label"], json!("beta"));
+    assert_eq!(failed["status"], json!("failed"), "{failed}");
+    assert!(
+        failed["context_updates"].get("output.finder").is_none(),
+        "no success data on a failed branch: {failed}"
+    );
+    let joins: Vec<(String, String)> = finished
+        .finished_nodes()
+        .into_iter()
+        .filter(|(_, node)| node == "join")
+        .collect();
+    assert_eq!(joins, vec![("partial_success".to_owned(), "join".to_owned())]);
+    assert!(twin.unmatched() >= 1);
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+/// Nested joins: an outer fork whose branch is an inner fork reports the
+/// inner results inside its own envelope, and the outer join sees exactly
+/// its two branches.
+#[tokio::test]
+async fn nested_joins_report_the_inner_results_inside_the_outer_envelope() {
+    let case = Case::new("nested-joins");
+    let workflow = case.workflow(
+        r#"digraph Nested {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    outer [shape=component]
+    x [shape=parallelogram, output_schema="routing", script="printf '%s' '{\"context_updates\":{\"output.x\":\"x\"}}'"]
+    inner [shape=component]
+    p [shape=parallelogram, output_schema="routing", script="printf '%s' '{\"context_updates\":{\"output.p\":\"p\"}}'"]
+    q [shape=parallelogram, output_schema="routing", script="printf '%s' '{\"context_updates\":{\"output.q\":\"q\"}}'"]
+    inner_join [shape=tripleoctagon]
+    outer_join [shape=tripleoctagon]
+    report [shape=parallelogram, script="cat > results.json", stdin_source="context.parallel.results"]
+    start -> outer
+    outer -> x
+    outer -> inner
+    inner -> p
+    inner -> q
+    p -> inner_join
+    q -> inner_join
+    x -> outer_join
+    inner_join -> outer_join
+    outer_join -> report -> exit
+}"#,
+        None,
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    let results = results_file(&case);
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0]["id"], json!("x"));
+    assert_eq!(results[0]["context_updates"]["output.x"], json!("x"));
+    assert_eq!(results[1]["id"], json!("inner"));
+    assert_eq!(results[1]["context_updates"]["parallel.branch_count"], json!(2));
+    let inner = results[1]["context_updates"]["parallel.results"]
+        .as_array()
+        .cloned()
+        .expect("inner results");
+    assert_eq!(inner.len(), 2);
+    assert_eq!(inner[0]["id"], json!("p"));
+    assert_eq!(inner[0]["context_updates"]["output.p"], json!("p"));
+    assert_eq!(inner[1]["id"], json!("q"));
+    let context = finished.final_context();
+    for key in ["output.x", "output.p", "output.q"] {
+        assert!(!context.contains_key(key), "{key} stays in its branch: {context:?}");
+    }
+    assert_eq!(context["parallel.branch_count"], json!(2));
     finished.assert_no_leaked_processes().await;
 }
