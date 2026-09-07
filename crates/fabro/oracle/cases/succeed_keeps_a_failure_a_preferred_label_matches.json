@@ -1,0 +1,11 @@
+{
+  "name": "succeed_keeps_a_failure_a_preferred_label_matches",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\", on_failure=\"succeed\"]\n  fix [prompt=\"x\"]\n  ship [prompt=\"x\"]\n  start -> a\n  a -> ship [label=\"[S] Ship\"]\n  a -> fix [label=\"[F] Fix\"]\n  fix -> exit\n  ship -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_reason": "boom",
+      "preferred_label": "Fix"
+    }
+  }
+}

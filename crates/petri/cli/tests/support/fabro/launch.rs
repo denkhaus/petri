@@ -141,10 +141,14 @@ impl Case {
             .env("PETRI_SANDBOX_HOST_PLUGIN", &self.plugin_link)
             .env("PETRI_SANDBOX_PLUGIN_DEV", "1")
             .env("PETRI_LOG", "warn");
+        for (key, value) in &launch.env {
+            command.env(key, value);
+        }
         for provider in &self.providers {
             let variable = match *provider {
                 "openai" => "OPENAI_API_KEY",
                 "anthropic" => "ANTHROPIC_API_KEY",
+                "openrouter" => "OPENROUTER_API_KEY",
                 other => panic!("no credential variable for provider `{other}`"),
             };
             command.env(variable, &self.credential);
@@ -262,6 +266,9 @@ pub(crate) struct Launch {
     pub(crate) interrupt_when: Option<PathBuf>,
     /// The child's `PATH`. Defaults to the harness's own.
     pub(crate) path:           Option<String>,
+    /// Extra environment variables for the child: what a case hands the run
+    /// beyond the isolated baseline, such as a `PETRI_SECRET_*` value.
+    pub(crate) env:            Vec<(String, String)>,
 }
 
 /// A `PATH` with an empty directory in front and only the system binaries

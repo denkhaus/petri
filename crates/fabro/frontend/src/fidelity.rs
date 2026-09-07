@@ -176,7 +176,10 @@ mod tests {
             resolve_thread(None, None, None, Some("impl"), Some("plan")),
             Some("impl")
         );
-        assert_eq!(resolve_thread(None, None, None, None, Some("plan")), Some("plan"));
+        assert_eq!(
+            resolve_thread(None, None, None, None, Some("plan")),
+            Some("plan")
+        );
         assert_eq!(resolve_thread(None, None, None, None, None), None);
     }
 }

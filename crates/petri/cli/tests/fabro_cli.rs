@@ -45,7 +45,6 @@ fn petri_run_auto_approve_answers_a_human_gate() {
 
 #[test]
 fn petri_check_lowers_a_fabro_file_and_warns_on_the_deprecated_spelling() {
-    // REMOVE AFTER 2026-10-04: `on_failure="succeed"` is refused again.
     let dir = RunDir::new("fabro-cli-check");
     let good = dir.path().join("good.fabro");
     fs::write(
@@ -56,7 +55,7 @@ fn petri_check_lowers_a_fabro_file_and_warns_on_the_deprecated_spelling() {
     let bad = dir.path().join("bad.fabro");
     fs::write(
         &bad,
-        "digraph G { start [shape=Mdiamond] exit [shape=Msquare] a [prompt=\"x\", on_failure=\"succeed\"] start -> a -> exit }",
+        "digraph G { start [shape=Mdiamond] exit [shape=Msquare] a [prompt=\"x\", auto_status=true] start -> a -> exit }",
     )
     .expect("write");
     let ok = Command::new(env!("CARGO_BIN_EXE_petri"))
@@ -79,7 +78,7 @@ fn petri_check_lowers_a_fabro_file_and_warns_on_the_deprecated_spelling() {
     let stderr = String::from_utf8_lossy(&shimmed.stderr);
     assert!(shimmed.status.success(), "{stderr}");
     assert!(
-        stderr.contains("deprecated.on_failure.succeed") && stderr.contains("2026-10-04"),
+        stderr.contains("deprecated.auto_status") && stderr.contains("on_failure=\"succeed\""),
         "{stderr}"
     );
 }

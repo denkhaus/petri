@@ -27,13 +27,13 @@ pub enum Policy {
     /// The failure becomes a `PartialSuccess` that keeps the failure on the
     /// record, and routes as a success.
     PartiallySucceed,
-    /// Fabro's `succeed`: like `partially_succeed`, except the stage reports
-    /// `succeeded` to its edge conditions and to later stages, as Fabro
-    /// shows them. The step record still carries the failure as a partial
-    /// status. A 30-day compatibility shim for `on_failure="succeed"` and
-    /// `auto_status=true`.
-    ///
-    /// REMOVE AFTER 2026-10-04.
+    /// Fabro's `succeed`: a failure that no explicit route matches is
+    /// promoted. The step keeps the failure on its record as a partial
+    /// status and reports `succeeded` to its edge conditions and to later
+    /// stages, as Fabro shows them. A failure an explicit route matches (a
+    /// condition, a preferred label, or a suggested target) stays failed and
+    /// takes that route, as Fabro's executor orders it. `auto_status=true` is
+    /// the deprecated spelling.
     Succeed,
 }
 
@@ -90,7 +90,7 @@ impl FailurePolicy {
     pub fn of(node: &NodeDecl, workflow: &Workflow, diags: &mut Diagnostics) -> Self {
         let read = |key: &str, attrs: &Attrs| attrs.text(key).and_then(|text| Policy::parse(&text));
         // Fabro reads `auto_status=true` as the node's `on_failure="succeed"`
-        // when no explicit `on_failure` is set. REMOVE AFTER 2026-10-04.
+        // when no explicit `on_failure` is set.
         let auto_status = node.attrs.bool("auto_status", diags).unwrap_or(false);
         let on_failure = read("on_failure", &node.attrs)
             .or_else(|| auto_status.then_some(Policy::Succeed))
@@ -122,9 +122,8 @@ impl FailurePolicy {
         }
     }
 
-    /// Whether either policy is the `succeed` shim, so a failure this node
-    /// converts reads as `succeeded` to its edge conditions.
-    /// REMOVE AFTER 2026-10-04.
+    /// Whether either policy is `succeed`, so a failure this node promotes
+    /// reads as `succeeded` to its edge conditions.
     pub fn succeeds(self) -> bool {
         self.on_failure == Policy::Succeed || self.on_retries_exhausted == Policy::Succeed
     }

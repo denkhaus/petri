@@ -58,7 +58,10 @@ pub struct InvocationHandle {
 }
 
 impl InvocationHandle {
-    pub(crate) fn new(
+    /// A handle over a status channel and a cancel channel. The coordinator
+    /// builds these; a host or a test that implements [`InvocationClient`]
+    /// itself builds them the same way.
+    pub fn new(
         id: InvocationId,
         status: watch::Receiver<InvocationStatus>,
         cancel: mpsc::UnboundedSender<InvocationId>,

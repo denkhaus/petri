@@ -42,6 +42,10 @@ pub struct HumanConfig {
     pub sensitive:       Option<bool>,
     #[serde(default)]
     pub on_failure:      Option<Policy>,
+    /// The node's explicit routes, carried for uniformity; a human gate never
+    /// promotes a failure.
+    #[serde(default, rename = "routes")]
+    pub explicit_routes: Option<Value>,
     #[serde(default)]
     pub timeout_ms:      Option<u64>,
     #[serde(default)]

@@ -54,11 +54,11 @@ pub(super) struct ThreadAttrs {
     pub fidelity:         Option<Fidelity>,
     pub default_fidelity: Option<Fidelity>,
     pub thread_id:        Option<String>,
-    pub default_thread: Option<String>,
-    pub classes:        Vec<String>,
-    pub project_memory: bool,
-    pub speed:          Option<String>,
-    pub max_tokens:     Option<i64>,
+    pub default_thread:   Option<String>,
+    pub classes:          Vec<String>,
+    pub project_memory:   bool,
+    pub speed:            Option<String>,
+    pub max_tokens:       Option<i64>,
 }
 
 impl ThreadAttrs {
@@ -102,8 +102,7 @@ impl ThreadAttrs {
                         node.id
                     ),
                 );
-            } else if fidelity != Some(Fidelity::Full) && graph_fidelity != Some(Fidelity::Full)
-            {
+            } else if fidelity != Some(Fidelity::Full) && graph_fidelity != Some(Fidelity::Full) {
                 diags.warning(
                     THREAD_RULE,
                     node.attrs.span_of("thread_id", &node.span),
@@ -115,10 +114,7 @@ impl ThreadAttrs {
                 );
             }
         }
-        let project_memory = node
-            .attrs
-            .bool("project_memory", diags)
-            .unwrap_or(true);
+        let project_memory = node.attrs.bool("project_memory", diags).unwrap_or(true);
         let speed = node.attrs.text("speed").filter(|s| !s.is_empty());
         if let Some(speed) = &speed
             && !matches!(speed.as_str(), "standard" | "fast")
@@ -247,7 +243,11 @@ pub(super) fn edge_payload(
 }
 
 /// Whether `node` is entered directly from a parallel fork.
-pub(super) fn is_branch_first(node: &NodeDecl, workflow: &Workflow, kinds: &HashMap<String, Kind>) -> bool {
+pub(super) fn is_branch_first(
+    node: &NodeDecl,
+    workflow: &Workflow,
+    kinds: &HashMap<String, Kind>,
+) -> bool {
     workflow
         .incoming(&node.id)
         .iter()

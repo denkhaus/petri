@@ -110,7 +110,11 @@ impl HookEvent {
     pub const fn blocking_by_default(self) -> bool {
         matches!(
             self,
-            Self::RunStart | Self::StageStart | Self::EdgeSelected | Self::PreToolUse | Self::SandboxReady
+            Self::RunStart
+                | Self::StageStart
+                | Self::EdgeSelected
+                | Self::PreToolUse
+                | Self::SandboxReady
         )
     }
 
@@ -557,7 +561,7 @@ max_tool_rounds = 3
         assert_eq!(codes, Vec::<String>::new());
         assert_eq!(hooks.len(), 5);
         assert_eq!(hooks[0].kind, HookKind::Command {
-            command: "./check.sh".into()
+            command: "./check.sh".into(),
         });
         assert_eq!(hooks[0].timeout_ms, Some(30_000));
         assert!(!hooks[0].runs_in_sandbox());
@@ -565,14 +569,19 @@ max_tool_rounds = 3
         assert!(hooks[0].is_blocking());
         assert_eq!(hooks[1].name, "notify");
         assert!(!hooks[1].is_blocking());
-        assert!(matches!(&hooks[1].kind, HookKind::Http { tls: TlsMode::NoVerify, headers, .. } if headers["X-Env"] == "prod"));
+        assert!(
+            matches!(&hooks[1].kind, HookKind::Http { tls: TlsMode::NoVerify, headers, .. } if headers["X-Env"] == "prod")
+        );
         assert_eq!(hooks[2].kind, HookKind::Command {
-            command: "cargo fmt".into()
+            command: "cargo fmt".into(),
         });
         assert_eq!(hooks[3].timeout(), Duration::from_millis(30_000));
         assert_eq!(hooks[4].timeout(), Duration::from_millis(60_000));
         assert_eq!(hooks[4].name, "verify");
-        assert!(matches!(&hooks[4].kind, HookKind::Agent { max_tool_rounds: Some(3), .. }));
+        assert!(matches!(&hooks[4].kind, HookKind::Agent {
+            max_tool_rounds: Some(3),
+            ..
+        }));
     }
 
     #[test]

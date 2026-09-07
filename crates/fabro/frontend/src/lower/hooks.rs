@@ -11,17 +11,15 @@
 use frontend::{CompileInputs, Diagnostics, FileSource, Span};
 use ir::Value;
 
-use crate::hooks::{self, HookDefinition, HookEvent};
-
 pub(super) use crate::hooks::PARAM;
-use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
+use crate::hooks::{self, HookDefinition, HookEvent, PROJECT_FILE, SETTINGS_HOOKS_VAR};
 
-/// Read and merge every hook layer. `workflow_toml` is the already-read text
-/// of the workflow's own `workflow.toml`, when it exists.
+/// Read and merge every hook layer. `workflow_toml` is the already-read
+/// `(path, text)` of the workflow's own `workflow.toml`, when it exists.
 pub(super) fn load(
     files: &dyn FileSource,
     inputs: &CompileInputs,
-    workflow_toml: Option<(&str, &str)>,
+    workflow_toml: Option<&(String, String)>,
     diags: &mut Diagnostics,
 ) -> Vec<HookDefinition> {
     let mut layers = Vec::with_capacity(3);

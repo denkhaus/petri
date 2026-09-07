@@ -97,6 +97,12 @@ impl CapabilitiesBuilder {
         self
     }
 
+    /// Whether a value of this type is already registered, so a component's
+    /// default provisioner can step aside for a host-supplied one.
+    pub fn has<T: Send + Sync + 'static>(&self) -> bool {
+        self.map.contains_key(&TypeId::of::<T>())
+    }
+
     pub fn build(self) -> Capabilities {
         Capabilities {
             map: Arc::new(self.map),

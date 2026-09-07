@@ -12,7 +12,7 @@ use std::{env, fs, process};
 
 use execution::host::{self, HostRun};
 use execution::{CoordinatorRecord, ExecutionId, ExecutionObserver};
-use fabro_steps::fabro_outcome;
+use fabro_steps::reported_outcome;
 use frontend_fabro::kinds::GOAL_CHECK_NODE;
 use ir::{Graph, Value};
 use runtime::engine::{EngineState, EventRecord};
@@ -103,7 +103,7 @@ impl ExecutionObserver for PathObserver {
                 if record.name != GOAL_CHECK_NODE {
                     visits.push(Visit {
                         node:    record.name.to_string(),
-                        outcome: fabro_outcome(&record.outcome.status).as_str().to_string(),
+                        outcome: reported_outcome(&record.outcome).as_str().to_string(),
                     });
                 }
             }

@@ -3,7 +3,7 @@
 //! the run context, and — with `output_schema="routing"` — the last JSON
 //! object of the output read as a routing directive.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use executor::{ProcessSpec, StdinMode};
@@ -13,12 +13,13 @@ use ir::{FailureClass, LogStream, Outcome, StepEvent, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Ending, Step, StepCtx, StepFailure, ladder};
+use steps::{Ending, Step, StepCtx, StepFailure, ValueOrSecretRef, ladder, resolve_env_refs};
 use tokio::io::AsyncWriteExt as _;
 use tokio::time;
 
+use crate::blobs::{self, OutputStore};
 use crate::directive;
-use crate::outcome::Stage;
+use crate::outcome::{ExplicitRoutes, Stage};
 
 /// The step kind id.
 pub const KIND: StepKindId = COMMAND_KIND;
@@ -26,34 +27,42 @@ pub const KIND: StepKindId = COMMAND_KIND;
 /// The process could not be started.
 pub const SPAWN_CLASS: FailureClass = FailureClass::new_static("spawn_failed");
 
-/// How much captured output a stage keeps in its output and context. Fabro
-/// offloads larger output to a blob; a later host capability does the same
-/// here, and until then the tail is kept with a truncation marker.
-pub const OUTPUT_CAP: usize = 64 * 1024;
+/// How much captured output a stage keeps in memory. Output above
+/// [`blobs::OFFLOAD_THRESHOLD`] leaves the context for the run's output store
+/// as a durable reference, as Fabro offloads it; a run with no store keeps
+/// the tail with a truncation marker.
+pub const OUTPUT_CAP: usize = 8 * 1024 * 1024;
 
 const TRUNCATED: &str = "\n… [output truncated]\n";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandConfig {
-    pub label:         String,
-    pub node:          String,
+    pub label:           String,
+    pub node:            String,
     #[serde(default)]
-    pub goal:          String,
-    pub script:        String,
+    pub goal:            String,
+    pub script:          String,
     #[serde(default = "default_language")]
-    pub language:      String,
+    pub language:        String,
     #[serde(default)]
-    pub stdin:         Value,
+    pub stdin:           Value,
     #[serde(default)]
-    pub output_schema: Option<Value>,
+    pub output_schema:   Option<Value>,
     #[serde(default)]
-    pub on_failure:    Option<Policy>,
+    pub on_failure:      Option<Policy>,
+    /// The node's explicit routes, for failure promotion.
+    #[serde(default, rename = "routes")]
+    pub explicit_routes: Option<ExplicitRoutes>,
     #[serde(default)]
-    pub timeout_ms:    Option<u64>,
+    pub timeout_ms:      Option<u64>,
+    /// Environment for the process: `[run.prepare]` step env and the
+    /// environment's secret values, resolved at spawn.
+    #[serde(default)]
+    pub env:             BTreeMap<SmolStr, ValueOrSecretRef>,
     /// The run context at spawn, resolved by the engine.
     #[serde(default)]
-    pub kv:            Value,
+    pub kv:              Value,
 }
 
 fn default_language() -> String {
@@ -135,11 +144,18 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
             format!("exec 2>&1\n{}", config.script),
         ]),
     };
-    let stdin = stdin_text(&config.stdin);
+    let store = ctx.capability::<OutputStore>();
+    let stdin_value = match &store {
+        Some(store) => blobs::hydrate(config.stdin.clone(), store.0.as_ref()).await,
+        None => config.stdin.clone(),
+    };
+    let stdin = stdin_text(&stdin_value);
+    let env = resolve_env_refs(&config.env, ctx.secrets.as_ref())?;
     let spec = ProcessSpec::new(
         program,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
     )
+    .with_env(env)
     .with_stdin(if stdin.is_some() {
         StdinMode::Piped
     } else {
@@ -234,7 +250,6 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
             .output
             .insert("exit_status".into(), json!(status.code));
     }
-    stage.output.insert("stdout".into(), json!(output));
     stage
         .context_updates
         .insert(SmolStr::new("command.output"), json!(output));
@@ -255,9 +270,21 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
                     "bad_output",
                     config.on_failure,
                 );
-                stage.output.insert("stdout".into(), json!(output));
+                stage
+                    .context_updates
+                    .insert(SmolStr::new("command.output"), json!(output));
             }
         }
     }
-    Ok(stage.into_outcome(&config.node))
+    // The stage output carries the same text; both leave for the store above
+    // the threshold, and the logical value stays readable through it.
+    let mut stdout = json!(output);
+    if let Some(store) = &store {
+        blobs::offload_value(&mut stdout, store.0.as_ref()).await;
+        blobs::offload_updates(&mut stage.context_updates, store.0.as_ref()).await;
+    }
+    stage.output.insert("stdout".into(), stdout);
+    Ok(stage
+        .with_routing(config.explicit_routes.clone(), config.kv.clone())
+        .into_outcome(&config.node))
 }

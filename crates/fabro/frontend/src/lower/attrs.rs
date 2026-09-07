@@ -163,12 +163,10 @@ pub(super) const NODE: &[&str] = &[
 
 /// Node attributes carried into the step config untouched but not acted on
 /// in phase one.
-pub(super) const NODE_IGNORED: &[(&str, &str)] = &[
-    (
-        "review_target",
-        "human review targets are not implemented in phase one",
-    ),
-];
+pub(super) const NODE_IGNORED: &[(&str, &str)] = &[(
+    "review_target",
+    "human review targets are not implemented in phase one",
+)];
 
 /// Edge attributes with workflow meaning.
 pub(super) const EDGE: &[&str] = &[

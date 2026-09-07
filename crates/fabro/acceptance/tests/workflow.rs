@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use execution::host::{self, HostRun};
+use execution::inspect::inspect_run;
 use fabro_acceptance::runs::fresh_run_dir;
 use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
 use frontend_fabro::load;
@@ -41,13 +42,16 @@ const CHILD: &str = r#"digraph Child {
     start -> count -> exit
 }"#;
 
+/// Fabro starts one child and polls it. A child that completes before the
+/// first poll returns its status and its public context changes, and the
+/// manager consumed one child invocation whatever `max_cycles` says.
 #[tokio::test]
-async fn a_manager_loop_runs_its_child_until_the_stop_condition_holds() {
+async fn a_manager_loop_runs_one_child_and_returns_its_context_changes() {
     let parent = r#"digraph Parent {
         start [shape=Mdiamond]
         exit [shape=Msquare]
         seed [shape=parallelogram, output_schema="routing", script="echo '{\"context_updates\": {\"n\": \"0\"}}'"]
-        loop [shape=house, stack.child_workflow="child.fabro", manager.max_cycles=10, manager.stop_condition="context.n >= 3"]
+        loop [shape=house, stack.child_workflow="child.fabro", manager.max_cycles=1000, manager.stop_condition="context.n >= 3"]
         start -> seed -> loop -> exit
     }"#;
     let files = MapFiles(
@@ -62,7 +66,7 @@ async fn a_manager_loop_runs_its_child_until_the_stop_condition_holds() {
         1,
         "the child was lowered with the parent"
     );
-    let dir = fresh_run_dir("fabro-workflow-stop");
+    let dir = fresh_run_dir("fabro-workflow-child");
     let rt = runtime(&dir);
     let report = host::run_configured(
         &rt,
@@ -78,12 +82,29 @@ async fn a_manager_loop_runs_its_child_until_the_stop_condition_holds() {
         report.state.errors()
     );
     let output = testkit::output_of(&report, "loop");
-    assert_eq!(output["cycles"], json!(3));
-    assert_eq!(report.state.run_context().get("n"), Some(&json!("3")));
+    assert_eq!(
+        output["cycles"],
+        json!(1),
+        "the child finished before a poll"
+    );
+    assert_eq!(
+        output["notes"],
+        json!("Child completed at cycle 1"),
+        "{output}"
+    );
+    assert_eq!(report.state.run_context().get("n"), Some(&json!("1")));
+    let inspection = inspect_run(&dir).expect("the run inspects");
+    assert_eq!(
+        inspection.invocations.len(),
+        2,
+        "the root and exactly one child invocation"
+    );
 }
 
+/// A failing child fails the manager node with the child's failure; the
+/// class is the child's own, and the explicit failure edge routes.
 #[tokio::test]
-async fn an_inline_child_runs_once_by_default_and_a_failing_child_fails_the_node() {
+async fn a_failing_child_fails_the_node_with_its_own_failure() {
     let parent = r#"digraph Parent {
         start [shape=Mdiamond]
         exit [shape=Msquare]
@@ -96,6 +117,17 @@ async fn an_inline_child_runs_once_by_default_and_a_failing_child_fails_the_node
     }"#;
     let lowered = lowered(parent, &NoFiles);
     let graph = lowered.graph.expect("the parent lowers");
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "loop")
+            .expect("the manager node")
+            .step
+            .config["max_cycles"],
+        json!(1000),
+        "a missing `manager.max_cycles` is 1000, as in Fabro"
+    );
     let dir = fresh_run_dir("fabro-workflow-fail");
     let rt = runtime(&dir);
     let report = host::run_configured(
@@ -115,9 +147,13 @@ async fn an_inline_child_runs_once_by_default_and_a_failing_child_fails_the_node
         testkit::status_of(&report, "loop").as_deref(),
         Some("failure")
     );
-    assert_eq!(
-        testkit::output_of(&report, "loop")["failure_class"],
-        json!("child_failed")
+    let output = testkit::output_of(&report, "loop");
+    assert_eq!(output["failure_class"], json!("exit_status:2"));
+    assert!(
+        output["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("status 2")),
+        "the child's failure detail is kept: {output}"
     );
     assert_eq!(
         testkit::status_of(&report, "recover").as_deref(),

@@ -72,6 +72,21 @@ pub enum WorkspaceRetention {
     Never,
 }
 
+/// What a workflow's own configuration says about how a standalone host
+/// should launch it, read back from the lowered graph. A host applies these
+/// only where the user gave no explicit option. Every field is optional: a
+/// format with no launch configuration returns the default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaunchSettings {
+    /// The sandbox backend the workflow asks for (`host`, `docker`,
+    /// `daytona`), in the host's spelling.
+    pub sandbox_backend: Option<String>,
+    /// Simulate the format's stages instead of running them.
+    pub dry_run:         bool,
+    /// Answer every question with its default choice.
+    pub auto_approve:    bool,
+}
+
 pub trait Frontend: Send + Sync {
     /// Short, stable, lower-case and unique: `gha`, `native`. What `--format`
     /// takes.
@@ -108,6 +123,13 @@ pub trait Frontend: Send + Sync {
     /// none.
     fn default_params(&self, _repo: &Path) -> Vec<(SmolStr, Value)> {
         Vec::new()
+    }
+
+    /// The launch settings the workflow's own configuration declares, read
+    /// from the lowered graph (its `params`), so a persisted graph carries
+    /// them. Default: none.
+    fn launch_settings(&self, _graph: &ir::Graph) -> LaunchSettings {
+        LaunchSettings::default()
     }
 
     /// Where the repository root is above `file`, when the host was not told. A

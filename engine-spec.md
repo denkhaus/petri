@@ -904,13 +904,18 @@ back edges, `Any` joins, `Budget.max_firings` capped at 500;
 `loop_restart` → `EdgeTransition::Restart`; `component` → fan-out groups or
 `Expansion::ForEach` over the template node; `tripleoctagon` → `All` join with
 the ordered branch results as output; `house` → a nested invocation by graph
-digest. Conditions lower onto the expression language with Fabro's text
-comparison, truthiness and numeric rules spelled out; `outcome=X` names only
-the four Fabro outcomes. Deprecated success spellings, the Attractor dialect,
-imports and unknown outcome values are specific `unsupported.*` rejections.
-One deliberate departure: the `partially_succeed` classification happens at the
-step boundary, before routing, so an explicit `outcome=failed` edge on such a
-node is unreachable (linted).
+digest; `tab` and a prompted `tripleoctagon` → the `fabro/prompt` step;
+`import` → expanded at load, so the persisted graph carries the imported
+nodes; `[run.prepare]` → command nodes between start and its successors.
+Conditions lower onto the expression language with Fabro's text comparison,
+truthiness and numeric rules spelled out; `outcome=X` names only the four
+Fabro outcomes. The Attractor dialect and unknown outcome values are specific
+`unsupported.*` rejections. Failure promotion is Fabro's: the step checks the
+node's explicit routes (carried in its config) against the failed outcome and
+the prospective context before it classifies, so an `outcome=failed` edge on a
+`succeed` node is taken and only an unmatched failure becomes a
+`PartialSuccess` that reports `succeeded`. The classification still happens
+once, at the step boundary, and the core's merge rules are unchanged.
 
 ## 13. Failure-class registry (grep anchor; extend here first)
 
