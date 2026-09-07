@@ -156,6 +156,7 @@ crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent d
 crates/petri/cli/tests/fabro_subagents_blackbox.rs  readiness item 9d through the binary: a parent delegates a workspace change; a hook blocks a child's effect; a child's failure is the parent's tool result; concurrent children and one invocation; a grandchild; an interrupt closes the child; a retained thread carries a child's result; accounting reconstructed from `execution::replay_run`
 crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
+crates/petri/cli/tests/fabro_evidence_blackbox.rs  the readiness gate's evidence: a scenario through the binary leaves a complete record with every pin, a failed scenario keeps its case directory, the coverage report counts only passed cells, the pin check rejects a record citing another revision, a required asset fails instead of skipping
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
@@ -189,6 +190,69 @@ filtered or skipped case stays visible; `mise run test:fabro:blackbox` runs
 them and reports the coverage, and `mise run test:fabro:blackbox:strict`
 (in `check:nightly`) requires Docker, the fetched bundles, and no skipped
 cell.
+
+### CI, evidence, and the readiness gate
+
+Required CI (`.github/workflows/ci.yml`, job `check` on Linux and macOS)
+fetches the GitHub Actions corpus, the Fabro corpus, and the Fabro bundle set
+(`scripts/corpus-fetch-fabro-bundles.sh`: every bundle at its locked revision,
+digest by digest, never skipped; an unreachable private source fails with the
+name of the missing deploy key), builds the sandbox plugins, and runs
+`mise run check` with `PETRI_REQUIRE_CORPUS`, `PETRI_REQUIRE_FABRO_CORPUS`,
+`PETRI_REQUIRE_FABRO_BUNDLES` and, on Linux, `PETRI_REQUIRE_DOCKER` set, so a
+missing asset, binary, scenario, or backend fails instead of skipping. Every
+required host scenario runs on both runners; the Docker subset runs on Linux,
+which also checks that no `petri-` container is left behind. The provider
+twins are `petri-cli` dev-dependencies pinned by revision in the public
+`lithoscomputer/twins` repository, so a build is their fetch. A second required
+job, `fabro compatibility`, builds the pinned `fabro` binary from the fetched
+corpus (`scripts/fabro-provision.sh`; only the binary is cached, keyed by the pin
+and the toolchain; about three minutes on a miss) and runs the comparison
+matrix through `mise run test:fabro:differential` with
+`PETRI_REQUIRE_FABRO_BINARY` set. The Nightly workflow repeats the black box
+set three times under different test schedules
+(`mise run test:fabro:blackbox:repeat`), runs the long tests, and reruns the
+matrix; it adds repetitions and is never the only parity evidence.
+
+Every black box scenario writes a machine-readable evidence record
+(`crates/petri/cli/tests/support/fabro/record.rs`, schema version 1) into
+the run-scoped directory `PETRI_EVIDENCE_DIR` names (`mise run
+test:fabro:blackbox` creates one under `target/fabro-evidence/` and links
+`latest` to it): the Petri, Pebble, lithos-llm, sandbox-driver, twins, and
+Fabro pins read from the manifests; the launch inputs and configuration; the
+twin scenarios matched; raw and normalized observations; the final context
+through `petri inspect --json`; artifacts; process output; assertions;
+compatibility decisions; the cleanup result; and links to the owning
+library's contract tests. A failed record keeps the whole case directory; a
+test that panics before finishing still leaves a failed record.
+`scripts/fabro-coverage-report.py` folds the records, the scenario matrix (`matrix.json`), the per-cell results,
+and Nextest's JUnit output into `coverage.json` and `coverage.md` with
+required, passed, failed, skipped, missing, blocked, and excluded cells. Only
+`passed` counts; a skip, an exclusion, or an empty run never does, and a runner
+failure overrides a passed record. CI writes the report into the job summary
+and keeps the full bundles of a failed run and the compact records of a passed
+run as job artifacts. `mise run check:pins` (`scripts/check-pins.py`) fails
+when the manifests, the "Pinned revisions" table in
+`crates/fabro/acceptance/CONTRACT.md`, and the latest records cite different
+revisions. The readiness checklist with each item's evidence source is the
+"Readiness gate checklist" section of that contract.
+
+#### Library and repository gates
+
+Pebble owns the agent loop and coding-agent behavior, `lithos-llm` owns
+provider transport and request retries, and an MCP client library owns its
+protocol. A change to any of them runs the owning repository's required checks
+before Petri moves its pin; then the manifests, the contract's pin table, and
+the affected evidence records move together, and the relevant Petri scenarios
+run again through the shipped binary. A library test pass never replaces a
+required Petri scenario. The current pins are in the contract's "Pinned
+revisions" table (Pebble `a2fcdda`, lithos-llm `4aab27d`, sandbox-driver
+`a5674ba`, twins `fedab8e`, Fabro `b648291`). The pending library batch,
+recorded by the readiness work and not yet pinned: Pebble `861d9bc`
+(summary-call usage accounting), Pebble exports for `RetryEventObserver`, a
+continue-an-unfinished-turn entry point, child agents inheriting project
+memory and skill directories, skipped-skill reporting; sandbox-driver exec
+output line loss under load and a port-forward or preview-URL operation.
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over

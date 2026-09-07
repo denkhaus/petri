@@ -22,7 +22,8 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-# The black box scenario loader (`tests/support/fabro/scenario.rs`).
+# The black box scenario loader (`tests/support/fabro/scenario.rs`) and the
+# pinned Fabro adapter's decision records.
 serde = { workspace = true }
 regex = { workspace = true }
 globset = { workspace = true }
