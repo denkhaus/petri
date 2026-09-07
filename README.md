@@ -156,6 +156,8 @@ crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent d
 crates/petri/cli/tests/fabro_subagents_blackbox.rs  readiness item 9d through the binary: a parent delegates a workspace change; a hook blocks a child's effect; a child's failure is the parent's tool result; concurrent children and one invocation; a grandchild; an interrupt closes the child; a retained thread carries a child's result; accounting reconstructed from `execution::replay_run`
 crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
+crates/petri/cli/tests/fabro_readiness_blackbox.rs  readiness item 10 (milestone D) through the binary: the item 8 workflow with every item 9 facility in one run (a skill-guided plan, a hooked MCP write, a hooked sub-agent, a fan-out, a compaction and a later node on the compacted thread with an MCP call, a second thread failing over to the Anthropic twin), no platform Git operation in the repository the run prepared, every family on the public stream; an exhausted chain and an interrupt inside a child's tool as separate cases
+crates/petri/lib/tests/embedding_readiness.rs  readiness item 10 through the embedding boundary: the same combined execution run in-process by a host with its own hooks, interviewer and sink against the twins; the same files and scripts, the run rebuilt from public events, replay equal to the live stream
 crates/petri/cli/tests/fabro_evidence_blackbox.rs  the readiness gate's evidence: a scenario through the binary leaves a complete record with every pin, a failed scenario keeps its case directory, the coverage report counts only passed cells, the pin check rejects a record citing another revision, a required asset fails instead of skipping
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
@@ -190,6 +192,18 @@ filtered or skipped case stays visible; `mise run test:fabro:blackbox` runs
 them and reports the coverage, and `mise run test:fabro:blackbox:strict`
 (in `check:nightly`) requires Docker, the fetched bundles, and no skipped
 cell.
+
+### The integration handoff
+
+`crates/fabro/HANDOFF.md` is what a host that embeds Petri to run Fabro
+workflows relies on: the optional interfaces (`ExecutionHooks`,
+`HookService`, `Interviewer`, `RunEventSink`, `SecretProvider`,
+`OutputStore`, the `PebbleClient` and `FabroHome` capabilities), the
+identities and event positions, the lifecycle acknowledgements, the
+compatibility versions and the strict rejection of incompatible logs, what
+stays Fabro's, and the integration checklist. The event contract's coverage
+matrix is `crates/core/execution/EVENTS.md`; the milestone D audit of every
+required row is in `crates/fabro/acceptance/CONTRACT.md`.
 
 ### CI, evidence, and the readiness gate
 
@@ -246,13 +260,18 @@ before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `a2fcdda`, lithos-llm `4aab27d`, sandbox-driver
-`a5674ba`, twins `fedab8e`, Fabro `b648291`). The pending library batch,
-recorded by the readiness work and not yet pinned: Pebble `861d9bc`
-(summary-call usage accounting), Pebble exports for `RetryEventObserver`, a
-continue-an-unfinished-turn entry point, child agents inheriting project
-memory and skill directories, skipped-skill reporting; sandbox-driver exec
-output line loss under load and a port-forward or preview-URL operation.
+revisions" table (Pebble `7ae5b27f`, lithos-llm `4aab27d`, sandbox-driver
+`a225832`, twins `fedab8e`, Fabro `b648291`, the runner image
+`df708f910111`); `mise run check:pins` keeps every citation in agreement.
+The library batch the readiness work asked for landed on
+`petri/readiness-batch` in each repository and is pinned: Pebble's
+summary-call usage accounting, `continue_prompt` for a failover with no
+repeated tool effect, child agents inheriting project memory and skill
+directories, skipped-skill reporting, sequential sub-agent tools, a routed
+scripted provider; sandbox-driver's silence-based output drain and the
+preview-URL operation for servers inside containers. Still open in Pebble:
+its project-memory loader is crate-private, so `fabro_steps::memory` mirrors
+it for prompt nodes.
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over

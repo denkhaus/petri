@@ -381,9 +381,124 @@ carries it.
 MCP (C2) landed: MCP tools are registered on the session with Pebble's
 `tools(mcp.tools())` (`pebble.rs`), so they live in the session's tool
 registry, outside `History`; compaction replaces only `History`, so a compacted
-session keeps its MCP tools. Verified by construction against the reference,
-the same way skills are; an end-to-end MCP-tool-after-compaction black box is a
-follow-up for the combined milestone D coverage (item 10).
+session keeps its MCP tools. Verified end to end by the readiness suites
+(milestone D below): the `review` node calls the MCP tool on the compacted
+thread, and the call is on the public stream (`fabro.mcp.tool` on `review`).
+
+
+## Milestone D: the final readiness audit (item 10, task 20)
+
+Status at task 20's finishing time (2026-09-07), audited against the code
+and tests on `swarm/task20-readiness` with `swarm/integration` `dbddbfb`
+merged, not against evidence prose. **Final readiness is met** with the
+recorded gaps below, each with an owner; no required row keeps a deferred
+status without one. The integration handoff is
+[`crates/fabro/HANDOFF.md`](../HANDOFF.md); the event contract and its
+coverage matrix are `crates/core/execution/EVENTS.md`. The evidence file is
+`.ai/reviews/fabro-unified/task20-readiness.md`.
+
+### Milestones
+
+| Milestone | Passed | Reference |
+|---|---|---|
+| A (items 1, 2 initial) | yes | `fabro_blackbox::milestone_a_smoke_run_without_fabro_on_path`, `standalone.rs`, `fabro_dependencies.rs`; evidence `task5-milestone-a.md` |
+| B (items 2 to 8) | yes | `fabro_milestone_blackbox` (3 cases, rerun at task 20: 4 of 4), `embedding::the_milestone_workflow_runs_through_the_embedding_boundary`, `fabro_terminal_blackbox` (10); evidence `task11-milestone-b.md` |
+| C1 to C5 (item 9) | yes, the table above | `fabro_fallback_blackbox` (15), `fabro_mcp_blackbox` (9), `fabro_skills_blackbox` (4), `fabro_subagents_blackbox` (8), `fabro_compaction_blackbox` (4), their in-process suites |
+| D (item 10) | yes, with the gaps below | the combined suites next |
+
+### Combined, recovery and embedding tests
+
+- Combined execution through the binary: `fabro_readiness_blackbox` (cells
+  `readiness/combined@host/openai`, `readiness/combined-failure@host/openai`,
+  `readiness/combined-cancellation@host/openai`): one run with a skill-guided
+  plan, a hooked MCP write, a hooked sub-agent, a scripted decision, a
+  `for_each` fan-out, a compaction and a later node reusing the compacted
+  thread (with an MCP call on it), and a second thread failing over to the
+  Anthropic twin and continuing there; failure (an exhausted chain) and
+  cancellation (an interrupt inside a child's tool) apart. Each case checks
+  output attribution, answer routing, the final status through `petri
+  inspect`, the retained workspace, the absence of Git commits, tags and
+  pushes in the repository the run prepared, and every item 9 family on the
+  public stream.
+- The same execution through the embedding example:
+  `embedding_readiness::the_combined_workflow_runs_through_the_embedding_boundary`
+  (a host with its own hooks, interviewer and sink; the same scripts spent in
+  the same order, the same files, the run rebuilt from public events, replay
+  equal to the live stream).
+- Local replay and sandbox recovery, preserved and passing:
+  `inspect_cli::inspect_reconstructs_a_restarted_run_with_children_after_the_process_exits`,
+  `inspect_cli::inspect_reports_torn_logs_as_incomplete_and_corrupt_logs_as_errors`,
+  `petri-execution::inspect::a_torn_coordinator_tail_is_reported_and_left_in_place`,
+  `embedding::recovery_redelivers_with_stable_identities`,
+  `petri::host::a_crashed_run_resumes_from_the_run_dir`,
+  `petri-driver::resume` (`a_torn_tail_is_truncated_and_resumed`,
+  `a_tampered_record_refuses_to_resume`, `an_undecodable_record_refuses_resume`,
+  `resume_reacquires_held_scopes`, `resume_fences_the_crashed_container`,
+  `interrupted_stop_resumes_the_same_sandbox_and_workspace`),
+  `petri-execution::sandbox_recovery`
+  (`allocation_crashes_recover_without_replacing_the_workspace`,
+  `recovery_refuses_a_changed_fingerprint_or_a_lost_workspace`),
+  `petri-fabro-steps::parallel::resume_keeps_a_finished_branch_and_finishes_the_unfinished_one`,
+  `petri::controls::the_breaker_state_is_restored_on_resume`,
+  `petri-fabro-steps::subagents::a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files`.
+  Fabro's, by the plan: Git-backed workspace restoration, database
+  transaction recovery, platform event migration, publication deduplication,
+  old-runner retention (`HANDOFF.md`, "What stays Fabro's").
+- Production code has no Fabro, database or UI dependency:
+  `fabro_dependencies.rs` (the full resolve graph, every kind, nested
+  manifests and build scripts), `standalone.rs` (no `fabro` on `PATH`);
+  `cargo tree -p petri-cli -e normal` names no database or UI crate (the
+  twins and `axum` are dev-dependencies of the test crates only).
+
+### Required rows: evidence
+
+Every required row of the feature matrix and the `workflow.toml` table
+above, with the tests that prove it on this branch. "Accepted difference"
+names the decision record under `decisions/`; "gap" names the owner.
+
+| Rows | Evidence |
+|---|---|
+| start, exit, `rankdir`, `label`; command nodes with `script`, `timeout`, `output_schema="routing"`, `stdin_source` (run id and `parallel.results`) | `petri-fabro-acceptance::routing::every_case_matches_the_fabro_oracle` (24 cases at the pin), `fabro_blackbox::contract_branch_envelopes_carry_index_status_and_context_updates`, `fabro_blackbox::contract_helper_merges_both_findings_into_the_report`, the code-review and security-review cells of `fabro_scenarios_blackbox`, differential `parallel_results_matches_the_pinned_fabro` |
+| agent nodes (`prompt`, `@prompts/*.j2`, includes), `output_schema="@schemas/*.json"`, `output_retries` | `fabro_blackbox::edit_and_verify_through_native_openai`, `fabro_blackbox::edit_and_verify_through_native_anthropic`, `fabro_blackbox::malformed_agent_output_fails_the_stage_routably`, cells `code-review/invalid-output-repaired`, `code-review/repair-exhausted`, `security-review/malformed-response`; differential `edit_and_verify_matches_the_pinned_fabro` |
+| `on_failure` `route`, `exit`, `succeed`; `max_retries`, `default_max_retries` | oracle cases `succeed_keeps_a_failure_an_explicit_edge_matches`, `succeed_keeps_a_failure_a_preferred_label_matches`, `succeed_promotes_a_failure_no_explicit_edge_matches`; cell `routing/failure-policy`; `fabro_terminal_blackbox::a_retry_is_announced_on_the_firing_that_retries`, `fabro_fallback_blackbox::a_workflow_retry_is_not_a_failover`. `partially_succeed`: accepted difference `partially-succeed-extension` |
+| `component` with `for_each`, `max_parallel`, `tripleoctagon` fan-in | `petri-fabro-steps::parallel` (`static_branches_return_envelopes_that_never_merge_into_the_parent`, `mixed_failures_join_partially_and_all_failed_fails_the_fan_in`, `an_empty_for_each_list_joins_with_no_branches_and_no_child`, `a_repeated_fork_publishes_results_per_visit_with_its_own_children`, `a_nested_fork_runs_inside_its_branch_and_reports_its_own_results`, `cancelling_the_run_settles_every_branch_child`, `resume_keeps_a_finished_branch_and_finishes_the_unfinished_one`), `petri-execution::admission` (`one_slot_serializes_the_attempts_of_a_fork_and_two_slots_let_them_overlap`, `a_backoff_releases_the_fork_slot_so_a_queued_branch_runs_first`, `the_limit_counts_finished_children_and_names_the_refused_call`), `fabro_blackbox::for_each_branches_keep_distinct_values_under_one_key_in_item_order`, `fabro_blackbox::an_empty_for_each_list_joins_without_calling_the_model`, `fabro_blackbox::nested_joins_report_the_inner_results_inside_the_outer_envelope`, `fabro_blackbox::parallel_gates_bind_each_answer_to_its_own_branch`, cells `backend/dynamic-parallelism@host` and `@docker`, both readiness suites. Accepted differences `parallel-branches-in-path`, `branch-context-updates-are-a-diff`, `empty-for-each-placeholder`. **Gap (scale), owner Petri core**: two successive 1,000-item forks (`petri-fabro-acceptance::e2e::two_successive_thousand_item_forks_stay_under_the_ceiling`, `#[ignore]`; every child's declaration records copy the O(N) fork snapshot; 300 items take 126 s and 1.3 GB); the 10,000-invocation ceiling itself is proven by `exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused` in `test:long` |
+| `class` with `model_stylesheet`, `model`, `provider`, `reasoning_effort`, `speed`, `max_tokens` | `petri-frontend-fabro::lowering`, cell `routing/bundle-defaults-and-overrides`, `fabro_blackbox::run_model_defaults_reach_openrouter_through_chat_completions`, `fabro_fallback_blackbox::reasoning_effort_maps_per_target_and_unfit_targets_are_skipped`, `petri-fabro-steps::hooks::speed_and_max_tokens_reach_the_model_requests` |
+| `default_fidelity`, `fidelity=*`, `thread_id`, `default_thread`, `project_memory` | `petri-fabro-steps::hooks::full_fidelity_nodes_continue_their_thread_and_others_start_fresh`, `petri-fabro-steps::hooks::edge_fidelity_wins_and_a_lost_thread_degrades_to_summary_high`, `petri-fabro-steps::hooks::project_memory_follows_the_profile_and_the_node_kind`, `fabro_hooks_blackbox::full_fidelity_nodes_share_one_conversation_through_the_binary`, `fabro_compaction_blackbox::a_node_that_lost_its_conversation_starts_at_summary_high`, `fabro_fallback_blackbox::a_retained_thread_continues_on_the_fallback_route`, both readiness suites (the `notes` and `docs` threads, the memory rule in the first request). **Gap, owner Fabro's restore step (item 4 of the checklist) with Petri's `sessions.rs` as the seam**: a retained thread is not durable across resume (the node starts a fresh session under Fabro's discarded-session rule; `petri-fabro-steps::subagents::a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files`) |
+| sub-agents | the C4 row above; `fabro_subagents_blackbox` (8), `petri-fabro-steps::subagents` (14), both readiness suites (a hooked child, cancellation inside the child's tool). Accepted differences `subagent-nesting-and-concurrency`, `subagent-mcp-tools`, `subagent-usage-separate` |
+| `stall_timeout`, `loop_restart_signature_limit`, `goal_gate`, `retry_target`, `max_visits`, `max_node_visits` | `petri::controls::an_idle_run_is_cancelled_by_the_watchdog`, `petri::controls::a_pending_question_parks_the_watchdog`, `fabro_blackbox::a_stalled_run_is_cancelled_by_the_watchdog`, `petri::controls::a_repeated_deterministic_failure_trips_the_breaker_across_restarts`, `petri::controls::a_restart_edge_admits_only_transient_failures`, `petri::controls::the_breaker_state_is_restored_on_resume`, `petri::controls::node_visit_totals_survive_a_restart_while_context_resets`, cell `routing/goal-gate-restart-and-visit-limit`, the oracle |
+| `hexagon` gates, every `question_type`, accelerator labels, `freeform=true`, `human.default_choice`, `review_target`, gate `timeout` | `fabro_blackbox::a_multi_select_answer_routes_on_the_first_key_and_records_all`, `fabro_blackbox::an_invalid_scripted_answer_is_re_asked_and_the_second_entry_routes`, `fabro_blackbox::a_delayed_reply_lands_on_its_gate`, `fabro_blackbox::a_withheld_reply_expires_into_the_default_choice`, `fabro_blackbox::a_withheld_reply_without_a_default_fails_with_the_retry_outcome`, `fabro_blackbox::a_review_target_gate_shows_its_reference_in_the_terminal`, `fabro_terminal_blackbox::interactive_multi_select_takes_comma_separated_keys`, `fabro_terminal_blackbox::interactive_freeform_takes_a_line_of_text`, `fabro_terminal_blackbox::interactive_invalid_input_is_refused_and_asked_again`, `fabro_terminal_blackbox::interactive_without_terminal_input_fails_closed_with_a_reason`, the eleven `interview/*` cells, differential `interview_scripted_choices_match_the_pinned_fabro`. Accepted difference `sensitive-answers`; tracked departure `interview-run-model-migration` (retire when `petri run` gains a launch-level model default; owner Petri CLI) |
+| `tab` prompt nodes | `petri-fabro-steps::prompt`, `fabro_blackbox::a_prompt_node_makes_one_tool_free_model_call`, `fabro_fallback_blackbox::a_prompt_node_fails_over_and_repairs_on_its_plan`. Accepted difference `event-kinds` |
+| `house` manager loop, `stack.child_workflow`, `manager.max_cycles` | `petri-fabro-steps::manager` (`a_thousand_polls_consume_one_child_then_exhaustion_cancels_it`, `a_redispatched_attempt_reattaches_and_a_new_attempt_starts_a_new_child`, `the_stop_condition_reads_the_parent_context_and_cancels_the_child`, `a_parent_cancel_cancels_the_child`, `max_cycles_normalizes_as_fabro_does`), `petri-fabro-acceptance::workflow`, the seven `implement/*` host cells (inline graphs of the bundle's shape: an accepted migration, task 17). **Gap, owner the implement bundle (Fabro)**: `implement/child-runs-successfully@docker/openrouter` stays `blocked` because the pinned child's verify script needs the Fabro repository's own toolchain; a container adds no manager-loop behavior |
+| conditions, `{{ inputs.* }}`, `[run.inputs]`, `import` | `petri-frontend-fabro::conditions`, the oracle, `fabro_blackbox::workflow_toml_inputs_bind_and_unsupported_sections_are_reported`, `petri-frontend-fabro::lowering::imports_expand_at_load_with_fabro_rules`, `fabro_blackbox::an_import_is_expanded_at_load_and_its_nodes_run_under_the_prefix` |
+| output values above 100 KiB, `parallel.results` offload | `petri-fabro-steps::steps::large_command_output_is_offloaded_and_reads_back_logically`. Accepted difference `output-references` |
+| `_version`, `[workflow]`, `[run]`, platform-only and rejected sections | `petri-frontend-fabro::lowering::workflow_toml_sections_warn_or_reject_and_never_pass_silently`, `fabro_blackbox::workflow_toml_inputs_bind_and_unsupported_sections_are_reported`, `fabro_blackbox::the_complete_configuration_is_validated_before_preparation_starts`. Accepted differences `checkpoint-saved-hook`, `run-agent-keys` |
+| `[run.model]`, `[run.model.fallbacks]` | the C1 row above; `fabro_fallback_blackbox` (15), `petri::fallback_events` (3), `petri-cli::llm_client` (2), both readiness suites (a failover on the `docs` thread, the chain exhausted in the failure case). Accepted differences `fallback-session-handoff`, `fallback-resolution`; baseline defect `fallback-repeated-tool-effect` |
+| `[run.prepare]`, `[run.execution]`, `[run.environment]`, `[environments.*]`, secrets | `fabro_blackbox::run_prepare_steps_run_before_the_nodes_and_a_failure_stops_the_run`, `fabro_blackbox::a_cancel_during_run_prepare_stops_the_run_before_any_node`, `fabro_blackbox::run_execution_settings_are_the_launch_defaults`, `fabro_blackbox::run_environment_env_and_secrets_reach_the_commands_and_stay_masked`, `petri-frontend-fabro::lowering::run_environment_and_prepare_lower_onto_the_scope_and_the_graph`, `fabro_terminal_blackbox::a_docker_run_keeps_its_sandbox_after_success_and_prune_removes_it` (and the failed and cancelled Docker cases), the five Docker cells. Accepted differences `image-dockerfile-warning`, `workflow-secrets-source`. **Docker coverage is thin by design**: four Docker cases plus five Docker cells run live here and on Linux CI; Daytona is mapped but never exercised (its gate is separate, not claimed) |
+| `[run.agent]` `fabro_tools`, `skills`, `compaction`; `[run.agent.mcps]` | the C2, C3, C5 rows; `petri-frontend-fabro::lowering::run_agent_skills_is_a_warned_extension`, `petri-frontend-fabro::lowering::mcps_lower_onto_agent_nodes_and_into_nested_workflows`, `fabro_mcp_blackbox::unsupported_mcp_settings_are_refused_before_the_run`, `fabro_mcp_blackbox::a_sandbox_server_in_a_docker_scope_is_reached_through_the_plugins_forward`, both readiness suites. Accepted differences `mcp-catalog-and-transports`, `mcp-server-lifetime`, `run-agent-skills-extension`, `malformed-skills-reported`, `missing-skill-failure-class`, `compaction-always-on`, `compaction-summary-usage` |
+| `[[run.hooks]]` | `petri-fabro-steps::hooks` (`command_hooks_fire_at_every_reference_phase_with_fabros_payload`, `a_blocking_run_start_hook_stops_the_run_before_work`, `command_decisions_skip_block_and_ignore_nonblocking_hooks`, `edge_hooks_override_and_block_routes`, `native_tool_hooks_block_pre_and_observe_post`, `acp_tool_hooks_are_best_effort_with_explicit_warnings`, `a_command_hook_timeout_blocks`, `http_hooks_post_the_context_and_fail_open`, `prompt_hooks_evaluate_with_one_model_call_and_fail_open`, `agent_hooks_investigate_the_workspace_then_decide`, `hooks_load_from_every_layer_and_merge_by_id`, `run_failed_then_sandbox_cleanup_run_at_the_run_end_in_fabros_order`, `parallel_start_and_parallel_complete_surround_the_branches`), `fabro_hooks_blackbox::a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`, `fabro_milestone_blackbox` (run-end hooks), both readiness suites (hooks on a skill-driven call, an MCP call, inside a child; every report on the public stream). Accepted differences `acp-tool-hooks-best-effort`, `stage-retrying-hook`, `run-level-hook-reports`, `checkpoint-saved-hook` |
+| `[run.clone]` | the code-review and security-review cells of `fabro_scenarios_blackbox` (the fixture repository checked out on the host and in a container), the `fabro.checkout` event |
+| pause, unpause, steer, cancellation, retention | `petri::controls::pause_holds_admission_and_unpause_releases_it`, `petri::controls::a_paused_run_can_still_be_cancelled`, `petri::controls::a_steer_reaches_the_stage_and_does_not_answer_its_question`, `fabro_blackbox::the_control_file_pauses_unpauses_and_steers_without_answering`, the cancellation cases of `fabro_milestone_blackbox` and `fabro_readiness_blackbox`, `fabro_blackbox::retain_never_deletes_the_workspace`. **Gap, owner Fabro's restore step with Petri's control service as the seam**: a pause does not survive resume (a resumed run starts unpaused) |
+
+### Known limitations carried into the handoff
+
+1. Fan-out scale: super-linear fork snapshots (above). Owner Petri core.
+2. Threads and pause do not survive resume (above). Owner Fabro's restore
+   step; Petri's `sessions.rs` and `controls.rs` are the seams.
+3. The implement family runs inline graphs of the bundle's shape; its Docker
+   cell is blocked on the Fabro toolchain. Owner the implement bundle.
+4. Docker coverage is thin (four cases, five cells); ACP and Daytona are
+   gated separately and not claimed.
+5. `fix-ci` is excluded by the owner's decision of 2026-09-07.
+6. The two deploy keys (`CODE_REVIEW_DEPLOY_KEY`, `FACTORY_DEPLOY_KEY`) do
+   not exist; the owner creates them. Hosted CI has not run; the first run's
+   required results are listed under the readiness gate checklist.
+7. A `for_each` fan-out emits no typed `fork_started`, `branch_completed`,
+   `fork_completed` (the `fabro.parallel.*` kinds and the invocation links
+   carry the facts). Owner Petri core (`execution::events`).
+8. Pebble does not export its project-memory loader; `fabro_steps::memory`
+   mirrors it for prompt nodes. Owner Pebble.
+9. The interview bundle needs a launch-level model default
+   (`interview-run-model-migration`). Owner Petri CLI.
 
 ## Library pin
 
@@ -428,49 +543,50 @@ fails when any of them disagree. The row names are the keys of a record's
 | `sandbox_driver` | `a225832ebb234b09e339e2b6cd30fedfe17a1818` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
+| `runner_image` | `df708f910111` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since this revision) |
 
 A change to Pebble, lithos-llm, or an MCP client library runs the owning
 repository's required checks before Petri moves its pin; then this table, the
-manifests, and the affected evidence records move together. The pending
-library batch is listed in `README.md` under "Library and repository gates".
+manifests, and the affected evidence records move together. The library batch
+the readiness work asked for is pinned (Pebble `7ae5b27f`, sandbox-driver
+`a225832`); the twins are pinned in both test crates that serve them.
 
 ## Readiness gate checklist
 
 The black box plan's "Verification and readiness gate", item by item, with
-where the evidence for each comes from. Status as of task 19 (2026-09-07):
-"met" has a passing check on the integration branch; "partial" names what is
-missing and which task closes it. The first hosted CI run is still to come;
-its required results are listed at the end.
+where the evidence for each comes from. Status as of task 20 (2026-09-07),
+on `swarm/integration` `dbddbfb` merged into the task 20 branch. "met" has a
+passing check on that tree; "partial" names what is missing and who closes
+it.
 
 | Item | Evidence source | Status |
 |---|---|---|
-| Repeatable focused task on the same required set as CI | `mise run test:fabro:blackbox` runs `scripts/test-fabro-blackbox.sh`: every `petri-cli` `fabro_*blackbox` binary plus `standalone` and `fabro_cli`, same build and features as `mise run test`, evidence and coverage report per run | met |
-| Extended variations and repeated process-isolation runs in `check:nightly` | `test:fabro:blackbox:repeat` (three runs, default, one, and two test threads, no fail-fast), `test:long`, `test:fabro:differential`, `check:msrv`, `test:release` | met |
-| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` | met (rule and check); the pending batch is not pinned yet |
-| Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox.rs` (task 12), `fallback_events.rs` | met (task 12) |
-| Required CI fetches and verifies pinned bundles and twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`: bundle fetch step with the deploy-key inputs; twins are pinned dev-dependencies (a build is the fetch); `PETRI_REQUIRE_CORPUS`, `PETRI_REQUIRE_FABRO_CORPUS`, `PETRI_REQUIRE_FABRO_BUNDLES`, `PETRI_REQUIRE_DOCKER` (Linux), `PETRI_REQUIRE_FABRO_BINARY` (compatibility job); `tests/support/fabro/require.rs` | partial: wired and verified locally; the two deploy keys do not exist, so the first hosted run fails at the bundle step until the owner creates them |
-| Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux | met for the scenarios that exist; task 17 fills the remaining bundle scenarios |
-| The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)` job: cached pinned build, `test:fabro:differential`; Nightly reruns it | partial: the job and the entry point exist; the matrix target `crates/petri/cli/tests/fabro_differential.rs` is task 18's, and the job fails until it lands |
-| A machine-readable record per scenario with pins, launch, matched services, raw and normalized observations, final context, artifacts, output, assertions, decisions, cleanup, library links | `tests/support/fabro/record.rs` (`Recorder`), proven by `fabro_evidence_blackbox.rs` | met for the writer; partial for coverage: only the smoke scenario records today; task 17 wires `Recorder` into every required scenario and task 18 fills `compatibility.differential` |
+| Repeatable focused task on the same required set as CI | `mise run test:fabro:blackbox` runs `scripts/test-fabro-blackbox.sh`: every `petri-cli` `fabro_*blackbox` binary (the readiness suite included) plus `standalone`, `fabro_cli` and the oracle test, same build and features as `mise run test`, evidence and coverage report per run | met |
+| Extended variations and repeated process-isolation runs in `check:nightly` | `test:fabro:blackbox:repeat` (three runs under different schedules), `test:long`, `test:fabro:blackbox:strict`, `test:fabro:differential`, `check:msrv`, `test:release` | met |
+| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` (the runner image included) | met; the batch is pinned |
+| Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox::a_tool_effect_is_not_repeated_across_a_failover`, `client_retries_are_spent_before_the_chain_advances`, `a_workflow_retry_is_not_a_failover`, `fallback_events.rs` | met |
+| Required CI fetches and verifies pinned bundles and twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs` | partial: wired and verified locally; the two deploy keys do not exist, so the first hosted run fails at the bundle step until the owner creates them; hosted CI has not run |
+| Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux; every planned cell of `matrix.json` has a test | met locally; hosted run pending |
+| The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)`: cached pinned build, `test:fabro:differential` (five live cells, zero unresolved differences) | met locally; hosted run pending |
+| A machine-readable record per scenario | `tests/support/fabro/record.rs`, one record per scenario cell, `compatibility.differential` from the engine records | met |
 | Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met (pending the first hosted run) |
-| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, strict in CI; `the_coverage_report_counts_only_passed_cells`, `an_empty_evidence_run_is_not_a_passing_gate` | met; the manifest it reads (`crates/fabro/acceptance/scenarios/matrix.json`, or `PETRI_SCENARIO_MATRIX`) is task 17's |
-| Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | partial: two bundles are `required-blocked` (fix-ci, implement-issue) pending task 17's stand-ins |
-| Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the coverage report plus each record's `services[].unmatched_requests` and interview receipt | partial until task 17's manifest lists every cell |
-| Final context, files, side effects meet independent expectations | each scenario's assertions, recorded per record | met per scenario |
-| No unresolved result, routing, or side-effect difference | the differential decisions (task 18) and the "Tracked departures" section above (both retired) | partial: task 18 |
-| Every used feature and temporary form has a disposition | the feature matrix above | met |
-| Inspection and replay trustworthy; cancellation and timeout leave no leak | `inspect_cli.rs`, `inspect.rs`, the terminal and milestone cancellation cases, `assert_no_leaked_processes`, the "No containers left behind" CI step, each record's `cleanup` | met |
+| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, strict in CI; with bundles fetched and every gate required: required 51 (the three readiness cells included), blocked 1 (`implement/child-runs-successfully@docker/openrouter`), excluded 6 (`fix-ci`) | met |
+| Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | met; `implement-issue` stays `required-blocked` for its Docker cell only |
+| Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the strict coverage report plus each record's `services[].unmatched_requests` and interview receipt | met, one blocked cell with its reason |
+| Final context, files, side effects meet independent expectations | each scenario's assertions, recorded per record; the readiness suites assert files, Git state and the public stream | met |
+| No unresolved result, routing, or side-effect difference | the differential decisions and the "Tracked departures" section (one tracked: `interview-run-model-migration`) | met |
+| Every used feature and temporary form has a disposition | the feature matrix and the milestone D audit above | met |
+| Inspection and replay trustworthy; cancellation and timeout leave no leak | `inspect_cli.rs`, `inspect.rs`, the milestone and readiness cancellation cases, `assert_no_leaked_processes`, the "No containers left behind" CI step, replay equal to the live stream (`embedding_readiness`) | met |
 | Additional cutover requirements (ACP, Daytona, crash resume) gated separately | out of the initial scope by decision; not claimed | not claimed |
 
 What the first hosted run must show, in order: the bundle step passes on
 every job once the two deploy keys exist (until then it fails naming them);
 the compatibility job restores or builds the pinned `fabro` binary and the
 "Build the pinned fabro binary" step reports its time; `test:fabro:differential`
-finds `fabro_differential.rs` (task 18) and passes; every `check` job writes
-`coverage.md` to the summary with zero skipped, missing, and failed required
-cells; the `fabro-evidence-*` artifacts exist; `check (ubuntu-24.04)` stays
-inside its 90-minute budget with the added steps (locally the bundle fetch is
-about one second and the pin check under one second).
+passes its five cells; every `check` job writes `coverage.md` to the summary
+with zero skipped, missing, and failed required cells and one blocked cell;
+the `fabro-evidence-*` artifacts exist; `check (ubuntu-24.04)` stays inside
+its 90-minute budget.
 
 ## Where things are
 
@@ -489,3 +605,6 @@ about one second and the pin check under one second).
 | Decision records | `crates/fabro/acceptance/decisions/` |
 | Scenario references | `crates/fabro/acceptance/scenarios/<name>/fabro-reference/reference.json` |
 | Reference-version checks | `crates/fabro/acceptance/tests/reference_version.rs` |
+| Integration handoff | `crates/fabro/HANDOFF.md` |
+| Combined readiness suites | `crates/petri/cli/tests/fabro_readiness_blackbox.rs`, `crates/petri/lib/tests/embedding_readiness.rs` |
+| Event contract and coverage matrix | `crates/core/execution/EVENTS.md` |

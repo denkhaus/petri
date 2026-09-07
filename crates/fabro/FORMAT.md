@@ -12,6 +12,12 @@ The rule throughout: **every construct lowers onto what the core has**. No
 engine semantics were added for Fabro. A construct that cannot lower is a
 specific `unsupported.*` rejection, never a silent approximation.
 
+What a host that embeds Petri relies on (interfaces, identities, event
+positions, acknowledgements, versions) and what stays Fabro's platform's is
+[`crates/fabro/HANDOFF.md`](HANDOFF.md). The public events every construct
+below produces, and the projection tests that prove them, are the
+event-coverage matrix in `crates/core/execution/EVENTS.md`.
+
 ## Run creation happens at load
 
 Fabro renders templates, resolves `@file` references and applies its model
