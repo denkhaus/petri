@@ -256,7 +256,7 @@ impl HumanConfig {
 
     /// Whether a choice is the affirmative one of a yes/no gate, as Fabro
     /// matches a `yes` answer: key `y` or `yes`, or label `yes`.
-    fn is_affirmative(&self, choice: &Choice) -> bool {
+    fn is_affirmative(choice: &Choice) -> bool {
         choice.key.eq_ignore_ascii_case("y")
             || choice.key.eq_ignore_ascii_case("yes")
             || strip_accelerator(&choice.label).eq_ignore_ascii_case("yes")
@@ -479,7 +479,7 @@ impl Step for HumanStep {
                 let answered = if !answer.choices.is_empty() {
                     answer.choices.join(", ")
                 } else if config.is_yes_no() {
-                    if config.is_affirmative(selected[0]) {
+                    if HumanConfig::is_affirmative(selected[0]) {
                         "yes".to_owned()
                     } else {
                         "no".to_owned()

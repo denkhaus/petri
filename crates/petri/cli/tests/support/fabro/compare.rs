@@ -19,9 +19,10 @@
 //! (`crates/fabro/acceptance/decisions/*.toml`) whose `accepts` list names
 //! the difference kind and whose scope names the scenario.
 
-use std::collections::BTreeMap;
-use std::fs;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::{fs, iter, mem};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -198,10 +199,8 @@ pub(crate) fn requests_of(twins: &[&Twin], credential: &str) -> (Vec<Request>, V
         let bodies = twin.requests_for(credential);
         // The twin's log covers every namespace; align by arrival order of
         // this credential's bodies within the log.
-        let mut log_index = 0;
-        for body in &bodies {
+        for (log_index, body) in bodies.iter().enumerate() {
             let record = log.get(log_index).cloned().unwrap_or(Value::Null);
-            log_index += 1;
             let request = Request {
                 provider: twin.provider.id().to_owned(),
                 model:    body["model"].as_str().unwrap_or_default().to_owned(),
@@ -230,8 +229,7 @@ pub(crate) fn project_petri(
     let document = finished.inspect();
     let status = document["status"]
         .as_str()
-        .map(petri_run_status)
-        .unwrap_or_else(|| "incomplete".to_owned());
+        .map_or_else(|| "incomplete".to_owned(), petri_run_status);
     let invocations = document["invocations"]
         .as_array()
         .cloned()
@@ -244,10 +242,11 @@ pub(crate) fn project_petri(
     let histories = |invocation: u64| -> Vec<Value> {
         let mut records = Vec::new();
         for execution in &executions {
-            if execution["invocation"].as_u64() == Some(invocation) {
-                if let Some(history) = execution["engine"]["history"].as_array() {
-                    records.extend(history.iter().cloned());
-                }
+            if execution["invocation"].as_u64() != Some(invocation) {
+                continue;
+            }
+            if let Some(history) = execution["engine"]["history"].as_array() {
+                records.extend(history.iter().cloned());
             }
         }
         records
@@ -379,6 +378,9 @@ pub(crate) fn project_petri(
     projection
 }
 
+/// A branch as its events record it: index, node, outcome.
+type BranchRecord = (u64, String, String);
+
 /// Project a Fabro run through `fabro events`, the dump, the run's working
 /// directory, the adapter's receipt and the twins' logs.
 pub(crate) fn project_fabro(
@@ -391,8 +393,7 @@ pub(crate) fn project_fabro(
     let mut path = Vec::new();
     let mut context_values: Map<String, Value> = Map::new();
     let mut fork_results: Vec<(String, Vec<Value>)> = Vec::new();
-    let mut branch_records: BTreeMap<String, BTreeMap<String, (u64, String, String)>> =
-        BTreeMap::new();
+    let mut branch_records: BTreeMap<String, BTreeMap<String, BranchRecord>> = BTreeMap::new();
     for event in &run.events {
         let kind = event["event"].as_str().unwrap_or_default();
         let node = event["node_id"].as_str().unwrap_or_default().to_owned();
@@ -406,7 +407,7 @@ pub(crate) fn project_fabro(
                     outcome: props["status"].as_str().unwrap_or("succeeded").to_owned(),
                 });
                 if let Some(values) = props["context_values"].as_object() {
-                    context_values = values.clone();
+                    context_values.clone_from(values);
                 }
                 if let Some(updates) = props["context_updates"].as_object() {
                     for (key, value) in updates {
@@ -414,17 +415,19 @@ pub(crate) fn project_fabro(
                     }
                 }
             }
-            "stage.failed" if branch.is_none() && !node.is_empty() => {
-                if !props["will_retry"].as_bool().unwrap_or(false) {
-                    path.push(Stage {
-                        node:    node.clone(),
-                        outcome: "failed".to_owned(),
-                    });
-                }
+            "stage.failed"
+                if branch.is_none()
+                    && !node.is_empty()
+                    && !props["will_retry"].as_bool().unwrap_or(false) =>
+            {
+                path.push(Stage {
+                    node:    node.clone(),
+                    outcome: "failed".to_owned(),
+                });
             }
             "checkpoint.completed" => {
                 if let Some(values) = props["context_values"].as_object() {
-                    context_values = values.clone();
+                    context_values.clone_from(values);
                 }
             }
             "parallel.completed" => {
@@ -451,7 +454,10 @@ pub(crate) fn project_fabro(
                         node.clone(),
                         String::new(),
                     ));
-                    record.2 = props["status"].as_str().unwrap_or("succeeded").to_owned();
+                    props["status"]
+                        .as_str()
+                        .unwrap_or("succeeded")
+                        .clone_into(&mut record.2);
                 }
             }
             _ => {}
@@ -462,7 +468,7 @@ pub(crate) fn project_fabro(
     // the fork node name in the stage directory (`<rank>-<node>@<visit>`).
     let dumped = run.dumped_parallel_results();
     let mut forks = Vec::new();
-    let mut groups: Vec<(String, BTreeMap<String, (u64, String, String)>)> =
+    let mut groups: Vec<(String, BTreeMap<String, BranchRecord>)> =
         branch_records.into_iter().collect();
     // Groups are `<fork>@<visit>`; keep event order by the fork's first appearance.
     groups.sort_by_key(|(group, _)| {
@@ -492,7 +498,7 @@ pub(crate) fn project_fabro(
             })
             .and_then(|(_, value)| value.as_array().cloned());
         let results = from_dump.unwrap_or(from_events);
-        let mut ordered: Vec<(u64, String, String)> = records.values().cloned().collect();
+        let mut ordered: Vec<BranchRecord> = records.values().cloned().collect();
         ordered.sort_by_key(|(index, _, _)| *index);
         let branches = ordered
             .into_iter()
@@ -601,11 +607,11 @@ fn normalize(projection: &mut Projection) {
         .map(|(placeholder, raw)| (raw.clone(), placeholder.clone()))
         .collect();
     // Longest raw values first so a path prefix never shadows a longer one.
-    replacements.sort_by_key(|(raw, _)| std::cmp::Reverse(raw.len()));
+    replacements.sort_by_key(|(raw, _)| Reverse(raw.len()));
     let mut blobs: BTreeMap<String, String> = BTreeMap::new();
     // The identity map itself keeps the raw values; only the observations
     // are rewritten.
-    let identities = std::mem::take(&mut projection.identities);
+    let identities = mem::take(&mut projection.identities);
     let mut value = serde_json::to_value(&*projection).expect("a projection serializes");
     rewrite(&mut value, &replacements, &mut blobs);
     let mut rewritten: Projection =
@@ -697,17 +703,16 @@ pub(crate) fn compare(
     // between the fork and the join where Fabro records branch events. Each
     // is its own named difference. The remaining sequences must match
     // exactly, in order.
-    let branch_nodes: std::collections::BTreeSet<&str> = petri
+    let branch_nodes: BTreeSet<&str> = petri
         .forks
         .iter()
         .flat_map(|fork| fork.branches.iter())
         .flat_map(|branch| {
-            std::iter::once(branch.id.as_str())
+            iter::once(branch.id.as_str())
                 .chain(branch.stages.iter().map(|stage| stage.node.as_str()))
         })
         .collect();
-    let fabro_nodes: std::collections::BTreeSet<&str> =
-        fabro.path.iter().map(|stage| stage.node.as_str()).collect();
+    let fabro_nodes: BTreeSet<&str> = fabro.path.iter().map(|stage| stage.node.as_str()).collect();
     let mut petri_path = Vec::new();
     for stage in &petri.path {
         if stage.outcome == "skipped" {
@@ -796,7 +801,7 @@ pub(crate) fn compare(
         .context
         .keys()
         .chain(fabro.context.keys())
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect::<BTreeSet<_>>()
     {
         match (petri.context.get(key), fabro.context.get(key)) {
             (Some(p), Some(f)) => {
@@ -903,11 +908,7 @@ fn compare_values(
 ) {
     match (petri, fabro) {
         (Value::Object(p), Value::Object(f)) => {
-            for key in p
-                .keys()
-                .chain(f.keys())
-                .collect::<std::collections::BTreeSet<_>>()
-            {
+            for key in p.keys().chain(f.keys()).collect::<BTreeSet<_>>() {
                 let field = format!("{field}.{key}");
                 match (p.get(key), f.get(key)) {
                     (Some(pv), Some(fv)) => compare_values(out, kind, &field, pv, fv),
@@ -1121,11 +1122,7 @@ pub(crate) fn json_differences(left: &Value, right: &Value) -> Vec<String> {
 fn json_diff_into(out: &mut Vec<String>, pointer: &str, left: &Value, right: &Value) {
     match (left, right) {
         (Value::Object(l), Value::Object(r)) => {
-            for key in l
-                .keys()
-                .chain(r.keys())
-                .collect::<std::collections::BTreeSet<_>>()
-            {
+            for key in l.keys().chain(r.keys()).collect::<BTreeSet<_>>() {
                 let pointer = format!("{pointer}/{key}");
                 match (l.get(key), r.get(key)) {
                     (Some(lv), Some(rv)) => json_diff_into(out, &pointer, lv, rv),

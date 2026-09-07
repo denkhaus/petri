@@ -287,6 +287,10 @@ fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
 /// Evidence records a differential run left (under `PETRI_EVIDENCE_DIR` or
 /// `target/fabro-differential`) were produced by the pinned Fabro.
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "an absent evidence directory is reported, not failed"
+)]
 fn evidence_records_name_the_pin() {
     let pin = pin();
     let dir = env::var_os("PETRI_EVIDENCE_DIR")

@@ -14,10 +14,11 @@
 //! is killed with its process group when the case ends.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use std::{env, fs, process};
+use std::{env, fs, io, process};
 
 use serde_json::{Map, Value, json};
 use tokio::net::TcpListener;
@@ -71,6 +72,10 @@ impl FabroBinary {
     /// `PETRI_REQUIRE_FABRO_BINARY=1` a missing binary fails. A binary that
     /// exists but does not report the pin always fails: an unpinned
     /// reference is never a baseline.
+    #[expect(
+        clippy::print_stderr,
+        reason = "the skip and its remedy are reported on the test's stderr"
+    )]
     pub(crate) fn provisioned() -> Option<Self> {
         let commit = pinned_commit();
         let path = env::var_os("FABRO_BIN").map_or_else(
@@ -79,8 +84,8 @@ impl FabroBinary {
         );
         if !path.is_file() {
             assert!(
-                env::var(REQUIRE_ENV).is_ok_and(|value| value == "1"),
-                "no pinned fabro binary at {}; run scripts/fabro-provision.sh",
+                !env::var(REQUIRE_ENV).is_ok_and(|value| value == "1"),
+                "no pinned fabro binary at {} and {REQUIRE_ENV}=1; run scripts/fabro-provision.sh",
                 path.display()
             );
             eprintln!(
@@ -165,11 +170,12 @@ impl FabroServer {
         for twin in twins {
             // Fabro's adapters append `/responses` and `/messages` to the
             // provider base URL; the twins serve those under `/v1`.
-            settings.push_str(&format!(
+            let _ = write!(
+                settings,
                 "\n[llm.providers.{}]\nbase_url = \"{}/v1\"\n",
                 twin.provider.id(),
                 twin.base_url
-            ));
+            );
         }
         let config = home.join(".fabro").join("settings.toml");
         fs::write(&config, settings).expect("write settings.toml");
@@ -341,6 +347,10 @@ impl FabroServer {
 
     /// Validate, create and drive one run to completion, then collect its
     /// events, state, dump and interview receipt.
+    #[expect(
+        clippy::print_stderr,
+        reason = "a failed dump is reported on the test's stderr; the run's evidence still stands"
+    )]
     pub(crate) async fn run(&self, launch: &FabroLaunch<'_>) -> FabroRun {
         let dump_dir = self.root.join("dump");
         let mut run = FabroRun {
@@ -377,7 +387,7 @@ impl FabroServer {
                 "rejected_by": "fabro validate",
                 "diagnostics": diagnostics,
             });
-            run.status = "rejected".to_owned();
+            "rejected".clone_into(&mut run.status);
             run.receipt = Interviews::load(launch.script).receipt();
             return run;
         }
@@ -463,7 +473,7 @@ impl FabroServer {
                 let _ = self
                     .api_post(&format!("/api/v1/runs/{run_id}/cancel"), &json!({}))
                     .await;
-                run.status = "timed_out".to_owned();
+                "timed_out".clone_into(&mut run.status);
                 break;
             }
             sleep(Duration::from_millis(200)).await;
@@ -580,16 +590,17 @@ fn server_env(
 
 /// The run id `fabro run --detach --json` printed.
 fn run_id_of(stdout: &str) -> Option<String> {
-    if let Ok(Value::Object(doc)) = serde_json::from_str::<Value>(stdout) {
-        if let Some(id) = doc.get("run_id").and_then(Value::as_str) {
-            return Some(id.to_owned());
-        }
+    let run_id_in = |text: &str| {
+        serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|doc| doc.get("run_id")?.as_str().map(str::to_owned))
+    };
+    if let Some(id) = run_id_in(stdout) {
+        return Some(id);
     }
     for line in stdout.lines() {
-        if let Ok(Value::Object(doc)) = serde_json::from_str::<Value>(line.trim()) {
-            if let Some(id) = doc.get("run_id").and_then(Value::as_str) {
-                return Some(id.to_owned());
-            }
+        if let Some(id) = run_id_in(line.trim()) {
+            return Some(id);
         }
         if let Some(rest) = line.trim().strip_prefix("Run: ") {
             return rest.split_whitespace().next().map(str::to_owned);
@@ -761,10 +772,11 @@ fn option_keys(question: &Value) -> Vec<String> {
 
 fn option_key(option: &Value) -> String {
     let label = option["label"].as_str().unwrap_or_default();
-    if let Some(rest) = label.strip_prefix('[') {
-        if let Some((key, _)) = rest.split_once(']') {
-            return key.trim().to_owned();
-        }
+    if let Some((key, _)) = label
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+    {
+        return key.trim().to_owned();
     }
     option["key"].as_str().unwrap_or_default().to_owned()
 }
@@ -908,8 +920,8 @@ impl Interviews {
         let action_kind = action["kind"].as_str().unwrap_or_default();
         let value = action["value"].as_str().unwrap_or_default().to_owned();
         let disposition = match action_kind {
-            "choice" => match find_option(question, &value) {
-                Some(option) => {
+            "choice" => {
+                if let Some(option) = find_option(question, &value) {
                     record["reply"] = json!({ "kind": "answered", "choice": value });
                     let body = if matches!(kind.as_str(), "yes_no" | "confirmation") {
                         json!({ "kind": if is_affirmative(option) { "yes" } else { "no" } })
@@ -917,8 +929,7 @@ impl Interviews {
                         json!({ "kind": "selected", "option_key": option["key"] })
                     };
                     Disposition::Answer(body)
-                }
-                None => {
+                } else {
                     self.errors.push(format!(
                         "entry `{}` chooses `{value}`, which question {qid} on `{stage}` does not offer ({keys:?})",
                         entry.id
@@ -926,7 +937,7 @@ impl Interviews {
                     record["delivery"] = json!("invalid");
                     Disposition::Error
                 }
-            },
+            }
             "choices" => {
                 let values: Vec<String> = action["values"]
                     .as_array()
@@ -940,27 +951,24 @@ impl Interviews {
                     .iter()
                     .map(|v| find_option(question, v).map(|o| o["key"].clone()))
                     .collect();
-                match mapped {
-                    Some(option_keys) => {
-                        // Petri's receipt records the first key as `choice`
-                        // beside every key under `choices`.
-                        record["reply"] = json!({
-                            "kind": "answered",
-                            "choice": values.first().cloned().unwrap_or_default(),
-                            "choices": values,
-                        });
-                        Disposition::Answer(
-                            json!({ "kind": "multi_selected", "option_keys": option_keys }),
-                        )
-                    }
-                    None => {
-                        self.errors.push(format!(
-                            "entry `{}` selects {values:?}, not all offered by question {qid}",
-                            entry.id
-                        ));
-                        record["delivery"] = json!("invalid");
-                        Disposition::Error
-                    }
+                if let Some(option_keys) = mapped {
+                    // Petri's receipt records the first key as `choice`
+                    // beside every key under `choices`.
+                    record["reply"] = json!({
+                        "kind": "answered",
+                        "choice": values.first().cloned().unwrap_or_default(),
+                        "choices": values,
+                    });
+                    Disposition::Answer(
+                        json!({ "kind": "multi_selected", "option_keys": option_keys }),
+                    )
+                } else {
+                    self.errors.push(format!(
+                        "entry `{}` selects {values:?}, not all offered by question {qid}",
+                        entry.id
+                    ));
+                    record["delivery"] = json!("invalid");
+                    Disposition::Error
                 }
             }
             "text" => {
@@ -1106,7 +1114,7 @@ pub(crate) fn stage_repository(source: &Path, dest: &Path) {
     ]);
 }
 
-pub(crate) fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;

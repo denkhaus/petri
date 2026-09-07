@@ -48,6 +48,9 @@ fn scenarios_dir() -> PathBuf {
 /// One independent assertion on a projection: name, passed, detail.
 type Check = (String, bool, Value);
 
+/// A twin's scripts for one namespace.
+type Scripts = fn(&str) -> Vec<Value>;
+
 fn check(name: &str, passed: bool, detail: impl Into<Value>) -> Check {
     (name.to_owned(), passed, detail.into())
 }
@@ -64,7 +67,7 @@ struct Cell {
     script:        Option<Vec<Value>>,
     /// Provider twins both engines need, with their scenario scripts built
     /// per namespace.
-    twins:         Vec<(Provider, fn(&str) -> Vec<Value>)>,
+    twins:         Vec<(Provider, Scripts)>,
     /// The independent expectation, asserted on each engine's projection.
     expect:        fn(&Projection) -> Vec<Check>,
     /// Baseline defects already recorded for the pinned Fabro: expectation
@@ -136,6 +139,10 @@ fn expect(record: &mut Record, projection: &Projection, cell: &Cell) -> Vec<Stri
 }
 
 /// Run one cell end to end.
+#[expect(
+    clippy::print_stderr,
+    reason = "known baseline defects are reported on the test's stderr"
+)]
 async fn run_cell(cell: Cell) {
     let scenario = cell.scenario;
     let fabro = FabroBinary::provisioned();
@@ -579,7 +586,7 @@ const COMMON_BOOKKEEPING: &[&str] = &[
     "parallel.branch_count",
 ];
 
-fn interview_entry(id: &str, node: &str, kind: &str, action: Value) -> Value {
+fn interview_entry(id: &str, node: &str, kind: &str, action: &Value) -> Value {
     json!({
         "id": id,
         "match": { "node": node, "kind": kind },
@@ -679,31 +686,31 @@ async fn interview_scripted_choices_match_the_pinned_fabro() {
                 "easy",
                 "yes_no",
                 "yes_no",
-                json!({ "kind": "choice", "value": "Y" }),
+                &json!({ "kind": "choice", "value": "Y" }),
             ),
             interview_entry(
                 "continue",
                 "confirmation",
                 "confirmation",
-                json!({ "kind": "choice", "value": "Y" }),
+                &json!({ "kind": "choice", "value": "Y" }),
             ),
             interview_entry(
                 "risks",
                 "multiple_choice",
                 "multiple_choice",
-                json!({ "kind": "choice", "value": "R" }),
+                &json!({ "kind": "choice", "value": "R" }),
             ),
             interview_entry(
                 "blockers",
                 "multi_select",
                 "multi_select",
-                json!({ "kind": "choices", "values": ["B"] }),
+                &json!({ "kind": "choices", "values": ["B"] }),
             ),
             interview_entry(
                 "nuance",
                 "freeform",
                 "freeform",
-                json!({ "kind": "text", "value": "ship on Friday" }),
+                &json!({ "kind": "text", "value": "ship on Friday" }),
             ),
         ]),
         twins:         vec![(Provider::OpenAi, interview_scripts)],
@@ -820,7 +827,7 @@ async fn edit_and_verify_matches_the_pinned_fabro() {
             "ship",
             "gate",
             "yes_no",
-            json!({ "kind": "choice", "value": "Y" }),
+            &json!({ "kind": "choice", "value": "Y" }),
         )]),
         twins:         vec![(Provider::OpenAi, edit_and_verify_scripts)],
         expect:        expect_edit_and_verify,

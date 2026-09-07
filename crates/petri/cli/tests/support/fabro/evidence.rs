@@ -16,6 +16,7 @@
 //! reviewable `git diff`, never a silent replacement.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs};
@@ -71,13 +72,14 @@ fn locked_revision(package: &str) -> Option<String> {
             in_package = true;
             continue;
         }
-        if in_package {
-            if let Some(source) = line.strip_prefix("source = \"") {
-                return source
-                    .rsplit('#')
-                    .next()
-                    .map(|rev| rev.trim_end_matches('"').to_owned());
-            }
+        if !in_package {
+            continue;
+        }
+        if let Some(source) = line.strip_prefix("source = \"") {
+            return source
+                .rsplit('#')
+                .next()
+                .map(|rev| rev.trim_end_matches('"').to_owned());
         }
     }
     None
@@ -156,7 +158,7 @@ pub(crate) fn bundle_digest(dir: &Path) -> String {
     for relative in files {
         let bytes = fs::read(dir.join(&relative)).unwrap_or_default();
         let digest = Sha256::digest(&bytes);
-        lines.push_str(&format!("{digest:x} {relative}\n"));
+        let _ = writeln!(lines, "{digest:x} {relative}");
     }
     format!("{:x}", Sha256::digest(lines.as_bytes()))
 }
@@ -281,6 +283,10 @@ pub(crate) fn load_reference(scenario: &str) -> Option<(Value, Projection)> {
 /// Check the live Fabro projection against the committed reference, or
 /// record it when `PETRI_FABRO_REFERENCE_RECORD=1`. Returns the differences
 /// as text when the reference does not match and recording is off.
+#[expect(
+    clippy::print_stderr,
+    reason = "a recorded reference is announced on the test's stderr"
+)]
 pub(crate) fn check_or_record_reference(
     scenario: &str,
     fabro: &FabroBinary,
