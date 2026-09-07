@@ -1542,6 +1542,7 @@ name = "petri-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "globset",
  "lithos-llm",
  "petri",
  "petri-cli-core",

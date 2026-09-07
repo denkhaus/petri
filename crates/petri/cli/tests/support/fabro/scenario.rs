@@ -9,9 +9,10 @@
 //! scenario that does not load never runs, so a typo cannot silently drop
 //! an assertion.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::{env, fs};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs, io};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -77,7 +78,13 @@ pub(crate) enum Bundle {
         entry_point: Option<String>,
     },
     Inline {
-        inline: String,
+        inline:      String,
+        /// A pinned bundle whose files are also copied into the fixture,
+        /// for an inline graph that calls one of the bundle's workflows.
+        #[serde(default)]
+        with_bundle: Option<String>,
+        #[serde(default)]
+        with_hash:   Option<String>,
     },
 }
 
@@ -216,6 +223,9 @@ pub(crate) struct InterruptWhen {
     pub(crate) container_file: Option<String>,
     #[serde(default)]
     pub(crate) request:        Option<String>,
+    /// A stderr line of the run containing this text.
+    #[serde(default)]
+    pub(crate) stderr:         Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -487,12 +497,35 @@ impl Scenario {
                     ));
                 }
             }
-            Bundle::Inline { inline } => {
+            Bundle::Inline {
+                inline,
+                with_bundle,
+                with_hash,
+            } => {
                 if !self.dir.join(inline).is_file() {
                     return Err(format!(
                         "{}: inline graph `{inline}` is not beside the scenario",
                         path.display()
                     ));
+                }
+                if let Some(id) = with_bundle {
+                    let hash = with_hash.as_deref().ok_or_else(|| {
+                        format!("{}: `with_bundle` needs `with_hash`", path.display())
+                    })?;
+                    let lock = lock()?;
+                    let entry = lock["bundles"]
+                        .as_array()
+                        .and_then(|bundles| bundles.iter().find(|b| b["id"] == id.as_str()))
+                        .ok_or_else(|| {
+                            format!("{}: bundle `{id}` is not in the lock", path.display())
+                        })?;
+                    if entry["bundle_hash"] != hash {
+                        return Err(format!(
+                            "{}: bundle `{id}` hash {hash} differs from the lock's {}",
+                            path.display(),
+                            entry["bundle_hash"]
+                        ));
+                    }
                 }
             }
         }
@@ -546,6 +579,14 @@ impl Scenario {
         }
     }
 
+    /// The pinned bundle whose files the fixture carries, if any.
+    pub(crate) fn bundle_files(&self) -> Option<&str> {
+        match &self.bundle {
+            Bundle::Pinned { id, .. } => Some(id),
+            Bundle::Inline { with_bundle, .. } => with_bundle.as_deref(),
+        }
+    }
+
     /// The workflow file to run, relative to the fixture repository root
     /// (pinned bundles) or to the scenario directory (inline graphs).
     pub(crate) fn entry_point(&self) -> Result<String, String> {
@@ -560,12 +601,12 @@ impl Scenario {
                     .map(str::to_owned)
                     .ok_or_else(|| "the lock entry has no entry point".to_owned())
             }
-            Bundle::Inline { inline } => Ok(inline.clone()),
+            Bundle::Inline { inline, .. } => Ok(inline.clone()),
         }
     }
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -609,7 +650,9 @@ pub(crate) struct Matrix {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Cell {
-    pub(crate) cell:     String,
+    /// The cell's name, `<scenario>@<backend>/<agent>`.
+    #[serde(rename = "cell")]
+    pub(crate) name:     String,
     pub(crate) scenario: Option<String>,
     pub(crate) backend:  Backend,
     pub(crate) agent:    Agent,
@@ -639,22 +682,22 @@ impl Matrix {
                 "matrix.json: schema_version is not {SCHEMA_VERSION}"
             ));
         }
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for cell in &matrix.cells {
-            if !seen.insert(cell.cell.clone()) {
-                return Err(format!("matrix.json: cell `{}` is listed twice", cell.cell));
+            if !seen.insert(cell.name.clone()) {
+                return Err(format!("matrix.json: cell `{}` is listed twice", cell.name));
             }
             match cell.status {
                 CellStatus::Planned if cell.test.is_none() => {
                     return Err(format!(
                         "matrix.json: planned cell `{}` names no test",
-                        cell.cell
+                        cell.name
                     ));
                 }
                 CellStatus::Blocked | CellStatus::Excluded if cell.reason.is_none() => {
                     return Err(format!(
                         "matrix.json: cell `{}` is {:?} with no reason",
-                        cell.cell, cell.status
+                        cell.name, cell.status
                     ));
                 }
                 _ => {}
@@ -664,7 +707,7 @@ impl Matrix {
     }
 
     pub(crate) fn cell(&self, name: &str) -> Option<&Cell> {
-        self.cells.iter().find(|cell| cell.cell == name)
+        self.cells.iter().find(|cell| cell.name == name)
     }
 }
 
@@ -909,8 +952,8 @@ impl CellRecord {
             "cell": self.cell,
             "status": status,
             "note": note,
-            "recorded_at": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            "recorded_at": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or_default(),
         });

@@ -46,8 +46,12 @@ repository paths and committed in the first commit. `entry_point` defaults
 to the lock's entry point and may name another graph of the bundle.
 
 `"bundle": { "inline": "workflow.fabro" }` runs a graph file that lives in
-the scenario's directory instead of a pinned bundle. Only the `provider-faults`
-and `routing` families use it, for cases the pinned bundles cannot express.
+the scenario's directory instead of a pinned bundle, for a shape the pinned
+bundles cannot express (a loop, a fork, a parent that calls a bundle). With
+`"with_bundle": "<id>", "with_hash": "<hash>"` the pinned bundle's files
+are copied into the fixture too, so the inline graph can call one of its
+workflows (`stack.child_workflow="fabro/workflows/<name>/workflow.fabro"`).
+A scenario's title says which shape the bundle lacks.
 
 ## Fixture
 
@@ -141,6 +145,9 @@ that uses it until a service is implemented.
   case cancels a run the way a person does, tied to an observed event.
 - `interrupt_when.request` sends SIGINT once the named twin scenario has been
   consumed: a cancellation timed to a provider request the run made.
+- `interrupt_when.stderr` sends SIGINT once a stderr line of the run
+  contains the text: the cancel a person sends when they see a gate
+  waiting (`waiting for an answer: <question>`).
 - `control_lines` append lines to a `--control` file, each after an observed
   workspace file, for pause, unpause, steer and cancel.
 - `stdin` runs `--interactive` with the given text; `close` sends EOF after.

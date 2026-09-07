@@ -19,7 +19,7 @@ use std::time::Duration;
 use std::{env, fs, process};
 
 use serde_json::Value;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::Command;
 use tokio::time::{Instant, sleep, timeout};
 
@@ -288,44 +288,65 @@ impl Case {
         let container_marker = launch
             .interrupt_when_container_file
             .map(|file| (self.run_dir.clone(), file));
-        let interrupt =
-            (launch.interrupt_when.is_some() || container_marker.is_some()).then(|| {
-                let marker = launch.interrupt_when;
-                tokio::spawn(async move {
-                    let deadline = Instant::now() + RUN_DEADLINE;
-                    loop {
-                        let appeared = match (&marker, &container_marker) {
-                            (Some(marker), _) => marker.exists(),
-                            (None, Some((run_dir, file))) => container_has(run_dir, file).await,
-                            (None, None) => true,
-                        };
-                        if appeared {
-                            break;
-                        }
-                        assert!(
-                            Instant::now() < deadline,
-                            "the interrupt marker {marker:?} {container_marker:?} never appeared"
-                        );
-                        sleep(Duration::from_millis(50)).await;
+        let stderr_marker = launch
+            .interrupt_when_stderr
+            .as_ref()
+            .map(|_| self.root.join("interrupt-on-stderr"));
+        let interrupt_when = launch.interrupt_when.or_else(|| stderr_marker.clone());
+        let interrupt = (interrupt_when.is_some() || container_marker.is_some()).then(|| {
+            let marker = interrupt_when;
+            tokio::spawn(async move {
+                let deadline = Instant::now() + RUN_DEADLINE;
+                loop {
+                    let appeared = match (&marker, &container_marker) {
+                        (Some(marker), _) => marker.exists(),
+                        (None, Some((run_dir, file))) => container_has(run_dir, file).await,
+                        (None, None) => true,
+                    };
+                    if appeared {
+                        break;
                     }
-                    #[cfg(unix)]
-                    {
-                        let _ = Command::new("kill")
-                            .args(["-INT", &pid.to_string()])
-                            .stdin(Stdio::null())
-                            .status()
-                            .await;
-                    }
-                })
-            });
+                    assert!(
+                        Instant::now() < deadline,
+                        "the interrupt marker {marker:?} {container_marker:?} never appeared"
+                    );
+                    sleep(Duration::from_millis(50)).await;
+                }
+                #[cfg(unix)]
+                {
+                    let _ = Command::new("kill")
+                        .args(["-INT", &pid.to_string()])
+                        .stdin(Stdio::null())
+                        .status()
+                        .await;
+                }
+            })
+        });
         let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let stderr_needle = launch.interrupt_when_stderr.clone();
         let drain = async {
             let mut out = Vec::new();
-            let mut err = Vec::new();
-            let (a, b) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+            let read_out = stdout.read_to_end(&mut out);
+            // stderr is read line by line so a watched line can fire the
+            // interrupt while the run is still live.
+            let read_err = async {
+                let mut err = Vec::new();
+                let mut lines = BufReader::new(stderr).split(b'\n');
+                while let Ok(Some(line)) = lines.next_segment().await {
+                    if let (Some(needle), Some(marker)) = (&stderr_needle, &stderr_marker)
+                        && !marker.exists()
+                        && String::from_utf8_lossy(&line).contains(needle.as_str())
+                    {
+                        let _ = fs::write(marker, "");
+                    }
+                    err.extend_from_slice(&line);
+                    err.push(b'\n');
+                }
+                err
+            };
+            let (a, err) = tokio::join!(read_out, read_err);
             a.expect("read stdout");
-            b.expect("read stderr");
             (out, err)
         };
         let waited = timeout(deadline, async {
@@ -399,6 +420,9 @@ pub(crate) struct Launch {
     /// The working directory of the `petri` process. Defaults to the
     /// harness's own.
     pub(crate) cwd: Option<PathBuf>,
+    /// Send SIGINT once a stderr line contains this text: the cancel a
+    /// person sends when they see a gate waiting.
+    pub(crate) interrupt_when_stderr: Option<String>,
 }
 
 /// A `PATH` with an empty directory in front and only the system binaries

@@ -147,6 +147,10 @@ pub struct InterviewError {
     message: String,
     #[source]
     source:  Option<Box<dyn StdError + Send + Sync + 'static>>,
+    /// What the interviewer wants in the receipt's `script` section even
+    /// though it failed: a scripted interviewer's per-entry counts when a
+    /// required entry went unused.
+    report:  Option<Value>,
 }
 
 impl InterviewError {
@@ -154,6 +158,7 @@ impl InterviewError {
         Self {
             message: message.into(),
             source:  None,
+            report:  None,
         }
     }
 
@@ -164,7 +169,19 @@ impl InterviewError {
         Self {
             message: message.into(),
             source:  Some(Box::new(source)),
+            report:  None,
         }
+    }
+
+    /// Attach the receipt section a failed `finish` still has to report.
+    #[must_use]
+    pub fn with_report(mut self, report: Value) -> Self {
+        self.report = Some(report);
+        self
+    }
+
+    pub fn report(&self) -> Option<&Value> {
+        self.report.as_ref()
     }
 
     pub fn message(&self) -> &str {
@@ -373,7 +390,8 @@ impl InterviewDispatcher {
             Ok(script) => script,
             Err(error) => {
                 inner.state().errors.push(error.to_string());
-                None
+                // A failed verification still reports what it counted.
+                error.report().cloned()
             }
         };
         let mut state = inner.state();

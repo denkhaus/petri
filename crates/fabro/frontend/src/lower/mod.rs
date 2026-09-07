@@ -221,7 +221,16 @@ pub(crate) fn lower(
     inputs: &CompileInputs,
     diags: Diagnostics,
 ) -> Lowered {
-    lower_nested(workflow, file, files, inputs, diags, Vec::new(), Vec::new())
+    lower_nested(
+        workflow,
+        file,
+        files,
+        inputs,
+        diags,
+        Vec::new(),
+        Vec::new(),
+        workflow_toml::ModelDefaults::default(),
+    )
 }
 
 /// [`lower`] for a workflow `stack` deep in nested-workflow calls. A nested
@@ -234,14 +243,19 @@ fn lower_nested(
     mut diags: Diagnostics,
     stack: Vec<String>,
     inherited_mcps: Vec<McpServer>,
+    inherited_model: workflow_toml::ModelDefaults,
 ) -> Lowered {
     let mut template = Context::new(inputs);
     // A nested workflow shares its parent's run settings; only the root reads
-    // the file beside it.
+    // the file beside it. The parent's `[run.model]` defaults come along, as
+    // Fabro's nested run shares the parent's run settings.
     let mut settings = if stack.is_empty() {
         workflow_toml::read(file, files, &mut template, &mut diags)
     } else {
-        workflow_toml::RunSettings::default()
+        workflow_toml::RunSettings {
+            model: inherited_model,
+            ..workflow_toml::RunSettings::default()
+        }
     };
     if stack.is_empty() {
         model_layers::apply(files, inputs, &mut settings.model, &mut diags);
@@ -1692,6 +1706,7 @@ impl Ctx<'_> {
             Diagnostics::new(),
             self.stack.clone(),
             self.mcps.clone(),
+            self.settings.model.clone(),
         );
         for diagnostic in lowered.diagnostics.iter() {
             self.diags.push(diagnostic.clone());

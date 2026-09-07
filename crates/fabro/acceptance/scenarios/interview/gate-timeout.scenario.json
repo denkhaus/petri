@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "id": "interview/gate-timeout",
+  "family": "interview",
+  "title": "A gate whose scripted answer is withheld expires at its timeout into its default choice, routes on it, and records the timeout as the answer. The pinned bundle's gates have no timeout, so the graph is inline.",
+  "obligation": "interview/timeout-cancel",
+  "bundle": {
+    "inline": "graphs/gate-timeout.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "none"
+  },
+  "services": {},
+  "interviews": [
+    {
+      "id": "never",
+      "match": {
+        "node": "gate"
+      },
+      "required": false,
+      "action": {
+        "kind": "withhold"
+      }
+    }
+  ],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "gate",
+        "hold"
+      ],
+      "forbidden_nodes": [
+        "ship"
+      ],
+      "visits": {
+        "gate": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "human.gate.selected": "N",
+        "human.gate.gate.answer": "timeout"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "decision.txt",
+        "text": "held\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [
+        {
+          "node": "gate",
+          "delivery": {
+            "$any": true
+          }
+        }
+      ],
+      "errors": [],
+      "consumed": {
+        "never": 1
+      },
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

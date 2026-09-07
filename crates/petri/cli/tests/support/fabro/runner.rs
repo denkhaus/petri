@@ -43,10 +43,14 @@ pub(crate) struct Ran {
 ///
 /// Panics with the first failed expectation. The cell's coverage record
 /// stays `failed` then; it becomes `passed` only when every row holds.
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice belongs to the test runner's output, which no subscriber reads"
+)]
 pub(crate) async fn run_cell(cell: &str, id: &str, backend: Backend, agent: Agent) -> Option<Ran> {
     let record = CellRecord::start(cell);
     let scenario = Scenario::from_id(id).unwrap_or_else(|error| panic!("{error}"));
-    if let Bundle::Pinned { id: bundle, .. } = &scenario.bundle
+    if let Some(bundle) = scenario.bundle_files()
         && bundle_dir(bundle).is_none()
     {
         assert!(
@@ -85,12 +89,17 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
     let fixture = case.root.join("fixture");
     let repo = fixture.join("repo");
     fs::create_dir_all(&repo).expect("fixture repository");
-    if let Bundle::Pinned { id, .. } = &scenario.bundle {
+    if let Some(id) = scenario.bundle_files() {
         let source = bundle_dir(id).expect("bundle fetched");
         copy_tree(&source, &repo);
-    } else if let Bundle::Inline { inline } = &scenario.bundle {
-        fs::copy(scenario.dir.join(inline), repo.join(inline)).expect("inline graph");
-        let toml = scenario.dir.join("workflow.toml");
+    }
+    if let Bundle::Inline { inline, .. } = &scenario.bundle {
+        // The graph lands at the repository root under its own name; a
+        // `workflow.toml` beside it in the scenario directory comes along.
+        let source = scenario.dir.join(inline);
+        let name = source.file_name().expect("inline graph name").to_owned();
+        fs::copy(&source, repo.join(&name)).expect("inline graph");
+        let toml = source.with_file_name("workflow.toml");
         if toml.is_file() {
             fs::copy(&toml, repo.join("workflow.toml")).expect("inline workflow.toml");
         }
@@ -218,6 +227,13 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
     let entry = scenario
         .entry_point()
         .unwrap_or_else(|error| panic!("{error}"));
+    let entry = match &scenario.bundle {
+        Bundle::Inline { .. } => Path::new(&entry)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or(entry),
+        Bundle::Pinned { .. } => entry,
+    };
     let workflow = repo.join(&entry);
     assert!(
         workflow.is_file(),
@@ -298,6 +314,9 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
         if let Some(file) = &when.container_file {
             launch.interrupt_when_container_file = Some(file.clone());
         }
+        if let Some(text) = &when.stderr {
+            launch.interrupt_when_stderr = Some(bindings.text(text));
+        }
         if let Some(request) = &when.request {
             // A marker the watcher touches once the twin consumed the named
             // scenario: the interrupt is tied to an observed request.
@@ -334,10 +353,23 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
     if let Some(watcher) = watcher {
         watcher.abort();
     }
-    let requests_at_interrupt: Option<usize> = interrupt_marker
+    let interrupted = interrupt_marker
         .as_ref()
-        .filter(|marker| marker.exists())
-        .map(|_| twins.iter().map(|t| t.request_log().len()).sum());
+        .is_some_and(|marker| marker.exists())
+        || scenario
+            .controls
+            .interrupt_when
+            .as_ref()
+            .is_some_and(|when| {
+                when.stderr.is_some() && case.root.join("interrupt-on-stderr").exists()
+            })
+        || scenario
+            .controls
+            .interrupt_when
+            .as_ref()
+            .is_some_and(|when| when.file.is_some() || when.container_file.is_some());
+    let requests_at_interrupt: Option<usize> =
+        interrupted.then(|| twins.iter().map(|t| t.request_log().len()).sum());
 
     // ── The workspace, on the host or copied out of the container ───────
     let workspace = if backend == Backend::Docker {
@@ -726,10 +758,10 @@ async fn expect(ran: &Ran, requests_at_interrupt: Option<usize>) {
         assert_eq!(now, at, "no model request after the cancel");
     }
     if let Some(reason) = &lifecycle.cancel_reason {
-        let text = serde_json::to_string(&document).expect("document");
-        assert!(
-            text.contains(&format!("\"{reason}\"")),
-            "cancel reason `{reason}` is recorded"
+        assert_eq!(
+            document["invocations"][0]["cancel_reason"]["kind"],
+            json!(reason),
+            "the root invocation's cancel reason"
         );
     }
     if lifecycle.no_leaked_processes {

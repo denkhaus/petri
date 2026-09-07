@@ -16,9 +16,10 @@
 //! `origin/main` resolves offline. Nothing is fetched from a remote.
 
 use std::collections::VecDeque;
+use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{fs, io};
+use std::{env, fs, io, process};
 
 use executor::ProcessSpec;
 use ir::{StepEvent, Value};
@@ -178,11 +179,7 @@ fn git_toplevel(path: &Path) -> Option<PathBuf> {
 /// one, and pack the clone (its `.git` included) as one tar archive whose
 /// entries are relative to the workspace root.
 fn pack_clone(toplevel: &Path, depth: i64) -> Result<(Vec<u8>, String, usize), String> {
-    let staging = std::env::temp_dir().join(format!(
-        "petri-checkout-{}-{}",
-        std::process::id(),
-        unique()
-    ));
+    let staging = env::temp_dir().join(format!("petri-checkout-{}-{}", process::id(), unique()));
     let clone = staging.join("clone");
     fs::create_dir_all(&staging)
         .map_err(|e| format!("could not create {}: {e}", staging.display()))?;
@@ -235,7 +232,7 @@ fn append_dir(
     files: &mut usize,
 ) -> io::Result<()> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    entries.sort_by_key(DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
         let name = prefix.join(entry.file_name());
@@ -287,7 +284,7 @@ async fn unpack(ctx: &StepCtx) -> Result<(), CheckoutError> {
     let archive = format!("{workspace}/{ARCHIVE}");
     let spec = ProcessSpec::new("sh", &[
         "-c",
-        &format!("tar -xf \"$1\" -C \"$2\" && rm -f \"$1\""),
+        "tar -xf \"$1\" -C \"$2\" && rm -f \"$1\"",
         "petri-checkout",
         &archive,
         &workspace,

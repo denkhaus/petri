@@ -44,8 +44,8 @@ use crate::host::EVENTS_FILE;
 use crate::interview::{InterviewReceipt, RECEIPT_FILE};
 use crate::store::{execution_relative_dir, verify_graph_registry};
 use crate::{
-    COORDINATOR_FILE, COORDINATOR_FORMAT_VERSION, CoordinatorState, EngineLogError, ExecutionId,
-    ExecutionState, GraphDigest, InvocationId, InvocationState, RUN_FILE, RunMetadata,
+    COORDINATOR_FILE, COORDINATOR_FORMAT_VERSION, CancelReason, CoordinatorState, EngineLogError,
+    ExecutionId, ExecutionState, GraphDigest, InvocationId, InvocationState, RUN_FILE, RunMetadata,
     SandboxBinding, SecretBinding, SecretBindings, StateError, StoreError, decode_coordinator_log,
     read_engine_log,
 };
@@ -172,6 +172,10 @@ pub struct InvocationInspection {
     /// `isolated` or `inherited`.
     pub sandbox:          &'static str,
     pub cancel_requested: bool,
+    /// Why, when the requester said: `interrupt`, `control`, or
+    /// `stall_timeout` with its budget and idle time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_reason:    Option<CancelReason>,
     /// Every execution of this invocation in order; each after the first
     /// followed a `loop_restart`.
     pub executions:       Vec<ExecutionId>,
@@ -592,6 +596,7 @@ fn inspect_invocation(
             SandboxBinding::Inherited { .. } => "inherited",
         },
         cancel_requested: invocation.cancelled,
+        cancel_reason: invocation.cancel_reason.clone(),
         executions: invocation.executions.clone(),
         final_execution: invocation
             .result

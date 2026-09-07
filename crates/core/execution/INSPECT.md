@@ -92,6 +92,7 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 | `secrets` | `mode` (`none`, `inherit`, `explicit`) and `names` (the explicit binding names). |
 | `sandbox` | `isolated` or `inherited`. |
 | `cancel_requested` | Whether the coordinator recorded a cancel request. |
+| `cancel_reason` | Why, when the requester said: `{"kind": "interrupt"}` (Ctrl-C), `{"kind": "control"}` (a run control), or `{"kind": "stall_timeout", "stall_timeout_ms", "idle_ms"}` (the watchdog). Absent for a plain cancel. Additive in format version 1. |
 | `executions` | Every execution, in order. Each after the first followed a restart. |
 | `final_execution` | The execution the result names, or `null`. |
 | `result` | `null` until finished. Otherwise `status`, `failure`, `final_execution`, `output`, `context` (the final execution's `kv`, as recorded). |

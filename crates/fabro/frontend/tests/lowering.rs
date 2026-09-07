@@ -2322,7 +2322,7 @@ fn run_clone_lands_on_the_launch_param_with_the_bound_repository() {
         !lowered
             .diagnostics
             .iter()
-            .any(|d| d.code.to_string() == "ignored.workflow_toml.run.clone"),
+            .any(|d| d.code.as_str() == "ignored.workflow_toml.run.clone"),
         "[run.clone] is applied, not ignored"
     );
     let graph = lowered.graph.expect("lowers");
@@ -2344,7 +2344,7 @@ fn run_clone_lands_on_the_launch_param_with_the_bound_repository() {
         lowered
             .diagnostics
             .iter()
-            .any(|d| d.code.to_string() == "unsupported.workflow_toml.key"),
+            .any(|d| d.code.as_str() == "unsupported.workflow_toml.key"),
         "a key Fabro's clone table refuses is refused: {:?}",
         lowered.diagnostics
     );

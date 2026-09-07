@@ -50,6 +50,56 @@ cell!(
     openai
 );
 
+cell!(
+    interview_repeated_and_concurrent_questions,
+    "interview/repeated-and-concurrent-questions",
+    host,
+    none
+);
+cell!(
+    interview_child_interviews,
+    "interview/child-interviews",
+    host,
+    openai
+);
+cell!(
+    interview_delayed_withheld_reply,
+    "interview/delayed-withheld-reply",
+    host,
+    openai
+);
+cell!(
+    interview_invalid_answer_reasked,
+    "interview/invalid-answer-reasked",
+    host,
+    openai
+);
+cell!(
+    interview_unexpected_question,
+    "interview/unexpected-question",
+    host,
+    openai
+);
+cell!(
+    interview_unused_answer,
+    "interview/unused-answer",
+    host,
+    openai
+);
+cell!(
+    interview_timeout_cancel,
+    "interview/timeout-cancel",
+    host,
+    openai
+);
+cell!(interview_gate_timeout, "interview/gate-timeout", host, none);
+cell!(
+    interview_terminal_eof,
+    "interview/terminal-eof",
+    host,
+    openai
+);
+
 /// Every tracked scenario file loads under the strict schema, its bundle
 /// hash equals the lock, and every planned matrix cell names a scenario
 /// that exists. A scenario that fails here never runs, so a typo in an
@@ -64,7 +114,7 @@ fn every_scenario_file_loads_and_the_matrix_is_consistent() {
             assert!(
                 cell.reason.is_some(),
                 "cell `{}` has no scenario and no reason",
-                cell.cell
+                cell.name
             );
             continue;
         };
@@ -75,13 +125,13 @@ fn every_scenario_file_loads_and_the_matrix_is_consistent() {
         assert!(
             id.split('/').count() == 2,
             "cell `{}` names a malformed scenario id `{id}`",
-            cell.cell
+            cell.name
         );
         if cell.status == CellStatus::Planned {
             assert!(
                 cell.test.is_some(),
                 "planned cell `{}` names no test",
-                cell.cell
+                cell.name
             );
         }
         let backend = match cell.backend {
@@ -89,9 +139,9 @@ fn every_scenario_file_loads_and_the_matrix_is_consistent() {
             support::fabro::scenario::Backend::Docker => "docker",
         };
         assert!(
-            cell.cell.contains(&format!("@{backend}/")),
+            cell.name.contains(&format!("@{backend}/")),
             "cell `{}` does not name its backend",
-            cell.cell
+            cell.name
         );
     }
     for (path, scenario) in &scenarios {

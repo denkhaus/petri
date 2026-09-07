@@ -21,9 +21,9 @@ use ir::{Outcome, ScopeId, StepKindId, Value};
 use serde::Deserialize;
 use steps::{Step, StepCtx};
 
-use crate::LocalHooksHandle;
 use crate::hooks::{BLOCKED_CLASS, Decision, report_event};
 use crate::outcome::Stage;
+use crate::{LocalHooksHandle, checkout};
 
 pub const KIND: StepKindId = STAGE_KIND;
 
@@ -146,11 +146,11 @@ impl Step for StageStep {
         // The checkout comes first: the sandbox is "ready" once the
         // repository is in it, as Fabro's clone precedes `sandbox_ready`.
         if config.kind == "start"
-            && let Err(error) = crate::checkout::seed(&ctx, &config.checkout).await
+            && let Err(error) = checkout::seed(&ctx, &config.checkout).await
         {
             return Stage::failed(
                 format!("checkout: {error}"),
-                crate::checkout::CLASS,
+                checkout::CLASS,
                 Some(frontend_fabro::Policy::Exit),
             )
             .into_outcome(&config.node);
