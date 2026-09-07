@@ -166,8 +166,9 @@ async fn branch_output_is_attributed_to_its_invocation_and_secrets_stay_masked()
 }
 
 /// A stage that prints far more than the terminal should carry: the echo
-/// stops at the bound with one marker naming the log, and the log has every
-/// line.
+/// stops at the bound with one marker naming the log, and the log holds
+/// every line the run captured (the step's own `command.output`, kept under
+/// the offload threshold so it stays inline).
 #[tokio::test]
 async fn a_stages_echo_is_bounded_while_its_log_keeps_everything() {
     let case = Case::new("terminal-bounded");
@@ -175,7 +176,7 @@ async fn a_stages_echo_is_bounded_while_its_log_keeps_everything() {
         r#"digraph Big {
     start [shape=Mdiamond]
     exit [shape=Msquare]
-    big [shape=parallelogram, script="seq 1 20000"]
+    big [shape=parallelogram, script="seq 100000 111000"]
     small [shape=parallelogram, script="echo small"]
     start -> big -> small -> exit
 }"#,
@@ -190,13 +191,16 @@ async fn a_stages_echo_is_bounded_while_its_log_keeps_everything() {
         .filter(|(_, line)| line.contains("[echo truncated after 65536 bytes; the full log is "))
         .collect();
     assert_eq!(markers.len(), 1, "one marker: {}", finished.stderr);
+    // 11,001 lines of 7 bytes are 77 KB (88 KB as a JSON string): past the
+    // 64 KiB echo bound, under the 100 KiB offload threshold.
     assert!(
-        big.len() < 20000 && big.len() > 100,
+        big.len() < 11_001 && big.len() > 100,
         "the echo stopped at the bound: {} lines",
         big.len()
     );
     assert!(
-        big.iter().any(|(_, line)| line == "1") && !big.iter().any(|(_, line)| line == "20000"),
+        big.iter().any(|(_, line)| line == "100000")
+            && !big.iter().any(|(_, line)| line == "111000"),
         "the first lines reached the terminal, the last did not"
     );
     assert!(
@@ -212,12 +216,25 @@ async fn a_stages_echo_is_bounded_while_its_log_keeps_everything() {
         .and_then(|rest| rest.strip_suffix(']'))
         .expect("the marker names the log");
     let log = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    // The log holds every line the step captured; the next stage's output
+    // (`command.output` is the last command's) shows the run went on.
+    let document = finished.inspect();
+    let nodes = &document["executions"][0]["engine"]["context"]["nodes"];
+    let captured = nodes["big"]["output"]["stdout"]
+        .as_str()
+        .expect("the big stage's stdout stays inline")
+        .lines()
+        .count();
+    assert!(
+        captured > 9_000,
+        "the stage printed past the bound: {captured} lines"
+    );
     assert_eq!(
         log.lines().count(),
-        20000,
-        "the persisted log keeps every line"
+        captured,
+        "the persisted log keeps every line the run captured"
     );
-    assert!(log.lines().last().is_some_and(|l| l == "[out] 20000"));
+    assert!(log.lines().all(|l| l.starts_with("[out] ")));
     finished.assert_no_leaked_processes().await;
 }
 
