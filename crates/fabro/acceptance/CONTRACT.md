@@ -315,6 +315,28 @@ report like every other call. The failing-at-the-pin contract test is
 usage assertion, which today asserts the prompt usage excludes the summary
 (`pebble.usage.input == 4 * 10 + total - 5`); at `861d9bc` it would include it.
 
+## Pinned revisions
+
+Every library Petri runs Fabro workflows through is pinned by revision. This
+table is the citation the evidence records and `scripts/check-pins.py`
+compare against the manifests (`Cargo.toml`, `crates/petri/cli/Cargo.toml`,
+`crates/fabro/corpus-pin.txt`, `bundles.lock.json`). `mise run check:pins`
+fails when any of them disagree. The row names are the keys of a record's
+`pins` block.
+
+| Pin | Revision | Repository | Role |
+|---|---|---|---|
+| `pebble` | `a2fcdda6a1de13509cf82b459c347bde4e4db943` | `lithoscomputer/pebble` (private) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `lithos_llm` | `4aab27d7d42e7f762a8b6a3871c3db86816b0721` | `lithoscomputer/lithos-llm` (private) | provider transport and request retries |
+| `sandbox_driver` | `a5674bab7d048cb599e4564e243c509e571e8d2b` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
+| `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
+
+A change to Pebble, lithos-llm, or an MCP client library runs the owning
+repository's required checks before Petri moves its pin; then this table, the
+manifests, and the affected evidence records move together. The pending
+library batch is listed in `README.md` under "Library and repository gates".
+
 ## Where things are
 
 | Artefact | Path |

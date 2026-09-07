@@ -38,7 +38,7 @@ mkdir -p "$SOURCES"
 
 # Fetch every source at its revision.
 if [ "$VERIFY_ONLY" -eq 0 ]; then
-  while IFS=$'\t' read -r repository url revision; do
+  while IFS=$'\t' read -r repository url revision visibility access; do
     dir="$SOURCES/$repository"
     env_name="FABRO_BUNDLE_SOURCE_$(echo "$repository" | tr '[:lower:]/-' '[:upper:]__')"
     source="${!env_name:-$url}"
@@ -49,7 +49,20 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
     mkdir -p "$dir"
     git -C "$dir" init -q 2>/dev/null || true
     if ! git -C "$dir" fetch -q --depth 1 "$source" "$revision"; then
-      echo "error: could not fetch $repository at $revision from $source" >&2
+      # A required source that cannot be reached fails the whole set. Say
+      # what would have reached it, because in CI the usual cause is a deploy
+      # key that is not configured.
+      {
+        echo "error: could not fetch $repository at $revision from $source"
+        echo "  visibility: $visibility"
+        echo "  access: $access"
+        if [ "$visibility" = private ]; then
+          echo "  In CI, pass the matching *-key input of .github/actions/private-dependencies from"
+          echo "  the repository secret named above (DEVELOPING.md, \"Private dependencies\")."
+          echo "  Locally, use an SSH agent with read access, or set $env_name to a checkout."
+        fi
+        echo "  The bundle set is required: no bundle is skipped."
+      } >&2
       exit 1
     fi
     git -C "$dir" checkout -qf FETCH_HEAD
@@ -62,7 +75,8 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
 import json, sys
 lock = json.load(open(sys.argv[1]))
 for key, source in lock["sources"].items():
-    print(source["repository"], source["url"], source["revision"], sep="\t")
+    print(source["repository"], source["url"], source["revision"],
+          source.get("visibility", "unknown"), source.get("access", ""), sep="\t")
 ' "$LOCK")
 fi
 
