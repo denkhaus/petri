@@ -40,7 +40,7 @@
         "human.gate.yes_no.answer": "Y",
         "human.gate.confirmation.answer": "N",
         "human.gate.multiple_choice.answer": "R",
-        "human.gate.multi_select.answer": "B,N",
+        "human.gate.multi_select.answer": "B, N",
         "human.gate.freeform.answer": "ship on Friday",
         "human.gate.yes_no.question": "Is this interview workflow easy to follow so far?",
         "human.gate.freeform.question": "Add any final context, constraints, or nuance for the summary.",

@@ -7,7 +7,48 @@
 
 mod support;
 
-use support::fabro::scenario::{CellStatus, Matrix, Scenario, matches};
+use support::fabro::runner::run_cell;
+use support::fabro::scenario::{Agent, Backend, CellStatus, Matrix, Scenario, matches};
+
+/// One matrix cell as one test: `cell!(test_name, "family/name", host,
+/// openai)`.
+macro_rules! cell {
+    ($name:ident, $id:literal, $backend:ident, $agent:ident) => {
+        #[tokio::test]
+        async fn $name() {
+            let backend = cell!(@backend $backend);
+            let agent = cell!(@agent $agent);
+            let cell = format!(
+                "{}@{}/{}",
+                $id,
+                cell!(@backend_name $backend),
+                cell!(@agent_name $agent)
+            );
+            run_cell(&cell, $id, backend, agent).await;
+        }
+    };
+    (@backend host) => { Backend::Host };
+    (@backend docker) => { Backend::Docker };
+    (@backend_name host) => { "host" };
+    (@backend_name docker) => { "docker" };
+    (@agent openai) => { Agent::OpenAi };
+    (@agent anthropic) => { Agent::Anthropic };
+    (@agent openrouter) => { Agent::OpenRouter };
+    (@agent none) => { Agent::None };
+    (@agent_name openai) => { "openai" };
+    (@agent_name anthropic) => { "anthropic" };
+    (@agent_name openrouter) => { "openrouter" };
+    (@agent_name none) => { "none" };
+}
+
+// ── Interview gates ─────────────────────────────────────────────────────────
+
+cell!(
+    interview_scripted_choice_refusal_freeform,
+    "interview/scripted-choice-refusal-freeform",
+    host,
+    openai
+);
 
 /// Every tracked scenario file loads under the strict schema, its bundle
 /// hash equals the lock, and every planned matrix cell names a scenario

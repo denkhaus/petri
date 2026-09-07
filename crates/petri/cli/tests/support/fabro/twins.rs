@@ -168,6 +168,11 @@ impl Twin {
             .count()
     }
 
+    /// The twin's request log file, for a watcher that polls it.
+    pub(crate) fn log_path(&self) -> PathBuf {
+        self.log_path.clone()
+    }
+
     /// The catalog layer that points `lithos-llm` at this twin.
     pub(crate) fn catalog_layer(&self) -> String {
         format!(

@@ -89,6 +89,11 @@ impl Case {
         self
     }
 
+    /// Whether this case runs on `--backend docker`.
+    pub(crate) fn is_docker(&self) -> bool {
+        self.docker_link.is_some()
+    }
+
     /// The environment every `petri` command of this case runs with.
     fn command(&self, path: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_petri"));
