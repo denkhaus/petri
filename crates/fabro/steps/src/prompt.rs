@@ -63,7 +63,9 @@ pub const COMPLETED_EVENT: &str = "fabro.prompt.completed";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptConfig {
-    #[serde(default)]
+    /// A prompt node is API-only; the lowering leaves `backend` out unless a
+    /// node names one, so the default here is the only one it can run on.
+    #[serde(default = "api_backend")]
     pub backend:          AgentBackend,
     pub label:            String,
     pub node:             String,
@@ -105,6 +107,10 @@ pub struct PromptConfig {
 
 fn default_output_retries() -> u64 {
     2
+}
+
+fn api_backend() -> AgentBackend {
+    AgentBackend::Api
 }
 
 pub struct PromptStep;
@@ -266,7 +272,13 @@ impl Step for PromptStep {
             if let Some(effort) = reasoning {
                 request = request.reasoning_effort(effort);
             }
-            if let Some(format) = PromptConfig::response_format(&contract) {
+            // Fabro asks the provider for a JSON response shape when the node
+            // has a contract. A model whose catalog row does not offer that
+            // shape still answers; the contract is then enforced by the
+            // validation below alone, as it is for an agent node.
+            if let Some(format) = PromptConfig::response_format(&contract)
+                && supports_format(&client.0, &selector, &format)
+            {
                 request = request.response_format(format);
             }
             if let Some(ms) = config.timeout_ms {
@@ -387,6 +399,22 @@ impl Step for PromptStep {
         let mut outcome = stage.into_outcome(&config.node);
         outcome.metrics = metrics(started, turns, &usage, cost);
         outcome
+    }
+}
+
+/// Whether the catalog row the selector resolves to offers `format`. A
+/// selector that does not resolve is left to the call, which reports why.
+fn supports_format(client: &Client, selector: &str, format: &ResponseFormat) -> bool {
+    let Ok(probe) = Request::builder().model(selector).user("probe").build() else {
+        return true;
+    };
+    match client.resolve_route(&probe) {
+        Ok(route) => !route
+            .model()
+            .capabilities()
+            .response_format(format)
+            .is_unsupported(),
+        Err(_) => true,
     }
 }
 
