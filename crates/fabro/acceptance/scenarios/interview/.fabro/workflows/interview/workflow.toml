@@ -1,1 +1,9 @@
 _version = 1
+
+# Migration for the differential matrix: the pinned bundle names no model
+# and Fabro takes the run's --provider default; the standalone Petri runner
+# has no launch-level model default. See
+# crates/fabro/acceptance/decisions/interview-run-model-migration.toml.
+[run.model]
+provider = "openai"
+name = "gpt-5.6-sol"

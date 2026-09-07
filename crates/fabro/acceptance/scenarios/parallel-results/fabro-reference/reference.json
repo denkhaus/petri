@@ -357,17 +357,19 @@
     },
     "interviews": [],
     "requests": [],
+    "platform_requests": [],
     "counts": {
       "interviews_asked": 0,
       "interviews_delivered": 0,
+      "platform_requests": 0,
       "provider_requests": 0
     },
     "identities": {
       "<BLOB_1>": "blob://sha256/29f4c975c15da82103d9d7f2ba61b0bcebaca0d5ab12da704baeb8fca373c144",
       "<BLOB_2>": "blob://sha256/e049fc35ec251f756dfb553b5d54d0d64e4f22f4d4b74f1bff073f9d50723213",
       "<BLOB_3>": "blob://sha256/35c726e9422508b0f00a8ed632f5f74e9aebd4154a867286ddc4d3ed31d28637",
-      "<RUN_ID>": "01M1XKYPACEMN6TAPVTPWCDCX9",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-parallel-results-43365-0/fabro/bundle"
+      "<RUN_ID>": "01M1XN5K55B4Z0KK6WVY8R67JA",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-parallel-results-97959-0/fabro/bundle"
     }
   }
 }
