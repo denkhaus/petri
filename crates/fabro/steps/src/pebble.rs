@@ -52,7 +52,7 @@ use crate::agent::backend::AgentError;
 use crate::fallback::{self, Disposition, Route};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
-use crate::memory;
+use crate::{memory, skills};
 
 /// Host capability supplied by applications embedding the native backend.
 /// Construct the client with the application's catalog, credentials, and
@@ -242,6 +242,8 @@ impl NativeSession {
                 ctx.attempt,
             ))
         });
+        // Fabro's skill directories, audited and recorded; Pebble discovers.
+        let skills = skills::prepare(config, ctx).await;
         let build = async {
             let environment = PebbleEnvironment::prepare(env, cancel.clone(), kill.clone())
                 .await
@@ -252,7 +254,7 @@ impl NativeSession {
                 .with_speed(speed)
                 .with_max_tokens(config.max_tokens)
                 .with_memory_files(memory_files)
-                .with_skill_dirs([".agents/skills".into(), ".pebble/skills".into()]);
+                .with_skill_dirs(skills.paths());
             let options = fallback::configure_options(options);
             // A resumed export keeps its route and its conversation; a
             // failed session's record keeps the conversation and takes the
@@ -375,7 +377,16 @@ impl NativeSession {
             Err(error) => Err(match fallback::classify(&error) {
                 Disposition::Cancelled => AgentError::Cancelled,
                 Disposition::Model(failure) => AgentError::Model(failure),
-                Disposition::Other { class, message } => AgentError::failed(class, message),
+                // A skill reference that does not expand keeps the skills
+                // module's class and reason; any other agent error is what
+                // the classifier said.
+                Disposition::Other { class, message } => match &error {
+                    pebble_coding_agent::Error::SkillExpansion(_) => AgentError::failed(
+                        skills::failure_class(&error),
+                        skills::describe(&error),
+                    ),
+                    _ => AgentError::failed(class, message),
+                },
             }),
         }
     }

@@ -1,0 +1,7 @@
+# Available Skills
+When the user's request matches a skill below, call the `Skill` tool to load its instructions, then follow them.
+- `cleanup`: Remove scratch files from the workspace
+- `greet`: Greet from the repository skills directory
+- `home-only`: Only in the Fabro home directory
+- `project-only`: Only in the project .fabro directory
+- `repo-only`: Only in the repository skills directory
