@@ -580,8 +580,8 @@ max_tool_rounds = 3
         assert_eq!(hooks[2].kind, HookKind::Command {
             command: "cargo fmt".into(),
         });
-        assert_eq!(hooks[3].timeout(), Duration::from_millis(30_000));
-        assert_eq!(hooks[4].timeout(), Duration::from_millis(60_000));
+        assert_eq!(hooks[3].timeout(), Duration::from_secs(30));
+        assert_eq!(hooks[4].timeout(), Duration::from_secs(60));
         assert_eq!(hooks[4].name, "verify");
         assert!(matches!(&hooks[4].kind, HookKind::Agent {
             max_tool_rounds: Some(3),

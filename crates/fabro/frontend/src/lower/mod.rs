@@ -37,6 +37,7 @@ pub use workflow_toml::{
     PrepareStep, RunSettings,
 };
 
+use crate::hooks::HookDefinition;
 use crate::kinds::{
     AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
     STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
@@ -191,7 +192,7 @@ struct Ctx<'a> {
     /// The env each synthetic `[run.prepare]` command node carries.
     prepare_envs:     BTreeMap<String, BTreeMap<String, workflow_toml::EnvValue>>,
     /// The run's merged `[[run.hooks]]`, carried on the stage steps.
-    hooks:            Vec<crate::hooks::HookDefinition>,
+    hooks:            Vec<HookDefinition>,
     /// The workflow's name, `FABRO_WORKFLOW` for hooks.
     workflow_name:    String,
 }
@@ -1158,7 +1159,14 @@ impl Ctx<'_> {
             config.insert("reasoning_effort".into(), Value::String(effort));
         }
         let branch_first = threads::is_branch_first(node, workflow, &self.kinds);
-        let threads = threads::ThreadAttrs::read(node, workflow, branch_first, &mut self.diags);
+        let default_speed = self.settings.model.speed.clone();
+        let threads = threads::ThreadAttrs::read(
+            node,
+            workflow,
+            branch_first,
+            default_speed.as_deref(),
+            &mut self.diags,
+        );
         threads.write(self.b.exprs(), &mut config);
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         self.output_schema(node, &mut config);

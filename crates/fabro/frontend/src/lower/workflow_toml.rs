@@ -14,9 +14,9 @@
 //! - `[run] goal`: the run goal when the graph sets none (the graph's `goal`
 //!   attribute wins, as in Fabro's run materialization). The `{ file }` form
 //!   reads beside `workflow.toml`.
-//! - `[run.model]`: the default `provider`, `name` and `reasoning_effort` an
-//!   agent or prompt node gets when neither it nor the graph sets one.
-//!   `controls.speed` warns (model fallback and speed are readiness item 9a).
+//! - `[run.model]`: the default `provider`, `name`, `reasoning_effort` and
+//!   `speed` an agent or prompt node gets when neither it nor the graph sets
+//!   one. `[run.model.fallbacks]` warns (model fallback is readiness item 9a).
 //! - `[run.execution]`: `mode = "dry_run"` and `approval = "auto"` become the
 //!   run's launch defaults; `--dry-run` and `--auto-approve` still win.
 //! - `[run.environment]` and `[environments.<id>]`: the `provider` selects the
@@ -84,6 +84,9 @@ pub struct ModelDefaults {
     pub provider:         Option<String>,
     pub name:             Option<String>,
     pub reasoning_effort: Option<String>,
+    /// `controls.speed`: `standard` or `fast`, the default an LLM node gets
+    /// when it names none.
+    pub speed:            Option<String>,
 }
 
 /// One environment value: a literal, or a secret name to resolve at spawn.
@@ -303,16 +306,16 @@ impl Reader<'_> {
         }
         for (key, item) in run {
             match key.as_str() {
-                "inputs" => {}
+                // Inputs were read above. `[[run.hooks]]` is read by
+                // `lower::hooks`, with the project and settings layers, from
+                // the text kept on the settings.
+                "inputs" | "hooks" => {}
                 "goal" => self.goal(item),
                 "model" => self.model(item),
                 "execution" => self.execution(item),
                 "environment" => self.environment(item, environments),
                 "prepare" => self.prepare(item),
                 "agent" => self.agent(item),
-                // `[[run.hooks]]` is read by `lower::hooks`, with the project
-                // and settings layers, from the text kept on the settings.
-                "hooks" => {}
                 other => self.other_run_key(other),
             }
         }
@@ -518,15 +521,8 @@ impl Reader<'_> {
                     {
                         self.settings.model.reasoning_effort = Some(effort.to_owned());
                     }
-                    if controls.contains_key("speed") {
-                        let path = self.path;
-                        self.warn(
-                            "ignored.workflow_toml.run.model.speed",
-                            format!(
-                                "`[run.model.controls] speed` in `{path}` is ignored: the speed \
-                                 control is readiness item 9a"
-                            ),
-                        );
+                    if let Some(speed) = controls.get("speed").and_then(toml::Value::as_str) {
+                        self.settings.model.speed = Some(speed.to_owned());
                     }
                 }
                 other => {

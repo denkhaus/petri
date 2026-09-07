@@ -1021,7 +1021,7 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
         "wf/workflow.toml",
         "[run]\ngoal = \"Fix {{ inputs.target }}\"\n[run.inputs]\ntarget = \"main\"\n\
          [run.model]\nprovider = \"openai\"\nname = \"gpt-5.6-sol\"\n\
-         [run.model.controls]\nreasoning_effort = \"low\"\n\
+         [run.model.controls]\nreasoning_effort = \"low\"\nspeed = \"fast\"\n\
          [run.execution]\nmode = \"dry_run\"\napproval = \"auto\"\n\
          [run.environment]\nid = \"review\"\n[run.environment.env]\nOVERRIDE = \"run\"\n\
          [environments.review]\nprovider = \"docker\"\n[environments.review.image]\n\
@@ -1089,6 +1089,7 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
     assert_eq!(a["model"], json!("gpt-5.6-sol"));
     assert_eq!(a["provider"], json!("openai"));
     assert_eq!(a["reasoning_effort"], json!("low"));
+    assert_eq!(a["speed"], json!("fast"));
     // Prepare steps: first after start, in order, with env, timeout, exit.
     assert_eq!(tiers(&graph, "start")[0].1[0].0, "run_prepare_1");
     assert_eq!(tiers(&graph, "run_prepare_1")[0].1[0].0, "run_prepare_2");
@@ -1715,14 +1716,14 @@ fn an_unparseable_workflow_toml_that_configures_hooks_is_an_error() {
         "a hook that cannot be read is never skipped silently"
     );
     // The same broken file without hooks stays a warning.
-    let files = files(&[("wf/workflow.toml", "[run]\ngoal = \"bad \\( escape\"\n")]);
+    let plain = self::files(&[("wf/workflow.toml", "[run]\ngoal = \"bad \\( escape\"\n")]);
     let lowered = frontend_fabro::load(
         "wf/workflow.fabro",
         &dot(r#"
             a [prompt="x"]
             start -> a -> exit
         "#),
-        &files,
+        &plain,
         &CompileInputs::new(),
     );
     assert!(lowered.graph.is_some(), "{:?}", lowered.diagnostics);

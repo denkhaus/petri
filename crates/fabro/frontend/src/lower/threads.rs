@@ -33,20 +33,18 @@ pub(super) fn fidelity_attr(
     diags: &mut Diagnostics,
 ) -> Option<Fidelity> {
     let value = attrs.text(key)?;
-    match value.parse::<Fidelity>() {
-        Ok(mode) => Some(mode),
-        Err(_) => {
-            diags.error(
-                "fabro.bad_fidelity",
-                attrs.span_of(key, span),
-                format!(
-                    "`{value}` on {what} is not a fidelity mode ({})",
-                    attrs::FIDELITIES.join(", ")
-                ),
-            );
-            None
-        }
+    let parsed = value.parse::<Fidelity>().ok();
+    if parsed.is_none() {
+        diags.error(
+            "fabro.bad_fidelity",
+            attrs.span_of(key, span),
+            format!(
+                "`{value}` on {what} is not a fidelity mode ({})",
+                attrs::FIDELITIES.join(", ")
+            ),
+        );
     }
+    parsed
 }
 
 /// The literal part of an agent or prompt node's thread configuration.
@@ -70,6 +68,7 @@ impl ThreadAttrs {
         node: &NodeDecl,
         workflow: &Workflow,
         branch_first: bool,
+        default_speed: Option<&str>,
         diags: &mut Diagnostics,
     ) -> Self {
         let fidelity = fidelity_attr(
@@ -115,7 +114,11 @@ impl ThreadAttrs {
             }
         }
         let project_memory = node.attrs.bool("project_memory", diags).unwrap_or(true);
-        let speed = node.attrs.text("speed").filter(|s| !s.is_empty());
+        let speed = node
+            .attrs
+            .text("speed")
+            .filter(|s| !s.is_empty())
+            .or_else(|| default_speed.map(str::to_owned));
         if let Some(speed) = &speed
             && !matches!(speed.as_str(), "standard" | "fast")
         {

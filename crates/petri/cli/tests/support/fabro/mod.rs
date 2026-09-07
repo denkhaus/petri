@@ -11,7 +11,11 @@
 //! pinned Fabro adapter (`crates/fabro/acceptance/scenarios/*/fabro-reference/`
 //! already holds the first capture and its `capture.sh`).
 
-#![allow(dead_code, reason = "each test file uses the subset it needs")]
+#![allow(
+    dead_code,
+    unused_imports,
+    reason = "each test file uses the subset it needs"
+)]
 
 pub(crate) mod bundle;
 pub(crate) mod inspect;
