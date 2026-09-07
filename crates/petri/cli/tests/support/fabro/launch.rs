@@ -180,6 +180,30 @@ impl Case {
                 }
             });
         }
+        let appends = launch.append_when;
+        let appender = (!appends.is_empty()).then(|| {
+            tokio::spawn(async move {
+                for (marker, file, text, delay) in appends {
+                    let deadline = Instant::now() + RUN_DEADLINE;
+                    while !marker.exists() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the append marker {} never appeared",
+                            marker.display()
+                        );
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    sleep(delay).await;
+                    let mut handle = fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&file)
+                        .expect("open the control file");
+                    std::io::Write::write_all(&mut handle, text.as_bytes())
+                        .expect("append to the control file");
+                }
+            })
+        });
         let interrupt = launch.interrupt_when.map(|marker| {
             tokio::spawn(async move {
                 let deadline = Instant::now() + RUN_DEADLINE;
@@ -218,6 +242,9 @@ impl Case {
         .await;
         if let Some(interrupt) = interrupt {
             interrupt.abort();
+        }
+        if let Some(appender) = appender {
+            appender.abort();
         }
         let (stdout, stderr, status, timed_out) = if let Ok((out, err, status)) = waited {
             (out, err, Some(status), false)
@@ -262,6 +289,11 @@ pub(crate) struct Launch {
     pub(crate) interrupt_when: Option<PathBuf>,
     /// The child's `PATH`. Defaults to the harness's own.
     pub(crate) path:           Option<String>,
+    /// Append lines to a file once a marker exists: how a case drives
+    /// `--control` the way a person at the terminal would. Entries run in
+    /// order on one task; each is (marker, file, text, delay after the
+    /// previous entry, or after the marker for the first).
+    pub(crate) append_when:    Vec<(PathBuf, PathBuf, String, Duration)>,
 }
 
 /// A `PATH` with an empty directory in front and only the system binaries

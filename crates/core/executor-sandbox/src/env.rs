@@ -89,14 +89,20 @@ fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>)
 /// Retained bytes are deliberately omitted, but delivery to the line pumps
 /// must be complete before Petri can report the command's exit status.
 fn streaming_exit_status(streaming: &ExecStreamingResult) -> Result<ExitStatus, String> {
-    if streaming.stdout_capture.truncated || streaming.stderr_capture.truncated {
-        return Err("sandbox command output delivery was incomplete".to_owned());
-    }
-    Ok(exit_status(
+    let status = exit_status(
         streaming.result.termination,
         streaming.result.exit_code,
         streaming.result.signal,
-    ))
+    );
+    // A command the provider killed at its deadline has its output cut off
+    // by design; the timeout is the status, not an incomplete delivery.
+    if status.timed_out {
+        return Ok(status);
+    }
+    if streaming.stdout_capture.truncated || streaming.stderr_capture.truncated {
+        return Err("sandbox command output delivery was incomplete".to_owned());
+    }
+    Ok(status)
 }
 
 /// What one streamed job runs: a step's exec, or an action's container.

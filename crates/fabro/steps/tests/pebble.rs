@@ -614,3 +614,50 @@ async fn an_agent_question_rides_the_core_question_protocol() {
         "the answer reaches the next model request: {requests}"
     );
 }
+
+/// A native agent attempt is `ExecutorEnforced`: the driver owns the
+/// deadline and cancels Pebble through the prompt's cancellation token.
+/// Pebble's own wall-clock timer is left unset, so the attempt reports
+/// `timed_out` from the driver, with the settled prompt's usage kept.
+#[tokio::test]
+async fn the_driver_deadline_cancels_a_native_attempt_through_its_token() {
+    let dir = RunDir::new("pebble-deadline");
+    let (client, provider) = scripted_client(vec![
+        ScriptedCall::response(tool_call_response(
+            "shell",
+            "work",
+            json!({"command":"printf ready"}),
+        )),
+        ScriptedCall::PendingOpen,
+    ]);
+    let rt = runtime(&dir, client);
+    let graph = graph(r#", timeout="1s""#);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "a")
+            .expect("a")
+            .budget
+            .timeout_policy,
+        ir::TimeoutPolicy::ExecutorEnforced
+    );
+    let driver = rt.driver(graph);
+    let run = tokio::spawn(driver.run());
+    timeout(Duration::from_secs(15), async {
+        provider.wait_for_call().await;
+        provider.wait_for_call().await;
+    })
+    .await
+    .expect("second call");
+    let report = timeout(Duration::from_secs(15), run)
+        .await
+        .expect("the deadline settles the attempt")
+        .expect("run task");
+    assert_eq!(
+        testkit::status_of(&report, "a").as_deref(),
+        Some("timed_out")
+    );
+    assert_eq!(metrics(&report)["pebble.usage"]["input"], 10);
+    assert_eq!(metrics(&report)["pebble.prompts"], 1);
+}
