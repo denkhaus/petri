@@ -244,11 +244,9 @@ pub enum LlmClientError {
 /// the developer's shell alone.
 ///
 /// [`LLM_RETRY_ATTEMPTS_ENV`] sets the client's same-route retries and
-/// [`LLM_TIMEOUT_ENV`] its per-call budget. Pebble's `RetryEventObserver`,
-/// which would put those retries on the agent's event stream, is not
-/// exported by the pinned Pebble (its `runtime` module is private), so a
-/// client retry shows in a provider's request log and in the stage's timing,
-/// not as an agent event.
+/// [`LLM_TIMEOUT_ENV`] its per-call budget. The client carries Pebble's
+/// `RetryEventObserver`, so each of those retries reaches the event stream of
+/// the session whose call it was, as an `LlmRetry` event with `phase = open`.
 pub fn llm_client() -> Result<lithos_llm::Client, LlmClientError> {
     build_llm_client(&LlmClientConfig::from_env()?)
 }

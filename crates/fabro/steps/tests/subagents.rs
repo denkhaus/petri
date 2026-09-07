@@ -425,9 +425,9 @@ async fn a_child_has_no_question_tool() {
     }
 }
 
-/// A child a Fabro agent spawns re-reads the project documents; a Pebble
-/// child is given none. Recorded as a library contract item; the test states
-/// the reference behavior and fails at the pinned Pebble.
+/// A child a Fabro agent spawns re-reads the project documents, and so does a
+/// Pebble child, because Petri asks for it
+/// (`SubagentOptions::with_inherited_memory`).
 #[tokio::test]
 async fn a_child_reads_the_project_documents_its_parent_read() {
     let dir = RunDir::new("subagents-memory");
@@ -983,10 +983,9 @@ fn skills_repository(dir: &RunDir) -> Option<PathBuf> {
 }
 
 /// The parent discovers the workspace's skills (task 14's directories); a
-/// child a Fabro agent spawns re-discovers them from the shared sandbox. A
-/// Pebble child is given no skill directories, so the reference behavior
-/// this test states fails at the pinned Pebble; recorded as a library
-/// contract item.
+/// child a Fabro agent spawns re-discovers them from the shared sandbox, and
+/// so does a Pebble child, because Petri asks for it
+/// (`SubagentOptions::with_inherited_skills`).
 #[tokio::test]
 async fn a_child_sees_the_skills_its_parent_discovered() {
     let dir = RunDir::new("subagents-skills");
