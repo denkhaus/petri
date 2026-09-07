@@ -828,3 +828,173 @@ async fn edit_and_verify_matches_the_pinned_fabro() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Scenario: fallback-failover (task 12's capture: the primary fails after a
+// completed tool effect and the chain falls back to Anthropic)
+// ---------------------------------------------------------------------------
+
+/// The primary answers the prompt with the append, then fails every request
+/// that carries the tool's result with a 503, however often the client
+/// retries.
+fn fallback_openai_scripts(namespace: &str) -> Vec<Value> {
+    use support::fabro::failures::{error, repeated};
+    use support::fabro::twins::{model, scenario, shell_tool, tool_call};
+    let provider = Provider::OpenAi;
+    vec![
+        scenario(
+            provider,
+            namespace,
+            "append",
+            model(provider),
+            "Append the word reviewed",
+            tool_call(
+                "append",
+                shell_tool(provider),
+                json!({ "command": "printf 'reviewed\\n' >> notes.txt && echo APPEND_DONE" }),
+            ),
+        ),
+        repeated(
+            scenario(
+                provider,
+                namespace,
+                "primary-down",
+                model(provider),
+                "APPEND_DONE",
+                error(
+                    503,
+                    "server_error",
+                    "service_unavailable",
+                    "the primary is overloaded",
+                ),
+            ),
+            12,
+        ),
+    ]
+}
+
+/// The fallback serves both continuations: the bare prompt (Fabro re-runs
+/// it) and the tool history (Petri continues it). A request that carries
+/// the history contains the prompt too, so the scripts are listed most
+/// specific first: the twin takes the first unspent match.
+fn fallback_anthropic_scripts(namespace: &str) -> Vec<Value> {
+    use support::fabro::twins::{model, scenario, shell_tool, text, tool_call};
+    let provider = Provider::Anthropic;
+    let shell = shell_tool(provider);
+    let model = model(provider);
+    vec![
+        scenario(
+            provider,
+            namespace,
+            "answer",
+            model,
+            "READ_DONE",
+            text("APPENDED: notes.txt now ends with reviewed."),
+        ),
+        scenario(
+            provider,
+            namespace,
+            "read-back",
+            model,
+            "APPEND_DONE",
+            tool_call(
+                "read",
+                shell,
+                json!({ "command": "cat notes.txt && echo READ_DONE" }),
+            ),
+        ),
+        scenario(
+            provider,
+            namespace,
+            "append",
+            model,
+            "Append the word reviewed",
+            tool_call(
+                "append",
+                shell,
+                json!({ "command": "printf 'reviewed\\n' >> notes.txt && echo APPEND_DONE" }),
+            ),
+        ),
+    ]
+}
+
+fn expect_fallback_failover(p: &Projection) -> Vec<Check> {
+    let mut checks = vec![check(
+        "status is succeeded",
+        p.status == "succeeded",
+        json!(p.status),
+    )];
+    let notes = p
+        .artifacts
+        .get("notes.txt")
+        .cloned()
+        .flatten()
+        .unwrap_or_default();
+    checks.push(check(
+        "notes.txt starts with the draft and ends with reviewed",
+        notes.starts_with("draft\n") && notes.ends_with("reviewed\n"),
+        json!(notes),
+    ));
+    let appends = notes.matches("reviewed\n").count();
+    checks.push(check(
+        "the append ran exactly once across the failover",
+        appends == 1,
+        json!({ "appends": appends, "notes": notes }),
+    ));
+    let openai: Vec<Option<&str>> = p
+        .requests
+        .iter()
+        .filter(|r| r.provider == "openai")
+        .map(|r| r.scenario.as_deref())
+        .collect();
+    checks.push(check(
+        "the primary served the append, then failed every retry",
+        openai.first() == Some(&Some("append"))
+            && openai.len() >= 2
+            && openai[1..].iter().all(|s| *s == Some("primary-down")),
+        json!(openai),
+    ));
+    let anthropic: Vec<Option<&str>> = p
+        .requests
+        .iter()
+        .filter(|r| r.provider == "anthropic")
+        .map(|r| r.scenario.as_deref())
+        .collect();
+    checks.push(check(
+        "the fallback finished the work on claude-sonnet-5",
+        anthropic.last() == Some(&Some("answer"))
+            && anthropic.contains(&Some("read-back"))
+            && p.requests
+                .iter()
+                .filter(|r| r.provider == "anthropic")
+                .all(|r| r.model == "claude-sonnet-5"),
+        json!(anthropic),
+    ));
+    checks.push(check(
+        "the last request of the run went to the fallback",
+        p.requests.last().is_some_and(|r| r.provider == "anthropic"),
+        json!(p.requests.last()),
+    ));
+    checks
+}
+
+#[tokio::test]
+async fn fallback_failover_matches_the_pinned_fabro() {
+    run_cell(Cell {
+        scenario:      "fallback-failover",
+        workflow:      "workflow.fabro",
+        inputs:        Vec::new(),
+        rules:         compare::rules(COMMON_BOOKKEEPING, &["notes.txt"]),
+        script:        None,
+        twins:         vec![
+            (Provider::OpenAi, fallback_openai_scripts),
+            (Provider::Anthropic, fallback_anthropic_scripts),
+        ],
+        expect:        expect_fallback_failover,
+        // The pinned Fabro re-runs the prompt from scratch on the fallback
+        // route and repeats the append (decision
+        // `fallback-repeated-tool-effect`); Petri must not.
+        known_defects: vec!["the append ran exactly once across the failover"],
+    })
+    .await;
+}

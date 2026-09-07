@@ -1049,7 +1049,10 @@ impl Decisions {
         self.records
             .iter()
             .find(|decision| {
-                decision.scenarios.iter().any(|s| s == "*" || s == scenario)
+                decision
+                    .scenarios
+                    .iter()
+                    .any(|pattern| glob_matches(pattern, scenario))
                     && decision.accepts.iter().any(|accepts| {
                         accepts.kind == difference.kind
                             && accepts

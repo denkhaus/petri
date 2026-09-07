@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "scenario": "fallback-failover",
+  "fabro_repository": "https://github.com/fabro-sh/fabro",
+  "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
+  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
+  "captured_on": "2026-09-07",
+  "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
+  "bundle_digest": "5aa8447473e162c1277ff29eeade6ba76636344f6f0743a993f6ab246c9c2a2d",
+  "twins": [
+    {
+      "provider": "openai",
+      "base_url": "http://127.0.0.1:63176"
+    },
+    {
+      "provider": "anthropic",
+      "base_url": "http://127.0.0.1:63177"
+    }
+  ],
+  "normalization": [
+    "generated run id -> <RUN_ID>",
+    "the run's working directory -> <WORKSPACE>",
+    "blob://sha256/<hex> -> <BLOB_n> (the dump's inline value is compared where the event log offloaded it)",
+    "engine bookkeeping context keys named by the scenario are moved to `bookkeeping`, never dropped"
+  ],
+  "projection": {
+    "engine": "fabro",
+    "status": "succeeded",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "prepare",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "agent",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "verify",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "forks": [],
+    "context": {},
+    "bookkeeping": {
+      "command.output": "<BLOB_1>",
+      "current_node": "verify",
+      "failure_class": "",
+      "failure_signature": "",
+      "graph.backend": "api",
+      "graph.goal": "Append one word through the agent's shell tool; the primary model fails after the tool ran and the chain falls back to Anthropic.",
+      "internal.fidelity": "compact",
+      "internal.node_visit_count": 1,
+      "internal.retry_count.agent": 0,
+      "internal.retry_count.prepare": 0,
+      "internal.retry_count.start": 0,
+      "internal.retry_count.verify": 0,
+      "internal.run_id": "<RUN_ID>",
+      "internal.thread_id": "agent",
+      "last_response": "APPENDED: notes.txt now ends with reviewed.",
+      "last_stage": "agent",
+      "outcome": "succeeded",
+      "response.agent": "APPENDED: notes.txt now ends with reviewed.",
+      "thread.agent.current_node": "verify",
+      "thread.prepare.current_node": "agent",
+      "thread.start.current_node": "prepare"
+    },
+    "artifacts": {
+      "notes.txt": "draft\nreviewed\nreviewed\n"
+    },
+    "interviews": [],
+    "requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "append"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "primary-down"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "primary-down"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "primary-down"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "primary-down"
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "effort": null,
+        "scenario": "append"
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "effort": null,
+        "scenario": "read-back"
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "effort": null,
+        "scenario": "answer"
+      }
+    ],
+    "platform_requests": [
+      {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+        "effort": null,
+        "scenario": null
+      }
+    ],
+    "counts": {
+      "interviews_asked": 0,
+      "interviews_delivered": 0,
+      "platform_requests": 1,
+      "provider_requests": 8
+    },
+    "identities": {
+      "<BLOB_1>": "blob://sha256/7fd4c803ae34813a52e6323303c9c6bedae5397ead13c5ab915038658b715865",
+      "<RUN_ID>": "01M1XNFGNP8AYGZ6G9V460MHSB",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-fallback-failover-24974-0/fabro/bundle"
+    }
+  }
+}
