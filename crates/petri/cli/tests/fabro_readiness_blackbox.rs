@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command as GitCommand, Stdio};
 use std::time::Duration;
-use std::{env, fs};
+use std::{env, fs, slice};
 
 use petri::execution::CancelReason;
 use petri::execution::events::{EventBody, RunEvent};
