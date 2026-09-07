@@ -813,6 +813,313 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     assert!(codes("_version = 1\n[workflow]\ngraph = \"workflow.fabro\"\n").is_empty());
 }
 
+/// Imports expand at load as Fabro's transform expands them: prefixed ids,
+/// dropped sentinels, spliced boundary edges, inherited defaults, propagated
+/// classes, rewritten retry targets, nested imports relative to their own
+/// file, and Fabro's refusals with Fabro's messages.
+#[test]
+fn imports_expand_at_load_with_fabro_rules() {
+    let files = files(&[
+        (
+            "flows/checks.fabro",
+            r#"digraph Checks {
+                start [shape=Mdiamond]
+                exit [shape=Msquare]
+                lint [shape=parallelogram, script="lint", retry_target="lint"]
+                test [prompt="@prompts/test.md", class="verification"]
+                start -> lint -> test -> exit
+            }"#,
+        ),
+        (
+            "flows/prompts/test.md",
+            "Run the tests for {{ inputs.target }}.",
+        ),
+        (
+            "flows/outer.fabro",
+            r#"digraph Outer {
+                start [shape=Mdiamond]
+                exit [shape=Msquare]
+                inner [import="checks.fabro", model="m1"]
+                start -> inner -> exit
+            }"#,
+        ),
+        (
+            "flows/loop.fabro",
+            r#"digraph Loop {
+                start [shape=Mdiamond]
+                exit [shape=Msquare]
+                again [import="loop.fabro"]
+                start -> again -> exit
+            }"#,
+        ),
+        (
+            "flows/bad.fabro",
+            r#"digraph Bad {
+                start [shape=Mdiamond]
+                exit [shape=Msquare]
+                a [prompt="x"]
+                b [prompt="x"]
+                start -> a
+                start -> b
+                a -> exit
+                b -> exit
+            }"#,
+        ),
+        (
+            "flows/empty.fabro",
+            "digraph Empty {\n                start [shape=Mdiamond]\n                exit \
+             [shape=Msquare]\n                start -> exit\n            }",
+        ),
+    ]);
+    let inputs = CompileInputs::new().with_input("target", "main");
+    let load = |text: &str| frontend_fabro::load("flows/main.fabro", text, &files, &inputs);
+    let lowered = load(&dot(r#"
+        build [shape=parallelogram, script="build"]
+        review [import="checks.fabro", model="m2", reasoning_effort="high", class="Review Step"]
+        ship [shape=parallelogram, script="ship"]
+        start -> build
+        build -> review [label="[G] Go"]
+        review -> ship [condition="outcome=succeeded"]
+        review -> exit
+        ship -> exit
+    "#));
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    let names: Vec<&str> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"review.lint") && names.contains(&"review.test"));
+    assert!(
+        !names.contains(&"review"),
+        "the placeholder is gone: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("start") && n != &"start"),
+        "the import's sentinels are dropped: {names:?}"
+    );
+    let test = node(&graph, "review.test");
+    assert_eq!(test.step.config["model"], json!("m2"), "inherited default");
+    assert_eq!(test.step.config["reasoning_effort"], json!("high"));
+    assert_eq!(
+        test.step.config["prompt"],
+        json!("Run the tests for main."),
+        "an @file inside the import resolves beside the imported file"
+    );
+    assert_eq!(
+        test.meta["classes"],
+        json!(["Review", "Step", "verification", "review"]),
+        "the placeholder's classes as parsed, the import's own, then Fabro's class from the \
+         placeholder id"
+    );
+    let lint = node(&graph, "review.lint");
+    assert_eq!(lint.step.kind, COMMAND_KIND);
+    assert!(
+        lint.step.config.get("model").is_none(),
+        "a command node takes no model default"
+    );
+    // The boundary edges keep their attributes and reach the right ends.
+    let build_tiers = tiers(&graph, "build");
+    assert_eq!(
+        build_tiers[0].1[0].0, "review.lint",
+        "incoming edge to the entry"
+    );
+    let review_tiers = tiers(&graph, "review.test");
+    assert_eq!(
+        review_tiers[0].1[0].0, "ship",
+        "outgoing edge from the exit predecessor"
+    );
+    // Retry targets inside the import are rewritten to the prefix.
+    let goal = load(&dot(r#"
+        review [import="checks.fabro"]
+        start -> review -> exit
+    "#));
+    assert!(!goal.diagnostics.has_errors(), "{:?}", goal.diagnostics);
+
+    // Nested imports and their cycle.
+    let nested = load(&dot(r#"
+        outer [import="outer.fabro"]
+        start -> outer -> exit
+    "#));
+    assert!(!nested.diagnostics.has_errors(), "{:?}", nested.diagnostics);
+    let graph = nested.graph.expect("lowers");
+    assert_eq!(
+        node(&graph, "outer.inner.test").step.config["model"],
+        json!("m1"),
+        "the inner placeholder's default reaches the doubly imported node"
+    );
+    let cycle = load(&dot(r#"
+        again [import="loop.fabro"]
+        start -> again -> exit
+    "#));
+    let messages: Vec<String> = cycle
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "fabro.import")
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("circular import detected")),
+        "{messages:?}"
+    );
+
+    // Fabro's refusals, with Fabro's reasons.
+    let refused = |body: &str| -> Vec<String> {
+        load(&dot(body))
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "fabro.import")
+            .map(|d| d.message.clone())
+            .collect()
+    };
+    assert!(
+        refused("bad [import=\"bad.fabro\"]\nstart -> bad -> exit")
+            .iter()
+            .any(|m| m.contains("must have exactly one successor")),
+    );
+    assert!(
+        refused("x [import=\"checks.fabro\", prompt=\"no\"]\nstart -> x -> exit")
+            .iter()
+            .any(|m| m.contains("has unsupported attribute 'prompt'")),
+    );
+    assert!(
+        refused("x [import=\"missing.fabro\"]\nstart -> x -> exit")
+            .iter()
+            .any(|m| m.contains("file not found")),
+    );
+    assert!(
+        refused(
+            "x [import=\"empty.fabro\"]\ny [prompt=\"p\"]\nstart -> x [label=\"[A] A\"]\nx -> y\ny -> exit"
+        )
+        .iter()
+        .any(|m| m.contains("cannot bypass semantic edges")),
+    );
+    // An empty import with plain edges is removed and its neighbours wired.
+    let bypass = load(&dot(r#"
+        x [import="empty.fabro"]
+        y [prompt="p"]
+        start -> x -> y -> exit
+    "#));
+    assert!(!bypass.diagnostics.has_errors(), "{:?}", bypass.diagnostics);
+    let graph = bypass.graph.expect("lowers");
+    assert_eq!(tiers(&graph, "start")[0].1[0].0, "y");
+}
+
+/// `[run.environment]` maps the provider onto the launch settings the CLI
+/// reads, the image onto the scope's container target, and literal env onto
+/// the scope env; `[run.prepare]` steps become the first command nodes.
+#[test]
+fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run]\ngoal = \"Fix {{ inputs.target }}\"\n[run.inputs]\ntarget = \"main\"\n\
+         [run.model]\nprovider = \"openai\"\nname = \"gpt-5.6-sol\"\n\
+         [run.model.controls]\nreasoning_effort = \"low\"\n\
+         [run.execution]\nmode = \"dry_run\"\napproval = \"auto\"\n\
+         [run.environment]\nid = \"review\"\n[run.environment.env]\nOVERRIDE = \"run\"\n\
+         [environments.review]\nprovider = \"docker\"\n[environments.review.image]\n\
+         docker = \"ghcr.io/acme/review:1\"\n[environments.review.resources]\ncpu = 4\n\
+         [environments.review.env]\nLANG = \"C.UTF-8\"\nOVERRIDE = \"base\"\n\
+         TOKEN = \"{{ secrets.REVIEW_TOKEN }}\"\n\
+         [run.prepare]\ntimeout = \"30s\"\n[[run.prepare.steps]]\nscript = \"make deps\"\n\
+         [[run.prepare.steps]]\ncommand = [\"sh\", \"-c\", \"echo {{ inputs.target }}\"]\n\
+         env = { STEP = \"two\" }\n",
+    )]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x"]
+            c [shape=parallelogram, script="true"]
+            start -> a -> c -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    // Launch settings, as the CLI reads them.
+    let launch = Fabro::new().launch_settings(&graph);
+    assert_eq!(launch.sandbox_backend.as_deref(), Some("docker"));
+    assert!(launch.dry_run && launch.auto_approve);
+    assert_eq!(
+        graph.params["fabro.launch"]["cpu_cores"],
+        json!(null),
+        "resources size Daytona only"
+    );
+    assert_eq!(
+        graph.params["goal"],
+        json!("Fix main"),
+        "[run] goal renders and applies"
+    );
+    // The scope: image and literal env; the secret is not on the scope.
+    let scope = &graph.scopes[0];
+    assert!(
+        matches!(&scope.runtime.target, ir::RuntimeTarget::Container { image, .. } if image == "ghcr.io/acme/review:1"),
+        "{:?}",
+        scope.runtime.target
+    );
+    assert_eq!(scope.env["LANG"], ir::ExprOrValue::Value(json!("C.UTF-8")));
+    assert_eq!(
+        scope.env["OVERRIDE"],
+        ir::ExprOrValue::Value(json!("run")),
+        "the run's env wins over the named environment's"
+    );
+    assert!(
+        !scope.env.contains_key("TOKEN"),
+        "a secret never lands on the scope"
+    );
+    // Commands carry the secret as a reference, resolved at spawn.
+    assert_eq!(
+        node(&graph, "c").step.config["env"]["TOKEN"],
+        json!({ "$secret": "REVIEW_TOKEN" })
+    );
+    // Model defaults reach the LLM node.
+    let a = &node(&graph, "a").step.config;
+    assert_eq!(a["model"], json!("gpt-5.6-sol"));
+    assert_eq!(a["provider"], json!("openai"));
+    assert_eq!(a["reasoning_effort"], json!("low"));
+    // Prepare steps: first after start, in order, with env, timeout, exit.
+    assert_eq!(tiers(&graph, "start")[0].1[0].0, "run_prepare_1");
+    assert_eq!(tiers(&graph, "run_prepare_1")[0].1[0].0, "run_prepare_2");
+    assert_eq!(tiers(&graph, "run_prepare_2")[0].1[0].0, "a");
+    let two = node(&graph, "run_prepare_2");
+    assert_eq!(two.step.kind, COMMAND_KIND);
+    assert_eq!(two.step.config["script"], json!("sh -c 'echo main'"));
+    assert_eq!(two.step.config["env"]["STEP"], json!("two"));
+    assert_eq!(
+        two.step.config["env"]["TOKEN"],
+        json!({ "$secret": "REVIEW_TOKEN" })
+    );
+    assert_eq!(two.step.config["on_failure"], json!("exit"));
+    assert_eq!(two.budget.timeout, Duration::from_secs(30));
+    assert_eq!(two.meta["classes"], json!(["run-prepare"]));
+    // A reserved id is refused.
+    let clash = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            run_prepare_1 [prompt="x"]
+            start -> run_prepare_1 -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    assert!(
+        clash
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "fabro.reserved_node_id"),
+        "{:?}",
+        clash.diagnostics
+    );
+}
+
 #[test]
 fn structural_mistakes_are_specific_errors() {
     let id_only = lower_ok("digraph G { start; exit; start -> exit }");

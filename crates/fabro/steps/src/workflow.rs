@@ -15,6 +15,7 @@
 //! cancellation cancels it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use execution::{
@@ -70,6 +71,13 @@ fn default_max_cycles() -> u64 {
 }
 
 pub struct WorkflowStep;
+
+/// A host-supplied invocation client for child workflows. The coordinator
+/// registers its own client on every run; a host that runs Fabro steps
+/// outside the coordinator, or a test with a controlled clock, registers
+/// this instead and the step uses it first.
+#[derive(Clone)]
+pub struct ChildInvoker(pub Arc<dyn InvocationClient>);
 
 /// The keys of the parent's context a child receives: everything a stage
 /// wrote that is not bookkeeping.
@@ -174,9 +182,12 @@ impl Step for WorkflowStep {
         let fail = |reason: String, class: &str| {
             Stage::failed(reason, class, config.on_failure).into_outcome(&config.node)
         };
-        let client = match ctx.require_capability::<CoordinatorInvocationClient>() {
-            Ok(client) => client,
-            Err(failure) => return failure.into(),
+        let client: Arc<dyn InvocationClient> = match ctx.capability::<ChildInvoker>() {
+            Some(invoker) => invoker.0.clone(),
+            None => match ctx.require_capability::<CoordinatorInvocationClient>() {
+                Ok(client) => client,
+                Err(failure) => return failure.into(),
+            },
         };
         let stop_condition = match config
             .stop_condition

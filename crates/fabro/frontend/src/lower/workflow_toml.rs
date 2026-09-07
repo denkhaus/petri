@@ -282,16 +282,16 @@ impl Reader<'_> {
     }
 
     fn run_table(&mut self, run: &toml::Table, environments: &toml::Table) {
+        // Input defaults first: every other section may render `{{ inputs.* }}`.
+        if let Some(inputs) = run.get("inputs").and_then(toml::Value::as_table) {
+            for (name, value) in inputs {
+                let json = serde_json::to_value(value).unwrap_or(Value::Null);
+                self.template.default_input(name, json);
+            }
+        }
         for (key, item) in run {
             match key.as_str() {
-                "inputs" => {
-                    if let Some(inputs) = item.as_table() {
-                        for (name, value) in inputs {
-                            let json = serde_json::to_value(value).unwrap_or(Value::Null);
-                            self.template.default_input(name, json);
-                        }
-                    }
-                }
+                "inputs" => {}
                 "goal" => self.goal(item),
                 "model" => self.model(item),
                 "execution" => self.execution(item),

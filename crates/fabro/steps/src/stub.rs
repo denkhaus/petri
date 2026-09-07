@@ -23,7 +23,7 @@ use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepRunner};
 
-use crate::outcome::Stage;
+use crate::outcome::{ExplicitRoutes, Stage};
 
 /// What a stub is told to return.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -65,6 +65,12 @@ struct StubConfig {
     freeform_target: Option<String>,
     #[serde(default)]
     simulate:        Option<Simulate>,
+    /// The node's explicit routes, so a simulated failure is promoted the
+    /// way a real one is.
+    #[serde(default)]
+    routes:          Option<ExplicitRoutes>,
+    #[serde(default)]
+    kv:              Value,
     #[serde(flatten)]
     _rest:           BTreeMap<String, Value>,
 }
@@ -190,7 +196,9 @@ impl StepRunner for StubStep {
                 .expect("the simulated output is constructed as an object"),
         );
         stage.context_updates = script.context_updates;
-        stage.into_outcome(&node)
+        stage
+            .with_routing(config.routes.clone(), config.kv.clone())
+            .into_outcome(&node)
     }
 }
 

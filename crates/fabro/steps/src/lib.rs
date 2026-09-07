@@ -36,7 +36,7 @@ pub use frontend_fabro::kinds::{
     AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
 pub use human::HumanStep;
-pub use outcome::{ExplicitRoutes, Stage, fabro_outcome};
+pub use outcome::{ExplicitRoutes, Stage, fabro_outcome, reported_outcome};
 pub use prompt::PromptStep;
 use runtime::Runtime;
 pub use stub::{Simulate, StubStep, register_stubs};

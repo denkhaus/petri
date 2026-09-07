@@ -22,7 +22,7 @@
       }
     ]
   },
-  "departure": "deliberate departure: the pinned Fabro's validator rejects on_failure=\"partially_succeed\" (its on_failure_valid rule accepts route, exit, succeed), so Fabro never runs this graph. Petri accepts the spelling as the honest form of Fabro's `succeed`: it classifies once at the step boundary, so the failure is a partial success before routing and `b` is taken. In Fabro's `succeed` form the explicit outcome=failed edge would still be taken; Petri's routing test for the shim covers that difference.",
+  "departure": "deliberate departure: the pinned Fabro's validator rejects on_failure=\"partially_succeed\" (its on_failure_valid rule accepts route, exit, succeed), so Fabro never runs this graph. Petri keeps the spelling as a documented extension: it behaves like Fabro's `succeed` in every respect (a failure an explicit route matches stays failed, an unmatched failure is promoted) except that the promoted stage reports `partially_succeeded` instead of `succeeded`. Here the explicit outcome=failed edge matches, so `recover` is taken and `a` stays failed.",
   "petri": {
     "status": "success",
     "path": [
@@ -32,10 +32,10 @@
       },
       {
         "node": "a",
-        "outcome": "partially_succeeded"
+        "outcome": "failed"
       },
       {
-        "node": "b",
+        "node": "recover",
         "outcome": "succeeded"
       },
       {

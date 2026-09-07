@@ -25,6 +25,19 @@ use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
 
+/// The outcome a stage reported, in Fabro's vocabulary: what Fabro's own
+/// events show for the stage. A failure `on_failure="succeed"` promoted is a
+/// `PartialSuccess` on the record whose reported `outcome` is `succeeded`;
+/// every other status maps by [`fabro_outcome`].
+pub fn reported_outcome(outcome: &Outcome) -> StageOutcome {
+    if matches!(outcome.status, Status::PartialSuccess { .. })
+        && outcome.output.get("outcome").and_then(Value::as_str) == Some("succeeded")
+    {
+        return StageOutcome::Succeeded;
+    }
+    fabro_outcome(&outcome.status)
+}
+
 /// The Fabro spelling of an engine status.
 pub fn fabro_outcome(status: &Status) -> StageOutcome {
     match status {

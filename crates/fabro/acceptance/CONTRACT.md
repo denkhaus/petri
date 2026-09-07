@@ -106,7 +106,7 @@ names the task in `.ai/plans/fabro-unified-task-list.md` that owns the fix.
 | agent node (`prompt`, `@prompts/*.j2`, `{% include %}`) | all but fix-ci commands | supported |
 | `output_schema="@schemas/*.json"`, `output_retries` | code-review, security-review | supported |
 | `on_failure="route"`, `"exit"` (node and graph) | code-review, security-review | supported |
-| `on_failure="succeed"` | code-review, security-review | supported as a 30-day shim (see below); the promotion order is a tracked defect (task 7) |
+| `on_failure="succeed"` | code-review, security-review | supported with Fabro's promotion order: a failure an explicit route matches stays failed, an unmatched failure is promoted and reports `succeeded` (oracle cases `succeed_*`) |
 | `max_retries`, `default_max_retries` | code-review, security-review, implement-plan | supported |
 | `component` with `for_each`, `max_parallel`, `tripleoctagon` fan-in | code-review, security-review | supported for expansion; `max_parallel` slot lifetime and branch context are tracked defects (task 6) |
 | `class` with `model_stylesheet` (including `{% set %}`, `{% if %}`, `inputs.*`) | code-review, security-review, implement-issue | supported |
@@ -114,12 +114,14 @@ names the task in `.ai/plans/fabro-unified-task-list.md` that owns the fix.
 | `project_memory=false` | code-review, security-review | ignored loudly today; tracked (task 8) |
 | `stall_timeout` | code-review, security-review | ignored loudly today; tracked (task 9) |
 | `goal_gate`, `retry_target` (graph and node), `max_visits`, `max_node_visits` | fix-ci, implement-plan | supported |
-| `house` manager loop, `stack.child_workflow`, `manager.max_cycles` | implement-issue | supported for invocation; child lifecycle and defaults are tracked (task 7) |
+| `house` manager loop, `stack.child_workflow`, `manager.max_cycles` | implement-issue | supported: one child per manager attempt at one durable call site, Fabro's 45 s poll and `max_cycles` normalization, stop condition at each poll, cancellation and failure propagation (`crates/fabro/steps/tests/manager.rs`, `crates/fabro/acceptance/tests/workflow.rs`) |
 | `hexagon` human gate, `question_type` (`yes_no`, `confirmation`, `multiple_choice`, `multi_select`, `freeform`), accelerator labels, `freeform=true` edge | interview | supported for `yes_no`, `multiple_choice`, `freeform`; `multi_select` answer shape is tracked (task 9) |
-| `tab` prompt node | interview | lowers to `fabro/agent` today; a distinct one-shot `fabro/prompt` step is tracked (task 7) |
-| `model`, `provider`, `reasoning_effort` on nodes | fix-ci, implement-plan | supported for `backend="api"`; `provider="openrouter"` needs a twin-backed mapping (task 4, task 7) |
-| Conditions: `outcome=succeeded`, `outcome!=succeeded`, `context.K=V`, `&&` | all | supported (`!=` is in the grammar) |
+| `tab` prompt node | interview | supported: `fabro/prompt`, one tool-free `lithos-llm` call with the output contract and repair turns; ACP is refused as Fabro refuses it (`crates/fabro/steps/tests/prompt.rs`, black box `a_prompt_node_makes_one_tool_free_model_call`) |
+| `model`, `provider`, `reasoning_effort` on nodes | fix-ci, implement-plan | supported for `backend="api"` and prompt nodes; `provider="openrouter"` resolves through the catalog to OpenAI's chat completions protocol, which the OpenAI twin serves (black box `run_model_defaults_reach_openrouter_through_chat_completions`) |
+| Conditions: `outcome=succeeded`, `outcome!=succeeded`, `context.K=V`, `&&` | all | supported (`!=` is in the grammar: `conditions.rs`, `holds("outcome!=failed", …)`) |
 | `{{ inputs.* }}` in `goal`, `script`, prompts | code-review, security-review, fix-ci | supported; `[run.inputs]` defaults are read |
+| `import` placeholders | none of the bundles; corpus and docs | supported at load with Fabro's prefixing, boundary rules, inherited defaults, class propagation, retry-target rewriting, nesting and cycle rejection (`lowering.rs`, black box `an_import_is_expanded_at_load_and_its_nodes_run_under_the_prefix`) |
+| Output values above 100 KiB | code-review, security-review (large command output) | supported: the `OutputStore` capability with the local blob store; durable `blob://sha256/…` references, logical reads through `stdin_source` and prompts (`steps.rs`, `large_command_output_is_offloaded_and_reads_back_logically`) |
 
 ### `workflow.toml`
 
@@ -132,28 +134,31 @@ Top-level keys are `_version`, `project`, `workflow`, `environments`, `run`,
 defaults. `[run.inputs]` replaces wholesale across layers; `--input` wins per
 key.
 
-Petri acts on `[run.inputs]` and `[workflow] graph`. Every other section is
-diagnosed at load (`crates/fabro/frontend/src/lower/mod.rs`,
-`read_workflow_toml`) under the readiness plan's item 1 rule: a platform-only
-option that has no effect warns (`ignored.workflow_toml.<section>`, with why);
-a feature essential to the requested work fails with a specific
-`unsupported.workflow_toml.<section>` error before any node runs; a key Fabro's
-own parser refuses is `unsupported.workflow_toml.key` with Fabro's rename
-hint. Nothing is dropped silently. The disposition column below is what
-`petri check` and `petri run` do today; "tracked" names the task that
-implements the option, at which point its diagnostic goes away.
+Petri acts on `[workflow] graph`, `[run.inputs]`, `[run] goal`,
+`[run.model]`, `[run.execution]`, `[run.environment]` with `[environments.*]`,
+and `[run.prepare]`. Every other section is diagnosed at load
+(`crates/fabro/frontend/src/lower/workflow_toml.rs`) under the readiness
+plan's item 1 rule: a platform-only option that has no effect warns
+(`ignored.workflow_toml.<section>`, with why); a feature essential to the
+requested work fails with a specific `unsupported.workflow_toml.<section>`
+error before any node runs; a key Fabro's own parser refuses is
+`unsupported.workflow_toml.key` with Fabro's rename hint. Nothing is dropped
+silently. The whole file is validated before `[run.prepare]` runs. The
+disposition column below is what `petri check` and `petri run` do today;
+"tracked" names the task that implements the option, at which point its
+diagnostic goes away.
 
 | Section and options | Effect in Fabro | Petri disposition today |
 |---|---|---|
 | `_version` (`1`) | schema version | supported: any other value is `unsupported.workflow_toml.version`; the legacy `version` key is `unsupported.workflow_toml.key` |
 | `[workflow]` `name`, `description`, `graph`, `metadata` | `graph` names the entry point | supported: `graph` selects the file; the rest is metadata |
-| `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | warn `ignored.workflow_toml.run.goal` (tracked, task 7: the graph `goal` attribute is used today), `run.working_dir`, `run.metadata` (platform-only) |
+| `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | `goal`: supported, the run goal when the graph sets none (the graph attribute wins, as in Fabro); `working_dir`, `metadata`: warn (platform-only) |
 | `[run.inputs]` | `{{ inputs.* }}` defaults | supported |
-| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | warn `ignored.workflow_toml.run.model` (tracked: task 7 for defaults, task 12 for `speed`) |
+| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | supported: the defaults an LLM node gets below the graph's `default_model` / `default_provider`; `controls.speed` warns `ignored.workflow_toml.run.model.speed` (tracked, task 12) |
 | `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | warn `ignored.workflow_toml.run.model.fallbacks` (tracked, task 12); used by code-review and security-review |
-| `[run.prepare]` `steps[].script`/`command`/`env`, `timeout` (default 5m) | runs before the first node | error `unsupported.workflow_toml.run.prepare` (tracked, task 7): the nodes would start without their setup |
-| `[run.execution]` `mode` (`normal`, `dry_run`), `approval` (`prompt`, `auto`) | dry run and auto approve | warn `ignored.workflow_toml.run.execution`: `--dry-run` and `--auto-approve` are the command-line forms; the file form is tracked (task 7) |
-| `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | warn `ignored.workflow_toml.run.environment` and `ignored.workflow_toml.environments` (tracked, task 7: map `local` to host, `docker` to the Docker plugin, `daytona` to the Daytona plugin; `env` with `{{ secrets.* }}` needs a secret source; `network`, `lifecycle`, `labels` stay platform-only warnings) |
+| `[run.prepare]` `steps[].script`/`command`/`env`, `timeout` (default 5m) | runs before the first node | supported: lowered as command nodes `run_prepare_N` between `start` and its successors, in the selected environment, with the step `env`, the section `timeout` and `on_failure="exit"`; exactly one of `script`/`command` per step (else `unsupported.workflow_toml.run.prepare`) |
+| `[run.execution]` `mode` (`normal`, `dry_run`), `approval` (`prompt`, `auto`) | dry run and auto approve | supported as launch defaults (`Graph.params["fabro.launch"]`, read by the CLI); `--dry-run`, `--auto-approve`, `--interactive`, `--interview-script` win |
+| `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | supported: `provider` selects the backend when `--backend` is absent (`local` host, `docker` Docker plugin, `daytona` Daytona plugin); `image.docker` is the scope's container image; `env` is the scope environment, with `{{ secrets.NAME }}` a `$secret` reference resolved at spawn from `PETRI_SECRET_NAME` (a missing secret fails the command `secret_unavailable`); `resources` size a Daytona runner. An unknown `id` or provider is an error. `cwd`, `network`, `lifecycle`, `labels`, `image.dockerfile` warn `ignored.workflow_toml.environments.<id>.<key>` (platform-only; the runner builds no image) |
 | `[run.agent]` `fabro_tools` | run-management tools for agents | explicit exclusion: platform-only, warn `ignored.workflow_toml.run.agent.fabro_tools` when `true` |
 | `[run.agent.mcps.<name>]` `id` or `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled` | MCP servers | error `unsupported.workflow_toml.run.agent.mcps` (tracked, task 13) |
 | `[[run.hooks]]` `id`, `name`, `event`, `matcher`, `blocking`, `timeout`, `sandbox`, and one of `script`/`command`, `url`+`headers`+`tls`, `prompt`+`model`, `agent="enabled"`+`prompt`+`model`+`max_tool_rounds` | local hooks | error `unsupported.workflow_toml.run.hooks` (tracked, task 8): a configured hook is never skipped silently; `checkpoint_saved` stays an accepted difference (warn, do not run) once hooks land |
@@ -166,7 +171,7 @@ implements the option, at which point its diagnostic goes away.
 | `[run.git.author]` `name`, `email` | checkpoint commit identity | explicit exclusion; warn `ignored.workflow_toml.run.git` |
 | `[run.notifications.<name>]`, `[run.interviews]` `provider`, `slack.channel` | Slack | explicit exclusion; warn `ignored.workflow_toml.run.notifications` / `run.interviews` |
 | `[run.scm]` | manifest metadata | explicit exclusion; warn `ignored.workflow_toml.run.scm` |
-| `[project]`, `[cli.*]`, `[server.*]`, `[llm.*]` | inert in a workflow file | accepted but inert; warn `ignored.workflow_toml.<section>`; the legacy `[llm]` keys (`provider`, `model`, `temperature`, `max_tokens`, `fallbacks`, `fallback`) are `unsupported.workflow_toml.key` with the `[run.model]` hint, as in Fabro |
+| `[project]`, `[cli.*]`, `[server.*]`, `[llm.*]` | inert in a workflow file | accepted but inert; warn `ignored.workflow_toml.<section>`; the legacy `[llm]` keys (`provider`, `model`, `temperature`, `max_tokens`, `fallbacks`, `fallback`) are `unsupported.workflow_toml.key` with the `[run.model]` hint, as in Fabro. `[environments.*]` without a `[run.environment]` that names one is inert |
 | Rejected legacy top-level keys (`version`, `vars`, `setup`, `sandbox`, `hooks`, `mcp_servers`, ...) and unknown `[run]` keys | hard error with a rename hint | `unsupported.workflow_toml.key` with Fabro's rename hint |
 
 Per-bundle `workflow.toml` use is recorded under `workflow_config.platform_only_sections`
@@ -174,20 +179,21 @@ in the lock file.
 
 ## Tracked departures to retire
 
-Both are owned by later tasks. This task records them; it does not fix them.
-
 1. **Parallel branch context** (task 6). Oracle case
    `static_fan_out_joins_all_branches`. Fabro keeps a branch's
    `context_updates` inside `parallel.results` and never merges them into the
    parent context. Petri merges them into `kv` and its branch results lack
    `context_updates`, so `parallel_values`-style helpers see nothing. The
    fixture records Fabro's result and Petri's current result side by side.
-2. **Failure promotion order** (task 7). Oracle case
-   `partially_succeed_policy_classifies_before_routing` and the "Deliberate
-   departure" note in `crates/fabro/FORMAT.md`. Fabro takes an explicit
-   `outcome=failed` edge on an `on_failure="succeed"` node and promotes only an
-   unmatched failure. Petri classifies once at the step boundary, so the edge
-   is unreachable.
+
+Retired by task 7: **failure promotion order**. Petri now follows Fabro's
+executor: a failure an explicit route matches stays failed and takes that
+route; an unmatched failure under `on_failure="succeed"` is promoted and
+reports `succeeded`. Oracle cases `succeed_keeps_a_failure_an_explicit_edge_matches`,
+`succeed_keeps_a_failure_a_preferred_label_matches` and
+`succeed_promotes_a_failure_no_explicit_edge_matches` match the pinned
+Fabro with no departure. The `partially_succeed` spelling stays as an
+accepted difference (below).
 
 ## Accepted differences
 
@@ -203,6 +209,11 @@ reference expectations.
 | `checkpoint_saved` hook | warning; the hook does not run | dispatched with no built-in behavior |
 | Sensitive answers (`sensitive=true`, `$secret`) | a Petri extension | not defined |
 | Skipped stages in the path | Petri records a `skipped` final outcome (oracle case `skipped_outcome_routes_like_success`) | no stage record |
+| `on_failure="partially_succeed"` | a Petri extension: Fabro's `succeed` promotion order, but the promoted stage reports `partially_succeeded` (oracle case `partially_succeed_policy_classifies_before_routing`, warned `fabro.petri_extension`) | refused by the validator (`on_failure_valid`) |
+| `[environments.*] image.dockerfile` | a warning; the scope runs on the selected backend's default runner image, or on `image.docker` when named | builds the image on the platform |
+| Workflow secrets | `{{ secrets.NAME }}` resolves from `PETRI_SECRET_NAME` in the standalone runner; an embedding host supplies its own `SecretProvider` | the platform vault |
+| Output references | `blob://sha256/<hex>` in a local store under `<run_dir>/blobs`, replaceable through the `OutputStore` capability; a structured value's reference carries `#json` | `blob://sha256/<hex>` in platform storage, materialized as `file://…/blobs/<hex>.json` for handlers |
+| Prompt events | `StepEvent::Custom` with `kind = "fabro.prompt"` / `"fabro.prompt.completed"` (see `crates/fabro/FORMAT.md`) | `stage.prompt` / `prompt.completed` |
 
 ## Where things are
 

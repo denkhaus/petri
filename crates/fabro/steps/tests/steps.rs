@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fabro_steps::command::OUTPUT_CAP;
-use fabro_steps::register;
+use fabro_steps::{LocalBlobStore, blobs, register};
 use frontend_fabro::load;
 use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
 use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
@@ -118,6 +118,22 @@ async fn large_command_output_is_offloaded_and_reads_back_logically() {
         json!("220000\n"),
         "the next command read the logical value"
     );
+    // The reference is durable: a fresh store over the same run directory,
+    // as a resumed run opens, hydrates it to the same logical value.
+    let reopened = LocalBlobStore::new(dir.path().join("blobs"));
+    let hydrated = blobs::hydrate(json!(recorded), &reopened).await;
+    assert_eq!(
+        hydrated.as_str().map(str::len),
+        Some(220_000),
+        "the logical value reads back after reopening the store"
+    );
+    let kv_value = report
+        .state
+        .run_context()
+        .get("command.output")
+        .cloned()
+        .expect("the last command's output");
+    assert_eq!(kv_value, json!("220000\n"));
     let small = lower(&dot(r#"
         s [shape=parallelogram, script="printf '%01000d' 7"]
         start -> s -> exit

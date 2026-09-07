@@ -33,6 +33,7 @@ use support::fabro::interview;
 use support::fabro::launch::{Case, Launch, sanitized_path};
 use support::fabro::twins::{
     Provider, Twin, model, question_tool, requested_effort, scenario, shell_tool, text, tool_call,
+    wire_model,
 };
 
 /// The edit-and-verify workflow: a command prepares a file, a native agent
@@ -1002,6 +1003,470 @@ async fn milestone_a_smoke_run_without_fabro_on_path() {
     assert_eq!(*receipt, finished.receipt(), "the document is the file");
     finished.assert_no_leaked_processes().await;
     twin.stop();
+}
+
+/// Task 7: a `tab` prompt node is one model call with no tools, through the
+/// same client the agent nodes use. The twin sees exactly one request that
+/// offers no tools, the node's reasoning effort is on the wire, and the
+/// response lands under `response.<node>` and `last_response`.
+#[tokio::test]
+async fn a_prompt_node_makes_one_tool_free_model_call() {
+    let provider = Provider::OpenAi;
+    let mut case = Case::new("prompt-node");
+    let twin = Twin::start(provider, &case.root.join("twins"), vec![scenario(
+        provider,
+        &case.credential,
+        "summary",
+        model(provider),
+        "Summarize what the command printed",
+        text("Summary: the command printed hello."),
+    )])
+    .await;
+    case.redirect(&twin);
+    let workflow = case.workflow(
+        &format!(
+            r#"digraph PromptNode {{
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    say [shape=parallelogram, script="echo hello"]
+    summarize [shape=tab, prompt="Summarize what the command printed.", model="{}", provider="openai", reasoning_effort="low"]
+    start -> say -> summarize -> exit
+}}"#,
+            model(provider)
+        ),
+        None,
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(twin.consumed(), ["summary"]);
+    assert_eq!(twin.unmatched(), 0);
+    let requests = twin.requests_for(&case.credential);
+    assert_eq!(requests.len(), 1, "one call, no agent loop: {requests:?}");
+    assert_eq!(requests[0]["model"], model(provider));
+    assert_eq!(requested_effort(provider, &requests[0]), Some("low"));
+    assert!(
+        requests[0]
+            .get("tools")
+            .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
+        "a prompt node offers no tools: {}",
+        requests[0]
+    );
+    let sent = serde_json::to_string(&requests[0]).expect("request");
+    assert!(
+        sent.contains("hello"),
+        "the preamble carries the command output: {sent}"
+    );
+    let context = finished.final_context();
+    assert_eq!(
+        context["response.summarize"],
+        json!("Summary: the command printed hello.")
+    );
+    assert_eq!(
+        context["last_response"],
+        json!("Summary: the command printed hello.")
+    );
+    assert_eq!(context["last_stage"], json!("summarize"));
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+/// Task 7: `[run.model]` in `workflow.toml` is the default model for a node
+/// that names none, and `provider = "openrouter"` reaches OpenRouter's chat
+/// completions protocol through the redirected catalog.
+#[tokio::test]
+async fn run_model_defaults_reach_openrouter_through_chat_completions() {
+    let provider = Provider::OpenRouter;
+    let mut case = Case::new("openrouter");
+    let twin = Twin::start(provider, &case.root.join("twins"), vec![scenario(
+        provider,
+        &case.credential,
+        "route",
+        wire_model(provider),
+        "Say routed",
+        text("routed"),
+    )])
+    .await;
+    case.redirect(&twin);
+    let workflow = case.workflow(
+        r#"digraph Routed {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    ask [shape=tab, prompt="Say routed."]
+    start -> ask -> exit
+}"#,
+        Some(&format!(
+            "[run.model]\nprovider = \"openrouter\"\nname = \"{}\"\n\n[run.model.controls]\nreasoning_effort = \"high\"\n",
+            model(provider)
+        )),
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(twin.consumed(), ["route"]);
+    let requests = twin.requests_for(&case.credential);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["model"], wire_model(provider));
+    assert_eq!(requested_effort(provider, &requests[0]), Some("high"));
+    assert_eq!(finished.final_context()["response.ask"], json!("routed"));
+    twin.stop();
+}
+
+/// Task 7: `[run.prepare]` steps run in the selected environment before any
+/// node, in order, with their `env`; a node then sees their effect. A failing
+/// step ends the run before the first node runs.
+#[tokio::test]
+async fn run_prepare_steps_run_before_the_nodes_and_a_failure_stops_the_run() {
+    let case = Case::new("prepare");
+    let workflow = case.workflow(
+        r#"digraph Prepared {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    read [shape=parallelogram, script="cat prepared.txt"]
+    start -> read -> exit
+}"#,
+        Some(
+            "[run.prepare]\ntimeout = \"30s\"\n\n[[run.prepare.steps]]\nscript = \"printf 'one\\\\n' > prepared.txt\"\n\n[[run.prepare.steps]]\ncommand = [\"sh\", \"-c\", \"printf \\\"$TAG\\\\n\\\" >> prepared.txt\"]\nenv = { TAG = \"two\" }\n",
+        ),
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(
+        fs::read_to_string(case.workspace().join("prepared.txt")).expect("prepared.txt"),
+        "one\ntwo\n"
+    );
+    let nodes: Vec<String> = finished
+        .finished_nodes()
+        .into_iter()
+        .map(|(_, node)| node)
+        .collect();
+    let position = |name: &str| {
+        nodes
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("{name} in {nodes:?}"))
+    };
+    assert!(position("run_prepare_1") < position("run_prepare_2"));
+    assert!(position("run_prepare_2") < position("read"));
+    assert_eq!(
+        finished.final_context()["command.output"],
+        json!("one\ntwo\n")
+    );
+
+    let failing = Case::new("prepare-fails");
+    let workflow = failing.workflow(
+        r#"digraph Prepared {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [shape=parallelogram, script="printf 'ran\n' > ran.txt"]
+    start -> work -> exit
+}"#,
+        Some("[[run.prepare.steps]]\nscript = \"echo setup broke >&2; exit 3\"\n"),
+    );
+    let finished = failing.run(&workflow, &[]).await;
+    finished.assert_code(1);
+    assert_eq!(
+        finished.status_line(),
+        Some("failed"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        !failing.workspace().join("ran.txt").exists(),
+        "no node ran after the failed preparation"
+    );
+    let nodes: Vec<(String, String)> = finished.finished_nodes();
+    assert!(
+        nodes
+            .iter()
+            .any(|(status, node)| node == "run_prepare_1" && status == "failure"),
+        "{nodes:?}"
+    );
+    assert!(!nodes.iter().any(|(_, node)| node == "work"), "{nodes:?}");
+    assert_eq!(
+        finished.final_context()["failure_class"],
+        json!("exit_status:3")
+    );
+}
+
+/// Task 7: a cancel during `[run.prepare]` stops the preparation and the run
+/// ends cancelled with no node run.
+#[tokio::test]
+async fn a_cancel_during_run_prepare_stops_the_run_before_any_node() {
+    let case = Case::new("prepare-cancel");
+    let workflow = case.workflow(
+        r#"digraph Prepared {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [shape=parallelogram, script="printf 'ran\n' > ran.txt"]
+    start -> work -> exit
+}"#,
+        Some("[[run.prepare.steps]]\nscript = \"printf 'started\\\\n' > started.txt; sleep 60; printf 'finished\\\\n' > finished.txt\"\n"),
+    );
+    let finished = case
+        .run_with(&workflow, &[], Launch {
+            interrupt_when: Some(case.workspace().join("started.txt")),
+            ..Launch::default()
+        })
+        .await;
+    assert!(!finished.timed_out, "the interrupt ended the run");
+    assert_eq!(
+        finished.status_line(),
+        Some("cancelled"),
+        "{}",
+        finished.stderr
+    );
+    assert!(case.workspace().join("started.txt").exists());
+    assert!(!case.workspace().join("finished.txt").exists());
+    assert!(!case.workspace().join("ran.txt").exists(), "no node ran");
+    finished.assert_no_leaked_processes().await;
+}
+
+/// Task 7: a validation error anywhere in `workflow.toml` stops the run
+/// before the preparation steps start.
+#[tokio::test]
+async fn the_complete_configuration_is_validated_before_preparation_starts() {
+    let case = Case::new("prepare-validate");
+    let workflow = case.workflow(
+        r#"digraph Prepared {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [shape=parallelogram, script="true"]
+    start -> work -> exit
+}"#,
+        Some(
+            "[[run.prepare.steps]]\nscript = \"printf 'prepared\\\\n' > prepared.txt\"\n\n[run.environment]\nid = \"missing\"\n",
+        ),
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(1);
+    assert!(
+        finished
+            .stderr
+            .contains("unsupported.workflow_toml.run.environment"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        !case.workspace().join("prepared.txt").exists(),
+        "nothing ran before validation passed"
+    );
+}
+
+/// Task 7: `[run.environment]` maps `provider = "local"` to the host and
+/// carries its `env` into every command; a `{{ secrets.NAME }}` value is
+/// resolved from `PETRI_SECRET_NAME` at spawn and masked in the log.
+#[tokio::test]
+async fn run_environment_env_and_secrets_reach_the_commands_and_stay_masked() {
+    let case = Case::new("environment-secrets");
+    let workflow = case.workflow(
+        r#"digraph Env {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    show [shape=parallelogram, script="echo \"lang=$LANG token=$TOKEN\""]
+    start -> show -> exit
+}"#,
+        Some(
+            "[run.environment]\nid = \"review\"\n\n[environments.review]\nprovider = \"local\"\n\n[environments.review.env]\nLANG = \"C.UTF-8\"\nTOKEN = \"{{ secrets.REVIEW_TOKEN }}\"\n",
+        ),
+    );
+    let finished = case
+        .run_with(&workflow, &[], Launch {
+            env: vec![(
+                "PETRI_SECRET_REVIEW_TOKEN".into(),
+                "s3cr3t-value-1234".into(),
+            )],
+            ..Launch::default()
+        })
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    let context = finished.final_context();
+    let output = context["command.output"].as_str().expect("output");
+    assert!(output.contains("lang=C.UTF-8"), "{output}");
+    assert!(
+        !output.contains("s3cr3t-value-1234"),
+        "the secret is masked in the recorded output: {output}"
+    );
+    assert!(output.contains("token="), "{output}");
+    assert!(
+        !finished.stderr.contains("s3cr3t-value-1234"),
+        "the secret never reaches the terminal"
+    );
+    assert!(
+        finished.stderr.contains("[show#"),
+        "the command ran on the host: {}",
+        finished.stderr
+    );
+
+    // Without the variable the secret is unavailable and the command fails
+    // routably, never silently empty.
+    let missing = Case::new("environment-secret-missing");
+    let workflow = missing.workflow(
+        r#"digraph Env {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    show [shape=parallelogram, script="echo $TOKEN", on_failure="exit"]
+    start -> show -> exit
+}"#,
+        Some(
+            "[run.environment]\nid = \"review\"\n\n[environments.review]\nprovider = \"local\"\n\n[environments.review.env]\nTOKEN = \"{{ secrets.REVIEW_TOKEN }}\"\n",
+        ),
+    );
+    let finished = missing.run(&workflow, &[]).await;
+    finished.assert_code(1);
+    assert_eq!(
+        finished.status_line(),
+        Some("failed"),
+        "{}",
+        finished.stderr
+    );
+    let nodes = finished.finished_nodes();
+    assert!(
+        nodes
+            .iter()
+            .any(|(status, node)| node == "show" && status == "failure"),
+        "{nodes:?}"
+    );
+    let document = finished.inspect();
+    let record = &support::fabro::inspect::root_nodes(&document)["show"];
+    assert_eq!(record["status"], json!("failure"), "{record}");
+    assert!(
+        serde_json::to_string(record)
+            .expect("record")
+            .contains("secret_unavailable"),
+        "the failure names the missing secret: {record}"
+    );
+}
+
+/// Task 7: `[run.execution]` supplies the launch defaults: `approval = "auto"`
+/// answers a gate with its first choice and `mode = "dry_run"` simulates the
+/// stages, with the explicit options still winning.
+#[tokio::test]
+async fn run_execution_settings_are_the_launch_defaults() {
+    let case = Case::new("execution-auto");
+    let workflow = case.workflow(
+        r#"digraph Gate {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Ship it?"]
+    yes [shape=parallelogram, script="echo shipped"]
+    no [shape=parallelogram, script="echo held"]
+    start -> gate
+    gate -> yes [label="[Y] Yes"]
+    gate -> no [label="[N] No"]
+    yes -> exit
+    no -> exit
+}"#,
+        Some("[run.execution]\napproval = \"auto\"\n"),
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.final_context()["command.output"],
+        json!("shipped\n")
+    );
+
+    let dry = Case::new("execution-dry-run");
+    let workflow = dry.workflow(
+        r#"digraph Dry {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [shape=parallelogram, script="printf 'ran\n' > ran.txt"]
+    start -> work -> exit
+}"#,
+        Some("[run.execution]\nmode = \"dry_run\"\n"),
+    );
+    let finished = dry.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert!(
+        !dry.workspace().join("ran.txt").exists(),
+        "the stage was simulated"
+    );
+    assert!(
+        !finished.final_context().contains_key("command.output"),
+        "a simulated command prints nothing"
+    );
+}
+
+/// Task 7: an `import` placeholder is expanded at load. The imported nodes run
+/// under the placeholder's prefix, its incoming and outgoing edges are
+/// spliced, and the persisted graph carries the expansion.
+#[tokio::test]
+async fn an_import_is_expanded_at_load_and_its_nodes_run_under_the_prefix() {
+    let case = Case::new("import");
+    fs::write(
+        case.root.join("workflow").join("checks.fabro"),
+        r#"digraph Checks {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    lint [shape=parallelogram, script="printf 'lint\n' >> log.txt"]
+    test [shape=parallelogram, script="printf 'test\n' >> log.txt"]
+    start -> lint -> test -> exit
+}"#,
+    )
+    .expect("write the imported workflow");
+    let workflow = case.workflow(
+        r#"digraph Main {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    build [shape=parallelogram, script="printf 'build\n' > log.txt"]
+    checks [import="checks.fabro"]
+    ship [shape=parallelogram, script="cat log.txt"]
+    start -> build -> checks -> ship -> exit
+}"#,
+        None,
+    );
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(
+        finished.final_context()["command.output"],
+        json!("build\nlint\ntest\n")
+    );
+    let nodes: Vec<String> = finished
+        .finished_nodes()
+        .into_iter()
+        .map(|(_, node)| node)
+        .collect();
+    assert_eq!(nodes, [
+        "start",
+        "build",
+        "checks.lint",
+        "checks.test",
+        "ship",
+        "exit"
+    ]);
+    let document = finished.inspect();
+    let recorded = support::fabro::inspect::root_nodes(&document);
+    assert!(recorded.get("checks.lint").is_some(), "{recorded}");
+    assert!(recorded.get("checks").is_none(), "the placeholder is gone");
 }
 
 /// Keep the workspace path formula in one place the tests can see.

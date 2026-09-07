@@ -288,16 +288,16 @@ fn acp_on_a_prompt_node_is_refused_as_fabro_refuses_it() {
         lowered.diagnostics
     );
     // The graph's ACP default does not reach a prompt node.
-    let graph = lower(&format!(
-        r#"digraph T {{
+    let graph = lower(
+        r#"digraph T {
         graph [backend="acp", acp.command="agent", default_model="test/model"]
         start [shape=Mdiamond]
         exit [shape=Msquare]
         a [prompt="x"]
         p [shape=tab, prompt="y"]
         start -> a -> p -> exit
-    }}"#
-    ));
+    }"#,
+    );
     let node = |name: &str| {
         graph
             .nodes
