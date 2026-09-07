@@ -402,7 +402,8 @@ async fn a_repeated_gate_in_a_loop_advances_its_occurrence() {
 }
 
 /// A gate inside a nested workflow carries the nested invocation's path,
-/// `/<node>/<cycle>` (cycles count from 1), and its own invocation id.
+/// `/<node>` (the manager loop's one durable call site per attempt), and its
+/// own invocation id.
 #[tokio::test]
 async fn a_nested_gate_carries_its_invocation_path() {
     const NESTED: &str = r#"digraph P {
@@ -448,7 +449,7 @@ async fn a_nested_gate_carries_its_invocation_path() {
         .iter()
         .find(|q| q.node == "outer")
         .expect("the outer gate");
-    assert_eq!(inner.invocation_path, "/m/1");
+    assert_eq!(inner.invocation_path, "/m");
     assert_eq!(outer.invocation_path, "/");
     assert_ne!(inner.invocation, outer.invocation);
     assert_ne!(inner.execution, outer.execution);
