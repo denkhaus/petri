@@ -346,11 +346,20 @@ script = "echo ran:$FABRO_NODE_ID >> tool-hooks.log"
         log.contains("ran:a"),
         "the post hook saw the child's call under the parent node: {log}"
     );
-    let requests = provider.requests();
-    let denial = serde_json::to_string(&requests[2]).expect("request");
+    // The child's first request follows the parent's spawn; which of the
+    // parent's `wait` turn and the child's turn reaches the provider first
+    // is a scheduling race, so the block reason is looked for in any
+    // request rather than at a fixed position.
+    let requests: Vec<String> = provider
+        .requests()
+        .iter()
+        .map(|request| serde_json::to_string(request).expect("request"))
+        .collect();
     assert!(
-        denial.contains("destructive commands are not allowed"),
-        "the child saw the block reason: {denial}"
+        requests
+            .iter()
+            .any(|request| request.contains("destructive commands are not allowed")),
+        "the child saw the block reason: {requests:?}"
     );
     assert_eq!(output_of(&report, "a")["text"], "The child cleaned up.");
 }
