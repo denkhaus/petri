@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, thread};
 
@@ -24,10 +23,10 @@ use fabro_steps::register;
 use fabro_steps::subagents::METRIC;
 use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
-use lithos_llm::types::ErrorKind;
+use lithos_llm::types::{ErrorKind, Request, Response};
 use pebble_coding_agent::test_support::{
-    ScriptedCall, ScriptedFailure, ScriptedProvider, multi_tool_call_response, scripted_client,
-    text_response, tool_call_response,
+    ScriptedCall, ScriptedFailure, multi_tool_call_response, scripted_client, text_response,
+    tool_call_response,
 };
 use runtime::driver::ExecutionReport;
 use runtime::engine::Event;
@@ -36,7 +35,7 @@ use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use smol_str::SmolStr;
 use testkit::{RunDir, output_of};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 fn dot(body: &str) -> String {
     format!(
@@ -134,7 +133,7 @@ fn read(path: &Path) -> String {
 }
 
 /// A parent turn that spawns `tasks` and waits for all of them.
-fn spawn_and_wait(tasks: &[&str]) -> lithos_llm::types::Response {
+fn spawn_and_wait(tasks: &[&str]) -> Response {
     let mut calls: Vec<(&str, &str, Value)> = tasks
         .iter()
         .enumerate()
@@ -151,7 +150,7 @@ fn spawn_and_wait(tasks: &[&str]) -> lithos_llm::types::Response {
 }
 
 /// The tool names a request advertised.
-fn tool_names(request: &lithos_llm::types::Request) -> Vec<String> {
+fn tool_names(request: &Request) -> Vec<String> {
     request.tools().iter().map(|t| t.name.clone()).collect()
 }
 
@@ -665,7 +664,7 @@ async fn cancelling_the_run_stops_every_descendant() {
     let run = tokio::spawn(driver.run());
     timeout(Duration::from_secs(15), async {
         while !waiting.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            sleep(Duration::from_millis(20)).await;
         }
     })
     .await
@@ -705,8 +704,7 @@ fn process_running(marker: &str) -> bool {
     Command::new("pgrep")
         .args(["-f", marker])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 // ── Threads and resume ──────────────────────────────────────────────────────
@@ -804,7 +802,7 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
     });
     timeout(Duration::from_secs(15), async {
         while !workspace.join("partial.txt").exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            sleep(Duration::from_millis(20)).await;
         }
     })
     .await
@@ -849,10 +847,3 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
     );
     assert_eq!(metrics(&resumed, "a")[METRIC]["spawned"], 1);
 }
-
-/// Keep the provider type in scope for the scripts above.
-#[expect(
-    dead_code,
-    reason = "names the scripted provider for readers of the helpers"
-)]
-type Provider = Arc<ScriptedProvider>;

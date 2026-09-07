@@ -9,15 +9,17 @@ mod support;
 
 use std::fs;
 use std::process::Stdio;
+use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use support::fabro::launch::{Case, Launch};
 use support::fabro::subagents::{
-    activities, descendant_usage, node_metrics, of_kind, one_call, provider_error, public_events,
-    spawn_and_wait,
+    Activity, activities, descendant_usage, node_metrics, of_kind, one_call, provider_error,
+    public_events, spawn_and_wait,
 };
 use support::fabro::twins::{Provider, Twin, model, scenario, shell_tool, text};
 use tokio::process::Command;
+use tokio::time::sleep;
 
 const PROVIDER: Provider = Provider::OpenAi;
 
@@ -692,7 +694,7 @@ async fn interrupting_the_run_stops_the_child_and_leaks_nothing() {
         of_kind(&agent, "SubAgentClosed").len(),
         1,
         "the child was closed on the way out: {:?}",
-        agent.iter().map(Activity_variant).collect::<Vec<_>>()
+        agent.iter().map(Activity::variant).collect::<Vec<_>>()
     );
     let mut alive = true;
     for _ in 0..50 {
@@ -706,16 +708,11 @@ async fn interrupting_the_run_stops_the_child_and_leaks_nothing() {
         if !alive {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(100)).await;
     }
     assert!(!alive, "the child's shell loop was stopped");
     finished.assert_no_leaked_processes().await;
     twin.stop();
-}
-
-#[expect(non_snake_case, reason = "a one-line projection for a failure message")]
-fn Activity_variant(activity: &support::fabro::subagents::Activity) -> String {
-    activity.variant()
 }
 
 /// Two `full` nodes on one thread: the second node's request carries the
@@ -835,7 +832,3 @@ async fn a_retained_thread_carries_a_childs_result_to_the_next_node() {
     finished.assert_no_leaked_processes().await;
     twin.stop();
 }
-
-/// Keeps the JSON helpers' type in scope for readers of the cases.
-#[expect(dead_code, reason = "names the value type the scripts build")]
-type Script = Value;

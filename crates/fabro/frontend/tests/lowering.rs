@@ -2042,3 +2042,56 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
     assert_eq!(hooks[1]["matcher"], json!("^agent$"));
     assert_eq!(hooks[0]["sandbox"], json!(false));
 }
+
+/// Every agent node carries the reference sub-agent configuration (on,
+/// Pebble's open-session bound); a prompt node, which runs no tools, does
+/// not; and the `[run.agent] subagents` key stays refused as Fabro refuses
+/// it, with a hint that says the tools are always on.
+#[test]
+fn agent_nodes_carry_the_reference_subagent_configuration() {
+    use frontend_fabro::subagents::{CONFIG_KEY, DEFAULT_MAX_OPEN_SESSIONS, SubagentConfig};
+    let graph = lower_ok(&dot(r#"
+        graph [backend="api", default_model="test/model"]
+        agent [prompt="delegate"]
+        ask [shape=tab, prompt="summarize"]
+        start -> agent -> ask -> exit
+    "#));
+    let agent = &node(&graph, "agent").step.config;
+    let read: SubagentConfig =
+        serde_json::from_value(agent[CONFIG_KEY].clone()).expect("the configuration reads");
+    assert_eq!(read, SubagentConfig::reference());
+    assert!(read.enabled);
+    assert_eq!(read.max_open_sessions, DEFAULT_MAX_OPEN_SESSIONS);
+    assert!(
+        node(&graph, "ask").step.config.get(CONFIG_KEY).is_none(),
+        "a prompt node runs no tools"
+    );
+
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run.agent]\nsubagents = { enabled = false }\n",
+    )]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [shape=parallelogram, script="true"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    let refusal = lowered
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "unsupported.workflow_toml.key")
+        .expect("the key is refused");
+    assert!(refusal.is_error());
+    assert!(
+        refusal.message.contains("run.agent.subagents")
+            && refusal
+                .message
+                .contains("always available to native agents"),
+        "{}",
+        refusal.message
+    );
+}

@@ -139,6 +139,8 @@ crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wai
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 crates/fabro/steps/tests/hooks.rs            readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
 crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the binary: a configured hook blocks a real tool effect of a native agent (`a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`); two `full` nodes share one conversation
+crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent delegates to Pebble-built children on real scopes; hooks and the question rule inside a child; the invocation ceiling never counts a child; the open-session bound; child failure, nesting, cancellation, thread reuse, resume; one ignored contract test for child project memory
+crates/petri/cli/tests/fabro_subagents_blackbox.rs  readiness item 9d through the binary: a parent delegates a workspace change; a hook blocks a child's effect; a child's failure is the parent's tool result; concurrent children and one invocation; a grandchild; an interrupt closes the child; a retained thread carries a child's result; accounting reconstructed from `execution::replay_run`
 crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
@@ -215,7 +217,7 @@ Fabro agent nodes can use Pebble directly as a Rust library. Set
 credentials from its environment. ACP remains the default. See
 [native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
 requirements, client injection, project memory, tool hooks, retained
-threads, events, and accounting. Fabro's `fidelity` modes, threads and
+threads, sub-agents, events, and accounting. Fabro's `fidelity` modes, threads and
 `[[run.hooks]]` are described under "Steps at run time" on the same page.
 
 `petri inspect --run-dir <dir> [--json]` reconstructs a run from its run
