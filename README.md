@@ -195,7 +195,7 @@ set three times under different test schedules
 matrix; it adds repetitions and is never the only parity evidence.
 
 Every black box scenario writes a machine-readable evidence record
-(`crates/petri/cli/tests/support/fabro/evidence.rs`, schema version 1) into
+(`crates/petri/cli/tests/support/fabro/record.rs`, schema version 1) into
 the run-scoped directory `PETRI_EVIDENCE_DIR` names (`mise run
 test:fabro:blackbox` creates one under `target/fabro-evidence/` and links
 `latest` to it): the Petri, Pebble, lithos-llm, sandbox-driver, twins, and

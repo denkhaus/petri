@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 use std::{env, fs, panic, process};
 
 use serde_json::{Value, json};
-use support::fabro::evidence::{Backend, Recorder, directory, outcomes};
+use support::fabro::record::{Backend, Recorder, directory, outcomes};
 use support::fabro::launch::Case;
 use support::fabro::require;
 use support::fabro::twins::{Provider, Twin, model, scenario, text};

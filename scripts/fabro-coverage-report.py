@@ -7,7 +7,7 @@
 Inputs:
 
   DIR/records/*.json   the evidence records the harness wrote
-                       (schema: crates/petri/cli/tests/support/fabro/evidence.rs)
+                       (schema: crates/petri/cli/tests/support/fabro/record.rs)
   --manifest FILE      the scenario manifest: which scenarios are required,
                        blocked, or excluded, on which backends, and which tests
                        prove them. Without it every recorded scenario counts as

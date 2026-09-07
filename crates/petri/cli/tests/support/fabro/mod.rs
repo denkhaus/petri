@@ -18,7 +18,7 @@
 )]
 
 pub(crate) mod bundle;
-pub(crate) mod evidence;
+pub(crate) mod record;
 pub(crate) mod failures;
 pub(crate) mod inspect;
 pub(crate) mod interview;

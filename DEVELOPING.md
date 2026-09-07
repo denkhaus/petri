@@ -220,7 +220,7 @@ Every black box scenario writes an evidence record into `PETRI_EVIDENCE_DIR`
 `target/fabro-evidence/latest/coverage.md` after a run; a failed scenario's
 process output, inspect document, twin logs, and case directory are under
 `bundles/<record id>/`. The record format is documented in
-`crates/petri/cli/tests/support/fabro/evidence.rs`.
+`crates/petri/cli/tests/support/fabro/record.rs`.
 
 The corpus contains third-party repositories and is not committed. The corpus
 run battery does not receive a GitHub token, so workflows from the corpus cannot
