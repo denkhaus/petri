@@ -1434,6 +1434,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "lithos-llm",
+ "pebble-coding-agent",
  "petri-execution",
  "petri-fabro-steps",
  "petri-frontend-fabro",
@@ -1456,6 +1457,7 @@ name = "petri-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "lithos-llm",
  "petri",
  "petri-cli-core",
  "petri-testkit",
