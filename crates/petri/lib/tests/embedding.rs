@@ -35,7 +35,9 @@ use petri::execution::{
     ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::{AGENT_KIND, CommandStep, HumanStep, StubStep, WAIT_KIND, WORKFLOW_KIND};
+use petri::fabro::{
+    AGENT_KIND, CommandStep, HumanStep, StageStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
+};
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
 use petri::ir::{Attempt, EdgeId, Graph, Outcome, RunStatus, Status, Value};
@@ -102,6 +104,7 @@ fn runtime(dir: &RunDir, hooks: Option<Arc<dyn ExecutionHooks>>) -> Runtime {
     }
     registry.register(CommandStep);
     registry.register(HumanStep);
+    registry.register(StageStep);
     let rt = Runtime::standard()
         .frontend(Fabro::new())
         .steps(registry)
