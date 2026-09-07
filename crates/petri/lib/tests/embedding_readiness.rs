@@ -476,7 +476,16 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             text("HANDOFF: the note is signed, written and delegated; f1..f5 written."),
         ),
         s("polish-done", "OUT5", text("POLISHED")),
-        s("review", "Review the polished note", text("REVIEWED")),
+        s(
+            "review-note",
+            "Review the polished note",
+            tool_call(
+                "review-note",
+                "mcp__notes__write_file",
+                &json!({ "path": "review.txt", "content": "reviewed\n" }),
+            ),
+        ),
+        s("review", "wrote 9 bytes to review.txt", text("REVIEWED")),
         s(
             "docs-down",
             "Draft the docs page",
@@ -519,7 +528,7 @@ const BEFORE_FAN_OUT: [&str; 11] = [
     "child-done",
     "synthesize",
 ];
-const AFTER_FAN_OUT: [&str; 9] = [
+const AFTER_FAN_OUT: [&str; 10] = [
     "r1",
     "r2",
     "r3",
@@ -527,6 +536,7 @@ const AFTER_FAN_OUT: [&str; 9] = [
     "r5",
     "summary",
     "polish-done",
+    "review-note",
     "review",
     "docs-down",
 ];
@@ -895,9 +905,9 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     assert_eq!(read(&ws.join("f5.txt")), "five");
     assert_eq!(
         read(&ws.join("tool-hooks.log")),
-        "ran:plan\nran:plan\nran:write\nran:delegate\nran:polish\nran:polish\nran:polish\nran:polish\nran:polish\n"
+        "ran:plan\nran:plan\nran:write\nran:delegate\nran:polish\nran:polish\nran:polish\nran:polish\nran:polish\nran:review\n"
     );
-    assert_eq!(read(&mcp_log).matches("call write_file").count(), 1);
+    assert_eq!(read(&mcp_log).matches("call write_file").count(), 2);
     let results: Vec<Value> =
         serde_json::from_str(&read(&ws.join("results.json"))).expect("results.json");
     assert_eq!(results.len(), 2);
@@ -977,6 +987,18 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     assert_eq!(
         count(&projected, "write", "fabro.mcp.tool"),
         1,
+        "{projected:#?}"
+    );
+    // The MCP tool is still on the session after the compaction: the review
+    // called it on the compacted thread (one pre and one post hook report).
+    assert_eq!(
+        count(&projected, "review", "fabro.mcp.tool"),
+        1,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        count(&projected, "review", "fabro.hook"),
+        2,
         "{projected:#?}"
     );
     assert_eq!(

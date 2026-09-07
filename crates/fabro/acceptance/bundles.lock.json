@@ -1133,9 +1133,7 @@
         "security-review/malformed-response",
         "security-review/timeout-cancel"
       ],
-      "blockers": [
-        "workflow.toml [run.model.fallbacks] is not applied yet (task 12)"
-      ],
+      "blockers": [],
       "notes": [
         "Uses `outcome!=succeeded` on the inventory -> inventory_failed edge.",
         "[run.environment.env] blanks GITHUB_TOKEN and GH_TOKEN so agents cannot reach GitHub."
@@ -1424,8 +1422,7 @@
         "implement/parent-cancellation"
       ],
       "blockers": [
-        "implement-plan's verify script requires cargo dev, bun, nightly clippy and the Fabro repository layout; a fixture repository or an accepted migration bundle is needed (task 17)",
-        "provider=\"openrouter\" reaches the OpenAI twin's chat completions endpoint (run_model_defaults_reach_openrouter_through_chat_completions); the scenario must script kimi-k3 there (task 17)"
+        "implement-plan's verify script requires cargo dev, bun, nightly clippy and the Fabro repository layout; a fixture repository or an accepted migration bundle is needed (task 17)"
       ],
       "notes": [
         "stack.child_workflow=\"fabro/workflows/implement-plan/workflow.fabro\" resolves through the .fabro/ prefix rule."
@@ -1537,9 +1534,7 @@
         "interview/timeout-cancel",
         "interview/terminal-eof"
       ],
-      "blockers": [
-        "multi_select answers: the shared Answer contract has one choice plus text; verify pinned Fabro's multi-select representation before asserting (task 9)"
-      ],
+      "blockers": [],
       "notes": [
         "No model is declared; the scenario supplies one through the run configuration."
       ]

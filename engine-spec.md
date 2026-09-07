@@ -483,7 +483,7 @@ and subjects that carry the node's `meta` and its branch role. Every event is
 derived from a durable record; the projector's `observed_at` is the one
 live-only field. The pure state machine reads no clock: observed times come
 from the driver (the attempt duration it fills into `metrics.duration_ms` when
-a step kind reported none) and from the projector.
+a step kind reported none) and from the projector. A record read back from the log is the record that was written, floats included (`serde_json` with `float_roundtrip`), so a replayed stream equals the live one event for event.
 
 **Awaited extension points.** A host that must finish work before execution
 continues installs `driver::lifecycle::ExecutionHooks`

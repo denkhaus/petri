@@ -443,6 +443,36 @@
       "test": "provider_faults_truncated_stream"
     },
     {
+      "cell": "readiness/combined-cancellation@host/openai",
+      "scenario": null,
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "readiness item 10: the combined run interrupted while a sub-agent's tool runs under the hooks; the cancel names the interrupt, the child is closed, nothing leaks, the work stays accessible",
+      "test": "petri-cli::fabro_readiness_blackbox::the_combined_workflow_is_cancelled_during_a_childs_tool_and_leaks_nothing"
+    },
+    {
+      "cell": "readiness/combined-failure@host/openai",
+      "scenario": null,
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "readiness item 10: the combined run with the fallback route down too; the chain is exhausted, the run fails, run_failed then sandbox_cleanup run, the work stays accessible",
+      "test": "petri-cli::fabro_readiness_blackbox::the_combined_workflow_reports_an_exhausted_chain_and_keeps_its_work"
+    },
+    {
+      "cell": "readiness/combined@host/openai",
+      "scenario": null,
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "readiness item 10: the item 8 workflow with every item 9 facility in one run (a skill-guided plan, a hooked MCP write, a hooked sub-agent, a fan-out, a compaction and a later node on the compacted thread, a second thread failing over to the Anthropic twin), no platform Git operation, every family on the public stream",
+      "test": "petri-cli::fabro_readiness_blackbox::the_combined_workflow_runs_end_to_end_through_the_binary"
+    },
+    {
       "cell": "routing/bundle-defaults-and-overrides@host/openrouter",
       "scenario": "routing/bundle-defaults-and-overrides",
       "backend": "host",

@@ -327,7 +327,17 @@ fn openai_scripts(case: &Case, child: &Child) -> Vec<Value> {
         ),
         s("polish-done", "OUT5", text("POLISHED")),
         // `review` continues the compacted thread.
-        s("review", "Review the polished note", text("REVIEWED")),
+        // `review` continues the compacted thread and still has its MCP tool.
+        s(
+            "review-note",
+            "Review the polished note",
+            tool_call(
+                "review-note",
+                "mcp__notes__write_file",
+                json!({ "path": "review.txt", "content": "reviewed\n" }),
+            ),
+        ),
+        s("review", "wrote 9 bytes to review.txt", text("REVIEWED")),
         // `draft_docs`: the primary is down, the chain moves the thread.
         s(
             "docs-down",
@@ -477,7 +487,7 @@ const BEFORE_FAN_OUT: [&str; 11] = [
 ];
 
 /// The OpenAI scripts every complete case spends after the fan-out.
-const AFTER_FAN_OUT: [&str; 10] = [
+const AFTER_FAN_OUT: [&str; 11] = [
     "r1",
     "r2",
     "r3",
@@ -485,6 +495,7 @@ const AFTER_FAN_OUT: [&str; 10] = [
     "r5",
     "summary",
     "polish-done",
+    "review-note",
     "review",
     "docs-down",
     // A placeholder so the two arrays have the same shape in assertions.
@@ -502,7 +513,7 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     let mut branches = consumed[11..13].to_vec();
     branches.sort();
     assert_eq!(branches, ["job-alpha", "job-beta"], "{}", finished.stderr);
-    assert_eq!(consumed[13..], AFTER_FAN_OUT[..9], "{}", finished.stderr);
+    assert_eq!(consumed[13..], AFTER_FAN_OUT[..10], "{}", finished.stderr);
     assert_eq!(
         setup.openai.unmatched(),
         0,
@@ -601,13 +612,13 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     assert_eq!(read(&workspace.join("f5.txt")), "five");
     assert_eq!(
         read(&workspace.join("tool-hooks.log")),
-        "ran:plan\nran:plan\nran:write\nran:delegate\nran:polish\nran:polish\nran:polish\nran:polish\nran:polish\n",
+        "ran:plan\nran:plan\nran:write\nran:delegate\nran:polish\nran:polish\nran:polish\nran:polish\nran:polish\nran:review\n",
         "the post hook saw every tool that ran, the child's under the parent stage, and none that was blocked"
     );
     assert_eq!(
         read(&setup.mcp_log).matches("call write_file").count(),
-        1,
-        "the server saw one call; the blocked one never reached it: {}",
+        2,
+        "the servers saw the allowed write and the review's note; the blocked one never reached them: {}",
         read(&setup.mcp_log)
     );
     let results: Vec<Value> =
@@ -820,6 +831,18 @@ fn assert_public_projection(events: &[RunEvent]) {
     assert_eq!(
         count(&projected, "write", "fabro.mcp.tool"),
         1,
+        "{projected:#?}"
+    );
+    // The MCP tool is still on the session after the compaction: the review
+    // called it on the compacted thread (one pre and one post hook report).
+    assert_eq!(
+        count(&projected, "review", "fabro.mcp.tool"),
+        1,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        count(&projected, "review", "fabro.hook"),
+        2,
         "{projected:#?}"
     );
     // C4: the child's lifecycle rides `agent_activity` under the delegate.

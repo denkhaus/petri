@@ -8,6 +8,10 @@ Sources compared:
   Cargo.toml                          pebble-coding-agent, pebble-agent, lithos-llm,
                                       the four sandbox-driver entries
   crates/petri/cli/Cargo.toml         twin-openai, twin-anthropic
+  crates/petri/lib/Cargo.toml         twin-openai, twin-anthropic (the embedding proof)
+  crates/core/executor-sandbox/src/backend.rs  RUNNER_PIN, the sandbox-images revision of
+                                      the default runner images (cited by the contract
+                                      table, not by evidence records)
   crates/fabro/corpus-pin.txt         the Fabro reference commit
   crates/fabro/acceptance/bundles.lock.json   fabro_reference.commit
   crates/fabro/acceptance/CONTRACT.md the "Pinned revisions" table
@@ -65,6 +69,7 @@ def main() -> int:
 
     workspace = manifest_revisions(ROOT / "Cargo.toml")
     cli = manifest_revisions(ROOT / "crates/petri/cli/Cargo.toml")
+    lib = manifest_revisions(ROOT / "crates/petri/lib/Cargo.toml")
     expected: dict[str, str] = {}
 
     pebble = same(problems, "pebble", {n: workspace[n][1] for n in ("pebble-coding-agent", "pebble-agent") if n in workspace})
@@ -77,7 +82,11 @@ def main() -> int:
     sandbox = same(problems, "sandbox-driver", {n: r for n, (_, r) in workspace.items() if n.startswith("sandbox-driver")})
     if sandbox:
         expected["sandbox_driver"] = sandbox
-    twins = same(problems, "twins", {n: r for n, (_, r) in cli.items() if n.startswith("twin-")})
+    twins = same(
+        problems,
+        "twins",
+        {f"{label}:{n}": r for label, manifest in (("cli", cli), ("lib", lib)) for n, (_, r) in manifest.items() if n.startswith("twin-")},
+    )
     if twins:
         expected["twins"] = twins
     for name in ("pebble", "lithos_llm", "sandbox_driver", "twins"):
@@ -97,6 +106,14 @@ def main() -> int:
     contract = contract_table(ROOT / "crates/fabro/acceptance/CONTRACT.md")
     if not contract:
         problems.append("CONTRACT.md: no `## Pinned revisions` table")
+    backend = (ROOT / "crates/core/executor-sandbox/src/backend.rs").read_text(encoding="utf-8")
+    runner = re.search(r'const RUNNER_PIN: &str = "([0-9a-f]+)"', backend)
+    if runner is None:
+        problems.append("backend.rs: RUNNER_PIN not found")
+    elif contract.get("runner_image") is None:
+        problems.append("CONTRACT.md: no row for runner_image")
+    elif not runner.group(1).startswith(contract["runner_image"]) and not contract["runner_image"].startswith(runner.group(1)):
+        problems.append(f"CONTRACT.md: runner_image is {contract['runner_image']}, backend.rs pins {runner.group(1)}")
     for name, rev in expected.items():
         cited = contract.get(name)
         if cited is None:
@@ -123,6 +140,8 @@ def main() -> int:
 
     for name, rev in sorted(expected.items()):
         print(f"{name:16} {rev}")
+    if runner is not None:
+        print(f"{'runner_image':16} {runner.group(1)}")
     print(f"evidence records checked: {len(records)}" + (f" ({evidence})" if records else ""))
     if problems:
         print("pin check failed:", file=sys.stderr)
