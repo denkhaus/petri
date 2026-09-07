@@ -15,8 +15,8 @@ pub(crate) mod policy;
 mod promotion;
 mod routing;
 mod secrets;
-mod threads;
 pub mod subagents;
+mod threads;
 mod workflow_toml;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
