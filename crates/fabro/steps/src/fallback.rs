@@ -32,7 +32,8 @@
 //! session's record resumes on the next route with Pebble's
 //! `ResumeMode::UseModel` ([`crate::pebble::Resume::Failover`]). A tool the
 //! failed turn already ran is not run again: the record carries its result,
-//! and the next model is asked to continue from it ([`CONTINUATION`]).
+//! and the next model continues the unfinished turn from it, with no new
+//! input (Pebble's `continue_prompt`).
 //!
 //! Every decision is a `StepEvent::Custom` payload with a stable `kind`
 //! ([`PLAN_EVENT`], [`ROUTE_EVENT`], [`USAGE_EVENT`], [`FAILOVER_EVENT`],
@@ -98,14 +99,6 @@ pub const FAILOVER_EVENT: &str = "fabro.fallback.failover";
 /// "ineligible" | "exhausted", error }`. A cancellation emits nothing: the
 /// outcome is the cancelled attempt.
 pub const STOP_EVENT: &str = "fabro.fallback.stop";
-
-/// The text the next model receives after a failover that interrupted a turn
-/// with tool effects already applied. It is sent as agent-sourced input, so
-/// Pebble attributes it to the runtime, not to the person driving the run.
-pub const CONTINUATION: &str = "The previous model request failed and this conversation moved to \
-                                another model. Continue from the state above. The tool results \
-                                shown were already applied; do not run those tools again. Finish \
-                                the task you were given.";
 
 /// The environment variable naming Pebble's turn replay budget: how many
 /// times Pebble re-sends a model request whose response stream broke, before
@@ -1234,15 +1227,19 @@ pub(crate) async fn prompt(
     let stage = Stage::of(ctx);
     let mut input = Input::Prompt(text.to_owned());
     loop {
-        let result = session
-            .prompt(
-                input.text(),
-                input.agent_sourced(),
-                &mut ctx.control,
-                ctx.env.grace(),
-                config.timeout_ms.map(Duration::from_millis),
-            )
-            .await;
+        let result = match &input {
+            Input::Prompt(text) => {
+                session
+                    .prompt(
+                        text,
+                        &mut ctx.control,
+                        ctx.env.grace(),
+                        config.timeout_ms.map(Duration::from_millis),
+                    )
+                    .await
+            }
+            Input::Continuation => session.continue_prompt(&mut ctx.control).await,
+        };
         if let Some(turn) = session.last_turn() {
             stage.usage(plan, &turn, result.is_ok()).await;
         }
@@ -1309,17 +1306,6 @@ enum Input {
 }
 
 impl Input {
-    fn text(&self) -> &str {
-        match self {
-            Self::Prompt(text) => text,
-            Self::Continuation => CONTINUATION,
-        }
-    }
-
-    fn agent_sourced(&self) -> bool {
-        matches!(self, Self::Continuation)
-    }
-
     fn name(&self) -> &'static str {
         match self {
             Self::Prompt(_) => "replay_prompt",

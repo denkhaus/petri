@@ -21,6 +21,8 @@ pub mod questions;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +40,7 @@ use pebble_coding_agent::extensions::Redactor;
 use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
-    InputSource, PromptReport, ResumeMode, ShutdownReason,
+    PromptReport, ResumeMode, ShutdownReason,
 };
 use questions::AgentQuestions;
 use serde_json::json;
@@ -366,26 +368,39 @@ impl NativeSession {
         Ok(session)
     }
 
-    /// One prompt turn. `agent_sourced` marks input the runtime wrote (the
-    /// continuation after a failover), which Pebble attributes to the agent.
-    /// A model error comes back typed as [`AgentError::Model`].
+    /// One prompt turn. A model error comes back typed as
+    /// [`AgentError::Model`].
     pub(crate) async fn prompt(
         &mut self,
         prompt: &str,
-        agent_sourced: bool,
+        control: &mut mpsc::Receiver<Control>,
+    ) -> Result<String, AgentError> {
+        self.run(Some(CodingInput::text(prompt)), control).await
+    }
+
+    /// Continue the prompt the conversation left unfinished (a failover after
+    /// committed tool results), with no new input.
+    pub(crate) async fn continue_prompt(
+        &mut self,
+        control: &mut mpsc::Receiver<Control>,
+    ) -> Result<String, AgentError> {
+        self.run(None, control).await
+    }
+
+    async fn run(
+        &mut self,
+        input: Option<CodingInput>,
         control: &mut mpsc::Receiver<Control>,
     ) -> Result<String, AgentError> {
         let handle = self.agent.control_handle();
         let questions = self.questions.clone();
         let cancel = self.cancel.clone();
         let kill = self.kill.clone();
-        let input = if agent_sourced {
-            CodingInput::text(prompt).with_source(InputSource::Agent)
-        } else {
-            CodingInput::text(prompt)
-        };
         let report = {
-            let prompt = self.agent.prompt_with_cancellation(input, &cancel);
+            let prompt: Pin<Box<dyn Future<Output = PromptReport> + Send + '_>> = match input {
+                Some(input) => Box::pin(self.agent.prompt_with_cancellation(input, &cancel)),
+                None => Box::pin(self.agent.continue_prompt_with_cancellation(&cancel)),
+            };
             tokio::pin!(prompt);
             let mut closed = false;
             loop {
@@ -530,6 +545,21 @@ impl EventSink for PetriEvents {
                 json!({"kind": "pebble", "firing": self.firing, "attempt": self.attempt, "scope": self.scope, "node": self.node, "event": self.masker.mask_value(&value)}),
             ))
             .await
-            .map_err(|_| EventSinkError::new("Petri event channel closed"))
+            .map_err(|_| EventSinkError::new("Petri event channel closed"))?;
+        // A skipped skill file is Pebble's report; the diagnostic is Petri's.
+        let skipped = skills::skipped(event);
+        if !skipped.is_empty() {
+            skills::report(
+                &self.sender,
+                &skills::Attribution {
+                    node:    self.node.clone(),
+                    firing:  self.firing,
+                    attempt: self.attempt,
+                },
+                &skipped,
+            )
+            .await;
+        }
+        Ok(())
     }
 }

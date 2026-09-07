@@ -43,6 +43,7 @@ use lithos_llm::catalog::{Catalog, CatalogError};
 use lithos_llm::client::ClientBuildError;
 use lithos_llm::credentials::{CredentialProvider, EnvironmentCredentials};
 use lithos_llm::middleware::{RetryMiddleware, RetryPolicy};
+use pebble_coding_agent::events::RetryEventObserver;
 pub use runtime::{
     DaytonaResources, DaytonaSandboxKind, RunOptions, Runtime, SandboxBackend, SandboxOptions,
     driver, engine, ir,
@@ -328,11 +329,14 @@ pub fn build_llm_client(config: &LlmClientConfig) -> Result<lithos_llm::Client, 
     };
     // The client's own retries, on the same route. Pebble's turn replay and
     // Fabro's model fallback are configured elsewhere and start after these.
+    // The observer puts each retry on the event stream of the session whose
+    // call it was, as `llm_retry`; a call no session made is ignored.
     let attempts = config.retry_attempts.max(1);
     if attempts > 1 {
-        builder = builder.middleware(RetryMiddleware::new(
-            RetryPolicy::exponential().max_attempts(attempts),
-        ));
+        builder = builder.middleware(
+            RetryMiddleware::new(RetryPolicy::exponential().max_attempts(attempts))
+                .observer(RetryEventObserver),
+        );
     }
     if let Some(budget) = config.timeout {
         builder = builder.default_timeout(budget);

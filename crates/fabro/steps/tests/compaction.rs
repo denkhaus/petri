@@ -353,10 +353,18 @@ async fn the_trigger_is_strictly_above_eighty_percent_of_the_window() {
             assert_eq!(metrics["pebble.compactions"], 0);
             assert_eq!(metrics["pebble.compaction_usage"]["input"], 0);
         }
-        // The prompt's own usage: five responses, the last one large. At the
-        // pinned Pebble the summary call is not in it.
-        assert_eq!(metrics["pebble.usage"]["input"], json!(4 * 10 + total - 5));
-        assert_eq!(metrics["pebble.usage"]["output"], 25);
+        // The prompt's own usage: five responses, the last one large, plus
+        // the summary call, which Pebble bills to the prompt that compacted.
+        let summary_input = if compacted { 70 } else { 0 };
+        let summary_output = if compacted { 7 } else { 0 };
+        assert_eq!(
+            metrics["pebble.usage"]["input"],
+            json!(4 * 10 + total - 5 + summary_input)
+        );
+        assert_eq!(
+            metrics["pebble.usage"]["output"],
+            json!(25 + summary_output)
+        );
     }
 }
 
@@ -562,7 +570,9 @@ async fn a_host_summary_policy_replaces_the_summary_call() {
         metrics(&report, "a")["pebble.compaction_cost_usd_micros"],
         7
     );
-    assert_eq!(metrics(&report, "a")["pebble.cost_usd_micros"], Value::Null);
+    // Pebble bills the host's summary to the prompt as well, so the same 7
+    // micros are the prompt's only cost: the scripted responses report none.
+    assert_eq!(metrics(&report, "a")["pebble.cost_usd_micros"], 7);
 }
 
 /// A summary call that fails leaves the history as it was: the node finishes
@@ -812,9 +822,10 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
         .expect("a finished");
     assert_eq!(finished_a["pebble.compactions"], 1);
     assert_eq!(finished_a["pebble.compaction_usage"]["input"], 70);
+    // The prompt's input includes the summary call's 70 tokens.
     assert_eq!(
         finished_a["pebble.usage"]["input"],
-        json!(4 * 10 + THRESHOLD + 10)
+        json!(4 * 10 + THRESHOLD + 10 + 70)
     );
     // The later node reused the thread and reported its own activity.
     let thread_b = events
