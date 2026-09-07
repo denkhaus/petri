@@ -84,7 +84,12 @@ pub struct Resolved {
 /// node is a parallel branch's first node: thread ids are inert and an
 /// explicit `full` degrades to `summary:high`. `degrade` is the resume
 /// fallback: the node's conversation is gone, so `full` degrades once.
-pub fn resolve(config: &ThreadConfig, incoming: &Incoming, branch: bool, degrade: bool) -> Resolved {
+pub fn resolve(
+    config: &ThreadConfig,
+    incoming: &Incoming,
+    branch: bool,
+    degrade: bool,
+) -> Resolved {
     let parse = |text: &Option<String>| text.as_deref().and_then(|t| t.parse::<Fidelity>().ok());
     let edge = parse(&incoming.fidelity);
     let node = parse(&config.fidelity);
@@ -161,15 +166,15 @@ pub struct Preamble<'a> {
 
 /// One completed stage, as the preamble renders it.
 struct Completed<'a> {
-    id:      &'a str,
-    kind:    Option<&'a str>,
-    script:  Option<&'a str>,
-    status:  &'a str,
-    notes:   Option<String>,
-    reason:  Option<String>,
-    output:  Option<String>,
-    model:   Option<String>,
-    text:    Option<String>,
+    id:       &'a str,
+    kind:     Option<&'a str>,
+    script:   Option<&'a str>,
+    status:   &'a str,
+    notes:    Option<String>,
+    reason:   Option<String>,
+    output:   Option<String>,
+    model:    Option<String>,
+    text:     Option<String>,
     /// The context keys this stage's output already rendered.
     rendered: Vec<String>,
 }
@@ -224,7 +229,12 @@ impl Preamble<'_> {
         out
     }
 
-    fn stage<'a>(&self, id: &'a str, info: Option<&'a StageInfo>, record: &Value) -> Option<Completed<'a>> {
+    fn stage<'a>(
+        &self,
+        id: &'a str,
+        info: Option<&'a StageInfo>,
+        record: &Value,
+    ) -> Option<Completed<'a>> {
         let kind = info.and_then(|s| s.kind.as_deref());
         if id == "start" || id == GOAL_CHECK_NODE || matches!(kind, Some("start" | "exit")) {
             return None;
@@ -238,25 +248,44 @@ impl Preamble<'_> {
             .get("failure_reason")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let notes = output.get("notes").and_then(Value::as_str).map(str::to_owned);
-        let is_llm = matches!(kind, Some("agent" | "prompt")) || output.get("text").is_some() && output.get("stdout").is_none();
+        let notes = output
+            .get("notes")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let is_llm = matches!(kind, Some("agent" | "prompt"))
+            || output.get("text").is_some() && output.get("stdout").is_none();
         let mut rendered = Vec::new();
-        let stdout = output.get("stdout").and_then(Value::as_str).map(str::to_owned);
+        let stdout = output
+            .get("stdout")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if stdout.is_some() {
             rendered.push("command.output".to_owned());
         }
-        let text = output.get("text").and_then(Value::as_str).map(str::to_owned);
+        let text = output
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if is_llm {
             rendered.push(format!("response.{id}"));
             rendered.push("last_stage".to_owned());
             rendered.push("last_response".to_owned());
         }
-        let model = info
-            .and_then(|s| s.model.clone())
-            .or_else(|| output.get("model").and_then(Value::as_str).map(str::to_owned));
+        let model = info.and_then(|s| s.model.clone()).or_else(|| {
+            output
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
         Some(Completed {
             id,
-            kind: kind.or(if is_llm { Some("agent") } else if stdout.is_some() { Some("command") } else { None }),
+            kind: kind.or(if is_llm {
+                Some("agent")
+            } else if stdout.is_some() {
+                Some("command")
+            } else {
+                None
+            }),
             script: info.and_then(|s| s.script.as_deref()),
             status: leak_status(&status),
             notes,
@@ -314,7 +343,11 @@ impl Preamble<'_> {
                 } else {
                     parts.push("- Output:".to_owned());
                     parts.push("  ```".to_owned());
-                    parts.push(tail_lines(output.trim(), SUMMARY_HIGH_OUTPUT_MAX_LINES, "  "));
+                    parts.push(tail_lines(
+                        output.trim(),
+                        SUMMARY_HIGH_OUTPUT_MAX_LINES,
+                        "  ",
+                    ));
                     parts.push("  ```".to_owned());
                 }
             }
@@ -622,7 +655,10 @@ mod tests {
             "Goal: Add a /health endpoint\n\n## Completed stages\n- **plan**: succeeded\n  - Model: claude\n- **test**: failed\n  - Script: `cargo test`\n  - Output:\n    ```\n    line 1\n    line 2\n    ```\n\n## Context\n- tests_passed: false\n"
         );
         let high = p.render(Fidelity::SummaryHigh);
-        assert!(high.contains("Pipeline progress: 2 of 2 stages completed"), "{high}");
+        assert!(
+            high.contains("Pipeline progress: 2 of 2 stages completed"),
+            "{high}"
+        );
         assert!(high.contains("## Stage: plan\n- Status: succeeded\n- Handler: agent\n- Model: claude\n- Response:\n  > Plan it."), "{high}");
         assert!(high.contains("- Failure reason: exit 1"), "{high}");
         assert!(high.contains("| tests_passed | false |"), "{high}");
@@ -631,14 +667,22 @@ mod tests {
         assert!(!low.contains("## Context"));
         let medium = p.render(Fidelity::SummaryMedium);
         assert!(medium.contains("Recent stages:\n- plan: succeeded\n  - Model: claude\n- test: failed [reason: exit 1]\n  - Script: `cargo test`"), "{medium}");
-        assert!(medium.contains("## Context\n- tests_passed: false"), "{medium}");
+        assert!(
+            medium.contains("## Context\n- tests_passed: false"),
+            "{medium}"
+        );
         assert_eq!(p.prompt(Fidelity::Full, "Do it."), "Do it.");
-        assert!(p.prompt(Fidelity::Compact, "Do it.").ends_with("\n\n\nDo it."));
+        assert!(
+            p.prompt(Fidelity::Compact, "Do it.")
+                .ends_with("\n\n\nDo it.")
+        );
     }
 
     #[test]
     fn summaries_window_recent_stages_and_bound_values() {
-        let stages: Vec<StageInfo> = (1..=7).map(|i| stage(&format!("s{i}"), "command", None)).collect();
+        let stages: Vec<StageInfo> = (1..=7)
+            .map(|i| stage(&format!("s{i}"), "command", None))
+            .collect();
         let nodes: Value = (1..=7)
             .map(|i| (format!("s{i}"), json!({"status": "success", "output": {"stdout": "ok", "outcome": "succeeded"}})))
             .collect::<Map<_, _>>()
@@ -648,11 +692,19 @@ mod tests {
         let p = preamble(&nodes, &kv, &stages);
         let low = p.render(Fidelity::SummaryLow);
         assert!(low.contains("(5 earlier stage(s) omitted)"), "{low}");
-        assert!(low.contains("- s6: succeeded") && low.contains("- s7: succeeded") && !low.contains("- s5:"), "{low}");
+        assert!(
+            low.contains("- s6: succeeded")
+                && low.contains("- s7: succeeded")
+                && !low.contains("- s5:"),
+            "{low}"
+        );
         let medium = p.render(Fidelity::SummaryMedium);
         assert!(medium.contains("(2 earlier stage(s) omitted)"), "{medium}");
         assert!(medium.contains("too large to inline"), "{medium}");
-        assert!(!medium.contains("- empty:"), "blank values are skipped: {medium}");
+        assert!(
+            !medium.contains("- empty:"),
+            "blank values are skipped: {medium}"
+        );
         let long: String = (1..=30).map(|i| format!("l{i}\n")).collect();
         assert!(tail_lines(long.trim(), 25, "  ").starts_with("  (5 lines omitted)\n  l6"));
     }
@@ -660,11 +712,11 @@ mod tests {
     #[test]
     fn resolution_follows_fabro_including_branches_and_resume() {
         let config = ThreadConfig {
-            fidelity: Some("full".into()),
+            fidelity:         Some("full".into()),
             default_fidelity: None,
-            thread_id: None,
-            default_thread: None,
-            classes: vec!["impl".into()],
+            thread_id:        None,
+            default_thread:   None,
+            classes:          vec!["impl".into()],
         };
         let incoming = Incoming {
             from:      Some("plan".into()),
@@ -673,23 +725,49 @@ mod tests {
         };
         let r = resolve(&config, &incoming, false, false);
         assert_eq!((r.fidelity, r.fidelity_source), (Fidelity::Full, "node"));
-        assert_eq!((r.thread.as_deref(), r.thread_source), (Some("impl"), Some("class")));
+        assert_eq!(
+            (r.thread.as_deref(), r.thread_source),
+            (Some("impl"), Some("class"))
+        );
         let r = resolve(&config, &incoming, true, false);
-        assert_eq!((r.fidelity, r.fidelity_source), (Fidelity::SummaryHigh, "branch"));
+        assert_eq!(
+            (r.fidelity, r.fidelity_source),
+            (Fidelity::SummaryHigh, "branch")
+        );
         assert_eq!(r.thread, None);
         let r = resolve(&config, &incoming, false, true);
-        assert_eq!((r.fidelity, r.fidelity_source), (Fidelity::SummaryHigh, "resume"));
+        assert_eq!(
+            (r.fidelity, r.fidelity_source),
+            (Fidelity::SummaryHigh, "resume")
+        );
         let edge = Incoming {
             from:      Some("plan".into()),
             fidelity:  Some("truncate".into()),
             thread_id: Some("side".into()),
         };
         let r = resolve(&config, &edge, false, false);
-        assert_eq!((r.fidelity, r.fidelity_source), (Fidelity::Truncate, "edge"));
-        assert_eq!((r.thread.as_deref(), r.thread_source), (Some("side"), Some("edge")));
-        let bare = resolve(&ThreadConfig::default(), &Incoming::from_value(&json!({"from": "a"})), false, false);
-        assert_eq!((bare.fidelity, bare.fidelity_source), (Fidelity::Compact, "default"));
-        assert_eq!((bare.thread.as_deref(), bare.thread_source), (Some("a"), Some("previous")));
+        assert_eq!(
+            (r.fidelity, r.fidelity_source),
+            (Fidelity::Truncate, "edge")
+        );
+        assert_eq!(
+            (r.thread.as_deref(), r.thread_source),
+            (Some("side"), Some("edge"))
+        );
+        let bare = resolve(
+            &ThreadConfig::default(),
+            &Incoming::from_value(&json!({"from": "a"})),
+            false,
+            false,
+        );
+        assert_eq!(
+            (bare.fidelity, bare.fidelity_source),
+            (Fidelity::Compact, "default")
+        );
+        assert_eq!(
+            (bare.thread.as_deref(), bare.thread_source),
+            (Some("a"), Some("previous"))
+        );
         assert_eq!(Incoming::from_value(&json!(null)), Incoming::default());
     }
 }

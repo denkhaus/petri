@@ -1,4 +1,12 @@
 //! Native Pebble sessions. The embedding application owns the model client.
+//!
+//! A session binds Petri's services for one node: the event sink attributed
+//! to the node's firing and attempt, the question bridge, the redactor, the
+//! tool-hook middleware, and the model controls. A node that continues a
+//! retained thread resumes Pebble's warm export with a fresh set of those
+//! bindings, so events, questions and hooks of the new stage are attributed
+//! to the new stage; the predecessor was shut down after it exported. Per
+//! stage metrics start at zero for each node.
 
 mod capture;
 pub mod environment;
@@ -10,15 +18,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use environment::{PebbleEnvironment, elapsed_ms};
+use execution::hooks::HookServiceHandle;
 use executor::Masker;
 use ir::{Attempt, Control, FiringId, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
-use lithos_llm::types::ReasoningEffort;
+use lithos_llm::types::{ReasoningEffort, Request, Speed};
 use pebble_coding_agent::events::{
     CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
-use pebble_coding_agent::{CodingAgent, CodingAgentOptions, PromptReport, ShutdownReason};
+use pebble_coding_agent::{
+    CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, PromptReport,
+    ShutdownReason,
+};
 use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
@@ -28,6 +40,9 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::agent::AgentConfig;
 use crate::agent::backend::AgentError;
+use crate::hooks::tools::ToolHooks;
+use crate::hooks::{self};
+use crate::memory;
 
 /// Host capability supplied by applications embedding the native backend.
 /// Construct the client with the application's catalog, credentials, and
@@ -48,8 +63,47 @@ pub(crate) struct NativeSession {
     prompts:         u64,
 }
 
+/// The Pebble profile name (`anthropic`, `claude-5`, `openai`, `gpt56`,
+/// `gpt6`, `gemini`, `kimi`) the model selector resolves to, from the
+/// catalog's `metadata.pebble.profile` on the model then the provider. The
+/// same rule Pebble applies when it builds the session.
+pub fn profile_of(client: &Client, selector: &str) -> Option<String> {
+    #[derive(serde::Deserialize, Default)]
+    struct PebbleMetadata {
+        profile: Option<String>,
+    }
+    let probe = Request::builder()
+        .model(selector)
+        .user("probe")
+        .build()
+        .ok()?;
+    let route = client.resolve_route(&probe).ok()?;
+    let read = |metadata: &lithos_llm::catalog::Metadata| {
+        metadata
+            .namespace::<PebbleMetadata>("pebble")
+            .ok()
+            .flatten()
+            .and_then(|m| m.profile)
+    };
+    read(route.model().metadata()).or_else(|| read(route.provider().metadata()))
+}
+
+/// Fabro's `speed` to lithos-llm's: `fast` asks for the fast tier,
+/// `standard` for the balanced one.
+pub fn speed_of(text: &str) -> Option<Speed> {
+    match text {
+        "fast" => Some(Speed::Fast),
+        "standard" => Some(Speed::Balanced),
+        _ => None,
+    }
+}
+
 impl NativeSession {
-    pub(crate) async fn open(config: &AgentConfig, ctx: &mut StepCtx) -> Result<Self, AgentError> {
+    pub(crate) async fn open(
+        config: &AgentConfig,
+        ctx: &mut StepCtx,
+        resume: Option<CodingAgentExport>,
+    ) -> Result<Self, AgentError> {
         let client = ctx.capability::<PebbleClient>().ok_or_else(|| {
             AgentError::failed(
                 "pebble_unconfigured",
@@ -85,6 +139,29 @@ impl NativeSession {
             .map(|value| serde_json::from_value::<ReasoningEffort>(json!(value)))
             .transpose()
             .map_err(|e| AgentError::failed("bad_config", e.to_string()))?;
+        let speed = match config.speed.as_deref() {
+            None => None,
+            Some(text) => Some(speed_of(text).ok_or_else(|| {
+                AgentError::failed(
+                    "bad_config",
+                    format!(
+                        "Invalid speed \"{text}\" for node \"{}\"; expected one of: standard, \
+                         fast",
+                        config.node
+                    ),
+                )
+            })?),
+        };
+        // Fabro's project documents for the model's profile, from the Git
+        // root down to the working directory. Pebble loads them.
+        let profile = profile_of(&client.0, &selector).unwrap_or_default();
+        let memory_files = memory::select(
+            ctx.env.as_ref(),
+            &profile,
+            memory::Scope::GitRootToWorkingDir,
+        )
+        .await;
+        let hook_service = ctx.capability::<HookServiceHandle>();
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
@@ -110,22 +187,46 @@ impl NativeSession {
         // cannot expire during an excluded interview wait.
         let env = ctx.env.clone();
         let provider = questions.clone();
+        let tool_hooks = hook_service.map(|handle| {
+            let view = hooks::step_view(ctx, "agent", &config.label, &config.kv);
+            Arc::new(ToolHooks::new(
+                handle.0.clone(),
+                view,
+                ctx.logs.clone(),
+                ctx.node.clone(),
+                ctx.firing,
+                ctx.attempt,
+            ))
+        });
         let build = async {
             let environment = PebbleEnvironment::prepare(env, cancel.clone(), kill.clone())
                 .await
                 .map_err(|e| AgentError::failed("pebble_environment", e.to_string()))?;
-            CodingAgent::builder(client.0.clone(), Arc::new(environment))
-                .model(&selector)
-                .options(
-                    CodingAgentOptions::default()
-                        .with_reasoning_effort(reasoning)
-                        .with_memory_files(["AGENTS.md".into()])
-                        .with_skill_dirs([".agents/skills".into(), ".pebble/skills".into()]),
-                )
+            let environment = Arc::new(environment);
+            let options = CodingAgentOptions::default()
+                .with_reasoning_effort(reasoning)
+                .with_speed(speed)
+                .with_max_tokens(config.max_tokens)
+                .with_memory_files(memory_files)
+                .with_skill_dirs([".agents/skills".into(), ".pebble/skills".into()]);
+            // A resumed export keeps its route and its conversation; the
+            // builder binds this node's services to it.
+            let mut builder: CodingAgentBuilder = match resume {
+                Some(export) => {
+                    CodingAgent::resume_from_export(client.0.clone(), environment, export)
+                }
+                None => CodingAgent::builder(client.0.clone(), environment).model(&selector),
+            };
+            builder = builder
+                .options(options)
                 .permission_level(PermissionLevel::Full)
                 .event_sink(sink)
                 .redactor(redactor)
-                .human_input(provider)
+                .human_input(provider);
+            if let Some(middleware) = tool_hooks {
+                builder = builder.tool_middleware(middleware);
+            }
+            builder
                 .build()
                 .await
                 .map_err(|e| AgentError::failed("pebble_config", e.to_string()))
@@ -232,6 +333,11 @@ impl NativeSession {
             ),
             ("pebble.tool_ms".into(), json!(elapsed_ms(self.tool))),
         ])
+    }
+
+    /// The conversation, warm, for a later node on the same thread.
+    pub(crate) fn export(&self) -> CodingAgentExport {
+        self.agent.export()
     }
 
     pub(crate) async fn shutdown(&mut self, reason: ShutdownReason) -> Result<(), AgentError> {

@@ -1,5 +1,15 @@
 //! `fabro/agent`: ACP or native Pebble, with shared prompt assembly,
 //! output validation, repair turns, and routing.
+//!
+//! The prompt is Fabro's: the fidelity preamble for the mode the incoming
+//! edge, the node and the graph resolve to ([`crate::fidelity`]), the node's
+//! prompt, and the output contract. A native node at `full` fidelity with a
+//! resolved thread continues the thread's retained conversation
+//! ([`crate::sessions`]); every other node starts fresh. A native session
+//! reads the project documents Fabro's profile selects ([`crate::memory`])
+//! and runs its tools through the hook middleware ([`crate::hooks::tools`]).
+//! An ACP agent gets the same prompt; its tool hooks are best effort and it
+//! never reuses a thread.
 
 pub(crate) mod backend;
 use std::env;
@@ -19,8 +29,10 @@ use steps::{Step, StepCtx};
 use crate::acp::AgentCommand;
 use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
+use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
-use crate::preamble;
+use crate::sessions::{Retained, SessionService};
+use crate::stage::RunInfo;
 
 pub const KIND: StepKindId = AGENT_KIND;
 
@@ -49,6 +61,33 @@ pub struct AgentConfig {
     #[serde(default)]
     pub fidelity:         Option<String>,
     #[serde(default)]
+    pub default_fidelity: Option<String>,
+    #[serde(default)]
+    pub thread_id:        Option<String>,
+    #[serde(default)]
+    pub default_thread:   Option<String>,
+    #[serde(default)]
+    pub classes:          Vec<String>,
+    /// The token that fired the node: the incoming edge's `from`,
+    /// `fidelity` and `thread_id`.
+    #[serde(default)]
+    pub incoming:         Value,
+    /// The node is a parallel branch's first node: threads are inert and
+    /// `full` degrades.
+    #[serde(default)]
+    pub branch:           bool,
+    /// Read project documents. Agent nodes always do; the flag is a prompt
+    /// node's.
+    #[serde(default = "default_true")]
+    pub project_memory:   bool,
+    #[serde(default)]
+    pub speed:            Option<String>,
+    #[serde(default)]
+    pub max_tokens:       Option<i64>,
+    /// Every stage of the workflow, for the preamble.
+    #[serde(default)]
+    pub stages:           Value,
+    #[serde(default)]
     pub output_schema:    Option<Value>,
     #[serde(default = "default_output_retries")]
     pub output_retries:   u64,
@@ -70,6 +109,15 @@ pub struct AgentConfig {
 fn default_output_retries() -> u64 {
     2
 }
+
+fn default_true() -> bool {
+    true
+}
+
+/// The `kind` of the `StepEvent::Custom` payload an agent node emits when
+/// its fidelity and thread resolve: `{ kind, node, firing, attempt, fidelity,
+/// fidelity_source, thread, thread_source, reused, backend }`.
+pub const THREAD_EVENT: &str = "fabro.thread";
 
 pub struct AgentStep;
 
@@ -97,21 +145,53 @@ impl AgentConfig {
         Contract::from_config(self.output_schema.as_ref())
     }
 
-    /// The prompt as the agent receives it.
-    fn assemble(&self, contract: &Contract) -> String {
-        let mut out = String::new();
-        if !self.goal.is_empty() {
-            out.push_str("Goal: ");
-            out.push_str(&self.goal);
-            out.push_str("\n\n");
-        }
-        let fidelity = self.fidelity.as_deref().unwrap_or("compact");
-        if fidelity != "truncate" {
-            out.push_str(&preamble::previous_stages(&self.nodes));
-        }
-        out.push_str(&self.prompt);
+    /// Fabro's resolution of this node's fidelity and thread. `degrade` is
+    /// the resume fallback: the thread's conversation is gone.
+    pub fn resolve(&self, degrade: bool) -> Resolved {
+        let config = ThreadConfig {
+            fidelity:         self.fidelity.clone(),
+            default_fidelity: self.default_fidelity.clone(),
+            thread_id:        self.thread_id.clone(),
+            default_thread:   self.default_thread.clone(),
+            classes:          self.classes.clone(),
+        };
+        fidelity::resolve(
+            &config,
+            &Incoming::from_value(&self.incoming),
+            self.branch,
+            degrade,
+        )
+    }
+
+    /// The prompt as the agent receives it: the preamble for `fidelity`,
+    /// the node's prompt, the contract.
+    pub fn assemble(&self, fidelity: Fidelity, run_id: &str, contract: &Contract) -> String {
+        let stages: Vec<StageInfo> = fidelity::stages(&self.stages);
+        let preamble = Preamble {
+            goal: &self.goal,
+            run_id,
+            stages: &stages,
+            nodes: &self.nodes,
+            kv: &self.kv,
+        };
+        let mut out = preamble.prompt(fidelity, &self.prompt);
         out.push_str(&contract.prompt_suffix());
         out
+    }
+
+    /// The `provider/model` selector a native session runs on.
+    pub fn selector(&self) -> Option<String> {
+        let model = self.model.as_deref().filter(|s| !s.trim().is_empty())?;
+        Some(self.provider.as_ref().map_or_else(
+            || model.to_owned(),
+            |provider| {
+                if model.starts_with(&format!("{provider}/")) {
+                    model.to_owned()
+                } else {
+                    format!("{provider}/{model}")
+                }
+            },
+        ))
     }
 }
 
@@ -143,18 +223,110 @@ impl Step for AgentStep {
             Err(message) => return fail(message, "bad_config"),
         };
         let started = Instant::now();
-        let mut session = match Session::open(&config, &mut ctx).await {
+        crate::stage::record(&ctx);
+        let run_id = ctx
+            .capability::<RunInfo>()
+            .map(|run| run.run_id.clone())
+            .unwrap_or_default();
+        // A retained thread is reused only by a native node at effective
+        // `full` fidelity; a retained conversation the run lost (a resume, a
+        // failed predecessor) degrades the node to `summary:high`, as Fabro
+        // documents.
+        let sessions = ctx.capability::<SessionService>();
+        let mut resolved = config.resolve(false);
+        let mut retained: Option<Retained> = None;
+        if config.backend == AgentBackend::Api
+            && resolved.fidelity == Fidelity::Full
+            && let Some(thread) = resolved.thread.clone()
+        {
+            retained = sessions.as_ref().and_then(|s| s.take(&thread));
+            match &retained {
+                Some(kept) if config.selector().as_deref() != Some(kept.selector.as_str()) => {
+                    ctx.log(
+                        LogStream::Stderr,
+                        format!(
+                            "thread `{thread}` was retained on `{}`; this node runs `{}`, so it \
+                             starts a fresh conversation",
+                            kept.selector,
+                            config.selector().unwrap_or_default()
+                        ),
+                    )
+                    .await;
+                    retained = None;
+                }
+                Some(_) => {}
+                None if sessions.as_ref().is_some_and(|s| s.lost(&thread)) => {
+                    resolved = config.resolve(true);
+                }
+                None => {}
+            }
+        }
+        if config.backend == AgentBackend::Acp
+            && resolved.thread.is_some()
+            && resolved.fidelity == Fidelity::Full
+        {
+            ctx.log(
+                LogStream::Stderr,
+                "the ACP backend does not reuse threads; this node starts a fresh agent session",
+            )
+            .await;
+        }
+        let reused = retained.is_some();
+        let _ = ctx
+            .logs
+            .send(ir::StepEvent::Custom(json!({
+                "kind": THREAD_EVENT,
+                "node": config.node,
+                "firing": ctx.firing,
+                "attempt": ctx.attempt,
+                "fidelity": resolved.fidelity.as_str(),
+                "fidelity_source": resolved.fidelity_source,
+                "thread": resolved.thread,
+                "thread_source": resolved.thread_source,
+                "reused": reused,
+                "backend": match config.backend { AgentBackend::Api => "api", AgentBackend::Acp => "acp" },
+            })))
+            .await;
+        let mut session = match Session::open(&config, &mut ctx, retained.map(|r| r.export)).await {
             Ok(session) => session,
             Err(AgentError::Cancelled) => return Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => return fail(message, &class),
         };
         let mut turns = 0;
-        let result = run_session(&config, &contract, &mut ctx, &mut session, &mut turns).await;
+        let result = run_session(
+            &config,
+            resolved.fidelity,
+            &run_id,
+            &contract,
+            &mut ctx,
+            &mut session,
+            &mut turns,
+        )
+        .await;
         let reason = match &result {
             Ok(_) => ShutdownReason::Completed,
             Err(AgentError::Cancelled) => ShutdownReason::Cancelled,
             Err(_) => ShutdownReason::Error,
         };
+        // The conversation outlives the node only through its export, taken
+        // before the agent shuts down; a failed node discards it.
+        if config.backend == AgentBackend::Api
+            && resolved.fidelity == Fidelity::Full
+            && let (Some(thread), Some(sessions)) = (&resolved.thread, &sessions)
+        {
+            match (&result, session.export()) {
+                (Ok(_), Some(export)) => {
+                    let uses = sessions.uses(thread) + 1;
+                    sessions.retain(thread, Retained {
+                        export,
+                        node: config.node.clone(),
+                        selector: config.selector().unwrap_or_default(),
+                        uses,
+                    });
+                }
+                _ => sessions.mark_lost(thread),
+            }
+        }
         let shutdown = session.shutdown(reason, ctx.env.grace()).await;
         let result = match result {
             Ok(stage) => shutdown.map(|()| stage),
@@ -183,12 +355,14 @@ impl Step for AgentStep {
 
 async fn run_session(
     config: &AgentConfig,
+    fidelity: Fidelity,
+    run_id: &str,
     contract: &Contract,
     ctx: &mut StepCtx,
     session: &mut Session,
     turn_count: &mut u64,
 ) -> Result<Stage, AgentError> {
-    let mut prompt = config.assemble(contract);
+    let mut prompt = config.assemble(fidelity, run_id, contract);
     let mut repairs = 0_u64;
     let (outcome, text) = loop {
         let text = session
@@ -230,9 +404,11 @@ async fn run_session(
         SmolStr::new(format!("response.{}", config.node)),
         json!(text),
     );
+    // Fabro keeps the first 200 characters in `last_response`.
+    let excerpt: String = text.chars().take(200).collect();
     stage
         .context_updates
-        .insert(SmolStr::new("last_response"), json!(text));
+        .insert(SmolStr::new("last_response"), json!(excerpt));
     stage
         .context_updates
         .insert(SmolStr::new("last_stage"), json!(config.node));

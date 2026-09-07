@@ -56,7 +56,12 @@ pub fn filenames(profile: &str) -> &'static [&'static str] {
 /// the working directory, each with the profile's filenames in order.
 /// `git_root` is the Git root's path as the scope sees it, when the working
 /// directory is inside one; the working directory is `working_dir`.
-pub fn candidates(profile: &str, git_root: Option<&str>, working_dir: &str, scope: Scope) -> Vec<String> {
+pub fn candidates(
+    profile: &str,
+    git_root: Option<&str>,
+    working_dir: &str,
+    scope: Scope,
+) -> Vec<String> {
     let names = filenames(profile);
     let mut dirs: Vec<String> = Vec::new();
     match scope {
@@ -113,7 +118,12 @@ pub async fn existing(env: &dyn ExecEnv, candidates: &[String]) -> Vec<String> {
     }
     let script = candidates
         .iter()
-        .map(|path| format!("if [ -f {p} ]; then printf '%s\\n' {p}; fi", p = quote(path)))
+        .map(|path| {
+            format!(
+                "if [ -f {p} ]; then printf '%s\\n' {p}; fi",
+                p = quote(path)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let Some(output) = run(env, &script).await else {
@@ -204,7 +214,7 @@ async fn run(env: &dyn ExecEnv, script: &str) -> Option<String> {
     let status = timeout(PROBE_TIMEOUT, handle.wait()).await.ok()?.ok()?;
     let out = drain.await.ok()?;
     status
-        .success()
+        .is_success()
         .then(|| String::from_utf8_lossy(&out).into_owned())
 }
 

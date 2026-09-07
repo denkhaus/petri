@@ -8,12 +8,27 @@
 //! than the `agent-client-protocol` crate: the subset a turn needs is small,
 //! and the transport is Petri's [`ProcessHandle`] rather than a socket the
 //! crate owns.
+//!
+//! Tool hooks are best effort here. ACP exposes one tool boundary Petri can
+//! act on: `session/request_permission`, which the agent sends only for
+//! calls it chooses to ask about. A `pre_tool_use` hook runs there, and a
+//! block answers the request with the rejecting option, so the effect does
+//! not happen for that call. Tool calls the agent never asks about, and
+//! every post-tool result, cross only as `session/update` notifications the
+//! agent may or may not send, so `post_tool_use` and `post_tool_use_failure`
+//! hooks cannot run against real results. The client says so, once per
+//! configured hook, on the step's progress channel and in a warning line,
+//! and never records an unenforceable block as enforced.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
+use execution::hooks::{HookDecision, HookPoint, HookRequest, HookService};
 use executor::{LineStream, ProcessHandle, ProcessSpec, Sig, StdinMode, StdinWriter};
-use ir::{Control, LogStream, StepEvent, Value};
+use frontend_fabro::hooks::HookEvent;
+use ir::{Attempt, Control, FiringId, LogStream, StepEvent, Value};
+use runtime::driver::FiringView;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
@@ -21,6 +36,164 @@ use steps::{Answer, Steer};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
+
+use crate::hooks::{ToolPayload, WARNING_EVENT, report_event, warning_event};
+
+/// The backend name in hook warnings.
+pub const BACKEND: &str = "acp";
+
+/// The hook service bound to one ACP node, and what it has already warned
+/// about.
+pub struct AcpHooks {
+    service: Arc<dyn HookService>,
+    view:    Arc<FiringView>,
+    node:    SmolStr,
+    firing:  FiringId,
+    attempt: Attempt,
+    /// Configured tool hooks by event, so a boundary gap is reported once per
+    /// hook.
+    pre:     Vec<String>,
+    post:    Vec<String>,
+    warned:  std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl AcpHooks {
+    pub fn new(
+        service: Arc<dyn HookService>,
+        view: Arc<FiringView>,
+        node: SmolStr,
+        firing: FiringId,
+        attempt: Attempt,
+        pre: Vec<String>,
+        post: Vec<String>,
+    ) -> Self {
+        Self {
+            service,
+            view,
+            node,
+            firing,
+            attempt,
+            pre,
+            post,
+            warned: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+        }
+    }
+
+    /// Whether any tool hook is configured.
+    pub fn has_tool_hooks(&self) -> bool {
+        !self.pre.is_empty() || !self.post.is_empty()
+    }
+
+    /// The warnings to emit before the agent starts: what this backend
+    /// cannot enforce for each configured tool hook.
+    pub fn known_gaps(&self) -> Vec<StepEvent> {
+        let mut out = Vec::new();
+        for hook in &self.pre {
+            out.push(warning_event(
+                &self.node,
+                self.firing,
+                self.attempt,
+                BACKEND,
+                hook,
+                HookEvent::PreToolUse,
+                "session/request_permission",
+                "the ACP agent decides which tool calls ask for permission; this hook runs only \
+                 for those, and a tool call the agent does not ask about is not intercepted",
+            ));
+        }
+        for hook in &self.post {
+            out.push(warning_event(
+                &self.node,
+                self.firing,
+                self.attempt,
+                BACKEND,
+                hook,
+                HookEvent::PostToolUse,
+                "none",
+                "ACP exposes no post-tool result boundary; this hook does not run for this node",
+            ));
+        }
+        out
+    }
+
+    /// Ask the `pre_tool_use` hooks about a permission request.
+    /// `Some(reason)` blocks.
+    async fn pre_tool(&self, params: &Value, logs: &mpsc::Sender<StepEvent>) -> Option<String> {
+        let call = params.get("toolCall").cloned().unwrap_or(Value::Null);
+        let tool_name = call
+            .get("title")
+            .or_else(|| call.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_owned();
+        let payload = ToolPayload {
+            tool_name,
+            tool_call_id: call
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            tool_input: call.get("rawInput").cloned(),
+            ..ToolPayload::default()
+        };
+        let report = self
+            .service
+            .run(HookRequest {
+                point:   HookPoint::BeforeToolUse,
+                view:    self.view.clone(),
+                outcome: None,
+                routes:  Vec::new(),
+                payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
+            })
+            .await;
+        if !report.is_silent() {
+            let _ = logs
+                .send(report_event(
+                    &self.node,
+                    self.firing,
+                    self.attempt,
+                    HookEvent::PreToolUse,
+                    &report,
+                ))
+                .await;
+        }
+        match report.decision {
+            HookDecision::Block { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// A tool call the agent reported without asking permission: the
+    /// configured `pre_tool_use` hooks could not run for it. Warn once per
+    /// hook and tool.
+    async fn unintercepted(&self, tool: &str, logs: &mpsc::Sender<StepEvent>) {
+        for hook in &self.pre {
+            let key = format!("{hook}:{tool}");
+            let first = self
+                .warned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key);
+            if !first {
+                continue;
+            }
+            let _ = logs
+                .send(warning_event(
+                    &self.node,
+                    self.firing,
+                    self.attempt,
+                    BACKEND,
+                    hook,
+                    HookEvent::PreToolUse,
+                    "session/update",
+                    &format!(
+                        "the agent ran `{tool}` without a permission request; the hook did not \
+                         run for it"
+                    ),
+                ))
+                .await;
+        }
+    }
+}
 
 /// How an agent is launched.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +307,7 @@ pub struct Client {
     next_id:    u64,
     session_id: Option<String>,
     exited:     bool,
+    hooks:      Option<Arc<AcpHooks>>,
 }
 
 /// What arrived from the agent, sorted by JSON-RPC shape.
@@ -178,7 +352,34 @@ impl Client {
             next_id: 1,
             session_id: None,
             exited: false,
+            hooks: None,
         })
+    }
+
+    /// Bind the tool hooks this node configured. Warns about the boundaries
+    /// this backend lacks before the first prompt.
+    pub async fn with_hooks(&mut self, hooks: Arc<AcpHooks>) {
+        for warning in hooks.known_gaps() {
+            if let StepEvent::Custom(value) = &warning
+                && value["kind"] == WARNING_EVENT
+            {
+                let _ = self
+                    .logs
+                    .send(StepEvent::Log {
+                        stream: LogStream::Stderr,
+                        line:   format!(
+                            "hook warning ({}): hook `{}` on `{}`: {}",
+                            BACKEND,
+                            value["hook"].as_str().unwrap_or("?"),
+                            value["event"].as_str().unwrap_or("?"),
+                            value["message"].as_str().unwrap_or("")
+                        ),
+                    })
+                    .await;
+            }
+            let _ = self.logs.send(warning).await;
+        }
+        self.hooks = Some(hooks);
     }
 
     async fn send(&mut self, message: Value) -> Result<(), AcpError> {
@@ -282,6 +483,27 @@ impl Client {
                 .iter()
                 .find(|o| o.get("kind").and_then(Value::as_str) == Some(kind))
         };
+        // The one boundary ACP exposes: a blocking `pre_tool_use` hook
+        // answers with the rejecting option, so the call does not happen.
+        if let Some(hooks) = self.hooks.clone()
+            && let Some(reason) = hooks.pre_tool(params, &self.logs).await
+        {
+            let rejected = pick("reject_once").or_else(|| pick("reject_always"));
+            let outcome = match rejected.and_then(|o| o.get("optionId")) {
+                Some(option) => json!({ "outcome": "selected", "optionId": option }),
+                None => json!({ "outcome": "cancelled" }),
+            };
+            let _ = self
+                .logs
+                .send(StepEvent::Log {
+                    stream: LogStream::Stderr,
+                    line:   format!("pre_tool_use hook blocked a permission request: {reason}"),
+                })
+                .await;
+            return self
+                .send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": outcome } }))
+                .await;
+        }
         let chosen = pick("allow_always")
             .or_else(|| pick("allow_once"))
             .or_else(|| {
@@ -355,6 +577,18 @@ impl Client {
         {
             turn.text.push_str(text);
             return;
+        }
+        // A tool call the agent reports without a permission request ran
+        // past every configured pre-tool hook: say so.
+        if kind == Some("tool_call")
+            && let Some(hooks) = self.hooks.clone()
+        {
+            let tool = update
+                .get("title")
+                .or_else(|| update.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            hooks.unintercepted(tool, &self.logs).await;
         }
         // Tool calls, thoughts, plans: observers see them as agent activity.
         let _ = self

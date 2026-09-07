@@ -39,8 +39,7 @@ pub use workflow_toml::{
 
 use crate::kinds::{
     AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
-    STAGE_KIND,
-    WAIT_KIND, WORKFLOW_KIND,
+    STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
@@ -191,6 +190,10 @@ struct Ctx<'a> {
     settings:         workflow_toml::RunSettings,
     /// The env each synthetic `[run.prepare]` command node carries.
     prepare_envs:     BTreeMap<String, BTreeMap<String, workflow_toml::EnvValue>>,
+    /// The run's merged `[[run.hooks]]`, carried on the stage steps.
+    hooks:            Vec<crate::hooks::HookDefinition>,
+    /// The workflow's name, `FABRO_WORKFLOW` for hooks.
+    workflow_name:    String,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -255,6 +258,8 @@ fn lower_nested(
         lenient_unbound: inputs.unbound_is_warning,
         settings,
         prepare_envs: BTreeMap::new(),
+        hooks,
+        workflow_name: workflow.name.clone(),
     };
     ctx.stack.push(file.to_string());
     let workflow_name = workflow.name.clone();
@@ -315,6 +320,7 @@ fn lower_nested(
         children,
         settings,
         stack,
+        hooks,
         ..
     } = ctx;
     let mut graph = b.build();
@@ -356,10 +362,9 @@ fn lower_nested(
     graph
         .params
         .insert(SmolStr::new("goal"), Value::String(goal));
-    graph.params.insert(
-        SmolStr::new("fabro_workflow"),
-        Value::String(workflow_name),
-    );
+    graph
+        .params
+        .insert(SmolStr::new("fabro_workflow"), Value::String(workflow_name));
 
     let report = ir::check(&graph);
     for error in &report.errors {
@@ -916,13 +921,20 @@ impl Ctx<'_> {
             // `start` and `exit` run the stage step: it records the scope's
             // environment for sandbox-placed hooks and fires the run-level
             // hooks (`sandbox_ready`, `run_start`, `run_complete`).
-            Kind::Start | Kind::Exit => (
-                Some(StepRef::new(
-                    STAGE_KIND,
-                    json!({ "node": node.id, "kind": kind.name(), "label": label }),
-                )),
-                STRUCTURAL_TIMEOUT,
-            ),
+            Kind::Start | Kind::Exit => {
+                let kv = self.b.exprs().var("kv");
+                let mut config = json!({
+                    "node": node.id,
+                    "kind": kind.name(),
+                    "label": label,
+                    "workflow": self.workflow_name,
+                    "kv": placeholder(kv),
+                });
+                if self.stack.len() == 1 {
+                    config["hooks"] = hooks::param(&self.hooks);
+                }
+                (Some(StepRef::new(STAGE_KIND, config)), STRUCTURAL_TIMEOUT)
+            }
             Kind::FanIn => {
                 if node
                     .attrs

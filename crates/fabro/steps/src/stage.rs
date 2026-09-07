@@ -13,12 +13,27 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use execution::hooks::{HookDecision, HookPoint, HookServiceHandle};
 use executor::ExecEnv;
-use frontend_fabro::kinds::STAGE_KIND;
+use frontend_fabro::hooks::HookEvent;
+use frontend_fabro::kinds::{STAGE_KIND, StageOutcome};
 use ir::{Outcome, ScopeId, StepKindId, Value};
+use serde::Deserialize;
 use steps::{Step, StepCtx};
 
+use crate::LocalHooksHandle;
+use crate::hooks::{BLOCKED_CLASS, report_event};
+use crate::outcome::Stage;
+
 pub const KIND: StepKindId = STAGE_KIND;
+
+/// The run's identity as hooks see it: `FABRO_RUN_ID` and the `run_id` field
+/// of every hook context. Set by the per-run provisioner from the run
+/// directory's name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunInfo {
+    pub run_id: String,
+}
 
 /// The environments of the scopes that have run a Fabro step, by scope id.
 /// Registered as a capability by [`crate::register`]; the local hook service
@@ -45,9 +60,7 @@ impl ScopeEnvironments {
     /// shares one sandbox).
     pub fn get(&self, scope: ScopeId) -> Option<Arc<dyn ExecEnv>> {
         let envs = self.envs.lock().unwrap_or_else(PoisonError::into_inner);
-        envs.get(&scope)
-            .or_else(|| envs.values().next())
-            .cloned()
+        envs.get(&scope).or_else(|| envs.values().next()).cloned()
     }
 }
 
@@ -58,15 +71,120 @@ pub fn record(ctx: &StepCtx) {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct StageConfig {
+    pub node:     String,
+    pub kind:     String,
+    pub label:    String,
+    /// The run's merged `[[run.hooks]]`, on `start` and `exit`.
+    pub hooks:    Value,
+    /// The workflow's name, for `FABRO_WORKFLOW`.
+    pub workflow: String,
+    /// The run context at spawn.
+    pub kv:       Value,
+    #[serde(flatten)]
+    pub rest:     serde_json::Map<String, Value>,
+}
+
+impl Default for StageConfig {
+    fn default() -> Self {
+        Self {
+            node:     String::new(),
+            kind:     String::new(),
+            label:    String::new(),
+            hooks:    Value::Null,
+            workflow: String::new(),
+            kv:       Value::Null,
+            rest:     serde_json::Map::new(),
+        }
+    }
+}
+
 pub struct StageStep;
 
+/// The run-level hooks a stage fires, in Fabro's order. `start` runs
+/// `sandbox_ready` (the sandbox exists once the first step runs in it) then
+/// `run_start`; both block. `exit` runs `run_complete`; a run that never
+/// reaches `exit` failed, and `fabro/agent` and friends do not know that, so
+/// `run_failed` is driven by the host's observer ([`crate::hooks::RunEnd`]).
 #[async_trait::async_trait]
 impl Step for StageStep {
     const NAME: &'static str = "fabro/stage";
-    type Config = Value;
+    type Config = StageConfig;
 
-    async fn run(&self, config: Value, ctx: StepCtx) -> Outcome {
+    async fn run(&self, config: StageConfig, mut ctx: StepCtx) -> Outcome {
         record(&ctx);
-        Outcome::success(config)
+        let Some(handle) = ctx.capability::<HookServiceHandle>() else {
+            return Outcome::success(Value::Object(config.rest));
+        };
+        let Some(local) = ctx.capability::<LocalHooksHandle>() else {
+            return Outcome::success(Value::Object(config.rest));
+        };
+        let local = &local.0;
+        if !config.hooks.is_null() {
+            local.configure_from(&serde_json::json!({
+                "hooks": config.hooks,
+                "workflow": config.workflow,
+            }));
+        }
+        let events: &[(HookEvent, HookPoint)] = match config.kind.as_str() {
+            "start" => &[
+                (HookEvent::SandboxReady, HookPoint::BeforeVisit),
+                (HookEvent::RunStart, HookPoint::BeforeVisit),
+            ],
+            "exit" => &[(HookEvent::RunComplete, HookPoint::AfterVisit)],
+            _ => &[],
+        };
+        let _ = &handle;
+        for (event, point) in events {
+            let context = local.context(*event);
+            let (decision, mut report) = local
+                .dispatch(*point, &context, Some(ctx.env.clone()))
+                .await;
+            if let crate::hooks::Decision::Block { reason } = &decision {
+                report.decision = HookDecision::Block {
+                    reason: reason
+                        .clone()
+                        .unwrap_or_else(|| format!("blocked by {} hook", event_title(*event))),
+                };
+            }
+            let silent = report.is_silent();
+            if !silent {
+                let _ = ctx
+                    .logs
+                    .send(report_event(
+                        &ctx.node,
+                        ctx.firing,
+                        ctx.attempt,
+                        *event,
+                        &report,
+                    ))
+                    .await;
+            }
+            if let HookDecision::Block { reason } = report.decision {
+                let _ = &mut ctx;
+                return Stage::failed(
+                    format!("blocked: {reason}"),
+                    BLOCKED_CLASS,
+                    Some(frontend_fabro::Policy::Exit),
+                )
+                .into_outcome(&config.node);
+            }
+        }
+        let mut stage = Stage::new(StageOutcome::Succeeded, None);
+        for (key, value) in config.rest {
+            stage.output.insert(key, value);
+        }
+        stage.into_outcome(&config.node)
+    }
+}
+
+fn event_title(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::RunStart => "RunStart",
+        HookEvent::SandboxReady => "SandboxReady",
+        HookEvent::RunComplete => "RunComplete",
+        other => other.as_str(),
     }
 }

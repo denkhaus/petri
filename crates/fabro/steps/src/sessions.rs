@@ -12,7 +12,7 @@
 //! The successor rebinds its event sink, human input, tool middleware and
 //! metrics when it resumes from the export. ACP never reuses threads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 
 use pebble_coding_agent::CodingAgentExport;
@@ -34,6 +34,9 @@ pub struct Retained {
 #[derive(Default)]
 pub struct SessionService {
     retained: Mutex<HashMap<String, Retained>>,
+    /// Threads whose conversation existed and was discarded: a later node on
+    /// the thread degrades `full` to `summary:high`.
+    lost:     Mutex<HashSet<String>>,
 }
 
 impl SessionService {
@@ -57,6 +60,36 @@ impl SessionService {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(thread.to_owned(), retained);
+        self.lost
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(thread);
+    }
+
+    /// The thread's conversation was discarded (the node failed or was
+    /// cancelled).
+    pub fn mark_lost(&self, thread: &str) {
+        self.lost
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(thread.to_owned());
+    }
+
+    /// Whether the thread had a conversation that is gone.
+    pub fn lost(&self, thread: &str) -> bool {
+        self.lost
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(thread)
+    }
+
+    /// How many nodes have used the thread so far.
+    pub fn uses(&self, thread: &str) -> u32 {
+        self.retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(thread)
+            .map_or(0, |r| r.uses)
     }
 
     /// The threads with a retained session, for inspection.

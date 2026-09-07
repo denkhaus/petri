@@ -42,9 +42,11 @@ use tokio::sync::mpsc;
 use crate::agent::AgentBackend;
 use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
+use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
-use crate::pebble::PebbleClient;
-use crate::preamble;
+use crate::pebble::{PebbleClient, profile_of, speed_of};
+use crate::stage::RunInfo;
+use crate::{memory, preamble};
 
 pub const KIND: StepKindId = PROMPT_KIND;
 
@@ -84,6 +86,28 @@ pub struct PromptConfig {
     #[serde(default)]
     pub fidelity:         Option<String>,
     #[serde(default)]
+    pub default_fidelity: Option<String>,
+    #[serde(default)]
+    pub thread_id:        Option<String>,
+    #[serde(default)]
+    pub default_thread:   Option<String>,
+    #[serde(default)]
+    pub classes:          Vec<String>,
+    #[serde(default)]
+    pub incoming:         Value,
+    #[serde(default)]
+    pub branch:           bool,
+    /// Fabro's `project_memory`: read the working directory's project
+    /// documents as the system prompt. Default true.
+    #[serde(default = "default_true")]
+    pub project_memory:   bool,
+    #[serde(default)]
+    pub speed:            Option<String>,
+    #[serde(default)]
+    pub max_tokens:       Option<i64>,
+    #[serde(default)]
+    pub stages:           Value,
+    #[serde(default)]
     pub output_schema:    Option<Value>,
     #[serde(default = "default_output_retries")]
     pub output_retries:   u64,
@@ -111,6 +135,10 @@ fn default_output_retries() -> u64 {
 
 fn api_backend() -> AgentBackend {
     AgentBackend::Api
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub struct PromptStep;
@@ -142,23 +170,42 @@ impl PromptConfig {
         ))
     }
 
+    /// Fabro's resolution of this node's fidelity. A prompt node never
+    /// reuses a thread, so `full` means no preamble and nothing more.
+    fn fidelity(&self) -> Fidelity {
+        let config = ThreadConfig {
+            fidelity:         self.fidelity.clone(),
+            default_fidelity: self.default_fidelity.clone(),
+            thread_id:        self.thread_id.clone(),
+            default_thread:   self.default_thread.clone(),
+            classes:          self.classes.clone(),
+        };
+        fidelity::resolve(
+            &config,
+            &Incoming::from_value(&self.incoming),
+            self.branch,
+            false,
+        )
+        .fidelity
+    }
+
     /// The one user message: the fidelity preamble, the branch results for
     /// a fan-in, the node's prompt, and the contract.
-    fn assemble(&self, contract: &Contract, results: &Value) -> String {
-        let mut out = String::new();
-        if !self.goal.is_empty() {
-            out.push_str("Goal: ");
-            out.push_str(&self.goal);
-            out.push_str("\n\n");
-        }
-        let fidelity = self.fidelity.as_deref().unwrap_or("compact");
-        if fidelity != "truncate" {
-            out.push_str(&preamble::previous_stages(&self.nodes));
-        }
+    fn assemble(&self, contract: &Contract, results: &Value, run_id: &str) -> String {
+        let stages: Vec<StageInfo> = fidelity::stages(&self.stages);
+        let preamble = Preamble {
+            goal: &self.goal,
+            run_id,
+            stages: &stages,
+            nodes: &self.nodes,
+            kv: &self.kv,
+        };
+        let mut body = String::new();
         if !self.sources.is_empty() {
-            out.push_str(&preamble::branch_results(&self.sources, results));
+            body.push_str(&preamble::branch_results(&self.sources, results));
         }
-        out.push_str(&self.prompt);
+        body.push_str(&self.prompt);
+        let mut out = preamble.prompt(self.fidelity(), &body);
         out.push_str(&contract.prompt_suffix());
         out
     }
@@ -225,7 +272,45 @@ impl Step for PromptStep {
             None => config.branch_results.clone(),
         };
         let started = Instant::now();
-        let prompt = config.assemble(&contract, &results);
+        crate::stage::record(&ctx);
+        let run_id = ctx
+            .capability::<RunInfo>()
+            .map(|run| run.run_id.clone())
+            .unwrap_or_default();
+        let prompt = config.assemble(&contract, &results, &run_id);
+        let speed = match config.speed.as_deref() {
+            None => None,
+            Some(text) => match speed_of(text) {
+                Some(speed) => Some(speed),
+                None => {
+                    return fail(
+                        format!(
+                            "Invalid speed \"{text}\" for node \"{}\"; expected one of: standard, \
+                             fast",
+                            config.node
+                        ),
+                        "bad_config",
+                    );
+                }
+            },
+        };
+        // Fabro's prompt handler: with `project_memory` on, the working
+        // directory's instruction files for the model's profile become the
+        // system prompt.
+        let system_prompt = if config.project_memory {
+            let profile = profile_of(&client.0, &selector).unwrap_or_default();
+            let paths =
+                memory::select(ctx.env.as_ref(), &profile, memory::Scope::WorkingDirOnly).await;
+            let documents = memory::read(ctx.env.as_ref(), &paths).await;
+            let text = documents
+                .iter()
+                .map(|d| d.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (!text.is_empty()).then_some(text)
+        } else {
+            None
+        };
         let _ = ctx
             .logs
             .send(StepEvent::Custom(json!({
@@ -259,7 +344,11 @@ impl Step for PromptStep {
                 "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             }))
         };
-        let mut messages = vec![Message::text(Role::User, prompt)];
+        let mut messages = Vec::new();
+        if let Some(system) = &system_prompt {
+            messages.push(Message::text(Role::System, system.clone()));
+        }
+        messages.push(Message::text(Role::User, prompt));
         let mut usage = TokenCounts::default();
         let mut cost: Option<u64> = None;
         let mut turns = 0_u64;
@@ -271,6 +360,12 @@ impl Step for PromptStep {
             }
             if let Some(effort) = reasoning {
                 request = request.reasoning_effort(effort);
+            }
+            if let Some(speed) = speed {
+                request = request.speed(speed);
+            }
+            if let Some(tokens) = config.max_tokens.and_then(|t| u32::try_from(t).ok()) {
+                request = request.max_output_tokens(tokens);
             }
             // Fabro asks the provider for a JSON response shape when the node
             // has a contract. A model whose catalog row does not offer that
