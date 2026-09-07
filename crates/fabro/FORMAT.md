@@ -367,11 +367,13 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   thread at `full` fidelity (native backend only). Repair turns keep that
   session's history. `speed` and `max_tokens` configure the native model
   request; on ACP they are observer metadata like the other model settings.
-  `backend="acp"` is the default. It starts the Agent Client Protocol command
-  from `acp.command` / `acp.config` (node, graph, then `PETRI_ACP_COMMAND`). The
-  ACP command owns model selection; model settings are observer metadata.
-  `backend="api"` runs the Pebble Rust library in Petri. `model` (or graph
-  `default_model`) is required. `provider` (or `default_provider`) qualifies the
+  `backend="api"` is the default, as Fabro's `select_run_backend` picks the
+  native agent for a node that names no backend (the pinned bundles name
+  none). It runs the Pebble Rust library in Petri. `model` (or graph
+  `default_model`, or `[run.model] name`) is required. `backend="acp"` starts
+  the Agent Client Protocol command from `acp.command` / `acp.config` (node,
+  graph, then `PETRI_ACP_COMMAND`). The ACP command owns model selection;
+  model settings are observer metadata. `provider` (or `default_provider`) qualifies the
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
@@ -410,7 +412,10 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
 - **`fabro/workflow`** is the nested invocation above.
 - **`fabro/stage`** is `start`, `exit` and a conditional: it returns its
   config as its output, as `noop` did, and records the scope's environment so
-  sandbox-placed hooks can run. `start` drives the run-level hooks
+  sandbox-placed hooks can run. The root `start` also checks the repository
+  out (`[run.clone]` above) and writes `internal.run_id`, the run's identity
+  Fabro sets at run creation (the run directory's name in the standalone
+  runner), which a `stdin_source="context.internal.run_id"` node reads. `start` drives the run-level hooks
   `sandbox_ready`, `run_start` and its own `stage_start`, in Fabro's order.
   `run_complete`, `run_failed` and `sandbox_cleanup` are not a stage's: the
   driver reports the run's end (by its final status, as Fabro's `on_run_end`

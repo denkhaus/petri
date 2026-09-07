@@ -92,18 +92,22 @@ pub(crate) enum Bundle {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Fixture {
     #[serde(default)]
-    pub(crate) commits:  Vec<Commit>,
+    pub(crate) commits:        Vec<Commit>,
     #[serde(default)]
-    pub(crate) remotes:  BTreeMap<String, Remote>,
+    pub(crate) remotes:        BTreeMap<String, Remote>,
     #[serde(default)]
-    pub(crate) bin:      BTreeMap<String, FileSpec>,
+    pub(crate) bin:            BTreeMap<String, FileSpec>,
     #[serde(default)]
-    pub(crate) env:      BTreeMap<String, String>,
+    pub(crate) env:            BTreeMap<String, String>,
     /// The host's user settings layer (`$FABRO_HOME/settings.toml`).
     #[serde(default)]
-    pub(crate) settings: Option<String>,
+    pub(crate) settings:       Option<String>,
+    /// Python modules the bundle's helpers import: the first `python3` on
+    /// the launcher's PATH that imports them all is the run's `python3`.
+    #[serde(default)]
+    pub(crate) python_modules: Vec<String>,
     #[serde(default = "yes")]
-    pub(crate) seed:     bool,
+    pub(crate) seed:           bool,
 }
 
 fn yes() -> bool {

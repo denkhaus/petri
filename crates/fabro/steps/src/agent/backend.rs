@@ -22,12 +22,14 @@ use crate::fallback::ModelFailure;
 use crate::hooks::step_view;
 use crate::pebble::{NativeSession, Resume, TurnUsage};
 
-/// How an agent node runs. ACP remains the default.
+/// How an agent node runs. The native API agent is the default, as Fabro's
+/// `select_run_backend` picks `Api` for a node that names no backend; the
+/// pinned bundles name none.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentBackend {
-    #[default]
     Acp,
+    #[default]
     Api,
 }
 

@@ -238,6 +238,18 @@ impl Step for StageStep {
         for (key, value) in config.rest {
             stage.output.insert(key, value);
         }
+        // Fabro sets `internal.run_id` at run creation; the bundles' prepare
+        // nodes read it through `stdin_source`. The root `start` stage is the
+        // first thing that runs, so it publishes the run's identity.
+        if config.kind == "start"
+            && !config.checkout.is_null()
+            && let Some(run) = ctx.capability::<RunInfo>()
+            && !run.run_id.is_empty()
+        {
+            stage
+                .context_updates
+                .insert("internal.run_id".into(), Value::String(run.run_id.clone()));
+        }
         stage.into_outcome(&config.node)
     }
 }

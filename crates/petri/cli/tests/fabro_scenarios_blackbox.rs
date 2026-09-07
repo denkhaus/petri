@@ -41,6 +41,15 @@ macro_rules! cell {
     (@agent_name none) => { "none" };
 }
 
+// ── Code review ─────────────────────────────────────────────────────────────
+
+cell!(
+    code_review_findings_in_multiple_branches,
+    "code-review/findings-in-multiple-branches",
+    host,
+    openrouter
+);
+
 // ── Interview gates ─────────────────────────────────────────────────────────
 
 cell!(

@@ -174,6 +174,48 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
 
     // ── The declared environment ────────────────────────────────────────
     let mut path_prefix = Vec::new();
+    if !scenario.fixture.python_modules.is_empty() {
+        // The bundle's image installs these modules into its `python3`. On
+        // the host, the interpreter that has them stands first on PATH and
+        // the directories they live in ride `PYTHONPATH`, because the run's
+        // isolated `HOME` hides a user site-packages directory.
+        let Some((python, site_dirs)) =
+            python_with(&scenario.fixture.python_modules, &case.root.join("home"))
+        else {
+            let reason = format!(
+                "no python3 on PATH imports {:?}; install the bundle's pinned requirements",
+                scenario.fixture.python_modules
+            );
+            drop(case);
+            CellRecord::skip(cell, &reason);
+            panic!("skipping: {reason}");
+        };
+        // A wrapper, not a link: the sandbox plugin is launched with a
+        // curated environment (`PATH`, `HOME`), so `PYTHONPATH` has to be
+        // set by the `python3` the steps resolve on that PATH. Bytecode
+        // caches stay off: the review helpers digest every untracked file
+        // of the tree and refuse to publish when one appeared.
+        let bin = fixture.join("python-bin");
+        fs::create_dir_all(&bin).expect("python bin");
+        let joined = env::join_paths(&site_dirs).expect("site paths");
+        let wrapper = format!(
+            "#!/bin/sh\nexport PYTHONPATH=\"{}${{PYTHONPATH:+:$PYTHONPATH}}\"\nexport \
+             PYTHONDONTWRITEBYTECODE=1\nexec \"{}\" \"$@\"\n",
+            joined.to_string_lossy(),
+            python.display()
+        );
+        write_spec(
+            &bin.join("python3"),
+            &FileSpec {
+                text: Some(wrapper),
+                file: None,
+                mode: Some("0755".to_owned()),
+            },
+            &scenario.dir,
+            &Bindings::default(),
+        );
+        path_prefix.push(bin);
+    }
     if !scenario.fixture.bin.is_empty() {
         let bin = fixture.join("bin");
         fs::create_dir_all(&bin).expect("fixture bin");
@@ -241,6 +283,12 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
         workflow.display()
     );
     let mut args: Vec<String> = Vec::new();
+    // The cell picks where the run executes, as an operator's environment
+    // choice does; a bundle's own `[run.environment]` may name Daytona.
+    if backend == Backend::Host {
+        args.push("--backend".into());
+        args.push("host".into());
+    }
     for (key, value) in &scenario.inputs {
         let value = bindings.value(value);
         let rendered = match value {
@@ -790,6 +838,70 @@ async fn expect(ran: &Ran, requests_at_interrupt: Option<usize>) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// The first `python3` on PATH that imports every module named, with the
+/// site directories those modules live in, verified once more under the
+/// run's `home` so a user site-packages directory is carried explicitly.
+fn python_with(modules: &[String], home: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
+    let path = env::var_os("PATH")?;
+    let locate = format!(
+        "import os
+{}
+for m in [{}]:
+    print(os.path.dirname(os.path.dirname(m.__file__)))
+",
+        modules
+            .iter()
+            .map(|module| format!("import {module}"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+"
+            ),
+        modules.join(", ")
+    );
+    let check = modules
+        .iter()
+        .map(|module| format!("import {module}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    for candidate in env::split_paths(&path).map(|dir| dir.join("python3")) {
+        if !candidate.is_file() {
+            continue;
+        }
+        let Ok(output) = Command::new(&candidate)
+            .args(["-c", &locate])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let mut site_dirs: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(PathBuf::from)
+            .collect();
+        site_dirs.sort();
+        site_dirs.dedup();
+        let joined = env::join_paths(&site_dirs).ok()?;
+        let verified = Command::new(&candidate)
+            .args(["-c", &check])
+            .env("HOME", home)
+            .env("PYTHONPATH", &joined)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if verified {
+            return Some((candidate, site_dirs));
+        }
+    }
+    None
+}
 
 fn provider_of(agent: Agent) -> Option<Provider> {
     match agent {
