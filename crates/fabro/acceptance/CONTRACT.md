@@ -109,12 +109,28 @@ clean machine and verifies every digest.
 |---|---|---|---|
 | `code-review` | `lithoscomputer/code-review` `0c81ffb4f68039ca56842ab3328fde03b9714350` (private; HEAD, clean) | required | empty diff; findings in multiple branches; no surviving findings; invalid output repaired; repair exhausted; one failed branch; reverse branch completion; multi-level fan-out |
 | `security-review` | `lithoscomputer/security-review` `c14279e9cdac4f7553b5e010718ada1a76e5c1f8` (public; HEAD, clean) | required | no vulnerabilities; several verified; rejected candidate; partial branch failure; malformed response; timeout and cancel |
-| `fix-ci` | `veniceai/factory` `1b50f791ac4811aad62788c2a4282a75d1e92422` (private; bundle files match HEAD, other files in that working tree were dirty) | required, blocked | initial check passes; fails then edit passes; repeated failure exhausts budget; provider failure; timeout; cancellation |
+| `fix-ci` | `veniceai/factory` `1b50f791ac4811aad62788c2a4282a75d1e92422` (private; bundle files match HEAD, other files in that working tree were dirty) | excluded (owner decision 2026-09-07) | none; see below |
 | `implement-issue` (with `implement-plan`) | `fabro-sh/fabro` at the pin | required, blocked | child runs; input and model inheritance; multiple manager cycles; stop condition; child failure; parent cancellation |
 | `interview` | `fabro-sh/fabro` at the pin | required | scripted choice, refusal, free text; repeated and concurrent questions; child interviews; delayed and withheld reply; invalid, unexpected and unused answers; timeout and cancel; terminal EOF |
 
 "Blocked" names a required bundle whose scenarios cannot run yet. The
 blockers are listed per bundle in the lock file. They are not exclusions.
+
+`fix-ci` is excluded by an owner decision of 2026-09-07: `fix_ci.py` resolves
+its target through `api.github.com` and clones `veniceai/interface`, and its
+setup step needs yarn 4.12.0 through corepack with no network, so a
+deterministic run needs a scripted stand-in for the GitHub API and an
+offline-installable Node target. The owner judged that overkill. The repair
+loop's behavior that does not depend on GitHub is covered elsewhere: a real
+deterministic check driving a repair loop until it passes, with the visit
+totals surviving the jump, is `routing/goal-gate-restart-and-visit-limit`;
+a provider failure, an exhausted retry budget, a hanging request and a
+cancellation are the `provider-faults` family; a failing stage's policy is
+`routing/failure-policy`. What stays uncovered is the bundle's own GitHub
+target resolution and its `publish` step's single push after success. The
+bundle keeps its provenance in `bundles.lock.json` with
+`status: "excluded"` and the reason, so the decision is visible and
+reversible.
 
 ### Inventory and classification
 
@@ -213,7 +229,7 @@ diagnostic goes away.
 | `[run.agent.mcps.<name>]` `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `protocol`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled`; or `id` | MCP servers for agent sessions | supported: every inline field with Fabro's rules and defaults, merged across the settings, project and workflow layers by name (`crates/fabro/FORMAT.md`, "MCP servers"); stdio servers on Petri's host, http servers from the host, sandbox servers in the scope's environment, reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward, Daytona's preview link); tools registered with Pebble under `mcp__<server>__<tool>` and run through the normal tool path, hooks included; explicit exclusions: `id` (a server-managed catalog reference, `unsupported.workflow_toml.run.agent.mcps.reference`), `protocol = "sse"` (`unsupported.workflow_toml.run.agent.mcps.protocol`), a secret token outside a whole `env`/`headers` value (`unsupported.workflow_toml.run.agent.mcps.secret`); `{{ env.* }}` is an error as in Fabro |
 | `[[run.hooks]]` `id`, `name`, `event`, `matcher`, `blocking`, `timeout`, `sandbox`, and one of `script`/`command`, `url`+`headers`+`tls`, `prompt`+`model`, `agent="enabled"`+`prompt`+`model`+`max_tool_rounds` | local hooks | supported: every field, transport and event, merged with `.fabro/project.toml` and the host's settings layer by `id`, run by the local hook service with Fabro's matching, decisions, placement and timeouts (`crates/fabro/FORMAT.md`, "Hooks"); a layer that cannot be read is an error, so a configured hook is never skipped silently; `checkpoint_saved` warns and does not run (accepted difference below); `stage_retrying` is dispatched (the reference never fires it) |
 | `[run.checkpoint]` `exclude_globs`, `skip_git_hooks`, `commit_timeout` | Git checkpoints | explicit exclusion: platform Git; warn `ignored.workflow_toml.run.checkpoint` |
-| `[run.clone]` `enabled`, `depth` | server clone depth | explicit exclusion: the standalone runner uses the given checkout; warn `ignored.workflow_toml.run.clone` |
+| `[run.clone]` `enabled`, `depth` | server clone depth | supported (task 17): the root `start` stage checks the repository the run was loaded from out into the workspace at `depth` commits (default 100, `0` full), on the host and in a container through the executor; `enabled = false` starts empty. Difference: the clone is of the local checkout at `HEAD`, not a fetch from the remote, and `origin` is the checkout's own `origin` |
 | `[run.run_branch]`, `[run.meta_branch]` `enabled`, `push` | Git branches | explicit exclusion: platform Git; warn `ignored.workflow_toml.run.run_branch` / `run.meta_branch` |
 | `[run.pull_request]` `enabled`, `draft`, `auto_merge`, `merge_strategy` | PR creation | explicit exclusion: platform publication; warn `ignored.workflow_toml.run.pull_request` |
 | `[run.artifacts]` `include` | artifact upload globs | explicit exclusion for upload; local retention keeps the files; warn `ignored.workflow_toml.run.artifacts` |
@@ -289,12 +305,11 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Terminal echo | a stage's echoed output is bounded at 64 KiB (one marker names the log file, which keeps everything); a branch's lines carry its invocation (`[invocation-N/node#firing]`) | the platform's log viewer |
 | `[run.agent]` keys | `subagents`, `compaction` and any key other than `fabro_tools`, `mcps` and `skills` are refused (`unsupported.workflow_toml.key`): the pinned Fabro's `[run.agent]` denies unknown keys and has no setting for sub-agents or compaction; sub-agents are always on for native agents, so the `subagents` refusal says so | refused by the parser |
 | Context compaction | always on with Fabro's values (80 percent trigger, six preserved turns); Pebble's automatic compaction summarizes and replaces the history, and Petri never rewrites it (`crates/fabro/FORMAT.md`, "Compaction") | identical values, self-contained in `fabro-agent` |
-| Compaction summary usage | the pinned Pebble leaves the summary call out of a prompt's usage, so Petri reports it separately: a `fabro.compaction` event and the `pebble.compaction_*` metrics carry the summary usage read from the `Compaction` turn in Pebble's history. Pebble `861d9bc` folds it into the prompt's usage; recommended re-pin below | the summary usage is dropped entirely (`compact_context` discards `response.usage`) |
+| Compaction summary usage | the summary call is part of the prompt's bill: Pebble puts its usage and cost in `pebble.usage` and `pebble.cost_usd_micros`, and Petri breaks the same share out as a `fabro.compaction` event and the `pebble.compaction_*` metrics, read from the `Compaction` turn in Pebble's history | the summary usage is dropped entirely (`compact_context` discards `response.usage`) |
 | `[run.agent] skills` | a Petri extension: extra skill directories searched after Fabro's three, warned `fabro.petri_extension` | refused by the parser |
-| Skill files that do not parse | reported: a `fabro.skills.warning` event and a stderr line per malformed or unreadable `SKILL.md`, and per workflow-named directory that does not exist; the file is still skipped, as Pebble skips it | skipped silently |
+| Skill files that do not parse | reported: a `fabro.skills.warning` event and a stderr line per skipped `SKILL.md` and per unsearchable directory, from Pebble's `SkillsDiscovered.skipped` report, and per workflow-named directory that does not exist, from Petri's own probe; the file is still skipped, as Pebble skips it | skipped silently |
 | A prompt naming a missing skill (`/name`) | the node fails with class `skill_missing` | the stage fails with an `InvalidState` error |
 | Sub-agent nesting and concurrency | a child may delegate again; one tree holds at most 4 sessions open at once (the root included; a finished child holds its slot until closed), and a spawn over the bound is the tool's answer (`Cannot spawn another agent`) | one level only (a child has no sub-agent tools; `max_subagent_depth = 1`); no bound on concurrent children |
-| Sub-agent project memory | a child reads no `AGENTS.md`/profile documents and no skill directories (Pebble's rule: "a task, not a project briefing"; library contract item in `.ai/reviews/fabro-unified/task15-subagents.md`) | a child re-discovers the project documents and skills from the shared sandbox |
 | Sub-agent MCP tools | a child inherits the workflow's `[run.agent.mcps]` tools (task 13 registers them `allow_in_subagents`) and calls them through the parent's one connection, under the parent's hooks and attribution; readiness items 9b and 9d ask for inherited tools | a child session is built without `mcp_servers`, so it has no MCP tools |
 | Sub-agent usage | the stage's `pebble.usage` is the parent session's own; the children's usage is the `pebble.subagents` metric and the `agent_activity` events | child usage merges into the stage's usage total through the event stream |
 | `checkpoint_saved` hook | warning; the hook does not run | dispatched with no built-in behavior |
@@ -314,14 +329,13 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
 | MCP `sandbox` transport | launched through the scope's execution environment and reached at `http://localhost:<port>`; a container or remote scope fails the server with a named reason (the plugin protocol exposes no port or preview URL) | a Daytona preview URL; local sandboxes fall back to localhost |
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
-| Model fallback: session handoff | the failed session's record resumes on the next route (`ResumeMode::UseModel`, same session id); a turn whose tool effects already ran is continued with an agent-sourced continuation message, never repeated | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
+| Model fallback: session handoff | the failed session's record resumes on the next route (`ResumeMode::UseModel`, same session id); the next model continues the unfinished turn with no new input (Pebble's `continue_prompt`), so a tool effect that already ran is never repeated | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
 | Model fallback: provider-only candidates | a bare provider in a chain resolves to the same model id on that provider when its catalog lists it, else `NoCompatibleModel` | picks the provider's closest model by feature profile and price |
 | Model fallback: unknown selectors | a selector no catalog row names is skipped with a notice unless the provider allows passthrough models | passed through for the provider to validate |
 | Model fallback: configuration errors | a bad chain (provider-named or qualified key, two keys for one model, unknown key or provider) fails the first LLM stage with class `bad_config` | fails run start |
 | Model fallback: ACP agents | no plan; the ACP command owns its model | the same |
 | Model fallback: events | `StepEvent::Custom` kinds `fabro.fallback.{plan,route,usage,failover,stop}` and the once-per-run stderr notices | `agent.failover` events and run notices |
 | Model fallback: recovery | a resumed node starts a new plan at position 0 on the primary; a request in flight at the crash may be sent again | sessions persist server-side |
-| Client retries on the agent event stream | `lithos-llm`'s same-route retries are not on the Pebble event stream: the pinned Pebble does not export `RetryEventObserver` | the reference's client reports its retries |
 | MCP server lifetime | one set of servers per agent node session, started before the agent and stopped after it (a retained thread's next node starts its own); a resumed run starts them again | one set per agent session; the same |
 
 ## Advanced agent milestones (item 9, milestones C1 to C5)
@@ -337,7 +351,7 @@ marked "not verified" with the reason, not "passed".
 | C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback`, commits `240e0c9`..`f0ce08e` and after (evidence `task12-fallback.md`) | passed on the branch with integration merged (tasks 13 to 16 in): selection order and the reference's notices (`fallback::tests`, 9 unit tests); through the binary with both twins injecting failures (`fabro_fallback_blackbox`, 15 cases: primary, qualifying and non-qualifying, a third provider, exhaustion, a tool effect kept across the handoff, cancellation, refusal, timeout, client retries, a workflow retry, effort mapping, repair turns, a retained thread, a prompt node); the outcome and per-route accounting rebuilt from public events (`fallback_events`, 3); the client's own retries and budget (`llm_client`, 2). Reference sequences derived from the pinned source, not captured from the binary |
 | C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp`, commits `b67d3ee`..`72be261` (evidence `task13-mcp.md`) | passed: merged; the MCP suites and the scripted stdio server (`fabro_mcp_blackbox`, `testdata`) pass in the gate (1192) |
 | C3 skills (item 9c, task 14) | versioned fixtures verify skill discovery, precedence, loading, prompt/tool behavior and events without Fabro | `swarm/task14-skills`, commits `c27fc3e`, `bdd5c5a` (evidence `task14-skills.md`) | passed: merged; the skills suites and fixtures (`testdata/skills`) pass in the gate; skill context is loaded into the system prompt, outside the agent history, so compaction cannot remove it (verified below) |
-| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`303f682`, `e8d20e1`, `269daca`, `ad2d472`, the merges `bd14208`, `3cbc1bc` and the task 16 merge (evidence `task15-subagents.md`) | passed: every native agent has Pebble's sub-agent tools (the pinned Fabro has no setting either; `[run.agent] subagents` stays refused because Fabro's parser refuses it); a parent delegates a workspace change to a child, hooks block inside a child, a child's failure is the parent's tool result, concurrent children and a grandchild, an interrupt closes the child, a retained thread keeps a child's result, resume restarts the stage, children never count against the invocation ceiling, accounting reconstructs from the public events. In-process `petri-fabro-steps::subagents` (12, two ignored contract tests for child memory and skills), black box `fabro_subagents_blackbox` (8, one with an inherited MCP tool). Accepted differences above: nesting under the open-session bound, no project memory or skills in a child, usage beside the parent's, inherited MCP tools |
+| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`303f682`, `e8d20e1`, `269daca`, `ad2d472`, the merges `bd14208`, `3cbc1bc` and the task 16 merge (evidence `task15-subagents.md`) | passed: every native agent has Pebble's sub-agent tools (the pinned Fabro has no setting either; `[run.agent] subagents` stays refused because Fabro's parser refuses it); a parent delegates a workspace change to a child, hooks block inside a child, a child's failure is the parent's tool result, concurrent children and a grandchild, an interrupt closes the child, a retained thread keeps a child's result, resume restarts the stage, children never count against the invocation ceiling, accounting reconstructs from the public events. In-process `petri-fabro-steps::subagents` (14, the child memory and skills contract tests included since the Pebble re-pin), black box `fabro_subagents_blackbox` (8, one with an inherited MCP tool). Accepted differences above: nesting under the open-session bound, usage beside the parent's, inherited MCP tools |
 | C5 context compaction (item 9e, task 16) | controlled histories trigger compaction and preserve required conversation/tool state, later thread use, usage, and events | `swarm/task16-compaction`, this branch | passed: the trigger below, at and above the 80 percent threshold; continuation, thread reuse, tool pairing across the boundary, summary failure, cancellation, resume fallback; public events and usage. In-process `petri-fabro-steps::compaction` (7), black box `fabro_compaction_blackbox` (4) |
 
 Skill context across compaction (item 9e's cross-feature check, C3 landed):
@@ -360,10 +374,9 @@ shows a child crossing the trigger, its own summary call, Pebble's
 child's session naming the parent, and the stage's `pebble.subagents.sessions`
 entry counting the compaction. A child's compaction produces no
 `fabro.compaction` event and no `pebble.compaction_usage`: that event is read
-from the parent agent's own history, and Pebble's `CompactionCompleted`
-carries no usage, so a child's summary usage is unreported at the pin (the
-recommended re-pin below folds it into the child's own usage, which the
-ledger sums).
+from the parent agent's own history. Pebble bills the child's summary call to
+the child's own prompt, so the ledger's `pebble.subagents.sessions` usage
+carries it.
 
 MCP (C2) landed: MCP tools are registered on the session with Pebble's
 `tools(mcp.tools())` (`pebble.rs`), so they live in the session's tool
@@ -372,19 +385,92 @@ session keeps its MCP tools. Verified by construction against the reference,
 the same way skills are; an end-to-end MCP-tool-after-compaction black box is a
 follow-up for the combined milestone D coverage (item 10).
 
-## Recommended library re-pin
+## Library pin
 
-Pebble `861d9bc` (one commit past the pin `a2fcdda`) is
-"Test coding across compaction and account for summary usage". Its only
-library change folds the automatic-compaction summary call's usage and cost
-into the prompt's `PromptReport.usage`/`cost_usd_micros`, which the pin drops.
-Recommended re-pin for the coordinator's batched library pass after wave 3.
-With it, Petri can drop the `fabro.compaction` usage read and the
-`pebble.compaction_*` metrics and read the summary usage from the prompt
-report like every other call. The failing-at-the-pin contract test is
-`petri-fabro-steps::compaction the_trigger_is_strictly_above_eighty_percent_of_the_window`'s
-usage assertion, which today asserts the prompt usage excludes the summary
-(`pebble.usage.input == 4 * 10 + total - 5`); at `861d9bc` it would include it.
+Pebble is pinned at `7ae5b27f64fac15f4b5758366b8ea1fb5ffdab71`
+(`petri/readiness-batch`), the library batch the coordinator ran after wave 3.
+Five changes reached Petri with the re-pin:
+
+- The summary call's usage and cost are in the prompt report, so
+  `pebble.usage` and `pebble.cost_usd_micros` include compaction and the
+  `pebble.compaction_*` metrics break that share out.
+- `Agent::continue_prompt` and `CodingAgent::continue_prompt` continue an
+  unfinished turn on the next model with no new input, so the failover no
+  longer sends a continuation message.
+- `SubagentOptions::with_inherited_memory()` and `with_inherited_skills()`
+  give a child the parent's project documents and skill directories, as
+  Fabro's child has them.
+- `SkillsDiscovered.skipped` reports each skipped skill file with a reason,
+  so Petri's diagnostics read Pebble's own report instead of auditing the
+  files itself.
+- The sub-agent tools of one round run in the model's order
+  (`ToolScheduling::Sequential`), so a `wait` beside its own `spawn_agent`
+  sees the child.
+
+`RetryEventObserver` needed no Pebble change: it was already exported as
+`pebble_coding_agent::events::RetryEventObserver`. Petri installs it on the
+client (`petri::build_llm_client`), so the client's own retries reach the
+agent's event stream as `LlmRetry`.
+
+## Pinned revisions
+
+Every library Petri runs Fabro workflows through is pinned by revision. This
+table is the citation the evidence records and `scripts/check-pins.py`
+compare against the manifests (`Cargo.toml`, `crates/petri/cli/Cargo.toml`,
+`crates/fabro/corpus-pin.txt`, `bundles.lock.json`). `mise run check:pins`
+fails when any of them disagree. The row names are the keys of a record's
+`pins` block.
+
+| Pin | Revision | Repository | Role |
+|---|---|---|---|
+| `pebble` | `7ae5b27f64fac15f4b5758366b8ea1fb5ffdab71` | `lithoscomputer/pebble` (private) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `lithos_llm` | `4aab27d7d42e7f762a8b6a3871c3db86816b0721` | `lithoscomputer/lithos-llm` (private) | provider transport and request retries |
+| `sandbox_driver` | `a5674bab7d048cb599e4564e243c509e571e8d2b` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
+| `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
+
+A change to Pebble, lithos-llm, or an MCP client library runs the owning
+repository's required checks before Petri moves its pin; then this table, the
+manifests, and the affected evidence records move together. The pending
+library batch is listed in `README.md` under "Library and repository gates".
+
+## Readiness gate checklist
+
+The black box plan's "Verification and readiness gate", item by item, with
+where the evidence for each comes from. Status as of task 19 (2026-09-07):
+"met" has a passing check on the integration branch; "partial" names what is
+missing and which task closes it. The first hosted CI run is still to come;
+its required results are listed at the end.
+
+| Item | Evidence source | Status |
+|---|---|---|
+| Repeatable focused task on the same required set as CI | `mise run test:fabro:blackbox` runs `scripts/test-fabro-blackbox.sh`: every `petri-cli` `fabro_*blackbox` binary plus `standalone` and `fabro_cli`, same build and features as `mise run test`, evidence and coverage report per run | met |
+| Extended variations and repeated process-isolation runs in `check:nightly` | `test:fabro:blackbox:repeat` (three runs, default, one, and two test threads, no fail-fast), `test:long`, `test:fabro:differential`, `check:msrv`, `test:release` | met |
+| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` | met (rule and check); the pending batch is not pinned yet |
+| Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox.rs` (task 12), `fallback_events.rs` | met (task 12) |
+| Required CI fetches and verifies pinned bundles and twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`: bundle fetch step with the deploy-key inputs; twins are pinned dev-dependencies (a build is the fetch); `PETRI_REQUIRE_CORPUS`, `PETRI_REQUIRE_FABRO_CORPUS`, `PETRI_REQUIRE_FABRO_BUNDLES`, `PETRI_REQUIRE_DOCKER` (Linux), `PETRI_REQUIRE_FABRO_BINARY` (compatibility job); `tests/support/fabro/require.rs` | partial: wired and verified locally; the two deploy keys do not exist, so the first hosted run fails at the bundle step until the owner creates them |
+| Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux | met for the scenarios that exist; task 17 fills the remaining bundle scenarios |
+| The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)` job: cached pinned build, `test:fabro:differential`; Nightly reruns it | partial: the job and the entry point exist; the matrix target `crates/petri/cli/tests/fabro_differential.rs` is task 18's, and the job fails until it lands |
+| A machine-readable record per scenario with pins, launch, matched services, raw and normalized observations, final context, artifacts, output, assertions, decisions, cleanup, library links | `tests/support/fabro/record.rs` (`Recorder`), proven by `fabro_evidence_blackbox.rs` | met for the writer; partial for coverage: only the smoke scenario records today; task 17 wires `Recorder` into every required scenario and task 18 fills `compatibility.differential` |
+| Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met (pending the first hosted run) |
+| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, strict in CI; `the_coverage_report_counts_only_passed_cells`, `an_empty_evidence_run_is_not_a_passing_gate` | met; the manifest it reads (`crates/fabro/acceptance/scenarios/matrix.json`, or `PETRI_SCENARIO_MATRIX`) is task 17's |
+| Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | partial: two bundles are `required-blocked` (fix-ci, implement-issue) pending task 17's stand-ins |
+| Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the coverage report plus each record's `services[].unmatched_requests` and interview receipt | partial until task 17's manifest lists every cell |
+| Final context, files, side effects meet independent expectations | each scenario's assertions, recorded per record | met per scenario |
+| No unresolved result, routing, or side-effect difference | the differential decisions (task 18) and the "Tracked departures" section above (both retired) | partial: task 18 |
+| Every used feature and temporary form has a disposition | the feature matrix above | met |
+| Inspection and replay trustworthy; cancellation and timeout leave no leak | `inspect_cli.rs`, `inspect.rs`, the terminal and milestone cancellation cases, `assert_no_leaked_processes`, the "No containers left behind" CI step, each record's `cleanup` | met |
+| Additional cutover requirements (ACP, Daytona, crash resume) gated separately | out of the initial scope by decision; not claimed | not claimed |
+
+What the first hosted run must show, in order: the bundle step passes on
+every job once the two deploy keys exist (until then it fails naming them);
+the compatibility job restores or builds the pinned `fabro` binary and the
+"Build the pinned fabro binary" step reports its time; `test:fabro:differential`
+finds `fabro_differential.rs` (task 18) and passes; every `check` job writes
+`coverage.md` to the summary with zero skipped, missing, and failed required
+cells; the `fabro-evidence-*` artifacts exist; `check (ubuntu-24.04)` stays
+inside its 90-minute budget with the added steps (locally the bundle fetch is
+about one second and the pin check under one second).
 
 ## Where things are
 

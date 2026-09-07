@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "id": "backend/dynamic-parallelism",
+  "family": "backend",
+  "title": "A planned list fans out to three agent branches under a limit of two: each branch writes its own file and keeps its own value under one context key, the fan-in lists them in item order, and the parent context carries none of the branch values.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/dynamic-fan-out.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openai\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openai"
+  },
+  "services": {
+    "openai": [
+      {
+        "scenario_id": "alpha",
+        "matcher": {
+          "input_contains": "\"name\": \"alpha\""
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "alpha",
+              "name": "shell_command",
+              "arguments": {
+                "command": "printf 'alpha\\n' > findings-alpha.txt && echo WROTE_alpha"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "beta",
+        "matcher": {
+          "input_contains": "\"name\": \"beta\""
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "beta",
+              "name": "shell_command",
+              "arguments": {
+                "command": "printf 'beta\\n' > findings-beta.txt && echo WROTE_beta"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "gamma",
+        "matcher": {
+          "input_contains": "\"name\": \"gamma\""
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "gamma",
+              "name": "shell_command",
+              "arguments": {
+                "command": "printf 'gamma\\n' > findings-gamma.txt && echo WROTE_gamma"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "alpha-answer",
+        "matcher": {
+          "input_contains": "WROTE_alpha"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"output.finder\": {\"found\": \"alpha\"}}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "beta-answer",
+        "matcher": {
+          "input_contains": "WROTE_beta"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"output.finder\": {\"found\": \"beta\"}}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "gamma-answer",
+        "matcher": {
+          "input_contains": "WROTE_gamma"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"output.finder\": {\"found\": \"gamma\"}}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 180000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "plan",
+        "fan",
+        "job#0",
+        "job#1",
+        "job#2",
+        "join",
+        "report"
+      ],
+      "forbidden_nodes": [],
+      "visits": {}
+    },
+    "context": {
+      "exact": {
+        "parallel.branch_count": 3
+      },
+      "absent": [
+        "output.finder"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "results.json",
+        "json": [
+          {
+            "$subset": {
+              "id": "job",
+              "index": 0,
+              "item_label": "alpha",
+              "status": "succeeded",
+              "context_updates": {
+                "$subset": {
+                  "output.finder": {
+                    "found": "alpha"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$subset": {
+              "id": "job",
+              "index": 1,
+              "item_label": "beta",
+              "status": "succeeded",
+              "context_updates": {
+                "$subset": {
+                  "output.finder": {
+                    "found": "beta"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "$subset": {
+              "id": "job",
+              "index": 2,
+              "item_label": "gamma",
+              "status": "succeeded",
+              "context_updates": {
+                "$subset": {
+                  "output.finder": {
+                    "found": "gamma"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "path": "findings-alpha.txt",
+        "text": "alpha\n"
+      },
+      {
+        "path": "findings-beta.txt",
+        "text": "beta\n"
+      },
+      {
+        "path": "findings-gamma.txt",
+        "text": "gamma\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openai": {
+        "consumed": {
+          "$len": 6
+        },
+        "unmatched": 0,
+        "requests": 6
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

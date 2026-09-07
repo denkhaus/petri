@@ -42,7 +42,10 @@ pub const METRIC: &str = "pebble.subagents";
 /// Give the node's agent the sub-agent tools its configuration asks for.
 pub fn configure(builder: CodingAgentBuilder, config: &SubagentConfig) -> CodingAgentBuilder {
     let options = if config.enabled {
-        SubagentOptions::enabled().with_limits(SubagentLimits::new(config.max_open_sessions))
+        SubagentOptions::enabled()
+            .with_limits(SubagentLimits::new(config.max_open_sessions))
+            .with_inherited_memory()
+            .with_inherited_skills()
     } else {
         SubagentOptions::disabled()
     };

@@ -174,6 +174,10 @@ async fn hello_runs_its_agent_against_the_fake_acp_agent() {
     let artifact = graph.unwrap_or_else(|| panic!("hello lowers: {:?}", outcome.diagnostics));
     assert!(artifact.children.is_empty());
     let mut graph = artifact.graph;
+    // The corpus workflow names no backend, so it lowers to the native
+    // agent, as Fabro's own default does. This case is the ACP path: it
+    // names the backend and the command the fake agent runs under.
+    node_config(&mut graph, "greet")["backend"] = json!("acp");
     node_config(&mut graph, "greet")["acp"] =
         json!({ "command": format!("python3 {}", agent.display()) });
     let report = run(&real(&dir), graph).await;

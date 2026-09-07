@@ -1430,7 +1430,7 @@ async fn acp_tool_hooks_are_best_effort_with_explicit_warnings() {
     let graph = lower(
         &format!(
             r#"digraph W {{
-        graph [goal="G", acp.command="python3 {}"]
+        graph [goal="G", backend="acp", acp.command="python3 {}"]
         start [shape=Mdiamond]
         exit [shape=Msquare]
         a [prompt="Say hello"]

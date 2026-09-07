@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "id": "routing/goal-gate-restart-and-visit-limit",
+  "family": "routing",
+  "title": "A goal gate sends the run back to its retry target until the deterministic check passes: the check runs twice, the repair once, the visit totals survive the jump, and the run leaves through the gate with the repaired state.",
+  "obligation": "routing/goal-gates-and-visit-limits",
+  "bundle": {
+    "inline": "graphs/goal-gate-loop.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "none"
+  },
+  "services": {},
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "seed",
+        "check",
+        "repair"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "check": 2,
+        "repair": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "command.output": "CHECK_PASSED\n"
+      },
+      "absent": [
+        "response.check"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "state.txt",
+        "text": "good\n"
+      },
+      {
+        "path": "repairs.log",
+        "text": "repaired\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

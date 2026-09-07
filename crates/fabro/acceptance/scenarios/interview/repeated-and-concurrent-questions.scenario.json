@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "id": "interview/repeated-and-concurrent-questions",
+  "family": "interview",
+  "title": "Two gates ask at the same time in parallel branches and each answer lands on its own branch (the late one included); then one gate is asked twice through a loop and each occurrence consumes its own scripted entry. The pinned bundle has no fork or loop, so the graph is inline.",
+  "obligation": "interview/repeated-and-concurrent-questions",
+  "bundle": {
+    "inline": "graphs/repeated-and-concurrent.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "none"
+  },
+  "services": {},
+  "interviews": [
+    {
+      "id": "a-late",
+      "match": {
+        "node": "a",
+        "invocation_path": "/branch:fan:0:a"
+      },
+      "delay_ms": 600,
+      "action": {
+        "kind": "negative"
+      }
+    },
+    {
+      "id": "b-now",
+      "match": {
+        "node": "b",
+        "invocation_path": "/branch:fan:1:b"
+      },
+      "action": {
+        "kind": "choice",
+        "value": "Y"
+      }
+    },
+    {
+      "id": "again-first",
+      "match": {
+        "node": "again",
+        "occurrence": 1
+      },
+      "action": {
+        "kind": "choice",
+        "value": "Y"
+      }
+    },
+    {
+      "id": "again-second",
+      "match": {
+        "node": "again",
+        "occurrence": 2
+      },
+      "action": {
+        "kind": "negative"
+      }
+    }
+  ],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "a",
+        "b",
+        "join",
+        "report",
+        "again",
+        "tick"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "again": 2,
+        "tick": 1,
+        "a": 1,
+        "b": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "human.gate.again.answer": "no",
+        "human.gate.selected": "N",
+        "parallel.branch_count": 2
+      },
+      "absent": [
+        "human.gate.a.answer",
+        "human.gate.b.answer"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "results.json",
+        "json": [
+          {
+            "$subset": {
+              "id": "a",
+              "index": 0,
+              "status": "succeeded",
+              "context_updates": {
+                "$subset": {
+                  "human.gate.selected": "N"
+                }
+              }
+            }
+          },
+          {
+            "$subset": {
+              "id": "b",
+              "index": 1,
+              "status": "succeeded",
+              "context_updates": {
+                "$subset": {
+                  "human.gate.selected": "Y"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "path": "asks.log",
+        "text": "asked\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [
+        {
+          "$any": true
+        },
+        {
+          "$any": true
+        },
+        {
+          "node": "again",
+          "delivery": "delivered",
+          "reply": {
+            "$subset": {
+              "choice": "Y"
+            }
+          },
+          "occurrence": 1
+        },
+        {
+          "node": "again",
+          "delivery": "delivered",
+          "reply": {
+            "$subset": {
+              "choice": "N"
+            }
+          },
+          "occurrence": 2
+        }
+      ],
+      "errors": [],
+      "consumed": {
+        "a-late": 1,
+        "b-now": 1,
+        "again-first": 1,
+        "again-second": 1
+      },
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

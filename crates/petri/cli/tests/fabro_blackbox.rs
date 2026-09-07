@@ -508,17 +508,23 @@ async fn an_unused_required_entry_fails_verification_without_rewriting_the_run_s
     );
     let receipt = finished.receipt();
     assert_eq!(receipt["questions"][0]["reply"]["choice"], "Y");
-    let entries = receipt["script"]["entries"].as_array();
-    assert!(
-        entries.is_none(),
-        "an unused entry is an error, not a summary"
-    );
+    // The unused entry is an error, and the per-entry counts stay in the
+    // receipt beside it: the report is complete exactly when it matters.
     assert!(
         receipt["errors"][0]
             .as_str()
             .is_some_and(|e| e.contains("`never-asked` answered 0 of 1")),
         "{receipt}"
     );
+    let entries = receipt["script"]["entries"]
+        .as_array()
+        .expect("the entry counts are reported on a failed verification");
+    let unused = entries
+        .iter()
+        .find(|entry| entry["id"] == "never-asked")
+        .expect("the unused entry is listed");
+    assert_eq!(unused["consumed"], 0, "{receipt}");
+    assert_eq!(unused["remaining"], 1, "{receipt}");
     // The persisted run stands as the engine reported it.
     let coordinator = fs::read_to_string(case.run_dir.join("coordinator.jsonl")).expect("log");
     assert!(

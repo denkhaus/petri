@@ -18,5 +18,7 @@ pub mod yaml;
 pub use diag::{Diagnostic, Diagnostics, Lowered, Severity, Span};
 pub use digest::graph_digest;
 pub use files::{DirFiles, FileSource, MapFiles, NoFiles};
-pub use format::{CompileInputs, Frontend, LaunchSettings, WorkspaceRetention, by_name, detect};
+pub use format::{
+    CompileInputs, Frontend, LaunchSettings, REPOSITORY_VAR, WorkspaceRetention, by_name, detect,
+};
 pub use print::print_graph;

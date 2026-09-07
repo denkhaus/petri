@@ -18,12 +18,12 @@
 //! every native session, resumed ones included, installs it. Pebble still
 //! chooses the cut, validates the summary and records the outcome.
 //!
-//! Accounting: at the pinned Pebble a prompt's usage excludes the summary
-//! call, but the call's usage and cost are recorded on the `Compaction` turn
-//! Pebble puts in the history. After each prompt settles, [`Accounting`]
-//! reads the turns that appeared, emits one [`EVENT`] per compaction with
-//! that usage, and sums them into the `pebble.compaction_*` metrics beside
-//! `pebble.usage`.
+//! Accounting: Pebble bills the summary call to the prompt that compacted, so
+//! its usage and cost are in the prompt report; the compaction events carry
+//! neither, but the `Compaction` turn Pebble puts in the history does. After
+//! each prompt settles, [`Accounting`] reads the turns that appeared, emits
+//! one [`EVENT`] per compaction with that usage, and sums them into the
+//! `pebble.compaction_*` metrics, which are a breakdown of `pebble.usage`.
 
 use std::sync::Arc;
 

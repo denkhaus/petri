@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "id": "provider-faults/truncated-stream",
+  "family": "provider-faults",
+  "title": "Every reply's stream is cut off mid-answer: the stage fails with a transport class rather than acting on a partial answer, the retries all meet the same cut stream, and the file the earlier command wrote is untouched.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/edit-and-verify.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"anthropic\"\nname = \"{model}\"\n[run.model.controls]\nreasoning_effort = \"high\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:anthropic"
+  },
+  "services": {
+    "anthropic": [
+      {
+        "scenario_id": "truncated",
+        "matcher": {},
+        "script": {
+          "kind": "success",
+          "response_text": "APPEND",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          },
+          "close_after_chunks": 1
+        },
+        "sticky": true
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "failed",
+      "required_nodes": [
+        "prepare",
+        "agent"
+      ],
+      "forbidden_nodes": [
+        "verify"
+      ],
+      "visits": {
+        "agent": 1
+      }
+    },
+    "context": {
+      "exact": {},
+      "absent": [
+        "response.agent"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "anthropic": {
+        "consumed": {
+          "$contains": "truncated"
+        },
+        "unmatched": 0
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": [
+        "{credential}"
+      ]
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

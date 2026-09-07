@@ -1,0 +1,13 @@
+digraph GateTimeout {
+    graph [goal="A gate whose answer never comes expires into its default choice"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Ship it?", question_type="yes_no", timeout="2s", human.default_choice="N"]
+    ship [shape=parallelogram, script="echo shipped > decision.txt"]
+    hold [shape=parallelogram, script="echo held > decision.txt"]
+    start -> gate
+    gate -> ship [label="[Y] Yes"]
+    gate -> hold [label="[N] No"]
+    ship -> exit
+    hold -> exit
+}

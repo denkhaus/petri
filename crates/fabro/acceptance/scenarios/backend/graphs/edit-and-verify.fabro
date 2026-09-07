@@ -1,0 +1,10 @@
+digraph EditAndVerify {
+    graph [goal="Edit a file through the model's shell tool inside the sandbox, then verify it"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prepare [shape=parallelogram, script="printf 'draft\n' > notes.txt && pwd && echo prepared"]
+    agent [label="Edit the notes", prompt="Append the word reviewed to notes.txt, then read it back and say APPENDED.", on_failure="exit"]
+    verify [shape=parallelogram, script="cat notes.txt && test -f notes.txt && echo VERIFIED"]
+    start -> prepare -> agent -> verify -> exit
+}

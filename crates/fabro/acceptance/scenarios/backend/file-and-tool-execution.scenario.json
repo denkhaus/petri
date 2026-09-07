@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "id": "backend/file-and-tool-execution",
+  "family": "backend",
+  "title": "A command writes a file, the model edits it through its shell tool, and a later command verifies it: the real file and tool path, asserted where the workspace lives (a directory on the host, the container's /workspace on Docker).",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/edit-and-verify.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openai\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openai"
+  },
+  "services": {
+    "openai": [
+      {
+        "scenario_id": "append",
+        "matcher": {
+          "input_contains": "Append the word reviewed"
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "append",
+              "name": "shell_command",
+              "arguments": {
+                "command": "printf 'reviewed\\n' >> notes.txt && echo APPEND_DONE"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "read-back",
+        "matcher": {
+          "input_contains": "APPEND_DONE"
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "read",
+              "name": "shell_command",
+              "arguments": {
+                "command": "cat notes.txt && echo READ_DONE"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "answer",
+        "matcher": {
+          "input_contains": "READ_DONE"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "APPENDED: notes.txt now ends with reviewed.",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 180000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "prepare",
+        "agent",
+        "verify"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "agent": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "response.agent": "APPENDED: notes.txt now ends with reviewed.",
+        "last_stage": "agent",
+        "command.output": "draft\nreviewed\nVERIFIED\n"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\nreviewed\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openai": {
+        "consumed": [
+          "append",
+          "read-back",
+          "answer"
+        ],
+        "unmatched": 0,
+        "requests": 3,
+        "model": "{model}",
+        "contains": [
+          {
+            "request": 2,
+            "text": "reviewed"
+          }
+        ]
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

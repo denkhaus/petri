@@ -1,0 +1,21 @@
+digraph ImplementIssueStopCondition {
+    graph [goal="Hand the work to the child, but stop as soon as the state is ready"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    seed [
+        shape=parallelogram,
+        output_schema="routing",
+        script="printf 'good\n' > state.txt && printf '%s' '{\"context_updates\":{\"ready\":\"yes\"}}'"
+    ]
+    implement [
+        label="Implement",
+        shape=house,
+        stack.child_workflow="slow-child.fabro",
+        manager.max_cycles=100,
+        manager.poll_interval="1s",
+        manager.stop_condition="context.ready=yes"
+    ]
+    report [shape=parallelogram, script="cat state.txt && echo PARENT_DONE"]
+    start -> seed -> implement -> report -> exit
+}

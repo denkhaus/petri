@@ -22,12 +22,14 @@ use crate::fallback::ModelFailure;
 use crate::hooks::step_view;
 use crate::pebble::{NativeSession, Resume, TurnUsage};
 
-/// How an agent node runs. ACP remains the default.
+/// How an agent node runs. The native API agent is the default, as Fabro's
+/// `select_run_backend` picks `Api` for a node that names no backend; the
+/// pinned bundles name none.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentBackend {
-    #[default]
     Acp,
+    #[default]
     Api,
 }
 
@@ -136,7 +138,6 @@ impl Session {
     pub(crate) async fn prompt(
         &mut self,
         text: &str,
-        agent_sourced: bool,
         control: &mut mpsc::Receiver<Control>,
         grace: Duration,
         deadline: Option<Duration>,
@@ -161,7 +162,22 @@ impl Session {
                 };
                 result.map(|turn| turn.text).map_err(Into::into)
             }
-            Self::Pebble(session) => session.prompt(text, agent_sourced, control).await,
+            Self::Pebble(session) => session.prompt(text, control).await,
+        }
+    }
+    /// Continue the unfinished turn a failover left (committed tool results
+    /// with no answer yet) on this session, with no new input. Only a native
+    /// session has a plan, so only it is ever asked.
+    pub(crate) async fn continue_prompt(
+        &mut self,
+        control: &mut mpsc::Receiver<Control>,
+    ) -> Result<String, AgentError> {
+        match self {
+            Self::Acp(_) => Err(AgentError::failed(
+                "continue_turn",
+                "an ACP session cannot continue an unfinished turn",
+            )),
+            Self::Pebble(session) => session.continue_prompt(control).await,
         }
     }
     /// The last turn's accounting; an ACP turn reports none.

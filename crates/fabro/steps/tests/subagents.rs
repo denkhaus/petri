@@ -4,15 +4,11 @@
 //! to the parent stage, the workflow's invocation ceiling never counts them,
 //! and cancellation, thread reuse and resume behave as the reference does.
 //!
-//! Every session of a tree answers from its own script:
-//! `support::routed_client` keys a child's script on the task its parent gave
-//! it, so the order in which the parent and its children reach the provider
-//! cannot hand an answer to the wrong session. A parent spawns in one turn and
-//! waits in the next. Pebble runs the tool calls of one round concurrently, so
-//! a `wait` beside the `spawn_agent` can run first, find no child, and return
-//! at once; a `wait` in its own turn always sees the child.
-
-mod support;
+//! Every session of a tree answers from its own script: Pebble's
+//! `test_support::routed_client` keys a child's script on the task its parent
+//! gave it, so the order in which the parent and its children reach the
+//! provider cannot hand an answer to the wrong session. A parent spawns in one
+//! turn and waits in the next.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -32,7 +28,7 @@ use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
 use lithos_llm::types::{ErrorKind, Request, Response, TokenCounts};
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, multi_tool_call_response,
-    scripted_client, text_response, tool_call_response, with_usage,
+    routed_client, scripted_client, text_response, tool_call_response, with_usage,
 };
 use runtime::driver::ExecutionReport;
 use runtime::engine::Event;
@@ -40,7 +36,6 @@ use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use smol_str::SmolStr;
-use support::routed_client;
 use testkit::{RunDir, output_of};
 use tokio::time::{sleep, timeout};
 
@@ -224,7 +219,7 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
         "the child acted in the parent's workspace"
     );
     assert_eq!(output_of(&report, "a")["text"], "The child wrote the file.");
-    assert_eq!(provider.child(task).requests().len(), 2);
+    assert_eq!(provider.lane(task).requests().len(), 2);
     let requests = provider.root().requests();
     assert_eq!(requests.len(), 3);
     let wait_result = serde_json::to_string(&requests[2]).expect("request");
@@ -381,7 +376,7 @@ script = "echo ran:$FABRO_NODE_ID >> tool-hooks.log"
         log.contains("ran:a"),
         "the post hook saw the child's call under the parent node: {log}"
     );
-    let child = provider.child(task).requests();
+    let child = provider.lane(task).requests();
     assert_eq!(child.len(), 3);
     let denial = serde_json::to_string(&child[1]).expect("request");
     assert!(
@@ -412,7 +407,7 @@ async fn a_child_has_no_question_tool() {
         .expect("replay");
     assert_eq!(report.status, RunStatus::Success);
     let parent = tool_names(&provider.root().requests()[0]);
-    let child = tool_names(&provider.child(task).requests()[0]);
+    let child = tool_names(&provider.lane(task).requests()[0]);
     let question = question_tool(&parent).expect("the root has a question tool");
     assert!(
         !child.contains(question),
@@ -430,12 +425,10 @@ async fn a_child_has_no_question_tool() {
     }
 }
 
-/// A child a Fabro agent spawns re-reads the project documents; a Pebble
-/// child is given none. Recorded as a library contract item; the test states
-/// the reference behavior and fails at the pinned Pebble.
+/// A child a Fabro agent spawns re-reads the project documents, and so does a
+/// Pebble child, because Petri asks for it
+/// (`SubagentOptions::with_inherited_memory`).
 #[tokio::test]
-#[ignore = "library gap: a Pebble child inherits no project memory (Fabro's child re-discovers \
-            AGENTS.md); see task15-subagents.md"]
 async fn a_child_reads_the_project_documents_its_parent_read() {
     let dir = RunDir::new("subagents-memory");
     let ws = workspace(&dir);
@@ -460,7 +453,7 @@ async fn a_child_reads_the_project_documents_its_parent_read() {
         parent.contains("sign notes with -- petri"),
         "the root read AGENTS.md"
     );
-    let child = serde_json::to_string(&provider.child(task).requests()[0]).expect("request");
+    let child = serde_json::to_string(&provider.lane(task).requests()[0]).expect("request");
     assert!(
         child.contains("sign notes with -- petri"),
         "the reference child reads the project documents too: {child}"
@@ -919,7 +912,7 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
     .await
     .expect("the parent waits and the child wrote its file");
     assert_eq!(
-        provider.child("child: write partial.txt").requests().len(),
+        provider.lane("child: write partial.txt").requests().len(),
         1
     );
     // The crash: the run's task is dropped with the child mid-tool.
@@ -990,13 +983,10 @@ fn skills_repository(dir: &RunDir) -> Option<PathBuf> {
 }
 
 /// The parent discovers the workspace's skills (task 14's directories); a
-/// child a Fabro agent spawns re-discovers them from the shared sandbox. A
-/// Pebble child is given no skill directories, so the reference behavior
-/// this test states fails at the pinned Pebble; recorded as a library
-/// contract item.
+/// child a Fabro agent spawns re-discovers them from the shared sandbox, and
+/// so does a Pebble child, because Petri asks for it
+/// (`SubagentOptions::with_inherited_skills`).
 #[tokio::test]
-#[ignore = "library gap: a Pebble child inherits no skill directories (Fabro's child re-discovers \
-            the skills); see task15-subagents.md"]
 async fn a_child_sees_the_skills_its_parent_discovered() {
     let dir = RunDir::new("subagents-skills");
     if skills_repository(&dir).is_none() {
@@ -1030,7 +1020,7 @@ async fn a_child_sees_the_skills_its_parent_discovered() {
             && tool_names(&root[0]).iter().any(|n| n == "use_skill"),
         "the root discovered the repository's skills"
     );
-    let first = &provider.child(task).requests()[0];
+    let first = &provider.lane(task).requests()[0];
     let child = serde_json::to_string(first).expect("request");
     assert!(
         child.contains("# Available Skills") && tool_names(first).iter().any(|n| n == "use_skill"),
@@ -1110,7 +1100,7 @@ async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_c
         "The child did four things."
     );
     assert_eq!(
-        provider.child(task).completion_count(),
+        provider.lane(task).completion_count(),
         1,
         "one summary call, the child's"
     );
@@ -1193,7 +1183,7 @@ async fn a_parent_still_delegates_after_its_own_compaction() {
         1,
         "the parent's summary call"
     );
-    assert_eq!(provider.child(task).completion_count(), 0);
+    assert_eq!(provider.lane(task).completion_count(), 0);
     let requests = provider.root().requests();
     let last = serde_json::to_string(requests.last().expect("request")).expect("request");
     assert!(

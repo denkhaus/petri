@@ -1,0 +1,8 @@
+digraph TwoPollChild {
+    graph [goal="Take longer than one manager poll interval"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [shape=parallelogram, label="Work", script="sleep 3 && printf 'CHILD_FINISHED\n' > child.txt && echo done"]
+    start -> work -> exit
+}

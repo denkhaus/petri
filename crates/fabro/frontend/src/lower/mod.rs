@@ -13,6 +13,7 @@ pub mod fallbacks;
 mod hooks;
 mod imports;
 mod mcps;
+mod model_layers;
 mod parallel;
 pub(crate) mod policy;
 mod promotion;
@@ -206,6 +207,9 @@ struct Ctx<'a> {
     mcps:             Vec<McpServer>,
     /// The workflow's name, `FABRO_WORKFLOW` for hooks.
     workflow_name:    String,
+    /// The absolute repository root the host bound (`petri.repository`),
+    /// the source of the run's checkout.
+    repository:       Option<String>,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -217,7 +221,16 @@ pub(crate) fn lower(
     inputs: &CompileInputs,
     diags: Diagnostics,
 ) -> Lowered {
-    lower_nested(workflow, file, files, inputs, diags, Vec::new(), Vec::new())
+    lower_nested(
+        workflow,
+        file,
+        files,
+        inputs,
+        diags,
+        Vec::new(),
+        Vec::new(),
+        workflow_toml::ModelDefaults::default(),
+    )
 }
 
 /// [`lower`] for a workflow `stack` deep in nested-workflow calls. A nested
@@ -230,15 +243,28 @@ fn lower_nested(
     mut diags: Diagnostics,
     stack: Vec<String>,
     inherited_mcps: Vec<McpServer>,
+    inherited_model: workflow_toml::ModelDefaults,
 ) -> Lowered {
     let mut template = Context::new(inputs);
     // A nested workflow shares its parent's run settings; only the root reads
-    // the file beside it.
-    let settings = if stack.is_empty() {
+    // the file beside it. The parent's `[run.model]` defaults come along, as
+    // Fabro's nested run shares the parent's run settings.
+    let mut settings = if stack.is_empty() {
         workflow_toml::read(file, files, &mut template, &mut diags)
     } else {
-        workflow_toml::RunSettings::default()
+        workflow_toml::RunSettings {
+            model: inherited_model,
+            ..workflow_toml::RunSettings::default()
+        }
     };
+    if stack.is_empty() {
+        model_layers::apply(files, inputs, &mut settings.model, &mut diags);
+    }
+    let repository = inputs
+        .vars
+        .get(frontend::REPOSITORY_VAR)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let hooks = if stack.is_empty() {
         hooks::load(files, inputs, settings.hooks_text.as_ref(), &mut diags)
     } else {
@@ -285,6 +311,7 @@ fn lower_nested(
         hooks,
         mcps,
         workflow_name: workflow.name.clone(),
+        repository,
     };
     ctx.stack.push(file.to_string());
 
@@ -390,7 +417,10 @@ impl Ctx<'_> {
         let mut params = BTreeMap::new();
         if self.stack.len() == 1 {
             params.insert(SmolStr::new(hooks::PARAM), hooks::param(&self.hooks));
-            params.insert(SmolStr::new(LAUNCH_PARAM), self.settings.launch_param());
+            params.insert(
+                SmolStr::new(LAUNCH_PARAM),
+                self.settings.launch_param(self.repository.as_deref()),
+            );
             if let Some(environment) = self.settings.environment_param() {
                 params.insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
             }
@@ -928,6 +958,14 @@ impl Ctx<'_> {
                 });
                 if self.stack.len() == 1 {
                     config["hooks"] = hooks::param(&self.hooks);
+                    // `[run.clone]` and the repository the host bound: the
+                    // root `start` stage checks the repository out into its
+                    // workspace before anything runs there.
+                    if kind == Kind::Start {
+                        let launch = self.b.exprs().var(LAUNCH_PARAM);
+                        let clone = self.b.exprs().field(launch, "clone");
+                        config["checkout"] = placeholder(clone);
+                    }
                 }
                 (Some(StepRef::new(STAGE_KIND, config)), STRUCTURAL_TIMEOUT)
             }
@@ -1668,6 +1706,7 @@ impl Ctx<'_> {
             Diagnostics::new(),
             self.stack.clone(),
             self.mcps.clone(),
+            self.settings.model.clone(),
         );
         for diagnostic in lowered.diagnostics.iter() {
             self.diags.push(diagnostic.clone());

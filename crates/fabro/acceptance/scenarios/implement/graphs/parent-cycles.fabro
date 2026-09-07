@@ -1,0 +1,15 @@
+digraph ImplementIssueCycles {
+    graph [goal="Let the manager poll the child more than once"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    implement [
+        label="Implement",
+        shape=house,
+        stack.child_workflow="two-poll-child.fabro",
+        manager.max_cycles=100,
+        manager.poll_interval="1s"
+    ]
+    report [shape=parallelogram, script="cat child.txt && echo PARENT_DONE"]
+    start -> implement -> report -> exit
+}

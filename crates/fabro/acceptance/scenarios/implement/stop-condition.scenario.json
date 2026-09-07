@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "id": "implement/stop-condition",
+  "family": "implement",
+  "title": "The manager's stop condition is already satisfied when it polls: the child is cancelled, the node succeeds with no context updates of its own, the child's long work never finishes, and the parent carries on.",
+  "obligation": "implement/stop-condition",
+  "bundle": {
+    "inline": "graphs/parent-stop-condition.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "the fixture the plan changes",
+        "write": {
+          "check.sh": {
+            "file": "fixtures/check.sh",
+            "mode": "0755"
+          },
+          "issue.md": {
+            "file": "fixtures/issue.md"
+          },
+          "state.txt": {
+            "text": "bad\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openrouter\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openrouter"
+  },
+  "services": {
+    "openrouter": []
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 180000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "seed",
+        "implement",
+        "report"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "implement": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "ready": "yes",
+        "command.output": "good\nPARENT_DONE\n"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "state.txt",
+        "text": "good\n"
+      },
+      {
+        "path": "child.txt",
+        "absent": true
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openrouter": {
+        "consumed": [],
+        "unmatched": 0,
+        "requests": 0
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

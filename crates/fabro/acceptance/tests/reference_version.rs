@@ -243,9 +243,13 @@ fn every_decision_record_is_complete() {
     );
 }
 
-/// A scenario staged from a required bundle keeps the bundle's files
-/// byte-identical to `bundles.lock.json`, except a file a migration
-/// decision names by its new digest.
+/// A bundle the fetcher staged keeps its files byte-identical to
+/// `bundles.lock.json`, except a file a migration decision names by its new
+/// digest. The scenarios read the staged bundle
+/// (`crates/fabro/acceptance/bundles/<id>`, written by
+/// `scripts/corpus-fetch-fabro-bundles.sh`) rather than committing a second
+/// copy, so that is what this checks; with no bundle fetched there is
+/// nothing to compare.
 #[test]
 fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
     let lock = json(&root().join("crates/fabro/acceptance/bundles.lock.json"));
@@ -258,7 +262,7 @@ fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
     let mut checked = 0;
     for bundle in lock["bundles"].as_array().expect("bundles") {
         let id = bundle["id"].as_str().unwrap_or_default();
-        let dir = root().join("crates/fabro/acceptance/scenarios").join(id);
+        let dir = root().join("crates/fabro/acceptance/bundles").join(id);
         if !dir.is_dir() {
             continue;
         }
@@ -281,7 +285,10 @@ fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
             );
         }
     }
-    assert!(checked > 0, "no staged bundle matched a lock entry");
+    assert!(
+        checked > 0 || !root().join("crates/fabro/acceptance/bundles").is_dir(),
+        "the bundles are fetched but no staged bundle matched a lock entry"
+    );
 }
 
 /// Evidence records a differential run left (under `PETRI_EVIDENCE_DIR` or

@@ -54,6 +54,8 @@ pub use lower::{
     MAX_INVOCATIONS, ModelDefaults, PREPARE_NODE_PREFIX, Policy, PrepareStep, ROUTES_KEY,
     RunSettings, shape_of, subagents,
 };
+use serde_json::Value;
+use smol_str::SmolStr;
 
 /// Parse and lower one workflow. `file` is the repository-relative path the
 /// spans carry and `@file` references resolve beside; `files` reads them.
@@ -77,11 +79,26 @@ pub fn load_text(file: &str, text: &str) -> Lowered {
 
 /// Fabro, as a [`Frontend`]: it claims `*.fabro` and `*.dot`.
 #[derive(Debug, Default)]
-pub struct Fabro;
+pub struct Fabro {
+    /// The host's user settings layer (`$FABRO_HOME/settings.toml`), bound
+    /// as the `fabro.settings_toml` variable of every load that does not
+    /// bind its own.
+    settings_toml: Option<String>,
+}
 
 impl Fabro {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Carry the user settings layer's text into every load. Fabro reads
+    /// `~/.fabro/settings.toml` (`$FABRO_HOME` when set) for hooks, MCP
+    /// servers, and `[run.model]` defaults; the host reads the file and
+    /// hands the text here, so lowering stays free of environment reads.
+    #[must_use]
+    pub fn with_settings_toml(mut self, text: Option<String>) -> Self {
+        self.settings_toml = text;
+        self
     }
 }
 
@@ -108,7 +125,17 @@ impl Frontend for Fabro {
         files: &dyn FileSource,
         inputs: &CompileInputs,
     ) -> Lowered {
-        load(file, text, files, inputs)
+        match &self.settings_toml {
+            Some(settings) if !inputs.vars.contains_key(hooks::SETTINGS_HOOKS_VAR) => {
+                let mut inputs = inputs.clone();
+                inputs.vars.insert(
+                    SmolStr::new(hooks::SETTINGS_HOOKS_VAR),
+                    Value::String(settings.clone()),
+                );
+                load(file, text, files, &inputs)
+            }
+            _ => load(file, text, files, inputs),
+        }
     }
 
     /// The launch settings `workflow.toml` declared, read back from the

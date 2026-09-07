@@ -28,11 +28,13 @@ a run will execute.
 | `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one |
 | `[run.model.fallbacks]` `"<model>" = ["provider:model", ...]` | Fabro's model-keyed fallback chains ("Model fallback" under "Native Pebble" below). The frontend checks the shape (a table keyed by a requested model; each entry a bare token, `provider:selector`, or the legacy `provider/selector`; a provider-qualified key is refused as Fabro refuses it, `fabro.model_fallbacks`) and puts the chains on every agent and prompt node config under `fallbacks`; the runner resolves them against its catalog at the first LLM stage |
 | `[run.execution]` `mode`, `approval` | launch defaults in `Graph.params["fabro.launch"]`: `mode = "dry_run"` runs the stub registry, `approval = "auto"` answers every question with its first choice. `--dry-run`, `--auto-approve`, `--interactive` and `--interview-script` win |
+| `[run.clone]` `enabled`, `depth` | the server clones the repository into the sandbox before the first stage | the root `start` stage checks the repository out into its workspace before anything runs there: a clone of the repository the run was loaded from (`--repo`, else the bundle root above the workflow file; the runtime binds it as the `petri.repository` compile variable, absolute) at `depth` commits (Fabro's default 100; `0` is the full history), packed on the host and delivered through the scope's executor to the environment's own `tar`, so a Docker workspace receives the same files as a host one. The clone's `origin` is the repository's own `origin` when it has one; nothing is fetched. `enabled = false` starts from an empty workspace. A file outside a Git work tree, or a host that lowers in memory without binding the variable, also starts empty, with a `checkout:` log line saying so. The launch parameter carries `clone` (`enabled`, `depth`, `repository`); a delivered checkout logs `checkout: <root> at <commit> (depth N)` and emits a `fabro.checkout` `StepEvent::Custom` (`repository`, `commit`, `depth`, `files`) |
+| `[run.model]` in `.fabro/project.toml` and the host's user settings layer | the three layers combine, settings under project under workflow | the same order: a `[run.model]` key `workflow.toml` leaves unset is filled from `.fabro/project.toml`, then from the settings layer (`fabro.settings_toml`, which `petri` binds from `$FABRO_HOME/settings.toml`, else `~/.fabro/settings.toml`). This is how a workflow that names no model, such as the pinned interview workflow, gets the operator's default |
 | `[run.environment]` `id` over `[environments.<id>]` | `provider` selects the sandbox backend when `--backend` is not given: `local` is the host, `docker` the Docker plugin, `daytona` the Daytona plugin. `image.docker` becomes the scope's container image under `docker` and `daytona`. `env` is the scope environment; a value that is exactly `{{ secrets.NAME }}` is a `$secret` reference every command resolves at spawn (the standalone runner reads `PETRI_SECRET_NAME`; a missing secret fails the command with `secret_unavailable`) and masks in every log. `resources` size a Daytona runner. `cwd`, `network`, `lifecycle`, `labels` and `image.dockerfile` are platform-only and warn `ignored.workflow_toml.environments.<id>.<key>`; an `id` with no table, or a provider outside the three, is an error |
 | `[run.prepare]` `steps`, `timeout` | setup steps lowered as command nodes `run_prepare_1`, `run_prepare_2`, ... between `start` and its successors, so they run in the selected environment before any node, in order, each with the section's `timeout` (default `5m`), its `env`, and `on_failure="exit"`: a failed step ends the run before the first node. `command` argv is joined with shell quoting; `script` runs as written; `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` render at load. The whole file is validated before any step runs |
 | `[[run.hooks]]` in `workflow.toml`, `.fabro/project.toml` at the repository root, and the host's user settings layer | local hooks ("Hooks" below). Each layer is read on its own and the three merge as Fabro's `combine_hooks` does: settings, then project, then workflow, a higher layer's entry replacing a lower one with the same `id` in place and the rest appending. Every field is validated at load (`fabro.hooks.toml`, `.entry`, `.event`, `.transport`, `.timeout`, `.matcher`); a hooks layer that cannot be read is an error, so a configured hook is never skipped silently. A `checkpoint_saved` hook warns `fabro.hooks.checkpoint_saved` and never runs. The merged list lands in `Graph.params["fabro_hooks"]` and on the `start` and `exit` stages. The user layer (`~/.fabro/settings.toml`) is outside the repository, so the host passes its text as the `fabro.settings_toml` compile variable when it wants one |
 | `[run.agent.mcps.<name>]` in `workflow.toml`, `.fabro/project.toml` and the host's user settings layer | MCP servers for native agent nodes ("MCP servers" under "Native Pebble" below). Each layer is read on its own with Fabro's field rules (`type` is `stdio`, `http` or `sandbox`; exactly one of `script` and `command`; `url`; `port`; `env`, `headers`; `startup_timeout` default `10s`, `tool_timeout` default `60s`; `enabled`), the three merge by name with the higher layer replacing the lower one whole (Fabro's sticky map) and `enabled = false` removing the name, and the merged list is carried on every agent node's config (`mcps`) and into nested workflows. `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` substitute at load; a value under `env` or `headers` that is exactly `{{ secrets.NAME }}` is a `$secret` reference resolved when the server launches. Errors: `fabro.mcps.entry`, `fabro.mcps.type`, `fabro.mcps.shape`, `fabro.mcps.toml` (a layer that names servers and does not parse), `fabro.mcps.unbound`, `fabro.mcps.env_token` (`{{ env.* }}`, refused as Fabro refuses it); `unsupported.workflow_toml.run.agent.mcps.reference` (`id = ...` names a server-managed catalog the standalone runner does not have), `unsupported.workflow_toml.run.agent.mcps.protocol` (`protocol = "sse"`), `unsupported.workflow_toml.run.agent.mcps.secret` (a secret token anywhere but a whole `env` or `headers` value) |
-| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is a specific `unsupported.workflow_toml.*` error (the MCP row above lists its three). A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
+| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is a specific `unsupported.workflow_toml.*` error (the MCP row above lists its three). A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
 | `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
 | `import="<path>"` | expanded at load as Fabro's import transform expands it (below); the persisted graph carries the imported nodes |
@@ -365,11 +367,13 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   thread at `full` fidelity (native backend only). Repair turns keep that
   session's history. `speed` and `max_tokens` configure the native model
   request; on ACP they are observer metadata like the other model settings.
-  `backend="acp"` is the default. It starts the Agent Client Protocol command
-  from `acp.command` / `acp.config` (node, graph, then `PETRI_ACP_COMMAND`). The
-  ACP command owns model selection; model settings are observer metadata.
-  `backend="api"` runs the Pebble Rust library in Petri. `model` (or graph
-  `default_model`) is required. `provider` (or `default_provider`) qualifies the
+  `backend="api"` is the default, as Fabro's `select_run_backend` picks the
+  native agent for a node that names no backend (the pinned bundles name
+  none). It runs the Pebble Rust library in Petri. `model` (or graph
+  `default_model`, or `[run.model] name`) is required. `backend="acp"` starts
+  the Agent Client Protocol command from `acp.command` / `acp.config` (node,
+  graph, then `PETRI_ACP_COMMAND`). The ACP command owns model selection;
+  model settings are observer metadata. `provider` (or `default_provider`) qualifies the
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
@@ -408,7 +412,10 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
 - **`fabro/workflow`** is the nested invocation above.
 - **`fabro/stage`** is `start`, `exit` and a conditional: it returns its
   config as its output, as `noop` did, and records the scope's environment so
-  sandbox-placed hooks can run. `start` drives the run-level hooks
+  sandbox-placed hooks can run. The root `start` also checks the repository
+  out (`[run.clone]` above) and writes `internal.run_id`, the run's identity
+  Fabro sets at run creation (the run directory's name in the standalone
+  runner), which a `stdin_source="context.internal.run_id"` node reads. `start` drives the run-level hooks
   `sandbox_ready`, `run_start` and its own `stage_start`, in Fabro's order.
   `run_complete`, `run_failed` and `sandbox_cleanup` are not a stage's: the
   driver reports the run's end (by its final status, as Fabro's `on_run_end`
@@ -601,9 +608,11 @@ tree holds open at once, the node's own session included) and
 Pebble builds and owns the children: each child runs in the parent's scope on
 the parent's model, under the same tool middleware, so the run's
 `pre_tool_use` hooks block inside a child, and the workflow's MCP tools
-(`[run.agent.mcps]`) reach a child through the parent's connection; a child
-never gets the question tool, project memory files, or skill directories; a
-child may delegate again within the open-session bound. `wait` blocks until the child finishes; a
+(`[run.agent.mcps]`) reach a child through the parent's connection. A child
+re-reads the parent's project memory files and re-discovers its skill
+directories, as Fabro's child does (`SubagentOptions::with_inherited_memory`
+and `with_inherited_skills`); it never gets the question tool; it may
+delegate again within the open-session bound. `wait` blocks until the child finishes; a
 child's failure is the parent's tool result and never fails the stage; a
 cancelled wait closes the child; the session's shutdown closes every child
 before the node releases its scope. Children are Pebble sessions, not
@@ -662,10 +671,10 @@ Attempt metrics include `pebble.prompts`, `pebble.usage` (five disjoint token
 buckets), `pebble.cost_usd_micros`, `pebble.inference_ms`, and `pebble.tool_ms`.
 They sum all settled prompt reports, including repair turns, failed prompts,
 and cancellation. Cost is a known subtotal: null means no response reported a
-cost. These metrics exclude the model calls a tool makes. They also exclude
-the compaction summary call, which the pinned Pebble leaves out of a prompt's
-usage; Petri reports it separately as `pebble.compactions`,
-`pebble.compaction_usage` and `pebble.compaction_cost_usd_micros` (below,
+cost. These metrics exclude the model calls a tool makes. They include the
+compaction summary call, which Pebble bills to the prompt that compacted;
+`pebble.compactions`, `pebble.compaction_usage` and
+`pebble.compaction_cost_usd_micros` break that share out (below,
 "Compaction"). ACP continues to report `acp.turns`.
 
 ### Model fallback
@@ -717,12 +726,12 @@ session's durable record resumes on the next route with Pebble's
 exist. When the failed request carried the prompt itself (the record ends
 with that user turn), the turn is dropped from the record and the prompt is
 sent again on the new route (`replay_prompt`). When work happened first (the
-record ends with tool results or an assistant turn), the next model is asked
-to continue from the state above with an agent-sourced message that names the
-tool results as already applied (`continue_turn`, the text is
-`fallback::CONTINUATION`); the tool that ran is not run again. Fabro rebuilds
-the session from the original prompt on every failover, which would repeat
-the tool; this is an accepted difference. A prompt node re-sends its
+record ends with tool results or an assistant turn), the next model continues
+that unfinished turn with no new input (`continue_turn`, Pebble's
+`continue_prompt`): it answers the committed tool results as they stand, and
+the tool that ran is not run again. Fabro rebuilds the session from the
+original prompt on every failover, which would repeat the tool; this is an
+accepted difference. A prompt node re-sends its
 messages, repair history included, on the next route (`replay_prompt`).
 
 Three retry mechanisms exist and each has one owner: the client's own
@@ -730,7 +739,10 @@ same-route retries (`PETRI_LLM_RETRY_ATTEMPTS`, default 3), Pebble's turn
 replay after a broken response stream (`PETRI_AGENT_TURN_REPLAY_ATTEMPTS`,
 unset keeps Pebble's default), and this chain, which starts only once both
 are spent. `PETRI_LLM_TIMEOUT_MS` bounds one client call, retries included;
-its expiry is a `timeout` and eligible.
+its expiry is a `timeout` and eligible. Both same-route mechanisms report on
+the agent's own event stream as Pebble's `LlmRetry` event, with `phase`
+`open` for a client retry and `consume` for a turn replay: Petri installs
+Pebble's `RetryEventObserver` on the client it builds.
 
 Recovery: nothing of a plan is durable. A run resumed after a crash starts
 the interrupted node's attempt again with a new plan at position 0, on the
@@ -873,14 +885,17 @@ Events, all `StepEvent::Custom`:
 - `kind = "fabro.skills.warning"`: `{ kind, node, firing, attempt, reason,
   path, message }` for each file or directory Pebble will skip:
   `malformed` (Pebble's parser rejects the file; the message says why in
-  the parser's words), `unreadable`, `missing_directory` (a
-  workflow-named directory that does not exist; a missing conventional
-  directory is ordinary and silent). The same text reaches the terminal as
-  a stderr line `skills: <path> <message>` of the node. Fabro and Pebble
-  skip such files silently; the audit mirrors Pebble's three parse
-  failures until Pebble reports skipped files itself.
+  the parser's words), `unreadable` (the file was found but could not be
+  read), `unsearchable` (a directory Pebble could not search) and
+  `missing_directory` (a workflow-named directory that does not exist; a
+  missing conventional directory is ordinary and silent). The same text
+  reaches the terminal as a stderr line `skills: <path> <message>` of the
+  node. Fabro skips such files silently. The first three come from Pebble's
+  own `SkillsDiscovered.skipped` report, read once per stage from the root
+  session; the fourth is Petri's own probe, because Pebble says nothing
+  about a directory that is not there.
 - `kind = "pebble"` envelopes carry Pebble's own `SkillsDiscovered`
-  (`profile`, `source_dirs`, `skills[{name, description}]`) and
+  (`profile`, `source_dirs`, `skills[{name, description}]`, `skipped`) and
   `SkillActivated` (`skill_name`, `source` = `slash` or `tool`), attributed
   to the node, firing, attempt and scope like every Pebble event.
 
@@ -919,17 +934,17 @@ resumed) starts again at `summary:high`, as after any lost session.
 
 Pebble emits `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
 and `CompactionCancelled` through the `pebble` envelope, and a
-`context_window` warning at the threshold. The pinned Pebble does not carry
-the summary call's usage on those events or in the prompt's usage, so after
-each prompt Petri reads the `Compaction` turns Pebble put in the history and
-emits, per compaction, a `StepEvent::Custom` with `kind = "fabro.compaction"`:
+`context_window` warning at the threshold. Those events do not carry the
+summary call's usage, so after each prompt Petri reads the `Compaction` turns
+Pebble put in the history and emits, per compaction, a `StepEvent::Custom`
+with `kind = "fabro.compaction"`:
 `{ kind, node, firing, attempt, session, reason, original_turn_count,
 preserved_turn_count, estimated_tokens_before, summary_token_estimate,
 tracked_file_count, summary_truncated, usage, cost_usd_micros }`. The attempt
 metrics `pebble.compactions`, `pebble.compaction_usage` and
-`pebble.compaction_cost_usd_micros` sum those. (Pebble `861d9bc`, one commit
-past the pin, folds the summary usage into the prompt's own usage; the
-recommended re-pin is recorded in `crates/fabro/acceptance/CONTRACT.md`.)
+`pebble.compaction_cost_usd_micros` sum those. Pebble also bills the summary
+call to the prompt that compacted, so these three are a breakdown of
+`pebble.usage` and `pebble.cost_usd_micros`, not an addition to them.
 
 ## Refused
 

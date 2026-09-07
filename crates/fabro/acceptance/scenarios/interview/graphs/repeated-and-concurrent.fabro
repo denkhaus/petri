@@ -1,0 +1,23 @@
+digraph RepeatedAndConcurrent {
+    graph [goal="Two gates asked at once in parallel branches, then one gate asked twice in a loop"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    fan [shape=component, label="Ask both"]
+    a [shape=hexagon, label="Branch A: proceed?", question_type="yes_no"]
+    b [shape=hexagon, label="Branch B: proceed?", question_type="yes_no"]
+    join [shape=tripleoctagon]
+    report [shape=parallelogram, script="cat > results.json", stdin_source="context.parallel.results"]
+    again [shape=hexagon, label="Ask again?", question_type="yes_no", max_visits=3]
+    tick [shape=parallelogram, script="echo asked >> asks.log && wc -l < asks.log | tr -d ' '"]
+    start -> fan
+    fan -> a
+    fan -> b
+    a -> join [label="[Y] Yes"]
+    a -> join [label="[N] No"]
+    b -> join [label="[Y] Yes"]
+    b -> join [label="[N] No"]
+    join -> report -> again
+    again -> tick [label="[Y] Yes"]
+    again -> exit [label="[N] No"]
+    tick -> again
+}

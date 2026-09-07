@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::{
-    AttemptAdmission, CoordinatorEvent, CoordinatorRecord, ExecutionId, GraphDigest, InvocationId,
-    InvocationResult, ParentCallKey, SandboxBinding, SecretBindings,
+    AttemptAdmission, CancelReason, CoordinatorEvent, CoordinatorRecord, ExecutionId, GraphDigest,
+    InvocationId, InvocationResult, ParentCallKey, SandboxBinding, SecretBindings,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,10 +24,12 @@ pub struct InvocationDeclaration {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InvocationState {
-    pub declaration: InvocationDeclaration,
-    pub executions:  Vec<ExecutionId>,
-    pub result:      Option<InvocationResult>,
-    pub cancelled:   bool,
+    pub declaration:   InvocationDeclaration,
+    pub executions:    Vec<ExecutionId>,
+    pub result:        Option<InvocationResult>,
+    pub cancelled:     bool,
+    /// Why the cancel was requested, when the requester said.
+    pub cancel_reason: Option<CancelReason>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -219,7 +221,7 @@ impl CoordinatorState {
                     self.calls.insert(call.clone(), *invocation);
                 }
                 self.invocations.insert(*invocation, InvocationState {
-                    declaration: InvocationDeclaration {
+                    declaration:   InvocationDeclaration {
                         id:              *invocation,
                         call:            call.clone(),
                         graph:           *graph,
@@ -228,9 +230,10 @@ impl CoordinatorState {
                         sandbox:         *sandbox,
                         admission:       admission.clone(),
                     },
-                    executions:  Vec::new(),
-                    result:      None,
-                    cancelled:   false,
+                    executions:    Vec::new(),
+                    result:        None,
+                    cancelled:     false,
+                    cancel_reason: None,
                 });
             }
             CoordinatorEvent::ExecutionDeclared {
@@ -323,11 +326,15 @@ impl CoordinatorState {
                     .expect("the invocation was checked above")
                     .result = Some(result.clone());
             }
-            CoordinatorEvent::InvocationCancelRequested { invocation, .. } => {
-                self.invocations
+            CoordinatorEvent::InvocationCancelRequested { invocation, reason } => {
+                let state = self
+                    .invocations
                     .get_mut(invocation)
-                    .ok_or(StateError::UnknownInvocation(*invocation))?
-                    .cancelled = true;
+                    .ok_or(StateError::UnknownInvocation(*invocation))?;
+                state.cancelled = true;
+                if state.cancel_reason.is_none() {
+                    state.cancel_reason.clone_from(reason);
+                }
             }
             CoordinatorEvent::RunFinished { status } => {
                 if self.run_status.is_some() {

@@ -703,7 +703,8 @@ impl Interviewer for ScriptedInterviewer {
             Err(InterviewError::new(format!(
                 "unused required interview script entries: {}",
                 unused.join("; ")
-            )))
+            ))
+            .with_report(json!({ "entries": summary })))
         }
     }
 }
