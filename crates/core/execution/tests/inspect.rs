@@ -289,6 +289,7 @@ impl Step for InvokeStep {
                 context: BTreeMap::from([("seed".into(), json!("from-parent"))]),
                 secrets: SecretBindings::None,
                 sandbox: SandboxMode::Isolated,
+                admission: None,
             })
             .await
         {

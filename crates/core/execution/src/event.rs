@@ -47,6 +47,19 @@ pub enum SandboxBinding {
     Isolated,
 }
 
+/// Bounded attempt concurrency for an invocation's steps: every attempt of
+/// every node in the invocation takes one of `max_parallel` slots from the
+/// gate `gate` before it starts and gives it back when the attempt ends. A
+/// backoff between attempts holds no slot. The gate is shared by every
+/// invocation the same parent execution declares under the same name, so a
+/// fork's branches share one limit while a repeated fork visit or a nested
+/// fork gets its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptAdmission {
+    pub gate:         SmolStr,
+    pub max_parallel: u32,
+}
+
 /// The one durable result returned by an invocation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InvocationResult {
@@ -82,6 +95,9 @@ pub enum CoordinatorEvent {
         context:         BTreeMap<SmolStr, Value>,
         secret_bindings: SecretBindings,
         sandbox:         SandboxBinding,
+        /// Bounded attempt concurrency, when the caller asked for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission:       Option<AttemptAdmission>,
     },
     ExecutionDeclared {
         execution:        ExecutionId,

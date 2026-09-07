@@ -67,6 +67,7 @@ impl Step for WaitForChild {
                 context: BTreeMap::new(),
                 secrets: SecretBindings::None,
                 sandbox: SandboxMode::Isolated,
+                admission: None,
             })
             .await
             .unwrap();

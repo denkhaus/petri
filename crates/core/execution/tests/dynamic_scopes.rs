@@ -459,6 +459,7 @@ impl Step for InheritDynamic {
                 context: BTreeMap::new(),
                 secrets: SecretBindings::None,
                 sandbox: SandboxMode::Inherit { scope: ctx.scope },
+                admission: None,
             })
             .await
             .expect("inherited child starts");

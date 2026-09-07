@@ -59,6 +59,7 @@ impl Step for WorkflowCallStep {
             context: config.context,
             secrets,
             sandbox: SandboxMode::Isolated,
+            admission: None,
         };
         let mut child = match client.start_or_attach(request).await {
             Ok(child) => child,

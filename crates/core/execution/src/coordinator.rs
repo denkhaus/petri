@@ -14,7 +14,7 @@ use ir::{
 };
 use runtime::RunRuntime;
 use smol_str::SmolStr;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinSet, spawn_blocking};
 
 use crate::client::StartRequest;
@@ -31,10 +31,47 @@ use crate::{
 
 pub const DEFAULT_MAX_INVOCATIONS: u32 = 1024;
 
+/// The hard ceiling on invocations in one run: the root plus every nested
+/// and branch invocation, finished, failed and cancelled ones included. No
+/// option raises it and none disables it; a lower limit is allowed.
+pub const MAX_INVOCATIONS: u32 = 10_000;
+
+/// A requested invocation limit the coordinator refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvocationLimitError {
+    #[error("the invocation limit cannot be disabled; it must be at least 1")]
+    Disabled,
+    #[error("the invocation limit {requested} is above the hard ceiling of {ceiling}")]
+    AboveCeiling { requested: u32, ceiling: u32 },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoordinatorOptions {
     pub max_invocations: u32,
     pub max_executions:  u32,
+}
+
+impl CoordinatorOptions {
+    /// Lower the invocation limit. Zero (no limit) and anything above
+    /// [`MAX_INVOCATIONS`] are refused.
+    pub fn with_max_invocations(mut self, limit: u32) -> Result<Self, InvocationLimitError> {
+        Self::check_limit(limit)?;
+        self.max_invocations = limit;
+        Ok(self)
+    }
+
+    fn check_limit(limit: u32) -> Result<(), InvocationLimitError> {
+        if limit == 0 {
+            return Err(InvocationLimitError::Disabled);
+        }
+        if limit > MAX_INVOCATIONS {
+            return Err(InvocationLimitError::AboveCeiling {
+                requested: limit,
+                ceiling:   MAX_INVOCATIONS,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Default for CoordinatorOptions {
@@ -60,8 +97,13 @@ pub enum CoordinatorError {
     UnknownGraph(GraphDigest),
     #[error("the root invocation is already declared with a different request")]
     RootRequestMismatch,
-    #[error("maximum total invocations per run reached")]
-    InvocationLimit,
+    #[error(
+        "the run declares {total} invocations, above its limit of {limit}; the limit cannot be \
+         lowered below what the run already holds"
+    )]
+    InvocationLimit { total: u64, limit: u32 },
+    #[error(transparent)]
+    InvalidInvocationLimit(#[from] InvocationLimitError),
     #[error("the calling firing has no inheritable sandbox")]
     NoInheritableSandbox,
     #[error("sandbox lease {lease} does not match its invocation graph")]
@@ -279,6 +321,10 @@ pub struct Coordinator {
     /// as its ledger.
     resources:        Arc<Mutex<ResourceStore>>,
     execution_leases: BTreeMap<ExecutionId, ExecutionLeases>,
+    /// Attempt gates by parent execution and gate name: the slots every
+    /// child invocation declared under that name shares. Rebuilt on demand,
+    /// so a resume recovers the accounting from the attempts it redispatches.
+    gates:            BTreeMap<(ExecutionId, SmolStr), Arc<Semaphore>>,
     #[cfg(test)]
     release_gate:     Option<Arc<tests::ReleaseGate>>,
 }
@@ -291,6 +337,7 @@ impl Coordinator {
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
     ) -> Result<Self, CoordinatorError> {
+        CoordinatorOptions::check_limit(options.max_invocations)?;
         let keys = middleware.iter().map(|item| item.key()).collect();
         let store = CoordinatorStore::create(runtime.run_dir(), keys)?;
         let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
@@ -305,11 +352,19 @@ impl Coordinator {
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
     ) -> Result<(Self, bool), CoordinatorError> {
+        CoordinatorOptions::check_limit(options.max_invocations)?;
         let (mut store, torn) = CoordinatorStore::resume(runtime.run_dir())?;
         let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
         let keys: Vec<MiddlewareKey> = middleware.iter().map(|item| item.key()).collect();
         if store.state().middleware_chain != keys {
             return Err(StoreError::State(crate::StateError::MiddlewareChain).into());
+        }
+        let total = store.state().invocations.len() as u64;
+        if total > u64::from(options.max_invocations) {
+            return Err(CoordinatorError::InvocationLimit {
+                total,
+                limit: options.max_invocations,
+            });
         }
         validate_resources(&mut store, &resources)?;
         for lease in store.state().invocations.values().filter_map(|invocation| {
@@ -358,9 +413,15 @@ impl Coordinator {
             last_root_report: None,
             resources,
             execution_leases: BTreeMap::new(),
+            gates: BTreeMap::new(),
             #[cfg(test)]
             release_gate: None,
         }
+    }
+
+    /// The invocation limit this run enforces.
+    pub fn max_invocations(&self) -> u32 {
+        self.options.max_invocations
     }
 
     /// Register an observer of every execution's records and every
@@ -435,6 +496,7 @@ impl Coordinator {
                 context,
                 secret_bindings: SecretBindings::None,
                 sandbox: SandboxBinding::Isolated,
+                admission: None,
             })?;
         }
 
@@ -624,6 +686,7 @@ impl Coordinator {
                     let done = result.expect("the execution set is not empty")?;
                     self.active_handles.remove(&done.execution);
                     self.execution_leases.remove(&done.execution);
+                    self.gates.retain(|(parent, _), _| *parent != done.execution);
                     Self::check_report(done.execution, &done.report)?;
                     self.settle_descendants(done.invocation, running).await?;
                     completed.insert(done.invocation, done);
@@ -986,6 +1049,9 @@ impl Coordinator {
             .observe(fold)
             .with_decision_resolver(pipeline.clone())
             .with_capability(client);
+        if let Some(slots) = self.attempt_slots(invocation) {
+            driver = driver.with_attempt_slots(slots);
+        }
         for observer in &self.observers {
             driver = driver.observe(Arc::new(crate::AddressedObserver::new(
                 execution,
@@ -1172,6 +1238,7 @@ impl Coordinator {
             if declaration.graph != request.request.graph
                 || declaration.context != request.request.context
                 || declaration.secret_bindings != request.request.secrets
+                || declaration.admission != request.request.admission
                 || !sandbox_matches
             {
                 return Err(InvokeError::RequestMismatch);
@@ -1203,8 +1270,15 @@ impl Coordinator {
                 return Ok(StartOutcome::Requeue { previous });
             }
         }
-        if self.store.state().invocations.len() >= self.options.max_invocations as usize {
-            return Err(InvokeError::InvocationLimit);
+        let total = self.store.state().invocations.len() as u64;
+        if total >= u64::from(self.options.max_invocations) {
+            return Err(InvokeError::InvocationLimit {
+                total,
+                limit: self.options.max_invocations,
+                parent: key.parent,
+                firing: key.firing,
+                slot: key.slot.clone(),
+            });
         }
         let invocation = self.store.state().next_invocation_id();
         let sandbox = match request.request.sandbox {
@@ -1227,6 +1301,7 @@ impl Coordinator {
             context: request.request.context.clone(),
             secret_bindings: request.request.secrets.clone(),
             sandbox,
+            admission: request.request.admission.clone(),
         })
         .map_err(invoke_error)?;
         Ok(StartOutcome::Attach {
@@ -1375,6 +1450,22 @@ impl Coordinator {
             }
         }
         Ok(())
+    }
+
+    /// The attempt slots an invocation's driver takes, when its declaration
+    /// bounds attempt concurrency: one semaphore per parent execution and
+    /// gate name, created with the first child that names it.
+    fn attempt_slots(&mut self, invocation: InvocationId) -> Option<Arc<Semaphore>> {
+        let declaration = &self.store.state().invocations[&invocation].declaration;
+        let admission = declaration.admission.as_ref()?;
+        let parent = declaration.call.as_ref()?.parent;
+        let limit = usize::try_from(admission.max_parallel.max(1)).unwrap_or(usize::MAX);
+        Some(
+            self.gates
+                .entry((parent, admission.gate.clone()))
+                .or_insert_with(|| Arc::new(Semaphore::new(limit)))
+                .clone(),
+        )
     }
 
     fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, CoordinatorError> {

@@ -85,6 +85,7 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
                 context:         context.clone(),
                 secret_bindings: SecretBindings::None,
                 sandbox:         SandboxBinding::Isolated,
+                admission: None,
             })
             .expect("invocation declaration persists");
         store
@@ -242,6 +243,7 @@ impl Step for InvokeStep {
                 } else {
                     SandboxMode::Isolated
                 },
+                admission: None,
             })
             .await
         {

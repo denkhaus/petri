@@ -5,25 +5,61 @@ use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
-    CallSite, GraphDigest, InvocationId, InvocationResult, InvocationStatus, SandboxMode,
-    SecretBindings,
+    AttemptAdmission, CallSite, ExecutionId, GraphDigest, InvocationId, InvocationResult,
+    InvocationStatus, SandboxMode, SecretBindings,
 };
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvocationRequest {
-    pub site:    CallSite,
-    pub graph:   GraphDigest,
-    pub context: BTreeMap<SmolStr, Value>,
-    pub secrets: SecretBindings,
-    pub sandbox: SandboxMode,
+    pub site:      CallSite,
+    pub graph:     GraphDigest,
+    pub context:   BTreeMap<SmolStr, Value>,
+    pub secrets:   SecretBindings,
+    pub sandbox:   SandboxMode,
+    /// Bounded attempt concurrency for the child's steps, shared with every
+    /// sibling the same parent execution declares under the same gate name.
+    /// `None` leaves the child's attempts unbounded.
+    pub admission: Option<AttemptAdmission>,
+}
+
+impl InvocationRequest {
+    /// A request with no attempt admission bound.
+    pub fn new(
+        site: CallSite,
+        graph: GraphDigest,
+        context: BTreeMap<SmolStr, Value>,
+        secrets: SecretBindings,
+        sandbox: SandboxMode,
+    ) -> Self {
+        Self {
+            site,
+            graph,
+            context,
+            secrets,
+            sandbox,
+            admission: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InvokeError {
     #[error("unknown invocation graph {0}")]
     UnknownGraph(GraphDigest),
-    #[error("the invocation limit has been reached")]
-    InvocationLimit,
+    /// The run declared as many invocations as it may. `total` counts every
+    /// invocation ever declared in the run, finished ones included; `parent`
+    /// and `slot` name the call that was refused.
+    #[error(
+        "the run-wide invocation limit is reached: {total} of {limit} invocations are declared, \
+         so execution {parent} firing {firing} cannot start `{slot}`"
+    )]
+    InvocationLimit {
+        total:  u64,
+        limit:  u32,
+        parent: ExecutionId,
+        firing: ir::FiringId,
+        slot:   SmolStr,
+    },
     #[error("the call site is already attached to a different invocation request")]
     RequestMismatch,
     #[error("the calling firing has no inheritable sandbox")]

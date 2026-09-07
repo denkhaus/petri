@@ -1023,6 +1023,12 @@ pub struct RunPolicy {
     /// blocked. `None` disables the circuit breaker. At least 1 when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_restart_signature_limit: Option<NonZeroU32>,
+    /// The most invocations one run may declare: the root plus every nested
+    /// and branch invocation, finished ones included. A host clamps it to
+    /// its own hard ceiling and may lower it; `None` leaves the host's
+    /// default. Durable with the graph, so a resume enforces the same limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_invocations:              Option<NonZeroU32>,
 }
 
 impl RunPolicy {

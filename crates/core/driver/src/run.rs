@@ -25,7 +25,7 @@ use ir::{
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio::time;
 use tracing::Instrument as _;
@@ -397,6 +397,12 @@ enum Signal {
         decision:    AttemptDecision,
     },
     /// The host's `prepare_result` answered for a finished attempt.
+    /// An attempt took one of the execution's attempt slots and may start.
+    SlotAcquired {
+        firing:  FiringId,
+        attempt: Attempt,
+        permit:  OwnedSemaphorePermit,
+    },
     ResultPrepared {
         firing:  FiringId,
         attempt: Attempt,
@@ -477,6 +483,10 @@ struct Task {
     workers:  JoinSet<()>,
     deadline: Option<AbortHandle>,
     reason:   Option<CancelReason>,
+    /// The attempt slot this attempt holds, released when the task ends.
+    /// Held, never read: dropping the task drops the permit.
+    #[expect(dead_code, reason = "the field exists to be dropped with the task")]
+    permit:   Option<OwnedSemaphorePermit>,
     /// The attempt's active-work budget, when the driver enforces it.
     budget:   Option<AttemptBudget>,
 }
@@ -516,6 +526,13 @@ struct ScopeAcquire {
     join: AbortHandle,
 }
 
+/// A dispatched attempt that is waiting for one of the execution's attempt
+/// slots.
+struct GatedStart {
+    resolved: ResolvedFiring,
+    wait:     AbortHandle,
+}
+
 pub struct Driver {
     engine:           EngineState,
     executor:         Arc<dyn Executor>,
@@ -533,6 +550,12 @@ pub struct Driver {
     next_acquire_id:  u64,
     acquire_failures: HashMap<ScopeId, String>,
     pending_starts:   HashMap<ScopeId, Vec<ResolvedFiring>>,
+    /// Bounded attempt concurrency for this execution: every attempt takes a
+    /// slot before it starts and holds it until it ends, so a backoff between
+    /// attempts holds none. `None` leaves attempts unbounded.
+    attempt_slots:    Option<Arc<Semaphore>>,
+    /// Attempts waiting for a slot, with the task that awaits it.
+    gated:            HashMap<FiringId, GatedStart>,
     /// Deliveries that arrived before execution admission resolved. Unlike
     /// [`Forward`], every buffered delivery carries an ack.
     early_deliveries: HashMap<FiringId, Vec<(Control, DeliverAck)>>,
@@ -580,6 +603,7 @@ impl Drop for Driver {
         for task in self.tasks.values_mut() {
             task.workers.abort_all();
         }
+        self.gated.clear();
         self.rx.close();
         let (_, empty) = mpsc::channel(1);
         let mut signals = mem::replace(&mut self.rx, empty);
@@ -738,6 +762,8 @@ impl Driver {
             next_acquire_id: 0,
             acquire_failures: HashMap::new(),
             pending_starts: HashMap::new(),
+            attempt_slots: None,
+            gated: HashMap::new(),
             early_deliveries: HashMap::new(),
             pending_forwards: HashMap::new(),
             pending_failures: HashMap::new(),
@@ -768,6 +794,17 @@ impl Driver {
     #[must_use]
     pub fn observe(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
+        self
+    }
+
+    /// Bound this execution's attempt concurrency: every attempt of every
+    /// node takes one of `slots` before it is dispatched and releases it when
+    /// the attempt ends. A retry backoff holds no slot, so a queued attempt
+    /// runs while another waits out its backoff. Shared slots bound several
+    /// executions together.
+    #[must_use]
+    pub fn with_attempt_slots(mut self, slots: Arc<Semaphore>) -> Self {
+        self.attempt_slots = Some(slots);
         self
     }
 
@@ -1077,6 +1114,11 @@ impl Driver {
             Signal::HardDeadline { firing, attempt } => {
                 self.on_hard_deadline(firing, attempt).await;
             }
+            Signal::SlotAcquired {
+                firing,
+                attempt,
+                permit,
+            } => self.on_slot_acquired(firing, attempt, permit),
             Signal::AcquireFinished { scope, id, result } => {
                 self.on_acquire_finished(scope, id, result);
             }
@@ -1687,6 +1729,42 @@ impl Driver {
             self.finish_instead_of_resuming(firing, attempt, node);
             return;
         }
+        if let Some(slots) = self.attempt_slots.clone()
+            && !self.gated.contains_key(&firing)
+        {
+            // Wait for a slot off the loop; the start continues from
+            // `on_slot_acquired`. A stop that lands first settles the attempt
+            // there, and the slot is never taken.
+            let tx = self.tx.clone();
+            let wait = self.background.spawn(async move {
+                let Ok(permit) = slots.acquire_owned().await else {
+                    return;
+                };
+                let _ = tx
+                    .send(Signal::SlotAcquired {
+                        firing,
+                        attempt,
+                        permit,
+                    })
+                    .await;
+            });
+            self.gated.insert(firing, GatedStart {
+                resolved: resolved.clone(),
+                wait,
+            });
+            return;
+        }
+        self.dispatch_admitted(resolved, None);
+    }
+
+    /// An attempt has its slot, or needs none: acknowledge and start it.
+    fn dispatch_admitted(
+        &mut self,
+        resolved: &ResolvedFiring,
+        permit: Option<OwnedSemaphorePermit>,
+    ) {
+        let (firing, attempt) = (resolved.id(), resolved.attempt());
+        let live = self.engine.firing(firing);
         // A started firing is already acknowledged in the loaded log; a second
         // `StepStarted` would be a replay divergence.
         let started = live.is_some_and(|state| state.started);
@@ -1704,9 +1782,64 @@ impl Driver {
             self.fail_now(firing, attempt, &message, steps::SECRET_UNAVAILABLE_CLASS);
             return;
         }
-        self.start(resolved);
+        self.start(resolved, permit);
         self.flush_early_deliveries(firing);
         self.flush_pending_forwards(firing);
+    }
+
+    fn on_slot_acquired(
+        &mut self,
+        firing: FiringId,
+        attempt: Attempt,
+        permit: OwnedSemaphorePermit,
+    ) {
+        let Some(gated) = self.gated.remove(&firing) else {
+            return;
+        };
+        let current = self
+            .engine
+            .firing(firing)
+            .is_some_and(|live| live.attempt == attempt && !live.cancelling);
+        if !current || gated.resolved.attempt() != attempt {
+            drop(permit);
+            return;
+        }
+        self.dispatch_admitted(&gated.resolved, Some(permit));
+    }
+
+    /// Settle an attempt that a stop reached while it waited for a slot: the
+    /// wait is abandoned and the attempt finishes `Cancelled` without having
+    /// started, like one whose scope acquisition was still pending.
+    fn finish_gated_start(&mut self, firing: FiringId, ctl: &Control) -> bool {
+        let Some(gated) = self.gated.remove(&firing) else {
+            return false;
+        };
+        gated.wait.abort();
+        self.reject_pending_forwards(firing);
+        self.pending_failures.remove(&firing);
+        let attempt = gated.resolved.attempt();
+        tracing::debug!(
+            firing = firing.raw(),
+            attempt = attempt.raw(),
+            control = if matches!(ctl, Control::Kill) {
+                "kill"
+            } else {
+                "cancel"
+            },
+            "step cancelled while waiting for an attempt slot"
+        );
+        let outcome = Outcome::new(Status::Cancelled, Value::Null);
+        let tx = self.tx.clone();
+        self.background.spawn(async move {
+            let _ = tx
+                .send(Signal::Finished {
+                    firing,
+                    attempt,
+                    outcome,
+                })
+                .await;
+        });
+        true
     }
 
     /// Finish a cancelling firing that resume would otherwise re-spawn: one
@@ -1943,7 +2076,7 @@ impl Driver {
 
     // ── Steps ──────────────────────────────────────────────────────────────
 
-    fn start(&mut self, resolved: &ResolvedFiring) {
+    fn start(&mut self, resolved: &ResolvedFiring, permit: Option<OwnedSemaphorePermit>) {
         let firing = resolved.id();
         let attempt = resolved.attempt();
         let scope = resolved.scope();
@@ -2124,6 +2257,7 @@ impl Driver {
             deadline: None,
             reason: None,
             budget,
+            permit,
         });
         self.arm_budget(firing);
     }
@@ -2293,7 +2427,9 @@ impl Driver {
     /// send lands: the deadline is what guarantees progress.
     fn stop_step(&mut self, firing: FiringId, ctl: Control, reason: CancelReason) {
         let Some(task) = self.tasks.get_mut(&firing) else {
-            self.finish_pending_start(firing, &ctl);
+            if !self.finish_gated_start(firing, &ctl) {
+                self.finish_pending_start(firing, &ctl);
+            }
             return;
         };
         // First reason wins: a timeout that beat a cancel makes this `TimedOut`.

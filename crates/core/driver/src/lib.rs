@@ -29,4 +29,4 @@ pub use run::{
     RunConfig, RunGuard, RunHandle, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
     ScopeLeases,
 };
-pub use view::{BranchMap, BranchRef, BranchRole, FiringView};
+pub use view::{BRANCH_ROLE_META, BranchMap, BranchRef, BranchRole, FiringView};

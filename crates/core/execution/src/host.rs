@@ -191,7 +191,8 @@ pub async fn run_configured(
     let secrets = run_runtime.secret_provider();
     let mut chain = policy_middleware(&run.graph);
     chain.extend(run.middleware);
-    let mut coordinator = Coordinator::create(run_runtime, chain, CoordinatorOptions::default())?;
+    let options = coordinator_options(&run.graph)?;
+    let mut coordinator = Coordinator::create(run_runtime, chain, options)?;
     for observer in run.observers {
         coordinator = coordinator.observe(observer);
     }
@@ -201,6 +202,19 @@ pub async fn run_configured(
     }
     with_handle(coordinator.handle(), secrets);
     finish_root(rt, coordinator, digest, run.graph).await
+}
+
+/// The coordinator options a root graph's run policy asks for: its
+/// invocation limit when it declares one, else the default. A limit above
+/// the hard ceiling or a disabled limit is refused before the run starts.
+pub fn coordinator_options(graph: &Graph) -> Result<CoordinatorOptions, HostError> {
+    let options = CoordinatorOptions::default();
+    match graph.policy.max_invocations {
+        Some(limit) => Ok(options
+            .with_max_invocations(limit.get())
+            .map_err(CoordinatorError::from)?),
+        None => Ok(options),
+    }
 }
 
 fn register(coordinator: &mut Coordinator, graph: &Graph) -> Result<GraphDigest, HostError> {
@@ -242,10 +256,12 @@ pub async fn resume_configured(
         .map(policy_middleware)
         .unwrap_or_default();
     chain.extend(middleware);
+    let options = root_graph
+        .as_ref()
+        .map_or(Ok(CoordinatorOptions::default()), coordinator_options)?;
     let run_runtime = rt.prepare_run(&run_dir);
     let secrets = run_runtime.secret_provider();
-    let (mut coordinator, torn) =
-        Coordinator::resume(run_runtime, chain, CoordinatorOptions::default())?;
+    let (mut coordinator, torn) = Coordinator::resume(run_runtime, chain, options)?;
     if torn {
         tracing::warn!("truncated an EOF-torn coordinator record before resume");
     }

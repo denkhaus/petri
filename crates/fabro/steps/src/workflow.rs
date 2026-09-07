@@ -220,6 +220,7 @@ impl Step for WorkflowStep {
             context: parent_context.clone(),
             secrets: SecretBindings::Inherit,
             sandbox: SandboxMode::Inherit { scope: ctx.scope },
+            admission: None,
         };
         let mut handle = match client.start_or_attach(request).await {
             Ok(handle) => handle,

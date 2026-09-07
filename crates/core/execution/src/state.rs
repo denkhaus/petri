@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::{
-    CoordinatorEvent, CoordinatorRecord, ExecutionId, GraphDigest, InvocationId, InvocationResult,
-    ParentCallKey, SandboxBinding, SecretBindings,
+    AttemptAdmission, CoordinatorEvent, CoordinatorRecord, ExecutionId, GraphDigest, InvocationId,
+    InvocationResult, ParentCallKey, SandboxBinding, SecretBindings,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -18,6 +18,8 @@ pub struct InvocationDeclaration {
     pub context:         BTreeMap<SmolStr, Value>,
     pub secret_bindings: SecretBindings,
     pub sandbox:         SandboxBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission:       Option<AttemptAdmission>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -196,6 +198,7 @@ impl CoordinatorState {
                 context,
                 secret_bindings,
                 sandbox,
+                admission,
             } => {
                 if !self.graphs.contains(graph) {
                     return Err(StateError::UnknownGraph(*graph));
@@ -223,6 +226,7 @@ impl CoordinatorState {
                         context:         context.clone(),
                         secret_bindings: secret_bindings.clone(),
                         sandbox:         *sandbox,
+                        admission:       admission.clone(),
                     },
                     executions:  Vec::new(),
                     result:      None,

@@ -80,6 +80,13 @@ pub struct BranchRef {
     pub index: u32,
 }
 
+/// The `Node::meta` key a frontend sets when it lowered a branch into a graph
+/// of its own: `{ "fork": <node id in the caller's graph>, "index": <n> }`.
+/// The node then plays [`BranchRole::Member`] of that branch even though its
+/// own graph has no fork, so hosts and events see the same role a branch that
+/// stayed in the caller's graph would have.
+pub const BRANCH_ROLE_META: &str = "branch_role";
+
 /// The branch roles of every node in a graph, computed once per graph shape.
 ///
 /// A fork is a node with two or more routing groups. Each group's arms start
@@ -101,6 +108,11 @@ pub struct BranchMap {
 impl BranchMap {
     pub fn of(graph: &Graph) -> Self {
         let mut roles: BTreeMap<NodeId, BranchRole> = BTreeMap::new();
+        for node in &graph.nodes {
+            if let Some(declared) = declared_role(&node.meta) {
+                roles.insert(node.id, declared);
+            }
+        }
         for fork in &graph.nodes {
             let groups = &fork.routing.groups;
             if groups.len() < 2 {
@@ -186,6 +198,17 @@ impl BranchMap {
     pub fn covers(&self, graph: &Graph) -> bool {
         self.nodes == graph.nodes.len()
     }
+}
+
+/// The role a frontend declared under [`BRANCH_ROLE_META`], if any.
+fn declared_role(meta: &Value) -> Option<BranchRole> {
+    let role = meta.get(BRANCH_ROLE_META)?;
+    let fork = u32::try_from(role.get("fork")?.as_u64()?).ok()?;
+    let index = u32::try_from(role.get("index")?.as_u64()?).ok()?;
+    Some(BranchRole::Member(BranchRef {
+        fork: NodeId::new(fork),
+        index,
+    }))
 }
 
 /// Whether an edge advances within the execution: not a back edge, not a

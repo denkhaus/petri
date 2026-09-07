@@ -41,6 +41,7 @@ impl Step for HandleChildFailure {
                 context: BTreeMap::new(),
                 secrets: SecretBindings::None,
                 sandbox: SandboxMode::Isolated,
+                admission: None,
             })
             .await
             .expect("child starts");
