@@ -38,6 +38,7 @@ pub use workflow_toml::{
 
 use crate::kinds::{
     AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
+    STAGE_KIND,
     WAIT_KIND, WORKFLOW_KIND,
 };
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
@@ -255,6 +256,7 @@ fn lower_nested(
         prepare_envs: BTreeMap::new(),
     };
     ctx.stack.push(file.to_string());
+    let workflow_name = workflow.name.clone();
 
     ctx.graph_attrs(&mut workflow);
     let Some(structure) = ctx.structure(&workflow) else {
@@ -351,6 +353,10 @@ fn lower_nested(
     graph
         .params
         .insert(SmolStr::new("goal"), Value::String(goal));
+    graph.params.insert(
+        SmolStr::new("fabro_workflow"),
+        Value::String(workflow_name),
+    );
 
     let report = ir::check(&graph);
     for error in &report.errors {
@@ -903,7 +909,17 @@ impl Ctx<'_> {
         self.b.set_meta(id, meta);
 
         let (step, timeout) = match kind {
-            Kind::Start | Kind::Exit | Kind::Conditional => (None, STRUCTURAL_TIMEOUT),
+            Kind::Conditional => (None, STRUCTURAL_TIMEOUT),
+            // `start` and `exit` run the stage step: it records the scope's
+            // environment for sandbox-placed hooks and fires the run-level
+            // hooks (`sandbox_ready`, `run_start`, `run_complete`).
+            Kind::Start | Kind::Exit => (
+                Some(StepRef::new(
+                    STAGE_KIND,
+                    json!({ "node": node.id, "kind": kind.name(), "label": label }),
+                )),
+                STRUCTURAL_TIMEOUT,
+            ),
             Kind::FanIn => {
                 if node
                     .attrs
@@ -1729,7 +1745,16 @@ impl Ctx<'_> {
                 false
             }
         };
-        let policy = res.policy;
+        // A `start` that fails (a blocking `run_start` hook) ends the run, as
+        // Fabro's blocked run does; it never routes on.
+        let policy = if res.kind == Kind::Start {
+            FailurePolicy {
+                on_failure:           Policy::Exit,
+                on_retries_exhausted: Policy::Exit,
+            }
+        } else {
+            res.policy
+        };
         let mut lowered = Vec::with_capacity(edges.len());
         for (index, edge) in edges.iter().enumerate() {
             let Some(mut to) = self.ids.get(&edge.to).copied() else {

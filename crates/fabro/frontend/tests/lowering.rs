@@ -33,8 +33,9 @@ fn shapes_lower_to_their_step_kinds() {
         h -> w [label="[Y] Yes"]
         w -> d -> m -> exit
     "#));
-    assert_eq!(node(&graph, "start").step.kind.as_str(), "noop");
-    assert_eq!(node(&graph, "exit").step.kind.as_str(), "noop");
+    assert_eq!(node(&graph, "start").step.kind, STAGE_KIND);
+    assert_eq!(node(&graph, "start").step.config["kind"], json!("start"));
+    assert_eq!(node(&graph, "exit").step.kind, STAGE_KIND);
     assert_eq!(node(&graph, "d").step.kind.as_str(), "noop");
     assert_eq!(node(&graph, "a").step.kind, AGENT_KIND);
     assert_eq!(node(&graph, "p").step.kind, PROMPT_KIND);

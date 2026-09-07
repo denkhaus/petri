@@ -20,6 +20,9 @@ pub const HUMAN_KIND: StepKindId = StepKindId::new_static("fabro/human");
 pub const WAIT_KIND: StepKindId = StepKindId::new_static("fabro/wait");
 /// A manager loop (`house`): a nested workflow.
 pub const WORKFLOW_KIND: StepKindId = StepKindId::new_static("fabro/workflow");
+/// A structural stage (`start`, `exit`): runs nothing, records where its scope
+/// runs so hooks placed in the sandbox find it, and fires the run-level hooks.
+pub const STAGE_KIND: StepKindId = StepKindId::new_static("fabro/stage");
 /// Reserved name of the synthetic node that enforces goal gates.
 pub const GOAL_CHECK_NODE: &str = "goal_check";
 /// The most repair turns one agent step accepts from configuration.
@@ -33,6 +36,7 @@ pub const ALL: &[&StepKindId] = &[
     &HUMAN_KIND,
     &WAIT_KIND,
     &WORKFLOW_KIND,
+    &STAGE_KIND,
 ];
 
 /// The closed set of stage outcomes a Fabro step may report, and the only
