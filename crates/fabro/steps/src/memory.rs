@@ -16,6 +16,8 @@
 //! uses [`read`], a small mirror of the loader's rules kept here until Pebble
 //! offers one. Delete `read` when it does.
 
+use std::collections::HashSet;
+use std::iter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -77,11 +79,7 @@ pub fn candidates(
                 Some(depth) => {
                     // Root first: `../..`, then `..`, then the working dir.
                     for level in (0..=depth).rev() {
-                        dirs.push(
-                            std::iter::repeat_n("..", level)
-                                .collect::<Vec<_>>()
-                                .join("/"),
-                        );
+                        dirs.push(iter::repeat_n("..", level).collect::<Vec<_>>().join("/"));
                     }
                 }
                 None => dirs.push(String::new()),
@@ -161,7 +159,7 @@ pub struct Document {
 /// loader; see the module note.
 pub async fn read(env: &dyn ExecEnv, paths: &[String]) -> Vec<Document> {
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut remaining = BUDGET_BYTES;
     for path in paths {
         if remaining == 0 {

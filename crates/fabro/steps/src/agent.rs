@@ -32,7 +32,7 @@ use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::sessions::{Retained, SessionService};
-use crate::stage::RunInfo;
+use crate::stage::{self, RunInfo};
 
 pub const KIND: StepKindId = AGENT_KIND;
 
@@ -223,7 +223,7 @@ impl Step for AgentStep {
             Err(message) => return fail(message, "bad_config"),
         };
         let started = Instant::now();
-        crate::stage::record(&ctx);
+        stage::record(&ctx);
         let run_id = ctx
             .capability::<RunInfo>()
             .map(|run| run.run_id.clone())
@@ -254,11 +254,10 @@ impl Step for AgentStep {
                     .await;
                     retained = None;
                 }
-                Some(_) => {}
                 None if sessions.as_ref().is_some_and(|s| s.lost(&thread)) => {
                     resolved = config.resolve(true);
                 }
-                None => {}
+                _ => {}
             }
         }
         if config.backend == AgentBackend::Acp

@@ -26,6 +26,8 @@ pub mod executors;
 pub mod tools;
 
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -193,7 +195,7 @@ pub struct LocalHooks {
     http:   executors::HttpClients,
     /// A hook that runs work inside another hook's work must not fire hooks
     /// again: the reference never does.
-    nested: std::sync::atomic::AtomicBool,
+    nested: AtomicBool,
 }
 
 impl Default for LocalHooks {
@@ -210,7 +212,7 @@ impl LocalHooks {
             client: Mutex::new(None),
             envs,
             http: executors::HttpClients::default(),
-            nested: std::sync::atomic::AtomicBool::new(false),
+            nested: AtomicBool::new(false),
         }
     }
 
@@ -322,7 +324,7 @@ impl LocalHooks {
         let Some(config) = self.config() else {
             return (Decision::Proceed, report);
         };
-        if self.nested.load(std::sync::atomic::Ordering::Acquire) {
+        if self.nested.load(Ordering::Acquire) {
             return (Decision::Proceed, report);
         }
         let matched: Vec<&Configured> = config
@@ -357,8 +359,7 @@ impl LocalHooks {
         let mut merged = Decision::Proceed;
         for hook in matched {
             let started = Instant::now();
-            self.nested
-                .store(true, std::sync::atomic::Ordering::Release);
+            self.nested.store(true, Ordering::Release);
             let result = executors::execute(
                 &hook.definition,
                 context,
@@ -367,8 +368,7 @@ impl LocalHooks {
                 &self.http,
             )
             .await;
-            self.nested
-                .store(false, std::sync::atomic::Ordering::Release);
+            self.nested.store(false, Ordering::Release);
             let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut run = HookRun {
                 name:        hook.definition.name.clone(),
@@ -584,7 +584,7 @@ impl LocalHooks {
         context.failure_reason = outcome
             .status
             .failure_info()
-            .map(|info| info.message.to_string())
+            .map(|info| info.message.clone())
             .or_else(|| {
                 outcome
                     .output
@@ -718,12 +718,14 @@ impl HookService for LocalHooks {
             return HookReport::proceed(request.point);
         }
         match request.point {
-            HookPoint::BeforeVisit | HookPoint::AfterAttempt => HookReport::proceed(request.point),
+            HookPoint::BeforeVisit
+            | HookPoint::AfterAttempt
+            | HookPoint::ForkStarted
+            | HookPoint::ForkCompleted => HookReport::proceed(request.point),
             HookPoint::BeforeAttempt => self.before_attempt(view).await,
             HookPoint::Retrying => self.retrying(view).await,
             HookPoint::AfterVisit => self.after_visit(view, request.outcome.as_ref()).await,
             HookPoint::RouteSelected => self.route_selected(view, &request.routes).await,
-            HookPoint::ForkStarted | HookPoint::ForkCompleted => HookReport::proceed(request.point),
             HookPoint::BeforeToolUse | HookPoint::AfterToolUse | HookPoint::AfterToolFailure => {
                 self.tool_point(request.point, view, &request.payload).await
             }
@@ -811,8 +813,8 @@ pub fn empty_map() -> Map<String, Value> {
     Map::new()
 }
 
-impl std::fmt::Debug for LocalHooks {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for LocalHooks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalHooks")
             .field("configured", &self.is_configured())
             .finish_non_exhaustive()

@@ -10,6 +10,7 @@ use std::{env, fs, process};
 
 use frontend::print::print_expr;
 use frontend::{CompileInputs, Frontend};
+use frontend_fabro::hooks::SETTINGS_HOOKS_VAR;
 use frontend_fabro::kinds::{
     AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
@@ -1226,12 +1227,12 @@ fn unused_attributes_warn_and_unbounded_agent_repairs_are_rejected() {
         a [prompt="x", frobnicate="yes"]
         start -> a -> exit
     "#));
-    for code in ["fabro.unknown_attribute"] {
-        assert!(
-            diags.iter().any(|diagnostic| diagnostic.code == code),
-            "{code} in {diags:?}"
-        );
-    }
+    assert!(
+        diags
+            .iter()
+            .any(|diagnostic| diagnostic.code == "fabro.unknown_attribute"),
+        "{diags:?}"
+    );
     assert!(
         codes(&dot(r#"
             a [prompt="x", output_retries=101]
@@ -1750,7 +1751,7 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
         ),
     ]);
     let inputs = CompileInputs::new().with_var(
-        frontend_fabro::hooks::SETTINGS_HOOKS_VAR,
+        SETTINGS_HOOKS_VAR,
         "[[run.hooks]]\nevent = \"run_start\"\nscript = \"user-start\"\nsandbox = false\n",
     );
     let lowered = frontend_fabro::load(

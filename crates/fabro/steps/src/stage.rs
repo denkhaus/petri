@@ -22,7 +22,7 @@ use serde::Deserialize;
 use steps::{Step, StepCtx};
 
 use crate::LocalHooksHandle;
-use crate::hooks::{BLOCKED_CLASS, report_event};
+use crate::hooks::{BLOCKED_CLASS, Decision, report_event};
 use crate::outcome::Stage;
 
 pub const KIND: StepKindId = STAGE_KIND;
@@ -105,9 +105,10 @@ pub struct StageStep;
 
 /// The run-level hooks a stage fires, in Fabro's order. `start` runs
 /// `sandbox_ready` (the sandbox exists once the first step runs in it) then
-/// `run_start`; both block. `exit` runs `run_complete`; a run that never
-/// reaches `exit` failed, and `fabro/agent` and friends do not know that, so
-/// `run_failed` is driven by the host's observer ([`crate::hooks::RunEnd`]).
+/// `run_start`; both block. `exit` runs `run_complete`. A run that never
+/// reaches `exit` failed, and no step runs at that moment, so `run_failed`
+/// (and `sandbox_cleanup`, at scope release) wait for an awaited run-end
+/// point in the engine; the frontend warns about a hook on either event.
 #[async_trait::async_trait]
 impl Step for StageStep {
     const NAME: &'static str = "fabro/stage";
@@ -148,7 +149,7 @@ impl Step for StageStep {
                     .await
             };
             if *event == HookEvent::StageStart
-                && let crate::hooks::Decision::Skip { .. } = &decision
+                && let Decision::Skip { .. } = &decision
             {
                 report.decision = HookDecision::Skip {
                     status: ir::Status::Skipped,
@@ -165,7 +166,7 @@ impl Step for StageStep {
                     .await;
                 return Stage::new(StageOutcome::Skipped, None).into_outcome(&config.node);
             }
-            if let crate::hooks::Decision::Block { reason } = &decision {
+            if let Decision::Block { reason } = &decision {
                 report.decision = HookDecision::Block {
                     reason: reason
                         .clone()

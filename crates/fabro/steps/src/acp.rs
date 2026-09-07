@@ -20,8 +20,8 @@
 //! configured hook, on the step's progress channel and in a warning line,
 //! and never records an unenforceable block as enforced.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use execution::hooks::{HookDecision, HookPoint, HookRequest, HookService};
@@ -54,7 +54,7 @@ pub struct AcpHooks {
     /// hook.
     pre:     Vec<String>,
     post:    Vec<String>,
-    warned:  std::sync::Mutex<std::collections::BTreeSet<String>>,
+    warned:  Mutex<BTreeSet<String>>,
 }
 
 impl AcpHooks {
@@ -75,7 +75,7 @@ impl AcpHooks {
             attempt,
             pre,
             post,
-            warned: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            warned: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -171,7 +171,7 @@ impl AcpHooks {
             let first = self
                 .warned
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(PoisonError::into_inner)
                 .insert(key);
             if !first {
                 continue;

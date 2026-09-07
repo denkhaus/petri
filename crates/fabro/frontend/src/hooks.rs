@@ -38,8 +38,10 @@ pub const DEFAULT_MODEL: &str = "haiku";
 /// The default tool-round limit for agent hooks.
 pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 50;
 
-/// The sixteen events Fabro's configuration accepts. Petri runs fifteen;
-/// `checkpoint_saved` is a Fabro platform event that warns and never runs.
+/// The sixteen events Fabro's configuration accepts. Petri dispatches
+/// thirteen; `checkpoint_saved` is a Fabro platform event that warns and
+/// never runs, and `run_failed` and `sandbox_cleanup` wait for an awaited
+/// run-end and scope-release point in the engine (a hook on them warns).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
@@ -443,6 +445,18 @@ fn resolve(
             format!(
                 "`{path}` in `{source}` listens for `checkpoint_saved`, a Fabro platform event; \
                  Petri does not write checkpoints, so this hook never runs"
+            ),
+        );
+    }
+    if matches!(event, HookEvent::RunFailed | HookEvent::SandboxCleanup) {
+        diags.warning(
+            "fabro.hooks.undispatched",
+            span.clone(),
+            format!(
+                "`{path}` in `{source}` listens for `{}`, which the standalone runner does not \
+                 dispatch yet: no step runs when a run fails or a scope is released, so this hook \
+                 never runs",
+                event.as_str()
             ),
         );
     }

@@ -8,6 +8,7 @@
 //! timeout is exit code -1, a block.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +23,7 @@ use pebble_coding_agent::{CodingAgent, ShutdownReason};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::AsyncWriteExt as _;
+use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -113,9 +115,8 @@ pub async fn execute(
 fn parse_decision(code: i32, stdout: &str) -> Decision {
     let json = serde_json::from_str::<Decision>(stdout.trim()).ok();
     match (code, json) {
-        (0, Some(decision)) => decision,
+        (0 | 2, Some(decision)) => decision,
         (0, None) => Decision::Proceed,
-        (2, Some(decision)) => decision,
         (code, _) => Decision::Block {
             reason: Some(format!("hook exited with code {code}")),
         },
@@ -168,11 +169,7 @@ async fn sandbox_command(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let relative = format!(".fabro-hook-context-{nanos}.json");
-    let context_path = if env
-        .write_file(std::path::Path::new(&relative), payload)
-        .await
-        .is_ok()
-    {
+    let context_path = if env.write_file(Path::new(&relative), payload).await.is_ok() {
         let absolute = format!("{}/{relative}", env.workspace_path().trim_end_matches('/'));
         vars.insert("FABRO_HOOK_CONTEXT".into(), absolute.clone());
         Some(absolute)
@@ -253,7 +250,7 @@ async fn host_command(
     vars: BTreeMap<String, String>,
     env: Option<&dyn ExecEnv>,
 ) -> Executed {
-    let mut process = tokio::process::Command::new("sh");
+    let mut process = Command::new("sh");
     process
         .arg("-c")
         .arg(command)

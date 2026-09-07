@@ -25,11 +25,12 @@ a run will execute.
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
 | `[run] goal` (text or `{ file }`) | the run goal when the graph sets no `goal` (the graph attribute wins, as in Fabro) |
-| `[run.model]` `provider`, `name`, `controls.reasoning_effort` | the model, provider and reasoning effort an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. `controls.speed` and `[run.model.fallbacks]` warn (readiness item 9a) |
+| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. `[run.model.fallbacks]` warns (readiness item 9a) |
 | `[run.execution]` `mode`, `approval` | launch defaults in `Graph.params["fabro.launch"]`: `mode = "dry_run"` runs the stub registry, `approval = "auto"` answers every question with its first choice. `--dry-run`, `--auto-approve`, `--interactive` and `--interview-script` win |
 | `[run.environment]` `id` over `[environments.<id>]` | `provider` selects the sandbox backend when `--backend` is not given: `local` is the host, `docker` the Docker plugin, `daytona` the Daytona plugin. `image.docker` becomes the scope's container image under `docker` and `daytona`. `env` is the scope environment; a value that is exactly `{{ secrets.NAME }}` is a `$secret` reference every command resolves at spawn (the standalone runner reads `PETRI_SECRET_NAME`; a missing secret fails the command with `secret_unavailable`) and masks in every log. `resources` size a Daytona runner. `cwd`, `network`, `lifecycle`, `labels` and `image.dockerfile` are platform-only and warn `ignored.workflow_toml.environments.<id>.<key>`; an `id` with no table, or a provider outside the three, is an error |
 | `[run.prepare]` `steps`, `timeout` | setup steps lowered as command nodes `run_prepare_1`, `run_prepare_2`, ... between `start` and its successors, so they run in the selected environment before any node, in order, each with the section's `timeout` (default `5m`), its `env`, and `on_failure="exit"`: a failed step ends the run before the first node. `command` argv is joined with shell quoting; `script` runs as written; `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` render at load. The whole file is validated before any step runs |
-| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.model.fallbacks]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is an error: `unsupported.workflow_toml.run.hooks` (a configured hook is never skipped silently), `unsupported.workflow_toml.run.agent.mcps`. A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
+| `[[run.hooks]]` in `workflow.toml`, `.fabro/project.toml` at the repository root, and the host's user settings layer | local hooks ("Hooks" below). Each layer is read on its own and the three merge as Fabro's `combine_hooks` does: settings, then project, then workflow, a higher layer's entry replacing a lower one with the same `id` in place and the rest appending. Every field is validated at load (`fabro.hooks.toml`, `.entry`, `.event`, `.transport`, `.timeout`, `.matcher`); a hooks layer that cannot be read is an error, so a configured hook is never skipped silently. A `checkpoint_saved` hook warns `fabro.hooks.checkpoint_saved` and never runs. The merged list lands in `Graph.params["fabro_hooks"]` and on the `start` and `exit` stages. The user layer (`~/.fabro/settings.toml`) is outside the repository, so the host passes its text as the `fabro.settings_toml` compile variable when it wants one |
+| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.model.fallbacks]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is an error: `unsupported.workflow_toml.run.agent.mcps`. A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
 | `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
 | `import="<path>"` | expanded at load as Fabro's import transform expands it (below); the persisted graph carries the imported nodes |
@@ -73,11 +74,11 @@ a warning; the importing workflow's stylesheet governs.
 
 | Shape / type | Petri node | Step config |
 |---|---|---|
-| `Mdiamond` start | `noop`, the entry | |
-| `Msquare` exit | `noop`; `Completion::TerminalNode(exit)` | |
+| `Mdiamond` start | `fabro/stage`, the entry | `kind = "start"`, the workflow name, the merged hooks |
+| `Msquare` exit | `fabro/stage`; `Completion::TerminalNode(exit)` | `kind = "exit"`, the workflow name, the merged hooks |
 | `diamond` conditional | `noop` | |
-| `box` agent | `fabro/agent` | prompt, goal, fidelity, `backend`, model settings, `output_schema`, `output_retries`, `acp` |
-| `tab` prompt | `fabro/prompt` | prompt, goal, fidelity, model settings, `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `fabro.prompt_backend`, and the graph's ACP settings never reach it |
+| `box` agent | `fabro/agent` | prompt, goal, `fidelity` and `default_fidelity`, `thread_id`, `default_thread` and the node's classes, `project_memory`, `backend`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`, `acp`, the workflow's stage list for the preamble |
+| `tab` prompt | `fabro/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `fabro.prompt_backend`, and the graph's ACP settings never reach it |
 | `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
 | `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
 | `component` parallel | `noop` with one routing group per branch, or a `for_each` expansion (below) | |
@@ -266,11 +267,17 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   store (below); the in-memory cap is 8 MiB.
 - **`fabro/prompt`** is one model call through the application's `lithos-llm`
   client (the `PebbleClient` capability), with no tools and no coding-agent
-  loop: the goal, the compact preamble of earlier stages, the branch results
-  for a prompted fan-in, the node's prompt and the output contract, as one
-  user message. `model` (or `default_model`, or `[run.model] name`) is
-  required; `provider` qualifies it; `reasoning_effort` rides the request; a
-  JSON response format is requested when the catalog row offers it. A
+  loop: the goal, the preamble of earlier stages at the node's resolved
+  fidelity ("Fidelity and threads" below; `full` has no preamble and a prompt
+  node never continues a conversation, so it reads as `summary:high`), the
+  branch results for a prompted fan-in, the node's prompt and the output
+  contract, as one user message. `project_memory` (default `true`) prepends
+  the project instruction files of the working directory alone, selected by
+  the model's agent profile as for an agent node, as a system message;
+  `project_memory=false` reads none. `model` (or `default_model`, or
+  `[run.model] name`) is required; `provider` qualifies it; `reasoning_effort`,
+  `speed` (`standard`, `fast`) and `max_tokens` ride the request; a JSON
+  response format is requested when the catalog row offers it. A
   response that misses the contract gets a repair turn (the failed reply and
   the repair message appended), up to `output_retries` times (default 2), then
   fails `bad_output`. The result writes `response.<node>`, `last_response`
@@ -282,10 +289,14 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   `model`, `outcome`, `response`, `calls`, `repairs`, `usage`,
   `cost_usd_micros`, `duration_ms`) after the last. Metrics: `prompt.calls`,
   `prompt.usage`, `prompt.cost_usd_micros`.
-- **`fabro/agent`** assembles the prompt from the goal, earlier stages, and the
-  node's prompt. Both backends share routing, `output_schema` validation,
-  `output_retries` repair turns, and steering deliveries. Each attempt starts a
-  fresh agent session. Repair turns keep that session's history.
+- **`fabro/agent`** assembles the prompt from the goal, the preamble of
+  earlier stages at the node's resolved fidelity, and the node's prompt
+  ("Fidelity and threads" below). Both backends share routing, `output_schema`
+  validation, `output_retries` repair turns, and steering deliveries. Each
+  attempt starts a fresh agent session unless the node continues a retained
+  thread at `full` fidelity (native backend only). Repair turns keep that
+  session's history. `speed` and `max_tokens` configure the native model
+  request; on ACP they are observer metadata like the other model settings.
   `backend="acp"` is the default. It starts the Agent Client Protocol command
   from `acp.command` / `acp.config` (node, graph, then `PETRI_ACP_COMMAND`). The
   ACP command owns model selection; model settings are observer metadata.
@@ -327,6 +338,13 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
     repeated.
 - **`fabro/wait`** sleeps, cancel-aware.
 - **`fabro/workflow`** is the nested invocation above.
+- **`fabro/stage`** is `start`, `exit` and a conditional: it returns its
+  config as its output, as `noop` did, and records the scope's environment so
+  sandbox-placed hooks can run. `start` drives the run-level hooks
+  `sandbox_ready`, `run_start` and its own `stage_start`, in Fabro's order;
+  `exit` drives `run_complete`. A blocking hook that blocks at `start` fails
+  the stage with class `hook_blocked` and ends the run; a skip at `start`
+  records a skipped stage and the run goes on.
 - **Output references.** A stage value whose serialized form is above 100 KiB
   (Fabro's offload threshold; a scalar never, a string by its JSON size) does
   not stay inline in the context or the event log. The step writes it to the
@@ -343,6 +361,121 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   reads the same references.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
   gate takes its first choice, as Fabro's `--dry-run` does.
+
+### Fidelity and threads
+
+Fabro's `fidelity` decides how much of the run so far an LLM node hears:
+`full`, `truncate`, `compact`, `summary:low`, `summary:medium`,
+`summary:high`. Any other value is `fabro.bad_fidelity` at load. The node's
+mode is resolved when it fires: the incoming edge's `fidelity`, else the
+node's, else the graph's `default_fidelity`, else `compact`. The preambles
+are deterministic text built from the run context with no model call, as
+`fabro-workflow`'s `preamble.rs` writes them: `truncate` is the goal and the
+run id; `compact` the nested bullets of every completed stage (script,
+prompt, output tail, context keys); `summary:low` and `summary:medium` the
+last two and five stages; `summary:high` the per-stage report with a context
+table. A stage value above 8 KiB is shown as a preview. `full` sends no
+preamble: the node continues its thread's conversation.
+
+A thread is resolved the same way: the edge's `thread_id`, else the node's,
+else the graph's `default_thread`, else the node's first class, else the
+previous node's id. `thread_id` on a node or edge without effective `full`
+fidelity is `fabro.thread_id_requires_fidelity_full` at load. The first
+node of a parallel branch has no thread and an explicit `full` reads as
+`summary:high` (Fabro's branch rule); a node whose thread's conversation was
+discarded (its predecessor on the thread failed, or the run resumed) also
+reads `full` as `summary:high`, once, and starts the thread again.
+
+The native backend retains a successful node's conversation per thread for
+the run (`fabro_steps::sessions::SessionService`, one per invocation). A
+later node at effective `full` on the same thread resumes it from Pebble's
+export with its own event sink, question handler, tool hooks and metrics
+bound; a node that names another model than the retained conversation's warns
+and continues it on the retained route. A failed node discards its session,
+as Fabro does. ACP never reuses a session. Each resolution is a
+`StepEvent::Custom` with `kind = "fabro.thread"` (`node`, `firing`,
+`attempt`, `fidelity`, `fidelity_source`, `thread`, `thread_source`,
+`reused`, `backend`).
+
+### Hooks
+
+`[[run.hooks]]` entries run in the standalone runner through
+`fabro_steps::hooks::LocalHooks`, the `execution::hooks::HookService` the
+Fabro component installs (`crates/core/execution/HOOKS.md`). One service
+serves every point, so a hook runs once whoever drives it: the engine's
+`HookAdapter` at the per-firing points, the native agent's Pebble
+`ToolMiddleware` at the tool boundary, the ACP client's permission requests,
+and the `fabro/stage` step for the run-level events. A host that installs its
+own service before `fabro_steps::register` runs keeps it; the local one is
+then not installed.
+
+Fields: `id` (merge identity), `name`, `event`, `matcher`, `blocking`,
+`timeout` (`60s` default; `30s` for prompt hooks), `sandbox` (default
+`true`), and one transport: `script` or `command` (a command hook), `url`
+with `headers` and `tls = "no_verify"` (an HTTP hook), `prompt` with `model`
+(a prompt hook, default model `haiku`), or `agent = "enabled"` with `prompt`,
+`model` and `max_tool_rounds` (an agent hook, default 50 rounds). Events, as
+Fabro names them: `run_start`, `run_complete`, `run_failed`, `stage_start`,
+`stage_complete`, `stage_failed`, `stage_retrying`, `edge_selected`,
+`parallel_start`, `parallel_complete`, `sandbox_ready`, `sandbox_cleanup`,
+`checkpoint_saved`, `pre_tool_use`, `post_tool_use`,
+`post_tool_use_failure`. Every event is validated and merged; two are not
+dispatched yet: `run_failed` and `sandbox_cleanup` need an awaited run-end
+and scope-release point the engine does not offer (the `fabro/stage` step
+only sees `start` and `exit`, and a failed run never reaches `exit`), so a
+hook on either warns `fabro.hooks.undispatched` at load rather than being
+skipped silently. `checkpoint_saved` warns `fabro.hooks.checkpoint_saved` at
+load and never runs (the standalone runner makes no checkpoints). Fabro's rules apply: `matcher` is
+an unanchored regex tested against the node id, handler type, edge ends and
+tool name the event carries; `run_start`, `sandbox_ready`, `stage_start`,
+`edge_selected` and `pre_tool_use` are blocking by default and the rest are
+not; a non-blocking hook still runs and its decision is ignored. Decisions merge as block over skip or override over
+proceed, the first of a rank winning, and a block ends the sequence. The
+reference never dispatches `stage_retrying`; Petri does, at the engine's
+`Retrying` point, and consumes no decision from it.
+
+Placement: a `sandbox = true` hook runs `sh -c` in the firing's scope with
+the scope's environment; `sandbox = false` runs `sh -c` on the host, with the
+scope's workspace as cwd when the scope is a host directory. Both see `FABRO_HOOK_CONTEXT` (the path of the
+JSON context: `event`, `run_id`, `workflow_name`, `cwd`, `node_id`,
+`node_label`, `handler_type`, `status`, `edge_from`, `edge_to`,
+`edge_label`, `failure_reason`, `attempt`, `max_attempts`, `tool_name`,
+`tool_input`, `tool_call_id`, `tool_output`, `error_message`), plus
+`FABRO_EVENT`, `FABRO_RUN_ID`, `FABRO_NODE_ID`, `FABRO_WORKFLOW`. A command
+decides by exit code: `0` proceeds unless stdout is a decision JSON
+(`{"decision": "proceed" | "skip" | "block" | "override", "reason",
+"edge_to"}`), `2` blocks unless stdout is one, any other code blocks. An
+HTTP hook posts the context and reads the same JSON from a `2xx` body. A
+prompt hook asks the model for `{"ok", "reason"}` and blocks on `false`; an
+agent hook does the same with tools in the sandbox. HTTP, prompt and agent
+hooks fail open on errors and timeouts; a command that times out is killed
+and, when blocking, blocks. A hook whose placement is unavailable (a sandbox
+hook before any scope exists, a model hook with no client) is recorded as
+`unsupported` and proceeds. Cancelling the firing cancels the hook. Hook
+output reaches the run log through the same event pipeline as every other
+step output, so Petri's secret masking applies to it.
+
+What a decision does: `stage_start` `skip` skips the node, `block` fails it
+with class `hook_blocked`; `edge_selected` `override` routes to `edge_to`
+when it names an edge out of the node, `block` fails the transition;
+`pre_tool_use` `block` denies the tool call (the tool never runs and the
+model sees the reason); every other event's decision is recorded and
+ignored. Per-firing reports are `host_note { kind: "hook" }` on the firing
+(point, decision, each hook's name, state, duration, message, and fail-open
+warnings). Tool and run-level reports are `StepEvent::Custom` with
+`kind = "fabro.hook"` (`node`, `firing`, `attempt`, `event`, `report`), and
+an enforcement gap is `kind = "fabro.hook.warning"` (`backend`, `hook`,
+`event`, `boundary`, `message`).
+
+Tool hooks on the ACP backend are best effort: the client answers
+`session/request_permission` with the hooks' decision, rejecting the call
+when a `pre_tool_use` hook blocks, and reports `post_tool_use` from the tool
+call updates it observes. A tool call the agent runs without asking (a
+permission mode that never asks, a tool the agent treats as safe) is
+warned once per hook and tool as `fabro.hook.warning`, naming the backend
+(`acp`), the hook, the event and the boundary the agent did not offer.
+Fabro ignores ACP tool hooks silently; the warning is an accepted
+difference.
 
 ## Native Pebble
 
@@ -367,8 +500,18 @@ Tools use the firing's `ExecEnv`. Commands run as `bash -c` inside the scope;
 files use the scope's filesystem. Bash, find, grep, and the usual file utilities
 must be available there. Content search uses ripgrep when available and grep
 otherwise. Searches fail explicitly when their captured output exceeds 4 MiB.
-The backend reads workspace `AGENTS.md` and discovers workspace skills in
-`.agents/skills` and `.pebble/skills`. Tools have full access within the scope's
+The backend reads the project instruction files Fabro's `discover_memory`
+selects for the model's agent profile (the catalog's `pebble.profile`
+metadata): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
+`.codex/instructions.md` for OpenAI, `AGENTS.md` and `GEMINI.md` for Gemini,
+`AGENTS.md` alone otherwise; from the Git root down to the working directory,
+root first, when the working directory is inside a repository. Petri selects
+the paths that exist in the scope (`fabro_steps::memory::select`) and Pebble's
+loader owns the 32 KiB budget, deduplication and truncation. The backend
+discovers workspace skills in `.agents/skills` and `.pebble/skills`. Every
+session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
+denies before the tool runs; `post_tool_use` observes the outcome), and the
+node's `speed` and `max_tokens`. Tools have full access within the scope's
 policy. Petri's sandbox owns process isolation. This integration does not
 install interactive approvals or subagents. Tool output is bounded by Pebble's
 capture and preview limits. Omitted bytes are discarded and cannot be retrieved.
@@ -384,7 +527,9 @@ Pebble events appear as `StepEvent::Custom` with `kind="pebble"`, firing,
 attempt, scope, node, and the original event envelope. The envelope preserves
 stream sequence, session, parent session, and tool-call identifiers. Petri's
 secret masker applies before forwarding. These events use Petri's existing
-log pipeline; the integration does not checkpoint or resume Pebble sessions.
+log pipeline. A successful node's session is retained in memory for the run
+by thread ("Fidelity and threads"); nothing is checkpointed, so a resumed run
+starts every thread again.
 
 The session's question tool (`request_user_input` for GPT-5.6 and GPT-6,
 `AskUserQuestion` for Claude) reaches the same interviewer a human gate does.
@@ -426,9 +571,11 @@ later rejection is deliberately stricter. `on_failure="succeed"` and
 plan. `.ai/plans/done/fabro-local-workflows.md` lists the workflows that
 depend on the alias and what to do at the sunset.
 
-Ignored loudly (a warning naming the attribute): `tool_hooks.*`,
-`project_memory`, `thread_id`, `max_tokens`, `speed`, `default_thread`, and
-any attribute Fabro does not define. Graphviz layout attributes are dropped
+Ignored loudly (a warning naming the attribute): `tool_hooks.pre`,
+`tool_hooks.post` and any other attribute Fabro does not define
+(`fabro.unknown_attribute`). Fabro's validator refuses `tool_hooks.*` as
+unknown too; tool hooks are configured through `[[run.hooks]]` (`pre_tool_use`,
+`post_tool_use`), never on a node. Graphviz layout attributes are dropped
 silently.
 
 ## Watchdog and circuit breaker

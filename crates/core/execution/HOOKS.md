@@ -22,7 +22,9 @@ where one exists, the selected routes at `RouteSelected`, and an opaque
 `failed_open`, `unsupported`), and fail-open warnings.
 
 Exactly one service is installed per run: `NoHooks` by default, the local
-executor in the standalone runner, the host's own when embedded. The service
+executor in the standalone runner (`fabro_steps::hooks::LocalHooks`, installed
+by `fabro_steps::register` when no service is installed yet), the host's own
+when embedded. The service
 owns configuration, matching, placement (host or sandbox), timeouts, and how
 an executor's result becomes a decision (a command's exit code, HTTP, prompt
 and agent hooks). Nothing else in Petri consults hook configuration for a

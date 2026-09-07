@@ -22,6 +22,7 @@ use execution::hooks::HookServiceHandle;
 use executor::Masker;
 use ir::{Attempt, Control, FiringId, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
+use lithos_llm::catalog::Metadata;
 use lithos_llm::types::{ReasoningEffort, Request, Speed};
 use pebble_coding_agent::events::{
     CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
@@ -78,7 +79,7 @@ pub fn profile_of(client: &Client, selector: &str) -> Option<String> {
         .build()
         .ok()?;
     let route = client.resolve_route(&probe).ok()?;
-    let read = |metadata: &lithos_llm::catalog::Metadata| {
+    let read = |metadata: &Metadata| {
         metadata
             .namespace::<PebbleMetadata>("pebble")
             .ok()

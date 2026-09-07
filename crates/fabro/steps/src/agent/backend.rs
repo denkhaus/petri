@@ -17,6 +17,7 @@ use tokio::time::timeout;
 use super::AgentConfig;
 use crate::LocalHooksHandle;
 use crate::acp::{AcpError, AcpHooks, Client};
+use crate::hooks::step_view;
 use crate::pebble::NativeSession;
 
 /// How an agent node runs. ACP remains the default.
@@ -102,7 +103,7 @@ impl Session {
                     post.extend(names(HookEvent::PostToolUseFailure));
                     let hooks = AcpHooks::new(
                         handle.0.clone(),
-                        crate::hooks::step_view(ctx, "agent", &config.label, &config.kv),
+                        step_view(ctx, "agent", &config.label, &config.kv),
                         ctx.node.clone(),
                         ctx.firing,
                         ctx.attempt,

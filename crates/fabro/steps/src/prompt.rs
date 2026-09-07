@@ -45,7 +45,7 @@ use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::pebble::{PebbleClient, profile_of, speed_of};
-use crate::stage::RunInfo;
+use crate::stage::{self, RunInfo};
 use crate::{memory, preamble};
 
 pub const KIND: StepKindId = PROMPT_KIND;
@@ -272,7 +272,7 @@ impl Step for PromptStep {
             None => config.branch_results.clone(),
         };
         let started = Instant::now();
-        crate::stage::record(&ctx);
+        stage::record(&ctx);
         let run_id = ctx
             .capability::<RunInfo>()
             .map(|run| run.run_id.clone())

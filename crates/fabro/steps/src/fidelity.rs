@@ -213,7 +213,7 @@ impl Preamble<'_> {
         for stage in self.stages {
             if let Some(record) = nodes.get(&stage.id) {
                 seen.insert(stage.id.as_str());
-                if let Some(completed) = self.stage(&stage.id, Some(stage), record) {
+                if let Some(completed) = completed_stage(&stage.id, Some(stage), record) {
                     out.push(completed);
                 }
             }
@@ -222,79 +222,11 @@ impl Preamble<'_> {
             if seen.contains(name.as_str()) {
                 continue;
             }
-            if let Some(completed) = self.stage(name, None, record) {
+            if let Some(completed) = completed_stage(name, None, record) {
                 out.push(completed);
             }
         }
         out
-    }
-
-    fn stage<'a>(
-        &self,
-        id: &'a str,
-        info: Option<&'a StageInfo>,
-        record: &Value,
-    ) -> Option<Completed<'a>> {
-        let kind = info.and_then(|s| s.kind.as_deref());
-        if id == "start" || id == GOAL_CHECK_NODE || matches!(kind, Some("start" | "exit")) {
-            return None;
-        }
-        let output = record.get("output").cloned().unwrap_or(Value::Null);
-        let status = output
-            .get("outcome")
-            .and_then(Value::as_str)
-            .map_or_else(|| status_word(record), str::to_owned);
-        let reason = output
-            .get("failure_reason")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let notes = output
-            .get("notes")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let is_llm = matches!(kind, Some("agent" | "prompt"))
-            || output.get("text").is_some() && output.get("stdout").is_none();
-        let mut rendered = Vec::new();
-        let stdout = output
-            .get("stdout")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if stdout.is_some() {
-            rendered.push("command.output".to_owned());
-        }
-        let text = output
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if is_llm {
-            rendered.push(format!("response.{id}"));
-            rendered.push("last_stage".to_owned());
-            rendered.push("last_response".to_owned());
-        }
-        let model = info.and_then(|s| s.model.clone()).or_else(|| {
-            output
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
-        Some(Completed {
-            id,
-            kind: kind.or(if is_llm {
-                Some("agent")
-            } else if stdout.is_some() {
-                Some("command")
-            } else {
-                None
-            }),
-            script: info.and_then(|s| s.script.as_deref()),
-            status: leak_status(&status),
-            notes,
-            reason,
-            output: stdout,
-            model: if is_llm { model } else { None },
-            text: if is_llm { text } else { None },
-            rendered,
-        })
     }
 
     fn compact(&self) -> String {
@@ -462,6 +394,75 @@ impl Preamble<'_> {
             .map(|(key, value)| (key.clone(), render_value(value)))
             .collect()
     }
+}
+
+/// One completed stage's record as the preambles show it; `None` for the
+/// structural stages (`start`, `exit`, the goal check) and unfinished ones.
+fn completed_stage<'a>(
+    id: &'a str,
+    info: Option<&'a StageInfo>,
+    record: &Value,
+) -> Option<Completed<'a>> {
+    let kind = info.and_then(|s| s.kind.as_deref());
+    if id == "start" || id == GOAL_CHECK_NODE || matches!(kind, Some("start" | "exit")) {
+        return None;
+    }
+    let output = record.get("output").cloned().unwrap_or(Value::Null);
+    let status = output
+        .get("outcome")
+        .and_then(Value::as_str)
+        .map_or_else(|| status_word(record), str::to_owned);
+    let reason = output
+        .get("failure_reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let notes = output
+        .get("notes")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let is_llm = matches!(kind, Some("agent" | "prompt"))
+        || output.get("text").is_some() && output.get("stdout").is_none();
+    let mut rendered = Vec::new();
+    let stdout = output
+        .get("stdout")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if stdout.is_some() {
+        rendered.push("command.output".to_owned());
+    }
+    let text = output
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if is_llm {
+        rendered.push(format!("response.{id}"));
+        rendered.push("last_stage".to_owned());
+        rendered.push("last_response".to_owned());
+    }
+    let model = info.and_then(|s| s.model.clone()).or_else(|| {
+        output
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    Some(Completed {
+        id,
+        kind: kind.or(if is_llm {
+            Some("agent")
+        } else if stdout.is_some() {
+            Some("command")
+        } else {
+            None
+        }),
+        script: info.and_then(|s| s.script.as_deref()),
+        status: leak_status(&status),
+        notes,
+        reason,
+        output: stdout,
+        model: if is_llm { model } else { None },
+        text: if is_llm { text } else { None },
+        rendered,
+    })
 }
 
 /// Fabro's compact per-stage details: a command's script and output, an LLM
@@ -705,7 +706,11 @@ mod tests {
             !medium.contains("- empty:"),
             "blank values are skipped: {medium}"
         );
-        let long: String = (1..=30).map(|i| format!("l{i}\n")).collect();
+        let long = (1..=30)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         assert!(tail_lines(long.trim(), 25, "  ").starts_with("  (5 lines omitted)\n  l6"));
     }
 

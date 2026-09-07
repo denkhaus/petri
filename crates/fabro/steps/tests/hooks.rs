@@ -6,8 +6,9 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use fabro_steps::agent::THREAD_EVENT;
@@ -19,6 +20,7 @@ use fabro_steps::{
 };
 use frontend::{CompileInputs, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
+use lithos_llm::types::{Role, Speed};
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedCompletion, ScriptedProvider, client_from, message_text, text_response,
     tool_call_response,
@@ -179,7 +181,7 @@ async fn run_with_stub_agents(dir: &RunDir, graph: Graph) -> (ExecutionReport, A
 }
 
 /// Script a stub node's calls, as the embedding test does.
-fn simulate(graph: &mut Graph, node: &str, calls: Value) {
+fn simulate(graph: &mut Graph, node: &str, calls: &Value) {
     let node = graph
         .body
         .nodes
@@ -268,7 +270,7 @@ script = "echo never >> hooks.log"
     simulate(
         &mut graph,
         "flaky",
-        json!([
+        &json!([
             { "outcome": "failed", "failure_class": "retry_requested" },
             { "outcome": "succeeded" }
         ]),
@@ -577,7 +579,7 @@ script = "sleep 5"
 timeout = "300ms"
 "#,
     );
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let (report, customs) = run(&dir, graph, None).await;
     assert!(
         started.elapsed() < Duration::from_secs(4),
@@ -1050,7 +1052,7 @@ async fn full_fidelity_nodes_continue_their_thread_and_others_start_fresh() {
         requests[0]
             .messages()
             .iter()
-            .find(|m| m.role() == lithos_llm::types::Role::User)
+            .find(|m| m.role() == Role::User)
             .expect("user"),
     );
     assert_eq!(first_user, "Plan.", "full fidelity: no preamble");
@@ -1240,7 +1242,7 @@ async fn project_memory_follows_the_profile_and_the_node_kind() {
     // directory is the workspace itself, so the walk is one level. Put a
     // parent-level file above to prove the walk starts at the Git root, not
     // above it.
-    let git = std::process::Command::new("git")
+    let git = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&ws)
         .status();
@@ -1287,7 +1289,7 @@ async fn project_memory_follows_the_profile_and_the_node_kind() {
     let system = agent_request
         .messages()
         .iter()
-        .filter(|m| m.role() == lithos_llm::types::Role::System)
+        .filter(|m| m.role() == Role::System)
         .map(message_text)
         .collect::<Vec<_>>()
         .join("\n");
@@ -1300,7 +1302,7 @@ async fn project_memory_follows_the_profile_and_the_node_kind() {
     let summary_system = completions[0]
         .messages()
         .iter()
-        .filter(|m| m.role() == lithos_llm::types::Role::System)
+        .filter(|m| m.role() == Role::System)
         .map(message_text)
         .collect::<Vec<_>>()
         .join("\n");
@@ -1312,7 +1314,7 @@ async fn project_memory_follows_the_profile_and_the_node_kind() {
         completions[1]
             .messages()
             .iter()
-            .all(|m| m.role() != lithos_llm::types::Role::System),
+            .all(|m| m.role() != Role::System),
         "project_memory=false"
     );
 }
@@ -1345,10 +1347,10 @@ async fn speed_and_max_tokens_reach_the_model_requests() {
         report.state.errors()
     );
     let agent = &provider.requests()[0];
-    assert_eq!(agent.speed(), Some(lithos_llm::types::Speed::Fast));
+    assert_eq!(agent.speed(), Some(Speed::Fast));
     assert_eq!(agent.max_output_tokens(), Some(777));
     let prompt = &provider.completion_requests()[0];
-    assert_eq!(prompt.speed(), Some(lithos_llm::types::Speed::Balanced));
+    assert_eq!(prompt.speed(), Some(Speed::Balanced));
     assert_eq!(prompt.max_output_tokens(), Some(555));
 }
 
