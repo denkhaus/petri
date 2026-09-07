@@ -580,7 +580,7 @@ metadata): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
 root first, when the working directory is inside a repository. Petri selects
 the paths that exist in the scope (`fabro_steps::memory::select`) and Pebble's
 loader owns the 32 KiB budget, deduplication and truncation. The backend
-discovers workspace skills in `.agents/skills` and `.pebble/skills`. Every
+searches Fabro's skill directories (below, "Skills"). Every
 session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the
 node's `speed` and `max_tokens`. Tools have full access within the scope's
@@ -620,6 +620,63 @@ They sum all settled prompt reports, including repair turns, failed prompts,
 and cancellation. Cost is a known subtotal: null means no response reported a
 cost. These metrics exclude compaction and model calls made inside tools.
 ACP continues to report `acp.turns`.
+
+### Skills
+
+A skill is a `<dir>/<name>/SKILL.md` file: a frontmatter block with `name:`
+and an optional `description:`, then the prompt it expands into. Petri
+resolves the directories the way Fabro's agent does
+(`fabro_steps::skills`), lowest precedence first:
+
+1. the configured skills directory, `$FABRO_HOME/skills` when `FABRO_HOME`
+   is set, else `$HOME/.fabro/skills`; an embedding host names the home
+   with the `fabro_steps::skills::FabroHome` capability instead;
+2. `<root>/.fabro/skills`, where the root is the Git root above the scope's
+   working directory, or the working directory outside a repository;
+3. `<root>/skills`;
+4. the directories `[run.agent] skills` lists in `workflow.toml`, in order,
+   a relative path resolved against the working directory. A Petri
+   extension: the pinned Fabro refuses the key, so the load warns
+   `fabro.petri_extension`.
+
+Pebble discovers `*/SKILL.md` in each directory, a later directory
+overriding an earlier name, lists the result under `# Available Skills` in
+the system prompt (Fabro's text), registers the skill tool (`use_skill`
+with `skill_name` for Fabro's own and the Codex vocabulary; `Skill` with
+`skill` and `args` for Claude 5 and Kimi Code), expands one `/name`
+reference in the node's prompt into the template, and serves a tool call
+with the template. A session that discovers no skills offers no tool and no
+section. A prompt that names a skill the session does not have fails the
+node with class `skill_missing` and the reason
+`expanding a skill reference: Unknown skill: /name`. The reference cases
+live in `crates/fabro/acceptance/testdata/skills`.
+
+Skill loading is separate from the fidelity preamble and from project
+document selection: the three share only the Git root probe. A skill's
+template is ordinary conversation content, so a tool it drives passes the
+node's tool hooks like any other call, and a skill loaded in one session
+(a parallel branch, a `compact` node) reaches no other session; a `full`
+thread carries it on as part of the conversation.
+
+Events, all `StepEvent::Custom`:
+
+- `kind = "fabro.skills"`: `{ kind, node, firing, attempt, scope, dirs }`
+  once per native session, `dirs` the ordered list of
+  `{ path, source }` with `source` one of `configured`, `project_fabro`,
+  `project`, `workflow`.
+- `kind = "fabro.skills.warning"`: `{ kind, node, firing, attempt, reason,
+  path, message }` for each file or directory Pebble will skip:
+  `malformed` (Pebble's parser rejects the file; the message says why in
+  the parser's words), `unreadable`, `missing_directory` (a
+  workflow-named directory that does not exist; a missing conventional
+  directory is ordinary and silent). The same text reaches the terminal as
+  a stderr line `skills: <path> <message>` of the node. Fabro and Pebble
+  skip such files silently; the audit mirrors Pebble's three parse
+  failures until Pebble reports skipped files itself.
+- `kind = "pebble"` envelopes carry Pebble's own `SkillsDiscovered`
+  (`profile`, `source_dirs`, `skills[{name, description}]`) and
+  `SkillActivated` (`skill_name`, `source` = `slash` or `tool`), attributed
+  to the node, firing, attempt and scope like every Pebble event.
 
 ## Refused
 

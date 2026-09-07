@@ -51,21 +51,18 @@ pub(super) fn read(
     };
     let mut dirs = Vec::with_capacity(entries.len());
     for entry in entries {
-        match entry.as_str().map(str::trim).filter(|dir| !dir.is_empty()) {
-            Some(dir) => dirs.push(dir.to_owned()),
-            None => {
-                diags.unsupported(
-                    UNSUPPORTED,
-                    span.clone(),
-                    format!(
-                        "every `run.agent.skills` entry in `{path}` must be a non-empty directory \
-                         path"
-                    ),
-                    "write `skills = [\"path/to/skills\"]`",
-                );
-                return SkillSettings::default();
-            }
-        }
+        let Some(dir) = entry.as_str().map(str::trim).filter(|dir| !dir.is_empty()) else {
+            diags.unsupported(
+                UNSUPPORTED,
+                span.clone(),
+                format!(
+                    "every `run.agent.skills` entry in `{path}` must be a non-empty directory path"
+                ),
+                "write `skills = [\"path/to/skills\"]`",
+            );
+            return SkillSettings::default();
+        };
+        dirs.push(dir.to_owned());
     }
     if !dirs.is_empty() {
         diags.warning(

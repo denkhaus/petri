@@ -23,11 +23,14 @@
 //! (`crate::fidelity`) and from project document selection
 //! (`crate::memory`): the three share nothing but the Git root probe.
 
+use std::env;
+use std::error::Error as _;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use executor::ExecEnv;
 use ir::StepEvent;
+use pebble_coding_agent::Error as PebbleError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use steps::StepCtx;
@@ -70,7 +73,7 @@ impl FabroHome {
     /// The home the process environment names, if any.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        Self::from_lookup(|name| std::env::var_os(name))
+        Self::from_lookup(|name| env::var_os(name))
     }
 
     /// Fabro's rule: `FABRO_HOME` when set, else `$HOME/.fabro`.
@@ -335,8 +338,8 @@ pub async fn prepare(config: &AgentConfig, ctx: &StepCtx) -> Prepared {
 /// the prompt named a skill the session does not have, `pebble_prompt`
 /// otherwise.
 #[must_use]
-pub fn failure_class(error: &pebble_coding_agent::Error) -> &'static str {
-    if matches!(error, pebble_coding_agent::Error::SkillExpansion(_)) {
+pub fn failure_class(error: &PebbleError) -> &'static str {
+    if matches!(error, PebbleError::SkillExpansion(_)) {
         MISSING_CLASS
     } else {
         PROMPT_CLASS
@@ -346,9 +349,9 @@ pub fn failure_class(error: &pebble_coding_agent::Error) -> &'static str {
 /// A Pebble error with its causes, `: `-joined, so a failure reason names
 /// the skill (`expanding a skill reference: Unknown skill: /name`).
 #[must_use]
-pub fn describe(error: &pebble_coding_agent::Error) -> String {
+pub fn describe(error: &PebbleError) -> String {
     let mut text = error.to_string();
-    let mut source = std::error::Error::source(error);
+    let mut source = error.source();
     while let Some(cause) = source {
         text.push_str(": ");
         text.push_str(&cause.to_string());
@@ -359,6 +362,8 @@ pub fn describe(error: &pebble_coding_agent::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use pebble_coding_agent::SkillExpansionError;
+
     use super::*;
 
     #[test]
@@ -433,20 +438,15 @@ mod tests {
 
     #[test]
     fn failure_class_names_a_missing_skill() {
-        let error = pebble_coding_agent::Error::SkillExpansion(
-            pebble_coding_agent::SkillExpansionError::UnknownSkill {
-                name: "nope".to_owned(),
-            },
-        );
+        let error = PebbleError::SkillExpansion(SkillExpansionError::UnknownSkill {
+            name: "nope".to_owned(),
+        });
         assert_eq!(failure_class(&error), MISSING_CLASS);
         assert!(
             describe(&error).ends_with("Unknown skill: /nope"),
             "{}",
             describe(&error)
         );
-        assert_eq!(
-            failure_class(&pebble_coding_agent::Error::SessionClosed),
-            PROMPT_CLASS
-        );
+        assert_eq!(failure_class(&PebbleError::SessionClosed), PROMPT_CLASS);
     }
 }
