@@ -60,6 +60,29 @@ pub struct AttemptAdmission {
     pub max_parallel: u32,
 }
 
+/// Why a cancel was requested, when the requester said so.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CancelReason {
+    /// The stall watchdog: no execution activity for the run's budget.
+    StallTimeout {
+        stall_timeout_ms: u64,
+        idle_ms:          u64,
+    },
+    /// An interrupt from the terminal (Ctrl-C).
+    Interrupt,
+    /// A run control: the control service, a control file, an embedding
+    /// host.
+    Control,
+}
+
+/// One cancel request on the coordinator's channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelRequest {
+    pub invocation: InvocationId,
+    pub reason:     Option<CancelReason>,
+}
+
 /// The one durable result returned by an invocation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InvocationResult {
@@ -116,6 +139,9 @@ pub enum CoordinatorEvent {
     },
     InvocationCancelRequested {
         invocation: InvocationId,
+        /// Why, when the requester said. Absent for a plain cancel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason:     Option<CancelReason>,
     },
     RunFinished {
         status: RunStatus,

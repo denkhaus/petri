@@ -32,9 +32,10 @@ use tracing::Instrument as _;
 
 use crate::jitter::jittered;
 use crate::lifecycle::{
-    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    RESULT_PREPARATION_CLASS, RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote,
-    RunFinished, ScopeReleased, TRANSITION_KIND, Transition, TransitionNote, apply_transition,
+    AdmitAttempt, AttemptDecision, BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote,
+    ExecutionHooks, Note, PrepareError, PrepareResult, Prepared, RESULT_PREPARATION_CLASS,
+    RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote, RunFinished, ScopeReleased,
+    TRANSITION_KIND, Transition, TransitionNote, apply_transition,
 };
 use crate::observe::{EventObserver, ObserveError};
 use crate::sink::LogSink;
@@ -2422,7 +2423,8 @@ impl Driver {
 
     /// A step asked the host a question: an interaction wait begins for this
     /// firing and attempt, and an executor-enforced budget stops counting.
-    /// A repeated question id while the first is pending is one wait.
+    /// A repeated question id while the first is pending is one wait. The
+    /// pause is recorded as a durable note on the firing.
     fn note_question(&mut self, firing: FiringId, event: &StepEvent) {
         let Some(question) = steps::Question::from_event(event) else {
             return;
@@ -2437,10 +2439,35 @@ impl Driver {
             question = %question.id,
             "interaction wait started"
         );
-        if let Some(budget) = task.budget.as_mut() {
-            budget.pending.insert(question.id);
-            Self::pause_budget(task);
+        let Some(budget) = task.budget.as_mut() else {
+            return;
+        };
+        budget.pending.insert(question.id);
+        let was_counting = budget.armed_at.is_some();
+        Self::pause_budget(task);
+        if was_counting {
+            let note = Self::budget_note(task, BUDGET_PAUSED_KIND);
+            self.record_notes(firing, &[note]);
         }
+    }
+
+    /// The durable fact about an attempt budget's pause or resume.
+    fn budget_note(task: &Task, kind: &str) -> Note {
+        let (remaining_ms, pending_questions) = task.budget.as_ref().map_or((0, 0), |budget| {
+            (
+                u64::try_from(budget.remaining.as_millis()).unwrap_or(u64::MAX),
+                u32::try_from(budget.pending.len()).unwrap_or(u32::MAX),
+            )
+        });
+        Note::new(
+            kind,
+            serde_json::to_value(BudgetNote {
+                attempt: task.attempt,
+                remaining_ms,
+                pending_questions,
+            })
+            .unwrap_or(Value::Null),
+        )
     }
 
     /// A host answered one of a step's questions: the wait ends, and once no
@@ -2487,6 +2514,10 @@ impl Driver {
         );
         if budget.pending.is_empty() {
             self.arm_budget(firing);
+            if let Some(task) = self.tasks.get(&firing) {
+                let note = Self::budget_note(task, BUDGET_RESUMED_KIND);
+                self.record_notes(firing, &[note]);
+            }
         }
     }
 

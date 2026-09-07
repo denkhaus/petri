@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use crate::{CoordinatorHandle, CoordinatorRecord, ExecutionId, ExecutionObserver};
+use crate::{CancelReason, CoordinatorHandle, CoordinatorRecord, ExecutionId, ExecutionObserver};
 
 /// Why the watchdog cancelled the run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,7 +98,13 @@ impl StallWatchdog {
         let inner = self.inner.clone();
         let stop = self.stop.clone();
         let task = tokio::spawn(async move {
-            monitor(inner, stop, move || handle.cancel_root()).await;
+            monitor(inner, stop, move |stall: StallTimeout| {
+                handle.cancel_root_for(CancelReason::StallTimeout {
+                    stall_timeout_ms: stall.stall_timeout_ms,
+                    idle_ms:          stall.idle_ms,
+                });
+            })
+            .await;
         });
         WatchdogTask {
             stop: self.stop.clone(),
@@ -154,7 +160,7 @@ impl WatchdogTask {
     }
 }
 
-async fn monitor(inner: Arc<Inner>, stop: CancellationToken, cancel: impl Fn()) {
+async fn monitor(inner: Arc<Inner>, stop: CancellationToken, cancel: impl Fn(StallTimeout)) {
     loop {
         let (deadline, blocked) = {
             let state = inner.state();
@@ -186,9 +192,9 @@ async fn monitor(inner: Arc<Inner>, stop: CancellationToken, cancel: impl Fn()) 
                     idle_ms = stall.idle_ms,
                     "stall watchdog: no execution activity; cancelling the run"
                 );
-                state.tripped = Some(stall);
+                state.tripped = Some(stall.clone());
                 drop(state);
-                cancel();
+                cancel(stall);
                 return;
             }
         }
@@ -259,7 +265,7 @@ mod tests {
         fired: Arc<AtomicUsize>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            monitor(inner, stop, move || {
+            monitor(inner, stop, move |_| {
                 fired.fetch_add(1, Ordering::SeqCst);
             })
             .await;

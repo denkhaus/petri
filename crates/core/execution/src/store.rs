@@ -313,7 +313,7 @@ impl CoordinatorStore {
         let invocation = match event {
             CoordinatorEvent::InvocationDeclared { invocation, .. }
             | CoordinatorEvent::InvocationFinished { invocation, .. }
-            | CoordinatorEvent::InvocationCancelRequested { invocation }
+            | CoordinatorEvent::InvocationCancelRequested { invocation, .. }
             | CoordinatorEvent::ExecutionDeclared { invocation, .. } => Some(*invocation),
             CoordinatorEvent::ExecutionFinished { execution, .. } => self
                 .state

@@ -846,7 +846,7 @@ async fn cancel_on_ctrl_c(handle: CoordinatorHandle) {
             eprintln!("cancelling the run; Ctrl-C again to kill");
             cancelled = true;
         }
-        handle.cancel_root();
+        handle.cancel_root_for(execution::CancelReason::Interrupt);
     }
 }
 

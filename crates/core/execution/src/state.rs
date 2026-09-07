@@ -323,7 +323,7 @@ impl CoordinatorState {
                     .expect("the invocation was checked above")
                     .result = Some(result.clone());
             }
-            CoordinatorEvent::InvocationCancelRequested { invocation } => {
+            CoordinatorEvent::InvocationCancelRequested { invocation, .. } => {
                 self.invocations
                     .get_mut(invocation)
                     .ok_or(StateError::UnknownInvocation(*invocation))?

@@ -21,12 +21,12 @@ use crate::client::StartRequest;
 use crate::host::EVENTS_FILE;
 use crate::middleware::derive_fold_event;
 use crate::{
-    CoordinatorEvent, CoordinatorInvocationClient, CoordinatorRecord, CoordinatorStore,
-    EngineLogError, ExecutionId, ExecutionObserver, GraphDigest, HOST_PROVIDER, InvocationHandle,
-    InvocationId, InvocationResult, InvocationSecrets, InvocationStatus, InvokeError,
-    JsonlEngineLog, Middleware, MiddlewarePipeline, MiddlewareState, ParentCallKey, ResourceError,
-    ResourceLedger, ResourceStore, SandboxAllocationKey, SandboxBinding, SandboxMode,
-    SecretBindings, StoreError, initial_middleware_state, read_engine_log,
+    CancelReason, CancelRequest, CoordinatorEvent, CoordinatorInvocationClient, CoordinatorRecord,
+    CoordinatorStore, EngineLogError, ExecutionId, ExecutionObserver, GraphDigest, HOST_PROVIDER,
+    InvocationHandle, InvocationId, InvocationResult, InvocationSecrets, InvocationStatus,
+    InvokeError, JsonlEngineLog, Middleware, MiddlewarePipeline, MiddlewareState, ParentCallKey,
+    ResourceError, ResourceLedger, ResourceStore, SandboxAllocationKey, SandboxBinding,
+    SandboxMode, SecretBindings, StoreError, initial_middleware_state, read_engine_log,
 };
 
 pub const DEFAULT_MAX_INVOCATIONS: u32 = 1024;
@@ -261,19 +261,31 @@ struct ControlRequest {
 /// A cloneable control path for a coordinator that is currently running.
 #[derive(Clone)]
 pub struct CoordinatorHandle {
-    cancel:  mpsc::UnboundedSender<InvocationId>,
+    cancel:  mpsc::UnboundedSender<CancelRequest>,
     control: mpsc::UnboundedSender<ControlRequest>,
 }
 
 impl CoordinatorHandle {
     /// Politely cancel an invocation and every active descendant.
     pub fn cancel(&self, invocation: InvocationId) {
-        let _ = self.cancel.send(invocation);
+        let _ = self.cancel.send(CancelRequest {
+            invocation,
+            reason: None,
+        });
     }
 
     /// Politely cancel the complete root run.
     pub fn cancel_root(&self) {
         self.cancel(InvocationId::ROOT);
+    }
+
+    /// Politely cancel the complete root run and record why: the reason
+    /// rides the `InvocationCancelRequested` record and the public event.
+    pub fn cancel_root_for(&self, reason: CancelReason) {
+        let _ = self.cancel.send(CancelRequest {
+            invocation: InvocationId::ROOT,
+            reason:     Some(reason),
+        });
     }
 
     /// Deliver a control to one execution-local firing.
@@ -308,8 +320,8 @@ pub struct Coordinator {
     observers:        Vec<Arc<dyn ExecutionObserver>>,
     start_tx:         mpsc::Sender<StartRequest>,
     start_rx:         mpsc::Receiver<StartRequest>,
-    cancel_tx:        mpsc::UnboundedSender<InvocationId>,
-    cancel_rx:        mpsc::UnboundedReceiver<InvocationId>,
+    cancel_tx:        mpsc::UnboundedSender<CancelRequest>,
+    cancel_rx:        mpsc::UnboundedReceiver<CancelRequest>,
     control_tx:       mpsc::UnboundedSender<ControlRequest>,
     control_rx:       mpsc::UnboundedReceiver<ControlRequest>,
     statuses:         BTreeMap<InvocationId, watch::Sender<InvocationStatus>>,
@@ -755,7 +767,8 @@ impl Coordinator {
             .copied()
             .filter(|(_, cancelled)| !cancelled)
             .collect();
-        self.cancel_invocations(uncancelled).await?;
+        self.cancel_invocations(uncancelled, InvocationId::ROOT, None)
+            .await?;
         for (descendant, _) in descendants {
             self.start_invocation(descendant, running)?;
         }
@@ -1200,7 +1213,8 @@ impl Coordinator {
                     && !self.store.state().invocations[&invocation].cancelled
                     && (!reply_delivered || self.store.state().invocations[&parent].cancelled)
                 {
-                    self.cancel_invocations(vec![(invocation, false)]).await?;
+                    self.cancel_invocations(vec![(invocation, false)], invocation, None)
+                        .await?;
                 }
                 Ok((incomplete
                     && !self.active.contains(&invocation)
@@ -1267,7 +1281,12 @@ impl Coordinator {
                 return Err(InvokeError::RequestMismatch);
             }
             if self.store.state().invocations[&previous].result.is_none() {
-                self.handle_cancel(previous).await.map_err(invoke_error)?;
+                self.handle_cancel(CancelRequest {
+                    invocation: previous,
+                    reason:     None,
+                })
+                .await
+                .map_err(invoke_error)?;
                 return Ok(StartOutcome::Requeue { previous });
             }
         }
@@ -1311,7 +1330,11 @@ impl Coordinator {
         })
     }
 
-    async fn handle_cancel(&mut self, cancelled: InvocationId) -> Result<(), CoordinatorError> {
+    async fn handle_cancel(&mut self, request: CancelRequest) -> Result<(), CoordinatorError> {
+        let CancelRequest {
+            invocation: cancelled,
+            reason,
+        } = request;
         if !self.store.state().invocations.contains_key(&cancelled) {
             return Ok(());
         }
@@ -1326,17 +1349,22 @@ impl Coordinator {
                     .then_some((*candidate, state.cancelled))
             })
             .collect();
-        self.cancel_invocations(affected).await
+        self.cancel_invocations(affected, cancelled, reason).await
     }
 
+    /// Record the cancel of every affected invocation; the reason goes on
+    /// the one the requester named, the descendants follow from it.
     async fn cancel_invocations(
         &mut self,
         affected: Vec<(InvocationId, bool)>,
+        requested: InvocationId,
+        reason: Option<CancelReason>,
     ) -> Result<(), CoordinatorError> {
         for (invocation, already_cancelled) in &affected {
             if !already_cancelled {
                 self.append(CoordinatorEvent::InvocationCancelRequested {
                     invocation: *invocation,
+                    reason:     (*invocation == requested).then(|| reason.clone()).flatten(),
                 })?;
             }
         }

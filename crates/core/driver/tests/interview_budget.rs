@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use driver::{DeliverDisposition, Driver, EventObserver, ExecutionReport, RunConfig};
 use engine::{EngineState, Event, EventLog, EventRecord};
 use executor::{
@@ -253,6 +254,35 @@ async fn the_waiting_stage_pays_only_for_active_work() {
     assert_eq!(status_of(&report, "stage").as_deref(), Some("timed_out"));
     assert_eq!(report.status, RunStatus::Failed);
     assert_replay_identical(&graph, &report);
+    // The pause and the resume are durable notes on the firing, with the
+    // time the attempt had left.
+    let notes: Vec<(String, BudgetNote)> = report
+        .state
+        .log
+        .records()
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::StepProgress { ev, .. } => Note::from_step_event(ev),
+            _ => None,
+        })
+        .filter(|note| note.kind == BUDGET_PAUSED_KIND || note.kind == BUDGET_RESUMED_KIND)
+        .map(|note| {
+            (
+                note.kind.to_string(),
+                serde_json::from_value(note.payload).expect("a budget note"),
+            )
+        })
+        .collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert_eq!(notes[0].0, BUDGET_PAUSED_KIND);
+    assert_eq!(notes[0].1.pending_questions, 1);
+    assert!(
+        (3_900..=4_000).contains(&notes[0].1.remaining_ms),
+        "4 s left at the pause: {notes:?}"
+    );
+    assert_eq!(notes[1].0, BUDGET_RESUMED_KIND);
+    assert_eq!(notes[1].1.pending_questions, 0);
+    assert_eq!(notes[1].1.remaining_ms, notes[0].1.remaining_ms);
 }
 
 /// The same shape with 3 s of work after the answer succeeds: the remaining

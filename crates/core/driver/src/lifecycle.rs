@@ -66,6 +66,26 @@ pub const TRANSITION_KIND: &str = "transition";
 pub const RESULT_PREPARATION_CLASS: ir::FailureClass =
     ir::FailureClass::new_static("result_preparation_failed");
 
+/// The note kind the driver records when an executor-enforced attempt budget
+/// stops counting: the attempt asked a question. Its payload is
+/// [`BudgetNote`].
+pub const BUDGET_PAUSED_KIND: &str = "budget_paused";
+
+/// The note kind the driver records when the budget counts again: the last
+/// pending question of the attempt was answered. Its payload is
+/// [`BudgetNote`].
+pub const BUDGET_RESUMED_KIND: &str = "budget_resumed";
+
+/// What the driver records about an attempt budget's pause or resume.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetNote {
+    pub attempt:           Attempt,
+    /// The active-work time left on the attempt.
+    pub remaining_ms:      u64,
+    /// Questions of this attempt still waiting for an answer.
+    pub pending_questions: u32,
+}
+
 /// The reason prefix on a routing block a fatal transition produced.
 pub const TRANSITION_BLOCKED_PREFIX: &str = "transition failed: ";
 

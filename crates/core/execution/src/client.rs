@@ -4,6 +4,7 @@ use ir::{Control, Value};
 use smol_str::SmolStr;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::event::CancelRequest;
 use crate::{
     AttemptAdmission, CallSite, ExecutionId, GraphDigest, InvocationId, InvocationResult,
     InvocationStatus, SandboxMode, SecretBindings,
@@ -90,7 +91,7 @@ pub trait InvocationClient: Send + Sync {
 pub struct InvocationHandle {
     id:     InvocationId,
     status: watch::Receiver<InvocationStatus>,
-    cancel: mpsc::UnboundedSender<InvocationId>,
+    cancel: mpsc::UnboundedSender<CancelRequest>,
 }
 
 impl InvocationHandle {
@@ -100,7 +101,7 @@ impl InvocationHandle {
     pub fn new(
         id: InvocationId,
         status: watch::Receiver<InvocationStatus>,
-        cancel: mpsc::UnboundedSender<InvocationId>,
+        cancel: mpsc::UnboundedSender<CancelRequest>,
     ) -> Self {
         Self { id, status, cancel }
     }
@@ -146,7 +147,10 @@ impl InvocationHandle {
         reason = "the public handle contract keeps cancellation awaitable across implementations"
     )]
     pub async fn cancel(&self) {
-        let _ = self.cancel.send(self.id);
+        let _ = self.cancel.send(CancelRequest {
+            invocation: self.id,
+            reason:     None,
+        });
     }
 }
 

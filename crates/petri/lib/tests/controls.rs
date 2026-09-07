@@ -12,12 +12,13 @@ use std::time::{Duration, Instant};
 
 use petri::engine::{EngineState, Event, EventRecord, RunError};
 use petri::execution::controls::{ControlError, ControlService};
+use petri::execution::events::{CollectingSink, EventBody, EventProjector, EventSource};
 use petri::execution::host::{self, HostRun};
 use petri::execution::inspect::inspect_run;
 use petri::execution::watchdog::StallWatchdog;
 use petri::execution::{
-    CoordinatorRecord, ExecutionId, ExecutionObserver, InterviewDispatcher, InterviewReply,
-    InterviewRequest, Interviewer,
+    CancelReason, CoordinatorRecord, ExecutionId, ExecutionObserver, InterviewDispatcher,
+    InterviewReply, InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
 use petri::fabro::{
@@ -373,7 +374,11 @@ async fn an_idle_run_is_cancelled_by_the_watchdog() {
     let graph = lowered.graph.expect("lowers");
     assert_eq!(graph.policy.stall_timeout, Some(Duration::from_millis(400)));
     let watchdog = StallWatchdog::new(graph.policy.stall_timeout.expect("a budget"));
-    let host_run = HostRun::new(graph).observe(Arc::new(watchdog.clone()));
+    let sink = Arc::new(CollectingSink::default());
+    let projector = EventProjector::new(sink.clone());
+    let host_run = HostRun::new(graph)
+        .observe(Arc::new(watchdog.clone()))
+        .observe(projector.clone() as Arc<dyn ExecutionObserver>);
     let mut task = None;
     let started = Instant::now();
     let report = host::run_configured(&rt, host_run, |handle, _| {
@@ -382,11 +387,47 @@ async fn an_idle_run_is_cancelled_by_the_watchdog() {
     .await
     .expect("the run completes");
     task.expect("started").stop().await;
+    let receipt = projector.shutdown().await;
+    assert!(receipt.is_clean(), "{receipt:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(report.status, RunStatus::Cancelled);
     let stall = watchdog.tripped().expect("the watchdog fired");
     assert_eq!(stall.stall_timeout_ms, 400);
     assert!(stall.idle_ms >= 400);
+    // The stall is a public event, derived from the durable cancel record
+    // that carries it as the reason.
+    let events = sink.events();
+    let stalls: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::StallTimeout { .. }))
+        .collect();
+    assert_eq!(stalls.len(), 1, "{events:#?}");
+    assert!(matches!(
+        stalls[0].body,
+        EventBody::StallTimeout {
+            stall_timeout_ms: 400,
+            idle_ms
+        } if idle_ms >= 400
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.body, EventBody::InvocationCancelRequested {
+                reason: Some(CancelReason::StallTimeout {
+                    stall_timeout_ms: 400,
+                    ..
+                }),
+                ..
+            })),
+        "the cancel names its reason: {events:#?}"
+    );
+    let replayed = petri::execution::events::replay_run(dir.path()).expect("replays");
+    assert!(
+        replayed
+            .iter()
+            .any(|e| matches!(e.body, EventBody::StallTimeout { .. })),
+        "the stall survives replay"
+    );
 }
 
 /// A pending question parks the watchdog: a gate that waits far longer than
@@ -482,8 +523,12 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     let rt = runtime(&dir).hooks(controls.hooks(None));
     let lowered = lower(&rt, &dir, TWO);
     let starts = Arc::new(Starts::default());
+    let sink = Arc::new(CollectingSink::default());
+    let projector = EventProjector::new(sink.clone());
+    projector.follow_controls(&controls);
     let host_run = HostRun::new(lowered.graph.expect("lowers"))
         .observe(Arc::new(controls.clone()))
+        .observe(projector.clone() as Arc<dyn ExecutionObserver>)
         .observe(starts.clone());
     controls.pause();
     let paused = controls.clone();
@@ -513,6 +558,41 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     for record in report.state.history() {
         assert_eq!(record.attempt.raw(), 1, "{}", record.name);
     }
+    let receipt = projector.shutdown().await;
+    assert!(receipt.is_clean(), "{receipt:?}");
+    // The pause and the unpause are live-only host notices with their own
+    // identity source, in order, before the first attempt started.
+    let events = sink.events();
+    let notices: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused))
+        .collect();
+    assert_eq!(notices.len(), 2, "{events:#?}");
+    assert!(matches!(notices[0].body, EventBody::RunPaused));
+    assert!(matches!(notices[1].body, EventBody::RunUnpaused));
+    assert!(
+        notices
+            .iter()
+            .all(|e| e.id.source == EventSource::Host && e.subject.is_none()),
+        "{notices:#?}"
+    );
+    assert!(notices[0].id.seq < notices[1].id.seq);
+    let first_attempt = events
+        .iter()
+        .position(|e| matches!(e.body, EventBody::AttemptStarted))
+        .expect("an attempt started");
+    let unpaused = events
+        .iter()
+        .position(|e| matches!(e.body, EventBody::RunUnpaused))
+        .expect("unpaused");
+    assert!(unpaused < first_attempt, "{events:#?}");
+    let replayed = petri::execution::events::replay_run(dir.path()).expect("replays");
+    assert!(
+        !replayed
+            .iter()
+            .any(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused)),
+        "notices are live-only"
+    );
 }
 
 /// Cancellation stays responsive during a pause: the held firing settles as

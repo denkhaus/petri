@@ -29,8 +29,9 @@ pub use coordinator::{
     InvocationLimitError, MAX_INVOCATIONS,
 };
 pub use event::{
-    AttemptAdmission, COORDINATOR_FORMAT_VERSION, CoordinatorEvent, CoordinatorRecord,
-    InvocationResult, InvocationStatus, SandboxBinding, SandboxMode, SecretBinding, SecretBindings,
+    AttemptAdmission, COORDINATOR_FORMAT_VERSION, CancelReason, CancelRequest, CoordinatorEvent,
+    CoordinatorRecord, InvocationResult, InvocationStatus, SandboxBinding, SandboxMode,
+    SecretBinding, SecretBindings,
 };
 pub use id::{
     CallSite, ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxAllocationKey,

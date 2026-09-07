@@ -39,8 +39,8 @@ use steps::Steer;
 use tokio::sync::watch;
 
 use crate::{
-    CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, ExecutionId, ExecutionObserver,
-    InvocationId,
+    CancelReason, CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, ExecutionId,
+    ExecutionObserver, InvocationId,
 };
 
 /// The service's [`ExecutionHooks`]: `before_attempt` holds while paused and
@@ -204,6 +204,12 @@ impl ControlService {
         *self.inner.paused.borrow()
     }
 
+    /// Every change of the paused state, for a projector that publishes
+    /// `run_paused` and `run_unpaused`.
+    pub fn paused_changes(&self) -> watch::Receiver<bool> {
+        self.inner.paused.subscribe()
+    }
+
     /// Hold every attempt not yet admitted. Running work is not interrupted.
     pub fn pause(&self) {
         if self.inner.paused.send_replace(true) {
@@ -257,7 +263,7 @@ impl ControlService {
 
     /// Cancel the whole run politely; a second call reaches the kill tier.
     pub fn cancel(&self) -> Result<(), ControlError> {
-        self.handle()?.cancel_root();
+        self.handle()?.cancel_root_for(CancelReason::Control);
         Ok(())
     }
 }
