@@ -28,6 +28,7 @@ pub(crate) mod launch;
 pub(crate) mod observe;
 pub(crate) mod record;
 pub(crate) mod require;
+pub(crate) mod scenario;
 pub(crate) mod subagents;
 pub(crate) mod subprocess;
 pub(crate) mod twins;
