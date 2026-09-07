@@ -2045,3 +2045,85 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
     assert_eq!(hooks[1]["matcher"], json!("^agent$"));
     assert_eq!(hooks[0]["sandbox"], json!(false));
 }
+
+/// `[run.agent.mcps]` from the three settings layers lands on every agent
+/// node (never on a prompt node), merged by name with the higher layer
+/// winning, interpolated, with secrets as `$secret` references; a nested
+/// workflow's agents inherit the parent's servers.
+#[test]
+fn mcps_lower_onto_agent_nodes_and_into_nested_workflows() {
+    let files = files(&[
+        (
+            "wf/workflow.toml",
+            "[run.agent.mcps.notes]\ntype = \"stdio\"\ncommand = [\"srv\", \"{{ inputs.root }}\"]\nenv = { TOKEN = \"{{ secrets.NOTES }}\" }\ntool_timeout = \"90s\"\n[run.agent.mcps.gone]\ntype = \"http\"\nurl = \"http://gone\"\nenabled = false\n",
+        ),
+        (
+            ".fabro/project.toml",
+            "[run.agent.mcps.notes]\ntype = \"http\"\nurl = \"http://low\"\n[run.agent.mcps.gone]\ntype = \"http\"\nurl = \"http://gone\"\n",
+        ),
+        (
+            "wf/child.fabro",
+            "digraph C { start [shape=Mdiamond] exit [shape=Msquare] inner [prompt=\"x\"] start -> inner -> exit }",
+        ),
+    ]);
+    let inputs = CompileInputs::new().with_input("root", "/srv").with_var(
+        SETTINGS_HOOKS_VAR,
+        "[run.agent.mcps.user]\ntype = \"http\"\nurl = \"http://user\"\n",
+    );
+    let lowered = frontend_fabro::load(
+        "wf/w.fabro",
+        &dot(r#"
+            graph [backend="api", default_model="m"]
+            a [prompt="a"]
+            p [shape=tab, prompt="p"]
+            child [shape=house, stack.child_workflow="child.fabro"]
+            start -> a -> p -> child -> exit
+        "#),
+        &files,
+        &inputs,
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("graph");
+    let mcps = &node(&graph, "a").step.config["mcps"];
+    let names: Vec<&str> = mcps
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|s| s["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, ["notes", "user"], "merged by name, `gone` disabled");
+    assert_eq!(mcps[0]["transport"]["type"], json!("stdio"));
+    assert_eq!(
+        mcps[0]["transport"]["command"],
+        json!(["srv", "/srv"]),
+        "the workflow layer wins and interpolates"
+    );
+    assert_eq!(
+        mcps[0]["transport"]["env"]["TOKEN"],
+        json!({"$secret": "NOTES"})
+    );
+    assert_eq!(mcps[0]["tool_timeout_ms"], json!(90_000));
+    assert_eq!(mcps[0]["startup_timeout_ms"], json!(10_000));
+    assert_eq!(mcps[0]["source"], json!("wf/workflow.toml"));
+    assert_eq!(mcps[1]["transport"]["url"], json!("http://user"));
+    assert!(
+        node(&graph, "p").step.config.get("mcps").is_none(),
+        "a prompt node has no tools"
+    );
+    let child = lowered.children.first().expect("the child graph");
+    let inner = child
+        .body
+        .nodes
+        .iter()
+        .find(|n| n.name == "inner")
+        .expect("inner");
+    assert_eq!(
+        inner.step.config["mcps"].as_array().map(Vec::len),
+        Some(2),
+        "the nested workflow inherits the servers"
+    );
+}
