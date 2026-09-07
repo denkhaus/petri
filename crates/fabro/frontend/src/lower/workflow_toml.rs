@@ -16,7 +16,7 @@
 //!   reads beside `workflow.toml`.
 //! - `[run.model]`: the default `provider`, `name`, `reasoning_effort` and
 //!   `speed` an agent or prompt node gets when neither it nor the graph sets
-//!   one. `[run.model.fallbacks]` warns (model fallback is readiness item 9a).
+//!   one. `[run.model.fallbacks]` is read by [`super::fallbacks`].
 //! - `[run.execution]`: `mode = "dry_run"` and `approval = "auto"` become the
 //!   run's launch defaults; `--dry-run` and `--auto-approve` still win.
 //! - `[run.environment]` and `[environments.<id>]`: the `provider` selects the
@@ -87,6 +87,9 @@ pub struct ModelDefaults {
     /// `controls.speed`: `standard` or `fast`, the default an LLM node gets
     /// when it names none.
     pub speed:            Option<String>,
+    /// `fallbacks`: the model-keyed chains as written, references in their
+    /// canonical spelling ([`super::fallbacks`]).
+    pub fallbacks:        BTreeMap<String, Vec<String>>,
 }
 
 /// One environment value: a literal, or a secret name to resolve at spawn.
@@ -496,19 +499,12 @@ impl Reader<'_> {
         let Some(model) = item.as_table() else {
             return;
         };
-        if model.contains_key("fallbacks") {
-            let path = self.path;
-            self.warn(
-                "ignored.workflow_toml.run.model.fallbacks",
-                format!(
-                    "`[run.model.fallbacks]` in `{path}` is ignored: the standalone runner does \
-                     not implement model fallback yet; each node runs on its own model"
-                ),
-            );
-        }
         for (key, value) in model {
             match key.as_str() {
-                "fallbacks" => {}
+                "fallbacks" => {
+                    self.settings.model.fallbacks =
+                        super::fallbacks::read(self.path, self.diags, value);
+                }
                 "provider" => self.settings.model.provider = value.as_str().map(str::to_owned),
                 "name" => self.settings.model.name = value.as_str().map(str::to_owned),
                 "controls" => {

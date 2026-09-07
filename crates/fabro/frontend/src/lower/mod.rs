@@ -8,6 +8,7 @@
 //! semantics.
 
 mod attrs;
+pub mod fallbacks;
 mod hooks;
 mod imports;
 mod parallel;
@@ -1129,6 +1130,7 @@ impl Ctx<'_> {
         {
             config.insert("reasoning_effort".into(), Value::String(effort));
         }
+        fallbacks::write(&self.settings, &mut config);
         let branch_first = threads::is_branch_first(node, workflow, &self.kinds);
         let default_speed = self.settings.model.speed.clone();
         let threads = threads::ThreadAttrs::read(

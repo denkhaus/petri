@@ -928,7 +928,6 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         "ignored.workflow_toml.run.clone",
         "ignored.workflow_toml.run.run_branch",
         "ignored.workflow_toml.run.pull_request",
-        "ignored.workflow_toml.run.model.fallbacks",
         "ignored.workflow_toml.run.integrations",
         "ignored.workflow_toml.run.checkpoint",
         "ignored.workflow_toml.run.artifacts",
@@ -945,6 +944,7 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     for code in [
         "ignored.workflow_toml.run.goal",
         "ignored.workflow_toml.run.model",
+        "ignored.workflow_toml.run.model.fallbacks",
         "ignored.workflow_toml.run.environment",
         "ignored.workflow_toml.run.execution",
         "ignored.workflow_toml.environments",
@@ -991,7 +991,7 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     // The milestone C agent facilities have no `workflow.toml` surface at the
     // pinned Fabro (its `[run.agent]` accepts `fabro_tools` and `mcps` only),
     // so a request for one is refused as Fabro refuses it, never passed
-    // silently; the model fallback chain is the one warned-and-ignored setting.
+    // silently.
     for key in ["skills", "subagents", "compaction", "context_window"] {
         assert_eq!(
             codes(&format!("[run.agent]\n{key} = {{ enabled = true }}\n")),
@@ -999,8 +999,11 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
             "`[run.agent] {key}` is refused"
         );
     }
-    assert_eq!(codes("[run.model.fallbacks]\n\"m\" = [\"p:m\"]\n"), [
-        "ignored.workflow_toml.run.model.fallbacks"
+    // The model fallback chain is read (task 12): a well-formed table is
+    // silent, a provider-qualified key is refused as Fabro refuses it.
+    assert!(codes("[run.model.fallbacks]\n\"m\" = [\"p:m\"]\n").is_empty());
+    assert_eq!(codes("[run.model.fallbacks]\n\"p/m\" = [\"q:m\"]\n"), [
+        "fabro.model_fallbacks"
     ]);
 
     // Keys Fabro's parser refuses, with its rename hint.
@@ -1246,6 +1249,7 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
         "[run]\ngoal = \"Fix {{ inputs.target }}\"\n[run.inputs]\ntarget = \"main\"\n\
          [run.model]\nprovider = \"openai\"\nname = \"gpt-5.6-sol\"\n\
          [run.model.controls]\nreasoning_effort = \"low\"\nspeed = \"fast\"\n\
+         [run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"anthropic:claude-opus\", \"openrouter/kimi-k3\"]\n\
          [run.execution]\nmode = \"dry_run\"\napproval = \"auto\"\n\
          [run.environment]\nid = \"review\"\n[run.environment.env]\nOVERRIDE = \"run\"\n\
          [environments.review]\nprovider = \"docker\"\n[environments.review.image]\n\
@@ -1314,6 +1318,11 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
     assert_eq!(a["provider"], json!("openai"));
     assert_eq!(a["reasoning_effort"], json!("low"));
     assert_eq!(a["speed"], json!("fast"));
+    // The fallback chains ride on the node as written, references canonical.
+    assert_eq!(
+        a["fallbacks"],
+        json!({ "gpt-5.6-sol": ["anthropic:claude-opus", "openrouter:kimi-k3"] })
+    );
     // Prepare steps: first after start, in order, with env, timeout, exit.
     assert_eq!(tiers(&graph, "start")[0].1[0].0, "run_prepare_1");
     assert_eq!(tiers(&graph, "run_prepare_1")[0].1[0].0, "run_prepare_2");
