@@ -128,6 +128,7 @@ crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` 
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
 crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation
+crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
@@ -970,6 +971,39 @@ may be routed to at all; a model on any other provider is unavailable. An
 unreadable or invalid layer leaves the client unbuilt and every native agent
 node failing with `pebble_unconfigured`, rather than reaching a live
 endpoint.
+
+## The embedding path
+
+A host that embeds Petri (a platform running Fabro workflows, say) uses the
+same `Runtime` the CLI does and adds three things, all Petri-owned types with
+no platform vocabulary in them:
+
+- **Events.** `execution::events` is the versioned public event contract
+  (`crates/core/execution/EVENTS.md`). An `EventProjector` is an
+  `ExecutionObserver` that derives `RunEvent`s from every record and hands
+  them to the host's `RunEventSink`, awaited per event so a slow store delays
+  and never drops; `replay_run` rebuilds the same events, with the same
+  identities, from a run dir after the fact, and `EventProjector::primed`
+  attaches at resume. Every event names its run, invocation, execution,
+  node (with the frontend's `meta`), firing, visit, attempt and branch role.
+- **Awaited extension points.** `Runtime::hooks` installs
+  `driver::lifecycle::ExecutionHooks`: `before_attempt` (pause, skip or block
+  an attempt), `prepare_result` (adjust the effective result; the original is
+  recorded beside it), `after_record`, and `transition` (override the selected
+  route, report best-effort problems, or fail advancement). Callbacks see an
+  immutable `FiringView` and change the run only through their return values.
+  Without hooks the driver's fast path is unchanged.
+- **Hook service.** `execution::hooks::HookService` is the one interface a
+  hook executor implements (`crates/core/execution/HOOKS.md`); the
+  `HookAdapter` is its one caller from workflow points, so the local hook
+  executor and a platform's hook service both run each configured hook once.
+- **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
+  on the terminal path.
+
+`crates/petri/lib/tests/embedding.rs` is the worked example: a Fabro workflow
+run without adapters, then with fake adapters that exercise every point, with
+the timeline, attempts, branches, question, outcomes and accounting
+reconstructed from public events alone.
 
 ## Local run layout
 

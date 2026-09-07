@@ -194,12 +194,26 @@ fn register(coordinator: &mut Coordinator, graph: &Graph) -> Result<GraphDigest,
 /// them on the provider before delivering again, or the resumed step fails
 /// with `secret_unavailable`.
 pub async fn resume(rt: &Runtime) -> Result<ExecutionReport, HostError> {
+    resume_configured(rt, Vec::new()).await
+}
+
+/// [`resume`] with observers attached before the first record: a resumed
+/// execution replays its regenerated suffix to them before it dispatches
+/// pending work, and the coordinator's own records reach them as they are
+/// appended.
+pub async fn resume_configured(
+    rt: &Runtime,
+    observers: Vec<Arc<dyn ExecutionObserver>>,
+) -> Result<ExecutionReport, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
     let run_runtime = rt.prepare_run(&run_dir);
     let (mut coordinator, torn) =
         Coordinator::resume(run_runtime, Vec::new(), CoordinatorOptions::default())?;
     if torn {
         tracing::warn!("truncated an EOF-torn coordinator record before resume");
+    }
+    for observer in observers {
+        coordinator = coordinator.observe(observer);
     }
     let digest = coordinator.store().state().invocations[&InvocationId::ROOT]
         .declaration

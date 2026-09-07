@@ -38,7 +38,7 @@ pub const HOOK_NOTE_KIND: &str = "hook";
 
 /// Where in a run a hook may be configured. Names describe the point, not
 /// any one workflow format's spelling of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookPoint {
     /// Before the first attempt of a visit is dispatched.

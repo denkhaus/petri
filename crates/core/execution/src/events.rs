@@ -33,7 +33,10 @@
 //! before dispatching pending work, so events for records the crash kept off
 //! disk arrive again with the same identities: delivery is at-least-once,
 //! deduplicated by [`EventId`]. Records before the loaded prefix are not
-//! re-delivered live; [`replay_run`] covers them.
+//! re-delivered live; [`replay_run`] covers them. A projector attached at
+//! resume is built with [`EventProjector::primed`], which folds the prefix
+//! into its state without delivering it, so the suffix derives the same
+//! events it would have derived live.
 //!
 //! # Durability
 //!
@@ -370,9 +373,11 @@ pub enum EventBody {
     WaitStateChanged {
         state: WaitState,
     },
+    /// A polite cancel. `scope` names the cancelled scope for a scope
+    /// cancel; `group` names the anchor node for a group cancel.
     CancelRequested {
-        scope: CancelScopeId,
-        /// The node whose group was cancelled, for a group cancel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<CancelScopeId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group: Option<NodeRef>,
     },
@@ -447,12 +452,14 @@ struct ExecutionTrack {
     parent:     Option<ParentLink>,
     /// Firings seen live, so a new one is a visit start.
     firings:    BTreeSet<FiringId>,
+    /// Firings whose attempt was dispatched at least once.
+    started:    BTreeSet<FiringId>,
     /// Firings with a question out.
     asking:     BTreeSet<FiringId>,
     history:    usize,
     branches:   BranchMap,
-    /// The status each finished firing ended with, for branch results.
-    statuses:   BTreeMap<FiringId, Status>,
+    /// Fork firings whose `ForkStarted` was emitted.
+    forks:      BTreeSet<FiringId>,
 }
 
 /// The stateless-by-record derivation, with the little state it needs across
@@ -592,6 +599,7 @@ impl Projection {
             }),
             Event::TokenEmitted(_) => {}
             Event::StepStarted { firing, .. } => {
+                track.started.insert(*firing);
                 emit(subject_of(state, track, *firing), EventBody::AttemptStarted);
                 emit(
                     subject_of(state, track, *firing),
@@ -714,26 +722,16 @@ impl Projection {
                 emit(subject.clone(), EventBody::RouteApplied { route });
                 if let (Some(subject), RouteApplied::Edge { .. }) = (&subject, applied)
                     && let BranchRole::Fork { branches } = subject.branch
+                    && track.forks.insert(firing)
                 {
                     // The fork's routing applies group by group; the first
                     // applied route announces the fork once.
-                    let first = state
-                        .log
-                        .records()
-                        .iter()
-                        .filter(
-                            |r| matches!(&r.event, Event::RouteApplied(a) if a.firing() == firing),
-                        )
-                        .map(|r| r.seq)
-                        .min();
-                    if first == Some(record.seq) {
-                        let fork = subject.node.id;
-                        emit(Some(subject.clone()), EventBody::ForkStarted {
-                            branches: (0..branches)
-                                .map(|index| BranchRef { fork, index })
-                                .collect(),
-                        });
-                    }
+                    let fork = subject.node.id;
+                    emit(Some(subject.clone()), EventBody::ForkStarted {
+                        branches: (0..branches)
+                            .map(|index| BranchRef { fork, index })
+                            .collect(),
+                    });
                 }
             }
             Event::RetryElapsed {
@@ -775,17 +773,12 @@ impl Projection {
                 });
             }
             Event::CancelRequested { scope } => emit(None, EventBody::CancelRequested {
-                scope: *scope,
+                scope: Some(*scope),
                 group: None,
             }),
             Event::CancelGroupRequested { node } => {
                 let group = state.graph().node(*node).map(node_ref);
-                emit(None, EventBody::CancelRequested {
-                    scope: state
-                        .cancel_scope(CancelScopeId::ROOT)
-                        .map_or(CancelScopeId::ROOT, |_| CancelScopeId::ROOT),
-                    group,
-                });
+                emit(None, EventBody::CancelRequested { scope: None, group });
             }
             Event::KillRequested { scope } => {
                 emit(None, EventBody::KillRequested { scope: *scope });
@@ -892,10 +885,7 @@ impl Projection {
         let history = state.history();
         if history.len() > track.history {
             for entry in &history[track.history..] {
-                track
-                    .statuses
-                    .insert(entry.firing, entry.outcome.status.clone());
-                let executed = track.firings.contains(&entry.firing);
+                let executed = track.started.contains(&entry.firing);
                 let attempts = entry.attempt.raw();
                 let subject = state.graph().node(entry.node).map(|node| Subject {
                     node:       node_ref(node),
@@ -1156,7 +1146,27 @@ pub struct EventProjector {
 }
 
 impl EventProjector {
+    /// A projector for a fresh run.
     pub fn new(sink: Arc<dyn RunEventSink>) -> Arc<Self> {
+        Self::with_projection(sink, Projection::new())
+    }
+
+    /// A projector for a run being resumed from `run_dir`: the records on
+    /// disk are folded into its state first, and nothing is delivered for
+    /// them. The resumed driver then delivers the regenerated suffix and
+    /// every new record with the identities a fresh run would have given
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// The run dir's logs do not decode or replay.
+    pub fn primed(sink: Arc<dyn RunEventSink>, run_dir: &Path) -> Result<Arc<Self>, ReplayError> {
+        let mut projection = Projection::new();
+        project_run(run_dir, &mut projection)?;
+        Ok(Self::with_projection(sink, projection))
+    }
+
+    fn with_projection(sink: Arc<dyn RunEventSink>, projection: Projection) -> Arc<Self> {
         let (tx, mut rx) = mpsc::unbounded_channel::<PumpMessage>();
         let pump = tokio::spawn(async move {
             let mut receipt = ProjectionReceipt {
@@ -1190,7 +1200,7 @@ impl EventProjector {
             receipt
         });
         Arc::new(Self {
-            projection: Mutex::new(Projection::new()),
+            projection: Mutex::new(projection),
             tx,
             pump: Mutex::new(Some(pump)),
             counts: Mutex::new(PumpState { projected: 0 }),
@@ -1308,6 +1318,12 @@ pub enum ReplayError {
 /// external event by external event so the derivation sees the same
 /// post-apply states the live observer saw. Identities equal the live ones.
 pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
+    let mut projection = Projection::new();
+    project_run(run_dir, &mut projection)
+}
+
+/// [`replay_run`] through a caller's projection state.
+fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEvent>, ReplayError> {
     let coordinator = run_dir.join(COORDINATOR_FILE);
     let bytes = fs::read(&coordinator).map_err(|source| ReplayError::Io {
         path: coordinator.clone(),
@@ -1315,7 +1331,6 @@ pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
     })?;
     let decoded = decode_coordinator_log(&coordinator, &bytes)?;
     let state = CoordinatorState::replay(&decoded.records)?;
-    let mut projection = Projection::new();
     let mut events = Vec::new();
     for record in &decoded.records {
         events.extend(projection.lifecycle(record));
@@ -1340,7 +1355,7 @@ pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
             continue;
         }
         let log = read_engine_log(&log_path)?.log;
-        events.extend(replay_execution(&mut projection, *execution, graph, &log));
+        events.extend(replay_execution(projection, *execution, graph, &log));
     }
     Ok(events)
 }

@@ -455,6 +455,10 @@ struct Task {
     name:     SmolStr,
     scope:    ScopeId,
     attempt:  Attempt,
+    /// When the attempt was dispatched, for the observed duration a step
+    /// kind did not measure itself. Driver-side only: the clock never enters
+    /// the core, only the recorded number does, like any step metric.
+    started:  time::Instant,
     /// The firing's `driver.step` span, held so the driver-loop events about
     /// this firing — the stop signal, the hard deadline, the finish — land
     /// inside it: they run on the driver task, not in the runner future the
@@ -800,6 +804,13 @@ impl Driver {
     }
 
     /// Run to completion.
+    ///
+    /// The loop's state is boxed here so the future a caller holds stays
+    /// small whatever the driver carries.
+    pub async fn run(self) -> ExecutionReport {
+        Box::pin(self.run_loop()).await
+    }
+
     #[tracing::instrument(
         name = "driver.run",
         skip_all,
@@ -809,7 +820,7 @@ impl Driver {
             node_count = self.engine.graph().nodes.len(),
         )
     )]
-    pub async fn run(mut self) -> ExecutionReport {
+    async fn run_loop(mut self) -> ExecutionReport {
         self.caps = self.caps.with(self.handle());
         match self.resume.take() {
             None => self.feed(Event::ExecutionStarted(self.start.clone())),
@@ -2068,6 +2079,7 @@ impl Driver {
             name,
             scope,
             attempt,
+            started: time::Instant::now(),
             span,
             forwards: forward_tx,
             workers,
@@ -2363,10 +2375,17 @@ impl Driver {
         if let Some(task) = self.tasks.get_mut(&firing) {
             task.workers.shutdown().await;
         }
+        let mut outcome = outcome;
         let (reason, span) = match self.tasks.remove(&firing) {
             Some(task) => {
                 if outcome.status.is_failure() {
                     self.scope_failed.insert(task.scope);
+                }
+                // The observed wall-clock duration, when the step kind did
+                // not report one of its own.
+                if outcome.metrics.duration_ms.is_none() {
+                    outcome.metrics.duration_ms =
+                        Some(u64::try_from(task.started.elapsed().as_millis()).unwrap_or(u64::MAX));
                 }
                 (task.reason, task.span)
             }
@@ -2375,7 +2394,6 @@ impl Driver {
 
         // A step reports `Cancelled` whichever way it was stopped; only the driver
         // knows a timer got there first.
-        let mut outcome = outcome;
         if reason == Some(CancelReason::TimedOut) && matches!(outcome.status, Status::Cancelled) {
             outcome.status = Status::TimedOut;
         }
@@ -2655,6 +2673,7 @@ mod teardown_tests {
             name: "paused".into(),
             scope: ScopeId::new(0),
             attempt,
+            started: time::Instant::now(),
             span: tracing::Span::none(),
             forwards,
             workers,
