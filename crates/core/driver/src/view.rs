@@ -81,11 +81,11 @@ pub struct BranchRef {
 }
 
 /// The `Node::meta` key a frontend sets when it lowered a branch into a graph
-/// of its own: `{ "fork": <node id in the caller's graph>, "index": <n> }`.
-/// The node then plays [`BranchRole::Member`] of that branch even though its
-/// own graph has no fork, so hosts and events see the same role a branch that
-/// stayed in the caller's graph would have.
-pub const BRANCH_ROLE_META: &str = "branch_role";
+/// of its own ([`ir::placeholder::BRANCH_ROLE_META`]). The node then plays
+/// [`BranchRole::Member`] of that branch even though its own graph has no
+/// fork, so hosts and events see the same role a branch that stayed in the
+/// caller's graph would have.
+pub use ir::placeholder::BRANCH_ROLE_META;
 
 /// The branch roles of every node in a graph, computed once per graph shape.
 ///

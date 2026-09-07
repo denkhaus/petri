@@ -14,6 +14,14 @@ use serde_json::Value;
 /// expression. Lowering replaces these with concrete values before execution.
 pub const EXPR_PLACEHOLDER_KEY: &str = "$expr";
 
+/// The `Node::meta` key a frontend sets when it lowered one branch of a fork
+/// into a graph of its own: `{ "fork": <node id in the caller's graph>,
+/// "index": <branch ordinal> }`. Hosts read a node's branch role from the
+/// graph shape; this key lets a branch that left its caller's graph keep the
+/// role it would have had there. Shared by frontends and the driver, like the
+/// placeholder keys.
+pub const BRANCH_ROLE_META: &str = "branch_role";
+
 /// The marker for a secret reference: `{"$secret": "NAME"}`.
 ///
 /// Unlike an expression placeholder, this one **survives** into a

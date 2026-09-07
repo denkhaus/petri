@@ -9,11 +9,12 @@ use std::time::Duration;
 use std::{env, fs, process};
 
 use frontend::print::print_expr;
-use frontend::{CompileInputs, Frontend};
+use frontend::{CompileInputs, Frontend, NoFiles};
 use frontend_fabro::kinds::{
-    AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND, WORKFLOW_KIND,
+    AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND,
+    WORKFLOW_KIND,
 };
-use frontend_fabro::{Fabro, MAX_FIRINGS};
+use frontend_fabro::{Fabro, MAX_FIRINGS, load};
 use ir::placeholder::contains_placeholder;
 use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy, TimeoutPolicy};
 use serde_json::json;
@@ -462,22 +463,128 @@ fn static_fan_out_and_fan_in_lower_to_groups_and_an_all_join() {
     );
     assert_eq!(node(&graph, "merge").join, JoinPolicy::All);
     assert_eq!(node(&graph, "a").join, JoinPolicy::Any);
-    let arm = &node(&graph, "a").routing.groups[0].arms[0];
+    // Each branch is a `fabro/branch` step over a child graph of its own,
+    // routing only to the fan-in with its envelope.
+    let a = node(&graph, "a");
+    assert_eq!(a.step.kind, BRANCH_KIND);
+    assert_eq!(a.step.config["node"], json!("a"));
+    assert_eq!(a.step.config["fork"], json!("fork"));
+    assert_eq!(a.step.config["index"], json!(0));
+    assert_eq!(a.step.config["max_parallel"], json!(4));
+    assert_eq!(node(&graph, "b").step.config["index"], json!(1));
+    assert_eq!(a.routing.groups.len(), 1);
+    let arm = &a.routing.groups[0].arms[0];
+    assert_eq!(target_name(&graph, arm.to), "merge");
     assert!(arm.map.is_some(), "a branch hands the fan-in its result");
+    assert_eq!(a.meta["kind"], json!("parallel.branch"));
+    assert_eq!(a.meta["synthetic"], json!(true));
+    assert_eq!(node(&graph, "merge").step.kind, FAN_IN_KIND);
     assert!(contains_placeholder(&node(&graph, "merge").step.config));
     ir::validate(&graph).expect("validates");
 }
 
 #[test]
-fn static_fan_in_payloads_keep_the_fan_out_branch_order() {
+fn branches_lower_to_child_graphs_that_keep_the_target_and_its_role() {
+    let lowered = load(
+        "w.fabro",
+        &dot(r#"
+        fork [shape=component, max_parallel=2]
+        a [shape=parallelogram, script="echo a", max_retries=2]
+        b [prompt="x", on_failure="succeed"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        b -> merge
+        merge -> exit
+    "#),
+        &NoFiles,
+        &CompileInputs::new(),
+    );
+    let graph = lowered.graph.expect("lowers");
+    assert_eq!(lowered.children.len(), 2, "one child graph per branch");
+    let child_of = |name: &str| {
+        let digest = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .and_then(|n| n.step.config["child_digest"].as_str())
+            .unwrap_or_else(|| panic!("{name}'s child digest"))
+            .to_owned();
+        lowered
+            .children
+            .iter()
+            .find(|child| frontend::graph_digest(child) == digest)
+            .unwrap_or_else(|| panic!("the child {name} names is registered"))
+    };
+    let child = child_of("a");
+    assert_eq!(child.nodes.len(), 1, "the target alone");
+    let target = &child.nodes[0];
+    assert_eq!(target.name, "a");
+    assert_eq!(target.step.kind, COMMAND_KIND);
+    assert_eq!(
+        target.retry.max_attempts.get(),
+        3,
+        "retries stay inside the child"
+    );
+    assert_eq!(target.meta["kind"], json!("command"));
+    assert_eq!(
+        target.meta[ir::placeholder::BRANCH_ROLE_META],
+        json!({ "fork": node_id(&graph, "fork").raw(), "index": 0 })
+    );
+    assert!(target.routing.groups.is_empty(), "a branch follows no edge");
+    assert_eq!(child.entry, vec![target.id]);
+    assert_eq!(child.result, ir::ResultProjection::NodeOutput(target.id));
+    // A prompt branch carries its fork preamble and item data, and no
+    // explicit routes: its succeed policy applies unconditionally.
+    let config = &child_of("b").nodes[0].step.config;
+    assert!(config.get("routes").is_none());
+    assert!(contains_placeholder(&config["preamble"]));
+    assert!(contains_placeholder(&config["item_data"]));
+    for child in &lowered.children {
+        ir::validate(child).expect("child validates");
+    }
+}
+
+#[test]
+fn max_parallel_follows_fabro_normalization() {
+    let branch = |attrs: &str| {
+        lower_ok(&dot(&format!(
+            r#"
+        fork [shape=component{attrs}]
+        a [prompt="x"]
+        merge [shape=tripleoctagon]
+        start -> fork -> a -> merge -> exit
+    "#
+        )))
+    };
+    let of = |graph: &ir::Graph| node(graph, "a").step.config["max_parallel"].clone();
+    assert_eq!(of(&branch("")), json!(4));
+    assert_eq!(of(&branch(", max_parallel=7")), json!(7));
+    assert_eq!(of(&branch(", max_parallel=0")), json!(1));
+    assert_eq!(of(&branch(", max_parallel=-3")), json!(4));
+    assert_eq!(of(&branch(", max_parallel=\"many\"")), json!(4));
+    assert!(
+        codes(&dot(r#"
+        fork [shape=component, max_parallel="many"]
+        a [prompt="x"]
+        merge [shape=tripleoctagon]
+        start -> fork -> a -> merge -> exit
+    "#))
+        .contains(&"fabro.max_parallel.normalized".to_string())
+    );
+}
+
+#[test]
+fn static_branch_payloads_carry_the_branch_index() {
     let graph = lower_ok(&dot(r#"
         fork [shape=component]
         a [prompt="x"]
-        a_tail [prompt="x"]
         b [prompt="x"]
         merge [shape=tripleoctagon]
         start -> fork
-        fork -> a -> a_tail -> merge
+        fork -> a -> merge
         fork -> b -> merge
         merge -> exit
     "#));
@@ -489,28 +596,112 @@ fn static_fan_in_payloads_keep_the_fan_out_branch_order() {
             .as_u64()
             .expect("numeric branch index")
     };
-    assert_eq!(index("a_tail"), 0);
+    assert_eq!(index("a"), 0);
     assert_eq!(index("b"), 1);
 }
 
 #[test]
-fn parallel_edges_to_exit_still_pass_through_the_goal_check() {
-    let graph = lower_ok(&dot(r#"
+fn branches_must_share_a_join_and_a_branch_follows_no_other_edge() {
+    // A tail after a branch target is never taken: the branches share no
+    // direct successor, so the fork has no join.
+    assert!(
+        codes(&dot(r#"
         fork [shape=component]
-        gate [prompt="x", goal_gate=true, retry_target="gate"]
+        a [prompt="x"]
+        a_tail [prompt="x"]
+        b [prompt="x"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a -> a_tail -> merge
+        fork -> b -> merge
+        merge -> exit
+    "#))
+        .contains(&"fabro.parallel.no_join".to_string())
+    );
+    // An edge from a branch target to anything but the join is reported.
+    assert!(
+        codes(&dot(r#"
+        fork [shape=component]
+        a [prompt="x"]
+        b [prompt="x"]
+        merge [shape=tripleoctagon]
+        extra [prompt="x"]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        a -> extra
+        b -> merge
+        merge -> exit
+        extra -> exit
+    "#))
+        .contains(&"fabro.parallel.branch_edge_ignored".to_string())
+    );
+    // The exit is not a branch target.
+    assert!(
+        codes(&dot(r#"
+        fork [shape=component]
+        gate [prompt="x"]
         start -> fork
         fork -> gate
         fork -> exit
         gate -> exit
+    "#))
+        .contains(&"fabro.parallel.bad_branch_target".to_string())
+    );
+}
+
+#[test]
+fn a_join_that_is_not_a_fan_in_gets_a_synthetic_fan_in_that_publishes_the_results() {
+    let graph = lower_ok(&dot(r#"
+        fork [shape=component]
+        a [prompt="x"]
+        b [prompt="x"]
+        debate [prompt="x"]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> debate
+        b -> debate
+        debate -> exit
     "#));
-    let targets: Vec<String> = node(&graph, "fork")
-        .routing
-        .groups
-        .iter()
-        .flat_map(|group| group.arms.iter())
-        .map(|arm| target_name(&graph, arm.to))
-        .collect();
-    assert_eq!(targets, ["gate", "goal_check"]);
+    let collector = node(&graph, "fork.fan_in");
+    assert_eq!(collector.step.kind, FAN_IN_KIND);
+    assert_eq!(collector.join, JoinPolicy::All);
+    assert_eq!(collector.meta["synthetic"], json!(true));
+    assert_eq!(collector.meta["kind"], json!("parallel.fan_in"));
+    assert_eq!(
+        target_name(&graph, collector.routing.groups[0].arms[0].to),
+        "debate"
+    );
+    for branch in ["a", "b"] {
+        assert_eq!(
+            target_name(&graph, node(&graph, branch).routing.groups[0].arms[0].to),
+            "fork.fan_in"
+        );
+    }
+    ir::validate(&graph).expect("validates");
+}
+
+#[test]
+fn a_duplicate_branch_target_gets_its_own_branch_node_and_index() {
+    let graph = lower_ok(&dot(r#"
+        fork [shape=component]
+        a [prompt="x"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> a
+        a -> merge
+        merge -> exit
+    "#));
+    assert_eq!(node(&graph, "a").step.config["index"], json!(0));
+    let duplicate = node(&graph, "a.branch1");
+    assert_eq!(duplicate.step.kind, BRANCH_KIND);
+    assert_eq!(duplicate.step.config["node"], json!("a"));
+    assert_eq!(duplicate.step.config["index"], json!(1));
+    assert_eq!(node(&graph, "fork").routing.groups.len(), 2);
+    ir::validate(&graph).expect("validates");
 }
 
 #[test]
@@ -532,9 +723,16 @@ fn for_each_lowers_to_an_expansion_on_the_template_node() {
     else {
         panic!("job expands");
     };
-    assert_eq!(*max_parallel, Some(4));
+    // The expansion itself is unbounded: `max_parallel` bounds the branch
+    // attempts through the child invocations' admission.
+    assert_eq!(*max_parallel, None);
     assert!(!fail_fast);
     assert_eq!(*target, ir::ExpandTarget::Node);
+    assert_eq!(job.step.kind, BRANCH_KIND);
+    assert_eq!(job.step.config["max_parallel"], json!(4));
+    assert_eq!(job.step.config["for_each"], json!(true));
+    assert!(contains_placeholder(&job.step.config["item"]));
+    assert!(contains_placeholder(&job.step.config["index"]));
     assert!(
         node(&graph, "fan").precondition.is_some(),
         "the item cap is a precondition"
@@ -1397,7 +1595,9 @@ fn stdin_source_reads_the_context_or_the_fan_in() {
             ir::ExprId::new(u32::try_from(id).expect("u32")),
         )
     };
-    assert_eq!(stdin("m"), "nodes.merge.output");
+    // The fan-in publishes `parallel.results` into the context, where a
+    // later command reads it like any other key.
+    assert_eq!(stdin("m"), "get(kv, 'parallel.results')");
     assert_eq!(stdin("k"), "get(kv, 'output.a')");
 }
 

@@ -63,6 +63,15 @@ pub struct AgentConfig {
     pub timeout_ms:       Option<u64>,
     #[serde(default)]
     pub kv:               Value,
+    /// The fidelity preamble a parallel branch was forked with, rendered by
+    /// the branch step from the parent's stage records. Present only inside
+    /// a branch child; it stands in for the child's own (empty) records.
+    #[serde(default)]
+    pub preamble:         Option<String>,
+    /// A `for_each` branch's item, rendered as fenced untrusted data by the
+    /// branch step. Appended after the prompt, as Fabro appends it.
+    #[serde(default)]
+    pub item_data:        Option<String>,
     #[serde(default)]
     pub nodes:            Value,
 }
@@ -107,9 +116,16 @@ impl AgentConfig {
         }
         let fidelity = self.fidelity.as_deref().unwrap_or("compact");
         if fidelity != "truncate" {
-            out.push_str(&preamble::previous_stages(&self.nodes));
+            match &self.preamble {
+                Some(preamble) => out.push_str(preamble),
+                None => out.push_str(&preamble::previous_stages(&self.nodes)),
+            }
         }
         out.push_str(&self.prompt);
+        if let Some(item) = self.item_data.as_deref().filter(|item| !item.is_empty()) {
+            out.push_str("\n\n");
+            out.push_str(item);
+        }
         out.push_str(&contract.prompt_suffix());
         out
     }

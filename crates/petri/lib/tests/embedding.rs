@@ -35,7 +35,9 @@ use petri::execution::{
     ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::{AGENT_KIND, CommandStep, HumanStep, StubStep, WAIT_KIND, WORKFLOW_KIND};
+use petri::fabro::{
+    AGENT_KIND, BranchStep, CommandStep, FanInStep, HumanStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
+};
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
 use petri::ir::{Attempt, EdgeId, Graph, Outcome, RunStatus, Status, Value};
@@ -102,6 +104,8 @@ fn runtime(dir: &RunDir, hooks: Option<Arc<dyn ExecutionHooks>>) -> Runtime {
     }
     registry.register(CommandStep);
     registry.register(HumanStep);
+    registry.register(BranchStep);
+    registry.register(FanInStep);
     let rt = Runtime::standard()
         .frontend(Fabro::new())
         .steps(registry)
@@ -523,7 +527,13 @@ impl Timeline {
             if let Some(invocation) = event.invocation {
                 timeline.invocations.insert(invocation.raw());
             }
-            let node = event.subject.as_ref().map(|subject| {
+            // A synthetic node is a lowering artifact (a parallel branch's
+            // delegate, a goal check): the stage it stands for has events of
+            // its own, so it takes no node timeline.
+            let synthetic = event.subject.as_ref().is_some_and(|subject| {
+                subject.node.meta.get("synthetic") == Some(&Value::Bool(true))
+            });
+            let node = event.subject.as_ref().filter(|_| !synthetic).map(|subject| {
                 let entry = timeline
                     .nodes
                     .entry(subject.node.name.to_string())
@@ -664,7 +674,8 @@ async fn the_workflow_runs_without_adapters_and_the_events_reconstruct_it() {
 
     let timeline = Timeline::from_events(&outcome.events);
     assert_eq!(timeline.run_status, Some(RunStatus::Success));
-    assert_eq!(timeline.invocations, BTreeSet::from([0]));
+    // The root and the two branch children.
+    assert_eq!(timeline.invocations, BTreeSet::from([0, 1, 2]));
 
     // The retry: two attempts, the first not final, then one final record.
     let flaky = timeline.node("flaky");
@@ -1331,10 +1342,11 @@ async fn recovery_redelivers_with_stable_identities() {
     let coordinator = dir.path().join("coordinator.jsonl");
     let text = fs::read_to_string(&coordinator).expect("reads");
     let lines: Vec<&str> = text.lines().collect();
+    // The root execution's finish: the branch children finished before it.
     let cut = lines
         .iter()
-        .position(|line| line.contains("ExecutionFinished"))
-        .expect("the execution finished");
+        .position(|line| line.contains("ExecutionFinished") && line.contains("\"execution\":0"))
+        .expect("the root execution finished");
     fs::write(&coordinator, format!("{}\n", lines[..cut].join("\n"))).expect("writes");
 
     let second = Arc::new(CollectingSink::default());

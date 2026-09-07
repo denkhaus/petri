@@ -9,6 +9,7 @@
 
 mod attrs;
 mod imports;
+mod parallel;
 pub(crate) mod policy;
 mod promotion;
 mod routing;
@@ -23,10 +24,12 @@ pub use imports::IMPORT_ERROR;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::validate::loop_reachable;
 use ir::{
-    Budget, Completion, Edge, EdgeId, ExpandTarget, ExprId, GraphBuilder, JoinPolicy, NodeId,
+    Budget, Completion, Edge, EdgeId, ExprId, GraphBuilder, JoinPolicy, NodeId,
     Routing, Scope, ScopeId, StepRef,
 };
 pub use promotion::ROUTES_KEY;
+pub use parallel::{BRANCH_META_KIND, DEFAULT_MAX_PARALLEL};
+pub use policy::MAX_INVOCATIONS;
 pub use routing::{FailurePolicy, Policy};
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
@@ -166,8 +169,6 @@ struct Ctx<'a> {
     ids:              HashMap<String, NodeId>,
     spans:            HashMap<NodeId, Span>,
     kinds:            HashMap<String, Kind>,
-    /// Static parallel branch node → the fan-out arm's ordinal.
-    branch_indices:   HashMap<String, usize>,
     /// The directory of the workflow file, for `@file` references.
     base_dir:         String,
     template:         Context,
@@ -236,7 +237,6 @@ fn lower_nested(
         ids: HashMap::new(),
         spans: HashMap::new(),
         kinds: HashMap::new(),
-        branch_indices: HashMap::new(),
         base_dir,
         template,
         goal: String::new(),
@@ -267,7 +267,6 @@ fn lower_nested(
         ctx.environment_scope();
     }
     ctx.kinds(&workflow, &structure);
-    ctx.static_branch_indices(&workflow);
 
     // Pass 1: ids, in declaration order.
     for node in &workflow.nodes {
@@ -297,53 +296,18 @@ fn lower_nested(
     if ctx.diags.has_errors() {
         return Lowered::rejected(ctx.diags);
     }
+    let params = ctx.params();
     let Ctx {
         mut diags,
         b,
         spans,
-        template,
-        goal,
         children,
-        settings,
-        stack,
         ..
     } = ctx;
     let mut graph = b.build();
     graph.completion = Completion::TerminalNode(exit);
     graph.policy = run_policy;
-    if stack.len() == 1 {
-        graph
-            .params
-            .insert(SmolStr::new(LAUNCH_PARAM), settings.launch_param());
-        if let Some(environment) = settings.environment_param() {
-            graph
-                .params
-                .insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
-        }
-    }
-    graph.params.insert(
-        SmolStr::new("inputs"),
-        Value::Object(
-            template
-                .inputs()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        ),
-    );
-    graph.params.insert(
-        SmolStr::new("vars"),
-        Value::Object(
-            template
-                .vars()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        ),
-    );
-    graph
-        .params
-        .insert(SmolStr::new("goal"), Value::String(goal));
+    graph.params = params;
 
     let report = ir::check(&graph);
     for error in &report.errors {
@@ -380,6 +344,42 @@ fn duration_ms(duration: Duration) -> Value {
 }
 
 impl Ctx<'_> {
+    /// The run parameters every graph this lowering produces carries: the
+    /// launch settings on the root, the rendered inputs and vars, the goal.
+    /// A branch child graph carries the same set, so an expression reads the
+    /// same statics inside a branch.
+    fn params(&self) -> BTreeMap<SmolStr, Value> {
+        let mut params = BTreeMap::new();
+        if self.stack.len() == 1 {
+            params.insert(SmolStr::new(LAUNCH_PARAM), self.settings.launch_param());
+            if let Some(environment) = self.settings.environment_param() {
+                params.insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
+            }
+        }
+        params.insert(
+            SmolStr::new("inputs"),
+            Value::Object(
+                self.template
+                    .inputs()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
+        params.insert(
+            SmolStr::new("vars"),
+            Value::Object(
+                self.template
+                    .vars()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
+        params.insert(SmolStr::new("goal"), Value::String(self.goal.clone()));
+        params
+    }
+
     fn unknown_attrs(
         &mut self,
         attrs: &Attrs,
@@ -810,32 +810,6 @@ impl Ctx<'_> {
                 self.kind_of(node)
             };
             self.kinds.insert(node.id.clone(), kind);
-        }
-    }
-
-    fn static_branch_indices(&mut self, workflow: &Workflow) {
-        for parallel in &workflow.nodes {
-            if self.kinds.get(&parallel.id) != Some(&Kind::Parallel)
-                || parallel.attrs.contains("for_each")
-            {
-                continue;
-            }
-            for (index, edge) in workflow.outgoing(&parallel.id).into_iter().enumerate() {
-                let mut seen = HashSet::new();
-                let mut pending = VecDeque::from([edge.to.as_str()]);
-                while let Some(id) = pending.pop_front() {
-                    if !seen.insert(id) || self.kinds.get(id) == Some(&Kind::FanIn) {
-                        continue;
-                    }
-                    self.branch_indices.insert(id.to_string(), index);
-                    pending.extend(
-                        workflow
-                            .outgoing(id)
-                            .into_iter()
-                            .map(|edge| edge.to.as_str()),
-                    );
-                }
-            }
         }
     }
 
@@ -1337,10 +1311,7 @@ impl Ctx<'_> {
         if key.is_empty() {
             return None;
         }
-        if key == "parallel.results" {
-            if let Some(fan_in) = self.nearest_fan_in(&node.id, workflow) {
-                return Some(self.b.exprs().path("nodes", &[&fan_in, "output"]));
-            }
+        if key == "parallel.results" && !self.upstream_fan_in(&node.id, workflow) {
             self.diags.warning(
                 "fabro.parallel_results_without_fan_in",
                 span.clone(),
@@ -1362,20 +1333,25 @@ impl Ctx<'_> {
         Some(self.b.exprs().call("get", vec![kv, name]))
     }
 
-    fn nearest_fan_in(&self, id: &str, workflow: &Workflow) -> Option<String> {
+    /// Whether a fan-in, or a parallel node whose fan-in publishes the
+    /// results, precedes `id`.
+    fn upstream_fan_in(&self, id: &str, workflow: &Workflow) -> bool {
         let mut seen: HashSet<&str> = HashSet::from([id]);
         let mut queue: VecDeque<&str> = VecDeque::from([id]);
         while let Some(current) = queue.pop_front() {
             for edge in workflow.incoming(current) {
-                if self.kinds.get(&edge.from) == Some(&Kind::FanIn) {
-                    return Some(edge.from.clone());
+                if matches!(
+                    self.kinds.get(&edge.from),
+                    Some(Kind::FanIn | Kind::Parallel)
+                ) {
+                    return true;
                 }
                 if seen.insert(&edge.from) {
                     queue.push_back(&edge.from);
                 }
             }
         }
-        None
+        false
     }
 
     fn human_config(
@@ -1764,7 +1740,7 @@ impl Ctx<'_> {
         };
         let policy = res.policy;
         let mut lowered = Vec::with_capacity(edges.len());
-        for (index, edge) in edges.iter().enumerate() {
+        for edge in &edges {
             let Some(mut to) = self.ids.get(&edge.to).copied() else {
                 continue;
             };
@@ -1786,7 +1762,6 @@ impl Ctx<'_> {
                 .attrs
                 .bool("loop_restart", &mut self.diags)
                 .unwrap_or(false);
-            let map = self.branch_payload(edge, index, res.kind, workflow);
             lowered.push(routing::OutEdge {
                 to,
                 target: edge.to.clone(),
@@ -1795,7 +1770,7 @@ impl Ctx<'_> {
                 label,
                 weight,
                 restart,
-                map,
+                map: None,
             });
         }
         if lowered.is_empty() {
@@ -1834,209 +1809,6 @@ impl Ctx<'_> {
             &mut self.diags,
             policy.succeeds(),
         )
-    }
-
-    /// The payload a branch sends to a fan-in: `{ index, value: { id, status,
-    /// output } }`, so the fan-in can put branches back in order. A clone of a
-    /// `for_each` template carries `index`; a static branch is its position
-    /// among the fan-out's arms.
-    fn branch_payload(
-        &mut self,
-        edge: &EdgeDecl,
-        index: usize,
-        kind: Kind,
-        workflow: &Workflow,
-    ) -> Option<ExprId> {
-        if self.kinds.get(&edge.to) != Some(&Kind::FanIn) || kind == Kind::FanIn {
-            return None;
-        }
-        let is_template = workflow.incoming(&edge.from).iter().any(|e| {
-            self.kinds.get(&e.from) == Some(&Kind::Parallel)
-                && workflow
-                    .node(&e.from)
-                    .is_some_and(|n| n.attrs.contains("for_each"))
-        });
-        let static_index = self
-            .branch_indices
-            .get(&edge.from)
-            .copied()
-            .unwrap_or(index);
-        let exprs = self.b.exprs();
-        let index_expr = if is_template {
-            exprs.var("index")
-        } else {
-            exprs.lit(u64::try_from(static_index).unwrap_or(u64::MAX))
-        };
-        let id = exprs.lit(edge.from.as_str());
-        let status = exprs.var("status");
-        let output = exprs.var("output");
-        let value = exprs.object(vec![("id", id), ("status", status), ("output", output)]);
-        Some(exprs.object(vec![("index", index_expr), ("value", value)]))
-    }
-
-    // ── Parallel ───────────────────────────────────────────────────────────
-
-    fn parallel(
-        &mut self,
-        workflow: &Workflow,
-        resolved: &[Resolved],
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-    ) {
-        for (node, res) in workflow.nodes.iter().zip(resolved) {
-            match res.kind {
-                Kind::Parallel => self.fan_out(node, res, workflow, exit, goal_check),
-                Kind::FanIn => {
-                    let ordered = {
-                        let exprs = self.b.exprs();
-                        let inputs = exprs.var("inputs");
-                        let index = exprs.lit("index");
-                        let sorted = exprs.call("sort_by_key", vec![inputs, index]);
-                        let value = exprs.lit("value");
-                        exprs.call("pluck", vec![sorted, value])
-                    };
-                    let step = &mut self.b.node_mut(res.id).step;
-                    if step.kind == PROMPT_KIND {
-                        // The prompted fan-in reads the same ordered results
-                        // the plain barrier would have produced.
-                        if let Value::Object(config) = &mut step.config {
-                            config.insert("branch_results".into(), placeholder(ordered));
-                        }
-                    } else {
-                        *step = StepRef::new("noop", placeholder(ordered));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn fan_out(
-        &mut self,
-        node: &NodeDecl,
-        res: &Resolved,
-        workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-    ) {
-        let edges = workflow.outgoing(&node.id);
-        for edge in &edges {
-            if edge
-                .attrs
-                .text("condition")
-                .is_some_and(|c| !c.trim().is_empty())
-            {
-                self.diags.error(
-                    "fabro.parallel.conditional_branch",
-                    edge.span.clone(),
-                    "a parallel node's branches are unconditional",
-                );
-            }
-        }
-        if edges.is_empty() {
-            self.diags.error(
-                "fabro.parallel.no_branches",
-                node.span.clone(),
-                format!("parallel node `{}` has no branches", node.id),
-            );
-            return;
-        }
-        let Some(source) = node.attrs.text("for_each") else {
-            let targets: Vec<NodeId> = edges
-                .iter()
-                .filter_map(|e| self.ids.get(&e.to).copied())
-                .map(|target| goal_check.filter(|_| target == exit).unwrap_or(target))
-                .collect();
-            self.b.fan_out(res.id, &targets);
-            return;
-        };
-        let span = node.attrs.span_of("for_each", &node.span);
-        let key = source
-            .strip_prefix("context.")
-            .unwrap_or(&source)
-            .trim()
-            .to_string();
-        if key.is_empty() {
-            self.diags.error(
-                "fabro.for_each.source",
-                span,
-                format!("`for_each` on `{}` must name a context key", node.id),
-            );
-            return;
-        }
-        if edges.len() != 1 {
-            self.diags.error(
-                "fabro.for_each.template_edges",
-                node.span.clone(),
-                format!(
-                    "`for_each` node `{}` needs exactly one template edge",
-                    node.id
-                ),
-            );
-            return;
-        }
-        let target_decl = &edges[0];
-        let Some(target) = self.ids.get(&target_decl.to).copied() else {
-            return;
-        };
-        let target_kind = self.kinds[&target_decl.to];
-        if !target_kind.is_llm() {
-            self.diags.error(
-                "fabro.for_each.target",
-                target_decl.to_span.clone(),
-                format!(
-                    "the `for_each` template `{}` must be an agent or prompt node",
-                    target_decl.to
-                ),
-            );
-            return;
-        }
-        if workflow
-            .node(&target_decl.to)
-            .is_some_and(|n| n.attrs.contains("for_each"))
-        {
-            self.diags.error(
-                "fabro.for_each.nested",
-                target_decl.to_span.clone(),
-                "nested `for_each` is not supported",
-            );
-            return;
-        }
-        let max_parallel = node
-            .attrs
-            .int("max_parallel", &mut self.diags)
-            .and_then(|n| u32::try_from(n).ok())
-            .filter(|n| *n > 0);
-
-        // The parallel node evaluates the item array and hands it on; the
-        // template node expands over its input.
-        let items = {
-            let exprs = self.b.exprs();
-            let kv = exprs.var("kv");
-            let name = exprs.lit(key.as_str());
-            exprs.call("get", vec![kv, name])
-        };
-        self.b.node_mut(res.id).step = StepRef::new("noop", placeholder(items));
-        let cap = {
-            let exprs = self.b.exprs();
-            let kv = exprs.var("kv");
-            let name = exprs.lit(key.as_str());
-            let items = exprs.call("get", vec![kv, name]);
-            let len = exprs.call("len", vec![items]);
-            let limit = exprs.lit(MAX_FOR_EACH_ITEMS);
-            exprs.binary(ir::BinOp::Le, len, limit)
-        };
-        self.b.set_precondition(res.id, cap);
-        self.b.link(res.id, target);
-        let input = self.b.exprs().var("input");
-        ir::parallel_for_each(
-            &mut self.b,
-            target,
-            input,
-            ExpandTarget::Node,
-            max_parallel,
-            false,
-        );
     }
 
     // ── Back edges, joins, budgets ─────────────────────────────────────────

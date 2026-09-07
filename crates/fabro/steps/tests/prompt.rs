@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use execution::host::{self, HostRun};
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::prompt::{COMPLETED_EVENT, PROMPT_EVENT};
 use fabro_steps::register;
@@ -24,14 +25,18 @@ use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
 
-fn lower(text: &str) -> Graph {
+fn lower_all(text: &str) -> (Graph, Vec<Graph>) {
     let lowered = frontend_fabro::load("test.fabro", text, &NoFiles, &CompileInputs::new());
     assert!(
         !lowered.diagnostics.has_errors(),
         "{:?}",
         lowered.diagnostics
     );
-    lowered.graph.expect("valid workflow")
+    (lowered.graph.expect("valid workflow"), lowered.children)
+}
+
+fn lower(text: &str) -> Graph {
+    lower_all(text).0
 }
 
 fn dot(body: &str) -> String {
@@ -82,10 +87,12 @@ async fn run(
     let dir = RunDir::new(label);
     let (client, provider) = client_from(ScriptedProvider::new(Vec::new()).completing(completions));
     let events = Arc::new(CustomEvents::default());
-    let report = runtime(&dir, client, events.clone())
-        .run(lower(&dot(body)))
+    let rt = runtime(&dir, client, events.clone());
+    let (graph, children) = lower_all(&dot(body));
+    // The host path: a parallel node's branches run as child invocations.
+    let report = host::run_configured(&rt, HostRun::new(graph).with_children(children), |_, _| {})
         .await
-        .expect("replay is byte-identical");
+        .expect("the run completes");
     let events = events.0.lock().expect("not poisoned").clone();
     (report, provider, events)
 }
@@ -358,7 +365,13 @@ async fn a_prompted_fan_in_joins_in_order_then_prompts_over_the_results() {
     assert!(a_at < b_at, "branch order, not completion order:\n{sent}");
     assert!(sent.contains("from-a") && sent.contains("from-b"), "{sent}");
     assert!(sent.contains("Combine the branch results."), "{sent}");
-    assert_eq!(events[0]["sources"], json!(["a", "b"]));
+    // The branch steps emit events of their own; the prompt event is the
+    // one with the prompt kind.
+    let prompt_event = events
+        .iter()
+        .find(|event| event["kind"] == PROMPT_EVENT)
+        .expect("the prompt event");
+    assert_eq!(prompt_event["sources"], json!(["a", "b"]));
     assert_eq!(
         report.state.run_context().get("response.merge"),
         Some(&json!("Combined."))

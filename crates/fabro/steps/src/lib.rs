@@ -20,6 +20,7 @@ pub mod contract;
 pub mod directive;
 pub mod human;
 mod outcome;
+pub mod parallel;
 pub mod pebble;
 pub mod preamble;
 pub mod prompt;
@@ -33,13 +34,15 @@ pub use agent::AgentStep;
 pub use blobs::{BlobStore, LocalBlobStore, OutputStore};
 pub use command::CommandStep;
 pub use frontend_fabro::kinds::{
-    AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND, WORKFLOW_KIND,
+    AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND,
+    WORKFLOW_KIND,
 };
 pub use human::HumanStep;
 pub use outcome::{ExplicitRoutes, Stage, fabro_outcome, reported_outcome};
+pub use parallel::{BranchStep, FanInStep};
 pub use prompt::PromptStep;
 use runtime::Runtime;
-pub use stub::{Simulate, StubStep, register_stubs};
+pub use stub::{Simulate, StubScripts, StubStep, register_stubs};
 pub use wait::WaitStep;
 pub use workflow::WorkflowStep;
 
@@ -56,6 +59,8 @@ pub fn register(runtime: Runtime) -> Runtime {
         .step(AgentStep)
         .step(PromptStep)
         .step(WorkflowStep)
+        .step(BranchStep)
+        .step(FanInStep)
         .run_services(|run_dir, caps| {
             if caps.has::<OutputStore>() {
                 return (caps, None);

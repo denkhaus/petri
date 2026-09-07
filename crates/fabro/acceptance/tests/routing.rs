@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use fabro_acceptance::pin;
-use fabro_acceptance::runs::{Case, RunResult, result_json, run};
+use fabro_acceptance::runs::{Case, RunResult, result_json};
 use serde_json::Value;
 
 fn oracle_dir() -> PathBuf {
@@ -32,7 +32,7 @@ fn cases() -> Vec<Case> {
 }
 
 async fn run_case(case: &Case) -> RunResult {
-    run(case.graph(), &case.name).await
+    case.run().await
 }
 
 fn assert_path(result: &RunResult, status: &str, path: &[&str]) {

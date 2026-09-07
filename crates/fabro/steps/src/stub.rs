@@ -82,6 +82,14 @@ struct Choice {
     to:    String,
 }
 
+/// Scripts for stubs, by node name, registered as a run capability. A
+/// registered graph must not change after lowering (a parallel branch's
+/// child graph is named by its digest), so a test that scripts a stage's
+/// stub hands the scripts to the runtime instead of editing the config. A
+/// node's own `simulate` config wins when it has one.
+#[derive(Clone, Debug, Default)]
+pub struct StubScripts(pub BTreeMap<String, Simulate>);
+
 /// The simulated step for one kind.
 pub struct StubStep {
     kind:  StepKindId,
@@ -137,7 +145,14 @@ impl StepRunner for StubStep {
             }
         };
         let node = config.node.clone().unwrap_or_else(|| ctx.node.to_string());
-        let mut script = config.simulate.clone().unwrap_or_default();
+        let mut script = config
+            .simulate
+            .clone()
+            .or_else(|| {
+                ctx.capability::<StubScripts>()
+                    .and_then(|scripts| scripts.0.get(&node).cloned())
+            })
+            .unwrap_or_default();
         if !script.calls.is_empty() {
             let call = self.next_call(ctx.env.workspace_path(), &ctx.node);
             let chosen = script.calls[call.min(script.calls.len() - 1)].clone();
@@ -243,5 +258,9 @@ pub fn register_stubs(runtime: Runtime) -> Runtime {
             calls.clone(),
         )));
     }
+    // The structural steps run for real: a dry run still starts each branch
+    // child (whose stages are simulated) and still joins the results.
+    registry.register(crate::parallel::BranchStep);
+    registry.register(crate::parallel::FanInStep);
     runtime.steps(registry)
 }

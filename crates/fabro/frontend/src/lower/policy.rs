@@ -21,6 +21,11 @@ pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Fabro's default `loop_restart_signature_limit`.
 pub const DEFAULT_SIGNATURE_LIMIT: u32 = 3;
 
+/// The most invocations one Fabro run may declare: the root, every branch
+/// of every parallel node, and every manager-loop child, finished ones
+/// included. The coordinator's hard ceiling; a Fabro run uses all of it.
+pub const MAX_INVOCATIONS: u32 = 10_000;
+
 /// The graph's run policy from its attributes. `stall_timeout=0` disables
 /// the watchdog; a `loop_restart_signature_limit` below 1 is refused.
 pub(super) fn run_policy(workflow: &Workflow, diags: &mut Diagnostics) -> RunPolicy {
@@ -50,6 +55,7 @@ pub(super) fn run_policy(workflow: &Workflow, diags: &mut Diagnostics) -> RunPol
     RunPolicy {
         stall_timeout,
         loop_restart_signature_limit: limit,
+        max_invocations: NonZeroU32::new(MAX_INVOCATIONS),
     }
 }
 

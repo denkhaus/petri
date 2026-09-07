@@ -11,10 +11,11 @@ use std::time::Duration;
 use std::{env, fs, process};
 
 use execution::host::{self, HostRun};
-use execution::{CoordinatorRecord, ExecutionId, ExecutionObserver};
-use fabro_steps::reported_outcome;
+use execution::{CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver, InvocationId};
+use fabro_steps::{Simulate, StubScripts, reported_outcome};
+use frontend_fabro::BRANCH_META_KIND;
 use frontend_fabro::kinds::GOAL_CHECK_NODE;
-use ir::{Graph, Value};
+use ir::{FiringId, Graph, Value};
 use runtime::engine::{EngineState, EventRecord};
 use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
@@ -41,7 +42,9 @@ pub fn fresh_run_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// Script a node's stub: the `simulate` object the stub step reads.
+/// Script a node's stub in place: the `simulate` object the stub step reads.
+/// Only for a graph that is not registered yet; a registered graph is named
+/// by its digest, so a case's scripts travel as [`StubScripts`] instead.
 pub fn simulate(graph: &mut Graph, node: &str, script: Value) {
     let node = graph
         .body
@@ -83,35 +86,157 @@ impl RunResult {
     }
 }
 
-/// Every final record of every execution of the run, in completion order —
-/// the run's path across a `loop_restart`, which no single execution report
-/// holds.
+/// One final record as the path observer saw it: a stage visit, or the
+/// parent-side delegate of a parallel branch, which stands for the stages
+/// its child invocation ran.
+#[derive(Clone, Debug)]
+struct Recorded {
+    visit:  Visit,
+    firing: FiringId,
+    /// The branch index when the node is a branch delegate.
+    branch: Option<u64>,
+}
+
+/// Every final record of every execution of the run, per execution and in
+/// completion order, with the invocation tree from the lifecycle log, so the
+/// path can be assembled across a `loop_restart` and across parallel branch
+/// invocations.
 #[derive(Default)]
 struct PathObserver {
-    visits: Mutex<Vec<Visit>>,
-    seen:   Mutex<BTreeMap<ExecutionId, usize>>,
+    records:     Mutex<BTreeMap<ExecutionId, Vec<Recorded>>>,
+    /// How many history records of each execution were already read.
+    seen:        Mutex<BTreeMap<ExecutionId, usize>>,
+    /// Each execution's invocation.
+    executions:  Mutex<BTreeMap<ExecutionId, InvocationId>>,
+    /// Each child invocation's calling execution and firing.
+    calls:       Mutex<BTreeMap<InvocationId, (ExecutionId, FiringId)>>,
+    invocations: Mutex<BTreeMap<InvocationId, Vec<ExecutionId>>>,
+}
+
+impl PathObserver {
+    /// The run's path: the root's records in order, with every branch
+    /// delegate of one fork replaced by its child's stages in branch index
+    /// order, so the path does not depend on which branch finished first.
+    fn path(&self) -> Vec<Visit> {
+        let records = self.records.lock().expect("not poisoned");
+        let invocations = self.invocations.lock().expect("not poisoned");
+        let calls = self.calls.lock().expect("not poisoned");
+        let root = invocations
+            .get(&InvocationId::ROOT)
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for execution in root {
+            self.assemble(execution, &records, &invocations, &calls, &mut out);
+        }
+        out
+    }
+
+    fn assemble(
+        &self,
+        execution: ExecutionId,
+        records: &BTreeMap<ExecutionId, Vec<Recorded>>,
+        invocations: &BTreeMap<InvocationId, Vec<ExecutionId>>,
+        calls: &BTreeMap<InvocationId, (ExecutionId, FiringId)>,
+        out: &mut Vec<Visit>,
+    ) {
+        let mut delegates: Vec<&Recorded> = Vec::new();
+        let flush = |delegates: &mut Vec<&Recorded>, out: &mut Vec<Visit>| {
+            delegates.sort_by_key(|record| record.branch);
+            for delegate in delegates.drain(..) {
+                let child = calls
+                    .iter()
+                    .find(|(_, (parent, firing))| *parent == execution && *firing == delegate.firing)
+                    .map(|(child, _)| *child);
+                let Some(child) = child else {
+                    continue;
+                };
+                for child_execution in invocations.get(&child).cloned().unwrap_or_default() {
+                    self.assemble(child_execution, records, invocations, calls, out);
+                }
+            }
+        };
+        for record in records.get(&execution).map(Vec::as_slice).unwrap_or_default() {
+            if record.branch.is_some() {
+                delegates.push(record);
+                continue;
+            }
+            flush(&mut delegates, out);
+            out.push(record.visit.clone());
+        }
+        flush(&mut delegates, out);
+    }
 }
 
 impl ExecutionObserver for PathObserver {
     fn on_engine_record(&self, execution: ExecutionId, _record: &EventRecord, state: &EngineState) {
         let history = state.history();
         let mut seen = self.seen.lock().expect("not poisoned");
-        let known = seen.entry(execution).or_insert(0);
-        if history.len() > *known {
-            let mut visits = self.visits.lock().expect("not poisoned");
-            for record in &history[*known..] {
-                if record.name != GOAL_CHECK_NODE {
-                    visits.push(Visit {
+        let seen = seen.entry(execution).or_insert(0);
+        let mut records = self.records.lock().expect("not poisoned");
+        let known = records.entry(execution).or_default();
+        if history.len() > *seen {
+            for record in &history[*seen..] {
+                let meta = state.graph().node(record.node).map(|node| &node.meta);
+                let branch = meta
+                    .filter(|meta| meta.get("kind").and_then(Value::as_str) == Some(BRANCH_META_KIND))
+                    .and_then(|meta| meta["branch"]["index"].as_u64());
+                // Synthetic nodes other than a branch delegate (the goal check,
+                // a synthetic fan-in) are lowering artifacts, not stages.
+                let synthetic = meta
+                    .is_some_and(|meta| meta.get("synthetic") == Some(&Value::Bool(true)));
+                if record.name == GOAL_CHECK_NODE || (synthetic && branch.is_none()) {
+                    continue;
+                }
+                known.push(Recorded {
+                    visit: Visit {
                         node:    record.name.to_string(),
                         outcome: reported_outcome(&record.outcome).as_str().to_string(),
-                    });
-                }
+                    },
+                    firing: record.firing,
+                    branch,
+                });
             }
-            *known = history.len();
+            *seen = history.len();
         }
     }
 
-    fn on_lifecycle(&self, _record: &CoordinatorRecord) {}
+    fn on_lifecycle(&self, record: &CoordinatorRecord) {
+        match &record.event {
+            CoordinatorEvent::InvocationDeclared {
+                invocation, call, ..
+            } => {
+                self.invocations
+                    .lock()
+                    .expect("not poisoned")
+                    .entry(*invocation)
+                    .or_default();
+                if let Some(call) = call {
+                    self.calls
+                        .lock()
+                        .expect("not poisoned")
+                        .insert(*invocation, (call.parent, call.firing));
+                }
+            }
+            CoordinatorEvent::ExecutionDeclared {
+                execution,
+                invocation,
+                ..
+            } => {
+                self.executions
+                    .lock()
+                    .expect("not poisoned")
+                    .insert(*execution, *invocation);
+                self.invocations
+                    .lock()
+                    .expect("not poisoned")
+                    .entry(*invocation)
+                    .or_default()
+                    .push(*execution);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Run `graph` through the standalone host (so `loop_restart` successions
@@ -122,8 +247,20 @@ pub async fn run(graph: Graph, label: &str) -> RunResult {
 
 /// Run a root graph with every pre-lowered child workflow it may invoke.
 pub async fn run_with_children(graph: Graph, children: Vec<Graph>, label: &str) -> RunResult {
+    run_scripted(graph, children, StubScripts::default(), label).await
+}
+
+/// [`run_with_children`] with stub scripts handed to the runtime, so a
+/// scripted stage inside a parallel branch's child graph is scripted too
+/// without changing the registered graph.
+pub async fn run_scripted(
+    graph: Graph,
+    children: Vec<Graph>,
+    scripts: StubScripts,
+    label: &str,
+) -> RunResult {
     let dir = fresh_run_dir(label);
-    let rt = stub_runtime(&dir);
+    let rt = stub_runtime(&dir).capability(scripts);
     let observer = Arc::new(PathObserver::default());
     let host_run = HostRun::new(graph)
         .with_children(children)
@@ -131,13 +268,20 @@ pub async fn run_with_children(graph: Graph, children: Vec<Graph>, label: &str) 
     let report = host::run_configured(&rt, host_run, |_, _| {})
         .await
         .unwrap_or_else(|e| panic!("the run completes: {e}"));
-    let path = observer.visits.lock().expect("not poisoned").clone();
+    let path = observer.path();
     let context = report
         .state
         .run_context()
         .kv
         .iter()
-        .filter(|(k, _)| k.as_str() != "failure_class")
+        // The bookkeeping keys the oracle harness drops from Fabro's context
+        // too: the failure class and the fan-in's published results.
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "failure_class" | "parallel.results" | "parallel.branch_count"
+            )
+        })
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
     let executions = report
@@ -173,9 +317,9 @@ impl Case {
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
-    /// Lower and script the case. Panics with the diagnostics when it does not
-    /// lower.
-    pub fn graph(&self) -> Graph {
+    /// Lower the case: the root graph and every child graph its parallel
+    /// branches run. Panics with the diagnostics when it does not lower.
+    pub fn graphs(&self) -> (Graph, Vec<Graph>) {
         let lowered = frontend_fabro::load_text(&format!("{}.fabro", self.name), &self.workflow);
         let graph = lowered.graph.unwrap_or_else(|| {
             panic!(
@@ -189,11 +333,27 @@ impl Case {
                     .join("\n")
             )
         });
-        let mut graph = graph;
-        for (node, script) in &self.scripts {
-            simulate(&mut graph, node, script.clone());
-        }
-        graph
+        (graph, lowered.children)
+    }
+
+    /// The case's stub scripts as the runtime capability the stubs read.
+    pub fn stub_scripts(&self) -> StubScripts {
+        StubScripts(
+            self.scripts
+                .iter()
+                .map(|(node, script)| {
+                    let script: Simulate = serde_json::from_value(script.clone())
+                        .unwrap_or_else(|e| panic!("case `{}` script `{node}`: {e}", self.name));
+                    (node.clone(), script)
+                })
+                .collect(),
+        )
+    }
+
+    /// Run the case under stubs, scripted as it declares.
+    pub async fn run(&self) -> RunResult {
+        let (graph, children) = self.graphs();
+        run_scripted(graph, children, self.stub_scripts(), &self.name).await
     }
 }
 

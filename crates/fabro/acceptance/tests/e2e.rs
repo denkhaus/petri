@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fs};
 
+use execution::host::{self, HostRun};
 use fabro_acceptance::runs::fresh_run_dir;
 use fabro_acceptance::{corpus_root, has_corpus, lower_one};
 use fabro_steps::{AGENT_KIND, HUMAN_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
@@ -62,6 +63,8 @@ fn commands_and_stubs(dir: &Path) -> Runtime {
     for kind in [AGENT_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND] {
         registry.register_runner(Arc::new(StubStep::new(kind)));
     }
+    registry.register(fabro_steps::BranchStep);
+    registry.register(fabro_steps::FanInStep);
     runtime.steps(registry).options(options(dir))
 }
 
@@ -215,7 +218,16 @@ async fn a_for_each_fan_out_expands_over_items_a_command_produced() {
         .graph
         .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics));
     let dir = fresh_run_dir("fabro-e2e-for-each");
-    let report = run(&commands_and_stubs(&dir), graph).await;
+    // Branches run as child invocations, so the fan-out needs the host's
+    // coordinator and the lowered child graphs.
+    let rt = commands_and_stubs(&dir);
+    let report = host::run_configured(
+        &rt,
+        HostRun::new(graph).with_children(lowered.children),
+        |_, _| {},
+    )
+    .await
+    .expect("the run completes");
     assert_eq!(
         report.status,
         RunStatus::Success,
@@ -244,7 +256,10 @@ async fn a_for_each_fan_out_expands_over_items_a_command_produced() {
         .as_array()
         .expect("the fan-in's output is the ordered branch results");
     assert_eq!(results.len(), 3);
-    assert!(results.iter().all(|r| r["status"] == json!("success")));
+    assert!(results.iter().all(|r| r["status"] == json!("succeeded")));
+    assert!(results.iter().all(|r| r["id"] == json!("job")));
+    let labels: Vec<&Value> = results.iter().map(|r| &r["item_label"]).collect();
+    assert_eq!(labels, [&json!("a"), &json!("b"), &json!("c")]);
     let stdout = testkit::output_of(&report, "report")["stdout"]
         .as_str()
         .expect("the report read the results on stdin")

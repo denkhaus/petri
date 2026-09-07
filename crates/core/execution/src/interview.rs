@@ -657,9 +657,17 @@ impl ExecutionObserver for InterviewDispatcher {
             Event::StepFinished { firing, .. } => {
                 // The firing is gone: every pending question of its is
                 // unanswerable now. Ending the wait tells the interviewer to
-                // stop, and marks whatever arrives afterwards as late.
+                // stop, and marks whatever arrives afterwards as late. Firing
+                // ids are per execution, so the execution is part of the key:
+                // a parallel branch's child execution numbers its firings
+                // from one like every other.
                 let state = self.inner.state();
-                for live in state.live.values().filter(|live| live.firing == *firing) {
+                for live in state
+                    .live
+                    .iter()
+                    .filter(|((owner, _), live)| *owner == execution && live.firing == *firing)
+                    .map(|(_, live)| live)
+                {
                     live.cancel.cancel();
                 }
             }

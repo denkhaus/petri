@@ -13,5 +13,5 @@
       }
     }
   },
-  "departure": "Fabro records the branches as parallel branch events, not stages, so its path omits `a` and `b`, and keeps branch context under parallel.results without merging it. Under Petri every branch is a node with a final record, branch results ride tokens into the fan-in's output, and a branch's context_updates still merge into kv."
+  "departure": "Fabro records the branches as parallel branch events, not stages, so its path omits `a` and `b`. Under Petri each branch runs in a child invocation whose stage keeps a final record, so the path lists `a` and `b` in branch order between `fork` and `merge`. Branch context is kept under parallel.results and never merges into the parent context, matching Fabro: the recorded context is empty on both sides."
 }

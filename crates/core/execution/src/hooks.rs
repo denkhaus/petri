@@ -195,9 +195,20 @@ impl HookAdapter {
     }
 }
 
+/// Whether a node is a lowering artifact rather than a stage: the frontend
+/// marked it `synthetic` (a goal check, a parallel branch's delegate node, a
+/// synthetic fan-in). No hook point fires for one; its stage, when it has
+/// one, runs elsewhere with hooks of its own.
+fn is_synthetic(view: &FiringView) -> bool {
+    view.meta().get("synthetic") == Some(&Value::Bool(true))
+}
+
 #[async_trait::async_trait]
 impl ExecutionHooks for HookAdapter {
     async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
+        if is_synthetic(&request.view) {
+            return AttemptDecision::admit();
+        }
         let mut notes = Vec::new();
         let mut admission = Admission::Admit;
         let points = if request.view.attempt == ir::Attempt::FIRST {
@@ -239,6 +250,9 @@ impl ExecutionHooks for HookAdapter {
     }
 
     async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
+        if is_synthetic(&request.view) {
+            return Ok(Prepared::unchanged());
+        }
         let report = self
             .service
             .run(HookRequest {
@@ -259,6 +273,9 @@ impl ExecutionHooks for HookAdapter {
     }
 
     async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
+        if is_synthetic(&recorded.view) {
+            return Vec::new();
+        }
         let report = self
             .service
             .run(HookRequest {
@@ -276,6 +293,9 @@ impl ExecutionHooks for HookAdapter {
         &self,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
+        if is_synthetic(&transition.view) {
+            return Ok(TransitionReport::default());
+        }
         let report = self
             .service
             .run(HookRequest {

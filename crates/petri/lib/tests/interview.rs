@@ -104,33 +104,26 @@ async fn run(
     (report, receipt)
 }
 
+/// Two human gates as the branches of one parallel node. A branch runs its
+/// target only and returns to the join, as Fabro runs it, so each gate's
+/// answer is read from its branch result rather than from a node it routes
+/// to.
 const TWO_GATES: &str = r#"digraph G {
     start [shape=Mdiamond]
     exit [shape=Msquare]
     fan [shape=component]
     a [shape=hexagon, label="A?", question_type="yes_no"]
     b [shape=hexagon, label="B?", question_type="yes_no"]
-    a_yes [shape=parallelogram, script="echo a-yes"]
-    a_no [shape=parallelogram, script="echo a-no"]
-    b_yes [shape=parallelogram, script="echo b-yes"]
-    b_no [shape=parallelogram, script="echo b-no"]
-    a_done [shape=parallelogram, script="echo a-done"]
-    b_done [shape=parallelogram, script="echo b-done"]
     join [shape=tripleoctagon]
+    report [shape=parallelogram, script="cat", stdin_source="context.parallel.results"]
     start -> fan
     fan -> a
     fan -> b
-    a -> a_yes [label="[Y] Yes"]
-    a -> a_no [label="[N] No"]
-    b -> b_yes [label="[Y] Yes"]
-    b -> b_no [label="[N] No"]
-    a_yes -> a_done
-    a_no -> a_done
-    b_yes -> b_done
-    b_no -> b_done
-    a_done -> join
-    b_done -> join
-    join -> exit
+    a -> join [label="[Y] Yes"]
+    a -> join [label="[N] No"]
+    b -> join [label="[Y] Yes"]
+    b -> join [label="[N] No"]
+    join -> report -> exit
 }"#;
 
 #[tokio::test]
@@ -160,20 +153,47 @@ async fn parallel_gates_are_answered_out_of_order_and_each_answer_lands_on_its_o
         "{:?}",
         report.state.errors()
     );
-    let ran: Vec<_> = report
+    // Each gate's answer lands in its own branch result, in branch order.
+    let results = report
         .state
-        .history()
-        .iter()
-        .map(|record| record.name.as_str())
-        .collect();
-    assert!(ran.contains(&"a_no"), "{ran:?}");
-    assert!(ran.contains(&"b_yes"), "{ran:?}");
-    assert!(!ran.contains(&"a_yes"), "{ran:?}");
+        .run_context()
+        .get("parallel.results")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .expect("the fan-in published the branch results");
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0]["id"], json!("a"));
+    assert_eq!(
+        results[0]["context_updates"]["human.gate.selected"],
+        json!("N")
+    );
+    assert_eq!(results[1]["id"], json!("b"));
+    assert_eq!(
+        results[1]["context_updates"]["human.gate.selected"],
+        json!("Y")
+    );
+    assert!(
+        !report
+            .state
+            .run_context()
+            .kv
+            .contains_key("human.gate.selected"),
+        "a branch's answer never reaches the parent context"
+    );
     assert!(receipt.is_clean(), "{:?}", receipt.errors);
     assert_eq!(receipt.questions.len(), 2);
     for record in &receipt.questions {
         assert_eq!(record.delivery, Delivery::Delivered);
-        assert_eq!(record.invocation_path, "/");
+        // Each gate ran in its branch's child invocation, whose call slot
+        // names the fork, the branch index and the target.
+        assert_eq!(
+            record.invocation_path,
+            format!(
+                "/branch:fan:{}:{}",
+                if record.node == "a" { 0 } else { 1 },
+                record.node
+            )
+        );
         assert_eq!(record.occurrence, 1);
         assert_eq!(record.ask, 1);
         assert_eq!(record.kind.as_deref(), Some("yes_no"));

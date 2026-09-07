@@ -2995,6 +2995,7 @@ mod teardown_tests {
             deadline: None,
             reason: None,
             budget: None,
+            permit: None,
         });
         let mut finishing = Box::pin(driver.finish(
             firing,

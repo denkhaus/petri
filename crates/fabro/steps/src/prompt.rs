@@ -95,6 +95,15 @@ pub struct PromptConfig {
     pub timeout_ms:       Option<u64>,
     #[serde(default)]
     pub kv:               Value,
+    /// The fidelity preamble a parallel branch was forked with, rendered by
+    /// the branch step from the parent's stage records. Present only inside
+    /// a branch child; it stands in for the child's own (empty) records.
+    #[serde(default)]
+    pub preamble:         Option<String>,
+    /// A `for_each` branch's item, rendered as fenced untrusted data by the
+    /// branch step. Appended after the prompt, as Fabro appends it.
+    #[serde(default)]
+    pub item_data:        Option<String>,
     #[serde(default)]
     pub nodes:            Value,
     /// A prompted fan-in: the branch source node ids, in edge order.
@@ -153,12 +162,19 @@ impl PromptConfig {
         }
         let fidelity = self.fidelity.as_deref().unwrap_or("compact");
         if fidelity != "truncate" {
-            out.push_str(&preamble::previous_stages(&self.nodes));
+            match &self.preamble {
+                Some(preamble) => out.push_str(preamble),
+                None => out.push_str(&preamble::previous_stages(&self.nodes)),
+            }
         }
         if !self.sources.is_empty() {
             out.push_str(&preamble::branch_results(&self.sources, results));
         }
         out.push_str(&self.prompt);
+        if let Some(item) = self.item_data.as_deref().filter(|item| !item.is_empty()) {
+            out.push_str("\n\n");
+            out.push_str(item);
+        }
         out.push_str(&contract.prompt_suffix());
         out
     }
@@ -220,10 +236,11 @@ impl Step for PromptStep {
             Err(error) => return fail(error.to_string(), "bad_config"),
         };
         let store = ctx.capability::<OutputStore>();
-        let results = match &store {
+        let mut results = match &store {
             Some(store) => blobs::hydrate(config.branch_results.clone(), store.0.as_ref()).await,
             None => config.branch_results.clone(),
         };
+        crate::parallel::strip_placeholders(&mut results);
         let started = Instant::now();
         let prompt = config.assemble(&contract, &results);
         let _ = ctx
@@ -358,6 +375,16 @@ impl Step for PromptStep {
             stage.output.insert("sources".into(), json!(config.sources));
             stage.output.insert(
                 "branch_count".into(),
+                json!(results.as_array().map_or(0, Vec::len)),
+            );
+            // The prompted fan-in is the barrier too: it publishes the
+            // results the plain fan-in would have.
+            stage.context_updates.insert(
+                SmolStr::new(crate::parallel::RESULTS_KEY),
+                results.clone(),
+            );
+            stage.context_updates.insert(
+                SmolStr::new(crate::parallel::BRANCH_COUNT_KEY),
                 json!(results.as_array().map_or(0, Vec::len)),
             );
         }
