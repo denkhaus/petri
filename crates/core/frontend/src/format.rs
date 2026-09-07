@@ -18,6 +18,12 @@ use crate::files::FileSource;
 /// and `{{ vars.* }}`). Distinct from [`Frontend::default_params`], which
 /// fills `Graph.params` *after* lowering and never changes the graph's
 /// shape. A format that renders nothing ignores it.
+/// The compile variable the runtime binds to the repository root a file is
+/// loaded from (`--repo`, else the frontend's `repo_root`), as an absolute
+/// path. A format whose runs start from a checkout of that repository reads
+/// it at load; a host that lowers in memory leaves it unset.
+pub const REPOSITORY_VAR: &str = "petri.repository";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompileInputs {
     pub inputs:             BTreeMap<SmolStr, Value>,

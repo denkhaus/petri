@@ -201,7 +201,11 @@ impl Case {
             .clone()
             .or_else(|| env::var("PATH").ok())
             .unwrap_or_else(|| "/usr/bin:/bin".into());
+        let deadline = launch.deadline.unwrap_or(RUN_DEADLINE);
         let mut command = self.command(&path);
+        if let Some(cwd) = &launch.cwd {
+            command.current_dir(cwd);
+        }
         command
             .env("PETRI_LLM_CATALOG", &catalog)
             .env("PETRI_LLM_PROVIDERS", self.providers.join(","));
@@ -319,7 +323,7 @@ impl Case {
             b.expect("read stderr");
             (out, err)
         };
-        let waited = timeout(RUN_DEADLINE, async {
+        let waited = timeout(deadline, async {
             let ((out, err), status) = tokio::join!(drain, child.wait());
             (out, err, status.expect("wait for petri"))
         })
@@ -384,6 +388,12 @@ pub(crate) struct Launch {
     /// Extra environment variables for the child: what a case hands the run
     /// beyond the isolated baseline, such as a `PETRI_SECRET_*` value.
     pub(crate) env: Vec<(String, String)>,
+    /// This launch's deadline, when the case declares one; else
+    /// [`RUN_DEADLINE`].
+    pub(crate) deadline: Option<Duration>,
+    /// The working directory of the `petri` process. Defaults to the
+    /// harness's own.
+    pub(crate) cwd: Option<PathBuf>,
 }
 
 /// A `PATH` with an empty directory in front and only the system binaries
@@ -448,7 +458,7 @@ pub(crate) struct Finished {
 impl Finished {
     /// Fail the test unless the run exited with `code`.
     pub(crate) fn assert_code(&self, code: i32) {
-        assert!(!self.timed_out, "petri run exceeded {RUN_DEADLINE:?}");
+        assert!(!self.timed_out, "petri run exceeded its deadline");
         assert_eq!(
             self.code,
             Some(code),

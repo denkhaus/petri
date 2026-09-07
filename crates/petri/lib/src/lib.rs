@@ -137,7 +137,7 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
         );
     }
     let runtime = Runtime::standard()
-        .frontend(frontend_fabro::Fabro::new())
+        .frontend(frontend_fabro::Fabro::new().with_settings_toml(fabro_settings_toml()))
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests.clone())
                 .with_runners(runners)
@@ -468,4 +468,14 @@ fn gh_auth_token() -> Option<executor::Secret> {
             }
         }
     }
+}
+
+/// The text of Fabro's user settings layer: `$FABRO_HOME/settings.toml`,
+/// else `$HOME/.fabro/settings.toml`, when the file exists. Fabro's own
+/// rule for its home directory.
+fn fabro_settings_toml() -> Option<String> {
+    let home = env::var_os("FABRO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".fabro")))?;
+    fs::read_to_string(home.join("settings.toml")).ok()
 }
