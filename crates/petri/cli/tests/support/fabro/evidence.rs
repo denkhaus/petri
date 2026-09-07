@@ -148,41 +148,23 @@ pub(crate) fn pins(fabro: Option<&FabroBinary>) -> Value {
     Value::Object(pins)
 }
 
-/// The SHA-256 over `<sha256> <path>` lines of every file under `dir`,
-/// sorted by path: the bundle digest.
-pub(crate) fn bundle_digest(dir: &Path) -> String {
-    let mut files = Vec::new();
-    collect_files(dir, dir, &mut files);
-    files.sort();
+/// The SHA-256 over `<sha256> <path>` lines of the bundle's declared files
+/// under `dir`, sorted by path: the bundle digest. Only the files both
+/// engines run are covered, so scenario metadata beside them (task 17's
+/// scenario documents, the `fabro-reference` capture) never moves it. A
+/// missing file fails: the declaration is part of the scenario.
+pub(crate) fn bundle_digest(dir: &Path, files: &[&str]) -> String {
+    let mut paths: Vec<&str> = files.to_vec();
+    paths.sort_unstable();
     let mut lines = String::new();
-    for relative in files {
-        let bytes = fs::read(dir.join(&relative)).unwrap_or_default();
+    for relative in paths {
+        let path = dir.join(relative);
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("bundle file {}: {error}", path.display()));
         let digest = Sha256::digest(&bytes);
         let _ = writeln!(lines, "{digest:x} {relative}");
     }
     format!("{:x}", Sha256::digest(lines.as_bytes()))
-}
-
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        // The bundle is what both engines run; the reference capture beside
-        // it and a git directory are not part of it.
-        if path
-            .file_name()
-            .is_some_and(|name| name == ".git" || name == "fabro-reference")
-        {
-            continue;
-        }
-        if path.is_dir() {
-            collect_files(root, &path, out);
-        } else if let Ok(relative) = path.strip_prefix(root) {
-            out.push(relative.to_string_lossy().replace('\\', "/"));
-        }
-    }
 }
 
 /// One evidence record under construction.

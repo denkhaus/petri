@@ -189,6 +189,23 @@ pub(crate) fn platform_request(log_record: &Value) -> Option<&'static str> {
         .then_some("fabro.run_title")
 }
 
+/// The raw request bodies one engine's workflow sent to its twins, in
+/// arrival order across twins, with the platform's own requests left out:
+/// what an engine-specific request matcher inspects.
+pub(crate) fn request_bodies(twins: &[&Twin], credential: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for twin in twins {
+        let log = twin.request_log();
+        for (index, body) in twin.requests_for(credential).into_iter().enumerate() {
+            let record = log.get(index).cloned().unwrap_or(Value::Null);
+            if platform_request(&record).is_none() {
+                out.push(body);
+            }
+        }
+    }
+    out
+}
+
 /// Requests one engine made to its twins, in arrival order across twins:
 /// the workflow's own, and the platform's apart.
 pub(crate) fn requests_of(twins: &[&Twin], credential: &str) -> (Vec<Request>, Vec<Request>) {

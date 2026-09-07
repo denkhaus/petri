@@ -10,7 +10,7 @@
   "twins": [
     {
       "provider": "openai",
-      "base_url": "http://127.0.0.1:62771"
+      "base_url": "http://127.0.0.1:53402"
     }
   ],
   "normalization": [
@@ -144,8 +144,8 @@
     },
     "identities": {
       "<BLOB_1>": "blob://sha256/c1167b31c4ce3d43251873cc8d2297e627db3a95cc56f0ec1b50e30734bdcddd",
-      "<RUN_ID>": "01M1XN5JW879B4D10BASDPN9HV",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-edit-and-verify-97962-0/fabro/bundle"
+      "<RUN_ID>": "01M1Y3NW0C9EVMTRCJNZG8MW78",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-edit-and-verify-91713-0/fabro/bundle"
     }
   }
 }

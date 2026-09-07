@@ -10,7 +10,7 @@
   "twins": [
     {
       "provider": "openai",
-      "base_url": "http://127.0.0.1:62859"
+      "base_url": "http://127.0.0.1:53390"
     }
   ],
   "normalization": [
@@ -205,8 +205,8 @@
       "provider_requests": 1
     },
     "identities": {
-      "<RUN_ID>": "01M1XN7EFR97SJR1C4VJTJKP08",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-interview-4325-0/fabro/bundle"
+      "<RUN_ID>": "01M1Y3NVDSNNJVF9XCW74XRZ5Y",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-interview-91711-0/fabro/bundle"
     }
   }
 }

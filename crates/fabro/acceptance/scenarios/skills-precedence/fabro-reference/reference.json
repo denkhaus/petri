@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "scenario": "skills-precedence",
+  "fabro_repository": "https://github.com/fabro-sh/fabro",
+  "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
+  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
+  "captured_on": "2026-09-07",
+  "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
+  "bundle_digest": "6828105ee11bddf1f551e1af216c7d3dd13c2ee5362056dfbd342bf5d513f028",
+  "twins": [
+    {
+      "provider": "openai",
+      "base_url": "http://127.0.0.1:53831"
+    }
+  ],
+  "normalization": [
+    "generated run id -> <RUN_ID>",
+    "the run's working directory -> <WORKSPACE>",
+    "blob://sha256/<hex> -> <BLOB_n> (the dump's inline value is compared where the event log offloaded it)",
+    "engine bookkeeping context keys named by the scenario are moved to `bookkeeping`, never dropped"
+  ],
+  "projection": {
+    "engine": "fabro",
+    "status": "succeeded",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "setup",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "agent",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "forks": [],
+    "context": {},
+    "bookkeeping": {
+      "command.output": "<BLOB_1>",
+      "current_node": "agent",
+      "failure_class": "",
+      "failure_signature": "",
+      "graph.backend": "api",
+      "graph.goal": "Greet Ada through the greet skill; the repository's copy of the skill must win over the project's and the home directory's.",
+      "internal.fidelity": "compact",
+      "internal.node_visit_count": 1,
+      "internal.retry_count.agent": 0,
+      "internal.retry_count.setup": 0,
+      "internal.retry_count.start": 0,
+      "internal.run_id": "<RUN_ID>",
+      "internal.thread_id": "setup",
+      "last_response": "GREETED Ada",
+      "last_stage": "agent",
+      "outcome": "succeeded",
+      "response.agent": "GREETED Ada",
+      "thread.setup.current_node": "agent",
+      "thread.start.current_node": "setup"
+    },
+    "artifacts": {},
+    "interviews": [],
+    "requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "greet-call"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "greeted"
+      }
+    ],
+    "platform_requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "effort": null,
+        "scenario": null
+      }
+    ],
+    "counts": {
+      "interviews_asked": 0,
+      "interviews_delivered": 0,
+      "platform_requests": 1,
+      "provider_requests": 2
+    },
+    "identities": {
+      "<BLOB_1>": "blob://sha256/03ef380fdaf49946cc4a5bda4ec5cd1a3d85097823992b89a64e37f6cefc1a37",
+      "<RUN_ID>": "01M1Y3R01SS3KGAQY29YHG3SFM",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-skills-precedence-2900-0/fabro/bundle"
+    }
+  }
+}

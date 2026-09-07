@@ -10,11 +10,11 @@
   "twins": [
     {
       "provider": "openai",
-      "base_url": "http://127.0.0.1:63176"
+      "base_url": "http://127.0.0.1:53424"
     },
     {
       "provider": "anthropic",
-      "base_url": "http://127.0.0.1:63177"
+      "base_url": "http://127.0.0.1:53425"
     }
   ],
   "normalization": [
@@ -143,8 +143,8 @@
     },
     "identities": {
       "<BLOB_1>": "blob://sha256/7fd4c803ae34813a52e6323303c9c6bedae5397ead13c5ab915038658b715865",
-      "<RUN_ID>": "01M1XNFGNP8AYGZ6G9V460MHSB",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-fallback-failover-24974-0/fabro/bundle"
+      "<RUN_ID>": "01M1Y3NWK65R0T9XPN6ESG52Q2",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-fallback-failover-91712-0/fabro/bundle"
     }
   }
 }

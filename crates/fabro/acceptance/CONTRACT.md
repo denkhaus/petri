@@ -93,7 +93,9 @@ Cells captured live from the pinned binary: `parallel-results` (commands,
 two fan-outs), `interview` (the required bundle, five gate kinds and the
 summary prompt node), `edit-and-verify` (a native agent with a real shell
 tool and a gate), `fallback-failover` (task 12's capture: a 503 after a
-completed tool effect and the fall back to Anthropic). Baseline defects of
+completed tool effect and the fall back to Anthropic), `skills-precedence`
+(task 14's capture: the three skill directories, the reference prompt
+section and `use_skill` tool, the repository's copy winning). Baseline defects of
 the pinned Fabro found by the matrix: it repeats a completed tool effect
 on failover (`fallback-repeated-tool-effect`).
 

@@ -1081,6 +1081,11 @@ pub(crate) fn stage_repository(source: &Path, dest: &Path) {
             dest.display()
         )
     });
+    init_repository(dest);
+}
+
+/// Make a staged directory a git repository with one commit.
+pub(crate) fn init_repository(dest: &Path) {
     let git = |args: &[&str]| {
         let status = process::Command::new("git")
             .args(args)

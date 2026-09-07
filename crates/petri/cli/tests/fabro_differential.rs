@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use support::fabro::compare::{self, Projection, Rules};
 use support::fabro::evidence::{self, Record};
 use support::fabro::fabro_adapter::{
-    FabroBinary, FabroLaunch, FabroServer, RUN_DEADLINE, copy_tree, repo_root, stage_repository,
+    FabroBinary, FabroLaunch, FabroServer, RUN_DEADLINE, copy_tree, init_repository, repo_root,
 };
 use support::fabro::launch::Case;
 use support::fabro::twins::{Provider, Twin};
@@ -60,6 +60,9 @@ struct Cell {
     scenario:      &'static str,
     /// The workflow file inside the bundle.
     workflow:      &'static str,
+    /// The bundle's files, relative to the scenario directory: what both
+    /// engines run, and what the bundle digest covers.
+    bundle:        Vec<&'static str>,
     /// Concrete inputs; `{bundle}` is replaced by the staged bundle's path.
     inputs:        Vec<(&'static str, String)>,
     rules:         Rules,
@@ -68,8 +71,16 @@ struct Cell {
     /// Provider twins both engines need, with their scenario scripts built
     /// per namespace.
     twins:         Vec<(Provider, Scripts)>,
+    /// Skill directories seeded under each engine's `$FABRO_HOME/skills`
+    /// (a fixture path relative to the repository root).
+    home_skills:   Option<&'static str>,
     /// The independent expectation, asserted on each engine's projection.
     expect:        fn(&Projection) -> Vec<Check>,
+    /// An engine-specific request matcher over the raw request bodies the
+    /// workflow sent (platform requests left out): the same item
+    /// assignments, tool actions and call obligations asserted on each
+    /// engine where prompt assembly differs.
+    probe:         Option<fn(&[Value]) -> Vec<Check>>,
     /// Baseline defects already recorded for the pinned Fabro: expectation
     /// names Fabro is known to fail. They are reported, never accepted.
     known_defects: Vec<&'static str>,
@@ -87,10 +98,11 @@ fn stage(scenario: &str, dest: &Path, repository: bool) -> Staged {
         "scenario `{scenario}` is not at {}",
         source.display()
     );
+    copy_tree(&source, dest).expect("stage the bundle");
+    // The capture beside the bundle is not part of it.
+    let _ = fs::remove_dir_all(dest.join("fabro-reference"));
     if repository {
-        stage_repository(&source, dest);
-    } else {
-        copy_tree(&source, dest).expect("stage the bundle");
+        init_repository(dest);
     }
     Staged {
         dir: dest.to_path_buf(),
@@ -126,16 +138,34 @@ fn twin_pins(twins: &[Twin]) -> Value {
     )
 }
 
-/// Apply the expectation, record every check, and return the failures.
-fn expect(record: &mut Record, projection: &Projection, cell: &Cell) -> Vec<String> {
+/// Apply the expectation and the request probe, record every check, and
+/// return the failures.
+fn expect(
+    record: &mut Record,
+    projection: &Projection,
+    bodies: &[Value],
+    cell: &Cell,
+) -> Vec<String> {
     let mut failures = Vec::new();
-    for (name, passed, detail) in (cell.expect)(projection) {
+    let mut checks = (cell.expect)(projection);
+    if let Some(probe) = cell.probe {
+        checks.extend(probe(bodies));
+    }
+    for (name, passed, detail) in checks {
         record.assert(&name, passed, detail.clone());
         if !passed {
             failures.push(format!("{name}: {detail}"));
         }
     }
     failures
+}
+
+/// Seed a fixture's skill directories under `home/.fabro/skills`.
+fn seed_home_skills(cell: &Cell, home: &Path) {
+    if let Some(fixture) = cell.home_skills {
+        let dest = home.join(".fabro").join("skills");
+        copy_tree(&repo_root().join(fixture), &dest).expect("seed the home skills");
+    }
 }
 
 /// Run one cell end to end.
@@ -146,11 +176,12 @@ fn expect(record: &mut Record, projection: &Projection, cell: &Cell) -> Vec<Stri
 async fn run_cell(cell: Cell) {
     let scenario = cell.scenario;
     let fabro = FabroBinary::provisioned();
-    let source_digest = evidence::bundle_digest(&scenarios_dir().join(scenario));
+    let source_digest = evidence::bundle_digest(&scenarios_dir().join(scenario), &cell.bundle);
     let decisions = compare::Decisions::load();
 
     // Petri.
     let mut case = Case::new(&format!("diff-{scenario}"));
+    seed_home_skills(&cell, &case.root.join("home"));
     let petri_bundle = stage(scenario, &case.root.join("petri-bundle"), false);
     let petri_twins = start_twins(&cell, &case.root.join("twins-petri"), &case.credential).await;
     for twin in &petri_twins {
@@ -224,7 +255,8 @@ async fn run_cell(cell: Cell) {
             "stderr_bytes": finished.stderr.len(),
         }),
     );
-    let petri_failures = expect(&mut petri_record, &petri_projection, &cell);
+    let petri_bodies = compare::request_bodies(&petri_twin_refs, &case.credential);
+    let petri_failures = expect(&mut petri_record, &petri_projection, &petri_bodies, &cell);
     petri_record.set("cleanup", json!({ "leaked_processes_checked": true }));
     let petri_record_path = petri_record.write();
     fs::write(
@@ -247,6 +279,7 @@ async fn run_cell(cell: Cell) {
         let namespace = format!("{}-fabro", case.credential);
         let fabro_twins = start_twins(&cell, &fabro_root.join("twins"), &namespace).await;
         let fabro_twin_refs: Vec<&Twin> = fabro_twins.iter().collect();
+        seed_home_skills(&cell, &fabro_root.join("server").join("home"));
         let server = FabroServer::start(
             binary.clone(),
             &fabro_root.join("server"),
@@ -315,7 +348,8 @@ async fn run_cell(cell: Cell) {
             "raw",
             json!({ "events": raw_events, "state": raw_state, "dump": raw_dump }),
         );
-        let failures = expect(&mut record, &projection, &cell);
+        let bodies = compare::request_bodies(&fabro_twin_refs, &namespace);
+        let failures = expect(&mut record, &projection, &bodies, &cell);
         let (known, unknown): (Vec<&String>, Vec<&String>) = failures
             .iter()
             .partition(|f| cell.known_defects.iter().any(|d| f.starts_with(d)));
@@ -507,6 +541,7 @@ async fn parallel_results_matches_the_pinned_fabro() {
     run_cell(Cell {
         scenario:      "parallel-results",
         workflow:      "workflow.fabro",
+        bundle:        vec!["workflow.fabro", "helper/code_review.py"],
         inputs:        vec![
             ("helper", "{bundle}/helper/code_review.py".to_owned()),
             ("level", "high".to_owned()),
@@ -541,6 +576,8 @@ async fn parallel_results_matches_the_pinned_fabro() {
         script:        None,
         twins:         Vec::new(),
         expect:        expect_parallel_results,
+        home_skills:   None,
+        probe:         None,
         known_defects: Vec::new(),
     })
     .await;
@@ -679,6 +716,12 @@ async fn interview_scripted_choices_match_the_pinned_fabro() {
     run_cell(Cell {
         scenario:      "interview",
         workflow:      ".fabro/workflows/interview/workflow.fabro",
+        bundle:        vec![
+            ".fabro/project.toml",
+            ".fabro/Dockerfile",
+            ".fabro/workflows/interview/workflow.fabro",
+            ".fabro/workflows/interview/workflow.toml",
+        ],
         inputs:        Vec::new(),
         rules:         compare::rules(COMMON_BOOKKEEPING, &[]),
         script:        Some(vec![
@@ -715,6 +758,8 @@ async fn interview_scripted_choices_match_the_pinned_fabro() {
         ]),
         twins:         vec![(Provider::OpenAi, interview_scripts)],
         expect:        expect_interview,
+        home_skills:   None,
+        probe:         None,
         known_defects: Vec::new(),
     })
     .await;
@@ -821,6 +866,7 @@ async fn edit_and_verify_matches_the_pinned_fabro() {
     run_cell(Cell {
         scenario:      "edit-and-verify",
         workflow:      "workflow.fabro",
+        bundle:        vec!["workflow.fabro"],
         inputs:        Vec::new(),
         rules:         compare::rules(COMMON_BOOKKEEPING, &["notes.txt", "decision.txt"]),
         script:        Some(vec![interview_entry(
@@ -831,6 +877,8 @@ async fn edit_and_verify_matches_the_pinned_fabro() {
         )]),
         twins:         vec![(Provider::OpenAi, edit_and_verify_scripts)],
         expect:        expect_edit_and_verify,
+        home_skills:   None,
+        probe:         None,
         known_defects: Vec::new(),
     })
     .await;
@@ -990,6 +1038,7 @@ async fn fallback_failover_matches_the_pinned_fabro() {
     run_cell(Cell {
         scenario:      "fallback-failover",
         workflow:      "workflow.fabro",
+        bundle:        vec!["workflow.fabro", "workflow.toml"],
         inputs:        Vec::new(),
         rules:         compare::rules(COMMON_BOOKKEEPING, &["notes.txt"]),
         script:        None,
@@ -998,10 +1047,138 @@ async fn fallback_failover_matches_the_pinned_fabro() {
             (Provider::Anthropic, fallback_anthropic_scripts),
         ],
         expect:        expect_fallback_failover,
+        home_skills:   None,
+        probe:         None,
         // The pinned Fabro re-runs the prompt from scratch on the fallback
         // route and repeats the append (decision
         // `fallback-repeated-tool-effect`); Petri must not.
         known_defects: vec!["the append ran exactly once across the failover"],
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: skills-precedence (task 14's capture: the three skill
+// directories, precedence, the prompt section and the skill tool)
+// ---------------------------------------------------------------------------
+
+/// The model calls the skill tool for `greet`, sees the winning copy's
+/// content, and answers. Most specific first: the second request carries
+/// the prompt too.
+fn skills_scripts(namespace: &str) -> Vec<Value> {
+    use support::fabro::twins::{model, scenario, text, tool_call};
+    let provider = Provider::OpenAi;
+    vec![
+        scenario(
+            provider,
+            namespace,
+            "greeted",
+            model(provider),
+            "REPOSITORY GREETING",
+            text("GREETED Ada"),
+        ),
+        scenario(
+            provider,
+            namespace,
+            "greet-call",
+            model(provider),
+            "Use the greet skill",
+            tool_call("skill-1", "use_skill", json!({ "skill_name": "greet" })),
+        ),
+    ]
+}
+
+fn expect_skills(p: &Projection) -> Vec<Check> {
+    let scenarios: Vec<Option<&str>> = p.requests.iter().map(|r| r.scenario.as_deref()).collect();
+    vec![
+        check(
+            "status is succeeded",
+            p.status == "succeeded",
+            json!(p.status),
+        ),
+        check(
+            "two model calls: the skill call, then the answer",
+            scenarios == [Some("greet-call"), Some("greeted")],
+            json!(scenarios),
+        ),
+        check(
+            "both calls asked gpt-5.6-sol on openai",
+            p.requests
+                .iter()
+                .all(|r| r.provider == "openai" && r.model == "gpt-5.6-sol"),
+            json!(p.requests),
+        ),
+    ]
+}
+
+/// The engine-specific matcher: the first request carries the reference
+/// prompt section and the reference `use_skill` tool; the second carries
+/// the repository's greeting and neither losing copy.
+fn probe_skills(bodies: &[Value]) -> Vec<Check> {
+    let fixtures = repo_root().join("crates/fabro/acceptance/testdata/skills/expected");
+    let section = fs::read_to_string(fixtures.join("prompt-section.use_skill.txt"))
+        .expect("the reference prompt section");
+    let tool: Value = serde_json::from_str(
+        &fs::read_to_string(fixtures.join("tool.use_skill.json")).expect("the reference tool"),
+    )
+    .expect("tool.use_skill.json is JSON");
+    let text = |body: &Value| serde_json::to_string(body).unwrap_or_default();
+    let first = bodies.first().cloned().unwrap_or(Value::Null);
+    let second = bodies.get(1).cloned().unwrap_or(Value::Null);
+    // The section as it appears inside a JSON string.
+    let section_in_json = text(&json!(section.trim()));
+    let section_in_json = section_in_json.trim_matches('"');
+    let offered = first["tools"]
+        .as_array()
+        .and_then(|tools| tools.iter().find(|t| t["name"] == "use_skill"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    vec![
+        check(
+            "the first request carries the reference skills prompt section",
+            text(&first).contains(section_in_json),
+            json!({ "expected": section.trim(), "instructions": first["instructions"] }),
+        ),
+        check(
+            "the first request offers the reference use_skill tool",
+            offered["description"] == tool["description"]
+                && offered["parameters"] == tool["parameters"],
+            json!({ "offered": offered, "expected": tool }),
+        ),
+        check(
+            "the second request carries the repository's greeting and neither losing copy",
+            text(&second).contains("REPOSITORY GREETING")
+                && !text(&second).contains("HOME GREETING")
+                && !text(&second).contains("PROJECT GREETING"),
+            json!({ "second_bytes": text(&second).len() }),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn skills_precedence_matches_the_pinned_fabro() {
+    run_cell(Cell {
+        scenario:      "skills-precedence",
+        workflow:      "workflow.fabro",
+        bundle:        vec![
+            "workflow.fabro",
+            ".fabro/skills/greet/SKILL.md",
+            ".fabro/skills/project-only/SKILL.md",
+            "skills/greet/SKILL.md",
+            "skills/repo-only/SKILL.md",
+            "skills/cleanup/SKILL.md",
+            "skills/no-frontmatter/SKILL.md",
+            "skills/no-name/SKILL.md",
+            "skills/unterminated/SKILL.md",
+        ],
+        inputs:        vec![("fixture", "{bundle}".to_owned())],
+        rules:         compare::rules(COMMON_BOOKKEEPING, &[]),
+        script:        None,
+        twins:         vec![(Provider::OpenAi, skills_scripts)],
+        home_skills:   Some("crates/fabro/acceptance/testdata/skills/home/skills"),
+        expect:        expect_skills,
+        probe:         Some(probe_skills),
+        known_defects: Vec::new(),
     })
     .await;
 }

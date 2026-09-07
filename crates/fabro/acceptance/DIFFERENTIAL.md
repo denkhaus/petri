@@ -146,8 +146,9 @@ and the unresolved count.
 
 `crates/fabro/acceptance/scenarios/<name>/fabro-reference/reference.json` is
 the committed projection of the pinned Fabro for that scenario, with the
-Fabro revision and version, the bundle digest (over the bundle's files,
-without `fabro-reference/`), the twins used and the normalization applied.
+Fabro revision and version, the bundle digest (over the files the cell
+declares as the bundle, so scenario metadata beside them never moves it),
+the twins used and the normalization applied.
 A live Fabro run must reproduce it exactly (the identity map aside); a
 difference fails the cell with a pointer-by-pointer diff. Only
 `PETRI_FABRO_REFERENCE_RECORD=1` rewrites the file, so a refresh after a
@@ -162,11 +163,20 @@ caused it.
 ## Adding a cell
 
 Declare the scenario in `fabro_differential.rs` (until task 17's schema
-lands): the bundle directory under `scenarios/`, the workflow file, the
+lands): the bundle directory under `scenarios/`, the bundle's files (what
+both engines run; the digest covers exactly these), the workflow file, the
 inputs (`{bundle}` is the staged path), the comparison rules (bookkeeping
 keys, artifacts), the shared interview script, the twins with their
-scripts per namespace, the independent expectation, and any known baseline
-defects of the pinned Fabro. Stage the bundle byte-identical to
+scripts per namespace, skill directories to seed under each engine's
+`$FABRO_HOME/skills`, the independent expectation, an optional
+engine-specific request probe over the raw request bodies, and any known
+baseline defects of the pinned Fabro.
+
+Fixture state must reach both engines the same way: Fabro's `local`
+environment runs inside the staged bundle, and Petri's workspace starts
+empty, so a scenario that needs files in the workspace copies them there
+itself (`parallel-results` and `skills-precedence` do it in a `setup` node
+from the bundle path they receive as an input). Stage the bundle byte-identical to
 `bundles.lock.json`; a changed file needs a migration decision naming both
 digests (`reference_version.rs` checks it). Record the reference once with
 the binary, review it, and commit it.
