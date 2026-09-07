@@ -11,7 +11,7 @@
 mod support;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use support::fabro::interview;
@@ -148,7 +148,7 @@ fn scripts(case: &Case) -> Vec<Value> {
     ]
 }
 
-fn ship_script(case: &Case) -> std::path::PathBuf {
+fn ship_script(case: &Case) -> PathBuf {
     interview::write(&case.root, "ship", &[interview::entry_matching(
         "ship-it",
         json!({ "node": "gate", "kind": "yes_no", "options": ["Y", "N"] }),

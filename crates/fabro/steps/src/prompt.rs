@@ -44,7 +44,7 @@ use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
-use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, strip_placeholders};
+use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
 use crate::pebble::{PebbleClient, profile_of, speed_of};
 use crate::stage::{self, RunInfo};
 use crate::{memory, preamble};
@@ -287,7 +287,7 @@ impl Step for PromptStep {
         let started = Instant::now();
         stage::record(&ctx);
         if let Some(fork) = &config.fork {
-            crate::parallel::parallel_complete(&ctx, fork).await;
+            parallel_complete(&ctx, fork).await;
         }
         let run_id = ctx
             .capability::<RunInfo>()

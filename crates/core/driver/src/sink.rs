@@ -50,7 +50,7 @@ impl LogSink {
     /// execution's lines belong to.
     #[must_use]
     pub(crate) fn with_label(mut self, label: &str) -> Self {
-        self.label = label.to_owned();
+        label.clone_into(&mut self.label);
         self
     }
 

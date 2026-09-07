@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use petri::engine::{EngineState, Event, EventRecord, RunError};
 use petri::execution::controls::{ControlError, ControlService};
-use petri::execution::events::{CollectingSink, EventBody, EventProjector, EventSource};
+use petri::execution::events::{
+    CollectingSink, EventBody, EventProjector, EventSource, replay_run,
+};
 use petri::execution::host::{self, HostRun};
 use petri::execution::inspect::inspect_run;
 use petri::execution::watchdog::StallWatchdog;
@@ -421,7 +423,7 @@ async fn an_idle_run_is_cancelled_by_the_watchdog() {
             })),
         "the cancel names its reason: {events:#?}"
     );
-    let replayed = petri::execution::events::replay_run(dir.path()).expect("replays");
+    let replayed = replay_run(dir.path()).expect("replays");
     assert!(
         replayed
             .iter()
@@ -586,7 +588,7 @@ async fn pause_holds_admission_and_unpause_releases_it() {
         .position(|e| matches!(e.body, EventBody::RunUnpaused))
         .expect("unpaused");
     assert!(unpaused < first_attempt, "{events:#?}");
-    let replayed = petri::execution::events::replay_run(dir.path()).expect("replays");
+    let replayed = replay_run(dir.path()).expect("replays");
     assert!(
         !replayed
             .iter()

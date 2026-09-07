@@ -139,6 +139,8 @@ crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wai
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 crates/fabro/steps/tests/hooks.rs            readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
 crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the binary: a configured hook blocks a real tool effect of a native agent (`a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`); two `full` nodes share one conversation
+crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
+crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
@@ -899,8 +901,11 @@ addition). Replay has landed; `engine::verify_replay` is the determinism canary.
 `petri run <workflow>` is the standalone runner: one invocation loads,
 validates and executes one root workflow with no server, database or UI. It
 prints the run dir first, then every step's output on stderr as
-`[<node>#<firing>] <line>` so interleaved output from parallel stages stays
-attributable (each line is masked and bounded; `--quiet` turns the echo off),
+`[<node>#<firing>] <line>`, or `[invocation-<N>/<node>#<firing>] <line>` for a
+parallel branch (a child invocation), so interleaved output stays attributable
+(each line is masked and cut at 4096 characters; a stage's echo stops at 64 KiB
+with one marker naming its log file, which keeps every line; a scheduled retry
+is announced as `retry: attempt N of M in Ss`; `--quiet` turns the echo off),
 then one `<status> <node>` line per finished node, the retained workspace
 paths, and `run: <status>`. The exit code is 0 for success, 1 for a failed or
 cancelled run, 2 for a usage error, 3 for a host error, and 4 when the run

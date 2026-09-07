@@ -24,6 +24,7 @@ use execution::{
     AttemptAdmission, CallSite, CoordinatorInvocationClient, GraphDigest, InvocationClient,
     InvocationRequest, InvocationResult, SandboxMode, SecretBindings,
 };
+use frontend_fabro::hooks::HookEvent;
 use frontend_fabro::kinds::{
     BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND, StageOutcome,
 };
@@ -38,6 +39,8 @@ use steps::{Step, StepCtx};
 
 use crate::LocalHooksHandle;
 use crate::blobs::{self, OutputStore};
+use crate::hooks::report_event;
+use crate::stage::record;
 use crate::workflow::ChildInvoker;
 
 pub const BRANCH: StepKindId = BRANCH_KIND;
@@ -434,11 +437,11 @@ pub async fn parallel_complete(ctx: &StepCtx, fork: &str) {
     if !report.is_silent() {
         let _ = ctx
             .logs
-            .send(crate::hooks::report_event(
+            .send(report_event(
                 &ctx.node,
                 ctx.firing,
                 ctx.attempt,
-                frontend_fabro::hooks::HookEvent::ParallelComplete,
+                HookEvent::ParallelComplete,
                 &report,
             ))
             .await;
@@ -482,7 +485,7 @@ impl Step for FanInStep {
     type Config = FanInConfig;
 
     async fn run(&self, config: FanInConfig, ctx: StepCtx) -> Outcome {
-        crate::stage::record(&ctx);
+        record(&ctx);
         parallel_complete(&ctx, &config.fork).await;
         let mut results = config.results;
         strip_placeholders(&mut results);

@@ -10,13 +10,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run;
 use fabro_acceptance::runs::fresh_run_dir;
 use fabro_acceptance::{corpus_root, has_corpus, lower_one};
+use fabro_steps::blobs::{holds_ref, hydrate};
 use fabro_steps::{AGENT_KIND, HUMAN_KIND, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
 use frontend::{CompileInputs, NoFiles};
 use frontend_fabro::load;
@@ -362,11 +363,11 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
         .cloned()
         .expect("the second fork's results");
     assert!(
-        fabro_steps::blobs::holds_ref(&stored),
+        holds_ref(&stored),
         "1,000 envelopes are above the offload threshold: {stored}"
     );
     let store = fabro_steps::LocalBlobStore::new(dir.join(fabro_steps::BLOBS_DIR));
-    let results = fabro_steps::blobs::hydrate(stored, &store).await;
+    let results = hydrate(stored, &store).await;
     let results = results.as_array().expect("the hydrated list");
     assert_eq!(results.len(), 1000);
     assert_eq!(results[999]["item_label"], json!("job-999"));
@@ -424,7 +425,7 @@ async fn fork_scaling_probe() {
         .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics));
     let dir = fresh_run_dir("fabro-e2e-fork-probe");
     let rt = commands_and_stubs(&dir);
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let report = host::run_configured(
         &rt,
         HostRun::new(graph).with_children(lowered.children),
@@ -434,9 +435,7 @@ async fn fork_scaling_probe() {
     .expect("the run completes");
     let elapsed = started.elapsed();
     assert_eq!(report.status, RunStatus::Success);
-    let coordinator = fs::metadata(dir.join("coordinator.jsonl"))
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let coordinator = fs::metadata(dir.join("coordinator.jsonl")).map_or(0, |m| m.len());
     eprintln!(
         "fork probe: {items} items in {:.1} s ({:.0} ms per child); coordinator.jsonl {} KB",
         elapsed.as_secs_f64(),

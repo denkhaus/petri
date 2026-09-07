@@ -211,6 +211,9 @@ reference expectations.
 | `outcome=success` | matched as `succeeded` with a warning until 2026-10-04, then refused | accepted, never matches |
 | ACP tool hooks | best effort at `session/request_permission`, with a `fabro.hook.warning` naming the backend, hook, event and missing boundary for each unenforceable hook | ignored silently |
 | `stage_retrying` hook | dispatched before each retry attempt; its decision is ignored | declared, never dispatched |
+| Run-level hook reports | `run_complete`, `run_failed` and `sandbox_cleanup` reports are logged, not recorded in the event log (they belong to no firing) | platform events |
+| Terminal echo | a stage's echoed output is bounded at 64 KiB (one marker names the log file, which keeps everything); a branch's lines carry its invocation (`[invocation-N/node#firing]`) | the platform's log viewer |
+| `[run.agent]` keys | `skills`, `subagents`, `compaction` and any key other than `fabro_tools` and `mcps` are refused (`unsupported.workflow_toml.key`): the pinned Fabro's `[run.agent]` denies unknown keys and has no setting for skills, sub-agents or compaction | refused by the parser |
 | `checkpoint_saved` hook | warning; the hook does not run | dispatched with no built-in behavior |
 | Sensitive answers (`sensitive=true`, `$secret`) | a Petri extension | not defined |
 | Skipped stages in the path | Petri records a `skipped` final outcome (oracle case `skipped_outcome_routes_like_success`) | no stage record |

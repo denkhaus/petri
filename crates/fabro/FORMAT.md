@@ -407,10 +407,15 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
 - **`fabro/stage`** is `start`, `exit` and a conditional: it returns its
   config as its output, as `noop` did, and records the scope's environment so
   sandbox-placed hooks can run. `start` drives the run-level hooks
-  `sandbox_ready`, `run_start` and its own `stage_start`, in Fabro's order;
-  `exit` drives `run_complete`. A blocking hook that blocks at `start` fails
-  the stage with class `hook_blocked` and ends the run; a skip at `start`
-  records a skipped stage and the run goes on.
+  `sandbox_ready`, `run_start` and its own `stage_start`, in Fabro's order.
+  `run_complete`, `run_failed` and `sandbox_cleanup` are not a stage's: the
+  driver reports the run's end (by its final status, as Fabro's `on_run_end`
+  does: `run_complete` for success, `run_failed` with the failure reason for a
+  failure, neither for a cancelled run) and each scope's release, with the
+  sandbox still in place, and the local hook service runs them there, in that
+  order. A blocking hook that blocks at `start` fails the stage with class
+  `hook_blocked` and ends the run; a skip at `start` records a skipped stage
+  and the run goes on.
 - **Output references.** A stage value whose serialized form is above 100 KiB
   (Fabro's offload threshold; a scalar never, a string by its JSON size) does
   not stay inline in the context or the event log. The step writes it to the
@@ -485,12 +490,13 @@ Fabro names them: `run_start`, `run_complete`, `run_failed`, `stage_start`,
 `stage_complete`, `stage_failed`, `stage_retrying`, `edge_selected`,
 `parallel_start`, `parallel_complete`, `sandbox_ready`, `sandbox_cleanup`,
 `checkpoint_saved`, `pre_tool_use`, `post_tool_use`,
-`post_tool_use_failure`. Every event is validated and merged; two are not
-dispatched yet: `run_failed` and `sandbox_cleanup` need an awaited run-end
-and scope-release point the engine does not offer (the `fabro/stage` step
-only sees `start` and `exit`, and a failed run never reaches `exit`), so a
-hook on either warns `fabro.hooks.undispatched` at load rather than being
-skipped silently. `checkpoint_saved` warns `fabro.hooks.checkpoint_saved` at
+`post_tool_use_failure`. Every event is validated, merged and dispatched at
+its reference phase: `parallel_start` fires once per fork visit before the
+branches (the parallel node's own kind says so, so a `for_each` fork counts),
+`parallel_complete` once every branch is in, from the fan-in itself, both
+naming the parallel node; `run_complete`/`run_failed` at the run's end by its
+status and `sandbox_cleanup` at the scope's release, both with the sandbox
+still there. `checkpoint_saved` warns `fabro.hooks.checkpoint_saved` at
 load and never runs (the standalone runner makes no checkpoints). Fabro's rules apply: `matcher` is
 an unanchored regex tested against the node id, handler type, edge ends and
 tool name the event carries; `run_start`, `sandbox_ready`, `stage_start`,

@@ -48,8 +48,16 @@ with `BranchRole`, never with node names.
 Run and invocation events (coordinator log): `run_started`, `run_finished`,
 `invocation_declared` (with the parent link, graph digest, sandbox binding and
 initial context), `invocation_finished` (with the `InvocationResult`),
-`invocation_cancel_requested`, `execution_declared` (predecessor, index,
-entry), `execution_finished` (the engine exit: terminal status or restart).
+`invocation_cancel_requested` (with the `reason` the requester gave, when it
+gave one: `stall_timeout`, `interrupt`, `control`), `stall_timeout` (derived
+beside the cancel request the stall watchdog made, with the budget and the
+idle time), `execution_declared` (predecessor, index, entry),
+`execution_finished` (the engine exit: terminal status or restart).
+
+Live-only host notices (`EventSource::Host`, `seq` counting the projector's
+notices): `run_paused`, `run_unpaused`, published by a projector that follows
+the control service (`EventProjector::follow_controls`). Nothing durable backs
+them, so replay does not carry them.
 
 Execution events (engine log), each attributed to a subject where one exists:
 
@@ -71,6 +79,7 @@ Execution events (engine log), each attributed to a subject where one exists:
 | `cancel_requested`, `kill_requested` | the two stop tiers, scope or group |
 | `output_line`, `artifact_recorded` | step output and artifacts |
 | `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it |
+| `budget_paused`, `budget_resumed` | an executor-enforced attempt budget stopped counting (the attempt asked a question; `remaining_ms` is the active-work time left, `pending_questions` how many wait) and counted again (its last pending question was answered); from the driver's durable `budget_paused`/`budget_resumed` notes |
 | `host_note` | a `driver::lifecycle::Note` the host or the driver recorded: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `hook` (a hook service report) |
 | `step_custom` | any other step-defined progress payload |
 
@@ -102,10 +111,12 @@ kind did not report one. The native agent backend reports `pebble.usage`,
   identities; delivery is at-least-once, deduplicated by `EventId`. A
   projector attached at resume is built with `EventProjector::primed`, which
   folds the on-disk prefix into its state without delivering it.
-- Every event is derived from a durable record, output lines included. The one
-  live-only field is `observed_at` (milliseconds since the epoch when the
-  projector saw the record), absent on replay. A backend's live stream chunks
-  that never reached the step's progress channel are not in the contract.
+- Every event is derived from a durable record, output lines included, except
+  the `Host`-sourced notices (`run_paused`, `run_unpaused`), which are
+  live-only by design. The one live-only field on a derived event is
+  `observed_at` (milliseconds since the epoch when the projector saw the
+  record), absent on replay. A backend's live stream chunks that never reached
+  the step's progress channel are not in the contract.
 
 ## Secrets
 
