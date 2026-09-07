@@ -25,6 +25,9 @@
           },
           "AGENTS.md": {
             "file": "fixtures/AGENTS.md"
+          },
+          ".gitignore": {
+            "text": "__pycache__/\n*.pyc\n"
           }
         }
       },

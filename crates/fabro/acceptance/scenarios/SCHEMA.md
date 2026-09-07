@@ -88,10 +88,12 @@ A scenario's title says which shape the bundle lacks.
   what a Fabro operator sets outside the repository, such as the
   `[run.model]` default a bundle that declares no model needs.
 - `python_modules` names Python modules the bundle's helpers import (the
-  bundle's own image installs them). The harness puts the first `python3`
-  on its PATH that imports them all first on the run's PATH; when none
-  does, the cell is skipped with that reason, which the coverage report
-  shows as a missing required cell until the modules are installed.
+  bundle's own image installs them). On the host the harness puts the first
+  `python3` on its PATH that imports them all first on the run's PATH; when
+  none does, the cell is skipped with that reason, which the coverage report
+  shows as a missing required cell until the modules are installed. A Docker
+  scope uses the pinned runner image's `python3`, which carries the modules
+  the pinned bundles need (PyYAML since sandbox-images `df708f91`).
 - `seed` (default `true`) is whether the run checks the fixture repository
   out into its workspace, as Fabro's `[run.clone]` does. The frontend's
   `[run.clone]` handling decides the depth.
