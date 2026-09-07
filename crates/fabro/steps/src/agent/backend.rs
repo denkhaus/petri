@@ -9,6 +9,7 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 use steps::StepCtx;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 
 use super::AgentConfig;
 use crate::acp::{AcpError, Client};
@@ -99,20 +100,19 @@ impl Session {
             Self::Acp(client) => {
                 let turn = client.prompt(text, control, grace);
                 let result = match deadline {
-                    Some(deadline) => match tokio::time::timeout(deadline, turn).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            client.terminate(grace).await;
-                            return Err(AgentError::failed(
-                                "timeout",
-                                format!(
-                                    "the agent turn timed out after {}ms",
-                                    u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)
-                                ),
-                            ));
-                        }
-                    },
-                    None => turn.await,
+                    Some(deadline) => timeout(deadline, turn).await.ok(),
+                    None => Some(turn.await),
+                };
+                let Some(result) = result else {
+                    client.terminate(grace).await;
+                    return Err(AgentError::failed(
+                        "timeout",
+                        format!(
+                            "the agent turn timed out after {}ms",
+                            deadline
+                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                        ),
+                    ));
                 };
                 result.map(|turn| turn.text).map_err(Into::into)
             }
