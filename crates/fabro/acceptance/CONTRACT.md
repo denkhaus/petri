@@ -253,12 +253,12 @@ owns C5 and this checklist; the other four stages ran in parallel, so a stage
 whose branch had not merged onto `swarm/integration` when task 16 finished is
 marked "not verified" with the reason, not "passed".
 
-| Stage | Acceptance gate | Branch / commit | Status at task 16 finish |
+| Stage | Acceptance gate | Branch / commit | Status |
 |---|---|---|---|
 | C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback` | not verified: not merged onto `swarm/integration` (head `bdd5c5a`) when task 16 finished |
 | C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp`, commits `b67d3ee`..`72be261` (evidence `task13-mcp.md`) | passed: merged; the MCP suites and the scripted stdio server (`fabro_mcp_blackbox`, `testdata`) pass in the gate (1192) |
 | C3 skills (item 9c, task 14) | versioned fixtures verify skill discovery, precedence, loading, prompt/tool behavior and events without Fabro | `swarm/task14-skills`, commits `c27fc3e`, `bdd5c5a` (evidence `task14-skills.md`) | passed: merged; the skills suites and fixtures (`testdata/skills`) pass in the gate; skill context is loaded into the system prompt, outside the agent history, so compaction cannot remove it (verified below) |
-| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents` | not verified: not merged onto `swarm/integration` when task 16 finished; `[run.agent] subagents` still refused |
+| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`3cbc1bc` (evidence `task15-subagents.md`) | passed: merged; every native agent has Pebble's sub-agent tools as the pinned Fabro's API agents do; the sub-agent suites (`steps/tests/subagents.rs`, `fabro_subagents_blackbox`) pass in the gate (1213); `[run.agent] subagents` stays refused because Fabro's parser refuses it; two Pebble contract gaps (child project memory, child skill directories) recorded with ignored failing tests; differences above |
 | C5 context compaction (item 9e, task 16) | controlled histories trigger compaction and preserve required conversation/tool state, later thread use, usage, and events | `swarm/task16-compaction`, this branch | passed: the trigger below, at and above the 80 percent threshold; continuation, thread reuse, tool pairing across the boundary, summary failure, cancellation, resume fallback; public events and usage. In-process `petri-fabro-steps::compaction` (7), black box `fabro_compaction_blackbox` (4) |
 
 Skill context across compaction (item 9e's cross-feature check, C3 landed):
