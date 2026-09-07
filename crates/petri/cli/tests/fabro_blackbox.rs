@@ -26,7 +26,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::fabro::interview;
@@ -1325,7 +1325,7 @@ async fn a_delayed_reply_lands_on_its_gate() {
         "delay_ms": 800,
         "action": { "kind": "choice", "value": "Y" }
     })]);
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let finished = case
         .run(&workflow, &[
             "--interview-script",
@@ -1769,7 +1769,7 @@ async fn a_stalled_run_is_cancelled_by_the_watchdog() {
 }"#,
         None,
     );
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let finished = case.run(&workflow, &["--auto-approve"]).await;
     assert!(
         started.elapsed() < Duration::from_secs(30),

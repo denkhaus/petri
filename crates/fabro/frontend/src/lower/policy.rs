@@ -31,9 +31,9 @@ pub(super) fn run_policy(workflow: &Workflow, diags: &mut Diagnostics) -> RunPol
         None => Some(DEFAULT_STALL_TIMEOUT),
     };
     let limit = match workflow.attrs.int("loop_restart_signature_limit", diags) {
-        Some(limit) => match u32::try_from(limit).ok().and_then(NonZeroU32::new) {
-            Some(limit) => Some(limit),
-            None => {
+        Some(limit) => {
+            let parsed = u32::try_from(limit).ok().and_then(NonZeroU32::new);
+            if parsed.is_none() {
                 diags.error(
                     "fabro.bad_signature_limit",
                     workflow
@@ -41,9 +41,9 @@ pub(super) fn run_policy(workflow: &Workflow, diags: &mut Diagnostics) -> RunPol
                         .span_of("loop_restart_signature_limit", &workflow.span),
                     format!("`loop_restart_signature_limit={limit}` must be at least 1"),
                 );
-                None
             }
-        },
+            parsed
+        }
         None if workflow.attrs.contains("loop_restart_signature_limit") => None,
         None => NonZeroU32::new(DEFAULT_SIGNATURE_LIMIT),
     };

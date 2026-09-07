@@ -6,21 +6,24 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use petri::engine::{EngineState, Event, EventRecord, RunError};
 use petri::execution::controls::{ControlError, ControlService};
 use petri::execution::host::{self, HostRun};
+use petri::execution::inspect::inspect_run;
 use petri::execution::watchdog::StallWatchdog;
 use petri::execution::{
-    ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
+    CoordinatorRecord, ExecutionId, ExecutionObserver, InterviewDispatcher, InterviewReply,
+    InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
 use petri::fabro::{AGENT_KIND, CommandStep, HumanStep, StubStep, WAIT_KIND, WORKFLOW_KIND};
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
-use petri::ir::{Graph, RunStatus, Value};
+use petri::ir::{Graph, RunStatus, Status, Value};
 use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
@@ -60,7 +63,7 @@ fn lower(rt: &Runtime, dir: &RunDir, text: &str) -> Lowered {
 }
 
 /// Script a stub node's calls.
-fn script(graph: &mut Graph, node: &str, calls: Value) {
+fn script(graph: &mut Graph, node: &str, calls: &Value) {
     let node = graph
         .body
         .nodes
@@ -70,7 +73,7 @@ fn script(graph: &mut Graph, node: &str, calls: Value) {
     let Value::Object(config) = &mut node.step.config else {
         panic!("an object config");
     };
-    config.insert("simulate".into(), json!({ "calls": calls }));
+    config.insert("simulate".into(), json!({ "calls": calls.clone() }));
 }
 
 fn firings_of(report: &driver::ExecutionReport, node: &str) -> usize {
@@ -105,13 +108,16 @@ async fn a_repeated_deterministic_failure_trips_the_breaker_across_restarts() {
     let lowered = lower(&rt, &dir, RESTART_LOOP);
     let mut graph = lowered.graph.expect("lowers");
     assert_eq!(
-        graph.policy.loop_restart_signature_limit.map(|n| n.get()),
+        graph
+            .policy
+            .loop_restart_signature_limit
+            .map(NonZeroU32::get),
         Some(3)
     );
     script(
         &mut graph,
         "work",
-        json!([{
+        &json!([{
             "outcome": "failed",
             "failure_reason": "the tests failed on line 12",
             "context_updates": { "done": "false" }
@@ -137,7 +143,7 @@ async fn a_repeated_deterministic_failure_trips_the_breaker_across_restarts() {
     );
     assert!(reason.contains("repeated 3 times (limit 3)"), "{reason}");
     // Three executions ran (two restarts), one `work` each.
-    let document = petri::execution::inspect::inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run(dir.path()).expect("inspects");
     assert_eq!(document.executions.len(), 3, "{document:?}");
 }
 
@@ -156,13 +162,13 @@ async fn a_success_between_failures_does_not_clear_the_count() {
     script(
         &mut graph,
         "work",
-        json!([fail, fail, { "context_updates": { "done": "false" } }, fail]),
+        &json!([fail, fail, { "context_updates": { "done": "false" } }, fail]),
     );
     let report = host::run_configured(&rt, HostRun::new(graph), |_, _| {})
         .await
         .expect("the run completes");
     assert_eq!(report.status, RunStatus::Failed);
-    let document = petri::execution::inspect::inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run(dir.path()).expect("inspects");
     assert_eq!(document.executions.len(), 4, "fail, fail, success, fail");
 }
 
@@ -185,7 +191,7 @@ async fn a_restart_edge_admits_only_transient_failures() {
     script(
         &mut graph,
         "work",
-        json!([{ "outcome": "failed", "failure_reason": "syntax error" }, {}]),
+        &json!([{ "outcome": "failed", "failure_reason": "syntax error" }, {}]),
     );
     let report = host::run_configured(&rt, HostRun::new(graph), |_, _| {})
         .await
@@ -212,7 +218,7 @@ async fn a_restart_edge_admits_only_transient_failures() {
     script(
         &mut graph,
         "work",
-        json!([{ "outcome": "failed", "failure_reason": "connection refused by the registry" }, {}]),
+        &json!([{ "outcome": "failed", "failure_reason": "connection refused by the registry" }, {}]),
     );
     let report = host::run_configured(&rt, HostRun::new(graph), |_, _| {})
         .await
@@ -223,7 +229,7 @@ async fn a_restart_edge_admits_only_transient_failures() {
         "{:?}",
         report.state.errors()
     );
-    let document = petri::execution::inspect::inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run(dir.path()).expect("inspects");
     assert_eq!(document.executions.len(), 2, "one restart, then success");
 }
 
@@ -249,7 +255,7 @@ async fn node_visit_totals_survive_a_restart_while_context_resets() {
     script(
         &mut graph,
         "work",
-        json!([{ "context_updates": { "done": "false", "seen": "yes" } }]),
+        &json!([{ "context_updates": { "done": "false", "seen": "yes" } }]),
     );
     let report = host::run_configured(&rt, HostRun::new(graph), |_, _| {})
         .await
@@ -264,7 +270,7 @@ async fn node_visit_totals_survive_a_restart_while_context_resets() {
         "{:?}",
         report.state.errors()
     );
-    let document = petri::execution::inspect::inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run(dir.path()).expect("inspects");
     assert_eq!(document.executions.len(), 3);
     // The final execution started with an empty context: the restart
     // replaced it, and `seen` was written again by nothing.
@@ -287,7 +293,7 @@ async fn the_breaker_state_is_restored_on_resume() {
     script(
         &mut graph,
         "work",
-        json!([{
+        &json!([{
             "outcome": "failed",
             "failure_reason": "the tests failed",
             "context_updates": { "done": "false" }
@@ -399,7 +405,7 @@ async fn a_pending_question_parks_the_watchdog() {
     impl Interviewer for Slow {
         async fn reply(&self, _: InterviewRequest, cancel: CancellationToken) -> InterviewReply {
             tokio::select! {
-                () = sleep(Duration::from_millis(3000)) => InterviewReply::Answered(Answer::choice("Y")),
+                () = sleep(Duration::from_secs(3)) => InterviewReply::Answered(Answer::choice("Y")),
                 () = cancel.cancelled() => InterviewReply::Cancelled,
             }
         }
@@ -443,12 +449,7 @@ async fn a_pending_question_parks_the_watchdog() {
 struct Starts(Mutex<Vec<String>>);
 
 impl ExecutionObserver for Starts {
-    fn on_engine_record(
-        &self,
-        _: petri::execution::ExecutionId,
-        record: &EventRecord,
-        state: &EngineState,
-    ) {
+    fn on_engine_record(&self, _: ExecutionId, record: &EventRecord, state: &EngineState) {
         if let Event::StepStarted { firing, .. } = &record.event
             && let Some(name) = state
                 .firing_node(*firing)
@@ -459,7 +460,7 @@ impl ExecutionObserver for Starts {
         }
     }
 
-    fn on_lifecycle(&self, _: &petri::execution::CoordinatorRecord) {}
+    fn on_lifecycle(&self, _: &CoordinatorRecord) {}
 }
 
 /// A paused run admits no new attempt; unpausing releases them, and the
@@ -539,9 +540,11 @@ async fn a_paused_run_can_still_be_cancelled() {
     .expect("the run completes");
     assert_eq!(report.status, RunStatus::Cancelled);
     assert!(
-        !report.state.history().iter().any(|r| r.name == "a"
-            && r.attempt.raw() > 0
-            && r.outcome.status == petri::ir::Status::Success),
+        !report
+            .state
+            .history()
+            .iter()
+            .any(|r| r.name == "a" && r.attempt.raw() > 0 && r.outcome.status == Status::Success),
         "`a` never ran"
     );
     assert!(!dir.workspace().join("ran.txt").exists());

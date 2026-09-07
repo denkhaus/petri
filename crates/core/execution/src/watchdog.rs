@@ -248,9 +248,12 @@ impl ExecutionObserver for StallWatchdog {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use tokio::task::yield_now;
+    use tokio::time::advance;
+
     use super::*;
 
-    async fn run_monitor(
+    fn run_monitor(
         inner: Arc<Inner>,
         stop: CancellationToken,
         fired: Arc<AtomicUsize>,
@@ -267,11 +270,11 @@ mod tests {
     async fn an_idle_run_is_cancelled_once_at_the_budget() {
         let watchdog = StallWatchdog::new(Duration::from_secs(60));
         let fired = Arc::new(AtomicUsize::new(0));
-        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone()).await;
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
+        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone());
+        advance(Duration::from_secs(59)).await;
+        yield_now().await;
         assert_eq!(fired.load(Ordering::SeqCst), 0);
-        tokio::time::advance(Duration::from_secs(2)).await;
+        advance(Duration::from_secs(2)).await;
         task.await.expect("the monitor ends after firing");
         assert_eq!(fired.load(Ordering::SeqCst), 1);
         let stall = watchdog.tripped().expect("tripped");
@@ -283,13 +286,13 @@ mod tests {
     async fn activity_re_arms_without_waking_the_monitor() {
         let watchdog = StallWatchdog::new(Duration::from_secs(60));
         let fired = Arc::new(AtomicUsize::new(0));
-        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone()).await;
-        tokio::time::advance(Duration::from_secs(50)).await;
+        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone());
+        advance(Duration::from_secs(50)).await;
         watchdog.touch();
-        tokio::time::advance(Duration::from_secs(50)).await;
-        tokio::task::yield_now().await;
+        advance(Duration::from_secs(50)).await;
+        yield_now().await;
         assert_eq!(fired.load(Ordering::SeqCst), 0, "active 50 s ago");
-        tokio::time::advance(Duration::from_secs(11)).await;
+        advance(Duration::from_secs(11)).await;
         task.await.expect("fires once idle");
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
@@ -298,22 +301,22 @@ mod tests {
     async fn a_pending_question_parks_the_clock_and_an_answer_restarts_it_in_full() {
         let watchdog = StallWatchdog::new(Duration::from_secs(60));
         let fired = Arc::new(AtomicUsize::new(0));
-        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone()).await;
-        tokio::time::advance(Duration::from_secs(30)).await;
+        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone());
+        advance(Duration::from_secs(30)).await;
         watchdog.block(ExecutionId::new(0), "gate#3".into());
-        tokio::time::advance(Duration::from_secs(600)).await;
-        tokio::task::yield_now().await;
+        advance(Duration::from_secs(600)).await;
+        yield_now().await;
         assert_eq!(fired.load(Ordering::SeqCst), 0, "blocked runs never stall");
         assert!(watchdog.is_blocked());
         watchdog.unblock(ExecutionId::new(0), "gate#3");
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
+        advance(Duration::from_secs(59)).await;
+        yield_now().await;
         assert_eq!(
             fired.load(Ordering::SeqCst),
             0,
             "a full budget after unblocking"
         );
-        tokio::time::advance(Duration::from_secs(2)).await;
+        advance(Duration::from_secs(2)).await;
         task.await.expect("fires");
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
@@ -322,18 +325,18 @@ mod tests {
     async fn two_pending_questions_unblock_only_when_both_are_answered() {
         let watchdog = StallWatchdog::new(Duration::from_secs(60));
         let fired = Arc::new(AtomicUsize::new(0));
-        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone()).await;
+        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone());
         watchdog.block(ExecutionId::new(0), "a#1".into());
         watchdog.block(ExecutionId::new(1), "b#2".into());
         watchdog.unblock(ExecutionId::new(0), "a#1");
-        tokio::time::advance(Duration::from_secs(600)).await;
-        tokio::task::yield_now().await;
+        advance(Duration::from_secs(600)).await;
+        yield_now().await;
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         // A stale answer to a question nobody asked changes nothing.
         watchdog.unblock(ExecutionId::new(0), "zzz#9");
         assert!(watchdog.is_blocked());
         watchdog.unblock(ExecutionId::new(1), "b#2");
-        tokio::time::advance(Duration::from_secs(61)).await;
+        advance(Duration::from_secs(61)).await;
         task.await.expect("fires");
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
@@ -342,10 +345,10 @@ mod tests {
     async fn stopping_ends_the_monitor_without_firing() {
         let watchdog = StallWatchdog::new(Duration::from_secs(60));
         let fired = Arc::new(AtomicUsize::new(0));
-        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone()).await;
+        let task = run_monitor(watchdog.inner.clone(), watchdog.stop.clone(), fired.clone());
         watchdog.stop.cancel();
         task.await.expect("stopped");
-        tokio::time::advance(Duration::from_secs(600)).await;
+        advance(Duration::from_secs(600)).await;
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         assert!(watchdog.tripped().is_none());
     }

@@ -18,6 +18,7 @@
 //! question. A missing or invalid target fails the gate before anyone is
 //! asked, and the URL itself never appears in the failure.
 
+use std::future::pending;
 use std::time::Duration;
 
 use frontend_fabro::Policy;
@@ -225,7 +226,7 @@ impl HumanConfig {
         question.default = self.choices.first().map(|c| c.key.clone());
         question.freeform = self.freeform_target.is_some();
         question.sensitive = self.sensitive.unwrap_or(false);
-        question.kind = self.question_type.clone();
+        question.kind.clone_from(&self.question_type);
         question.timeout_ms = self.timeout_ms;
         question
     }
@@ -373,7 +374,7 @@ impl Step for HumanStep {
         let deadline = async {
             match config.timeout_ms {
                 Some(ms) => time::sleep(Duration::from_millis(ms)).await,
-                None => std::future::pending::<()>().await,
+                None => pending::<()>().await,
             }
         };
         tokio::pin!(deadline);

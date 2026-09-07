@@ -206,11 +206,15 @@ pub fn normalize_reason(reason: &str) -> String {
     let s = COMMA_SPACE_RE.replace_all(&s, ",");
     let s = WHITESPACE_RE.replace_all(&s, " ");
     let s = s.trim();
-    if s.len() > 240 {
-        s[..s.floor_char_boundary(240)].to_string()
-    } else {
-        s.to_string()
+    if s.len() <= 240 {
+        return s.to_string();
     }
+    // The reference cuts at 240 bytes on a char boundary.
+    let mut cut = 240;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s[..cut].to_string()
 }
 
 /// `<node>|<category>|<normalized reason>`, `unknown` for an empty reason.

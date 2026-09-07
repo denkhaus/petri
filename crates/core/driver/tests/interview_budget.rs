@@ -9,6 +9,7 @@
 mod support;
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ use serde_json::json;
 use steps::{Answer, Question, Registry, Step, StepCtx};
 use support::*;
 use tokio::sync::mpsc;
+use tokio::task::yield_now;
 use tokio::time::{self, Duration as TokioDuration};
 
 // ── A sandbox that runs nothing ───────────────────────────────────────────
@@ -44,15 +46,15 @@ impl ExecEnv for NoEnv {
         ))
     }
 
-    fn workspace_path(&self) -> &str {
+    fn workspace_path(&self) -> &'static str {
         "/work"
     }
 
-    async fn read_file(&self, _relative: &std::path::Path) -> Result<Option<Vec<u8>>, EnvError> {
+    async fn read_file(&self, _relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
         Ok(None)
     }
 
-    async fn write_file(&self, _relative: &std::path::Path, _: &[u8]) -> Result<(), EnvError> {
+    async fn write_file(&self, _relative: &Path, _: &[u8]) -> Result<(), EnvError> {
         Ok(())
     }
 
@@ -187,7 +189,7 @@ fn driver(graph: Graph, dir: &RunDir) -> (Driver, mpsc::UnboundedReceiver<(Firin
 /// Let every runnable task make progress without moving the clock.
 async fn settle() {
     for _ in 0..64 {
-        tokio::task::yield_now().await;
+        yield_now().await;
     }
 }
 
@@ -204,7 +206,7 @@ async fn next_question(rx: &mut mpsc::UnboundedReceiver<(FiringId, String)>) -> 
         if let Ok(question) = rx.try_recv() {
             return question;
         }
-        tokio::task::yield_now().await;
+        yield_now().await;
     }
     panic!("no question was asked");
 }

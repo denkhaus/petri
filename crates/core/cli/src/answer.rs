@@ -99,9 +99,9 @@ fn plain_label(label: &str) -> &str {
 /// A deadline in the largest whole unit that fits: `90s`, `15m`, `2h`.
 fn render_deadline(ms: u64) -> String {
     let seconds = ms.div_ceil(1000);
-    if seconds >= 3600 && seconds % 3600 == 0 {
+    if seconds >= 3600 && seconds.is_multiple_of(3600) {
         format!("{}h", seconds / 3600)
-    } else if seconds >= 60 && seconds % 60 == 0 {
+    } else if seconds >= 60 && seconds.is_multiple_of(60) {
         format!("{}m", seconds / 60)
     } else {
         format!("{seconds}s")
@@ -712,6 +712,7 @@ impl Interviewer for ScriptedInterviewer {
 mod tests {
     use execution::{ExecutionId, InvocationId};
     use runtime::ir::{Attempt, FiringId};
+    use runtime::steps::QuestionReference;
     use tokio::time::timeout;
 
     use super::*;
@@ -876,7 +877,7 @@ mod tests {
     #[test]
     fn a_review_reference_and_a_deadline_are_shown_with_the_question() {
         let mut request = request("gate", Some("yes_no"), &[("Y", "[Y] Yes"), ("N", "[N] No")]);
-        request.question.reference = Some(runtime::steps::QuestionReference {
+        request.question.reference = Some(QuestionReference {
             label: "the plan".into(),
             url:   "https://example.com/plan".into(),
             kind:  Some("document".into()),

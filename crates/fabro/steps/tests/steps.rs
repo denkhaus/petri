@@ -3,7 +3,7 @@
 //! `Control::Deliver` — with byte-identical replay on every run.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fabro_steps::command::OUTPUT_CAP;
 use fabro_steps::register;
@@ -12,8 +12,8 @@ use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
 use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
 use runtime::executor::Retention;
 use runtime::frontend::{CompileInputs, NoFiles};
-use runtime::ir::{CancelScopeId, Graph, RunStatus};
-use runtime::steps::{Answer, Question};
+use runtime::ir::{CancelScopeId, Graph, RunStatus, TimeoutPolicy};
+use runtime::steps::{Answer, Question, Steer};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
@@ -378,9 +378,9 @@ async fn a_command_deadline_is_enforced_by_the_sandbox() {
             .expect("c")
             .budget
             .timeout_policy,
-        runtime::ir::TimeoutPolicy::HandlerManaged
+        TimeoutPolicy::HandlerManaged
     );
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let report = run(graph, "fabro-command-deadline").await;
     assert!(
         started.elapsed() < Duration::from_secs(10),
@@ -400,6 +400,54 @@ async fn a_command_deadline_is_enforced_by_the_sandbox() {
         reason.contains("started"),
         "the output tail rides along: {reason}"
     );
+}
+
+/// Every question the run asked.
+struct CountQuestions(Arc<Mutex<Vec<Question>>>);
+
+impl EventObserver for CountQuestions {
+    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+        if let Event::StepProgress { ev, .. } = &record.event
+            && let Some(question) = Question::from_event(ev)
+        {
+            self.0.lock().expect("not poisoned").push(question);
+        }
+    }
+}
+
+/// Steers the first question it sees, then answers it `N` a little later.
+struct SteerThenAnswer {
+    handle: Mutex<Option<RunHandle>>,
+}
+
+impl EventObserver for SteerThenAnswer {
+    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+        let Event::StepProgress { firing, ev } = &record.event else {
+            return;
+        };
+        let Some(question) = Question::from_event(ev) else {
+            return;
+        };
+        let handle = self
+            .handle
+            .lock()
+            .expect("not poisoned")
+            .clone()
+            .expect("wired");
+        let firing = *firing;
+        tokio::spawn(async move {
+            handle
+                .deliver(firing, Steer::new("think harder").to_control())
+                .await;
+            time::sleep(Duration::from_millis(200)).await;
+            handle
+                .deliver(
+                    firing,
+                    Answer::choice("N").for_question(&question.id).to_control(),
+                )
+                .await;
+        });
+    }
 }
 
 /// A human gate's `timeout` is its answer deadline. Unanswered, it fails
@@ -422,25 +470,15 @@ async fn an_unanswered_gate_expires_into_the_retry_outcome() {
             .expect("gate")
             .budget
             .timeout_policy,
-        runtime::ir::TimeoutPolicy::HandlerManaged
+        TimeoutPolicy::HandlerManaged
     );
     let dir = RunDir::new("fabro-human-expiry");
     let rt = runtime(&dir);
     let asked = Arc::new(Mutex::new(Vec::new()));
-    struct Count(Arc<Mutex<Vec<Question>>>);
-    impl EventObserver for Count {
-        fn on_record(&self, record: &EventRecord, _: &EngineState) {
-            if let Event::StepProgress { ev, .. } = &record.event
-                && let Some(question) = Question::from_event(ev)
-            {
-                self.0.lock().expect("not poisoned").push(question);
-            }
-        }
-    }
     let driver = rt
         .driver(graph.clone())
-        .observe(Arc::new(Count(asked.clone())));
-    let started = std::time::Instant::now();
+        .observe(Arc::new(CountQuestions(asked.clone())));
+    let started = Instant::now();
     let report = rt
         .run_verified(graph, |_| Ok::<_, ReplayMismatch>(driver))
         .await
@@ -612,41 +650,6 @@ async fn a_steer_does_not_answer_a_gate() {
     let graph = lower(&dot(GATE));
     let dir = RunDir::new("fabro-human-steer");
     let rt = runtime(&dir);
-    struct SteerThenAnswer {
-        handle: Mutex<Option<RunHandle>>,
-    }
-    impl EventObserver for SteerThenAnswer {
-        fn on_record(&self, record: &EventRecord, _: &EngineState) {
-            let Event::StepProgress { firing, ev } = &record.event else {
-                return;
-            };
-            let Some(question) = Question::from_event(ev) else {
-                return;
-            };
-            let handle = self
-                .handle
-                .lock()
-                .expect("not poisoned")
-                .clone()
-                .expect("wired");
-            let firing = *firing;
-            tokio::spawn(async move {
-                handle
-                    .deliver(
-                        firing,
-                        runtime::steps::Steer::new("think harder").to_control(),
-                    )
-                    .await;
-                time::sleep(Duration::from_millis(200)).await;
-                handle
-                    .deliver(
-                        firing,
-                        Answer::choice("N").for_question(&question.id).to_control(),
-                    )
-                    .await;
-            });
-        }
-    }
     let answerer = Arc::new(SteerThenAnswer {
         handle: Mutex::new(None),
     });

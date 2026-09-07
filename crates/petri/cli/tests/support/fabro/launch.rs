@@ -12,6 +12,7 @@
 //! Nextest.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -199,7 +200,8 @@ impl Case {
                         .create(true)
                         .open(&file)
                         .expect("open the control file");
-                    std::io::Write::write_all(&mut handle, text.as_bytes())
+                    handle
+                        .write_all(text.as_bytes())
                         .expect("append to the control file");
                 }
             })
