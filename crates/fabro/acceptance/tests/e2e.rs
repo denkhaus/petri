@@ -398,8 +398,9 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
     );
 }
 
-/// One `for_each` fork over `PETRI_FORK_PROBE_ITEMS` items (default 100):
-/// the per-child cost of a fan-out, measured by hand at several sizes with
+/// One `for_each` fork over `PETRI_FORK_PROBE_ITEMS` items (default 100)
+/// under `PETRI_FORK_PROBE_MAX_PARALLEL` slots (default 32): the per-child
+/// cost of a fan-out, measured by hand at several sizes with
 /// `/usr/bin/time -l`. Prints the wall time and the record sizes.
 #[tokio::test]
 #[ignore = "a measurement, not a check; run by hand with PETRI_FORK_PROBE_ITEMS"]
@@ -412,12 +413,16 @@ async fn fork_scaling_probe() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
+    let max_parallel: usize = env::var("PETRI_FORK_PROBE_MAX_PARALLEL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
     let text = format!(
         r#"digraph T {{
         start [shape=Mdiamond]
         exit [shape=Msquare]
         plan [shape=parallelogram, output_schema="routing", script="python3 -c 'import json; print(json.dumps({{\"context_updates\": {{\"jobs\": [{{\"name\": \"job-\" + str(i)}} for i in range({items})]}}}}))'"]
-        fan [shape=component, for_each="context.jobs", max_parallel=32]
+        fan [shape=component, for_each="context.jobs", max_parallel={max_parallel}]
         job [prompt="Do the job"]
         join [shape=tripleoctagon]
         start -> plan -> fan -> job -> join -> exit
@@ -441,7 +446,8 @@ async fn fork_scaling_probe() {
     assert_eq!(report.status, RunStatus::Success);
     let coordinator = fs::metadata(dir.join("coordinator.jsonl")).map_or(0, |m| m.len());
     eprintln!(
-        "fork probe: {items} items in {:.1} s ({:.0} ms per child); coordinator.jsonl {} KB",
+        "fork probe: {items} items under {max_parallel} slots in {:.1} s ({:.0} ms per child); \
+         coordinator.jsonl {} KB",
         elapsed.as_secs_f64(),
         elapsed.as_secs_f64() * 1000.0 / items as f64,
         coordinator / 1024

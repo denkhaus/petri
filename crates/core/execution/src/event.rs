@@ -47,13 +47,15 @@ pub enum SandboxBinding {
     Isolated,
 }
 
-/// Bounded attempt concurrency for an invocation's steps: every attempt of
-/// every node in the invocation takes one of `max_parallel` slots from the
-/// gate `gate` before it starts and gives it back when the attempt ends. A
-/// backoff between attempts holds no slot. The gate is shared by every
-/// invocation the same parent execution declares under the same name, so a
-/// fork's branches share one limit while a repeated fork visit or a nested
-/// fork gets its own.
+/// Bounded concurrency for a fork's child invocations: the invocations one
+/// parent execution declares under the gate `gate` share `max_parallel`
+/// slots. A child's engine starts only on a free slot, in declaration order,
+/// keeps the slot while its attempts run and between them, and releases it
+/// when the engine ends or when a retry backoff begins. So at most
+/// `max_parallel` children are live at once, plus any waiting out a backoff.
+/// The gate is shared by every invocation the same parent execution declares
+/// under the same name, so a fork's branches share one limit while a repeated
+/// fork visit or a nested fork gets its own.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptAdmission {
     pub gate:         SmolStr,

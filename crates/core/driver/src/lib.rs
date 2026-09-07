@@ -25,8 +25,8 @@ pub use lifecycle::ExecutionHooks;
 pub use observe::{EventObserver, ObserveError};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,
-    DeliverDisposition, Driver, ExecutionReport, KILLED_BEFORE_RESUME, ResumeError, ResumeInfo,
-    RunConfig, RunGuard, RunHandle, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
+    DeliverDisposition, Driver, ExecutionReport, ExecutionSlot, KILLED_BEFORE_RESUME, ResumeError,
+    ResumeInfo, RunConfig, RunGuard, RunHandle, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
     ScopeLeases,
 };
 pub use view::{BRANCH_ROLE_META, BranchMap, BranchRef, BranchRole, FiringView};

@@ -290,14 +290,21 @@ list fires the template once with the placeholder item
 results, so no model call happens. `for_each` inside a `for_each` branch is
 `fabro.for_each.nested`.
 
-`max_parallel` bounds admission per fork occurrence: a missing, non-integer
-or negative value is 4 (`fabro.max_parallel.normalized`), zero is 1. Every
-branch attempt takes one slot before it starts and releases it when the
-attempt ends, so a branch waiting out a retry backoff holds none. The slots
-are one gate per parent execution and fork visit (`AttemptAdmission` on the
-child invocation, rebuilt from the coordinator log on resume). Branch steps
-report `fabro.parallel.branch.started` and `fabro.parallel.branch.completed`,
-the fan-in `fabro.parallel.completed`, as `StepEvent::Custom`.
+`max_parallel` bounds the fork's live children per fork occurrence: a
+missing, non-integer or negative value is 4 (`fabro.max_parallel.normalized`),
+zero is 1. Every branch child is declared at once, so its call site, its
+durable `InvocationDeclared` record and its place in the invocation count are
+fixed at the fork. The child's engine starts only when the fork has a free
+slot, in declaration order, and the child keeps the slot until its engine
+ends. A branch waiting out a retry backoff holds none, so a queued sibling
+runs during the backoff; the live count exceeds `max_parallel` only by the
+branches between attempts. A branch cancelled while it waits still starts,
+under the bound, and finishes as cancelled. The slots are one gate per parent
+execution and fork visit (`AttemptAdmission` on the child invocation). On
+resume the gate is rebuilt from the coordinator log, and every declared but
+unfinished branch queues again under the same bound. Branch steps report
+`fabro.parallel.branch.started` and `fabro.parallel.branch.completed`, the
+fan-in `fabro.parallel.completed`, as `StepEvent::Custom`.
 
 Every Fabro run has a hard ceiling of 10,000 invocations, root and all
 children counted, finished ones included (`RunPolicy.max_invocations`, set by

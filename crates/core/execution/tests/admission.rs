@@ -1,27 +1,34 @@
-//! Attempt admission across child invocations and the run-wide invocation
+//! Fork admission across child invocations and the run-wide invocation
 //! ceiling.
 //!
 //! A parent that forks work into child invocations names one gate for the
-//! fork and a slot count; every attempt of every child under that gate takes
-//! a slot before it runs and releases it when the attempt ends, so a child
-//! waiting out a retry backoff holds none and a queued sibling runs first.
-//! The ceiling counts every invocation a run ever declared, finished ones
-//! included, cannot be raised above 10,000 or disabled, and survives a
-//! resume.
+//! fork and a slot count. Every child is declared at once, but a child's
+//! driver starts only on a free slot, in declaration order, and keeps the
+//! slot until the driver ends, so the fork never has more live children than
+//! slots. A child waiting out a retry backoff holds none, so a queued
+//! sibling runs first. A child cancelled while it waits still starts, under
+//! the bound, and finishes as cancelled; a resume queues the declared but
+//! unfinished children again. The ceiling counts every invocation a run ever
+//! declared, finished ones included, cannot be raised above 10,000 or
+//! disabled, and survives a resume.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use execution::{
-    AttemptAdmission, CallSite, Coordinator, CoordinatorError, CoordinatorInvocationClient,
-    CoordinatorOptions, GraphDigest, InvocationClient as _, InvocationLimitError,
+    AttemptAdmission, CallSite, Coordinator, CoordinatorError, CoordinatorEvent,
+    CoordinatorInvocationClient, CoordinatorOptions, CoordinatorRecord, ExecutionId,
+    ExecutionObserver, GraphDigest, InvocationClient as _, InvocationId, InvocationLimitError,
     InvocationRequest, InvokeError, MAX_INVOCATIONS, SandboxMode, SecretBindings,
 };
 use ir::{
     Backoff, FailureClass, FailureInfo, GraphBuilder, Outcome, ResultProjection, RetryOn,
     RetryPolicy, RunStatus, ScopeId, Status, StepRef, Value,
 };
+use runtime::engine::{EngineState, EventRecord};
 use runtime::steps::{Step, StepCtx};
 use runtime::{RunOptions, Runtime};
 use serde::Deserialize;
@@ -126,6 +133,129 @@ impl Step for AfterAStep {
 }
 
 #[derive(Deserialize)]
+struct HoldConfig {
+    name:   String,
+    #[serde(default)]
+    marker: Option<PathBuf>,
+}
+
+/// Holds its slot until its marker file is gone (forever without one) or
+/// until it is stopped, and then finishes `Cancelled`. Records
+/// `hold:<name>` at its start and `hold:<name>:end` at its end, and
+/// signals [`AStarted`] when it starts.
+struct HoldStep;
+
+#[async_trait::async_trait]
+impl Step for HoldStep {
+    const NAME: &'static str = "test/hold";
+    type Config = HoldConfig;
+
+    async fn run(&self, config: HoldConfig, mut ctx: StepCtx) -> Outcome {
+        let trace = ctx.capability::<Trace>().expect("trace");
+        trace.record(format!("hold:{}", config.name));
+        if let Some(started) = ctx.capability::<AStarted>() {
+            started.0.notify_one();
+        }
+        let released = async {
+            loop {
+                if config
+                    .marker
+                    .as_ref()
+                    .is_some_and(|marker| !marker.exists())
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let outcome = tokio::select! {
+            () = released => Outcome::success(json!({ "name": config.name })),
+            _ = ctx.control.recv() => Outcome::cancelled(),
+        };
+        trace.record(format!("hold:{}:end", config.name));
+        outcome
+    }
+}
+
+/// The child drivers live at once, seen from the coordinator records: a
+/// child's `ExecutionDeclared` opens one and its `ExecutionFinished` closes
+/// it. Also the order the children were declared and dispatched in.
+#[derive(Default)]
+struct LiveChildren(Mutex<LiveChildrenSeen>);
+
+#[derive(Clone, Default)]
+struct LiveChildrenSeen {
+    executions: BTreeMap<ExecutionId, InvocationId>,
+    live:       usize,
+    peak:       usize,
+    declared:   Vec<InvocationId>,
+    dispatched: Vec<InvocationId>,
+}
+
+impl LiveChildren {
+    fn seen(&self) -> LiveChildrenSeen {
+        self.0.lock().expect("not poisoned").clone()
+    }
+}
+
+impl ExecutionObserver for LiveChildren {
+    fn on_engine_record(&self, _: ExecutionId, _: &EventRecord, _: &EngineState) {}
+
+    fn on_lifecycle(&self, record: &CoordinatorRecord) {
+        let mut seen = self.0.lock().expect("not poisoned");
+        match &record.event {
+            CoordinatorEvent::InvocationDeclared {
+                invocation,
+                call: Some(_),
+                ..
+            } => seen.declared.push(*invocation),
+            CoordinatorEvent::ExecutionDeclared {
+                execution,
+                invocation,
+                ..
+            } if *invocation != InvocationId::ROOT => {
+                seen.dispatched.push(*invocation);
+                seen.executions.insert(*execution, *invocation);
+                seen.live += 1;
+                seen.peak = seen.peak.max(seen.live);
+            }
+            CoordinatorEvent::ExecutionFinished { execution, .. }
+                if seen.executions.contains_key(execution) =>
+            {
+                seen.live -= 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The most `start` labels open at once in `labels`, where `<start>:end`
+/// closes one.
+fn peak_concurrency(labels: &[String], start: &str) -> usize {
+    let end = format!("{start}:end");
+    let (mut open, mut peak) = (0usize, 0usize);
+    for label in labels {
+        if *label == start {
+            open += 1;
+            peak = peak.max(open);
+        } else if *label == end {
+            open -= 1;
+        }
+    }
+    peak
+}
+
+fn slot_of(coordinator: &Coordinator, invocation: InvocationId) -> String {
+    coordinator.store().state().invocations[&invocation]
+        .declaration
+        .call
+        .as_ref()
+        .expect("a child has a call")
+        .slot
+        .to_string()
+}
+
+#[derive(Deserialize)]
 struct InvokeConfig {
     graph:        GraphDigest,
     slot:         String,
@@ -201,6 +331,7 @@ fn runtime(directory: &RunDir, trace: &Trace, started: &AStarted) -> Runtime {
     Runtime::standard()
         .step(TraceStep)
         .step(AfterAStep)
+        .step(HoldStep)
         .step(InvokeStep)
         .capability(trace.clone())
         .capability(started.clone())
@@ -228,6 +359,31 @@ fn traced_child(name: &str, fail_first: bool, hold_ms: u64) -> ir::Graph {
         })
         .with_retry_on(RetryOn::classes(&[FailureClass::new("flaky")]));
     child.build()
+}
+
+/// A child graph of one holding node named `h`.
+fn hold_child(marker: Option<&Path>) -> ir::Graph {
+    let mut child = GraphBuilder::new();
+    child.add_node(
+        "h",
+        ScopeId::new(0),
+        StepRef::new(HoldStep::NAME, json!({ "name": "h", "marker": marker })),
+    );
+    child.build()
+}
+
+/// A parent of `count` branches `b00..`, each starting `child` under
+/// `fork@1` with `max_parallel` slots, at call slots `c00..`.
+fn fork_parent(child: GraphDigest, count: usize, max_parallel: u32) -> ir::Graph {
+    let mut parent = GraphBuilder::new();
+    for index in 0..count {
+        parent.add_node(
+            format!("b{index:02}").as_str(),
+            ScopeId::new(0),
+            invoke(child, &format!("c{index:02}"), Some("fork@1"), max_parallel),
+        );
+    }
+    parent.build()
 }
 
 fn invoke(graph: GraphDigest, slot: &str, gate: Option<&str>, max_parallel: u32) -> StepRef {
@@ -683,6 +839,247 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
     assert_eq!(
         coordinator.store().state().invocations.len(),
         MAX_INVOCATIONS as usize
+    );
+    coordinator.finish().await;
+}
+
+/// Fifty children under four slots: at most four child drivers are live at
+/// once, and they start in declaration order, which is branch order.
+#[tokio::test]
+async fn a_fork_of_fifty_children_keeps_four_live_and_starts_them_in_order() {
+    let directory = RunDir::new("admission-live-bound");
+    let trace = Trace::default();
+    let started = AStarted::default();
+    let runtime = runtime(&directory, &trace, &started);
+    let live = Arc::new(LiveChildren::default());
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator starts")
+    .observe(live.clone());
+    let child = coordinator
+        .register_graph(&traced_child("c", false, 20))
+        .expect("child registers");
+    let parent = coordinator
+        .register_graph(&fork_parent(child, 50, 4))
+        .expect("parent registers");
+    let result = timeout(
+        Duration::from_secs(60),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the fork completes")
+    .expect("the run completes");
+    assert_eq!(result.status, RunStatus::Success);
+    let seen = live.seen();
+    assert_eq!(seen.peak, 4, "four child drivers are live at the most");
+    assert_eq!(seen.live, 0, "every child driver finished");
+    assert_eq!(seen.dispatched.len(), 50);
+    assert_eq!(
+        seen.dispatched, seen.declared,
+        "children start in declaration order"
+    );
+    let slots: Vec<String> = seen
+        .declared
+        .iter()
+        .map(|invocation| slot_of(&coordinator, *invocation))
+        .collect();
+    let expected: Vec<String> = (0..50).map(|index| format!("c{index:02}")).collect();
+    assert_eq!(slots, expected, "declaration order is branch order");
+    assert!(
+        peak_concurrency(&trace.labels(), "c:1") <= 4,
+        "at most four child steps run at once: {:?}",
+        trace.labels()
+    );
+    coordinator.finish().await;
+}
+
+/// Twelve holding children under one slot, cancelled while eleven wait for
+/// a slot: every child finishes as cancelled, each after its own driver ran
+/// once under the bound, and none is left live or queued.
+#[tokio::test]
+async fn cancelling_the_parent_finishes_every_queued_child_as_cancelled() {
+    let directory = RunDir::new("admission-cancel-queued");
+    let trace = Trace::default();
+    let started = AStarted::default();
+    let runtime = runtime(&directory, &trace, &started);
+    let live = Arc::new(LiveChildren::default());
+    let mut coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator starts")
+    .observe(live.clone());
+    let child = coordinator
+        .register_graph(&hold_child(None))
+        .expect("child registers");
+    let parent = coordinator
+        .register_graph(&fork_parent(child, 12, 1))
+        .expect("parent registers");
+    let handle = coordinator.handle();
+    let first_started = started.clone();
+    tokio::spawn(async move {
+        first_started.0.notified().await;
+        handle.cancel_root();
+    });
+    let result = timeout(
+        Duration::from_secs(30),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the cancelled fork settles")
+    .expect("the run completes");
+    assert_eq!(result.status, RunStatus::Cancelled);
+    let state = coordinator.store().state();
+    assert_eq!(state.invocations.len(), 13);
+    for index in 1..=12 {
+        let invocation = &state.invocations[&InvocationId::new(index)];
+        assert!(invocation.cancelled, "child {index} was cancelled");
+        assert_eq!(
+            invocation.result.as_ref().map(|result| result.status),
+            Some(RunStatus::Cancelled),
+            "child {index} finished as cancelled"
+        );
+        assert_eq!(
+            invocation.executions.len(),
+            1,
+            "child {index} ran one execution"
+        );
+    }
+    let seen = live.seen();
+    assert_eq!(
+        seen.dispatched.len(),
+        12,
+        "every queued child got its driver"
+    );
+    assert_eq!(seen.peak, 1, "one child driver is live at the most");
+    assert_eq!(seen.live, 0, "no child driver is left live");
+    assert_eq!(
+        trace
+            .labels()
+            .iter()
+            .filter(|label| *label == "hold:h")
+            .count(),
+        1,
+        "only the admitted child ran its step: {:?}",
+        trace.labels()
+    );
+    coordinator.finish().await;
+}
+
+/// Six holding children under two slots. The run crashes while two are live
+/// and four wait for a slot. The resumed run resumes the two without
+/// declaring them again and dispatches the four under the same bound, in
+/// declaration order.
+#[tokio::test]
+async fn resume_redispatches_queued_children_under_the_bound() {
+    let directory = RunDir::new("admission-resume-queued");
+    let marker = directory.path().join("hold");
+    fs::write(&marker, b"").expect("the marker is written");
+    let trace = Trace::default();
+    let started = AStarted::default();
+    let first_runtime = runtime(&directory, &trace, &started);
+    let live = Arc::new(LiveChildren::default());
+    let mut coordinator = Coordinator::create(
+        first_runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator starts")
+    .observe(live.clone());
+    let child = coordinator
+        .register_graph(&hold_child(Some(&marker)))
+        .expect("child registers");
+    let parent = coordinator
+        .register_graph(&fork_parent(child, 6, 2))
+        .expect("parent registers");
+    {
+        let run = coordinator.run_root(parent, BTreeMap::new());
+        tokio::pin!(run);
+        let two_live = async {
+            loop {
+                let seen = live.seen();
+                let holding = trace
+                    .labels()
+                    .iter()
+                    .filter(|label| *label == "hold:h")
+                    .count();
+                if seen.declared.len() == 6 && seen.dispatched.len() == 2 && holding == 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            result = &mut run => panic!("the run finished before the crash: {result:?}"),
+            waited = timeout(Duration::from_secs(20), two_live) => {
+                waited.expect("two children are live and four wait");
+            }
+        }
+        // The crash: the run future drops here, and its drivers with it.
+    }
+    drop(coordinator);
+    let before = live.seen();
+    let labels_before = trace.labels().len();
+    fs::remove_file(&marker).expect("the marker is removed");
+
+    let resumed_runtime = runtime(&directory, &trace, &started);
+    let resumed_live = Arc::new(LiveChildren::default());
+    let (coordinator, _) = Coordinator::resume(
+        resumed_runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .expect("the coordinator resumes");
+    let mut coordinator = coordinator.observe(resumed_live.clone());
+    let result = timeout(
+        Duration::from_secs(30),
+        coordinator.run_root(parent, BTreeMap::new()),
+    )
+    .await
+    .expect("the resumed fork completes")
+    .expect("the resumed run completes");
+    assert_eq!(result.status, RunStatus::Success);
+    let state = coordinator.store().state();
+    assert_eq!(state.invocations.len(), 7, "no child was declared again");
+    for index in 1..=6 {
+        let invocation = &state.invocations[&InvocationId::new(index)];
+        assert_eq!(
+            invocation.executions.len(),
+            1,
+            "child {index} has one execution"
+        );
+        assert_eq!(
+            invocation.result.as_ref().map(|result| result.status),
+            Some(RunStatus::Success),
+            "child {index} succeeded"
+        );
+    }
+    let after = resumed_live.seen();
+    let queued: Vec<InvocationId> = before
+        .declared
+        .iter()
+        .copied()
+        .filter(|invocation| !before.dispatched.contains(invocation))
+        .collect();
+    assert_eq!(queued.len(), 4);
+    assert_eq!(
+        after.dispatched, queued,
+        "the queued children get their first execution on resume, in order"
+    );
+    assert!(
+        after.peak <= 2,
+        "at most two new drivers live: {}",
+        after.peak
+    );
+    assert_eq!(after.live, 0);
+    assert!(
+        peak_concurrency(&trace.labels()[labels_before..], "hold:h") <= 2,
+        "at most two child steps run at once after the resume: {:?}",
+        &trace.labels()[labels_before..]
     );
     coordinator.finish().await;
 }

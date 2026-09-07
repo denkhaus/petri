@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::mem;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use engine::{
@@ -495,10 +495,6 @@ struct Task {
     workers:  JoinSet<()>,
     deadline: Option<AbortHandle>,
     reason:   Option<CancelReason>,
-    /// The attempt slot this attempt holds, released when the task ends.
-    /// Held, never read: dropping the task drops the permit.
-    #[expect(dead_code, reason = "the field exists to be dropped with the task")]
-    permit:   Option<OwnedSemaphorePermit>,
     /// The attempt's active-work budget, when the driver enforces it.
     budget:   Option<AttemptBudget>,
 }
@@ -538,11 +534,50 @@ struct ScopeAcquire {
     join: AbortHandle,
 }
 
-/// A dispatched attempt that is waiting for one of the execution's attempt
-/// slots.
+/// A dispatched attempt that is waiting for the execution's slot.
 struct GatedStart {
     resolved: ResolvedFiring,
     wait:     AbortHandle,
+}
+
+/// The one admission slot an execution holds while it is live, shared
+/// between the driver and the host that admitted it. The driver gives the
+/// slot back during a retry backoff and takes a fresh one before its next
+/// attempt; the host releases the slot once the execution's end is
+/// recorded, so a sibling waiting for the slot starts only after that.
+#[derive(Clone, Default)]
+pub struct ExecutionSlot(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+
+impl ExecutionSlot {
+    /// A slot the host already took for the execution.
+    pub fn holding(permit: OwnedSemaphorePermit) -> Self {
+        Self(Arc::new(Mutex::new(Some(permit))))
+    }
+
+    /// No slot yet: the driver takes one before its first attempt.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    fn is_held(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Hold `permit`, or release it when the execution already holds one.
+    fn put(&self, permit: OwnedSemaphorePermit) {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.is_none() {
+            *held = Some(permit);
+        }
+    }
+
+    /// Give the slot back.
+    fn release(&self) {
+        drop(self.0.lock().unwrap_or_else(PoisonError::into_inner).take());
+    }
 }
 
 pub struct Driver {
@@ -562,10 +597,15 @@ pub struct Driver {
     next_acquire_id:  u64,
     acquire_failures: HashMap<ScopeId, String>,
     pending_starts:   HashMap<ScopeId, Vec<ResolvedFiring>>,
-    /// Bounded attempt concurrency for this execution: every attempt takes a
-    /// slot before it starts and holds it until it ends, so a backoff between
-    /// attempts holds none. `None` leaves attempts unbounded.
+    /// Bounded execution concurrency: the execution holds one of these
+    /// slots (`slot`) while it is live, takes one before an attempt starts
+    /// when it holds none, and gives its slot back during a retry backoff
+    /// so a sibling execution runs meanwhile. `None` leaves the execution
+    /// unbounded.
     attempt_slots:    Option<Arc<Semaphore>>,
+    /// The slot this execution holds, shared with the host that admitted
+    /// it; the host releases it once the execution's end is recorded.
+    slot:             ExecutionSlot,
     /// Attempts waiting for a slot, with the task that awaits it.
     gated:            HashMap<FiringId, GatedStart>,
     /// Deliveries that arrived before execution admission resolved. Unlike
@@ -778,6 +818,7 @@ impl Driver {
             acquire_failures: HashMap::new(),
             pending_starts: HashMap::new(),
             attempt_slots: None,
+            slot: ExecutionSlot::empty(),
             gated: HashMap::new(),
             early_deliveries: HashMap::new(),
             pending_forwards: HashMap::new(),
@@ -813,14 +854,17 @@ impl Driver {
         self
     }
 
-    /// Bound this execution's attempt concurrency: every attempt of every
-    /// node takes one of `slots` before it is dispatched and releases it when
-    /// the attempt ends. A retry backoff holds no slot, so a queued attempt
-    /// runs while another waits out its backoff. Shared slots bound several
-    /// executions together.
+    /// Bound this execution's concurrency with its siblings: the execution
+    /// holds one of `slots` in `slot` while it is live. When `slot` already
+    /// holds one, the first attempt starts without waiting; otherwise an
+    /// attempt takes one before it starts. A retry backoff, with nothing
+    /// else running in the execution, gives the slot back, so a sibling
+    /// waiting for one runs meanwhile. The caller keeps its clone of `slot`
+    /// and releases it once the execution's end is recorded.
     #[must_use]
-    pub fn with_attempt_slots(mut self, slots: Arc<Semaphore>) -> Self {
+    pub fn with_attempt_slots(mut self, slots: Arc<Semaphore>, slot: ExecutionSlot) -> Self {
         self.attempt_slots = Some(slots);
+        self.slot = slot;
         self
     }
 
@@ -1727,6 +1771,11 @@ impl Driver {
                 next_attempt,
                 base_delay,
             } => {
+                // A backoff holds no slot while nothing else in the execution
+                // runs: a sibling waiting for one runs meanwhile.
+                if self.tasks.is_empty() {
+                    self.slot.release();
+                }
                 let delay = jittered(base_delay, firing, next_attempt);
                 tracing::debug!(
                     firing = firing.raw(),
@@ -1784,6 +1833,7 @@ impl Driver {
             return;
         }
         if let Some(slots) = self.attempt_slots.clone()
+            && !self.slot.is_held()
             && !self.gated.contains_key(&firing)
         {
             // Wait for a slot off the loop; the start continues from
@@ -1808,15 +1858,12 @@ impl Driver {
             });
             return;
         }
-        self.dispatch_admitted(resolved, None);
+        self.dispatch_admitted(resolved);
     }
 
-    /// An attempt has its slot, or needs none: acknowledge and start it.
-    fn dispatch_admitted(
-        &mut self,
-        resolved: &ResolvedFiring,
-        permit: Option<OwnedSemaphorePermit>,
-    ) {
+    /// The execution holds its slot, or needs none: acknowledge the attempt
+    /// and start it.
+    fn dispatch_admitted(&mut self, resolved: &ResolvedFiring) {
         let (firing, attempt) = (resolved.id(), resolved.attempt());
         let live = self.engine.firing(firing);
         // A started firing is already acknowledged in the loaded log; a second
@@ -1836,11 +1883,13 @@ impl Driver {
             self.fail_now(firing, attempt, &message, steps::SECRET_UNAVAILABLE_CLASS);
             return;
         }
-        self.start(resolved, permit);
+        self.start(resolved);
         self.flush_early_deliveries(firing);
         self.flush_pending_forwards(firing);
     }
 
+    /// The execution has its slot: start the attempt that waited for it and
+    /// every other attempt waiting, since one slot admits the execution.
     fn on_slot_acquired(
         &mut self,
         firing: FiringId,
@@ -1848,17 +1897,22 @@ impl Driver {
         permit: OwnedSemaphorePermit,
     ) {
         let Some(gated) = self.gated.remove(&firing) else {
+            drop(permit);
             return;
         };
+        self.slot.put(permit);
         let current = self
             .engine
             .firing(firing)
             .is_some_and(|live| live.attempt == attempt && !live.cancelling);
-        if !current || gated.resolved.attempt() != attempt {
-            drop(permit);
-            return;
+        if current && gated.resolved.attempt() == attempt {
+            self.dispatch_admitted(&gated.resolved);
         }
-        self.dispatch_admitted(&gated.resolved, Some(permit));
+        let others: Vec<GatedStart> = self.gated.drain().map(|(_, other)| other).collect();
+        for other in others {
+            other.wait.abort();
+            self.dispatch_admitted(&other.resolved);
+        }
     }
 
     /// Settle an attempt that a stop reached while it waited for a slot: the
@@ -2171,7 +2225,7 @@ impl Driver {
 
     // ── Steps ──────────────────────────────────────────────────────────────
 
-    fn start(&mut self, resolved: &ResolvedFiring, permit: Option<OwnedSemaphorePermit>) {
+    fn start(&mut self, resolved: &ResolvedFiring) {
         let firing = resolved.id();
         let attempt = resolved.attempt();
         let scope = resolved.scope();
@@ -2352,7 +2406,6 @@ impl Driver {
             deadline: None,
             reason: None,
             budget,
-            permit,
         });
         self.arm_budget(firing);
     }
@@ -3120,7 +3173,6 @@ mod teardown_tests {
             deadline: None,
             reason: None,
             budget: None,
-            permit: None,
         });
         let mut finishing = Box::pin(driver.finish(
             firing,

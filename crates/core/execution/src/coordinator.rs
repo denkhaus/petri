@@ -1,11 +1,14 @@
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
-use driver::{EventObserver as _, SandboxAssignment, ScopeLease, ScopeLeaseAllocator, ScopeLeases};
+use driver::{
+    EventObserver as _, ExecutionSlot, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
+    ScopeLeases,
+};
 use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
 use executor_sandbox::{CONTAINER_KIND, RoutingExecutor};
 use ir::{
@@ -14,8 +17,8 @@ use ir::{
 };
 use runtime::RunRuntime;
 use smol_str::SmolStr;
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
-use tokio::task::{JoinError, JoinSet, spawn_blocking};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::task::{AbortHandle, JoinError, JoinSet, spawn_blocking};
 
 use crate::client::StartRequest;
 use crate::host::EVENTS_FILE;
@@ -152,6 +155,9 @@ struct PreparedExecution {
     driver:            driver::Driver,
     pipeline:          Arc<MiddlewarePipeline>,
     cancel_before_run: bool,
+    /// The fork slot a gated child holds while it is live, released once
+    /// its `ExecutionFinished` is recorded.
+    slot:              Option<ExecutionSlot>,
 }
 
 /// A driver has stopped; its invocation can finish after its descendants
@@ -162,6 +168,7 @@ struct CompletedExecution {
     graph:            Arc<Graph>,
     report:           driver::ExecutionReport,
     middleware_state: MiddlewareState,
+    slot:             Option<ExecutionSlot>,
 }
 
 type ExecutionLeases = Arc<Mutex<BTreeMap<ScopeId, crate::SandboxLeaseId>>>;
@@ -312,6 +319,64 @@ impl CoordinatorHandle {
     }
 }
 
+/// A fork gate's identity: the parent execution and the gate name its
+/// children were declared under.
+type GateKey = (ExecutionId, SmolStr);
+
+/// One fork's admission: the slots its children share, and the declared
+/// children waiting for a slot before their driver starts, in declaration
+/// order. A child holds its slot from dispatch to the end of its driver,
+/// except across a retry backoff, so a fork never has more live children
+/// than slots, plus the children waiting out a backoff.
+struct ForkGate {
+    slots:  Arc<Semaphore>,
+    queued: VecDeque<InvocationId>,
+    /// The task waiting for the next free slot while `queued` is not empty.
+    waiter: Option<AbortHandle>,
+}
+
+impl ForkGate {
+    fn new(max_parallel: u32) -> Self {
+        let limit = usize::try_from(max_parallel.max(1)).unwrap_or(usize::MAX);
+        Self {
+            slots:  Arc::new(Semaphore::new(limit)),
+            queued: VecDeque::new(),
+            waiter: None,
+        }
+    }
+
+    /// Wait for the next free slot while children are queued; at most one
+    /// wait at a time. The slot comes back on the coordinator's admission
+    /// channel, for the child at the head of the queue.
+    fn wait_for_slot(&mut self, key: GateKey, admit: mpsc::UnboundedSender<AdmittedSlot>) {
+        if self.waiter.is_some() || self.queued.is_empty() {
+            return;
+        }
+        let slots = self.slots.clone();
+        let waiter = tokio::spawn(async move {
+            let Ok(permit) = slots.acquire_owned().await else {
+                return;
+            };
+            let _ = admit.send(AdmittedSlot { gate: key, permit });
+        });
+        self.waiter = Some(waiter.abort_handle());
+    }
+}
+
+impl Drop for ForkGate {
+    fn drop(&mut self) {
+        if let Some(waiter) = &self.waiter {
+            waiter.abort();
+        }
+    }
+}
+
+/// A free slot of one fork gate, taken for the next queued child.
+struct AdmittedSlot {
+    gate:   GateKey,
+    permit: OwnedSemaphorePermit,
+}
+
 /// Owns one run's lifecycle log, engines, resource boundary, and observers.
 pub struct Coordinator {
     store:            CoordinatorStore,
@@ -324,6 +389,8 @@ pub struct Coordinator {
     cancel_rx:        mpsc::UnboundedReceiver<CancelRequest>,
     control_tx:       mpsc::UnboundedSender<ControlRequest>,
     control_rx:       mpsc::UnboundedReceiver<ControlRequest>,
+    admit_tx:         mpsc::UnboundedSender<AdmittedSlot>,
+    admit_rx:         mpsc::UnboundedReceiver<AdmittedSlot>,
     statuses:         BTreeMap<InvocationId, watch::Sender<InvocationStatus>>,
     active:           BTreeSet<InvocationId>,
     active_handles:   BTreeMap<ExecutionId, (InvocationId, driver::RunHandle)>,
@@ -333,10 +400,11 @@ pub struct Coordinator {
     /// as its ledger.
     resources:        Arc<Mutex<ResourceStore>>,
     execution_leases: BTreeMap<ExecutionId, ExecutionLeases>,
-    /// Attempt gates by parent execution and gate name: the slots every
-    /// child invocation declared under that name shares. Rebuilt on demand,
-    /// so a resume recovers the accounting from the attempts it redispatches.
-    gates:            BTreeMap<(ExecutionId, SmolStr), Arc<Semaphore>>,
+    /// Fork gates by parent execution and gate name: the slots every child
+    /// invocation declared under that name shares, and the children queued
+    /// for one. Rebuilt on demand, so a resume recovers the accounting from
+    /// the children it redispatches.
+    gates:            BTreeMap<GateKey, ForkGate>,
     #[cfg(test)]
     release_gate:     Option<Arc<tests::ReleaseGate>>,
 }
@@ -403,6 +471,7 @@ impl Coordinator {
         let (start_tx, start_rx) = mpsc::channel(128);
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (admit_tx, admit_rx) = mpsc::unbounded_channel();
         // The records are the executor's ledger from here on: every
         // container scope it allocates is written here before it exists.
         let resources = Arc::new(Mutex::new(resources));
@@ -418,6 +487,8 @@ impl Coordinator {
             cancel_rx,
             control_tx,
             control_rx,
+            admit_tx,
+            admit_rx,
             statuses: BTreeMap::new(),
             active: BTreeSet::new(),
             active_handles: BTreeMap::new(),
@@ -531,6 +602,7 @@ impl Coordinator {
                 &declaration.start,
                 declaration.middleware_state,
                 &registered,
+                None,
             )?;
             let report = driver.run().await;
             Self::check_report(execution, &report)?;
@@ -698,10 +770,15 @@ impl Coordinator {
                     let done = result.expect("the execution set is not empty")?;
                     self.active_handles.remove(&done.execution);
                     self.execution_leases.remove(&done.execution);
-                    self.gates.retain(|(parent, _), _| *parent != done.execution);
                     Self::check_report(done.execution, &done.report)?;
                     self.settle_descendants(done.invocation, running).await?;
+                    self.drop_idle_gates();
                     completed.insert(done.invocation, done);
+                }
+                admitted = self.admit_rx.recv() => {
+                    if let Some(admitted) = admitted {
+                        self.dispatch_admitted(admitted, running)?;
+                    }
                 }
                 result = releasing.join_next(), if !releasing.is_empty() => {
                     let invocation = result.expect("the release set is not empty")?;
@@ -775,6 +852,10 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Start an unfinished invocation that is not already live. A fork's
+    /// child (one declared under a gate) is queued for a slot instead, so the
+    /// fork has at most `max_parallel` live children; its declaration is
+    /// durable already, and only its driver waits.
     fn start_invocation(
         &mut self,
         invocation: InvocationId,
@@ -784,6 +865,47 @@ impl Coordinator {
         if state.result.is_some() || self.active.contains(&invocation) {
             return Ok(());
         }
+        if let Some((key, max_parallel)) = self.fork_admission(invocation) {
+            self.active.insert(invocation);
+            let gate = self
+                .gates
+                .entry(key.clone())
+                .or_insert_with(|| ForkGate::new(max_parallel));
+            gate.queued.push_back(invocation);
+            gate.wait_for_slot(key, self.admit_tx.clone());
+            return Ok(());
+        }
+        self.dispatch_invocation(invocation, None, running)
+    }
+
+    /// A fork gate's waiter took a slot: the child at the head of the queue
+    /// starts on it, and the gate waits again for the next one.
+    fn dispatch_admitted(
+        &mut self,
+        admitted: AdmittedSlot,
+        running: &mut JoinSet<CompletedExecution>,
+    ) -> Result<(), CoordinatorError> {
+        let AdmittedSlot { gate: key, permit } = admitted;
+        let Some(gate) = self.gates.get_mut(&key) else {
+            return Ok(());
+        };
+        gate.waiter = None;
+        let Some(invocation) = gate.queued.pop_front() else {
+            return Ok(());
+        };
+        gate.wait_for_slot(key, self.admit_tx.clone());
+        self.dispatch_invocation(invocation, Some(permit), running)
+    }
+
+    /// Declare the invocation's first execution when it has none, then run
+    /// its driver. `slot` is the fork slot a gated child was admitted on.
+    fn dispatch_invocation(
+        &mut self,
+        invocation: InvocationId,
+        slot: Option<OwnedSemaphorePermit>,
+        running: &mut JoinSet<CompletedExecution>,
+    ) -> Result<(), CoordinatorError> {
+        let state = &self.store.state().invocations[&invocation];
         if state.executions.is_empty() {
             self.declare_first_execution(invocation)?;
         }
@@ -806,12 +928,14 @@ impl Coordinator {
             driver,
             pipeline,
             cancel_before_run,
+            slot,
         } = self.prepare_execution(
             invocation,
             execution,
             &declaration.start,
             declaration.middleware_state,
             &graph,
+            slot,
         )?;
         let handle = driver.handle();
         self.active.insert(invocation);
@@ -828,6 +952,7 @@ impl Coordinator {
                 graph,
                 report,
                 middleware_state: pipeline.checkpoint(),
+                slot,
             }
         });
         Ok(())
@@ -845,6 +970,7 @@ impl Coordinator {
             graph,
             report,
             middleware_state,
+            slot,
         } = done;
         let exit = report.exit.clone();
         if let Some(recorded) = &self.store.state().executions[&execution].exit {
@@ -857,6 +983,10 @@ impl Coordinator {
                 exit: exit.clone(),
             })?;
         }
+        // The fork slot goes back only now, after the end is recorded, so the
+        // next queued child's `ExecutionDeclared` follows this
+        // `ExecutionFinished`.
+        drop(slot);
         match exit {
             EngineExit::Restart { target, .. } => {
                 self.active.remove(&invocation);
@@ -966,6 +1096,7 @@ impl Coordinator {
         start: &EngineStart,
         middleware_state: MiddlewareState,
         graph: &Graph,
+        slot: Option<OwnedSemaphorePermit>,
     ) -> Result<PreparedExecution, CoordinatorError> {
         let mut cancel_before_run = self.store.state().invocations[&invocation].cancelled;
         let directory = self.store.create_execution_dir(invocation, execution)?;
@@ -1063,8 +1194,11 @@ impl Coordinator {
             .observe(fold)
             .with_decision_resolver(pipeline.clone())
             .with_capability(client);
+        let mut execution_slot = None;
         if let Some(slots) = self.attempt_slots(invocation) {
-            driver = driver.with_attempt_slots(slots);
+            let held = slot.map_or_else(ExecutionSlot::empty, ExecutionSlot::holding);
+            driver = driver.with_attempt_slots(slots, held.clone());
+            execution_slot = Some(held);
         }
         for observer in &self.observers {
             driver = driver.observe(Arc::new(crate::AddressedObserver::new(
@@ -1076,6 +1210,7 @@ impl Coordinator {
             driver,
             pipeline,
             cancel_before_run,
+            slot: execution_slot,
         })
     }
 
@@ -1481,20 +1616,43 @@ impl Coordinator {
         Ok(())
     }
 
-    /// The attempt slots an invocation's driver takes, when its declaration
-    /// bounds attempt concurrency: one semaphore per parent execution and
-    /// gate name, created with the first child that names it.
-    fn attempt_slots(&mut self, invocation: InvocationId) -> Option<Arc<Semaphore>> {
+    /// The fork gate an invocation was declared under, and its slot count,
+    /// when its declaration bounds concurrency.
+    fn fork_admission(&self, invocation: InvocationId) -> Option<(GateKey, u32)> {
         let declaration = &self.store.state().invocations[&invocation].declaration;
         let admission = declaration.admission.as_ref()?;
         let parent = declaration.call.as_ref()?.parent;
-        let limit = usize::try_from(admission.max_parallel.max(1)).unwrap_or(usize::MAX);
+        Some(((parent, admission.gate.clone()), admission.max_parallel))
+    }
+
+    /// The slots an invocation's driver shares with its fork's other
+    /// children: one semaphore per parent execution and gate name, created
+    /// with the first child that names it.
+    fn attempt_slots(&mut self, invocation: InvocationId) -> Option<Arc<Semaphore>> {
+        let (key, max_parallel) = self.fork_admission(invocation)?;
         Some(
             self.gates
-                .entry((parent, admission.gate.clone()))
-                .or_insert_with(|| Arc::new(Semaphore::new(limit)))
+                .entry(key)
+                .or_insert_with(|| ForkGate::new(max_parallel))
+                .slots
                 .clone(),
         )
+    }
+
+    /// Drop every fork gate whose parent execution is no longer live and
+    /// that has no child queued or live. A gate still in use keeps its
+    /// slots, so the bound holds for children that settle after their
+    /// parent, and a child that restarts rejoins the same gate.
+    fn drop_idle_gates(&mut self) {
+        let in_use: BTreeSet<GateKey> = self
+            .active
+            .iter()
+            .filter_map(|invocation| self.fork_admission(*invocation).map(|(key, _)| key))
+            .collect();
+        let live = &self.active_handles;
+        self.gates.retain(|key, gate| {
+            live.contains_key(&key.0) || !gate.queued.is_empty() || in_use.contains(key)
+        });
     }
 
     fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, CoordinatorError> {
