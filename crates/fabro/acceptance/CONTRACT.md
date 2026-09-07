@@ -337,6 +337,44 @@ repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The pending
 library batch is listed in `README.md` under "Library and repository gates".
 
+## Readiness gate checklist
+
+The black box plan's "Verification and readiness gate", item by item, with
+where the evidence for each comes from. Status as of task 19 (2026-09-07):
+"met" has a passing check on the integration branch; "partial" names what is
+missing and which task closes it. The first hosted CI run is still to come;
+its required results are listed at the end.
+
+| Item | Evidence source | Status |
+|---|---|---|
+| Repeatable focused task on the same required set as CI | `mise run test:fabro:blackbox` runs `scripts/test-fabro-blackbox.sh`: every `petri-cli` `fabro_*blackbox` binary plus `standalone` and `fabro_cli`, same build and features as `mise run test`, evidence and coverage report per run | met |
+| Extended variations and repeated process-isolation runs in `check:nightly` | `test:fabro:blackbox:repeat` (three runs, default, one, and two test threads, no fail-fast), `test:long`, `test:fabro:differential`, `check:msrv`, `test:release` | met |
+| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` | met (rule and check); the pending batch is not pinned yet |
+| Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox.rs` (task 12), `fallback_events.rs` | met (task 12) |
+| Required CI fetches and verifies pinned bundles and twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`: bundle fetch step with the deploy-key inputs; twins are pinned dev-dependencies (a build is the fetch); `PETRI_REQUIRE_CORPUS`, `PETRI_REQUIRE_FABRO_CORPUS`, `PETRI_REQUIRE_FABRO_BUNDLES`, `PETRI_REQUIRE_DOCKER` (Linux), `PETRI_REQUIRE_FABRO_BINARY` (compatibility job); `tests/support/fabro/require.rs` | partial: wired and verified locally; the two deploy keys do not exist, so the first hosted run fails at the bundle step until the owner creates them |
+| Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux | met for the scenarios that exist; task 17 fills the remaining bundle scenarios |
+| The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)` job: cached pinned build, `test:fabro:differential`; Nightly reruns it | partial: the job and the entry point exist; the matrix target `crates/petri/cli/tests/fabro_differential.rs` is task 18's, and the job fails until it lands |
+| A machine-readable record per scenario with pins, launch, matched services, raw and normalized observations, final context, artifacts, output, assertions, decisions, cleanup, library links | `tests/support/fabro/evidence.rs` (`Recorder`), proven by `fabro_evidence_blackbox.rs` | met for the writer; partial for coverage: only the smoke scenario records today; task 17 wires `Recorder` into every required scenario and task 18 fills `compatibility.differential` |
+| Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met (pending the first hosted run) |
+| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, strict in CI; `the_coverage_report_counts_only_passed_cells`, `an_empty_evidence_run_is_not_a_passing_gate` | met; the manifest it reads (`crates/fabro/acceptance/scenarios/manifest.json`, or `PETRI_SCENARIO_MANIFEST`) is task 17's |
+| Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | partial: two bundles are `required-blocked` (fix-ci, implement-issue) pending task 17's stand-ins |
+| Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the coverage report plus each record's `services[].unmatched_requests` and interview receipt | partial until task 17's manifest lists every cell |
+| Final context, files, side effects meet independent expectations | each scenario's assertions, recorded per record | met per scenario |
+| No unresolved result, routing, or side-effect difference | the differential decisions (task 18) and the "Tracked departures" section above (both retired) | partial: task 18 |
+| Every used feature and temporary form has a disposition | the feature matrix above | met |
+| Inspection and replay trustworthy; cancellation and timeout leave no leak | `inspect_cli.rs`, `inspect.rs`, the terminal and milestone cancellation cases, `assert_no_leaked_processes`, the "No containers left behind" CI step, each record's `cleanup` | met |
+| Additional cutover requirements (ACP, Daytona, crash resume) gated separately | out of the initial scope by decision; not claimed | not claimed |
+
+What the first hosted run must show, in order: the bundle step passes on
+every job once the two deploy keys exist (until then it fails naming them);
+the compatibility job restores or builds the pinned `fabro` binary and the
+"Build the pinned fabro binary" step reports its time; `test:fabro:differential`
+finds `fabro_differential.rs` (task 18) and passes; every `check` job writes
+`coverage.md` to the summary with zero skipped, missing, and failed required
+cells; the `fabro-evidence-*` artifacts exist; `check (ubuntu-24.04)` stays
+inside its 90-minute budget with the added steps (locally the bundle fetch is
+about one second and the pin check under one second).
+
 ## Where things are
 
 | Artefact | Path |

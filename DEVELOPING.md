@@ -39,6 +39,18 @@ The `sandbox-driver-read` GitHub environment must contain these secrets:
 - `SANDBOX_DRIVER_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/sandbox-driver`.
 - `PEBBLE_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/pebble`.
 - `LITHOS_LLM_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/lithos-llm`.
+- `CODE_REVIEW_DEPLOY_KEY`: read-only deploy key on `lithoscomputer/code-review`,
+  a Fabro black box bundle source.
+- `FACTORY_DEPLOY_KEY`: read-only deploy key on `veniceai/factory`, the
+  `fix-ci` bundle source.
+
+The last two do not exist yet. Owner action: create one read-only deploy key
+pair per repository (`ssh-keygen -t ed25519 -N '' -f code-review` and the
+same for `factory`), add each public key as a read-only deploy key on its
+repository, and add each private key as the named secret in the
+`sandbox-driver-read` environment. Until then the "Fetch and verify the Fabro
+bundles" step fails with a message naming the key; it never skips a bundle.
+The twins (`lithoscomputer/twins`) are public and need no key.
 
 Use a different key pair for each repository. The action selects each key with
 an SSH host alias and checks GitHub's pinned host key. Each workflow removes
@@ -60,6 +72,10 @@ bounded output capture, and the Pebble environment contract on Host and Docker.
 | `mise run test` | Run the routine suite with Nextest, then run doctests |
 | `mise run check:msrv` | Check all targets with Rust 1.89 |
 | `mise run check` | Run the complete routine verification gate |
+| `mise run check:pins` | Check that the manifests, `CONTRACT.md`, and the latest evidence records cite the same revisions |
+| `mise run test:fabro:blackbox` | Run the required Fabro black box scenarios and write their evidence records and coverage report |
+| `mise run test:fabro:blackbox:repeat` | The same set three times, each in fresh processes under a different schedule |
+| `mise run test:fabro:differential` | Compare the shipped binary with the pinned `fabro` binary (built from the corpus on first use, about three minutes) |
 | `mise run check:nightly` | Run the extended verification gate |
 | `mise run release <target> <version>` | Build a native release archive |
 
@@ -77,6 +93,16 @@ PETRI_LOG=debug mise run dev -- run workflow.yml
 `PETRI_LOG` takes any `tracing_subscriber` filter directive. Diagnostics never
 mix with command output on stdout. Tracing fields carry only structural data;
 secrets, step output, and environment values are never captured.
+
+## Library and repository gates
+
+Pebble, `lithos-llm`, and any MCP client library are pinned by revision. A
+change to one of them runs that repository's required checks first; only then
+does Petri move the pin, update the "Pinned revisions" table in
+`crates/fabro/acceptance/CONTRACT.md`, and rerun the affected black box
+scenarios. `mise run check:pins` fails while the citations disagree. A library
+test pass never replaces a required Petri scenario. The pending library batch
+is listed in `README.md` under "Library and repository gates".
 
 ## Rust policy
 
@@ -169,9 +195,32 @@ Each package builds its same-named plugin executable.
 Nextest is the normal test runner. `mise run test` also uses Cargo to run
 doctests, which Nextest does not run.
 
-CI sets `PETRI_REQUIRE_DOCKER=1` on Linux and `PETRI_REQUIRE_CORPUS=1` on all
-runners. These variables turn an unexpected skip into a failure. Do not set
-them for ordinary local work unless both resources are available.
+The Fabro side has three more fetched assets. `scripts/corpus-fetch-fabro.sh`
+fetches the Fabro corpus at the pin in `crates/fabro/corpus-pin.txt`.
+`scripts/corpus-fetch-fabro-bundles.sh` materializes the bundle set in
+`crates/fabro/acceptance/bundles.lock.json` and verifies every digest; the two
+private sources need SSH read access, or `FABRO_BUNDLE_SOURCE_<OWNER>_<REPO>`
+pointing at a local checkout (for example
+`FABRO_BUNDLE_SOURCE_LITHOSCOMPUTER_CODE_REVIEW=../code-review`).
+`scripts/fabro-binary.sh` builds the pinned `fabro` binary from the fetched
+corpus into `crates/fabro/corpus/fabro-target/` and checks it reports the pin;
+a `fabro` on `PATH` is never used.
+
+CI sets `PETRI_REQUIRE_DOCKER=1` on Linux and `PETRI_REQUIRE_CORPUS=1`,
+`PETRI_REQUIRE_FABRO_CORPUS=1`, and `PETRI_REQUIRE_FABRO_BUNDLES=1` on all
+runners; the compatibility job also sets `PETRI_REQUIRE_FABRO_BINARY=1`. These
+variables turn an unexpected skip into a failure. Do not set them for ordinary
+local work unless the resources are available. Without them an absent asset
+prints a `skipping:` notice, and the coverage report shows the scenario as
+skipped, never as passed.
+
+Every black box scenario writes an evidence record into `PETRI_EVIDENCE_DIR`
+(`mise run test:fabro:blackbox` picks a directory under
+`target/fabro-evidence/` and links `latest` to it). Read
+`target/fabro-evidence/latest/coverage.md` after a run; a failed scenario's
+process output, inspect document, twin logs, and case directory are under
+`bundles/<record id>/`. The record format is documented in
+`crates/petri/cli/tests/support/fabro/evidence.rs`.
 
 The corpus contains third-party repositories and is not committed. The corpus
 run battery does not receive a GitHub token, so workflows from the corpus cannot
@@ -185,8 +234,20 @@ whitespace, the full test suite, and a release build. Linux also runs the
 Docker-backed acceptance tests and checks that Petri leaves no containers
 behind.
 
-The scheduled Nightly workflow also checks the Rust 1.89 compiler floor and
-runs the full test suite in release mode. You can start it manually from GitHub
+The `check` jobs also fetch and verify the Fabro bundle set, write the Fabro
+coverage report into the job summary, and keep the evidence as artifacts
+(`fabro-evidence-<runner>` on success with the records and the report;
+`fabro-evidence-<runner>-failed` on failure with every bundle). A second job,
+`fabro compatibility (ubuntu-24.04)`, builds the pinned `fabro` binary (cached
+by pin and toolchain) and runs the comparison matrix. Both `check (ubuntu-24.04)`,
+`check (macos-15)`, and `fabro compatibility (ubuntu-24.04)` are the required
+checks for `main`; mark them required in the branch protection rule. Run
+`mise run check:actions` (zizmor) after any workflow change.
+
+The scheduled Nightly workflow also checks the Rust 1.89 compiler floor, runs
+the long tests, repeats the black box set three times under different
+schedules, reruns the comparison matrix (required on Linux x86_64, best effort
+on the other runners), and runs the full test suite in release mode. You can start it manually from GitHub
 Actions. Nightly includes Linux arm64 coverage. Keep arm64 in Nightly until its
 Docker and corpus runs are reliable enough for the routine gate.
 
