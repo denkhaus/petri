@@ -132,7 +132,8 @@
     "context": {
       "exact": {
         "human.gate.freeform.answer": "none",
-        "response.summarize": "Summary."
+        "response.summarize": "Summary.",
+        "human.gate.label": "none"
       },
       "absent": [],
       "extra_allowed": [],

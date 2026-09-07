@@ -56,7 +56,7 @@
     },
     "context": {
       "exact": {
-        "human.gate.yes_no.answer": "Y"
+        "human.gate.yes_no.answer": "yes"
       },
       "absent": [
         "human.gate.confirmation.answer",

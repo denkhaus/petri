@@ -73,8 +73,8 @@
     },
     "context": {
       "exact": {
-        "human.gate.yes_no.answer": "Y",
-        "human.gate.confirmation.answer": "Y"
+        "human.gate.yes_no.answer": "yes",
+        "human.gate.confirmation.answer": "yes"
       },
       "absent": [
         "human.gate.multiple_choice.answer",

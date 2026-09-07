@@ -96,7 +96,7 @@
     },
     "context": {
       "exact": {
-        "human.gate.again.answer": "N",
+        "human.gate.again.answer": "no",
         "human.gate.selected": "N",
         "parallel.branch_count": 2
       },

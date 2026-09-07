@@ -133,10 +133,11 @@
     },
     "context": {
       "exact": {
-        "human.gate.pre.answer": "Y",
+        "human.gate.pre.answer": "yes",
         "human.gate.freeform.answer": "from the child",
-        "human.gate.yes_no.answer": "Y",
-        "response.summarize": "Child summary."
+        "human.gate.yes_no.answer": "yes",
+        "response.summarize": "Child summary.",
+        "human.gate.label": "from the child"
       },
       "absent": [],
       "extra_allowed": [],

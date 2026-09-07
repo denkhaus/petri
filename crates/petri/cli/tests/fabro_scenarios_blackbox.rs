@@ -50,6 +50,49 @@ cell!(
     openrouter
 );
 
+cell!(
+    code_review_empty_diff,
+    "code-review/empty-diff",
+    host,
+    openrouter
+);
+cell!(
+    code_review_no_surviving_findings,
+    "code-review/no-surviving-findings",
+    host,
+    openrouter
+);
+cell!(
+    code_review_invalid_output_repaired,
+    "code-review/invalid-output-repaired",
+    host,
+    openrouter
+);
+cell!(
+    code_review_repair_exhausted,
+    "code-review/repair-exhausted",
+    host,
+    openrouter
+);
+cell!(
+    code_review_one_failed_branch,
+    "code-review/one-failed-branch",
+    host,
+    openrouter
+);
+cell!(
+    code_review_reverse_branch_completion,
+    "code-review/reverse-branch-completion",
+    host,
+    openrouter
+);
+cell!(
+    code_review_multi_level_fan_out,
+    "code-review/multi-level-fan-out",
+    host,
+    openrouter
+);
+
 // ── Interview gates ─────────────────────────────────────────────────────────
 
 cell!(
