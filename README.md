@@ -127,7 +127,9 @@ crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-a
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
-crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation
+crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation, occurrence across a loop, nested invocation paths, the re-ask, expiry
+crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering
+crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
@@ -929,16 +931,42 @@ An interview script:
 for the root, `/<slot>` per nested call), `occurrence` (which distinct question
 of that node, 1-based), `ask` (which time the same question was asked, after a
 rejected answer), `kind`, `text`, `text_contains`, `options` (the offered keys
-in order), `default`, `freeform`, `sensitive`. Actions: `choice` (`value`),
-`choices` (`values`, for `multi_select`), `text` (`value`), `negative` (the
-`N`/`no` option), `invalid` (`value`, sent as a choice the step must reject),
-`cancel`, `withhold` (no reply until the question is cancelled). `delay_ms`
-waits before acting; `required: false` lets an entry go unused.
+in order), `default`, `freeform`, `sensitive`, `reference_url_contains` (a
+`review_target` gate's URL). Actions: `choice` (`value`), `choices`
+(`values`, for `multi_select`; Fabro's `multi_selected` `option_keys`), `text`
+(`value`), `negative` (the `N`/`no` option), `invalid` (`value`, sent as a
+choice the step must reject; the re-ask matches `"ask": 2`), `cancel`,
+`withhold` (no reply until the question is cancelled, so a gate with a
+`timeout` expires into its `human.default_choice` or Fabro's retry outcome).
+`delay_ms` waits before acting; `required: false` lets an entry go unused.
+
+The terminal shows a `review_target` gate's reference as `review: <label>
+<url>` and a gate's answer deadline as `(answer within 90s)`. Steering is not
+answering: a control line (below) never consumes a pending question's answer.
+
+**Controls.** `--control <file>` tails a file for run controls while the run is
+live, one per appended line: `pause` holds every attempt not yet admitted
+(running work continues, and Ctrl-C still cancels), `unpause` releases them,
+`steer <node> <text>` delivers guidance to the named stage's live firing (an
+agent queues it for its session; a human gate ignores it), and `cancel`
+cancels the run (a second `cancel` reaches the kill tier). Each line's effect
+is reported as `control: ...` on stderr; a line that is not a command or names
+a stage that is not running is reported and skipped. An embedded host drives
+the same `execution::controls::ControlService`.
+
+**Policies.** A Fabro graph's `stall_timeout` (default 30 minutes) cancels a
+run that emits no execution event for that long; a pending question parks the
+clock, and the terminal prints `stall watchdog: no execution activity for N
+s`. Its `loop_restart_signature_limit` (default 3) fails a run whose node
+repeats one deterministic failure that many times and blocks a `loop_restart`
+edge taken by anything but a transient failure. See `crates/fabro/FORMAT.md`,
+"Watchdog and circuit breaker".
 
 **The receipt.** Every run with an interviewer writes
 `<run-dir>/interviews.json` (`execution::InterviewReceipt`, version 1): one
 record per question with its invocation, execution, firing, attempt, node,
-occurrence, ask, question id, kind, text, offered option keys, the reply
+occurrence, ask, question id, kind, text, offered option keys, the review
+`reference` and `timeout_ms` when the question had them, the reply
 (`answered` with `choice`/`choices`/`text`, `cancelled`, or `failed`), and
 how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
 `errors` list; and under `script`, a scripted interviewer's per-entry

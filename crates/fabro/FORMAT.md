@@ -41,7 +41,7 @@ Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
 | `diamond` conditional | `noop` | |
 | `box` agent, `tab` prompt | `fabro/agent` | prompt, goal, fidelity, `backend`, model settings, `output_schema`, `output_retries`, `acp` |
 | `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema` |
-| `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive` |
+| `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
 | `component` parallel | `noop` with one routing group per branch, or a `for_each` expansion (below) | |
 | `tripleoctagon` fan-in | `noop`, `join: all`; its output is the ordered branch results | |
 | `insulator` wait | `fabro/wait` | `duration_ms` |
@@ -56,6 +56,27 @@ Timeouts: `timeout` is the per-attempt `Budget.timeout`. Without one, a
 command gets 600 s (Fabro's default), an agent 24 h, a human gate 30 days, a
 wait its duration plus an hour. A bare number (`timeout=1200`) is the
 Attractor spelling and is refused; write the unit.
+
+Who enforces the timeout follows Fabro's handler policies
+(`Budget.timeout_policy`). A command, a human gate and an ACP agent are
+`HandlerManaged`: the command sends its deadline to the sandbox (`timeout_ms`
+in the step config, 600 s by default) and fails with `Script timed out after
+Nms` and class `timeout`; the human gate's timeout is its answer deadline (see
+"Steps at run time"); the ACP agent hands the deadline to its turn. The
+driver arms no timer of its own around those steps, so a human gate's 30 day
+default is not an answer deadline. Every other node, including a native
+`backend="api"` agent and a `tab` prompt on it, is `ExecutorEnforced`: the
+driver's timer counts active work only, stops while the step has a question
+pending with the host, and resumes with the remaining time when the last
+pending question is answered. A sibling's question never extends another
+stage's budget. On expiry the driver cancels the step (for a native agent,
+through Pebble's prompt cancellation token; Pebble's own wall-clock timer stays
+unset). The attempt is `timed_out` and a retry gets a fresh budget.
+
+Run policies: `stall_timeout` (default 30 m; `0s` disables) is the stall
+watchdog's budget, and `loop_restart_signature_limit` (default 3, at least 1)
+is the failure circuit breaker's limit. Both lower to the graph's
+`RunPolicy`; the host enforces them (see "Watchdog and circuit breaker").
 
 Retries: `max_retries` (default `default_max_retries`, default 0) or a
 `retry_policy` preset (`none`, `standard`, `aggressive`, `linear`, `patient`)
@@ -202,12 +223,32 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
   delivered answer. The host's interviewer answers: `petri run --interactive`
   from the terminal, `--auto-approve` with the first choice,
   `--interview-script <file>` from a script (see the README's terminal path
-  section). A `question_type="multi_select"` answer names several choices;
+  section). A `question_type="multi_select"` answer names several choices
+  (`Answer::choices`, the `option_keys` of Fabro's `multi_selected` answer);
   the first routes, and `human.gate.selected` / `human.gate.label` record every
-  selected key and label joined by `,` and `, `, as Fabro does. A
+  selected key and label joined by `,` and `, `, as Fabro does. Every answered
+  gate also records `human.gate.<node>.question`, `.answer` and `.label`. A
   `sensitive=true` gate's free text crosses as a `$secret` reference, which is
   a Petri extension. An answer marked `cancelled` (the interviewer failed, or
-  the wait was cancelled) fails the gate closed with class `interrupted`.
+  the wait was cancelled) fails the gate closed with class `interrupted`. A
+  delivered steer (`{"$steer": ...}`) is not an answer: the gate ignores it
+  and keeps its question open.
+  - `timeout` is the answer deadline. An unanswered question expires in the
+    step: with `human.default_choice="<target or key>"` the gate takes that
+    choice and records `timeout` as the answer; without one it fails with
+    Fabro's retry outcome (class `retry_requested`), so `max_retries` asks
+    again and `on_retries_exhausted` decides after that. The question carries
+    `timeout_ms` so a host can show the deadline.
+  - `review_target=true` reads `review_target` from the run context
+    (`{"label", "url", "kind"}`, as an earlier stage's `context_updates`
+    wrote it), validates it as Fabro does (a non-empty label of at most 200
+    characters, an absolute `http`/`https` URL of at most 2048 characters with
+    a host and no credentials or `<>|` characters), asks Fabro's sentence
+    `Review the <label> <kind>, then choose the next action.` with the
+    reference attached to the question, and logs `review: <label> <url>`. A
+    missing or invalid target fails the gate before anyone is asked, with
+    Fabro's message and class `review_target`; the refused URL is never
+    repeated.
 - **`fabro/wait`** sleeps, cancel-aware.
 - **`fabro/workflow`** is the nested invocation above.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
@@ -292,7 +333,38 @@ shims for 30 days, each with a warning that names the date and a
 `outcome=success` in a condition (see "Conditions"). `.ai/plans/done/fabro-local-workflows.md`
 lists the workflows that depend on them and what to do at the sunset.
 
-Ignored loudly (a warning naming the attribute): `stall_timeout` and
-`loop_restart_signature_limit` (host policy, later phases), `tool_hooks.*`, and
+Ignored loudly (a warning naming the attribute): `tool_hooks.*`,
+`project_memory`, `thread_id`, `max_tokens`, `speed`, `default_thread`, and
 any attribute Fabro does not define. Graphviz layout attributes are dropped
 silently.
+
+## Watchdog and circuit breaker
+
+Two host policies ride the graph's `RunPolicy` and never change routing on
+their own.
+
+**Stall watchdog** (`stall_timeout`, default 30 m, `0s` disables). The
+standalone host installs `execution::watchdog::StallWatchdog` as an observer.
+Any engine or lifecycle record of any execution is activity. A question
+pending with the host parks the clock: a run waiting on a person is blocked,
+not stalled. When the last pending question is answered the run gets a full
+stall budget again. A run idle for the whole budget is cancelled through the
+coordinator, and the terminal prints `stall watchdog: no execution activity
+for N s`. This is separate from each attempt's active-work timer.
+
+**Circuit breaker** (`loop_restart_signature_limit`, default 3, at least 1).
+The standalone host installs `execution::breaker::CircuitBreaker` as routing
+middleware (`host::policy_middleware`), on run and on resume. After every
+node's final outcome a failure is classified into Fabro's categories
+(`transient_infra`, `deterministic`, `budget_exhausted`, `compilation_loop`,
+`canceled`, `structural`, from the failure class and the reference's message
+hints) and a signature `<node>|<category>|<normalized reason>`. A
+`deterministic` or `structural` signature is counted; reaching the limit
+blocks the failed firing's route with `deterministic failure cycle detected`,
+which fails the run. A `loop_restart` edge is blocked for any classified
+failure other than `transient_infra`, and a tracked failure's restart
+signature is counted in its own map with the same limit. Success never clears
+a count. Both maps live in the middleware state, so they survive a restart
+successor and are restored on resume. Node visit totals also survive a
+`loop_restart` (the successor starts with the predecessor's firing counts)
+while the context is replaced; the run-wide invocation total never resets.

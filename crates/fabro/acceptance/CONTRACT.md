@@ -112,10 +112,12 @@ names the task in `.ai/plans/fabro-unified-task-list.md` that owns the fix.
 | `class` with `model_stylesheet` (including `{% set %}`, `{% if %}`, `inputs.*`) | code-review, security-review, implement-issue | supported |
 | `default_fidelity`, `fidelity="truncate"`, `fidelity="summary:high"` | code-review, security-review, implement-issue, interview | accepted at load; fidelity modes are tracked (task 8) |
 | `project_memory=false` | code-review, security-review | ignored loudly today; tracked (task 8) |
-| `stall_timeout` | code-review, security-review | ignored loudly today; tracked (task 9) |
+| `stall_timeout` | code-review, security-review | supported: the stall watchdog (default 30 m, `0s` disables); a pending question parks it |
+| `loop_restart_signature_limit`, `loop_restart` circuit breaker | fix-ci, implement-plan | supported: default 3, minimum 1, restart edges admit only `transient_infra`, counts survive restart and resume |
+| `human.default_choice`, `review_target`, human gate `timeout` | interview | supported: expiry takes the default choice or Fabro's retry outcome; the review target is validated and shown |
 | `goal_gate`, `retry_target` (graph and node), `max_visits`, `max_node_visits` | fix-ci, implement-plan | supported |
 | `house` manager loop, `stack.child_workflow`, `manager.max_cycles` | implement-issue | supported for invocation; child lifecycle and defaults are tracked (task 7) |
-| `hexagon` human gate, `question_type` (`yes_no`, `confirmation`, `multiple_choice`, `multi_select`, `freeform`), accelerator labels, `freeform=true` edge | interview | supported for `yes_no`, `multiple_choice`, `freeform`; `multi_select` answer shape is tracked (task 9) |
+| `hexagon` human gate, `question_type` (`yes_no`, `confirmation`, `multiple_choice`, `multi_select`, `freeform`), accelerator labels, `freeform=true` edge | interview | supported; a `multi_select` answer is `Answer::choices` (Fabro's `multi_selected` `option_keys`), the first key routes and every key and label is recorded |
 | `tab` prompt node | interview | lowers to `fabro/agent` today; a distinct one-shot `fabro/prompt` step is tracked (task 7) |
 | `model`, `provider`, `reasoning_effort` on nodes | fix-ci, implement-plan | supported for `backend="api"`; `provider="openrouter"` needs a twin-backed mapping (task 4, task 7) |
 | Conditions: `outcome=succeeded`, `outcome!=succeeded`, `context.K=V`, `&&` | all | supported (`!=` is in the grammar) |
