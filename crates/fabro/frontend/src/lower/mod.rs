@@ -8,7 +8,9 @@
 //! semantics.
 
 mod attrs;
+mod hooks;
 mod routing;
+mod threads;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -197,7 +199,15 @@ fn lower_nested(
     stack: Vec<String>,
 ) -> Lowered {
     let mut template = Context::new(inputs);
-    read_workflow_toml(file, files, &mut template, &mut diags);
+    let workflow_toml = read_workflow_toml(file, files, &mut template, &mut diags);
+    let hooks = hooks::load(
+        files,
+        inputs,
+        workflow_toml
+            .as_ref()
+            .map(|(path, text)| (path.as_str(), text.as_str())),
+        &mut diags,
+    );
 
     let mut b = GraphBuilder::bare();
     let scope = b.add_scope(Scope::new(ScopeId::new(0)));
@@ -294,6 +304,9 @@ fn lower_nested(
     graph
         .params
         .insert(SmolStr::new("goal"), Value::String(goal));
+    graph
+        .params
+        .insert(SmolStr::new(hooks::PARAM), hooks::param(&hooks));
 
     let report = ir::check(&graph);
     for error in &report.errors {
@@ -322,7 +335,8 @@ fn lower_nested(
 }
 
 /// `workflow.toml` beside the workflow. Petri acts on `[run.inputs]` (the
-/// defaults an input takes when the host supplies none) and the host resolves
+/// defaults an input takes when the host supplies none) and `[[run.hooks]]`
+/// (read by `lower::hooks` from the returned text), and the host resolves
 /// `[workflow] graph`. Every other section is diagnosed here, never dropped
 /// silently: a platform-only or not-yet-applied section warns with why, an
 /// unsupported requirement is an `unsupported.workflow_toml.*` error, and a
@@ -332,7 +346,7 @@ fn read_workflow_toml(
     files: &dyn FileSource,
     template: &mut Context,
     diags: &mut Diagnostics,
-) {
+) -> Option<(String, String)> {
     let dir = file.rfind('/').map_or("", |i| &file[..i]);
     let path = if dir.is_empty() {
         "workflow.toml".to_string()
@@ -340,7 +354,7 @@ fn read_workflow_toml(
         format!("{dir}/workflow.toml")
     };
     let Some(text) = files.read(&path) else {
-        return;
+        return None;
     };
     let value: toml::Table = match text.parse() {
         Ok(value) => value,
@@ -350,7 +364,7 @@ fn read_workflow_toml(
                 Span::file(&path),
                 format!("`{path}` is not valid TOML and its input defaults are ignored: {error}"),
             );
-            return;
+            return None;
         }
     };
     let span = Span::file(&path);
@@ -403,6 +417,7 @@ fn read_workflow_toml(
     if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
         read_run_table(run, &path, &span, template, diags);
     }
+    Some((path, text))
 }
 
 /// The `[run]` table of `workflow.toml`.
@@ -480,19 +495,9 @@ fn read_run_table(
                     );
                 }
             }
-            "hooks" => {
-                if item.as_array().is_some_and(|hooks| !hooks.is_empty()) {
-                    diags.unsupported(
-                        "workflow_toml.run.hooks",
-                        span.clone(),
-                        format!(
-                            "`[[run.hooks]]` in `{path}` configures hooks, which the standalone \
-                             runner does not run yet; a configured hook is never skipped silently"
-                        ),
-                        "remove the hooks, or wait for the local hook system (readiness item 5)",
-                    );
-                }
-            }
+            // `[[run.hooks]]` is read by `hooks::load`, with the project and
+            // settings layers, once the whole file has been checked.
+            "hooks" => {}
             "prepare" => diags.unsupported(
                 "workflow_toml.run.prepare",
                 span.clone(),
@@ -577,8 +582,8 @@ const WORKFLOW_TOML_INERT: &[(&str, &str)] = &[
 
 /// `[run.*]` sections of `workflow.toml` the standalone runner reads but does
 /// not act on, each with why. `[run.inputs]` is the one it acts on;
-/// `[run.model]`, `[run.agent]`, `[run.hooks]` and `[run.prepare]` have
-/// their own diagnostics.
+/// `[run.model]`, `[run.agent]` and `[run.prepare]` have their own
+/// diagnostics; `[[run.hooks]]` is loaded by `hooks::load`.
 const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
     (
         "goal",
@@ -879,6 +884,7 @@ impl Ctx<'_> {
         for key in ["on_failure", "on_retries_exhausted"] {
             self.check_policy(key, &attrs, &span);
         }
+        threads::check_graph(workflow, &mut self.diags);
     }
 
     /// Diagnose one failure-policy attribute: an unknown spelling is an
@@ -1253,28 +1259,6 @@ impl Ctx<'_> {
         config
     }
 
-    fn fidelity(&mut self, node: &NodeDecl, workflow: &Workflow) -> Option<String> {
-        let (value, span) = match node.attrs.text("fidelity") {
-            Some(value) => (value, node.attrs.span_of("fidelity", &node.span)),
-            None => (
-                workflow.attrs.text("default_fidelity")?,
-                workflow.attrs.span_of("default_fidelity", &workflow.span),
-            ),
-        };
-        if !attrs::FIDELITIES.contains(&value.as_str()) {
-            self.diags.error(
-                "fabro.bad_fidelity",
-                span,
-                format!(
-                    "`{value}` is not a fidelity mode ({})",
-                    attrs::FIDELITIES.join(", ")
-                ),
-            );
-            return None;
-        }
-        Some(value)
-    }
-
     fn agent_config(
         &mut self,
         node: &NodeDecl,
@@ -1336,9 +1320,10 @@ impl Ctx<'_> {
         {
             config.insert("provider".into(), Value::String(provider));
         }
-        if let Some(fidelity) = self.fidelity(node, workflow) {
-            config.insert("fidelity".into(), Value::String(fidelity));
-        }
+        let branch_first = threads::is_branch_first(node, workflow, &self.kinds);
+        let threads = threads::ThreadAttrs::read(node, workflow, branch_first, &mut self.diags);
+        threads.write(self.b.exprs(), &mut config);
+        config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {
             let retries = retries.max(0);
@@ -1918,7 +1903,18 @@ impl Ctx<'_> {
                 .attrs
                 .bool("loop_restart", &mut self.diags)
                 .unwrap_or(false);
-            let map = self.branch_payload(edge, index, res.kind, workflow);
+            let graph_full = workflow.attrs.text("default_fidelity").as_deref() == Some("full");
+            let map = self
+                .branch_payload(edge, index, res.kind, workflow)
+                .or_else(|| {
+                    threads::edge_payload(
+                        self.b.exprs(),
+                        edge,
+                        &self.kinds,
+                        graph_full,
+                        &mut self.diags,
+                    )
+                });
             lowered.push(routing::OutEdge {
                 to,
                 target: edge.to.clone(),

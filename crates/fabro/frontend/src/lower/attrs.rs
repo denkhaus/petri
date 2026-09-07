@@ -84,6 +84,7 @@ pub(super) const LAYOUT: &[&str] = &[
 /// Graph-level attributes with workflow meaning.
 pub(super) const GRAPH: &[&str] = &[
     "goal",
+    "default_thread",
     "label",
     "backend",
     "model_stylesheet",
@@ -104,10 +105,6 @@ pub(super) const GRAPH: &[&str] = &[
 /// Graph-level attributes whose meaning belongs to a host policy Petri does
 /// not run in phase one. Each is named in an `ignored.*` warning.
 pub(super) const GRAPH_IGNORED: &[(&str, &str)] = &[
-    (
-        "default_thread",
-        "Petri does not yet preserve agent threads between nodes",
-    ),
     (
         "loop_restart_signature_limit",
         "the circuit breaker is routing middleware, a later phase",
@@ -142,6 +139,10 @@ pub(super) const NODE: &[&str] = &[
     "on_retries_exhausted",
     "allow_partial",
     "fidelity",
+    "thread_id",
+    "project_memory",
+    "speed",
+    "max_tokens",
     "timeout",
     "model",
     "provider",
@@ -167,18 +168,6 @@ pub(super) const NODE_IGNORED: &[(&str, &str)] = &[
         "review_target",
         "human review targets are not implemented in phase one",
     ),
-    (
-        "thread_id",
-        "Petri does not yet preserve agent threads between nodes",
-    ),
-    ("max_tokens", "the ACP agent owns its token limit"),
-    ("speed", "the ACP agent owns its speed setting"),
-    (
-        "project_memory",
-        "project memory is not implemented in phase one",
-    ),
-    ("tool_hooks.pre", "agent tool hooks are a later phase"),
-    ("tool_hooks.post", "agent tool hooks are a later phase"),
 ];
 
 /// Edge attributes with workflow meaning.

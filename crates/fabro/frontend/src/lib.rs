@@ -29,6 +29,8 @@
 
 pub mod condition;
 pub mod dot;
+pub mod fidelity;
+pub mod hooks;
 pub mod kinds;
 pub mod labels;
 mod lower;
