@@ -4,19 +4,41 @@
 //! preferred-label tier routes) and the suggested target. A cancel fails
 //! closed, and no answer ever falls through to an unconditional edge — the
 //! lowering guards the fallback tier for human gates.
+//!
+//! The gate owns its answer deadline (`TimeoutPolicy::HandlerManaged`): with
+//! a `timeout`, an unanswered question expires here. `human.default_choice`
+//! then routes to the named choice; without one the gate fails with Fabro's
+//! retry outcome (class `retry_requested`), so `max_retries` asks again and
+//! `on_retries_exhausted` decides after that. The driver arms no timer around
+//! a human gate, so its 30 day structural budget is not the answer deadline.
+//!
+//! A `review_target=true` gate reads `review_target` from the run context
+//! (`{label, url, kind}`), validates it as Fabro does, and asks Fabro's review
+//! question with the reference attached, so a host shows the URL beside the
+//! question. A missing or invalid target fails the gate before anyone is
+//! asked, and the URL itself never appears in the failure.
+
+use std::time::Duration;
 
 use frontend_fabro::Policy;
-use frontend_fabro::kinds::{HUMAN_KIND, StageOutcome};
+use frontend_fabro::kinds::{HUMAN_KIND, RETRY_REQUESTED_CLASS, StageOutcome};
 use frontend_fabro::labels::strip_accelerator;
 use ir::{Control, LogStream, Outcome, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Answer, Question, QuestionOption, Step, StepCtx};
+use steps::{Answer, Question, QuestionOption, QuestionReference, Step, StepCtx};
+use tokio::time;
 
 use crate::outcome::Stage;
 
 pub const KIND: StepKindId = HUMAN_KIND;
+
+/// The context key a review gate reads its target from, as Fabro names it.
+pub const REVIEW_TARGET_KEY: &str = "review_target";
+
+const REVIEW_TARGET_LABEL_MAX_CHARS: usize = 200;
+const REVIEW_TARGET_URL_MAX_CHARS: usize = 2048;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Choice {
@@ -40,8 +62,15 @@ pub struct HumanConfig {
     pub question_type:   Option<String>,
     #[serde(default)]
     pub sensitive:       Option<bool>,
+    /// Read `review_target` from the context and ask about it.
+    #[serde(default)]
+    pub review_target:   Option<bool>,
+    /// The choice (by target, else by key) an expired question takes.
+    #[serde(default)]
+    pub default_choice:  Option<String>,
     #[serde(default)]
     pub on_failure:      Option<Policy>,
+    /// The answer deadline. Absent: wait until answered or cancelled.
     #[serde(default)]
     pub timeout_ms:      Option<u64>,
     #[serde(default)]
@@ -50,26 +79,155 @@ pub struct HumanConfig {
 
 pub struct HumanStep;
 
+/// Why a review target could not be shown. The messages are Fabro's, and
+/// none of them repeats the value it rejects.
+#[derive(Debug, PartialEq, Eq)]
+enum ReviewTargetError {
+    Missing,
+    NotAnObject,
+    EmptyLabel,
+    LabelTooLong,
+    LabelContainsControl,
+    EmptyUrl,
+    UrlTooLong,
+    UrlContainsUnsafeCharacters,
+    InvalidUrl,
+    UnsupportedUrlScheme,
+    MissingUrlHost,
+    UrlContainsCredentials,
+}
+
+impl ReviewTargetError {
+    fn message(&self, node: &str) -> String {
+        match self {
+            Self::Missing => format!(
+                "Human gate \"{node}\" has review_target=true but context.review_target is missing"
+            ),
+            other => format!(
+                "Human gate \"{node}\" has invalid context.review_target: {}",
+                match other {
+                    Self::Missing => unreachable!("handled above"),
+                    Self::NotAnObject => "review target must be an object with label, url and kind",
+                    Self::EmptyLabel => "review target label must not be empty",
+                    Self::LabelTooLong => "review target label must be at most 200 characters",
+                    Self::LabelContainsControl =>
+                        "review target label must not contain control characters",
+                    Self::EmptyUrl => "review target URL must not be empty",
+                    Self::UrlTooLong => "review target URL must be at most 2048 characters",
+                    Self::UrlContainsUnsafeCharacters =>
+                        "review target URL must not contain control characters or link delimiters",
+                    Self::InvalidUrl => "review target URL must be a valid absolute URL",
+                    Self::UnsupportedUrlScheme => "review target URL must use http or https",
+                    Self::MissingUrlHost => "review target URL must include a host",
+                    Self::UrlContainsCredentials =>
+                        "review target URL must not include username or password credentials",
+                }
+            ),
+        }
+    }
+}
+
+/// Validate a review target the way Fabro's `ReviewTarget::new` does. The URL
+/// is parsed only to check its shape; it is never fetched.
+fn review_target(value: Option<&Value>) -> Result<QuestionReference, ReviewTargetError> {
+    let value = value.ok_or(ReviewTargetError::Missing)?;
+    let object = value.as_object().ok_or(ReviewTargetError::NotAnObject)?;
+    let label = object
+        .get("label")
+        .and_then(Value::as_str)
+        .ok_or(ReviewTargetError::EmptyLabel)?
+        .trim();
+    let url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or(ReviewTargetError::EmptyUrl)?
+        .trim();
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("document");
+    if label.is_empty() {
+        return Err(ReviewTargetError::EmptyLabel);
+    }
+    if label.chars().count() > REVIEW_TARGET_LABEL_MAX_CHARS {
+        return Err(ReviewTargetError::LabelTooLong);
+    }
+    if label.chars().any(char::is_control) {
+        return Err(ReviewTargetError::LabelContainsControl);
+    }
+    if url.is_empty() {
+        return Err(ReviewTargetError::EmptyUrl);
+    }
+    if url.chars().count() > REVIEW_TARGET_URL_MAX_CHARS {
+        return Err(ReviewTargetError::UrlTooLong);
+    }
+    if url
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '<' | '>' | '|'))
+    {
+        return Err(ReviewTargetError::UrlContainsUnsafeCharacters);
+    }
+    let (scheme, rest) = url.split_once("://").ok_or(ReviewTargetError::InvalidUrl)?;
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return Err(ReviewTargetError::InvalidUrl);
+    }
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return Err(ReviewTargetError::UnsupportedUrlScheme);
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err(ReviewTargetError::UrlContainsCredentials);
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                host
+            } else {
+                authority
+            }
+        });
+    if host.is_empty() {
+        return Err(ReviewTargetError::MissingUrlHost);
+    }
+    if host.chars().any(char::is_whitespace) {
+        return Err(ReviewTargetError::InvalidUrl);
+    }
+    Ok(QuestionReference {
+        label: label.to_owned(),
+        url:   url.to_owned(),
+        kind:  Some(kind.to_owned()),
+    })
+}
+
 impl HumanConfig {
     /// The question this gate asks. The id names the firing, so a re-asked
     /// question after a resume is a new question with a new secret name.
+    /// A review gate's text is Fabro's review sentence and carries the
+    /// validated reference.
     pub fn question(&self, ctx: &StepCtx) -> Question {
-        Question {
-            id:        format!("{}#{}", self.node, ctx.firing.raw()),
-            text:      self.label.clone(),
-            options:   self
-                .choices
-                .iter()
-                .map(|c| QuestionOption {
-                    key:   c.key.clone(),
-                    label: c.label.clone(),
-                })
-                .collect(),
-            default:   self.choices.first().map(|c| c.key.clone()),
-            freeform:  self.freeform_target.is_some(),
-            sensitive: self.sensitive.unwrap_or(false),
-            kind:      self.question_type.clone(),
-        }
+        let mut question = Question::new(
+            format!("{}#{}", self.node, ctx.firing.raw()),
+            self.label.clone(),
+        );
+        question.options = self
+            .choices
+            .iter()
+            .map(|c| QuestionOption {
+                key:   c.key.clone(),
+                label: c.label.clone(),
+            })
+            .collect();
+        question.default = self.choices.first().map(|c| c.key.clone());
+        question.freeform = self.freeform_target.is_some();
+        question.sensitive = self.sensitive.unwrap_or(false);
+        question.kind = self.question_type.clone();
+        question.timeout_ms = self.timeout_ms;
+        question
     }
 
     /// The choice an answer names, by key or by label (accelerator-free,
@@ -81,6 +239,82 @@ impl HumanConfig {
                 || strip_accelerator(&c.label).to_lowercase() == wanted
         })
     }
+
+    /// The choice `human.default_choice` names: a target node first, as
+    /// Fabro reads it, else a key.
+    fn default_choice(&self) -> Option<Choice> {
+        let wanted = self.default_choice.as_deref()?;
+        self.choices
+            .iter()
+            .find(|c| c.to == wanted)
+            .or_else(|| self.choices.iter().find(|c| c.key == wanted))
+            .cloned()
+            .or_else(|| {
+                Some(Choice {
+                    key:   wanted.to_owned(),
+                    label: wanted.to_owned(),
+                    to:    wanted.to_owned(),
+                })
+            })
+    }
+
+    fn interrupted(&self) -> Outcome {
+        Stage::failed(
+            "human interaction interrupted before an answer was provided",
+            "interrupted",
+            self.on_failure,
+        )
+        .into_outcome(&self.node)
+    }
+
+    /// The outcome for one or more selected choices: the first routes; every
+    /// selected key and label is recorded, as Fabro records them.
+    fn selected(&self, selected: &[&Choice], question: &str, answer_text: &str) -> Outcome {
+        let mut stage = Stage::new(StageOutcome::Succeeded, self.on_failure);
+        let first = selected[0];
+        let label = strip_accelerator(&first.label).to_string();
+        stage.output.insert("preferred_label".into(), json!(label));
+        stage
+            .output
+            .insert("suggested_next_ids".into(), json!([first.to]));
+        let keys = selected
+            .iter()
+            .map(|c| c.key.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let labels = selected
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        stage.output.insert("choice".into(), json!(keys));
+        stage
+            .context_updates
+            .insert(SmolStr::new("human.gate.selected"), json!(keys));
+        stage
+            .context_updates
+            .insert(SmolStr::new("human.gate.label"), json!(labels));
+        self.answer_context(&mut stage, question, answer_text, Some(&labels));
+        stage.into_outcome(&self.node)
+    }
+
+    /// Fabro's per-gate record of what was asked and answered.
+    fn answer_context(&self, stage: &mut Stage, question: &str, answer: &str, label: Option<&str>) {
+        stage.context_updates.insert(
+            SmolStr::new(format!("human.gate.{}.question", self.node)),
+            json!(question),
+        );
+        stage.context_updates.insert(
+            SmolStr::new(format!("human.gate.{}.answer", self.node)),
+            json!(answer),
+        );
+        if let Some(label) = label {
+            stage.context_updates.insert(
+                SmolStr::new(format!("human.gate.{}.label", self.node)),
+                json!(label),
+            );
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -89,7 +323,7 @@ impl Step for HumanStep {
     type Config = HumanConfig;
 
     async fn run(&self, config: HumanConfig, mut ctx: StepCtx) -> Outcome {
-        let question = config.question(&ctx);
+        let mut question = config.question(&ctx);
         if config.choices.is_empty() && config.freeform_target.is_none() {
             return Stage::failed(
                 format!(
@@ -101,27 +335,82 @@ impl Step for HumanStep {
             )
             .into_outcome(&config.node);
         }
+        if config.review_target.unwrap_or(false) {
+            match review_target(config.kv.get(REVIEW_TARGET_KEY)) {
+                Ok(reference) => {
+                    question.text = format!(
+                        "Review the {} {}, then choose the next action.",
+                        reference.label,
+                        reference.kind.as_deref().unwrap_or("document")
+                    );
+                    question.reference = Some(reference);
+                }
+                Err(error) => {
+                    return Stage::failed(
+                        error.message(&config.node),
+                        "review_target",
+                        config.on_failure,
+                    )
+                    .into_outcome(&config.node);
+                }
+            }
+        }
         let _ = ctx.logs.send(question.to_event()).await;
         ctx.log(
             LogStream::Stdout,
             format!("waiting for an answer: {}", question.text),
         )
         .await;
+        if let Some(reference) = &question.reference {
+            ctx.log(
+                LogStream::Stdout,
+                format!("review: {} <{}>", reference.label, reference.url),
+            )
+            .await;
+        }
+        // The answer deadline, when the gate has one. `pending` sleeps forever
+        // otherwise, so the gate waits for the answer or a cancel.
+        let deadline = async {
+            match config.timeout_ms {
+                Some(ms) => time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(deadline);
         loop {
-            let value = match ctx.control.recv().await {
-                Some(Control::Deliver(value)) => value,
-                Some(Control::Cancel | Control::Kill) | None => {
+            let value = tokio::select! {
+                control = ctx.control.recv() => match control {
+                    Some(Control::Deliver(value)) => value,
                     // Fail closed: an interrupted gate never routes.
+                    Some(Control::Cancel | Control::Kill) | None => return config.interrupted(),
+                    Some(_) => continue,
+                },
+                () = &mut deadline => {
+                    let waited = config.timeout_ms.unwrap_or_default();
+                    ctx.log(
+                        LogStream::Stderr,
+                        format!("no answer within {waited}ms; the question expired"),
+                    )
+                    .await;
+                    if let Some(choice) = config.default_choice() {
+                        ctx.log(
+                            LogStream::Stdout,
+                            format!("taking the default choice `{}`", choice.to),
+                        )
+                        .await;
+                        return config.selected(&[&choice], &question.text, "timeout");
+                    }
                     return Stage::failed(
-                        "human interaction interrupted before an answer was provided",
-                        "interrupted",
+                        "human gate timeout, no default",
+                        RETRY_REQUESTED_CLASS,
                         config.on_failure,
                     )
                     .into_outcome(&config.node);
                 }
-                Some(_) => continue,
             };
             let Some(answer) = Answer::from_value(&value) else {
+                // A steer or any other control payload is not an answer; the
+                // question stays open.
                 ctx.log(
                     LogStream::Stderr,
                     "ignoring a delivery that is not an answer",
@@ -136,14 +425,8 @@ impl Step for HumanStep {
             }
             if answer.cancelled {
                 // The host ended the interview: fail closed, as a cancel does.
-                return Stage::failed(
-                    "human interaction interrupted before an answer was provided",
-                    "interrupted",
-                    config.on_failure,
-                )
-                .into_outcome(&config.node);
+                return config.interrupted();
             }
-            let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
             // A multi-select answer names several choices; as Fabro does, the
             // first routes and every selected key and label is recorded.
             let selected: Vec<&Choice> = if answer.choices.is_empty() {
@@ -167,32 +450,18 @@ impl Step for HumanStep {
                     .filter_map(|c| config.choice_for(c))
                     .collect()
             };
-            if let Some(choice) = selected.first() {
-                let label = strip_accelerator(&choice.label).to_string();
-                stage.output.insert("preferred_label".into(), json!(label));
-                stage
-                    .output
-                    .insert("suggested_next_ids".into(), json!([choice.to]));
-                let keys = selected
-                    .iter()
-                    .map(|c| c.key.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let labels = selected
-                    .iter()
-                    .map(|c| c.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                stage.output.insert("choice".into(), json!(keys));
-                stage
-                    .context_updates
-                    .insert(SmolStr::new("human.gate.selected"), json!(keys));
-                stage
-                    .context_updates
-                    .insert(SmolStr::new("human.gate.label"), json!(labels));
-            } else if let (Some(target), Some(text)) = (&config.freeform_target, &answer.text) {
+            if !selected.is_empty() {
+                let answered = if answer.choices.is_empty() {
+                    selected[0].key.clone()
+                } else {
+                    answer.choices.join(", ")
+                };
+                return config.selected(&selected, &question.text, &answered);
+            }
+            if let (Some(target), Some(text)) = (&config.freeform_target, &answer.text) {
                 // Free text: the value (or its `$secret` reference) as
                 // written, never resolved here.
+                let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
                 stage
                     .output
                     .insert("suggested_next_ids".into(), json!([target]));
@@ -203,24 +472,75 @@ impl Step for HumanStep {
                 stage
                     .context_updates
                     .insert(SmolStr::new("human.gate.text"), text.clone());
-            } else {
-                ctx.log(
-                    LogStream::Stderr,
-                    format!(
-                        "the answer names no choice; the choices are {}",
-                        config
-                            .choices
-                            .iter()
-                            .map(|c| format!("[{}] {}", c.key, strip_accelerator(&c.label)))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                )
-                .await;
-                let _ = ctx.logs.send(question.to_event()).await;
-                continue;
+                let shown = match text {
+                    Value::String(plain) => plain.clone(),
+                    other => other.to_string(),
+                };
+                config.answer_context(&mut stage, &question.text, &shown, None);
+                return stage.into_outcome(&config.node);
             }
-            return stage.into_outcome(&config.node);
+            ctx.log(
+                LogStream::Stderr,
+                format!(
+                    "the answer names no choice; the choices are {}",
+                    config
+                        .choices
+                        .iter()
+                        .map(|c| format!("[{}] {}", c.key, strip_accelerator(&c.label)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .await;
+            let _ = ctx.logs.send(question.to_event()).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(label: &str, url: &str) -> Value {
+        json!({ "label": label, "url": url, "kind": "document" })
+    }
+
+    #[test]
+    fn a_review_target_is_validated_as_fabro_validates_it() {
+        let ok = review_target(Some(&target(
+            "Quarry review exercise",
+            "https://quarry.lithos.computer/tmp/0123456789abcdef0123456789abcdef",
+        )))
+        .expect("valid");
+        assert_eq!(ok.label, "Quarry review exercise");
+        assert_eq!(ok.kind.as_deref(), Some("document"));
+        assert_eq!(review_target(None), Err(ReviewTargetError::Missing));
+        assert_eq!(
+            review_target(Some(&target("Unsafe", "javascript:alert(1)"))),
+            Err(ReviewTargetError::InvalidUrl)
+        );
+        assert_eq!(
+            review_target(Some(&target("Ftp", "ftp://example.com/x"))),
+            Err(ReviewTargetError::UnsupportedUrlScheme)
+        );
+        assert_eq!(
+            review_target(Some(&target("Creds", "https://user:pw@example.com/"))),
+            Err(ReviewTargetError::UrlContainsCredentials)
+        );
+        assert_eq!(
+            review_target(Some(&target("No host", "https:///path"))),
+            Err(ReviewTargetError::MissingUrlHost)
+        );
+        assert_eq!(
+            review_target(Some(&target("", "https://example.com"))),
+            Err(ReviewTargetError::EmptyLabel)
+        );
+        assert_eq!(
+            review_target(Some(&target("Pipe", "https://example.com/a|b"))),
+            Err(ReviewTargetError::UrlContainsUnsafeCharacters)
+        );
+        let message = ReviewTargetError::UnsupportedUrlScheme.message("gate");
+        assert!(message.contains("must use http or https"), "{message}");
+        assert!(!message.contains("javascript"), "{message}");
     }
 }

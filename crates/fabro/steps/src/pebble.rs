@@ -22,7 +22,7 @@ use pebble_coding_agent::{CodingAgent, CodingAgentOptions, PromptReport, Shutdow
 use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::StepCtx;
+use steps::{Steer, StepCtx};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -104,6 +104,10 @@ impl NativeSession {
             ctx.node.clone(),
             ctx.firing,
         ));
+        // The attempt's deadline is the driver's (`TimeoutPolicy::ExecutorEnforced`):
+        // it counts active work only and cancels this session through `cancel`
+        // when it expires. Pebble's own wall-clock timer stays unset, so it
+        // cannot expire during an excluded interview wait.
         let env = ctx.env.clone();
         let provider = questions.clone();
         let build = async {
@@ -116,10 +120,7 @@ impl NativeSession {
                     CodingAgentOptions::default()
                         .with_reasoning_effort(reasoning)
                         .with_memory_files(["AGENTS.md".into()])
-                        .with_skill_dirs([".agents/skills".into(), ".pebble/skills".into()])
-                        .with_wall_clock_timeout(Duration::from_millis(
-                            config.timeout_ms.unwrap_or(86_400_000),
-                        )),
+                        .with_skill_dirs([".agents/skills".into(), ".pebble/skills".into()]),
                 )
                 .permission_level(PermissionLevel::Full)
                 .event_sink(sink)
@@ -242,7 +243,12 @@ impl NativeSession {
     }
 }
 
+/// The guidance a delivered value carries: a core [`Steer`], or the older
+/// bare string and `{ "text": ... }` spellings.
 fn steering_text(value: &Value) -> Option<String> {
+    if let Some(steer) = Steer::from_value(value) {
+        return Some(steer.text);
+    }
     value
         .as_str()
         .or_else(|| value.get("text").and_then(Value::as_str))

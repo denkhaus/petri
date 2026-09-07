@@ -17,7 +17,7 @@ use ir::{Control, LogStream, StepEvent, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::Answer;
+use steps::{Answer, Steer};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -503,7 +503,12 @@ impl Client {
 }
 
 /// The text a delivered steering value carries: a string, or `{ "text": … }`.
+/// The guidance a delivered value carries: a core [`Steer`], or the older
+/// answer-shaped spelling (a bare string, or `text`/`choice` fields).
 fn steer_text(value: &Value) -> Option<String> {
+    if let Some(steer) = Steer::from_value(value) {
+        return Some(steer.text);
+    }
     let answer = Answer::from_value(value)?;
     answer
         .text

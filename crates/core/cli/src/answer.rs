@@ -699,19 +699,21 @@ mod tests {
             occurrence:      1,
             ask:             1,
             question:        Question {
-                id:        format!("{node}#1"),
-                text:      "Ship it?".into(),
-                options:   options
+                id:         format!("{node}#1"),
+                text:       "Ship it?".into(),
+                options:    options
                     .iter()
                     .map(|(key, label)| QuestionOption {
                         key:   (*key).into(),
                         label: (*label).into(),
                     })
                     .collect(),
-                default:   options.first().map(|(key, _)| (*key).into()),
-                freeform:  false,
-                sensitive: false,
-                kind:      kind.map(Into::into),
+                default:    options.first().map(|(key, _)| (*key).into()),
+                freeform:   false,
+                sensitive:  false,
+                kind:       kind.map(Into::into),
+                reference:  None,
+                timeout_ms: None,
             },
         }
     }

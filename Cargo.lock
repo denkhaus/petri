@@ -1526,6 +1526,7 @@ dependencies = [
  "petri-runtime",
  "petri-steps",
  "petri-testkit",
+ "regex",
  "serde",
  "serde_json",
  "smol_str",

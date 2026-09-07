@@ -22,4 +22,5 @@ pub use process::{
 };
 pub use question::{
     ANSWER_KEY, ANSWER_SECRET_PREFIX, Answer, QUESTION_KEY, Question, QuestionOption,
+    QuestionReference, STEER_KEY, Steer,
 };

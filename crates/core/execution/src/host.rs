@@ -26,9 +26,10 @@ use executor::SecretProvider;
 use ir::Graph;
 use runtime::Runtime;
 
+use crate::breaker::CircuitBreaker;
 use crate::{
-    Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, ExecutionObserver,
-    GraphDigest, InvocationId,
+    Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, CoordinatorState,
+    ExecutionObserver, GraphDigest, InvocationId, Middleware, decode_coordinator_log,
 };
 
 /// Each execution's engine-log file name under its execution directory.
@@ -99,9 +100,13 @@ pub fn read_events(path: &Path) -> Result<DecodedEvents, HostError> {
 /// is registered before the root starts, so an invoke by digest always
 /// resolves), and the observers that see every execution's records.
 pub struct HostRun {
-    pub graph:     Graph,
-    pub children:  Vec<Graph>,
-    pub observers: Vec<Arc<dyn ExecutionObserver>>,
+    pub graph:      Graph,
+    pub children:   Vec<Graph>,
+    pub observers:  Vec<Arc<dyn ExecutionObserver>>,
+    /// Decision middleware the host adds after the graph's own policy chain
+    /// ([`policy_middleware`]): a pause gate, a product's routing hooks. A
+    /// resume must install the same list.
+    pub middleware: Vec<Arc<dyn Middleware>>,
 }
 
 impl From<Graph> for HostRun {
@@ -117,6 +122,7 @@ impl HostRun {
             graph,
             children: Vec::new(),
             observers: Vec::new(),
+            middleware: Vec::new(),
         }
     }
 
@@ -131,6 +137,24 @@ impl HostRun {
         self.observers.push(observer);
         self
     }
+
+    #[must_use]
+    pub fn with_middleware(mut self, middleware: Arc<dyn Middleware>) -> Self {
+        self.middleware.push(middleware);
+        self
+    }
+}
+
+/// The decision middleware a root graph's [`ir::RunPolicy`] asks for: the
+/// failure circuit breaker when `loop_restart_signature_limit` is set. The
+/// standalone host installs it ahead of the host's own middleware on run and
+/// on resume, so the recorded chain matches.
+pub fn policy_middleware(graph: &Graph) -> Vec<Arc<dyn Middleware>> {
+    let mut chain: Vec<Arc<dyn Middleware>> = Vec::new();
+    if let Some(limit) = graph.policy.loop_restart_signature_limit {
+        chain.push(Arc::new(CircuitBreaker::reference(limit)));
+    }
+    chain
 }
 
 /// Run a graph with the durable run dir, to completion. Every log's `finish`
@@ -165,8 +189,9 @@ pub async fn run_configured(
     let run_dir = rt.run_options().run_dir.clone();
     let run_runtime = rt.prepare_run(&run_dir);
     let secrets = run_runtime.secret_provider();
-    let mut coordinator =
-        Coordinator::create(run_runtime, Vec::new(), CoordinatorOptions::default())?;
+    let mut chain = policy_middleware(&run.graph);
+    chain.extend(run.middleware);
+    let mut coordinator = Coordinator::create(run_runtime, chain, CoordinatorOptions::default())?;
     for observer in run.observers {
         coordinator = coordinator.observe(observer);
     }
@@ -194,18 +219,74 @@ fn register(coordinator: &mut Coordinator, graph: &Graph) -> Result<GraphDigest,
 /// them on the provider before delivering again, or the resumed step fails
 /// with `secret_unavailable`.
 pub async fn resume(rt: &Runtime) -> Result<ExecutionReport, HostError> {
+    resume_configured(rt, Vec::new(), Vec::new(), |_, _| {}).await
+}
+
+/// [`resume`] with the host's observers, its own middleware (the same list
+/// the run was started with, after the graph's policy chain), and the handle
+/// hook. The policy chain is rebuilt from the stored root graph before the
+/// coordinator checks the recorded chain.
+pub async fn resume_configured(
+    rt: &Runtime,
+    middleware: Vec<Arc<dyn Middleware>>,
+    observers: Vec<Arc<dyn ExecutionObserver>>,
+    with_handle: impl FnOnce(CoordinatorHandle, Arc<dyn SecretProvider>),
+) -> Result<ExecutionReport, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
+    let root_graph = stored_root_graph(&run_dir)?;
+    let mut chain = root_graph
+        .as_ref()
+        .map(policy_middleware)
+        .unwrap_or_default();
+    chain.extend(middleware);
     let run_runtime = rt.prepare_run(&run_dir);
+    let secrets = run_runtime.secret_provider();
     let (mut coordinator, torn) =
-        Coordinator::resume(run_runtime, Vec::new(), CoordinatorOptions::default())?;
+        Coordinator::resume(run_runtime, chain, CoordinatorOptions::default())?;
     if torn {
         tracing::warn!("truncated an EOF-torn coordinator record before resume");
+    }
+    for observer in observers {
+        coordinator = coordinator.observe(observer);
     }
     let digest = coordinator.store().state().invocations[&InvocationId::ROOT]
         .declaration
         .graph;
     let graph = (*coordinator.load_graph(digest)?).clone();
+    with_handle(coordinator.handle(), secrets);
     finish_root(rt, coordinator, digest, graph).await
+}
+
+/// The root invocation's registered graph, read without taking the run
+/// lease: what a resume needs before the coordinator exists. `None` when the
+/// log has no root invocation yet.
+fn stored_root_graph(run_dir: &Path) -> Result<Option<Graph>, HostError> {
+    let log_path = run_dir.join(crate::COORDINATOR_FILE);
+    let bytes = fs::read(&log_path).map_err(|e| HostError::Io {
+        action: "read",
+        path:   log_path.clone(),
+        source: e,
+    })?;
+    let decoded = decode_coordinator_log(&log_path, &bytes).map_err(CoordinatorError::from)?;
+    let state = CoordinatorState::replay(&decoded.records)
+        .map_err(|error| CoordinatorError::from(crate::StoreError::State(error)))?;
+    let Some(root) = state.invocations.get(&InvocationId::ROOT) else {
+        return Ok(None);
+    };
+    let path = run_dir
+        .join(crate::GRAPHS_DIR)
+        .join(format!("{}.json", root.declaration.graph));
+    let bytes = fs::read(&path).map_err(|e| HostError::Io {
+        action: "read",
+        path:   path.clone(),
+        source: e,
+    })?;
+    let graph: Graph = serde_json::from_slice(&bytes).map_err(|error| HostError::Io {
+        action: "decode",
+        path,
+        source: io::Error::new(io::ErrorKind::InvalidData, error),
+    })?;
+    Ok(Some(graph))
 }
 
 /// The shared tail of [`run`] and [`resume`]: run the root invocation to its

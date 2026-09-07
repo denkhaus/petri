@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use executor::{ProcessSpec, StdinMode};
 use frontend_fabro::Policy;
@@ -73,6 +74,29 @@ impl Step for CommandStep {
             Err(failure) => failure.into(),
         }
     }
+}
+
+/// Fabro's default command deadline when the node sets no `timeout`.
+pub const DEFAULT_TIMEOUT_MS: u64 = 600_000;
+
+/// The failure class of a command the sandbox ended at its deadline.
+pub const TIMEOUT_CLASS: &str = "timeout";
+
+/// The last 2000 characters of the output, appended to a failure reason.
+fn append_tail(reason: &mut String, output: &str) {
+    if output.trim().is_empty() {
+        return;
+    }
+    let tail: String = output
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    reason.push('\n');
+    reason.push_str(tail.trim_end());
 }
 
 /// The text a context value feeds to stdin: strings as they are, everything
@@ -144,7 +168,13 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         StdinMode::Piped
     } else {
         StdinMode::Null
-    });
+    })
+    // The command owns its deadline (`TimeoutPolicy::HandlerManaged`): the
+    // sandbox ends the process at `timeout_ms`, and the driver arms no timer
+    // of its own around this step.
+    .with_timeout(Some(Duration::from_millis(
+        config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+    )));
     let mut handle = ctx.env.spawn(spec).await.map_err(|e| StepFailure {
         class:   SPAWN_CLASS,
         message: e.to_string(),
@@ -194,6 +224,17 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         Ending::Natural(status) if status.is_success() => {
             Stage::new(StageOutcome::Succeeded, config.on_failure)
         }
+        Ending::Natural(status) if status.timed_out => {
+            // Fabro's `Script timed out after {ms}ms`: a handler failure,
+            // classed as a timeout so the reference's transient rule applies.
+            let mut reason = format!(
+                "Script timed out after {}ms: {}",
+                config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+                config.script
+            );
+            append_tail(&mut reason, &output);
+            Stage::failed(reason, TIMEOUT_CLASS, config.on_failure)
+        }
         Ending::Natural(status) => {
             let (reason, class) = match (status.code, status.signal) {
                 (_, Some(signal)) => (
@@ -209,18 +250,7 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
                 }
             };
             let mut reason = reason;
-            if !output.trim().is_empty() {
-                let tail: String = output
-                    .chars()
-                    .rev()
-                    .take(2000)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                reason.push('\n');
-                reason.push_str(tail.trim_end());
-            }
+            append_tail(&mut reason, &output);
             Stage::failed(reason, class.as_str(), config.on_failure)
         }
         Ending::Signalled { .. } => {

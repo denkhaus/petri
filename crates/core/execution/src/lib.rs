@@ -1,6 +1,8 @@
 //! Invocation trees and reset-free execution successions.
 
+pub mod breaker;
 mod client;
+pub mod controls;
 mod coordinator;
 mod event;
 pub mod host;
@@ -15,6 +17,7 @@ mod resource;
 mod secret;
 mod state;
 mod store;
+pub mod watchdog;
 
 pub use client::{
     CoordinatorInvocationClient, InvocationClient, InvocationHandle, InvocationRequest, InvokeError,

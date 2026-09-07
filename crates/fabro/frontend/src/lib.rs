@@ -41,6 +41,7 @@ use std::path::{Component, Path, PathBuf};
 use frontend::{
     CompileInputs, Diagnostics, FileSource, Frontend, Lowered, NoFiles, WorkspaceRetention,
 };
+pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
 pub use lower::{
     FailurePolicy, Kind, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, Policy, shape_of,
 };

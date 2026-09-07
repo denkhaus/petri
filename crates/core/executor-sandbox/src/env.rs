@@ -64,16 +64,25 @@ pub(crate) struct SandboxEnv {
 /// provider that stopped the command but could not observe how (Daytona ends
 /// a session without seeing the child's status).
 fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>) -> ExitStatus {
+    // The provider's own deadline ended the command: the step reads it as a
+    // timeout, whatever signal the provider observed on the way.
+    if termination == Termination::TimedOut {
+        return ExitStatus::timed_out(signal.unwrap_or_else(|| Sig::Kill.number()));
+    }
     if let Some(signal) = signal {
         return ExitStatus::signalled(signal);
     }
     match termination {
-        Termination::Killed | Termination::TimedOut => ExitStatus::signalled(Sig::Kill.number()),
+        Termination::Killed => ExitStatus::signalled(Sig::Kill.number()),
         // The step's ladder decides cancel vs timeout; the handle only needs a
         // plausible signalled status for a stop it did not exit from.
         Termination::Cancelled => ExitStatus::signalled(Sig::Term.number()),
         // Exited, Unknown, and any future variant: report the code as-is.
-        _ => ExitStatus { code, signal: None },
+        _ => ExitStatus {
+            code,
+            signal: None,
+            timed_out: false,
+        },
     }
 }
 
@@ -270,9 +279,14 @@ impl ExecEnv for SandboxEnv {
         // The step's program and arguments go to the sandbox as given: the
         // exec contract is an argument vector, so nothing is quoted or
         // interpreted on the way.
-        let mut exec_spec = ExecSpec::new(spec.program.as_str())
-            .args(spec.args.iter().map(SmolStr::as_str))
-            .no_timeout();
+        // The step's deadline rides to the provider, which ends the command
+        // itself; a step that sets none runs until it exits or is stopped.
+        let mut exec_spec =
+            ExecSpec::new(spec.program.as_str()).args(spec.args.iter().map(SmolStr::as_str));
+        exec_spec = match spec.timeout {
+            Some(timeout) => exec_spec.timeout(timeout),
+            None => exec_spec.no_timeout(),
+        };
         if let Some(dir) = working_dir {
             exec_spec = exec_spec.working_dir(dir);
         }

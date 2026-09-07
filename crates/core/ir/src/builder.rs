@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::expr::ExprTable;
 use crate::graph::{
     Budget, Completion, Edge, Expansion, Fallthrough, Graph, GraphBody, JoinPolicy, Node,
-    ResultProjection, Routing, Scope, SelectGroup, SelectionPolicy, StepRef,
+    ResultProjection, Routing, RunPolicy, Scope, SelectGroup, SelectionPolicy, StepRef,
 };
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
 
@@ -69,6 +69,7 @@ impl<S> Default for GraphBuilder<S> {
         Self {
             graph:     Graph {
                 body:       GraphBody::default(),
+                policy:     RunPolicy::default(),
                 params:     BTreeMap::default(),
                 completion: Completion::AnyFailure,
                 result:     ResultProjection::None,

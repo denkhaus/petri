@@ -19,6 +19,10 @@ pub const QUESTION_KEY: &str = "$question";
 pub const ANSWER_KEY: &str = "$answer";
 /// The `$secret` reference prefix for a sensitive answer's value.
 pub const ANSWER_SECRET_PREFIX: &str = "answer:";
+/// The key a steering message rides under in a `Control::Deliver` value. A
+/// steer is never an answer: a step waiting on a question ignores it, and an
+/// agent step queues it as guidance for its session.
+pub const STEER_KEY: &str = "$steer";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {
@@ -27,30 +31,64 @@ pub struct QuestionOption {
     pub label: String,
 }
 
+/// Something a person should look at before answering: a review document,
+/// a pull request. The host shows the label and the URL beside the question;
+/// it never fetches the URL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionReference {
+    pub label: String,
+    pub url:   String,
+    /// What the reference is, in the asking format's words (`document`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind:  Option<String>,
+}
+
 /// What a step asks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
     /// Unique within the run: what an answer names, and what a sensitive
     /// answer's secret is registered as (`answer:<id>`).
-    pub id:        String,
-    pub text:      String,
+    pub id:         String,
+    pub text:       String,
     #[serde(default)]
-    pub options:   Vec<QuestionOption>,
+    pub options:    Vec<QuestionOption>,
     /// The option a host takes when told to auto-approve, by key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default:   Option<String>,
+    pub default:    Option<String>,
     /// Whether free text is an acceptable answer.
     #[serde(default)]
-    pub freeform:  bool,
+    pub freeform:   bool,
     /// Whether the answer must cross as a `$secret` reference.
     #[serde(default)]
-    pub sensitive: bool,
+    pub sensitive:  bool,
     /// The asking format's own question type, for a host that renders it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind:      Option<String>,
+    pub kind:       Option<String>,
+    /// What to review before answering, when the step names something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference:  Option<QuestionReference>,
+    /// How long the step waits for the answer, when it has a deadline. The
+    /// step owns the expiry; a host shows the deadline so a person knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Question {
+    /// A question with the given id and text, no options, and nothing else.
+    pub fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            id:         id.into(),
+            text:       text.into(),
+            options:    Vec::new(),
+            default:    None,
+            freeform:   false,
+            sensitive:  false,
+            kind:       None,
+            reference:  None,
+            timeout_ms: None,
+        }
+    }
+
     /// The event a step emits to ask.
     pub fn to_event(&self) -> StepEvent {
         StepEvent::Custom(json!({ QUESTION_KEY: self }))
@@ -67,6 +105,29 @@ impl Question {
     /// The secret name a sensitive answer to this question registers as.
     pub fn secret_name(&self) -> String {
         format!("{ANSWER_SECRET_PREFIX}{}", self.id)
+    }
+}
+
+/// Guidance a host delivers to a running stage: text an agent step queues
+/// for its session. Not an answer to anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Steer {
+    pub text: String,
+}
+
+impl Steer {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    /// The control a host delivers.
+    pub fn to_control(&self) -> Control {
+        Control::Deliver(json!({ STEER_KEY: self }))
+    }
+
+    /// The steer a delivered value carries, if it is one.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.get(STEER_KEY)?.clone()).ok()
     }
 }
 
@@ -157,6 +218,9 @@ impl Answer {
         if let Some(inner) = value.get(ANSWER_KEY) {
             return serde_json::from_value(inner.clone()).ok();
         }
+        if value.get(STEER_KEY).is_some() {
+            return None;
+        }
         match value {
             Value::String(s) => Some(Self {
                 question:  None,
@@ -178,16 +242,18 @@ mod tests {
     #[test]
     fn a_question_round_trips_through_its_event() {
         let question = Question {
-            id:        "q1".into(),
-            text:      "Ship?".into(),
-            options:   vec![QuestionOption {
+            id:         "q1".into(),
+            text:       "Ship?".into(),
+            options:    vec![QuestionOption {
                 key:   "Y".into(),
                 label: "[Y] Yes".into(),
             }],
-            default:   Some("Y".into()),
-            freeform:  false,
-            sensitive: false,
-            kind:      Some("yes_no".into()),
+            default:    Some("Y".into()),
+            freeform:   false,
+            sensitive:  false,
+            kind:       Some("yes_no".into()),
+            reference:  None,
+            timeout_ms: None,
         };
         assert_eq!(
             Question::from_event(&question.to_event()),
@@ -222,5 +288,16 @@ mod tests {
             Some(Answer::text("free"))
         );
         assert_eq!(Answer::from_value(&json!(3)), None);
+    }
+
+    #[test]
+    fn a_steer_is_never_read_as_an_answer() {
+        let steer = Steer::new("check the edge cases");
+        let Control::Deliver(value) = steer.to_control() else {
+            panic!("deliver");
+        };
+        assert_eq!(Steer::from_value(&value), Some(steer));
+        assert_eq!(Answer::from_value(&value), None);
+        assert_eq!(Steer::from_value(&json!({ "text": "plain" })), None);
     }
 }
