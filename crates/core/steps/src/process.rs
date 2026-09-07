@@ -6,19 +6,22 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use executor::{ExitStatus, LogLine, ProcessSpec, Sig, StdinMode};
 use ir::placeholder::SECRET_REF_KEY;
-use ir::{Control, FailureClass, FailureInfo, Outcome, Status, StepEvent, StepKindId, Value};
+use ir::{
+    Control, FailureClass, FailureInfo, LogStream, Outcome, Status, StepEvent, StepKindId, Value,
+};
 use serde::Deserialize;
 use serde_json::Map;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tokio::time;
 
 use crate::ctx::{Step, StepCtx, StepFailure};
+use crate::drain::{DRAIN_IDLE_LIMIT, Drain, Forwarded, Forwarder};
 use crate::outputs::{BAD_OUTPUT_CLASS, parse};
 
 /// The step kind id the process step registers under.
@@ -39,8 +42,10 @@ pub const WORKSPACE_CLASS: FailureClass = FailureClass::new_static("workspace_se
 /// The process could not be started at all.
 pub(crate) const SPAWN_CLASS: FailureClass = FailureClass::new_static("spawn_failed");
 
-/// How long to keep draining log output after the process has gone.
-const DRAIN_LIMIT: Duration = Duration::from_secs(5);
+/// The line the step logs when its post-exit drain ended on silence, so the
+/// persisted log says its tail may be missing.
+pub const OUTPUT_INCOMPLETE_NOTE: &str =
+    "… [output incomplete: nothing more arrived within 5s of the process ending]";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -249,16 +254,29 @@ pub async fn run_resolved(
 
     // Log capture runs on its own task and keeps going through cancellation, so a
     // cancelled step's final output is not lost.
-    let mut drain = JoinSet::new();
-    if let Some(lines) = handle.lines() {
-        drain.spawn(forward_lines(lines, ctx.logs.clone()));
-    }
+    let forwarder = handle.lines().map(|lines| {
+        let logs = ctx.logs.clone();
+        Forwarder::spawn(move |forwarded| forward_lines(lines, logs, forwarded))
+    });
 
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
 
-    let _ = time::timeout(DRAIN_LIMIT, drain.join_next()).await;
-    drain.shutdown().await;
+    // The process is gone; drain what it left, for as long as lines keep
+    // arriving. Silence for the idle limit ends the drain and is recorded in
+    // the log, since the tail may then be missing.
+    if let Some(forwarder) = forwarder
+        && forwarder.finish(DRAIN_IDLE_LIMIT).await == Drain::Silent
+    {
+        tracing::warn!(
+            firing = %ctx.firing.raw(),
+            "the step's output drain ended on silence; its log may be incomplete"
+        );
+        let _ = ctx.logs.try_send(StepEvent::Log {
+            stream: LogStream::Stderr,
+            line:   OUTPUT_INCOMPLETE_NOTE.to_owned(),
+        });
+    }
 
     let output = match read_outputs(&*ctx.env, &output_rel_path).await {
         Ok(output) => output,
@@ -411,11 +429,16 @@ pub(crate) fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output:
     }
 }
 
-async fn forward_lines(mut lines: executor::LineStream, out: mpsc::Sender<StepEvent>) {
+async fn forward_lines(
+    mut lines: executor::LineStream,
+    out: mpsc::Sender<StepEvent>,
+    forwarded: Forwarded,
+) {
     while let Some(LogLine { stream, line, .. }) = lines.recv().await {
         if out.send(StepEvent::Log { stream, line }).await.is_err() {
             return;
         }
+        forwarded.fetch_add(1, Ordering::Relaxed);
     }
 }
 

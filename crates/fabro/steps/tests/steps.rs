@@ -189,7 +189,9 @@ async fn stdin_source_feeds_the_script_from_the_context() {
         "{:?}",
         report.state.errors()
     );
-    assert_eq!(output_of(&report, "c")["stdout"], json!("from context\n"));
+    // `cat` of the context string, byte for byte: no newline the script did
+    // not write.
+    assert_eq!(output_of(&report, "c")["stdout"], json!("from context"));
 }
 
 #[tokio::test]

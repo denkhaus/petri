@@ -143,10 +143,14 @@ impl fmt::Debug for ProcessSpec {
 /// One captured output line, tagged with the stream it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogLine {
-    pub stream:    ir::LogStream,
-    pub line:      String,
+    pub stream:     ir::LogStream,
+    pub line:       String,
     /// The line hit the size cap and was cut.
-    pub truncated: bool,
+    pub truncated:  bool,
+    /// The process ended the line with a newline. False only for the last
+    /// line of a stream the process left unterminated, so a consumer that
+    /// rejoins the lines can restore the exact bytes.
+    pub terminated: bool,
 }
 
 /// Captured output, merged across both streams in arrival order.

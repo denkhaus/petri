@@ -347,7 +347,9 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
     );
     assert_eq!(status_of(&report, "join").as_deref(), Some("success"));
     assert_eq!(status_of(&report, "report").as_deref(), Some("success"));
-    assert_eq!(output_of(&report, "report")["stdout"], json!("[]\n"));
+    // `cat` of the results JSON, byte for byte: no newline the script did
+    // not write.
+    assert_eq!(output_of(&report, "report")["stdout"], json!("[]"));
     assert_eq!(invocation_count(dir.path()), 1, "no child ran");
 }
 

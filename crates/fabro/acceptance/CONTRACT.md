@@ -229,14 +229,9 @@ in the lock file.
 
 ## Tracked departures to retire
 
-Both found by the differential matrix (task 18) and recorded as decision
-records with their retirement conditions:
+Found by the differential matrix (task 18) and recorded as a decision record
+with its retirement condition:
 
-- **Command output gains a final newline**
-  (`decisions/command-output-trailing-newline.toml`). The sandbox plugin
-  streams a command's output as line records, so a final line the script
-  did not terminate gains one in `command.output`; Fabro keeps the bytes.
-  Retire when the plugin protocol reports the final line's newline state.
 - **The interview bundle needs a `[run.model]` default**
   (`decisions/interview-run-model-migration.toml`). Fabro takes the run's
   model from the launch; the standalone runner has no launch-level model
@@ -246,6 +241,16 @@ records with their retirement conditions:
 Resolved by the matrix (Petri fixed, no departure): a `yes_no` or
 `confirmation` gate records `yes`/`no` under `human.gate.<node>.answer` as
 Fabro does, and a freeform answer sets `human.gate.label`.
+
+Retired with the sandbox-driver re-pin (`a225832`): **command output gained
+a final newline**. The plugin's exec path was byte-exact all along; the
+newline came from Petri's line pump, which now records whether the process
+terminated each line (`LogLine::terminated`), and the command step joins the
+lines accordingly, so `command.output` is the script's output byte for byte
+(`printf 'a\nb'` yields `a\nb`). The `command-output-trailing-newline`
+record is deleted; the differential cells pass with `petri == fabro`
+exactly, and a recurrence is reported as an unresolved
+`value.trailing_newline` difference.
 
 Retired by task 6: **parallel branch context**. Each branch now runs as a
 child invocation from the fork snapshot, the fan-in publishes

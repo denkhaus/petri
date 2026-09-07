@@ -40,7 +40,7 @@ Rules:
   listed in `reference_version.rs` (`KINDS`), and an unknown kind fails.
 - A tracked departure (not intentional) says so in `reason` and names the
   retirement condition in `acceptance`; example:
-  `command-output-trailing-newline`.
+  `interview-run-model-migration`.
 - A migration names the old and new bundle file digests; the staged
   bundle's other files stay byte-identical to `bundles.lock.json`.
 - A baseline defect of the pinned Fabro is never accepted as Petri

@@ -946,10 +946,10 @@ fn compare_values(
             }
         }
         (Value::String(p), Value::String(f)) if p != f => {
-            // Petri's command output arrives as line records from the
-            // sandbox plugin, so a final line without a newline gains one.
-            // That exact shape is its own named difference; any other
-            // string difference is the general kind.
+            // A value equal to Fabro's plus one final newline is its own
+            // named difference (once a command output departure, now
+            // retired and accepted by no record, so a recurrence is named
+            // as itself); any other string difference is the general kind.
             let kind = if p.len() == f.len() + 1 && p.strip_suffix('\n') == Some(f.as_str()) {
                 "value.trailing_newline".to_owned()
             } else {

@@ -36,6 +36,9 @@ pub async fn pump<R: AsyncRead + Unpin + Send + 'static>(
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
+        // Only the stream's last line can lack the newline: `read_until`
+        // returns without one at end of input alone.
+        let terminated = buf.last() == Some(&b'\n');
         while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
             buf.pop();
         }
@@ -52,11 +55,51 @@ pub async fn pump<R: AsyncRead + Unpin + Send + 'static>(
                 stream,
                 line,
                 truncated,
+                terminated,
             })
             .await
             .is_err()
         {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn lines_of(input: &'static [u8]) -> Vec<LogLine> {
+        let (tx, mut rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
+        pump(input, ir::LogStream::Stdout, tx).await;
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// The pump records whether each line ended with a newline, so a
+    /// consumer that rejoins the lines can restore the exact bytes: only a
+    /// final line the process did not terminate is unterminated.
+    #[tokio::test]
+    async fn the_last_line_records_whether_the_process_terminated_it() {
+        let lines = lines_of(b"a\nb").await;
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.line.as_str(), line.terminated))
+                .collect::<Vec<_>>(),
+            [("a", true), ("b", false)]
+        );
+        let lines = lines_of(b"a\r\nb\n").await;
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.line.as_str(), line.terminated))
+                .collect::<Vec<_>>(),
+            [("a", true), ("b", true)]
+        );
+        assert!(lines_of(b"").await.is_empty());
     }
 }

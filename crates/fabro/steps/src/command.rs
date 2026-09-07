@@ -4,6 +4,7 @@
 //! object of the output read as a routing directive.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,9 +15,11 @@ use ir::{FailureClass, LogStream, Outcome, StepEvent, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Ending, Step, StepCtx, StepFailure, ValueOrSecretRef, ladder, resolve_env_refs};
+use steps::{
+    DRAIN_IDLE_LIMIT, Drain, Ending, Forwarder, Step, StepCtx, StepFailure, ValueOrSecretRef,
+    ladder, resolve_env_refs,
+};
 use tokio::io::AsyncWriteExt as _;
-use tokio::time;
 
 use crate::blobs::{self, OutputStore};
 use crate::directive;
@@ -139,9 +142,14 @@ impl OutputTail {
         }
     }
 
-    fn push_line(&mut self, line: &str) {
+    /// One captured line, with its newline only when the script wrote one:
+    /// `command.output` is the script's output byte for byte, as Fabro keeps
+    /// it, so a final line the script left unterminated stays that way.
+    fn push_line(&mut self, line: &str, terminated: bool) {
         self.push(line.as_bytes());
-        self.push(b"\n");
+        if terminated {
+            self.push(b"\n");
+        }
     }
 
     fn render(&self) -> String {
@@ -202,34 +210,41 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         });
     }
     let captured = Arc::new(Mutex::new(OutputTail::default()));
-    let mut drain = None;
-    if let Some(mut lines) = handle.lines() {
+    let forwarder = handle.lines().map(|mut lines| {
         let logs = ctx.logs.clone();
         let captured = captured.clone();
-        drain = Some(tokio::spawn(async move {
+        Forwarder::spawn(move |forwarded| async move {
             while let Some(line) = lines.recv().await {
                 captured
                     .lock()
                     .expect("the output tail lock is not poisoned")
-                    .push_line(&line.line);
+                    .push_line(&line.line, line.terminated);
                 let _ = logs
                     .send(StepEvent::Log {
                         stream: LogStream::Stdout,
                         line:   line.line,
                     })
                     .await;
+                forwarded.fetch_add(1, Ordering::Relaxed);
             }
-        }));
-    }
+        })
+    });
     let grace = ctx.env.grace();
     let ending = ladder(&mut *handle, &mut ctx.control, grace).await;
-    if let Some(mut drain) = drain
-        && time::timeout(time::Duration::from_secs(5), &mut drain)
-            .await
-            .is_err()
+    // The script is gone; keep capturing for as long as its output keeps
+    // arriving. Silence for the idle limit ends the capture, and the output
+    // then carries the truncation marker, since its tail may be missing.
+    if let Some(forwarder) = forwarder
+        && forwarder.finish(DRAIN_IDLE_LIMIT).await == Drain::Silent
     {
-        drain.abort();
-        let _ = drain.await;
+        tracing::warn!(
+            node = %config.node,
+            "the command's output drain ended on silence; its output may be incomplete"
+        );
+        captured
+            .lock()
+            .expect("the output tail lock is not poisoned")
+            .truncated = true;
     }
     let output = captured
         .lock()
@@ -317,4 +332,35 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     Ok(stage
         .with_routing(config.explicit_routes.clone(), config.kv.clone())
         .into_outcome(&config.node))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `command.output` is the script's output byte for byte: a final line
+    /// the script did not terminate gains no newline, as Fabro keeps it.
+    #[test]
+    fn captured_output_keeps_the_final_lines_newline_state() {
+        let mut tail = OutputTail::default();
+        tail.push_line("a", true);
+        tail.push_line("b", false);
+        assert_eq!(tail.render(), "a\nb");
+
+        let mut tail = OutputTail::default();
+        tail.push_line("a", true);
+        tail.push_line("b", true);
+        assert_eq!(tail.render(), "a\nb\n");
+
+        assert_eq!(OutputTail::default().render(), "");
+    }
+
+    /// A capture that ended on silence carries the truncation marker.
+    #[test]
+    fn a_silent_drain_marks_the_output_truncated() {
+        let mut tail = OutputTail::default();
+        tail.push_line("kept", true);
+        tail.truncated = true;
+        assert_eq!(tail.render(), format!("{TRUNCATED}kept\n"));
+    }
 }

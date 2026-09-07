@@ -107,8 +107,10 @@ Rules, as the plan states them:
   explicit map the projection carries. Nothing sorts arrays, coerces
   types, drops nulls, drops context updates, or collapses a failed stage.
 - One exact string shape has its own kind: Petri's value equal to Fabro's
-  plus one final newline is `value.trailing_newline` (the command output
-  departure).
+  plus one final newline is `value.trailing_newline`. That departure was
+  retired (command output is byte-exact since the sandbox-driver re-pin);
+  the kind stays named so a recurrence is reported as itself, and no record
+  accepts it.
 
 Order of checks in a cell: Petri's independent expectation, Fabro's
 independent expectation, the committed reference, then the comparison. A
