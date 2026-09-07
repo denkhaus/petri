@@ -1398,3 +1398,185 @@ async fn recovery_redelivers_with_stable_identities() {
         "the recovered run projects the same stream"
     );
 }
+
+// ── Readiness item 8: the milestone workflow through the embedding boundary ──
+
+/// The intermediate milestone workflow's shape, as the embedding host sees
+/// it: `[run.prepare]` steps, real commands, scripted agents, a human
+/// decision, a bounded `for_each` fan-out whose results a command consumes,
+/// and final file checks. The fake host pauses the fork's admission, accepts
+/// the final check's failure as a partial success, and reports a best-effort
+/// problem on the join's transition; the run is reconstructed from public
+/// events alone and replay yields the same stream.
+#[tokio::test]
+async fn the_milestone_workflow_runs_through_the_embedding_boundary() {
+    const MILESTONE: &str = r#"digraph M {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        plan [shape=box, prompt="Plan the note"]
+        edit [shape=parallelogram, script="printf 'reviewed\n' >> notes.txt; echo edited"]
+        gate [shape=hexagon, label="Ship?", question_type="yes_no"]
+        jobs [shape=parallelogram, output_schema="routing", script="printf '%s' '{\"context_updates\":{\"jobs\":[{\"name\":\"alpha\"},{\"name\":\"beta\"}]}}'"]
+        fan [shape=component, for_each="context.jobs", max_parallel=2]
+        job [shape=box, prompt="Review the item"]
+        join [shape=tripleoctagon]
+        report [shape=parallelogram, script="cat > results.json", stdin_source="context.parallel.results"]
+        check [shape=parallelogram, script="cat notes.txt results.json; echo unsigned >&2; exit 3", on_failure="exit"]
+        hold [shape=parallelogram, script="echo held > held.txt"]
+        start -> plan -> edit -> gate
+        gate -> jobs [label="[Y] Yes"]
+        gate -> hold [label="[N] No"]
+        jobs -> fan -> job -> join -> report -> check -> exit
+        hold -> exit
+    }"#;
+    let dir = RunDir::new("embed-milestone");
+    fs::write(
+        dir.path().join("workflow.toml"),
+        "[run.prepare]\n[[run.prepare.steps]]\nscript = \"printf 'draft\\\\n' > notes.txt\"\n",
+    )
+    .expect("write workflow.toml");
+    let host = FakeHost::new(Script {
+        pause: Some("fan"),
+        accept_failure_of: Some("check"),
+        metadata_problem: Some("join"),
+        ..Script::default()
+    });
+    let rt = runtime(&dir, Some(host.clone()));
+    let lowered = lower(&rt, &dir, MILESTONE);
+    let sink = Arc::new(CollectingSink::default());
+    let releaser = host.clone();
+    let release = tokio::spawn(async move {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while releaser.paused.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the fork was never paused");
+            sleep(Duration::from_millis(10)).await;
+        }
+        sleep(Duration::from_millis(100)).await;
+        releaser.release.notify_waiters();
+    });
+    let (report, receipt) = run_projected(&rt, lowered, sink.clone(), Vec::new()).await;
+    release.await.expect("the releaser ran");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(receipt.is_clean(), "{receipt:?}");
+    let events = sink.events();
+    assert_unique_ids(&events);
+    let timeline = Timeline::from_events(&events);
+    assert_eq!(timeline.run_status, Some(RunStatus::Success));
+
+    // Setup ran as a stage before the nodes; the agents, the command edit,
+    // the decision and the fan-out all left their marks.
+    assert_eq!(timeline.node("run_prepare_1").kind, "command");
+    assert_eq!(
+        timeline.node("run_prepare_1").final_status.as_deref(),
+        Some("success")
+    );
+    assert_eq!(timeline.node("plan").kind, "agent");
+    assert_eq!(timeline.node("gate").answers, vec!["Y".to_owned()]);
+    assert!(
+        timeline
+            .node("gate")
+            .waits
+            .contains(&WaitState::AwaitingAnswer),
+        "{:?}",
+        timeline.node("gate").waits
+    );
+    assert!(
+        !timeline.nodes.contains_key("hold"),
+        "the refused route never ran"
+    );
+    // The root and the two branch children, each its own invocation.
+    assert_eq!(timeline.invocations, BTreeSet::from([0, 1, 2]));
+    assert_eq!(
+        timeline.node("join").final_status.as_deref(),
+        Some("success")
+    );
+    assert_eq!(
+        timeline.node("report").final_status.as_deref(),
+        Some("success")
+    );
+
+    // Awaited admission: the fork's visit existed while paused and no attempt
+    // had started; once released it ran once.
+    assert_eq!(host.paused.load(Ordering::SeqCst), 1);
+    assert_eq!(timeline.node("fan").visits, 1);
+    assert_eq!(timeline.node("fan").attempts.len(), 1);
+
+    // Result preparation: the check's failure became a partial success with
+    // the original evidence recorded beside it, and the run went on.
+    let check = timeline.node("check");
+    assert_eq!(check.final_status.as_deref(), Some("partial_success"));
+    let evidence = bodies_of(&events, "check")
+        .into_iter()
+        .find_map(|b| match b {
+            EventBody::HostNote { kind, payload } if kind == RESULT_PREPARED_KIND => Some(payload),
+            _ => None,
+        })
+        .expect("the original evidence is recorded");
+    assert_eq!(
+        evidence["original"]["Failure"]["class"],
+        json!("exit_status:3")
+    );
+
+    // Transition ordering, per completed node, from the durable notes.
+    for node in ["run_prepare_1", "plan", "edit", "gate", "jobs", "report"] {
+        assert_eq!(
+            timeline.node(node).notes,
+            vec![
+                "fake_host:before_attempt",
+                "fake_host:prepare_result",
+                "fake_host:after_record",
+                "fake_host:transition",
+            ],
+            "{node}"
+        );
+    }
+    // The adjusted node carries the original evidence between preparation
+    // and the record.
+    assert_eq!(check.notes, vec![
+        "fake_host:before_attempt",
+        "fake_host:prepare_result",
+        "result_prepared:",
+        "fake_host:after_record",
+        "fake_host:transition",
+    ]);
+    // The join's best-effort metadata problem was recorded and did not stop
+    // the run.
+    assert!(
+        bodies_of(&events, "join").iter().any(|b| matches!(
+            b,
+            EventBody::HostNote { kind, payload }
+                if kind == TRANSITION_KIND
+                    && payload["problems"]
+                        .as_array()
+                        .is_some_and(|p| !p.is_empty())
+        )),
+        "{:#?}",
+        bodies_of(&events, "join")
+    );
+
+    // The files: setup, the edit, and the consumed branch results.
+    let ws = workspace(&dir);
+    assert_eq!(
+        fs::read_to_string(ws.join("notes.txt")).expect("notes.txt"),
+        "draft\nreviewed\n"
+    );
+    let results: Value =
+        serde_json::from_str(&fs::read_to_string(ws.join("results.json")).expect("results.json"))
+            .expect("results.json is JSON");
+    let results = results.as_array().expect("a list");
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0]["item_label"], json!("alpha"));
+    assert_eq!(results[1]["item_label"], json!("beta"));
+    assert!(results.iter().all(|r| r["status"] == json!("succeeded")));
+    assert!(!ws.join("held.txt").exists());
+
+    // Replay yields the same public stream, identity for identity.
+    let mut replayed = replay_run(dir.path()).expect("replays");
+    replayed.sort_by_key(|e| e.id);
+    assert_eq!(replayed, normalized(&events));
+}
