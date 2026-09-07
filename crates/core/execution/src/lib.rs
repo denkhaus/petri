@@ -3,6 +3,8 @@
 mod client;
 mod coordinator;
 mod event;
+pub mod events;
+pub mod hooks;
 pub mod host;
 mod id;
 pub mod inspect;

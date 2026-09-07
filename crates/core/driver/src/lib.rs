@@ -11,14 +11,17 @@
 
 mod decision;
 mod jitter;
+pub mod lifecycle;
 mod observe;
 mod run;
 mod sink;
+mod view;
 
 pub use decision::{
     AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
     RoutingRequest, RoutingResolution, default_group_decision,
 };
+pub use lifecycle::ExecutionHooks;
 pub use observe::{EventObserver, ObserveError};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,
@@ -26,3 +29,4 @@ pub use run::{
     RunConfig, RunGuard, RunHandle, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
     ScopeLeases,
 };
+pub use view::{BranchMap, BranchRef, BranchRole, FiringView};

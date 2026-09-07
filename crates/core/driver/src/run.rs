@@ -31,8 +31,14 @@ use tokio::time;
 use tracing::Instrument as _;
 
 use crate::jitter::jittered;
+use crate::lifecycle::{
+    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
+    RESULT_PREPARATION_CLASS, RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote,
+    TRANSITION_KIND, Transition, TransitionNote, apply_transition,
+};
 use crate::observe::{EventObserver, ObserveError};
 use crate::sink::LogSink;
+use crate::view::{BranchMap, live_view, routing_view};
 use crate::{
     AdmissionResolution, AdmitRequest, DecisionResolver, DefaultDecisionResolver, RoutingRequest,
     RoutingResolution,
@@ -381,6 +387,25 @@ enum Signal {
         id:     u64,
         result: Result<AcquiredScope, String>,
     },
+    /// The host's `before_attempt` answered; the resolver runs next when it
+    /// admitted.
+    HookAdmitted {
+        decision_id: DecisionId,
+        decision:    AttemptDecision,
+    },
+    /// The host's `prepare_result` answered for a finished attempt.
+    ResultPrepared {
+        firing:  FiringId,
+        attempt: Attempt,
+        result:  Result<Prepared, PrepareError>,
+    },
+    /// A routing decision that went through `after_record`, the resolver and
+    /// `transition`, with the notes to append before its record.
+    HookedRoutingResolved {
+        decision_id: DecisionId,
+        resolution:  RoutingResolution,
+        notes:       Vec<Note>,
+    },
 }
 
 /// An acquired environment that has not reached the driver yet.
@@ -501,6 +526,14 @@ pub struct Driver {
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer:    Option<AbortHandle>,
     decision_tasks:   HashMap<DecisionId, AbortHandle>,
+    /// The host's awaited extension points, when installed.
+    hooks:            Option<Arc<dyn ExecutionHooks>>,
+    /// Branch roles over the live graph, for the views hooks see. Recomputed
+    /// when a splice grows the graph.
+    branches:         BranchMap,
+    /// Finished attempts whose result the host is still preparing: the
+    /// outcome as reported, recorded as-is if the run is killed first.
+    preparing:        HashMap<FiringId, (Attempt, Outcome, AbortHandle)>,
     start:            EngineStart,
     /// Set by [`Driver::resume`]; consumed at the top of [`Driver::run`].
     resume:           Option<PendingResume>,
@@ -691,6 +724,9 @@ impl Driver {
             releases: Vec::new(),
             cleanup_timer: None,
             decision_tasks: HashMap::new(),
+            hooks: None,
+            branches: BranchMap::default(),
+            preparing: HashMap::new(),
             start,
             resume: None,
             tx,
@@ -751,6 +787,15 @@ impl Driver {
     #[must_use]
     pub fn with_decision_resolver(mut self, resolver: Arc<dyn DecisionResolver>) -> Self {
         self.decisions = resolver;
+        self
+    }
+
+    /// Install the host's awaited extension points (`lifecycle`). Without
+    /// them the driver takes the unchanged fast path: no callback, no extra
+    /// task, no extra record.
+    #[must_use]
+    pub fn with_hooks(mut self, hooks: Arc<dyn ExecutionHooks>) -> Self {
+        self.hooks = Some(hooks);
         self
     }
 
@@ -940,7 +985,16 @@ impl Driver {
                 firing,
                 attempt,
                 outcome,
-            } => self.finish(firing, attempt, outcome).await,
+            } => {
+                // A step that returned has a task; every driver-produced finish
+                // (a dispatch failure, a resume settle) has none.
+                let origin = if self.tasks.contains_key(&firing) {
+                    ResultOrigin::Step
+                } else {
+                    ResultOrigin::Driver
+                };
+                self.finish(firing, attempt, outcome, origin).await;
+            }
             Signal::Timeout { firing, attempt } => self.on_timeout(firing, attempt),
             Signal::RetryDue {
                 firing,
@@ -987,7 +1041,319 @@ impl Driver {
             Signal::AcquireFinished { scope, id, result } => {
                 self.on_acquire_finished(scope, id, result);
             }
+            Signal::HookAdmitted {
+                decision_id,
+                decision,
+            } => self.on_hook_admitted(decision_id, decision),
+            Signal::ResultPrepared {
+                firing,
+                attempt,
+                result,
+            } => self.on_result_prepared(firing, attempt, result),
+            Signal::HookedRoutingResolved {
+                decision_id,
+                resolution,
+                notes,
+            } => {
+                self.decision_tasks.remove(&decision_id);
+                if !self.engine.has_pending_routing(decision_id) {
+                    return;
+                }
+                if let DecisionId::Route { firing, .. } = decision_id {
+                    self.record_notes(firing, &notes);
+                }
+                self.feed(Event::RoutingResolved {
+                    decision_id,
+                    groups: resolution.groups,
+                });
+            }
         }
+    }
+
+    // ── Awaited extension points ─────────────────────────────────────────────
+
+    /// The branch roles over the graph as it stands now.
+    fn branch_map(&mut self) -> BranchMap {
+        if !self.branches.covers(self.engine.graph()) {
+            self.branches = BranchMap::of(self.engine.graph());
+        }
+        self.branches.clone()
+    }
+
+    /// Append the host's notes as progress records on `firing`, masked, in
+    /// order, ahead of the record they annotate.
+    fn record_notes(&mut self, firing: FiringId, notes: &[Note]) {
+        for note in notes {
+            let StepEvent::Custom(value) = note.to_step_event() else {
+                continue;
+            };
+            let ev = StepEvent::Custom(self.sink.mask_value(&value));
+            let commands = self.apply_event(Event::StepProgress { firing, ev });
+            debug_assert!(commands.is_empty(), "a progress record derives no commands");
+        }
+    }
+
+    /// Ask the host before an attempt. `true` when a hook took the decision;
+    /// `false` when the caller should go straight to the resolver.
+    fn hook_admission(&mut self, decision_id: DecisionId) -> bool {
+        let Some(hooks) = self.hooks.clone() else {
+            return false;
+        };
+        let DecisionId::AttemptStart { firing, .. } = decision_id else {
+            return false;
+        };
+        let config = self
+            .engine
+            .pending_admissions()
+            .find(|(id, _)| *id == decision_id)
+            .and_then(|(_, pending)| pending.resolved.as_ref())
+            .map(|resolved| resolved.config().clone());
+        let branches = self.branch_map();
+        let Some(view) = live_view(&self.engine, &branches, firing, config) else {
+            return false;
+        };
+        let request = AdmitAttempt {
+            decision: decision_id,
+            view:     Arc::new(view),
+        };
+        let tx = self.tx.clone();
+        let task = self.background.spawn(async move {
+            let decision = hooks.before_attempt(request).await;
+            let _ = tx
+                .send(Signal::HookAdmitted {
+                    decision_id,
+                    decision,
+                })
+                .await;
+        });
+        self.track_decision(decision_id, task);
+        true
+    }
+
+    fn on_hook_admitted(&mut self, decision_id: DecisionId, decision: AttemptDecision) {
+        self.decision_tasks.remove(&decision_id);
+        // A stop tier settled the firing while the host was deciding.
+        if !self.engine.has_pending_admission(decision_id) {
+            return;
+        }
+        let DecisionId::AttemptStart { firing, .. } = decision_id else {
+            return;
+        };
+        self.record_notes(firing, &decision.notes);
+        match decision.admission {
+            Admission::Admit => self.resolve_admission(AdmitRequest { decision_id }),
+            decision => self.feed(Event::Admitted {
+                decision_id,
+                decision,
+                trace: vec![engine::MiddlewareKey::new("host.before_attempt")],
+            }),
+        }
+    }
+
+    /// Hand a finished attempt to the host before its record, when hooks are
+    /// installed. `true` when the finish is now the hook task's to complete.
+    fn hook_result(
+        &mut self,
+        firing: FiringId,
+        attempt: Attempt,
+        outcome: &Outcome,
+        origin: ResultOrigin,
+    ) -> bool {
+        let Some(hooks) = self.hooks.clone() else {
+            return false;
+        };
+        let branches = self.branch_map();
+        let Some(view) = live_view(&self.engine, &branches, firing, None) else {
+            return false;
+        };
+        let retry = &view.node.retry;
+        let will_retry = retry.should_retry(&outcome.status) && retry.has_attempt_after(attempt);
+        let exhausted = !retry.has_attempt_after(attempt);
+        let request = PrepareResult {
+            view: Arc::new(view),
+            outcome: outcome.clone(),
+            origin,
+            will_retry,
+            exhausted,
+        };
+        let tx = self.tx.clone();
+        let task = self.background.spawn(async move {
+            let result = hooks.prepare_result(request).await;
+            let _ = tx
+                .send(Signal::ResultPrepared {
+                    firing,
+                    attempt,
+                    result,
+                })
+                .await;
+        });
+        self.preparing
+            .insert(firing, (attempt, outcome.clone(), task));
+        true
+    }
+
+    fn on_result_prepared(
+        &mut self,
+        firing: FiringId,
+        attempt: Attempt,
+        result: Result<Prepared, PrepareError>,
+    ) {
+        let Some((pending_attempt, original, _)) = self.preparing.remove(&firing) else {
+            return;
+        };
+        if pending_attempt != attempt {
+            return;
+        }
+        let mut outcome = original.clone();
+        let mut notes = Vec::new();
+        match result {
+            Ok(prepared) => {
+                let reason = prepared.adjustment.reason.clone();
+                let changed = prepared.adjustment.apply(&mut outcome);
+                notes.extend(prepared.notes);
+                if changed {
+                    notes.push(result_prepared_note(attempt, &original, &outcome, reason));
+                }
+            }
+            Err(error) if error.fatal => {
+                outcome = Outcome::new(
+                    Status::Failure(
+                        FailureInfo::new(error.message.clone())
+                            .with_class(RESULT_PREPARATION_CLASS),
+                    ),
+                    original.output.clone(),
+                );
+                notes.push(result_prepared_note(
+                    attempt,
+                    &original,
+                    &outcome,
+                    Some(error.message),
+                ));
+            }
+            Err(error) => {
+                notes.push(Note::new(
+                    RESULT_PREPARED_KIND,
+                    serde_json::json!({
+                        "attempt": attempt,
+                        "best_effort_problem": error.message,
+                    }),
+                ));
+            }
+        }
+        // The host's changes are masked like the step's own output.
+        outcome.output = self.sink.mask_value(&outcome.output);
+        outcome.status = outcome
+            .status
+            .map_messages(|message| self.sink.masker().mask(&message));
+        self.record_notes(firing, &notes);
+        self.feed(Event::StepFinished {
+            firing,
+            attempt,
+            outcome,
+        });
+    }
+
+    /// A kill ends the host's result preparation: every reported outcome is
+    /// recorded as it was, so the run can reach quiescence.
+    fn abandon_preparation(&mut self) {
+        let preparing: Vec<(FiringId, (Attempt, Outcome, AbortHandle))> =
+            self.preparing.drain().collect();
+        for (firing, (attempt, outcome, task)) in preparing {
+            task.abort();
+            self.feed(Event::StepFinished {
+                firing,
+                attempt,
+                outcome,
+            });
+        }
+    }
+
+    /// Resolve routing through `after_record`, the resolver, and
+    /// `transition`, in that order, on one task. `true` when hooks own it.
+    fn hook_routing(&mut self, request: RoutingRequest) -> Option<RoutingRequest> {
+        let Some(hooks) = self.hooks.clone() else {
+            return Some(request);
+        };
+        let DecisionId::Route { firing, .. } = request.decision_id else {
+            return Some(request);
+        };
+        let branches = self.branch_map();
+        let Some(view) = routing_view(&self.engine, &branches, firing) else {
+            return Some(request);
+        };
+        let outcome = self
+            .engine
+            .pending_routings()
+            .find(|pending| pending.firing == firing)
+            .map_or_else(
+                || Outcome::new(Status::Skipped, Value::Null),
+                |pending| pending.outcome.clone(),
+            );
+        let view = Arc::new(view);
+        let decision_id = request.decision_id;
+        let resolver = self.decisions.clone();
+        let tx = self.tx.clone();
+        let task = self.background.spawn(async move {
+            let mut notes = hooks
+                .after_record(Recorded {
+                    view:    view.clone(),
+                    outcome: outcome.clone(),
+                })
+                .await;
+            let group_ids: Vec<u32> = request.groups.iter().map(|group| group.group).collect();
+            let resolution = match resolver.route_now(&request) {
+                Some(resolution) => resolution,
+                None => resolver
+                    .route(request)
+                    .await
+                    .unwrap_or_else(|error| blocked_routing(&group_ids, error.message())),
+            };
+            let mut groups = resolution.groups;
+            let attempt = view.attempt;
+            let report = hooks
+                .transition(Transition {
+                    decision: decision_id,
+                    view,
+                    outcome,
+                    groups: groups.clone(),
+                })
+                .await;
+            apply_transition(&mut groups, &report);
+            let transition = match &report {
+                Ok(report) => {
+                    notes.extend(report.notes.iter().cloned());
+                    (!report.problems.is_empty() || !report.overrides.is_empty()).then(|| {
+                        TransitionNote {
+                            attempt,
+                            problems: report.problems.clone(),
+                            overrides: report.overrides.clone(),
+                            blocked: None,
+                        }
+                    })
+                }
+                Err(error) => Some(TransitionNote {
+                    attempt,
+                    problems: Vec::new(),
+                    overrides: Vec::new(),
+                    blocked: Some(error.message.clone()),
+                }),
+            };
+            if let Some(transition) = transition {
+                notes.push(Note::new(
+                    TRANSITION_KIND,
+                    serde_json::to_value(transition).unwrap_or(Value::Null),
+                ));
+            }
+            let _ = tx
+                .send(Signal::HookedRoutingResolved {
+                    decision_id,
+                    resolution: RoutingResolution { groups },
+                    notes,
+                })
+                .await;
+        });
+        self.track_decision(decision_id, task);
+        None
     }
 
     /// The two-tier stop wiring (§10). The first root cancel feeds
@@ -1035,6 +1401,7 @@ impl Driver {
         self.feed(Event::KillRequested {
             scope: ir::CancelScopeId::ROOT,
         });
+        self.abandon_preparation();
     }
 
     fn abort_decisions(&mut self) {
@@ -1142,37 +1509,45 @@ impl Driver {
         }
     }
 
+    /// The resolver's admission, after any host hook admitted.
+    fn resolve_admission(&mut self, request: AdmitRequest) {
+        let decision_id = request.decision_id;
+        if let Some(resolution) = self.decisions.admit_now(&request) {
+            self.send_decision_signal(Signal::Admitted {
+                decision_id,
+                resolution,
+            });
+            return;
+        }
+        let resolver = self.decisions.clone();
+        let tx = self.tx.clone();
+        let task = self.background.spawn(async move {
+            let resolution =
+                resolver
+                    .admit(request)
+                    .await
+                    .unwrap_or_else(|error| AdmissionResolution {
+                        decision: Admission::Block {
+                            reason: SmolStr::new(error.message()),
+                        },
+                        trace:    Vec::new(),
+                    });
+            let _ = tx
+                .send(Signal::Admitted {
+                    decision_id,
+                    resolution,
+                })
+                .await;
+        });
+        self.track_decision(decision_id, task);
+    }
+
     fn dispatch(&mut self, command: Command) {
         match command {
             Command::Admit { decision_id } => {
-                let request = AdmitRequest { decision_id };
-                if let Some(resolution) = self.decisions.admit_now(&request) {
-                    self.send_decision_signal(Signal::Admitted {
-                        decision_id,
-                        resolution,
-                    });
-                    return;
+                if !self.hook_admission(decision_id) {
+                    self.resolve_admission(AdmitRequest { decision_id });
                 }
-                let resolver = self.decisions.clone();
-                let tx = self.tx.clone();
-                let task =
-                    self.background.spawn(async move {
-                        let resolution = resolver.admit(request).await.unwrap_or_else(|error| {
-                            AdmissionResolution {
-                                decision: Admission::Block {
-                                    reason: SmolStr::new(error.message()),
-                                },
-                                trace:    Vec::new(),
-                            }
-                        });
-                        let _ = tx
-                            .send(Signal::Admitted {
-                                decision_id,
-                                resolution,
-                            })
-                            .await;
-                    });
-                self.track_decision(decision_id, task);
             }
             Command::ResolveRouting {
                 decision_id,
@@ -1184,6 +1559,9 @@ impl Driver {
                     restart_allowed,
                     groups,
                 };
+                let Some(request) = self.hook_routing(request) else {
+                    return;
+                };
                 if let Some(resolution) = self.decisions.route_now(&request) {
                     self.send_decision_signal(Signal::RoutingResolved {
                         decision_id,
@@ -1193,32 +1571,20 @@ impl Driver {
                 }
                 let resolver = self.decisions.clone();
                 let tx = self.tx.clone();
-                let task =
-                    self.background.spawn(async move {
-                        let group_ids: Vec<u32> =
-                            request.groups.iter().map(|group| group.group).collect();
-                        let resolution = resolver.route(request).await.unwrap_or_else(|error| {
-                            RoutingResolution {
-                                groups: group_ids
-                                    .into_iter()
-                                    .map(|group| GroupDecision {
-                                        group,
-                                        draw: None,
-                                        trace: Vec::new(),
-                                        decision: RouteDecision::Block {
-                                            reason: SmolStr::new(error.message()),
-                                        },
-                                    })
-                                    .collect(),
-                            }
-                        });
-                        let _ = tx
-                            .send(Signal::RoutingResolved {
-                                decision_id,
-                                resolution,
-                            })
-                            .await;
-                    });
+                let task = self.background.spawn(async move {
+                    let group_ids: Vec<u32> =
+                        request.groups.iter().map(|group| group.group).collect();
+                    let resolution = resolver
+                        .route(request)
+                        .await
+                        .unwrap_or_else(|error| blocked_routing(&group_ids, error.message()));
+                    let _ = tx
+                        .send(Signal::RoutingResolved {
+                            decision_id,
+                            resolution,
+                        })
+                        .await;
+                });
                 self.track_decision(decision_id, task);
             }
             Command::AcquireScope { scope } => self.acquire(scope),
@@ -1976,11 +2342,22 @@ impl Driver {
                 "the step did not return after Control::Cancel; the driver stopped waiting",
             )
             .await;
-        self.finish(firing, attempt, escalation_outcome(status, &CANCEL_FORCED))
-            .await;
+        self.finish(
+            firing,
+            attempt,
+            escalation_outcome(status, &CANCEL_FORCED),
+            ResultOrigin::Driver,
+        )
+        .await;
     }
 
-    async fn finish(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
+    async fn finish(
+        &mut self,
+        firing: FiringId,
+        attempt: Attempt,
+        outcome: Outcome,
+        origin: ResultOrigin,
+    ) {
         // A firing finished from `fail_now` or from resume's direct finish has no
         // task, and so no step span: those events belong to the run instead.
         if let Some(task) = self.tasks.get_mut(&firing) {
@@ -2064,6 +2441,11 @@ impl Driver {
             "step finished"
         );
 
+        // The host prepares the result before its record when hooks are
+        // installed; the hook task then feeds the finish.
+        if self.hook_result(firing, attempt, &outcome, origin) {
+            return;
+        }
         self.feed(Event::StepFinished {
             firing,
             attempt,
@@ -2088,6 +2470,43 @@ impl Driver {
             StepEvent::Custom(value) => StepEvent::Custom(self.sink.mask_value(&value)),
         }
     }
+}
+
+/// Every group blocked with one reason: what a failed resolver resolves to.
+fn blocked_routing(groups: &[u32], reason: &str) -> RoutingResolution {
+    RoutingResolution {
+        groups: groups
+            .iter()
+            .map(|group| GroupDecision {
+                group:    *group,
+                draw:     None,
+                trace:    Vec::new(),
+                decision: RouteDecision::Block {
+                    reason: SmolStr::new(reason),
+                },
+            })
+            .collect(),
+    }
+}
+
+/// The original-evidence note for an adjusted result.
+fn result_prepared_note(
+    attempt: Attempt,
+    original: &Outcome,
+    effective: &Outcome,
+    reason: Option<String>,
+) -> Note {
+    Note::new(
+        RESULT_PREPARED_KIND,
+        serde_json::to_value(ResultPreparedNote {
+            attempt,
+            original: original.status.clone(),
+            effective: effective.status.clone(),
+            output: original.output.clone(),
+            reason,
+        })
+        .unwrap_or(Value::Null),
+    )
 }
 
 fn value_to_string(value: &Value) -> String {
@@ -2246,6 +2665,7 @@ mod teardown_tests {
             firing,
             attempt,
             Outcome::new(Status::Cancelled, Value::Null),
+            ResultOrigin::Driver,
         ));
         time::timeout(Duration::from_secs(10), async {
             tokio::select! {
