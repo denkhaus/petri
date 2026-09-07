@@ -1,0 +1,9 @@
+digraph ToolThenAnswer {
+    graph [goal="One tool call, then an answer that reports what the tool did"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    agent [label="Count the notes", prompt="Run `wc -l < notes.txt` and report the count as COUNT=<n>.", on_failure="exit"]
+    report [shape=parallelogram, script="cat notes.txt; ls -1 | sort"]
+    start -> agent -> report -> exit
+}

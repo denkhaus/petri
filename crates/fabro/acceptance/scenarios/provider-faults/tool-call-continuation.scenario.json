@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "id": "provider-faults/tool-call-continuation",
+  "family": "provider-faults",
+  "title": "A tool call is answered and its result continues the same turn: the second request carries the tool result, the model's answer names it, the tool ran exactly once, and no duplicate effect reaches the workspace.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/tool-then-answer.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          },
+          "notes.txt": {
+            "text": "one\ntwo\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"anthropic\"\nname = \"{model}\"\n[run.model.controls]\nreasoning_effort = \"high\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:anthropic"
+  },
+  "services": {
+    "anthropic": [
+      {
+        "scenario_id": "count",
+        "matcher": {
+          "input_contains": "Run `wc -l < notes.txt`"
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "count",
+              "name": "Bash",
+              "arguments": {
+                "command": "wc -l < notes.txt | tr -d ' ' > count.txt && cat count.txt"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "answer",
+        "matcher": {
+          "input_contains": "2"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "COUNT=2",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "agent",
+        "report"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "agent": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "response.agent": "COUNT=2",
+        "last_stage": "agent"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "count.txt",
+        "text": "2\n"
+      },
+      {
+        "path": "notes.txt",
+        "text": "one\ntwo\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "anthropic": {
+        "consumed": [
+          "count",
+          "answer"
+        ],
+        "unmatched": 0,
+        "requests": 2,
+        "contains": [
+          {
+            "request": 1,
+            "text": "2"
+          }
+        ]
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": [
+        "{credential}"
+      ]
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

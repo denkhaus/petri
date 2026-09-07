@@ -93,6 +93,84 @@ cell!(
     openrouter
 );
 
+// ── Security review ─────────────────────────────────────────────────────────
+
+cell!(
+    security_review_no_vulnerabilities,
+    "security-review/no-vulnerabilities",
+    host,
+    openrouter
+);
+cell!(
+    security_review_several_verified,
+    "security-review/several-verified",
+    host,
+    openrouter
+);
+cell!(
+    security_review_rejected_candidate,
+    "security-review/rejected-candidate",
+    host,
+    openrouter
+);
+cell!(
+    security_review_partial_branch_failure,
+    "security-review/partial-branch-failure",
+    host,
+    openrouter
+);
+cell!(
+    security_review_malformed_response,
+    "security-review/malformed-response",
+    host,
+    openrouter
+);
+cell!(
+    security_review_timeout_cancel,
+    "security-review/timeout-cancel",
+    host,
+    openrouter
+);
+
+// ── Cross-cutting provider faults ───────────────────────────────────────────
+
+cell!(
+    provider_faults_auth_failure,
+    "provider-faults/auth-failure",
+    host,
+    anthropic
+);
+cell!(
+    provider_faults_rate_limit_then_recovery,
+    "provider-faults/rate-limit-then-recovery",
+    host,
+    anthropic
+);
+cell!(
+    provider_faults_exhausted_retries,
+    "provider-faults/exhausted-retries",
+    host,
+    anthropic
+);
+cell!(
+    provider_faults_hanging_response,
+    "provider-faults/hanging-response",
+    host,
+    anthropic
+);
+cell!(
+    provider_faults_truncated_stream,
+    "provider-faults/truncated-stream",
+    host,
+    anthropic
+);
+cell!(
+    provider_faults_tool_call_continuation,
+    "provider-faults/tool-call-continuation",
+    host,
+    anthropic
+);
+
 // ── Interview gates ─────────────────────────────────────────────────────────
 
 cell!(

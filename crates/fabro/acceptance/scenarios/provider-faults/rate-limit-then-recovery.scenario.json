@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "id": "provider-faults/rate-limit-then-recovery",
+  "family": "provider-faults",
+  "title": "A rate-limit reply is retried on the same route and the second answer succeeds: the stage completes, the tool call runs once, the file is edited once, and the retry is visible only in the request count.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/edit-and-verify.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"anthropic\"\nname = \"{model}\"\n[run.model.controls]\nreasoning_effort = \"high\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:anthropic"
+  },
+  "services": {
+    "anthropic": [
+      {
+        "scenario_id": "rate-limited",
+        "matcher": {
+          "input_contains": "Append the word reviewed"
+        },
+        "script": {
+          "kind": "error",
+          "status": 429,
+          "error_type": "rate_limit_error",
+          "code": "rate_limit_exceeded",
+          "message": "slow down",
+          "retry_after": "0"
+        }
+      },
+      {
+        "scenario_id": "append",
+        "matcher": {
+          "input_contains": "Append the word reviewed"
+        },
+        "script": {
+          "kind": "success",
+          "tool_calls": [
+            {
+              "id": "append",
+              "name": "Bash",
+              "arguments": {
+                "command": "printf 'reviewed\\n' >> notes.txt && echo APPEND_DONE"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "answer",
+        "matcher": {
+          "input_contains": "APPEND_DONE"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "APPENDED: notes.txt now ends with reviewed.",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "prepare",
+        "agent",
+        "verify"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "agent": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "response.agent": "APPENDED: notes.txt now ends with reviewed.",
+        "last_stage": "agent",
+        "command.output": "draft\nreviewed\n"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\nreviewed\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "anthropic": {
+        "consumed": [
+          "rate-limited",
+          "append",
+          "answer"
+        ],
+        "unmatched": 0,
+        "requests": 3,
+        "model": "{model}"
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": [
+        "{credential}"
+      ]
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

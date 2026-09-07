@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "id": "provider-faults/auth-failure",
+  "family": "provider-faults",
+  "title": "The provider rejects the credential: the agent stage fails with the authentication class, the run stops on the exit policy, no tool runs, and the workspace keeps what the earlier command wrote.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/edit-and-verify.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"anthropic\"\nname = \"{model}\"\n[run.model.controls]\nreasoning_effort = \"high\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:anthropic"
+  },
+  "services": {
+    "anthropic": [
+      {
+        "scenario_id": "auth-denied",
+        "matcher": {
+          "input_contains": "Append the word reviewed"
+        },
+        "script": {
+          "kind": "error",
+          "status": 401,
+          "error_type": "authentication_error",
+          "code": "invalid_api_key",
+          "message": "the fixture rejects this key"
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "failed",
+      "required_nodes": [
+        "prepare",
+        "agent"
+      ],
+      "forbidden_nodes": [
+        "verify"
+      ],
+      "visits": {
+        "agent": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "failure_class": "llm:authentication",
+        "command.output": "prepared\n"
+      },
+      "absent": [
+        "response.agent"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "anthropic": {
+        "consumed": [
+          "auth-denied"
+        ],
+        "unmatched": 0,
+        "requests": 1,
+        "model": "{model}",
+        "effort": "high"
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": [
+        "{credential}"
+      ]
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

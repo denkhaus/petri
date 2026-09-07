@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "id": "provider-faults/hanging-response",
+  "family": "provider-faults",
+  "title": "The provider never answers and the run is cancelled from the terminal: the run ends cancelled with the interrupt reason, no tool ran, no further request is made, and the retained workspace holds only what the command wrote.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/edit-and-verify.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"anthropic\"\nname = \"{model}\"\n[run.model.controls]\nreasoning_effort = \"high\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:anthropic"
+  },
+  "services": {
+    "anthropic": [
+      {
+        "scenario_id": "hangs",
+        "matcher": {
+          "input_contains": "Append the word reviewed"
+        },
+        "script": {
+          "kind": "hang"
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {
+    "interrupt_when": {
+      "request": "hangs"
+    }
+  },
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "cancelled",
+      "required_nodes": [
+        "prepare"
+      ],
+      "forbidden_nodes": [
+        "verify"
+      ],
+      "visits": {}
+    },
+    "context": {
+      "exact": {
+        "command.output": "prepared\n"
+      },
+      "absent": [
+        "response.agent"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "anthropic": {
+        "consumed": [
+          "hangs"
+        ],
+        "unmatched": 0,
+        "requests": 1
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": [
+        "{credential}"
+      ]
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true,
+      "no_requests_after_cancel": true,
+      "cancel_reason": "interrupt"
+    }
+  }
+}
