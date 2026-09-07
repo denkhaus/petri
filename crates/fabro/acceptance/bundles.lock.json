@@ -768,12 +768,11 @@
         "code-review/reverse-branch-completion",
         "code-review/multi-level-fan-out"
       ],
-      "blockers": [
-        "workflow.toml [run.model.fallbacks] is not applied yet (task 12); [run.environment] image.dockerfile warns and the run uses the selected backend's default image"
-      ],
+      "blockers": [],
       "notes": [
         "The prepare node reads context.internal.run_id through stdin_source; Petri must expose an equivalent run identity.",
-        "publish_pr is a no-op unless post_pr=\"true\"; scenarios keep it empty."
+        "publish_pr is a no-op unless post_pr=\"true\"; scenarios keep it empty.",
+        "[run.environment] image.dockerfile warns and the run uses the selected backend's default runner image; the rule tiers' PyYAML import is satisfied there since sandbox-images df708f91."
       ]
     },
     {

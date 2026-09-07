@@ -18,7 +18,7 @@ use testkit::is_docker_ready;
 use tokio::process::Command;
 use tokio::time;
 
-const DIND_IMAGE: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-2b40d6c3364d";
+const DIND_IMAGE: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-df708f910111";
 
 async fn dind_image_local() -> bool {
     Command::new("docker")

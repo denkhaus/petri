@@ -189,11 +189,13 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
 
     // ── The declared environment ────────────────────────────────────────
     let mut path_prefix = Vec::new();
-    if !scenario.fixture.python_modules.is_empty() {
-        // The bundle's image installs these modules into its `python3`. On
-        // the host, the interpreter that has them stands first on PATH and
-        // the directories they live in ride `PYTHONPATH`, because the run's
-        // isolated `HOME` hides a user site-packages directory.
+    if backend == Backend::Host && !scenario.fixture.python_modules.is_empty() {
+        // The bundle's image installs these modules into its `python3`, and
+        // the pinned runner image carries them, so a Docker scope needs
+        // nothing from the host. On the host, the interpreter that has them
+        // stands first on PATH and the directories they live in ride
+        // `PYTHONPATH`, because the run's isolated `HOME` hides a user
+        // site-packages directory.
         let Some((python, site_dirs)) =
             python_with(&scenario.fixture.python_modules, &case.root.join("home"))
         else {

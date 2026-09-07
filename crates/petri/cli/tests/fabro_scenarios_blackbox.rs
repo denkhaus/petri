@@ -49,6 +49,12 @@ cell!(
     host,
     openrouter
 );
+cell!(
+    code_review_findings_in_multiple_branches_docker,
+    "code-review/findings-in-multiple-branches",
+    docker,
+    openrouter
+);
 
 cell!(
     code_review_empty_diff,

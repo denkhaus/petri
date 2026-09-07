@@ -9,7 +9,7 @@ use executor::EnvError;
 use ir::RuntimeSpec;
 use sandbox_driver::{Resources, SandboxKind};
 
-const RUNNER_PIN: &str = "2b40d6c3364d";
+const RUNNER_PIN: &str = "df708f910111";
 const DEFAULT_LABEL: &str = "ubuntu-24.04";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

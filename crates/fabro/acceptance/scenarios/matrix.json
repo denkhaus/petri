@@ -58,9 +58,9 @@
       "backend": "docker",
       "agent": "api:openrouter",
       "required": true,
-      "status": "blocked",
-      "reason": "the review bundle's rule-mapped tiers need PyYAML, which the default Docker runner image does not carry and the bundle's own image cannot be built offline; `backend/dynamic-parallelism@docker` covers dynamic fan-out on Docker instead",
-      "test": null
+      "status": "planned",
+      "reason": null,
+      "test": "code_review_findings_in_multiple_branches_docker"
     },
     {
       "cell": "code-review/findings-in-multiple-branches@host/openrouter",
