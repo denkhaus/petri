@@ -263,11 +263,16 @@ pub fn read_layer(text: &str, source: &str, diags: &mut Diagnostics) -> Vec<Hook
     let table: toml::Table = match text.parse() {
         Ok(table) => table,
         Err(error) => {
-            diags.error(
-                "fabro.hooks.toml",
-                span,
-                format!("`{source}` is not valid TOML: {error}"),
-            );
+            // A file that names hooks and cannot be read would skip them
+            // silently; the workflow reader's own warning covers a file that
+            // configures none.
+            if text.contains("run.hooks") {
+                diags.error(
+                    "fabro.hooks.toml",
+                    span,
+                    format!("`{source}` configures hooks but is not valid TOML: {error}"),
+                );
+            }
             return Vec::new();
         }
     };

@@ -186,7 +186,12 @@ pub(super) fn read(
                 Span::file(&path),
                 format!("`{path}` is not valid TOML and is ignored: {error}"),
             );
-            return RunSettings::default();
+            // The hook loader still sees the text: a configured hook in an
+            // unparseable file is an error there, never a silent skip.
+            return RunSettings {
+                hooks_text: Some((path, text)),
+                ..RunSettings::default()
+            };
         }
     };
     let mut reader = Reader {

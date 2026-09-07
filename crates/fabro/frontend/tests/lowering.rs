@@ -1690,6 +1690,51 @@ fn codes_of(text: &str) -> Vec<String> {
 }
 
 #[test]
+fn an_unparseable_workflow_toml_that_configures_hooks_is_an_error() {
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[[run.hooks]]\nevent = \"stage_start\"\nscript = \"sed 's/\\(x\\)/y/'\"\n",
+    )]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    let codes: Vec<String> = lowered
+        .diagnostics
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect();
+    assert!(codes.contains(&"fabro.hooks.toml".to_string()), "{codes:?}");
+    assert!(
+        lowered.graph.is_none(),
+        "a hook that cannot be read is never skipped silently"
+    );
+    // The same broken file without hooks stays a warning.
+    let files = files(&[("wf/workflow.toml", "[run]\ngoal = \"bad \\( escape\"\n")]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    assert!(lowered.graph.is_some(), "{:?}", lowered.diagnostics);
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "fabro.workflow_toml")
+    );
+}
+
+#[test]
 fn hooks_load_from_every_layer_and_merge_by_id() {
     let files = files(&[
         (

@@ -1856,6 +1856,19 @@ impl Ctx<'_> {
             res.kind == Kind::Human,
             random,
         );
+        // The edge table hooks read: arm id to target node id and label, so
+        // an `edge_selected` hook names Fabro nodes, never engine ids.
+        let mut edges = Map::new();
+        for (arm, out) in group.arms.iter().zip(&lowered) {
+            edges.insert(
+                arm.id.raw().to_string(),
+                json!({ "to": out.target, "label": out.label }),
+            );
+        }
+        let meta = &mut self.b.node_mut(res.id).meta;
+        if let Value::Object(map) = meta {
+            map.insert("edges".into(), Value::Object(edges));
+        }
         self.b.node_mut(res.id).routing = Routing::groups(vec![group]);
     }
 

@@ -66,8 +66,8 @@ impl ScopeEnvironments {
 
 /// Record the step's environment for hooks that run in its scope.
 pub fn record(ctx: &StepCtx) {
-    if let Some(envs) = ctx.capability::<ScopeEnvironments>() {
-        envs.record(ctx.scope, ctx.env.clone());
+    if let Some(local) = ctx.capability::<LocalHooksHandle>() {
+        local.0.environments().record(ctx.scope, ctx.env.clone());
     }
 }
 

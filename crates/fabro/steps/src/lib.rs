@@ -79,7 +79,6 @@ pub fn register(runtime: Runtime) -> Runtime {
         runtime
             .hooks(Arc::new(HookAdapter::new(service.clone())))
             .capability(HookServiceHandle(service))
-            .capability(local.environments())
             .capability(LocalHooksHandle(local))
     };
     runtime.run_services(|run_dir, caps| {
