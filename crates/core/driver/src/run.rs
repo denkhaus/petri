@@ -25,7 +25,7 @@ use ir::{
 use smol_str::SmolStr;
 use steps::{Capabilities, Registry, StepCtx};
 use tokio::runtime::Handle;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio::time;
 use tracing::Instrument as _;
@@ -34,7 +34,7 @@ use crate::jitter::jittered;
 use crate::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
     RESULT_PREPARATION_CLASS, RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote,
-    TRANSITION_KIND, Transition, TransitionNote, apply_transition,
+    RunFinished, ScopeReleased, TRANSITION_KIND, Transition, TransitionNote, apply_transition,
 };
 use crate::observe::{EventObserver, ObserveError};
 use crate::sink::LogSink;
@@ -113,6 +113,10 @@ pub struct RunConfig {
     /// supplies them; a bare driver has none, and its executor then keys
     /// each sandbox by the scope alone and ends it with the scope.
     pub scope_leases:        ScopeLeases,
+    /// Whether this execution's terminal exit ends the run: a bare driver
+    /// always owns its run; under a coordinator only the root invocation's
+    /// executions do. The owner reports [`ExecutionHooks::run_finished`].
+    pub run_owner:           bool,
 }
 
 /// Which durable lease each scope of an execution acquires its sandbox under.
@@ -168,7 +172,14 @@ impl RunConfig {
             workspace_override:  None,
             runtime_override:    None,
             scope_leases:        ScopeLeases::None,
+            run_owner:           true,
         }
+    }
+
+    #[must_use]
+    pub fn with_run_owner(mut self, run_owner: bool) -> Self {
+        self.run_owner = run_owner;
+        self
     }
 
     #[must_use]
@@ -570,6 +581,9 @@ pub struct Driver {
     run_guards:       Vec<Box<dyn RunGuard>>,
     guard_teardown:   Option<JoinHandle<()>>,
     releases:         Vec<JoinHandle<ReleaseReport>>,
+    /// Opened once the run-end hook has run: a release spawned at the run's
+    /// end waits for it, so `run_finished` precedes `scope_released`.
+    end_gate:         watch::Sender<bool>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer:    Option<AbortHandle>,
     /// One id per attempt-timer arming, so a stale expiry is recognizable.
@@ -774,6 +788,7 @@ impl Driver {
             run_guards: Vec::new(),
             guard_teardown: None,
             releases: Vec::new(),
+            end_gate: watch::channel(false).0,
             cleanup_timer: None,
             next_timer_id: 0,
             decision_tasks: HashMap::new(),
@@ -863,6 +878,14 @@ impl Driver {
         self
     }
 
+    /// Whether this execution's terminal exit ends the run
+    /// ([`RunConfig::run_owner`]).
+    #[must_use]
+    pub fn with_run_owner(mut self, run_owner: bool) -> Self {
+        self.config.run_owner = run_owner;
+        self
+    }
+
     /// Run to completion.
     ///
     /// The loop's state is boxed here so the future a caller holds stays
@@ -906,7 +929,7 @@ impl Driver {
             let signal = tokio::select! {
                 signal = self.rx.recv() => signal,
                 Some(handle) = self.abandoned_rx.recv() => {
-                    self.spawn_release(handle, ScopeOutcome::Failed);
+                    self.spawn_release(handle, ScopeOutcome::Failed, None);
                     continue;
                 }
                 joined = self.background.join_next(), if !self.background.is_empty() => {
@@ -938,6 +961,11 @@ impl Driver {
         }
         self.tasks.clear();
         self.finish_acquires().await;
+
+        // The run-end hook runs while every environment is still usable, then
+        // the releases held for it proceed.
+        self.report_run_finished().await;
+        let _ = self.end_gate.send_replace(true);
 
         // Release is best effort and never fails the run, but the run should not
         // report back before the environments are actually gone.
@@ -1978,14 +2006,55 @@ impl Driver {
         } else {
             ScopeOutcome::Succeeded
         };
-        self.spawn_release(handle, outcome);
+        self.spawn_release(handle, outcome, Some(scope));
     }
 
-    fn spawn_release(&mut self, handle: EnvHandle, outcome: ScopeOutcome) {
+    /// Release an environment on its own task. A scope that ran a step gets
+    /// the host's `scope_released` point first, unless the sandbox is an
+    /// inherited one (the release ends this execution's use of it, not the
+    /// sandbox); a release that is part of the run's end waits for the
+    /// run-end hook so the two keep their order.
+    fn spawn_release(&mut self, handle: EnvHandle, outcome: ScopeOutcome, scope: Option<ScopeId>) {
         let executor = self.executor.clone();
+        let inherited = matches!(self.config.scope_leases, ScopeLeases::Shared(_));
+        let hooks = self.hooks.clone().zip(scope).filter(|_| !inherited);
+        let mut gate = self.engine.is_finished().then(|| self.end_gate.subscribe());
         self.releases.push(tokio::spawn(async move {
+            if let Some((hooks, scope)) = hooks {
+                if let Some(gate) = gate.as_mut() {
+                    while !*gate.borrow_and_update() {
+                        if gate.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                hooks.scope_released(ScopeReleased { scope, outcome }).await;
+            }
             executor.release(handle, outcome).await
         }));
+    }
+
+    /// Tell the host the run ended, when this execution owns the run and its
+    /// exit is terminal (a restart hands the run on; nothing ended).
+    async fn report_run_finished(&self) {
+        if !self.config.run_owner {
+            return;
+        }
+        let Some(hooks) = &self.hooks else {
+            return;
+        };
+        if matches!(self.engine.exit(), Some(EngineExit::Restart { .. })) {
+            return;
+        }
+        let status = self.engine.folded_status();
+        let failure = self
+            .engine
+            .history()
+            .iter()
+            .rev()
+            .find_map(|record| record.outcome.status.failure_info())
+            .map(|info| info.message.clone());
+        hooks.run_finished(RunFinished { status, failure }).await;
     }
 
     /// Stop unfinished acquires, then collect any successful result that raced
@@ -2005,7 +2074,7 @@ impl Driver {
             }
         }
         while let Ok(handle) = self.abandoned_rx.try_recv() {
-            self.spawn_release(handle, ScopeOutcome::Failed);
+            self.spawn_release(handle, ScopeOutcome::Failed, None);
         }
     }
 

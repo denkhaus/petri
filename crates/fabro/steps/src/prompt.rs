@@ -132,6 +132,9 @@ pub struct PromptConfig {
     /// A prompted fan-in: the ordered branch results the barrier collected.
     #[serde(default)]
     pub branch_results:   Value,
+    /// A prompted fan-in: the parallel node it joins, for `parallel_complete`.
+    #[serde(default)]
+    pub fork:             Option<String>,
 }
 
 fn default_output_retries() -> u64 {
@@ -283,6 +286,9 @@ impl Step for PromptStep {
         strip_placeholders(&mut results);
         let started = Instant::now();
         stage::record(&ctx);
+        if let Some(fork) = &config.fork {
+            crate::parallel::parallel_complete(&ctx, fork).await;
+        }
         let run_id = ctx
             .capability::<RunInfo>()
             .map(|run| run.run_id.clone())

@@ -62,6 +62,16 @@ impl ScopeEnvironments {
         let envs = self.envs.lock().unwrap_or_else(PoisonError::into_inner);
         envs.get(&scope).or_else(|| envs.values().next()).cloned()
     }
+
+    /// Any recorded environment: where a run-level hook runs.
+    pub fn any(&self) -> Option<Arc<dyn ExecEnv>> {
+        self.envs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .next()
+            .cloned()
+    }
 }
 
 /// Record the step's environment for hooks that run in its scope.
@@ -105,10 +115,10 @@ pub struct StageStep;
 
 /// The run-level hooks a stage fires, in Fabro's order. `start` runs
 /// `sandbox_ready` (the sandbox exists once the first step runs in it) then
-/// `run_start`; both block. `exit` runs `run_complete`. A run that never
-/// reaches `exit` failed, and no step runs at that moment, so `run_failed`
-/// (and `sandbox_cleanup`, at scope release) wait for an awaited run-end
-/// point in the engine; the frontend warns about a hook on either event.
+/// `run_start`; both block. `run_complete`, `run_failed` and
+/// `sandbox_cleanup` are not a stage's: the local hook service runs them
+/// from the driver's run-end and scope-release points, by the run's final
+/// status, with the sandbox still in place.
 #[async_trait::async_trait]
 impl Step for StageStep {
     const NAME: &'static str = "fabro/stage";
@@ -135,7 +145,6 @@ impl Step for StageStep {
                 (HookEvent::RunStart, HookPoint::BeforeVisit),
                 (HookEvent::StageStart, HookPoint::BeforeAttempt),
             ],
-            "exit" => &[(HookEvent::RunComplete, HookPoint::AfterVisit)],
             _ => &[],
         };
         let _ = &handle;

@@ -139,7 +139,7 @@ impl AcpHooks {
             .service
             .run(HookRequest {
                 point:   HookPoint::BeforeToolUse,
-                view:    self.view.clone(),
+                view:    Some(self.view.clone()),
                 outcome: None,
                 routes:  Vec::new(),
                 payload: serde_json::to_value(&payload).unwrap_or(Value::Null),

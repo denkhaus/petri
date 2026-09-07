@@ -26,7 +26,8 @@ use std::sync::Arc;
 use driver::FiringView;
 use driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    Recorded, RouteOverride, Transition, TransitionError, TransitionReport,
+    Recorded, RouteOverride, RunFinished, ScopeReleased, Transition, TransitionError,
+    TransitionReport,
 };
 use engine::{Admission, RouteDecision};
 use ir::{EdgeId, Outcome, Status, Value};
@@ -59,6 +60,13 @@ pub enum HookPoint {
     ForkStarted,
     /// A fork's branches have all completed.
     ForkCompleted,
+    /// The run ended: its status is final, no environment is released yet.
+    /// A run-level point: the request carries no firing view; its payload is
+    /// [`RunFinishedPayload`].
+    RunFinished,
+    /// A scope's environment is about to be released. A run-level point: no
+    /// firing view; the payload is [`ScopeReleasedPayload`].
+    ScopeReleased,
     /// An agent tool is about to run. Served at the tool boundary.
     BeforeToolUse,
     /// An agent tool returned. Served at the tool boundary.
@@ -135,10 +143,28 @@ impl HookReport {
     }
 }
 
+/// The payload of a [`HookPoint::RunFinished`] request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFinishedPayload {
+    pub status:  ir::RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+/// The payload of a [`HookPoint::ScopeReleased`] request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeReleasedPayload {
+    pub scope:   ir::ScopeId,
+    /// `succeeded` or `failed`: the scope outcome retention is decided on.
+    pub outcome: SmolStr,
+}
+
 /// What a service is asked about.
 pub struct HookRequest {
     pub point:   HookPoint,
-    pub view:    Arc<FiringView>,
+    /// The firing the point belongs to. `None` for the run-level points
+    /// (`RunFinished`, `ScopeReleased`), which have no firing.
+    pub view:    Option<Arc<FiringView>>,
     /// The attempt's outcome (`AfterAttempt`, `AfterVisit`, `RouteSelected`).
     pub outcome: Option<Outcome>,
     /// The selected routes (`RouteSelected`), one decision per group.
@@ -221,7 +247,7 @@ impl ExecutionHooks for HookAdapter {
                 .service
                 .run(HookRequest {
                     point,
-                    view: request.view.clone(),
+                    view: Some(request.view.clone()),
                     outcome: None,
                     routes: Vec::new(),
                     payload: Value::Null,
@@ -257,7 +283,7 @@ impl ExecutionHooks for HookAdapter {
             .service
             .run(HookRequest {
                 point:   HookPoint::AfterAttempt,
-                view:    request.view.clone(),
+                view:    Some(request.view.clone()),
                 outcome: Some(request.outcome.clone()),
                 routes:  Vec::new(),
                 payload: Value::Null,
@@ -280,7 +306,7 @@ impl ExecutionHooks for HookAdapter {
             .service
             .run(HookRequest {
                 point:   HookPoint::AfterVisit,
-                view:    recorded.view,
+                view:    Some(recorded.view),
                 outcome: Some(recorded.outcome),
                 routes:  Vec::new(),
                 payload: Value::Null,
@@ -300,7 +326,7 @@ impl ExecutionHooks for HookAdapter {
             .service
             .run(HookRequest {
                 point:   HookPoint::RouteSelected,
-                view:    transition.view,
+                view:    Some(transition.view),
                 outcome: Some(transition.outcome),
                 routes:  transition
                     .groups
@@ -323,5 +349,57 @@ impl ExecutionHooks for HookAdapter {
             }
             _ => Ok(out),
         }
+    }
+
+    async fn run_finished(&self, finished: RunFinished) {
+        let report = self
+            .run_level(HookPoint::RunFinished, RunFinishedPayload {
+                status:  finished.status,
+                failure: finished.failure,
+            })
+            .await;
+        Self::log_run_level(&report);
+    }
+
+    async fn scope_released(&self, released: ScopeReleased) {
+        let report = self
+            .run_level(HookPoint::ScopeReleased, ScopeReleasedPayload {
+                scope:   released.scope,
+                outcome: SmolStr::new(match released.outcome {
+                    executor::ScopeOutcome::Succeeded => "succeeded",
+                    executor::ScopeOutcome::Failed => "failed",
+                }),
+            })
+            .await;
+        Self::log_run_level(&report);
+    }
+}
+
+impl HookAdapter {
+    /// A point with no firing: the payload is the whole request. No decision
+    /// is consumed; the report is logged, not recorded (there is no firing
+    /// to record it under).
+    async fn run_level(&self, point: HookPoint, payload: impl Serialize) -> HookReport {
+        self.service
+            .run(HookRequest {
+                point,
+                view: None,
+                outcome: None,
+                routes: Vec::new(),
+                payload: serde_json::to_value(payload).unwrap_or(Value::Null),
+            })
+            .await
+    }
+
+    fn log_run_level(report: &HookReport) {
+        if report.is_silent() {
+            return;
+        }
+        tracing::info!(
+            point = ?report.point,
+            hooks = report.hooks.len(),
+            warnings = ?report.warnings,
+            "run-level hooks ran"
+        );
     }
 }

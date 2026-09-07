@@ -59,7 +59,7 @@ impl ToolHooks {
             .service
             .run(HookRequest {
                 point,
-                view: self.view.clone(),
+                view: Some(self.view.clone()),
                 outcome: None,
                 routes: Vec::new(),
                 payload: serde_json::to_value(&payload).unwrap_or(Value::Null),

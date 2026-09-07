@@ -11,14 +11,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use execution::host::{self, HostRun};
 use fabro_steps::agent::THREAD_EVENT;
 use fabro_steps::hooks::{REPORT_EVENT, WARNING_EVENT};
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::{
-    AGENT_KIND, CommandStep, HumanStep, PROMPT_KIND, StageStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
-    register,
+    AGENT_KIND, BranchStep, CommandStep, FanInStep, HumanStep, PROMPT_KIND, StageStep, StubStep,
+    WAIT_KIND, WORKFLOW_KIND, register,
 };
-use frontend::{CompileInputs, MapFiles};
+use frontend::{CompileInputs, Lowered, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
 use lithos_llm::types::{Role, Speed};
 use pebble_coding_agent::test_support::{
@@ -116,6 +117,11 @@ fn hook_names(customs: &Customs) -> Vec<String> {
 }
 
 fn lower(dot: &str, toml: &str) -> Graph {
+    lower_all(dot, toml).graph.expect("lowers")
+}
+
+/// The whole lowering, child graphs included (a parallel node's branches).
+fn lower_all(dot: &str, toml: &str) -> Lowered {
     let files = MapFiles(BTreeMap::from([(
         "wf/workflow.toml".to_string(),
         toml.to_string(),
@@ -126,7 +132,41 @@ fn lower(dot: &str, toml: &str) -> Graph {
         "{:?}",
         lowered.diagnostics
     );
-    lowered.graph.expect("lowers")
+    lowered
+}
+
+/// Real commands, stages, branches and fan-ins under the coordinator (a
+/// branch is a child invocation), simulated agents.
+async fn run_coordinated(dir: &RunDir, lowered: Lowered) -> (ExecutionReport, Arc<Customs>) {
+    let mut options = RunOptions::new(dir.path());
+    options.grace = Duration::from_millis(200);
+    options.retention = Retention::Always;
+    options.echo = false;
+    let customs = Arc::new(Customs::default());
+    let mut registry = Runtime::standard().registry().clone();
+    for kind in [&AGENT_KIND, &PROMPT_KIND, &WAIT_KIND, &WORKFLOW_KIND] {
+        registry.register_runner(Arc::new(StubStep::new((*kind).clone())));
+    }
+    registry.register(CommandStep);
+    registry.register(HumanStep);
+    registry.register(StageStep);
+    registry.register(BranchStep);
+    registry.register(FanInStep);
+    let rt = fabro_steps::services(
+        Runtime::standard()
+            .steps(registry)
+            .observe(customs.clone())
+            .options(options),
+    );
+    let graph = lowered.graph.expect("lowers");
+    let report = host::run_configured(
+        &rt,
+        HostRun::new(graph).with_children(lowered.children),
+        |_, _| {},
+    )
+    .await
+    .expect("the run completes");
+    (report, customs)
 }
 
 fn runtime(dir: &RunDir, client: Option<lithos_llm::Client>) -> (Runtime, Arc<Customs>) {
@@ -1458,4 +1498,130 @@ script = "echo after >> post.log"
             .all(|(_, e)| e["event"] != "post_tool_use"),
         "no fabricated post-tool activity"
     );
+}
+
+/// The run-end hooks follow Fabro's `on_run_end`: a failed run fires
+/// `run_failed` with the failure reason and never `run_complete`; then
+/// `sandbox_cleanup` runs in the sandbox before it is released. Both run
+/// while the workspace is still there.
+#[tokio::test]
+async fn run_failed_then_sandbox_cleanup_run_at_the_run_end_in_fabros_order() {
+    let dir = RunDir::new("hooks-run-end");
+    let host_log = dir.path().join("host.log");
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        prepare [shape=parallelogram, script="echo prepared"]
+        broken [shape=parallelogram, script="echo boom >&2; exit 3", on_failure="exit"]
+        start -> prepare -> broken -> exit
+    }"#,
+        &format!(
+            r#"
+[[run.hooks]]
+event = "run_failed"
+script = "echo run_failed:$(grep -o '\"failure_reason\":\"[^\"]*\"' \"$FABRO_HOOK_CONTEXT\" | cut -d'\"' -f4) >> hooks.log"
+
+[[run.hooks]]
+event = "sandbox_cleanup"
+script = "echo sandbox_cleanup:$(basename $(pwd)) >> hooks.log"
+
+[[run.hooks]]
+event = "run_complete"
+script = "echo run_complete >> {host}"
+sandbox = false
+"#,
+            host = host_log.display()
+        ),
+    );
+    let (report, _customs) = run(&dir, graph, None).await;
+    assert_eq!(report.status, RunStatus::Failed);
+    let log = read(&workspace(&dir).join("hooks.log"));
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(
+        lines[0].starts_with("run_failed:") && lines[0].len() > "run_failed:".len(),
+        "the failure reason reaches the hook: {log}"
+    );
+    assert_eq!(lines[1], "sandbox_cleanup:work", "{log}");
+    assert!(
+        !host_log.exists(),
+        "a failed run never fires run_complete: {}",
+        read(&host_log)
+    );
+}
+
+/// `parallel_start` fires once before a fork's branches and
+/// `parallel_complete` once after the last branch joined, both naming the
+/// parallel node; the branches (child invocations) run their own stage
+/// hooks in between.
+#[tokio::test]
+async fn parallel_start_and_parallel_complete_surround_the_branches() {
+    let dir = RunDir::new("hooks-parallel");
+    let lowered = lower_all(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        fork [shape=component]
+        a [shape=parallelogram, script="echo a >> order.log"]
+        b [shape=parallelogram, script="echo b >> order.log"]
+        join [shape=tripleoctagon]
+        after [shape=parallelogram, script="cat order.log"]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> join
+        b -> join
+        join -> after -> exit
+    }"#,
+        r#"
+[[run.hooks]]
+event = "parallel_start"
+script = "echo parallel_start:$FABRO_NODE_ID >> hooks.log"
+
+[[run.hooks]]
+event = "parallel_complete"
+script = "echo parallel_complete:$FABRO_NODE_ID >> hooks.log"
+
+[[run.hooks]]
+event = "stage_complete"
+matcher = "^(a|b|after)$"
+script = "echo stage_complete:$FABRO_NODE_ID >> hooks.log"
+"#,
+    );
+    let (report, customs) = run_coordinated(&dir, lowered).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let ws = dir.path().join("scopes/invocation-0-scope-0/work");
+    let log = read(&ws.join("hooks.log"));
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.first().copied(), Some("parallel_start:fork"), "{log}");
+    let complete = lines
+        .iter()
+        .position(|l| *l == "parallel_complete:fork")
+        .unwrap_or_else(|| panic!("no parallel_complete: {log}"));
+    for branch in ["stage_complete:a", "stage_complete:b"] {
+        let at = lines
+            .iter()
+            .position(|l| *l == branch)
+            .unwrap_or_else(|| panic!("no {branch}: {log}"));
+        assert!(at < complete, "{branch} before parallel_complete: {log}");
+    }
+    assert_eq!(lines.last().copied(), Some("stage_complete:after"), "{log}");
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("parallel_")).count(),
+        2,
+        "once each: {log}"
+    );
+    let events: Vec<_> = customs
+        .reports()
+        .into_iter()
+        .filter(|(_, e)| e["event"] == "parallel_complete")
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].1["report"]["hooks"][0]["state"], "executed");
 }

@@ -319,6 +319,10 @@ impl Ctx<'_> {
         }
         let join_id = self.ids.get(&join).copied()?;
         if self.kinds.get(&join) == Some(&Kind::FanIn) {
+            // The join reports `parallel_complete` for this fork.
+            if let Value::Object(config) = &mut self.b.node_mut(join_id).step.config {
+                config.insert("fork".into(), Value::String(fork.id.clone()));
+            }
             return Some((join_id, join));
         }
         let target = goal_check.filter(|_| join_id == exit).unwrap_or(join_id);
@@ -332,6 +336,7 @@ impl Ctx<'_> {
                 json!({
                     "label": format!("Fan-in of {}", fork.id),
                     "node": name,
+                    "fork": fork.id,
                     "results": results,
                 }),
             ),

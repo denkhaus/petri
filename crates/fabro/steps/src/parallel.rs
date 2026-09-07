@@ -36,6 +36,7 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
+use crate::LocalHooksHandle;
 use crate::workflow::ChildInvoker;
 
 pub const BRANCH: StepKindId = BRANCH_KIND;
@@ -411,10 +412,36 @@ impl Step for BranchStep {
 pub struct FanInConfig {
     pub label:   String,
     pub node:    String,
+    /// The parallel node whose branches this join collects, for the
+    /// `parallel_complete` hook.
+    #[serde(default)]
+    pub fork:    String,
     /// The branch envelopes, in branch order, as the join's inputs carried
     /// them.
     #[serde(default)]
     pub results: Value,
+}
+
+/// Fabro's `parallel_complete`: every branch of `fork` is in, before the
+/// fan-in publishes. Driven by the join step itself, so a synthetic fan-in
+/// and a prompted one report it the same way.
+pub async fn parallel_complete(ctx: &StepCtx, fork: &str) {
+    let Some(local) = ctx.capability::<LocalHooksHandle>() else {
+        return;
+    };
+    let report = local.0.parallel_complete(ctx, fork).await;
+    if !report.is_silent() {
+        let _ = ctx
+            .logs
+            .send(crate::hooks::report_event(
+                &ctx.node,
+                ctx.firing,
+                ctx.attempt,
+                frontend_fabro::hooks::HookEvent::ParallelComplete,
+                &report,
+            ))
+            .await;
+    }
 }
 
 pub struct FanInStep;
@@ -454,6 +481,8 @@ impl Step for FanInStep {
     type Config = FanInConfig;
 
     async fn run(&self, config: FanInConfig, ctx: StepCtx) -> Outcome {
+        crate::stage::record(&ctx);
+        parallel_complete(&ctx, &config.fork).await;
         let mut results = config.results;
         strip_placeholders(&mut results);
         let items = match &results {

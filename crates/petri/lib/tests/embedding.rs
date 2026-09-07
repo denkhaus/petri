@@ -367,13 +367,21 @@ struct FakeHooks {
 #[async_trait::async_trait]
 impl HookService for FakeHooks {
     async fn run(&self, request: HookRequest) -> HookReport {
+        let Some(view) = request.view.as_deref() else {
+            // The run-level points carry no firing.
+            self.calls
+                .lock()
+                .expect("not poisoned")
+                .push((request.point, String::new(), 0));
+            return HookReport::proceed(request.point);
+        };
         self.calls.lock().expect("not poisoned").push((
             request.point,
-            request.view.node_name().to_owned(),
-            request.view.attempt.raw(),
+            view.node_name().to_owned(),
+            view.attempt.raw(),
         ));
         let mut report = HookReport::proceed(request.point);
-        if request.point == HookPoint::BeforeVisit && request.view.node_name() == self.skip {
+        if request.point == HookPoint::BeforeVisit && view.node_name() == self.skip {
             report.decision = HookDecision::Skip {
                 status: Status::Skipped,
             };

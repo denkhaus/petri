@@ -448,18 +448,6 @@ fn resolve(
             ),
         );
     }
-    if matches!(event, HookEvent::RunFailed | HookEvent::SandboxCleanup) {
-        diags.warning(
-            "fabro.hooks.undispatched",
-            span.clone(),
-            format!(
-                "`{path}` in `{source}` listens for `{}`, which the standalone runner does not \
-                 dispatch yet: no step runs when a run fails or a scope is released, so this hook \
-                 never runs",
-                event.as_str()
-            ),
-        );
-    }
     let name = entry
         .name
         .clone()

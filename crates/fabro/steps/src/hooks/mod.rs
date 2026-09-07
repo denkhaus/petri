@@ -27,15 +27,17 @@ pub mod tools;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use execution::hooks::{HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService};
+use execution::hooks::{
+    HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService, RunFinishedPayload,
+    ScopeReleasedPayload,
+};
 use executor::ExecEnv;
 use frontend_fabro::hooks::{HookDefinition, HookEvent};
 use frontend_fabro::kinds::GOAL_CHECK_NODE;
-use ir::{EdgeId, Outcome, Status, Value};
+use ir::{EdgeId, Outcome, RunStatus, Status, Value};
 use runtime::driver::{BranchRole, FiringView};
 use runtime::engine::RouteDecision;
 use serde::{Deserialize, Serialize};
@@ -193,9 +195,18 @@ pub struct LocalHooks {
     client: Mutex<Option<PebbleClient>>,
     envs:   Arc<ScopeEnvironments>,
     http:   executors::HttpClients,
-    /// A hook that runs work inside another hook's work must not fire hooks
-    /// again: the reference never does.
-    nested: AtomicBool,
+}
+
+tokio::task_local! {
+    /// Set while a hook's own work runs: a hook that runs work inside another
+    /// hook's work (an agent hook's tool calls) must not fire hooks again, as
+    /// the reference never does. Task-local, so hooks of parallel branches
+    /// running at the same time do not see each other as nesting.
+    static IN_HOOK: bool;
+}
+
+fn in_hook() -> bool {
+    IN_HOOK.try_with(|nested| *nested).unwrap_or(false)
 }
 
 impl Default for LocalHooks {
@@ -212,7 +223,6 @@ impl LocalHooks {
             client: Mutex::new(None),
             envs,
             http: executors::HttpClients::default(),
-            nested: AtomicBool::new(false),
         }
     }
 
@@ -324,7 +334,7 @@ impl LocalHooks {
         let Some(config) = self.config() else {
             return (Decision::Proceed, report);
         };
-        if self.nested.load(Ordering::Acquire) {
+        if in_hook() {
             return (Decision::Proceed, report);
         }
         let matched: Vec<&Configured> = config
@@ -359,16 +369,18 @@ impl LocalHooks {
         let mut merged = Decision::Proceed;
         for hook in matched {
             let started = Instant::now();
-            self.nested.store(true, Ordering::Release);
-            let result = executors::execute(
-                &hook.definition,
-                context,
-                env.as_ref(),
-                client.as_ref(),
-                &self.http,
-            )
-            .await;
-            self.nested.store(false, Ordering::Release);
+            let result = IN_HOOK
+                .scope(
+                    true,
+                    executors::execute(
+                        &hook.definition,
+                        context,
+                        env.as_ref(),
+                        client.as_ref(),
+                        &self.http,
+                    ),
+                )
+                .await;
             let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut run = HookRun {
                 name:        hook.definition.name.clone(),
@@ -547,11 +559,28 @@ impl LocalHooks {
             },
             Decision::Proceed | Decision::Override { .. } => HookDecision::Proceed,
         };
-        if matches!(view.branch, BranchRole::Fork { .. }) && view.attempt == ir::Attempt::FIRST {
+        // Fabro's `parallel_start`: once per fork visit, before its branches.
+        // The node's Fabro kind says so (a `for_each` fork has one routing
+        // group, so the graph shape alone does not).
+        if handler_type(view).as_deref() == Some("parallel") && view.attempt == ir::Attempt::FIRST {
             let parallel = self.stage_context(HookEvent::ParallelStart, view);
             let (_, extra) = self.dispatch(HookPoint::ForkStarted, &parallel, env).await;
             merge_report(&mut report, extra);
         }
+        report
+    }
+
+    /// Fabro's `parallel_complete`, driven by the fan-in step once every
+    /// branch of `fork` is in. The context names the parallel node, as
+    /// Fabro's does.
+    pub async fn parallel_complete(&self, ctx: &steps::StepCtx, fork: &str) -> HookReport {
+        let mut context = self.context(HookEvent::ParallelComplete);
+        context.node_id = Some(fork.to_owned());
+        context.handler_type = Some("parallel".into());
+        context.cwd = Some(ctx.env.workspace_path().to_owned());
+        let (_, report) = self
+            .dispatch(HookPoint::ForkCompleted, &context, Some(ctx.env.clone()))
+            .await;
         report
     }
 
@@ -592,17 +621,9 @@ impl LocalHooks {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
-        let env = self.env_for(view);
-        let (_, mut report) = self
-            .dispatch(HookPoint::AfterVisit, &context, env.clone())
+        let (_, report) = self
+            .dispatch(HookPoint::AfterVisit, &context, self.env_for(view))
             .await;
-        if matches!(view.branch, BranchRole::Join { .. }) {
-            let parallel = self.stage_context(HookEvent::ParallelComplete, view);
-            let (_, extra) = self
-                .dispatch(HookPoint::ForkCompleted, &parallel, env)
-                .await;
-            merge_report(&mut report, extra);
-        }
         report
     }
 
@@ -650,6 +671,42 @@ impl LocalHooks {
                 Decision::Proceed | Decision::Skip { .. } => {}
             }
         }
+        report
+    }
+
+    /// The run ended: Fabro's `on_run_end`. `run_complete` for a run that
+    /// succeeded, `run_failed` with the failure reason for one that failed,
+    /// nothing for a cancelled run. The environments are still usable, so a
+    /// sandbox-placed hook runs in the run's sandbox.
+    async fn run_finished(&self, payload: &Value) -> HookReport {
+        let point = HookPoint::RunFinished;
+        let Ok(finished) = serde_json::from_value::<RunFinishedPayload>(payload.clone()) else {
+            return HookReport::proceed(point);
+        };
+        let event = match finished.status {
+            RunStatus::Success => HookEvent::RunComplete,
+            RunStatus::Failed => HookEvent::RunFailed,
+            RunStatus::Cancelled => return HookReport::proceed(point),
+        };
+        let mut context = self.context(event);
+        if event == HookEvent::RunFailed {
+            context.failure_reason = Some(finished.failure.unwrap_or_else(|| "run failed".into()));
+        }
+        let (_, report) = self.dispatch(point, &context, self.envs.any()).await;
+        report
+    }
+
+    /// A scope's environment is about to go: Fabro's `sandbox_cleanup`, run
+    /// in that environment before it is stopped.
+    async fn scope_released(&self, payload: &Value) -> HookReport {
+        let point = HookPoint::ScopeReleased;
+        let Ok(released) = serde_json::from_value::<ScopeReleasedPayload>(payload.clone()) else {
+            return HookReport::proceed(point);
+        };
+        let context = self.context(HookEvent::SandboxCleanup);
+        let (_, report) = self
+            .dispatch(point, &context, self.envs.get(released.scope))
+            .await;
         report
     }
 
@@ -708,7 +765,16 @@ fn merge_report(report: &mut HookReport, extra: HookReport) {
 #[async_trait::async_trait]
 impl HookService for LocalHooks {
     async fn run(&self, request: HookRequest) -> HookReport {
-        let view = request.view.as_ref();
+        let Some(view) = request.view.as_deref() else {
+            if !self.is_configured() {
+                return HookReport::proceed(request.point);
+            }
+            return match request.point {
+                HookPoint::RunFinished => self.run_finished(&request.payload).await,
+                HookPoint::ScopeReleased => self.scope_released(&request.payload).await,
+                _ => HookReport::proceed(request.point),
+            };
+        };
         if let Some(config) = &view.config
             && config.get("hooks").is_some()
         {
@@ -721,7 +787,9 @@ impl HookService for LocalHooks {
             HookPoint::BeforeVisit
             | HookPoint::AfterAttempt
             | HookPoint::ForkStarted
-            | HookPoint::ForkCompleted => HookReport::proceed(request.point),
+            | HookPoint::ForkCompleted
+            | HookPoint::RunFinished
+            | HookPoint::ScopeReleased => HookReport::proceed(request.point),
             HookPoint::BeforeAttempt => self.before_attempt(view).await,
             HookPoint::Retrying => self.retrying(view).await,
             HookPoint::AfterVisit => self.after_visit(view, request.outcome.as_ref()).await,

@@ -267,6 +267,27 @@ impl PrepareError {
     }
 }
 
+/// The run this driver owns has ended: its status is final and no
+/// environment has been released yet. Only the driver that owns the run
+/// reports it (a bare driver, or the coordinator's root invocation on a
+/// terminal exit); a restart successor and an internal child invocation
+/// report nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunFinished {
+    pub status:  ir::RunStatus,
+    /// The failure the run ended on, when a stage recorded one.
+    pub failure: Option<String>,
+}
+
+/// A scope's environment is about to be released. The environment is still
+/// usable when the callback runs; a release that is part of the run's end
+/// waits for [`ExecutionHooks::run_finished`] first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeReleased {
+    pub scope:   ir::ScopeId,
+    pub outcome: executor::ScopeOutcome,
+}
+
 /// A final outcome has been recorded and routing is about to be asked for.
 pub struct Recorded {
     pub view:    Arc<FiringView>,
@@ -357,6 +378,18 @@ pub trait ExecutionHooks: Send + Sync {
     ) -> Result<TransitionReport, TransitionError> {
         let _ = transition;
         Ok(TransitionReport::default())
+    }
+
+    /// The run ended, before its environments are released. Awaited: the
+    /// release waits for it.
+    async fn run_finished(&self, finished: RunFinished) {
+        let _ = finished;
+    }
+
+    /// A scope's environment is about to be released. Awaited: the release
+    /// waits for it.
+    async fn scope_released(&self, released: ScopeReleased) {
+        let _ = released;
     }
 }
 

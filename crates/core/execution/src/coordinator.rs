@@ -1045,6 +1045,7 @@ impl Coordinator {
         let client = CoordinatorInvocationClient::new(execution, self.start_tx.clone());
         let fold = Arc::new(pipeline.fold_observer());
         let mut driver = driver
+            .with_run_owner(invocation == InvocationId::ROOT)
             .observe(writer.clone())
             .observe(fold)
             .with_decision_resolver(pipeline.clone())
