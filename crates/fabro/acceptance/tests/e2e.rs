@@ -66,7 +66,7 @@ fn commands_and_stubs(dir: &Path) -> Runtime {
     }
     registry.register(fabro_steps::BranchStep);
     registry.register(fabro_steps::FanInStep);
-    runtime.steps(registry).options(options(dir))
+    fabro_steps::services(runtime.steps(registry).options(options(dir)))
 }
 
 fn set_env(graph: &mut Graph, pairs: &[(&str, String)]) {
@@ -312,9 +312,17 @@ async fn random_selection_routes_on_a_recorded_draw() {
 
 /// Two successive `for_each` fan-outs over 1,000 items each: 2,001 invocations,
 /// well under the run-wide ceiling of 10,000, every branch a durable child
-/// invocation. This takes minutes, so it runs in the extended gate.
+/// invocation. The first fork's 1,000 envelopes exceed the offload threshold,
+/// so the second fork's snapshot (copied into each of its 1,000 children)
+/// carries a blob reference, not the list.
+///
+/// Ignored: on 2026-09-07 the first fork alone had declared 708 children after
+/// 10 minutes at 9.3 GB RSS (every child's `InvocationDeclared` and
+/// `ExecutionDeclared` record carries the 88 KB fork snapshot, and all 1,000
+/// child drivers are live at once while `max_parallel` gates their attempts).
+/// [`fork_scaling_probe`] measures one fork at a chosen size.
 #[tokio::test]
-#[ignore = "declares 2,001 durable invocations; run in the extended gate"]
+#[ignore = "declares 2,001 durable invocations and holds 1,000 live child drivers; run by hand"]
 async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
     let text = r#"digraph T {
         start [shape=Mdiamond]
@@ -347,12 +355,19 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
         "{:?}",
         report.state.errors()
     );
-    let results = report
+    let stored = report
         .state
         .run_context()
         .get("parallel.results")
-        .and_then(|v| v.as_array())
+        .cloned()
         .expect("the second fork's results");
+    assert!(
+        fabro_steps::blobs::holds_ref(&stored),
+        "1,000 envelopes are above the offload threshold: {stored}"
+    );
+    let store = fabro_steps::LocalBlobStore::new(dir.join(fabro_steps::BLOBS_DIR));
+    let results = fabro_steps::blobs::hydrate(stored, &store).await;
+    let results = results.as_array().expect("the hydrated list");
     assert_eq!(results.len(), 1000);
     assert_eq!(results[999]["item_label"], json!("job-999"));
     assert_eq!(results[999]["index"], json!(999));
@@ -361,5 +376,71 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
         inspection.invocations.len(),
         2001,
         "the root and 2,000 branches"
+    );
+    // The second fork's children were declared from a snapshot that holds
+    // the reference, not the first fork's 1,000 envelopes.
+    let second_fork_child = inspection
+        .invocations
+        .iter()
+        .rev()
+        .find(|invocation| invocation.invocation.raw() > 1000)
+        .expect("a child of the second fork");
+    let declared = serde_json::to_string(&second_fork_child.context).expect("json");
+    assert!(
+        declared.len() < 64 * 1024,
+        "the child's declared context is small: {} bytes",
+        declared.len()
+    );
+}
+
+/// One `for_each` fork over `PETRI_FORK_PROBE_ITEMS` items (default 100):
+/// the per-child cost of a fan-out, measured by hand at several sizes with
+/// `/usr/bin/time -l`. Prints the wall time and the record sizes.
+#[tokio::test]
+#[ignore = "a measurement, not a check; run by hand with PETRI_FORK_PROBE_ITEMS"]
+#[expect(
+    clippy::print_stderr,
+    reason = "the probe's measurements are its output"
+)]
+async fn fork_scaling_probe() {
+    let items: usize = env::var("PETRI_FORK_PROBE_ITEMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let text = format!(
+        r#"digraph T {{
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        plan [shape=parallelogram, output_schema="routing", script="python3 -c 'import json; print(json.dumps({{\"context_updates\": {{\"jobs\": [{{\"name\": \"job-\" + str(i)}} for i in range({items})]}}}}))'"]
+        fan [shape=component, for_each="context.jobs", max_parallel=32]
+        job [prompt="Do the job"]
+        join [shape=tripleoctagon]
+        start -> plan -> fan -> job -> join -> exit
+    }}"#
+    );
+    let lowered = load("probe.fabro", &text, &NoFiles, &CompileInputs::new());
+    let graph = lowered
+        .graph
+        .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics));
+    let dir = fresh_run_dir("fabro-e2e-fork-probe");
+    let rt = commands_and_stubs(&dir);
+    let started = std::time::Instant::now();
+    let report = host::run_configured(
+        &rt,
+        HostRun::new(graph).with_children(lowered.children),
+        |_, _| {},
+    )
+    .await
+    .expect("the run completes");
+    let elapsed = started.elapsed();
+    assert_eq!(report.status, RunStatus::Success);
+    let coordinator = fs::metadata(dir.join("coordinator.jsonl"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    eprintln!(
+        "fork probe: {items} items in {:.1} s ({:.0} ms per child); coordinator.jsonl {} KB",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / items as f64,
+        coordinator / 1024
     );
 }

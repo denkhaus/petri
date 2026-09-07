@@ -988,6 +988,20 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     );
     // An empty hook list or MCP table asks for nothing.
     assert!(codes("[run]\nhooks = []\n[run.agent.mcps]\n").is_empty());
+    // The milestone C agent facilities have no `workflow.toml` surface at the
+    // pinned Fabro (its `[run.agent]` accepts `fabro_tools` and `mcps` only),
+    // so a request for one is refused as Fabro refuses it, never passed
+    // silently; the model fallback chain is the one warned-and-ignored setting.
+    for key in ["skills", "subagents", "compaction", "context_window"] {
+        assert_eq!(
+            codes(&format!("[run.agent]\n{key} = {{ enabled = true }}\n")),
+            ["unsupported.workflow_toml.key"],
+            "`[run.agent] {key}` is refused"
+        );
+    }
+    assert_eq!(codes("[run.model.fallbacks]\n\"m\" = [\"p:m\"]\n"), [
+        "ignored.workflow_toml.run.model.fallbacks"
+    ]);
 
     // Keys Fabro's parser refuses, with its rename hint.
     let legacy = diags("version = 1\n[vars]\nmode = \"x\"\n[llm]\nmodel = \"m\"\n");

@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use execution::{
-    CallSite, ExecutionId, GraphDigest, InvocationClient, InvocationHandle, InvocationId,
-    InvocationRequest, InvocationResult, InvocationStatus, InvokeError,
+    CallSite, CancelRequest, ExecutionId, GraphDigest, InvocationClient, InvocationHandle,
+    InvocationId, InvocationRequest, InvocationResult, InvocationStatus, InvokeError,
 };
 use executor::{EnvError, ExecEnv, MapSecrets, ProcessHandle, ProcessSpec};
 use fabro_steps::workflow::{
@@ -43,7 +43,7 @@ struct Child {
 struct FakeClient {
     children:  Mutex<Vec<Child>>,
     cancelled: Mutex<Vec<InvocationId>>,
-    cancel_tx: Mutex<Option<mpsc::UnboundedSender<InvocationId>>>,
+    cancel_tx: Mutex<Option<mpsc::UnboundedSender<CancelRequest>>>,
 }
 
 impl FakeClient {
@@ -54,7 +54,10 @@ impl FakeClient {
         let sink = client.clone();
         tokio::spawn(async move {
             while let Some(id) = rx.recv().await {
-                sink.cancelled.lock().expect("not poisoned").push(id);
+                sink.cancelled
+                    .lock()
+                    .expect("not poisoned")
+                    .push(id.invocation);
             }
         });
         client

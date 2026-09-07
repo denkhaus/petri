@@ -37,6 +37,7 @@ use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
 use crate::LocalHooksHandle;
+use crate::blobs::{self, OutputStore};
 use crate::workflow::ChildInvoker;
 
 pub const BRANCH: StepKindId = BRANCH_KIND;
@@ -532,6 +533,13 @@ impl Step for FanInStep {
         outcome
             .context_updates
             .insert(SmolStr::new(BRANCH_COUNT_KEY), json!(items.len()));
+        // A large result list leaves the context for the output store, as
+        // any other large stage value does: every later fork snapshot, and
+        // every branch child declared from one, then carries a reference
+        // instead of the whole list.
+        if let Some(store) = ctx.capability::<OutputStore>() {
+            blobs::offload_updates(&mut outcome.context_updates, store.0.as_ref()).await;
+        }
         outcome
     }
 }
