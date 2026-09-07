@@ -71,6 +71,10 @@ pub struct HumanConfig {
     pub default_choice:  Option<String>,
     #[serde(default)]
     pub on_failure:      Option<Policy>,
+    /// The node's explicit routes, carried for uniformity; a human gate never
+    /// promotes a failure.
+    #[serde(default, rename = "routes")]
+    pub explicit_routes: Option<Value>,
     /// The answer deadline. Absent: wait until answered or cancelled.
     #[serde(default)]
     pub timeout_ms:      Option<u64>,

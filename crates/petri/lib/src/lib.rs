@@ -303,6 +303,13 @@ impl GithubSecrets {
     }
 }
 
+/// The environment variable prefix a workflow secret (`{{ secrets.NAME }}` in
+/// `workflow.toml`) is read from in the standalone runner: `PETRI_SECRET_NAME`.
+/// Fabro reads the same name from its vault; the standalone runner has no
+/// vault, and a variable named after the secret is the explicit source. The
+/// value is masked in every log from the moment it is resolved.
+pub const SECRET_ENV_PREFIX: &str = "PETRI_SECRET_";
+
 impl executor::SecretProvider for GithubSecrets {
     fn resolve(&self, name: &str) -> Result<executor::Secret, executor::SecretError> {
         match self.registered.resolve(name) {
@@ -311,7 +318,13 @@ impl executor::SecretProvider for GithubSecrets {
             Err(error) => return Err(error),
         }
         if name != GITHUB_TOKEN_SECRET {
-            return Err(executor::SecretError::Unknown(name.into()));
+            let variable = format!("{SECRET_ENV_PREFIX}{name}");
+            let value = env::var(&variable)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| executor::SecretError::Unknown(name.into()))?;
+            self.registered.masker().register(&value);
+            return Ok(executor::Secret::new(value.into()));
         }
         let value = self
             .token

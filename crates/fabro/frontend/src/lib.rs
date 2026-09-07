@@ -39,11 +39,14 @@ pub mod template;
 use std::path::{Component, Path, PathBuf};
 
 use frontend::{
-    CompileInputs, Diagnostics, FileSource, Frontend, Lowered, NoFiles, WorkspaceRetention,
+    CompileInputs, Diagnostics, FileSource, Frontend, LaunchSettings, Lowered, NoFiles,
+    WorkspaceRetention,
 };
 pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
 pub use lower::{
-    FailurePolicy, Kind, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, Policy, shape_of,
+    ENVIRONMENT_PARAM, EnvValue, Environment, FailurePolicy, IMPORT_ERROR, Kind, LAUNCH_PARAM,
+    MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, ModelDefaults, PREPARE_NODE_PREFIX, Policy,
+    PrepareStep, ROUTES_KEY, RunSettings, shape_of,
 };
 
 /// Parse and lower one workflow. `file` is the repository-relative path the
@@ -100,6 +103,19 @@ impl Frontend for Fabro {
         inputs: &CompileInputs,
     ) -> Lowered {
         load(file, text, files, inputs)
+    }
+
+    /// The launch settings `workflow.toml` declared, read back from the
+    /// persisted graph's `fabro.launch` parameter.
+    fn launch_settings(&self, graph: &ir::Graph) -> LaunchSettings {
+        let Some(launch) = graph.params.get(LAUNCH_PARAM) else {
+            return LaunchSettings::default();
+        };
+        LaunchSettings {
+            sandbox_backend: launch["sandbox_backend"].as_str().map(str::to_owned),
+            dry_run:         launch["dry_run"].as_bool().unwrap_or(false),
+            auto_approve:    launch["auto_approve"].as_bool().unwrap_or(false),
+        }
     }
 
     /// A Fabro run's result is the files its stages produced or changed, so a

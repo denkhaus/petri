@@ -36,7 +36,7 @@ use execution::{
 };
 use runtime::engine::{self, EventLog};
 use runtime::executor::Retention;
-use runtime::frontend::{self, CompileInputs, Lowered, WorkspaceRetention};
+use runtime::frontend::{self, CompileInputs, LaunchSettings, Lowered, WorkspaceRetention};
 use runtime::ir::{Graph, RunStatus};
 use runtime::{
     DaytonaResources, DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend,
@@ -146,9 +146,10 @@ impl FileArgs {
 
 #[derive(Args)]
 struct ProviderArgs {
-    /// Where workflow processes run: host, docker, or daytona.
-    #[arg(long, default_value = "host")]
-    backend:            SandboxBackend,
+    /// Where workflow processes run: host, docker, or daytona. Defaults to
+    /// what the workflow's own configuration asks for, else host.
+    #[arg(long)]
+    backend:            Option<SandboxBackend>,
     /// Allow plugins without a pinned checksum. Debug builds allow them by
     /// default.
     #[arg(long)]
@@ -156,9 +157,15 @@ struct ProviderArgs {
 }
 
 impl ProviderArgs {
+    /// Whether `--backend` was given, so a workflow's own environment does
+    /// not override it.
+    fn backend_given(&self) -> bool {
+        self.backend.is_some()
+    }
+
     fn options(self) -> SandboxOptions {
         SandboxOptions {
-            backend: self.backend,
+            backend: self.backend.unwrap_or_default(),
             plugin_dev: self.sandbox_plugin_dev.then_some(true),
             ..Default::default()
         }
@@ -371,7 +378,17 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
-            let runtime_mode = if dry_run {
+            // The workflow is lowered once, before the runtime mode is chosen:
+            // its own configuration (Fabro's `[run.execution]` and
+            // `[run.environment]`) supplies the defaults an explicit option
+            // does not override. Both registries validate the same kinds, so
+            // the graph is the same under either.
+            let lowered = match lowered_graph(&make(RuntimeMode::Real), &target, false, false) {
+                Ok(lowered) => lowered,
+                Err(code) => return code,
+            };
+            let launch = launch_settings(&make(RuntimeMode::Real), &target, &lowered);
+            let runtime_mode = if dry_run || launch.dry_run {
                 RuntimeMode::DryRun
             } else {
                 RuntimeMode::Real
@@ -392,7 +409,15 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                         .map(|frontend| frontend.default_retention().into())
                 })
                 .map_or(options.retention, Retention::from);
+            let backend_given = provider.backend_given();
             options.sandbox = provider.options();
+            if !backend_given
+                && let Some(backend) = launch.sandbox_backend.as_deref()
+                && let Ok(backend) = backend.parse::<SandboxBackend>()
+            {
+                // The frontend diagnosed any spelling it does not know.
+                options.sandbox.backend = backend;
+            }
             options.sandbox.runner_images = runner.images.into_iter().collect();
             options.sandbox.daytona_kind = runner.daytona_kind;
             options.sandbox.daytona_resources = DaytonaResources {
@@ -400,7 +425,11 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 memory_mb: runner.daytona_memory_mb,
                 disk_mb:   runner.daytona_disk_mb,
             };
-            let answers = match (interactive, auto_approve, interview_script) {
+            let answers = match (
+                interactive,
+                auto_approve || launch.auto_approve,
+                interview_script,
+            ) {
                 (_, _, Some(script)) => Some(Answers::Scripted(script)),
                 (true, _, None) => Some(Answers::Interactive),
                 (_, true, None) => Some(Answers::AutoApprove),
@@ -410,6 +439,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 &rt.options(options),
                 &target,
                 &run_dir,
+                lowered,
                 answers,
                 controls,
                 control,
@@ -590,6 +620,7 @@ async fn run(
     rt: &Runtime,
     target: &FileArgs,
     run_dir: &Path,
+    lowered: Lowered,
     answers: Option<Answers>,
     controls: ControlService,
     control: Option<PathBuf>,
@@ -611,10 +642,6 @@ async fn run(
                 return ExitCode::from(2);
             }
         },
-    };
-    let lowered = match lowered_graph(rt, target, false, false) {
-        Ok(lowered) => lowered,
-        Err(code) => return code,
     };
     let Some(mut graph) = lowered.graph else {
         eprintln!(
@@ -876,6 +903,17 @@ fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// What the workflow's own configuration says about launching it, read from
+/// the lowered graph by its format. Nothing when the graph did not lower.
+fn launch_settings(rt: &Runtime, target: &FileArgs, lowered: &Lowered) -> LaunchSettings {
+    let Some(graph) = &lowered.graph else {
+        return LaunchSettings::default();
+    };
+    rt.frontend_for(&target.file, target.format.as_deref())
+        .map(|frontend| frontend.launch_settings(graph))
+        .unwrap_or_default()
 }
 
 /// Fill in what the file's own format says a host owes it, without overwriting

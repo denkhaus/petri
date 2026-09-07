@@ -1,0 +1,10 @@
+{
+  "name": "succeed_keeps_a_failure_an_explicit_edge_matches",
+  "workflow": "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n\n  a [prompt=\"x\", on_failure=\"succeed\"]\n  recover [prompt=\"x\"]\n  b [prompt=\"x\"]\n  start -> a\n  a -> recover [condition=\"outcome=failed\"]\n  a -> b\n  recover -> exit\n  b -> exit\n\n}\n",
+  "scripts": {
+    "a": {
+      "outcome": "failed",
+      "failure_reason": "boom"
+    }
+  }
+}

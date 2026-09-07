@@ -770,8 +770,7 @@
       ],
       "blockers": [
         "parallel branch results lack context_updates (readiness item 3; task 6)",
-        "on_failure=\"succeed\" promotion departure (task 7)",
-        "workflow.toml sections beyond [run.inputs] are not loaded by Petri yet (task 4/7)"
+        "workflow.toml [run.model.fallbacks] is not applied yet (task 12); [run.environment] image.dockerfile warns and the run uses the selected backend's default image"
       ],
       "notes": [
         "The prepare node reads context.internal.run_id through stdin_source; Petri must expose an equivalent run identity.",
@@ -1138,9 +1137,7 @@
       ],
       "blockers": [
         "parallel branch results lack context_updates (task 6)",
-        "on_failure=\"succeed\" promotion departure (task 7)",
-        "workflow.toml sections beyond [run.inputs] are not loaded by Petri yet (task 4/7)",
-        "outcome!=succeeded condition operator: verify Petri's condition grammar accepts it (task 7)"
+        "workflow.toml [run.model.fallbacks] is not applied yet (task 12)"
       ],
       "notes": [
         "Uses `outcome!=succeeded` on the inventory -> inventory_failed edge.",
@@ -1305,7 +1302,8 @@
       ],
       "blockers": [
         "fix_ci.py checkout calls the GitHub API (api.github.com) and clones veniceai/interface; the deterministic harness needs a local stand-in (task 17)",
-        "{{ secrets.* }} in [environments.fix-ci.env] has no Petri equivalent yet (task 7)",
+        "{{ secrets.* }} in [environments.fix-ci.env] resolve from PETRI_SECRET_<NAME> in the standalone runner; the harness must supply RXDB_PREMIUM and VENICE_PACKAGE_REGISTRY_READ_PAT stand-ins (task 17)",
+        "[environments.fix-ci.image] dockerfile is a warning; the scenario must name a prebuilt image or run on the docker backend's default runner image (task 17)",
         "setup node installs the target's yarn dependencies (network); a fixture target must be offline-installable",
         "Daytona provider is outside the initial black box scope; run on docker"
       ],
@@ -1442,8 +1440,7 @@
       ],
       "blockers": [
         "implement-plan's verify script requires cargo dev, bun, nightly clippy and the Fabro repository layout; a fixture repository or an accepted migration bundle is needed (task 17)",
-        "provider=\"openrouter\" model selection must map onto a twin-backed provider (task 4/7)",
-        "manager-loop child lifecycle differs from Fabro today (readiness item 4; task 7)"
+        "provider=\"openrouter\" reaches the OpenAI twin's chat completions endpoint (run_model_defaults_reach_openrouter_through_chat_completions); the scenario must script kimi-k3 there (task 17)"
       ],
       "notes": [
         "stack.child_workflow=\"fabro/workflows/implement-plan/workflow.fabro\" resolves through the .fabro/ prefix rule."
@@ -1556,8 +1553,7 @@
         "interview/terminal-eof"
       ],
       "blockers": [
-        "multi_select answers: the shared Answer contract has one choice plus text; verify pinned Fabro's multi-select representation before asserting (task 9)",
-        "the summarize node is a `tab` prompt node; Petri lowers it to fabro/agent today, a distinct fabro/prompt step is task 7"
+        "multi_select answers: the shared Answer contract has one choice plus text; verify pinned Fabro's multi-select representation before asserting (task 9)"
       ],
       "notes": [
         "No model is declared; the scenario supplies one through the run configuration."

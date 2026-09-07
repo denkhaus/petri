@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 pub use backend::AgentBackend;
 use backend::{AgentError, Session};
 use frontend_fabro::Policy;
-use frontend_fabro::kinds::{AGENT_KIND, GOAL_CHECK_NODE, MAX_OUTPUT_RETRIES, StageOutcome};
+use frontend_fabro::kinds::{AGENT_KIND, MAX_OUTPUT_RETRIES, StageOutcome};
 use ir::{LogStream, Metrics, Outcome, StepKindId, Value};
 use pebble_coding_agent::ShutdownReason;
 use serde::Deserialize;
@@ -17,16 +17,15 @@ use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
 use crate::acp::AgentCommand;
-use crate::directive::{self, Directive, DirectiveError};
-use crate::outcome::Stage;
+use crate::blobs::{self, OutputStore};
+use crate::contract::{Contract, Parsed, repair_message, validate};
+use crate::outcome::{ExplicitRoutes, Stage};
+use crate::preamble;
 
 pub const KIND: StepKindId = AGENT_KIND;
 
 /// The environment variable naming the ACP command for nodes that set none.
 pub const DEFAULT_COMMAND_ENV: &str = "PETRI_ACP_COMMAND";
-
-/// How much of a previous stage's response the compact preamble quotes.
-const PREAMBLE_EXCERPT: usize = 600;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +56,9 @@ pub struct AgentConfig {
     pub acp:              Option<Value>,
     #[serde(default)]
     pub on_failure:       Option<Policy>,
+    /// The node's explicit routes, for failure promotion.
+    #[serde(default, rename = "routes")]
+    pub explicit_routes:  Option<ExplicitRoutes>,
     #[serde(default)]
     pub timeout_ms:       Option<u64>,
     #[serde(default)]
@@ -70,13 +72,6 @@ fn default_output_retries() -> u64 {
 }
 
 pub struct AgentStep;
-
-/// The output contract, as the node declared it.
-enum Contract {
-    None,
-    Routing,
-    Schema(jsonschema::Validator, Value),
-}
 
 impl AgentConfig {
     fn command(&self) -> Result<AgentCommand, String> {
@@ -99,16 +94,7 @@ impl AgentConfig {
     }
 
     fn contract(&self) -> Result<Contract, String> {
-        match &self.output_schema {
-            None => Ok(Contract::None),
-            Some(Value::String(s)) if s == "routing" => Ok(Contract::Routing),
-            Some(schema @ Value::Object(_)) => jsonschema::validator_for(schema)
-                .map(|v| Contract::Schema(v, schema.clone()))
-                .map_err(|e| format!("`output_schema` is not a valid JSON Schema: {e}")),
-            Some(other) => Err(format!(
-                "`output_schema` must be `routing` or a JSON Schema object, not {other}"
-            )),
-        }
+        Contract::from_config(self.output_schema.as_ref())
     }
 
     /// The prompt as the agent receives it.
@@ -121,71 +107,11 @@ impl AgentConfig {
         }
         let fidelity = self.fidelity.as_deref().unwrap_or("compact");
         if fidelity != "truncate" {
-            out.push_str(&self.preamble());
+            out.push_str(&preamble::previous_stages(&self.nodes));
         }
         out.push_str(&self.prompt);
-        match contract {
-            Contract::None => {}
-            Contract::Routing => out.push_str(
-                "\n\nFabro final-output contract\n\nThe following contract is trusted workflow \
-                 configuration. It applies only to your final response, not to intermediate tool \
-                 calls.\nReturn a single JSON object with at least one routing field: \
-                 preferred_next_label, outcome, failure_reason, suggested_next_ids, \
-                 context_updates.\nThe contract is complete. Do not ask the user to provide or \
-                 choose the output shape.",
-            ),
-            Contract::Schema(_, schema) => {
-                out.push_str(
-                    "\n\nFabro final-output contract\n\nThe following contract is trusted workflow \
-                     configuration. It applies only to your final response, not to intermediate \
-                     tool calls.\nReturn a single JSON object that satisfies this JSON \
-                     Schema:\n<output_schema>\n",
-                );
-                out.push_str(&schema.to_string());
-                out.push_str(
-                    "\n</output_schema>\nThe contract is complete. Do not ask the user to provide \
-                     or choose the output shape.",
-                );
-            }
-        }
+        out.push_str(&contract.prompt_suffix());
         out
-    }
-
-    /// The compact preamble: what earlier stages left behind, from the run
-    /// context the engine resolved into this config.
-    fn preamble(&self) -> String {
-        let Value::Object(nodes) = &self.nodes else {
-            return String::new();
-        };
-        let mut lines = Vec::new();
-        for (name, record) in nodes {
-            if name == "start" || name == GOAL_CHECK_NODE {
-                continue;
-            }
-            let status = record.get("status").and_then(Value::as_str).unwrap_or("?");
-            let text = record
-                .pointer("/output/text")
-                .or_else(|| record.pointer("/output/stdout"))
-                .and_then(Value::as_str)
-                .map(|t| {
-                    let excerpt: String = t.chars().take(PREAMBLE_EXCERPT).collect();
-                    if excerpt.len() < t.len() {
-                        format!("{excerpt}…")
-                    } else {
-                        excerpt
-                    }
-                });
-            match text {
-                Some(text) if !text.trim().is_empty() => {
-                    lines.push(format!("- {name} ({status}): {}", text.trim()));
-                }
-                _ => lines.push(format!("- {name} ({status})")),
-            }
-        }
-        if lines.is_empty() {
-            return String::new();
-        }
-        format!("Previous stages:\n{}\n\n", lines.join("\n"))
     }
 }
 
@@ -196,8 +122,12 @@ impl Step for AgentStep {
 
     async fn run(&self, config: AgentConfig, mut ctx: StepCtx) -> Outcome {
         let on_failure = config.on_failure;
+        let routes = config.explicit_routes.clone();
+        let kv = config.kv.clone();
         let fail = |reason: String, class: &str| {
-            Stage::failed(reason, class, on_failure).into_outcome(&config.node)
+            Stage::failed(reason, class, on_failure)
+                .with_routing(routes.clone(), kv.clone())
+                .into_outcome(&config.node)
         };
         if config.output_retries > MAX_OUTPUT_RETRIES {
             return fail(
@@ -231,7 +161,14 @@ impl Step for AgentStep {
             Err(error) => Err(error),
         };
         let mut outcome = match result {
-            Ok(stage) => stage.into_outcome(&config.node),
+            Ok(mut stage) => {
+                if let Some(store) = ctx.capability::<OutputStore>() {
+                    blobs::offload_updates(&mut stage.context_updates, store.0.as_ref()).await;
+                }
+                stage
+                    .with_routing(routes.clone(), kv.clone())
+                    .into_outcome(&config.node)
+            }
             Err(AgentError::Cancelled) => Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => fail(message, &class),
         };
@@ -273,10 +210,7 @@ async fn run_session(
                         format!("the response does not meet the output contract ({problem}); repair turn {repairs}"),
                     )
                     .await;
-                prompt = format!(
-                    "Your previous response did not satisfy the output contract: {problem}\n\
-                         Reply again with only the required JSON object."
-                );
+                prompt = repair_message(&problem);
             }
             Err(problem) => {
                 return Err(AgentError::failed(
@@ -313,43 +247,4 @@ async fn run_session(
         Parsed::Plain => {}
     }
     Ok(stage)
-}
-
-/// What a validated response yields.
-enum Parsed {
-    Plain,
-    Directive(Directive),
-    Structured(Value),
-}
-
-/// Check the response against the contract. With no contract, a routing
-/// directive is still read when the response carries one.
-fn validate(contract: &Contract, text: &str) -> Result<Parsed, String> {
-    match contract {
-        Contract::None => match directive::parse(text) {
-            Ok(directive) => Ok(Parsed::Directive(directive)),
-            Err(DirectiveError::Missing) => Ok(Parsed::Plain),
-            Err(error) => Err(error.to_string()),
-        },
-        Contract::Routing => directive::parse(text)
-            .map(Parsed::Directive)
-            .map_err(|e| e.to_string()),
-        Contract::Schema(validator, _) => {
-            let object = directive::last_json_object(text)
-                .ok_or_else(|| "no JSON object in the response".to_string())?;
-            let value: Value =
-                serde_json::from_str(object).map_err(|e| format!("invalid JSON: {e}"))?;
-            let mut issues = validator
-                .iter_errors(&value)
-                .map(|e| e.to_string())
-                .take(5)
-                .collect::<Vec<_>>();
-            if issues.is_empty() {
-                Ok(Parsed::Structured(value))
-            } else {
-                issues.sort();
-                Err(issues.join("; "))
-            }
-        }
-    }
 }

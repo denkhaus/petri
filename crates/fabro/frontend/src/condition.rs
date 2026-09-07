@@ -267,10 +267,9 @@ struct Builder<'a> {
     diags:   &'a mut Diagnostics,
     span:    &'a Span,
     ok:      bool,
-    /// The node's failure policy is the `succeed` shim: a failure it
-    /// converted is a partial status whose reported outcome is not
-    /// `partially_succeeded`, and it reads as `succeeded`.
-    /// REMOVE AFTER 2026-10-04.
+    /// The node's failure policy is `succeed`: a failure it promoted is a
+    /// partial status whose reported outcome is not `partially_succeeded`,
+    /// and it reads as `succeeded`.
     succeed: bool,
 }
 
@@ -308,7 +307,6 @@ impl Builder<'_> {
     /// A partial status the `succeed` policy made out of a failure: the step
     /// reported anything but a genuine `partially_succeeded` (the step
     /// boundary says `succeeded`; exhausted retries leave `failed`).
-    /// REMOVE AFTER 2026-10-04.
     fn converted_failure(&mut self) -> ExprId {
         let partial = self.status_is("partial_success");
         let reported = self.table.path("output", &["outcome"]);

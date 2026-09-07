@@ -24,13 +24,50 @@ a run will execute.
 | `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint. `petri check` given no inputs at all downgrades it to the warning `fabro.unbound_input` and leaves the text unrendered, so a file validates before its inputs exist; a run is always strict |
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
-| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only or not-yet-applied sections warn `ignored.workflow_toml.<section>` with why (`[run.goal]`, `[run.working_dir]`, `[run.metadata]`, `[run.execution]`, `[run.model]` and `[run.model.fallbacks]`, `[run.environment]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[environments]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is an error: `unsupported.workflow_toml.run.prepare` (setup steps would be skipped), `unsupported.workflow_toml.run.hooks` (a configured hook is never skipped silently), `unsupported.workflow_toml.run.agent.mcps`. A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
+| `[run] goal` (text or `{ file }`) | the run goal when the graph sets no `goal` (the graph attribute wins, as in Fabro) |
+| `[run.model]` `provider`, `name`, `controls.reasoning_effort` | the model, provider and reasoning effort an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. `controls.speed` and `[run.model.fallbacks]` warn (readiness item 9a) |
+| `[run.execution]` `mode`, `approval` | launch defaults in `Graph.params["fabro.launch"]`: `mode = "dry_run"` runs the stub registry, `approval = "auto"` answers every question with its first choice. `--dry-run`, `--auto-approve`, `--interactive` and `--interview-script` win |
+| `[run.environment]` `id` over `[environments.<id>]` | `provider` selects the sandbox backend when `--backend` is not given: `local` is the host, `docker` the Docker plugin, `daytona` the Daytona plugin. `image.docker` becomes the scope's container image under `docker` and `daytona`. `env` is the scope environment; a value that is exactly `{{ secrets.NAME }}` is a `$secret` reference every command resolves at spawn (the standalone runner reads `PETRI_SECRET_NAME`; a missing secret fails the command with `secret_unavailable`) and masks in every log. `resources` size a Daytona runner. `cwd`, `network`, `lifecycle`, `labels` and `image.dockerfile` are platform-only and warn `ignored.workflow_toml.environments.<id>.<key>`; an `id` with no table, or a provider outside the three, is an error |
+| `[run.prepare]` `steps`, `timeout` | setup steps lowered as command nodes `run_prepare_1`, `run_prepare_2`, ... between `start` and its successors, so they run in the selected environment before any node, in order, each with the section's `timeout` (default `5m`), its `env`, and `on_failure="exit"`: a failed step ends the run before the first node. `command` argv is joined with shell quoting; `script` runs as written; `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` render at load. The whole file is validated before any step runs |
+| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.model.fallbacks]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is an error: `unsupported.workflow_toml.run.hooks` (a configured hook is never skipped silently), `unsupported.workflow_toml.run.agent.mcps`. A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
 | `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
-| `import` | `unsupported.import` (later phase) |
+| `import="<path>"` | expanded at load as Fabro's import transform expands it (below); the persisted graph carries the imported nodes |
 
 Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
-`goal`), so the persisted graph is self-describing for replay.
+`goal`), so the persisted graph is self-describing for replay. The launch
+settings `workflow.toml` declared land in `Graph.params["fabro.launch"]`
+(`sandbox_backend`, `dry_run`, `auto_approve`, the Daytona sizes) and the
+resolved environment in `Graph.params["fabro.environment"]`; the CLI reads
+them back through `Frontend::launch_settings` when it starts the run.
+
+## Imports
+
+A node with `import="<path>"` is a placeholder for another workflow file,
+resolved relative to the importing file. The imported file's nodes are
+spliced in under the placeholder's id as a prefix (`<placeholder>.<node>`);
+its start and exit sentinels (`Mdiamond`/`Msquare`, or the ids `start`,
+`exit`, `end`) are dropped; the placeholder's incoming edges reach the
+imported entry node and its outgoing edges leave the imported exit
+predecessor, both with their attributes. The placeholder may carry only
+`import`, `class`, and the inheritable defaults `model`, `provider`,
+`reasoning_effort`, `speed`, `backend`, `acp.command`, `acp.config`,
+`fidelity`, `max_retries`, `thread_id`; each default lands on every imported
+node that does not set it. The placeholder's classes and a class made from its
+id (lowercase, spaces to `-`, `[a-z0-9-]` only) propagate to every imported
+node. `retry_target` and `fallback_retry_target` inside the import are rewritten
+to the prefixed ids; `@file` references inside it resolve beside the imported
+file. Imports nest, each relative to its own file; a cycle is refused.
+
+Fabro's boundary rules apply and every failure is `fabro.import` on the
+placeholder with Fabro's message: exactly one start and one exit; no edge into
+start or out of exit; exactly one successor of start and one predecessor of
+exit, neither edge carrying `condition`, `label`, `weight`, `fidelity`,
+`thread_id`, `loop_restart` or `freeform`; an empty import (start to exit
+only) is removed and its neighbours wired directly, but not across a semantic
+edge; a placeholder with any other attribute, a self-loop, or a prefixed id
+that already exists is refused. An imported `model_stylesheet` is ignored with
+a warning; the importing workflow's stylesheet governs.
 
 ## Nodes
 
@@ -39,18 +76,23 @@ Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
 | `Mdiamond` start | `noop`, the entry | |
 | `Msquare` exit | `noop`; `Completion::TerminalNode(exit)` | |
 | `diamond` conditional | `noop` | |
-| `box` agent, `tab` prompt | `fabro/agent` | prompt, goal, fidelity, `backend`, model settings, `output_schema`, `output_retries`, `acp` |
-| `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema` |
+| `box` agent | `fabro/agent` | prompt, goal, fidelity, `backend`, model settings, `output_schema`, `output_retries`, `acp` |
+| `tab` prompt | `fabro/prompt` | prompt, goal, fidelity, model settings, `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `fabro.prompt_backend`, and the graph's ACP settings never reach it |
+| `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
 | `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
 | `component` parallel | `noop` with one routing group per branch, or a `for_each` expansion (below) | |
 | `tripleoctagon` fan-in | `noop`, `join: all`; its output is the ordered branch results | |
+| `tripleoctagon` fan-in with a `prompt` | `fabro/prompt`, `join: all`: the ordered barrier, then one model call over the branch results (`sources`, `branch_results`) | |
 | `insulator` wait | `fabro/wait` | `duration_ms` |
 | `house` manager loop | `fabro/workflow` | the child graph's digest, `manager.*` |
 | `circle`, `doublecircle`, other shapes | `fabro/agent`, with a `fabro.unknown_shape` warning | |
 
 Every node's `meta` carries `label`, `shape`, `kind`, `classes`, `span`, and
 `model` / `provider` / `reasoning_effort` when set. Every step config carries
-`kv` (the run context at spawn) and `on_failure`.
+`kv` (the run context at spawn) and `on_failure`; a node whose `on_failure` is
+`succeed` or `partially_succeed` also carries `routes`, its explicit routes
+(condition texts, label keys, unconditional targets) for the promotion check
+below.
 
 Timeouts: `timeout` is the per-attempt `Budget.timeout`. Without one, a
 command gets 600 s (Fabro's default), an agent 24 h, a human gate 30 days, a
@@ -126,41 +168,41 @@ target with empty context.
 
 ### Failure policy
 
-Two attributes, one value set — `route`, `exit`, `partially_succeed` — and the
-specific one wins:
+Two attributes, one value set — Fabro's `route`, `exit`, `succeed`, plus
+Petri's `partially_succeed` — and the specific one wins:
 
 - `on_failure` decides a non-retryable failure; `on_retries_exhausted` decides a
   retryable one that ran out of attempts (`allow_partial=true` spells the latter's
   `partially_succeed`).
 - `route`: the unconditional edge is taken. `exit`: it is guarded `!failed`, so
-  the run quiesces and fails under `TerminalNode`. `partially_succeed`: the step
-  classifies the failure as `PartialSuccess` (failure kept in `underlying`) and it
-  routes as a success.
+  the run quiesces and fails under `TerminalNode`.
+- `succeed` promotes a failure the way Fabro's executor does. The step first
+  checks the node's explicit routes against the failed outcome and the
+  prospective context (the run context with the stage's own updates applied):
+  a conditional edge whose condition holds, a preferred label naming a
+  labelled edge, or a suggested target naming an edge. A failure an explicit
+  route matches stays a failure and routing takes that route. Any other
+  non-retryable failure is promoted: the record is a `PartialSuccess` with the
+  failure kept in `underlying`, `output.promoted` says so, the reported
+  `output.outcome` is `succeeded`, and the node's `outcome=succeeded`
+  conditions match it while `outcome=partially_succeeded` does not, as Fabro
+  shows its conditions. The event log never records a clean success for a
+  failed step. `auto_status=true` is the deprecated spelling
+  (`deprecated.auto_status`, Fabro's `auto_status_deprecated` rule) and is
+  ignored when `on_failure` is set.
+- `partially_succeed` is a Petri extension (`fabro.petri_extension` names it):
+  the same promotion check and the same `PartialSuccess` record, but the
+  reported outcome is `partially_succeeded`, so `outcome=partially_succeeded`
+  conditions match the promoted stage. Fabro's validator refuses the spelling
+  (`on_failure_valid` accepts `route`, `exit`, `succeed`), so a workflow that
+  uses it runs on Petri only; the oracle case
+  `partially_succeed_policy_classifies_before_routing` records that
+  rejection beside Petri's result, and `crates/fabro/acceptance/CONTRACT.md`
+  lists the spelling under accepted differences.
+- A retryable failure is never promoted by the step: the engine retries it,
+  and `allow_partial` / `on_retries_exhausted="partially_succeed"` accept the
+  last failure as a partial success on exhaustion (`Exhaustion::AcceptPartial`).
 - A human gate never falls through on failure, whatever the policy.
-- `on_failure="succeed"` (and `auto_status=true`, its deprecated spelling) is a
-  30-day compatibility shim, accepted until **2026-10-04** with the warning
-  `deprecated.on_failure.succeed` / `deprecated.auto_status`. It lowers like
-  `partially_succeed` with one difference at the step boundary: the step keeps
-  the failure on its record as a `PartialSuccess`, but reports
-  `output.outcome = "succeeded"`, and the node's `outcome=succeeded` conditions
-  match that converted failure while `outcome=partially_succeeded` does not — what
-  Fabro shows its conditions. The event log never records a clean success for a
-  failed step. After the sunset both spellings are refused again
-  (`unsupported.on_failure.succeed`, `unsupported.auto_status`); rewrite the
-  workflow to `partially_succeed` first.
-
-**Deliberate departure (tracked defect, owned by task 7 of
-`.ai/plans/fabro-unified-task-list.md`).** Fabro promotes a failed outcome only
-when no explicit route matches, so an `outcome=failed` edge on a `succeed` node
-is still taken. Petri classifies once, at the step boundary, before routing sees
-the outcome; an `outcome=failed` edge on a `partially_succeed` node is
-unreachable and gets the `fabro.unreachable_failure_edge` lint. The pinned
-Fabro's validator also refuses the `partially_succeed` spelling itself (its
-`on_failure_valid` rule accepts `route`, `exit`, `succeed`), so the oracle
-case `partially_succeed_policy_classifies_before_routing` records a Fabro
-rejection beside Petri's result. The compatibility contract in
-`crates/fabro/acceptance/CONTRACT.md` lists this and the parallel-context
-departure as the two differences to retire.
 
 ### Goal gates and loops
 
@@ -193,19 +235,53 @@ fan-in's output.
 `stack.child_workflow` (a path; `fabro/…` stands for `.fabro/…`) or
 `stack.child_dot_source` (inline DOT) is lowered with the parent, to at most
 three levels, with cycles refused. The child graph is registered before the
-run starts, and the `fabro/workflow` step invokes it by digest through the
-coordinator, once per cycle up to `manager.max_cycles`, until
-`manager.stop_condition` holds over the child's final context. The child
-inherits the parent's sandbox and secrets; the parent's cancel cancels it.
+run starts. The `fabro/workflow` step follows Fabro's manager loop: it starts
+the child once per manager attempt, at one durable call site (the node id), so
+a re-dispatch of the same attempt after a crash reattaches to the child it
+declared instead of starting another; a later attempt starts a fresh child.
+It then polls: every `manager.poll_interval` (45 seconds when unset) it
+evaluates `manager.stop_condition` against the parent's public context with a
+reference success outcome (`outcome=succeeded`, no preferred label). A
+satisfied condition cancels the child and the node succeeds with no context
+updates; `manager.max_cycles` polls without child completion cancel the child
+and fail the node (`max_cycles`). A child that completes first returns its
+status, its failure (message and class) when it failed, and every public key
+it changed (`internal.*`, `graph.*`, `thread.*` and `current*` keys excluded).
+`manager.max_cycles` normalizes as Fabro does: missing, non-integer or negative
+is 1000 (a warning names the bad value), zero is 1. A 1,000-poll manager
+consumes one child invocation. The child inherits the parent's sandbox and
+secrets; the parent's cancel cancels it. A host that runs Fabro steps outside
+the coordinator registers `fabro_steps::workflow::ChildInvoker`.
 
 ## Steps at run time
 
 - **`fabro/command`** runs the script in bash (`language="python"`: `python3 -c`)
-  with stderr merged, feeds `stdin_source` through the process's stdin, keeps
-  the last 64 KiB of output in `output.stdout` and `command.output`, and with
-  `output_schema="routing"` reads the last JSON object of the output as the
-  routing directive (`outcome`, `preferred_next_label`, `suggested_next_ids`,
-  `context_updates`, `failure_reason`).
+  with stderr merged, with the config's `env` (secret references resolved at
+  spawn), feeds `stdin_source` through the process's stdin (an output
+  reference is read back through the store first), records the output in
+  `output.stdout` and `command.output`, and with `output_schema="routing"`
+  reads the last JSON object of the output as the routing directive
+  (`outcome`, `preferred_next_label`, `suggested_next_ids`, `context_updates`,
+  `failure_reason`). Output above 100 KiB leaves the record for the output
+  store (below); the in-memory cap is 8 MiB.
+- **`fabro/prompt`** is one model call through the application's `lithos-llm`
+  client (the `PebbleClient` capability), with no tools and no coding-agent
+  loop: the goal, the compact preamble of earlier stages, the branch results
+  for a prompted fan-in, the node's prompt and the output contract, as one
+  user message. `model` (or `default_model`, or `[run.model] name`) is
+  required; `provider` qualifies it; `reasoning_effort` rides the request; a
+  JSON response format is requested when the catalog row offers it. A
+  response that misses the contract gets a repair turn (the failed reply and
+  the repair message appended), up to `output_retries` times (default 2), then
+  fails `bad_output`. The result writes `response.<node>`, `last_response`
+  (the first 200 characters), `last_stage`, then the routing fields or
+  `output.<node>`. Two `StepEvent::Custom` payloads carry what a host maps
+  onto Fabro's `stage.prompt` and `prompt.completed`: `kind = "fabro.prompt"`
+  (`node`, `firing`, `attempt`, `model`, `prompt`, `sources`) before the first
+  call, and `kind = "fabro.prompt.completed"` (`node`, `firing`, `attempt`,
+  `model`, `outcome`, `response`, `calls`, `repairs`, `usage`,
+  `cost_usd_micros`, `duration_ms`) after the last. Metrics: `prompt.calls`,
+  `prompt.usage`, `prompt.cost_usd_micros`.
 - **`fabro/agent`** assembles the prompt from the goal, earlier stages, and the
   node's prompt. Both backends share routing, `output_schema` validation,
   `output_retries` repair turns, and steering deliveries. Each attempt starts a
@@ -251,6 +327,20 @@ inherits the parent's sandbox and secrets; the parent's cancel cancels it.
     repeated.
 - **`fabro/wait`** sleeps, cancel-aware.
 - **`fabro/workflow`** is the nested invocation above.
+- **Output references.** A stage value whose serialized form is above 100 KiB
+  (Fabro's offload threshold; a scalar never, a string by its JSON size) does
+  not stay inline in the context or the event log. The step writes it to the
+  run's output store and records `blob://sha256/<hex>` in its place (a
+  structured value carries a `#json` suffix so it parses back). `stdin_source`,
+  a prompted fan-in's branch results, and the agent and prompt steps' own
+  updates read the logical value back through the store; a route or a
+  condition that reads such a key sees the reference text, as Fabro's edge
+  selection does for every key but `command.output`. The store is the
+  `fabro_steps::OutputStore` capability: `fabro_steps::register` installs a
+  `LocalBlobStore` under `<run_dir>/blobs` unless the host registered its own
+  before the run, so a Fabro host replaces it with platform storage without
+  changing node semantics. The store is content addressed, so a resumed run
+  reads the same references.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
   gate takes its first choice, as Fabro's `--dry-run` does.
 
@@ -320,18 +410,21 @@ ACP continues to report `acp.turns`.
 |---|---|
 | `outcome=X` for X outside the four outcomes (and, after 2026-10-04, `success`) | `unsupported.outcome_value` |
 | `llm_prompt`, `is_codergen`, `node_type`, bare-number timeouts | `unsupported.attractor` |
-| `import` | `unsupported.import` |
+| an `import` Fabro's transform would refuse (missing file, bad boundary, cycle, extra placeholder attribute) | `fabro.import` |
+| `backend="acp"` on a `tab` prompt node | `fabro.prompt_backend` |
 | `acp_command` (legacy) | `unsupported.acp_command` |
-| a `tripleoctagon` with a `prompt` | `unsupported.fan_in.prompt` |
 | an unbound `{{ inputs.* }}` (a warning, `fabro.unbound_input`, under `petri check` with no inputs) | `unsupported.template.unbound_input` |
 | ports, HTML strings, undirected graphs, `strict`, anonymous subgraphs | `unsupported.dot.*` |
 
-**Accepted until 2026-10-04.** Two Fabro spellings that phase one refused are
-shims for 30 days, each with a warning that names the date and a
-`REMOVE AFTER 2026-10-04` comment at every site (`grep -r "REMOVE AFTER"`):
-`on_failure="succeed"` / `auto_status=true` (see "Failure policy") and
-`outcome=success` in a condition (see "Conditions"). `.ai/plans/done/fabro-local-workflows.md`
-lists the workflows that depend on them and what to do at the sunset.
+**Accepted until 2026-10-04.** One spelling is a dated shim, with a warning
+that names the date and a `REMOVE AFTER 2026-10-04` comment at every site
+(`grep -r "REMOVE AFTER"`): `outcome=success` in a condition (see
+"Conditions"). Fabro accepts that spelling but it never matches, so Petri's
+later rejection is deliberately stricter. `on_failure="succeed"` and
+`auto_status` are supported for as long as the reference Fabro supports them
+(see "Failure policy"); their earlier sunset was withdrawn by the readiness
+plan. `.ai/plans/done/fabro-local-workflows.md` lists the workflows that
+depend on the alias and what to do at the sunset.
 
 Ignored loudly (a warning naming the attribute): `tool_hooks.*`,
 `project_memory`, `thread_id`, `max_tokens`, `speed`, `default_thread`, and
@@ -368,3 +461,21 @@ a count. Both maps live in the middleware state, so they survive a restart
 successor and are restored on resume. Node visit totals also survive a
 `loop_restart` (the successor starts with the predecessor's firing counts)
 while the context is replaced; the run-wide invocation total never resets.
+
+## Syntax both runners reject, and Petri's stricter diagnostics
+
+Rejected by both: Attractor attributes (`unsupported.attractor`), a bare-number
+`timeout`, an `outcome=` value outside the four outcomes
+(`unsupported.outcome_value`), the legacy `acp_command`, an import Fabro's
+transform refuses (`fabro.import`), `backend="acp"` on a prompt node, a human
+gate with no edges, a `for_each` template that is not an LLM node, structural
+mistakes (no start, no exit, unreachable nodes), and the `workflow.toml` keys
+Fabro's parser refuses (`unsupported.workflow_toml.key`).
+
+Petri-stricter, tested as differences and listed in
+`crates/fabro/acceptance/CONTRACT.md`: the 500-firing cap and its
+`fabro.max_visits_too_large` / `info.budget.default` diagnostics (Fabro is
+unlimited), `outcome=success` after its sunset, the 10,000-invocation maximum,
+`image.dockerfile` and the other platform-only `workflow.toml` warnings, and
+`on_failure="partially_succeed"` in the other direction: Petri accepts a
+spelling Fabro refuses.

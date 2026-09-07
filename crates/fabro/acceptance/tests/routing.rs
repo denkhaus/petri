@@ -144,9 +144,28 @@ async fn loop_restart_produces_a_successor_execution() {
 async fn skipped_and_partial_outcomes_route_as_fabro_documents() {
     let r = run_named("skipped_outcome_routes_like_success").await;
     assert_path(&r, "success", &["start", "a", "b", "exit"]);
+    // Petri's `partially_succeed` extension follows Fabro's promotion order:
+    // the explicit failure edge wins and the stage stays failed.
     let r = run_named("partially_succeed_policy_classifies_before_routing").await;
-    assert_path(&r, "success", &["start", "a", "b", "exit"]);
-    assert_eq!(r.path[1].outcome, "partially_succeeded");
+    assert_path(&r, "success", &["start", "a", "recover", "exit"]);
+    assert_eq!(r.path[1].outcome, "failed");
+}
+
+/// Fabro's promotion order under `on_failure="succeed"`: a failure an
+/// explicit route matches (a condition, a preferred label) stays failed and
+/// takes that route; a failure no explicit route matches is promoted and
+/// reports `succeeded`, as the pinned Fabro's events show it.
+#[tokio::test]
+async fn succeed_promotes_only_a_failure_no_explicit_route_matches() {
+    let r = run_named("succeed_keeps_a_failure_an_explicit_edge_matches").await;
+    assert_path(&r, "success", &["start", "a", "recover", "exit"]);
+    assert_eq!(r.path[1].outcome, "failed");
+    let r = run_named("succeed_keeps_a_failure_a_preferred_label_matches").await;
+    assert_path(&r, "success", &["start", "a", "fix", "exit"]);
+    assert_eq!(r.path[1].outcome, "failed");
+    let r = run_named("succeed_promotes_a_failure_no_explicit_edge_matches").await;
+    assert_path(&r, "success", &["start", "a", "ok", "exit"]);
+    assert_eq!(r.path[1].outcome, "succeeded");
 }
 
 /// Every shared case against its committed Fabro oracle fixture. The fixture

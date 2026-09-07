@@ -8,25 +8,35 @@
 //! semantics.
 
 mod attrs;
+mod imports;
 pub(crate) mod policy;
+mod promotion;
 mod routing;
+mod secrets;
+mod workflow_toml;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
+pub use imports::IMPORT_ERROR;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::validate::loop_reachable;
 use ir::{
     Budget, Completion, Edge, EdgeId, ExpandTarget, ExprId, GraphBuilder, JoinPolicy, NodeId,
     Routing, Scope, ScopeId, StepRef,
 };
+pub use promotion::ROUTES_KEY;
 pub use routing::{FailurePolicy, Policy};
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
+pub use workflow_toml::{
+    ENVIRONMENT_PARAM, EnvValue, Environment, LAUNCH_PARAM, ModelDefaults, PREPARE_NODE_PREFIX,
+    PrepareStep, RunSettings,
+};
 
 use crate::kinds::{
-    AGENT_KIND, COMMAND_KIND, COMPAT_SUNSET, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES,
+    AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
     WAIT_KIND, WORKFLOW_KIND,
 };
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
@@ -174,6 +184,10 @@ struct Ctx<'a> {
     /// Whether an unbound template input is a warning that leaves the text
     /// unrendered: `petri check` with no inputs. A run is always strict.
     lenient_unbound:  bool,
+    /// What `workflow.toml` asked of the run.
+    settings:         workflow_toml::RunSettings,
+    /// The env each synthetic `[run.prepare]` command node carries.
+    prepare_envs:     BTreeMap<String, BTreeMap<String, workflow_toml::EnvValue>>,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -198,7 +212,13 @@ fn lower_nested(
     stack: Vec<String>,
 ) -> Lowered {
     let mut template = Context::new(inputs);
-    read_workflow_toml(file, files, &mut template, &mut diags);
+    // A nested workflow shares its parent's run settings; only the root reads
+    // the file beside it.
+    let settings = if stack.is_empty() {
+        workflow_toml::read(file, files, &mut template, &mut diags)
+    } else {
+        workflow_toml::RunSettings::default()
+    };
 
     let mut b = GraphBuilder::bare();
     let scope = b.add_scope(Scope::new(ScopeId::new(0)));
@@ -206,6 +226,8 @@ fn lower_nested(
         Some(index) => file[..index].to_string(),
         None => String::new(),
     };
+    // Imports expand first, so everything below sees the spliced workflow.
+    imports::expand(&mut workflow, file, &base_dir, &base_dir, files, &mut diags);
     let mut ctx = Ctx {
         files,
         diags,
@@ -223,6 +245,8 @@ fn lower_nested(
         children: Vec::new(),
         stack,
         lenient_unbound: inputs.unbound_is_warning,
+        settings,
+        prepare_envs: BTreeMap::new(),
     };
     ctx.stack.push(file.to_string());
 
@@ -231,6 +255,17 @@ fn lower_nested(
     let Some(structure) = ctx.structure(&workflow) else {
         return Lowered::rejected(ctx.diags);
     };
+    if ctx.stack.len() == 1 {
+        let span = Span::file(&ctx.workflow_toml_path());
+        ctx.prepare_envs = workflow_toml::insert_prepare_nodes(
+            &mut workflow,
+            &structure.start,
+            &ctx.settings,
+            &span,
+            &mut ctx.diags,
+        );
+        ctx.environment_scope();
+    }
     ctx.kinds(&workflow, &structure);
     ctx.static_branch_indices(&workflow);
 
@@ -269,11 +304,23 @@ fn lower_nested(
         template,
         goal,
         children,
+        settings,
+        stack,
         ..
     } = ctx;
     let mut graph = b.build();
     graph.completion = Completion::TerminalNode(exit);
     graph.policy = run_policy;
+    if stack.len() == 1 {
+        graph
+            .params
+            .insert(SmolStr::new(LAUNCH_PARAM), settings.launch_param());
+        if let Some(environment) = settings.environment_param() {
+            graph
+                .params
+                .insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
+        }
+    }
     graph.params.insert(
         SmolStr::new("inputs"),
         Value::Object(
@@ -324,366 +371,6 @@ fn lower_nested(
     Lowered::with_children(graph, children, diags)
 }
 
-/// `workflow.toml` beside the workflow. Petri acts on `[run.inputs]` (the
-/// defaults an input takes when the host supplies none) and the host resolves
-/// `[workflow] graph`. Every other section is diagnosed here, never dropped
-/// silently: a platform-only or not-yet-applied section warns with why, an
-/// unsupported requirement is an `unsupported.workflow_toml.*` error, and a
-/// key Fabro's own parser refuses is an error with Fabro's rename hint.
-fn read_workflow_toml(
-    file: &str,
-    files: &dyn FileSource,
-    template: &mut Context,
-    diags: &mut Diagnostics,
-) {
-    let dir = file.rfind('/').map_or("", |i| &file[..i]);
-    let path = if dir.is_empty() {
-        "workflow.toml".to_string()
-    } else {
-        format!("{dir}/workflow.toml")
-    };
-    let Some(text) = files.read(&path) else {
-        return;
-    };
-    let value: toml::Table = match text.parse() {
-        Ok(value) => value,
-        Err(error) => {
-            diags.warning(
-                "fabro.workflow_toml",
-                Span::file(&path),
-                format!("`{path}` is not valid TOML and its input defaults are ignored: {error}"),
-            );
-            return;
-        }
-    };
-    let span = Span::file(&path);
-    for key in value.keys() {
-        if !WORKFLOW_TOML_TOP_LEVEL.contains(&key.as_str()) {
-            let hint = workflow_toml_rename_hint(key)
-                .unwrap_or("remove it; Fabro's settings schema has no such key");
-            diags.unsupported(
-                "workflow_toml.key",
-                span.clone(),
-                format!("`{key}` in `{path}` is not a key Fabro's `workflow.toml` accepts"),
-                hint,
-            );
-        }
-    }
-    if let Some(version) = value.get("_version").and_then(toml::Value::as_integer)
-        && version != i64::from(WORKFLOW_TOML_VERSION)
-    {
-        diags.unsupported(
-            "workflow_toml.version",
-            span.clone(),
-            format!(
-                "`_version = {version}` in `{path}` is not the settings schema version this \
-                 build reads ({WORKFLOW_TOML_VERSION})"
-            ),
-            "set `_version = 1`",
-        );
-    }
-    for (section, why) in WORKFLOW_TOML_INERT {
-        if value.contains_key(*section) {
-            diags.warning(
-                &format!("ignored.workflow_toml.{section}"),
-                span.clone(),
-                format!("`[{section}]` in `{path}` is ignored: {why}"),
-            );
-        }
-    }
-    if let Some(llm) = value.get("llm").and_then(toml::Value::as_table) {
-        for key in WORKFLOW_TOML_LEGACY_LLM_KEYS {
-            if llm.contains_key(*key) {
-                diags.unsupported(
-                    "workflow_toml.key",
-                    span.clone(),
-                    format!("`llm.{key}` in `{path}` is a legacy key Fabro refuses"),
-                    "rename to `[run.model]`",
-                );
-            }
-        }
-    }
-    if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
-        read_run_table(run, &path, &span, template, diags);
-    }
-}
-
-/// The `[run]` table of `workflow.toml`.
-fn read_run_table(
-    run: &toml::Table,
-    path: &str,
-    span: &Span,
-    template: &mut Context,
-    diags: &mut Diagnostics,
-) {
-    for (key, item) in run {
-        match key.as_str() {
-            "inputs" => {
-                if let Some(inputs) = item.as_table() {
-                    for (name, value) in inputs {
-                        let json = serde_json::to_value(value).unwrap_or(Value::Null);
-                        template.default_input(name, json);
-                    }
-                }
-            }
-            "model" => {
-                let Some(model) = item.as_table() else {
-                    continue;
-                };
-                if model.contains_key("fallbacks") {
-                    diags.warning(
-                        "ignored.workflow_toml.run.model.fallbacks",
-                        span.clone(),
-                        format!(
-                            "`[run.model.fallbacks]` in `{path}` is ignored: the standalone \
-                             runner does not implement model fallback yet; each node runs on \
-                             its own model"
-                        ),
-                    );
-                }
-                if model.keys().any(|key| key != "fallbacks") {
-                    diags.warning(
-                        "ignored.workflow_toml.run.model",
-                        span.clone(),
-                        format!(
-                            "`[run.model]` in `{path}` is ignored: the default model, provider \
-                             and request controls are not applied yet; set `model` and \
-                             `provider` on the node or the graph"
-                        ),
-                    );
-                }
-            }
-            "agent" => {
-                let Some(agent) = item.as_table() else {
-                    continue;
-                };
-                if agent.get("fabro_tools").and_then(toml::Value::as_bool) == Some(true) {
-                    diags.warning(
-                        "ignored.workflow_toml.run.agent.fabro_tools",
-                        span.clone(),
-                        format!(
-                            "`fabro_tools = true` in `{path}` is ignored: run-management tools \
-                             are a Fabro platform facility; agents get the sandbox tools only"
-                        ),
-                    );
-                }
-                if agent
-                    .get("mcps")
-                    .and_then(toml::Value::as_table)
-                    .is_some_and(|mcps| !mcps.is_empty())
-                {
-                    diags.unsupported(
-                        "workflow_toml.run.agent.mcps",
-                        span.clone(),
-                        format!(
-                            "`[run.agent.mcps]` in `{path}` configures MCP servers, which the \
-                             standalone runner does not start yet"
-                        ),
-                        "remove the servers, or wait for MCP support (readiness item 9b)",
-                    );
-                }
-            }
-            "hooks" => {
-                if item.as_array().is_some_and(|hooks| !hooks.is_empty()) {
-                    diags.unsupported(
-                        "workflow_toml.run.hooks",
-                        span.clone(),
-                        format!(
-                            "`[[run.hooks]]` in `{path}` configures hooks, which the standalone \
-                             runner does not run yet; a configured hook is never skipped silently"
-                        ),
-                        "remove the hooks, or wait for the local hook system (readiness item 5)",
-                    );
-                }
-            }
-            "prepare" => diags.unsupported(
-                "workflow_toml.run.prepare",
-                span.clone(),
-                format!(
-                    "`[run.prepare]` in `{path}` names setup steps, which the standalone runner \
-                     does not run yet; the nodes would start without them"
-                ),
-                "run the steps as the first command node, or wait for readiness item 4",
-            ),
-            other => match RUN_SECTIONS_IGNORED
-                .iter()
-                .find(|(section, _)| *section == other)
-            {
-                Some((section, why)) => diags.warning(
-                    &format!("ignored.workflow_toml.run.{section}"),
-                    span.clone(),
-                    format!("`[run.{section}]` in `{path}` is ignored: {why}"),
-                ),
-                None => diags.unsupported(
-                    "workflow_toml.key",
-                    span.clone(),
-                    format!("`run.{other}` in `{path}` is not a key Fabro's `[run]` table accepts"),
-                    "remove it; Fabro's settings schema has no such key",
-                ),
-            },
-        }
-    }
-}
-
-/// The settings schema version this build reads, Fabro's `_version`.
-const WORKFLOW_TOML_VERSION: u32 = 1;
-
-/// The top-level keys Fabro's settings parser accepts; anything else is a
-/// hard error there and here.
-const WORKFLOW_TOML_TOP_LEVEL: &[&str] = &[
-    "_version",
-    "project",
-    "workflow",
-    "environments",
-    "run",
-    "cli",
-    "server",
-    "llm",
-];
-
-/// Legacy `[llm]` keys Fabro refuses with a rename hint.
-const WORKFLOW_TOML_LEGACY_LLM_KEYS: &[&str] = &[
-    "provider",
-    "model",
-    "temperature",
-    "max_tokens",
-    "fallbacks",
-    "fallback",
-];
-
-/// Top-level sections that are accepted in a workflow file but carry nothing
-/// the standalone runner acts on.
-const WORKFLOW_TOML_INERT: &[(&str, &str)] = &[
-    (
-        "project",
-        "project settings belong to `.fabro/project.toml`; the standalone runner reads none",
-    ),
-    (
-        "environments",
-        "named environments are not applied yet; every scope runs on the `--backend` the run \
-         was given",
-    ),
-    (
-        "cli",
-        "Fabro CLI settings do not apply to the standalone runner",
-    ),
-    (
-        "server",
-        "Fabro server settings do not apply to the standalone runner",
-    ),
-    (
-        "llm",
-        "the provider catalog comes from the distribution and `PETRI_LLM_CATALOG`, not from \
-         the workflow file",
-    ),
-];
-
-/// `[run.*]` sections of `workflow.toml` the standalone runner reads but does
-/// not act on, each with why. `[run.inputs]` is the one it acts on;
-/// `[run.model]`, `[run.agent]`, `[run.hooks]` and `[run.prepare]` have
-/// their own diagnostics.
-const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
-    (
-        "goal",
-        "the run goal is not read from the file yet; the graph's `goal` attribute is used",
-    ),
-    (
-        "working_dir",
-        "the working directory is the sandbox workspace the run was given",
-    ),
-    ("metadata", "run metadata is a Fabro platform record"),
-    (
-        "execution",
-        "`mode` and `approval` are taken from the command line: `--dry-run` and \
-         `--auto-approve`",
-    ),
-    (
-        "environment",
-        "the standalone runner runs every scope on the `--backend` it was given; a named \
-         environment's image, resources and `env` are not applied yet",
-    ),
-    (
-        "clone",
-        "the standalone runner does not clone a repository; the workspace is what the run \
-         starts with",
-    ),
-    (
-        "run_branch",
-        "the standalone runner performs no Git operations of its own",
-    ),
-    (
-        "meta_branch",
-        "the standalone runner performs no Git operations of its own",
-    ),
-    (
-        "pull_request",
-        "the standalone runner performs no Git operations of its own",
-    ),
-    (
-        "git",
-        "the standalone runner performs no Git operations of its own",
-    ),
-    (
-        "integrations",
-        "platform integrations are supplied by an embedding host, not the standalone runner; \
-         the run inherits the ambient `GITHUB_TOKEN` or none",
-    ),
-    (
-        "checkpoint",
-        "the standalone runner does not checkpoint the workspace; it retains it instead",
-    ),
-    (
-        "artifacts",
-        "artifact selection is not implemented yet; the whole retained workspace is the result",
-    ),
-    (
-        "notifications",
-        "notification routes are a Fabro platform facility",
-    ),
-    (
-        "interviews",
-        "interview routing is a Fabro platform facility; the host's interviewer answers",
-    ),
-    ("scm", "SCM metadata is a Fabro platform record"),
-];
-
-/// Fabro's rename hint for a top-level key its parser refuses.
-fn workflow_toml_rename_hint(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "version" => "rename to `_version`",
-        "goal" | "goal_file" | "work_dir" | "directory" => "move to `[run]`",
-        "graph" => "move to `[workflow]`",
-        "labels" => "move to `[run.metadata]`",
-        "vars" => "rename to `[run.inputs]`",
-        "setup" => "rename to `[run.prepare]`",
-        "sandbox" => "rename to `[run.environment]` and `[environments.<slug>]`",
-        "checkpoint" => "move under `[run.checkpoint]`",
-        "pull_request" => "move under `[run.pull_request]`",
-        "artifacts" => "move under `[run.artifacts]`",
-        "hooks" => "move under `[[run.hooks]]`",
-        "mcp_servers" => "move under `[run.agent.mcps.<name>]`",
-        "exec" => "rename to `[cli.exec]`",
-        "api" => "rename to `[server.api]`",
-        "web" => "rename to `[server.web]`",
-        "artifact_storage" => "rename to `[server.artifacts]`",
-        "storage_dir" | "data_dir" => "rename to `[server.storage] root`",
-        "max_concurrent_runs" => "rename to `[server.scheduler]`",
-        "fabro" => "rename to `[project]`",
-        "git" => "split into `[run.git]` and `[server.integrations.github]`",
-        "github" => {
-            "split into `[server.integrations.github]` and `[run.integrations.github.permissions]`"
-        }
-        "slack" => "move under `[server.integrations.slack]`",
-        "log" => "rename to `[server.logging]` or `[cli.logging]`",
-        "prevent_idle_sleep" => "rename to `[cli.exec] prevent_idle_sleep`",
-        "verbose" => "rename to `[cli.output] verbosity`",
-        "upgrade_check" => "rename to `[cli.updates] check`",
-        "dry_run" => "rename to `[run.execution] mode = \"dry_run\"`",
-        "auto_approve" => "rename to `[run.execution] approval = \"auto\"`",
-        _ => return None,
-    })
-}
-
 fn placeholder(id: ExprId) -> Value {
     json!({ EXPR_PLACEHOLDER_KEY: id.raw() })
 }
@@ -712,26 +399,23 @@ impl Ctx<'_> {
                 );
                 continue;
             }
-            if key == "import" {
-                self.diags.unsupported(
-                    "import",
-                    attr.span.clone(),
-                    "workflow imports are not supported in phase one",
-                    "inline the imported nodes; see .ai/plans/done/fabro-frontend-phase-one.md §4.2",
-                );
-                continue;
-            }
             if key == "auto_status" {
-                // REMOVE AFTER 2026-10-04: reject the attribute again.
-                self.diags.warning(
-                    "deprecated.auto_status",
-                    attr.span.clone(),
+                // Fabro's `auto_status_deprecated` rule: accepted, warned.
+                let message = if attrs.contains("on_failure") {
                     format!(
-                        "`auto_status` is the deprecated spelling of `on_failure=\"succeed\"`: a \
-                         failed step is recorded as a partial success that reports `succeeded`. \
-                         Accepted until {COMPAT_SUNSET}; use `on_failure=\"partially_succeed\"`"
-                    ),
-                );
+                        "`auto_status` on {what} is deprecated and ignored because `on_failure` \
+                         is set"
+                    )
+                } else if attrs.bool("auto_status", &mut Diagnostics::new()) == Some(true) {
+                    format!(
+                        "`auto_status=true` on {what} is the deprecated spelling of \
+                         `on_failure=\"succeed\"`; use `on_failure=\"succeed\"`"
+                    )
+                } else {
+                    format!("`auto_status` on {what} is deprecated and has no effect unless true")
+                };
+                self.diags
+                    .warning("deprecated.auto_status", attr.span.clone(), message);
                 continue;
             }
             if key == "acp_command" {
@@ -759,6 +443,64 @@ impl Ctx<'_> {
                 attr.span.clone(),
                 format!("`{key}` on {what} is not a Fabro attribute and is ignored"),
             );
+        }
+    }
+
+    /// The `workflow.toml` path beside the root workflow, for spans.
+    fn workflow_toml_path(&self) -> String {
+        if self.base_dir.is_empty() {
+            "workflow.toml".to_string()
+        } else {
+            format!("{}/workflow.toml", self.base_dir)
+        }
+    }
+
+    /// Apply the resolved `[run.environment]` to the one scope: its literal
+    /// `env` and, for a container provider with an image, the container
+    /// target. Secret values reach commands through their configs.
+    fn environment_scope(&mut self) {
+        let Some(environment) = self.settings.environment.clone() else {
+            return;
+        };
+        let scope = self
+            .b
+            .graph_mut()
+            .body
+            .scopes
+            .iter_mut()
+            .find(|scope| scope.id == self.scope);
+        let Some(scope) = scope else {
+            return;
+        };
+        for (key, value) in &environment.env {
+            if let workflow_toml::EnvValue::Literal(text) = value {
+                scope.env.insert(
+                    SmolStr::new(key),
+                    ir::ExprOrValue::Value(Value::String(text.clone())),
+                );
+            }
+        }
+        if let Some(image) = &environment.image
+            && environment.provider != "local"
+        {
+            scope.runtime.target = ir::RuntimeTarget::Container {
+                image:       SmolStr::new(image),
+                options:     ir::ContainerOptions::default(),
+                credentials: None,
+            };
+        }
+    }
+
+    /// The branch source nodes a prompted fan-in joins, for its prompt and
+    /// its record.
+    fn fan_in_sources(node: &NodeDecl, workflow: &Workflow, config: &mut Value) {
+        let sources: Vec<Value> = workflow
+            .incoming(&node.id)
+            .into_iter()
+            .map(|edge| Value::String(edge.from.clone()))
+            .collect();
+        if let Value::Object(config) = config {
+            config.insert("sources".into(), Value::Array(sources));
         }
     }
 
@@ -850,7 +592,13 @@ impl Ctx<'_> {
         self.unknown_attrs(&attrs, attrs::GRAPH, attrs::GRAPH_IGNORED, "the graph");
         let span = workflow.span.clone();
         let goal_span = attrs.span_of("goal", &span);
-        let goal = attrs.text("goal").unwrap_or_default();
+        // The graph's `goal` wins over `[run] goal`, as Fabro's run
+        // materialization orders them.
+        let goal = attrs
+            .text("goal")
+            .filter(|goal| !goal.trim().is_empty())
+            .or_else(|| self.settings.goal.clone())
+            .unwrap_or_default();
         if let Some(goal) = self.rendered(&goal, &goal_span, "the graph `goal`") {
             self.goal.clone_from(&goal);
             self.template.set_goal(goal);
@@ -891,21 +639,22 @@ impl Ctx<'_> {
             return;
         };
         match Policy::parse(&value) {
-            // REMOVE AFTER 2026-10-04: refuse `succeed` again.
-            Some(Policy::Succeed) => self.diags.warning(
-                &format!("deprecated.{key}.succeed"),
+            Some(Policy::PartiallySucceed) => self.diags.warning(
+                "fabro.petri_extension",
                 attrs.span_of(key, span),
                 format!(
-                    "`{key}=\"succeed\"` records a failed step as a partial success that reports \
-                     `succeeded`. Accepted until {COMPAT_SUNSET}; use `partially_succeed`, which \
-                     keeps the failure on the record"
+                    "`{key}=\"partially_succeed\"` is a Petri extension: Fabro's validator \
+                     accepts `route`, `exit` and `succeed` only, so Fabro refuses this workflow"
                 ),
             ),
             Some(_) => {}
             None => self.diags.error(
                 "fabro.bad_on_failure",
                 attrs.span_of(key, span),
-                format!("`{key}` must be `route`, `exit` or `partially_succeed`, not `{value}`"),
+                format!(
+                    "`{key}` must be `route`, `exit`, `succeed` or `partially_succeed`, not \
+                     `{value}`"
+                ),
             ),
         }
     }
@@ -1148,21 +897,35 @@ impl Ctx<'_> {
         let (step, timeout) = match kind {
             Kind::Start | Kind::Exit | Kind::Conditional => (None, STRUCTURAL_TIMEOUT),
             Kind::FanIn => {
-                if node.attrs.contains("prompt") {
-                    self.diags.unsupported(
-                        "fan_in.prompt",
-                        node.attrs.span_of("prompt", &node.span),
-                        "a fan-in node with a `prompt` runs an agent over the branch results",
-                        "join with a plain `tripleoctagon`, then read the results in the next node",
-                    );
+                if node
+                    .attrs
+                    .text("prompt")
+                    .is_some_and(|prompt| !prompt.trim().is_empty())
+                {
+                    // A prompted fan-in: the ordered barrier, then one model
+                    // call over the branch results.
+                    let mut config = self.agent_config(node, kind, workflow, policy, explicit);
+                    Self::fan_in_sources(node, workflow, &mut config);
+                    (
+                        Some(StepRef::new(PROMPT_KIND, config)),
+                        explicit.unwrap_or(AGENT_TIMEOUT),
+                    )
+                } else {
+                    (None, STRUCTURAL_TIMEOUT)
                 }
-                (None, STRUCTURAL_TIMEOUT)
             }
             Kind::Parallel => (None, explicit.unwrap_or(STRUCTURAL_TIMEOUT)),
-            Kind::Agent | Kind::Prompt => {
+            Kind::Agent => {
                 let config = self.agent_config(node, kind, workflow, policy, explicit);
                 (
                     Some(StepRef::new(AGENT_KIND, config)),
+                    explicit.unwrap_or(AGENT_TIMEOUT),
+                )
+            }
+            Kind::Prompt => {
+                let config = self.agent_config(node, kind, workflow, policy, explicit);
+                (
+                    Some(StepRef::new(PROMPT_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),
                 )
             }
@@ -1235,6 +998,7 @@ impl Ctx<'_> {
     fn base_config(
         &mut self,
         node: &NodeDecl,
+        workflow: &Workflow,
         policy: FailurePolicy,
         timeout: Option<Duration>,
     ) -> Map<String, Value> {
@@ -1253,6 +1017,17 @@ impl Ctx<'_> {
         );
         if let Some(ms) = timeout.map(duration_ms) {
             config.insert("timeout_ms".into(), ms);
+        }
+        if matches!(
+            policy.on_failure,
+            Policy::Succeed | Policy::PartiallySucceed
+        ) {
+            // Fabro promotes a failure only when no explicit route matches
+            // it; the step decides that with the node's routes in hand.
+            config.insert(
+                ROUTES_KEY.into(),
+                promotion::explicit_routes(node, workflow),
+            );
         }
         config
     }
@@ -1287,7 +1062,7 @@ impl Ctx<'_> {
         policy: FailurePolicy,
         timeout: Option<Duration>,
     ) -> Value {
-        let mut config = self.base_config(node, policy, timeout);
+        let mut config = self.base_config(node, workflow, policy, timeout);
         config.insert("kind".into(), Value::String(kind.name().into()));
         let prompt_span = node.attrs.span_of("prompt", &node.span);
         let prompt = match node.attrs.text("prompt") {
@@ -1311,6 +1086,7 @@ impl Ctx<'_> {
         ) {
             config.insert("prompt".into(), Value::String(prompt));
         }
+        let is_prompt = kind != Kind::Agent;
         if let Some(backend) = node
             .attrs
             .text("backend")
@@ -1323,22 +1099,46 @@ impl Ctx<'_> {
                     "agent backend must be acp or api",
                 );
             }
-            config.insert("backend".into(), Value::String(backend));
+            // Fabro's `backend_valid` rule: a prompt node is API-only. The
+            // graph's `backend="acp"` applies to agent nodes only.
+            if is_prompt && backend == "acp" {
+                if node.attrs.contains("backend") {
+                    self.diags.error(
+                        "fabro.prompt_backend",
+                        node.attrs.span_of("backend", &node.span),
+                        "backend=\"acp\" is only valid on agent nodes; prompt nodes are API-only",
+                    );
+                }
+            } else {
+                config.insert("backend".into(), Value::String(backend));
+            }
         }
         for key in ["model", "provider", "reasoning_effort"] {
             if let Some(value) = node.attrs.text(key) {
                 config.insert(key.into(), Value::String(value));
             }
         }
+        // The graph's defaults, then `[run.model]` from `workflow.toml`.
         if !config.contains_key("model")
-            && let Some(model) = workflow.attrs.text("default_model")
+            && let Some(model) = workflow
+                .attrs
+                .text("default_model")
+                .or_else(|| self.settings.model.name.clone())
         {
             config.insert("model".into(), Value::String(model));
         }
         if !config.contains_key("provider")
-            && let Some(provider) = workflow.attrs.text("default_provider")
+            && let Some(provider) = workflow
+                .attrs
+                .text("default_provider")
+                .or_else(|| self.settings.model.provider.clone())
         {
             config.insert("provider".into(), Value::String(provider));
+        }
+        if !config.contains_key("reasoning_effort")
+            && let Some(effort) = self.settings.model.reasoning_effort.clone()
+        {
+            config.insert("reasoning_effort".into(), Value::String(effort));
         }
         if let Some(fidelity) = self.fidelity(node, workflow) {
             config.insert("fidelity".into(), Value::String(fidelity));
@@ -1358,7 +1158,15 @@ impl Ctx<'_> {
                 Value::from(retries.min(i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX))),
             );
         }
-        if config.get("backend").and_then(Value::as_str) == Some("api") {
+        if is_prompt {
+            if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
+                self.diags.error(
+                    "fabro.backend_options",
+                    node.span.clone(),
+                    "a prompt node cannot set acp.command or acp.config; prompt nodes are API-only",
+                );
+            }
+        } else if config.get("backend").and_then(Value::as_str) == Some("api") {
             if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
                 self.diags.error(
                     "fabro.backend_options",
@@ -1447,7 +1255,7 @@ impl Ctx<'_> {
         policy: FailurePolicy,
         timeout: Option<Duration>,
     ) -> Value {
-        let mut config = self.base_config(node, policy, timeout);
+        let mut config = self.base_config(node, workflow, policy, timeout);
         let language = node
             .attrs
             .text("language")
@@ -1481,6 +1289,22 @@ impl Ctx<'_> {
                 node.span.clone(),
                 format!("command node `{}` needs a `script`", node.id),
             ),
+        }
+        let mut env = Map::new();
+        if let Some(environment) = &self.settings.environment {
+            for (key, value) in &environment.env {
+                if let workflow_toml::EnvValue::Secret(_) = value {
+                    env.insert(key.clone(), value.to_json());
+                }
+            }
+        }
+        if let Some(prepare_env) = self.prepare_envs.get(&node.id) {
+            for (key, value) in prepare_env {
+                env.insert(key.clone(), value.to_json());
+            }
+        }
+        if !env.is_empty() {
+            config.insert("env".into(), Value::Object(env));
         }
         if let Some(source) = node.attrs.text("stdin_source") {
             let span = node.attrs.span_of("stdin_source", &node.span);
@@ -1561,7 +1385,7 @@ impl Ctx<'_> {
         policy: FailurePolicy,
         timeout: Option<Duration>,
     ) -> Value {
-        let mut config = self.base_config(node, policy, timeout);
+        let mut config = self.base_config(node, workflow, policy, timeout);
         let mut choices = Vec::new();
         let mut freeform_target = None;
         for edge in workflow.outgoing(&node.id) {
@@ -1659,9 +1483,30 @@ impl Ctx<'_> {
         );
         let kv = self.b.exprs().var("kv");
         config.insert("kv".into(), placeholder(kv));
-        if let Some(cycles) = node.attrs.int("manager.max_cycles", &mut self.diags) {
-            config.insert("max_cycles".into(), Value::from(cycles.max(0)));
-        }
+        // Fabro's normalization: missing, non-integer or negative is 1000;
+        // zero is 1. A value Fabro would silently discard is named here.
+        let cycles = match node.attrs.get("manager.max_cycles") {
+            None => 1000,
+            Some(attr) => match &attr.value {
+                model::AttrValue::Int(n) if *n >= 0 => (*n).max(1),
+                model::AttrValue::Str(s) if s.trim().parse::<i64>().is_ok_and(|n| n >= 0) => {
+                    s.trim().parse::<i64>().unwrap_or(1000).max(1)
+                }
+                other => {
+                    self.diags.warning(
+                        "fabro.manager.max_cycles",
+                        attr.span.clone(),
+                        format!(
+                            "`manager.max_cycles={}` is not a non-negative integer; Fabro reads \
+                             it as 1000",
+                            other.as_text()
+                        ),
+                    );
+                    1000
+                }
+            },
+        };
+        config.insert("max_cycles".into(), Value::from(cycles));
         if let Some(interval) = node
             .attrs
             .duration("manager.poll_interval", &mut self.diags)
@@ -1934,7 +1779,7 @@ impl Ctx<'_> {
                 &[],
                 &format!("edge `{} -> {}`", edge.from, edge.to),
             );
-            let cond = self.edge_condition(edge, res, policy);
+            let cond = self.edge_condition(edge, policy);
             let weight = edge.attrs.int("weight", &mut self.diags).unwrap_or(0);
             let label = edge.attrs.text("label").filter(|l| !l.is_empty());
             let restart = edge
@@ -1976,35 +1821,12 @@ impl Ctx<'_> {
         self.b.node_mut(res.id).routing = Routing::groups(vec![group]);
     }
 
-    fn edge_condition(
-        &mut self,
-        edge: &EdgeDecl,
-        res: &Resolved,
-        policy: FailurePolicy,
-    ) -> Option<ExprId> {
+    fn edge_condition(&mut self, edge: &EdgeDecl, policy: FailurePolicy) -> Option<ExprId> {
         let text = edge.attrs.text("condition")?;
         if text.trim().is_empty() {
             return None;
         }
         let span = edge.attrs.span_of("condition", &edge.span);
-        if matches!(
-            policy.on_failure,
-            Policy::PartiallySucceed | Policy::Succeed
-        ) && condition::parse(&text).is_ok_and(|c| mentions_failed(&c))
-        {
-            self.diags.warning(
-                "fabro.unreachable_failure_edge",
-                span.clone(),
-                format!(
-                    "`{}` has `on_failure=\"{}\"`, so a non-retryable failure is classified as a \
-                     partial success before routing sees it, and this `outcome=failed` edge can \
-                     never match. Fabro would take it; under Petri the outcome is classified \
-                     once, at the step boundary. Use two nodes for both behaviors",
-                    res.id,
-                    policy.on_failure.name()
-                ),
-            );
-        }
         condition::lower(
             &text,
             self.b.exprs(),
@@ -2073,7 +1895,16 @@ impl Ctx<'_> {
                         let value = exprs.lit("value");
                         exprs.call("pluck", vec![sorted, value])
                     };
-                    self.b.node_mut(res.id).step = StepRef::new("noop", placeholder(ordered));
+                    let step = &mut self.b.node_mut(res.id).step;
+                    if step.kind == PROMPT_KIND {
+                        // The prompted fan-in reads the same ordered results
+                        // the plain barrier would have produced.
+                        if let Value::Object(config) = &mut step.config {
+                            config.insert("branch_results".into(), placeholder(ordered));
+                        }
+                    } else {
+                        *step = StepRef::new("noop", placeholder(ordered));
+                    }
                 }
                 _ => {}
             }
@@ -2354,18 +2185,6 @@ impl Ctx<'_> {
                 self.b
                     .set_budget(check, Budget::new(limit, STRUCTURAL_TIMEOUT));
             }
-        }
-    }
-}
-
-fn mentions_failed(condition: &condition::Condition) -> bool {
-    match condition {
-        condition::Condition::Clause(c) => {
-            c.key == "outcome" && c.value == "failed" && c.op == condition::Op::Eq
-        }
-        condition::Condition::Not(inner) => mentions_failed(inner),
-        condition::Condition::And(items) | condition::Condition::Or(items) => {
-            items.iter().any(mentions_failed)
         }
     }
 }

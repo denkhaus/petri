@@ -20,7 +20,7 @@ crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, nested workflow, and the stub registry
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the output store, and the stub registry
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
@@ -121,7 +121,9 @@ crates/fabro/frontend/tests/fuzz.rs          Fabro plan §7 1: arbitrary text ne
 crates/fabro/acceptance/tests/harness.rs     Fabro plan §7 2: every corpus file lowers or is rejected specifically; REPORT.md
 crates/fabro/acceptance/tests/runs.rs        Fabro plan §7 5: every lowered corpus file runs under stubs; RUNS.md
 crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripted battery, checked against the Fabro oracle
-crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator
+crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator; one child per manager attempt
+crates/fabro/steps/tests/manager.rs          readiness item 4: the manager loop under a controlled clock (polls, stop condition, exhaustion, defaults, reattach, cancel)
+crates/fabro/steps/tests/prompt.rs           readiness item 4: `fabro/prompt` against a scripted model client, contracts and repair turns, the prompted fan-in, prompt events
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
@@ -131,7 +133,7 @@ crates/petri/lib/tests/interview.rs          the interview dispatcher on the sta
 crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering
 crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
-crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver
+crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
@@ -168,7 +170,10 @@ Host jobs inherit `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`,
 explicitly through workflow environment settings.
 
 `petri run --backend host|docker|daytona` selects the execution backend.
-Host is the default. Docker runs process jobs in a pinned slim runner image.
+Host is the default, unless the workflow's own configuration asks for another
+(a Fabro `workflow.toml` `[environments.<id>] provider`, read back from the
+lowered graph through `Frontend::launch_settings`); an explicit `--backend`
+always wins. Docker runs process jobs in a pinned slim runner image.
 Daytona runs them in a VM with nested Docker; container jobs, services, and
 Docker actions stay inside that VM. `--runner-image LABEL=IMAGE` overrides a
 runner label. Docker defaults cover Ubuntu 22.04, 24.04, and 26.04. Daytona's
@@ -998,7 +1003,15 @@ base_url = "http://127.0.0.1:3000"
 may be routed to at all; a model on any other provider is unavailable. An
 unreadable or invalid layer leaves the client unbuilt and every native agent
 node failing with `pebble_unconfigured`, rather than reaching a live
-endpoint.
+endpoint. Fabro prompt nodes (`tab`) use the same client for their one
+tool-free call.
+
+**Workflow secrets.** A Fabro `workflow.toml` environment value written as
+`{{ secrets.NAME }}` is a secret reference. The standalone runner resolves it
+from the environment variable `PETRI_SECRET_NAME` when the command that
+carries it starts, masks the value in every log, and fails the command with
+`secret_unavailable` when the variable is unset. An embedding host supplies
+its own `SecretProvider` instead.
 
 ## The embedding path
 

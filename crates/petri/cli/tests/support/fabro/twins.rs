@@ -28,6 +28,9 @@ use twin_openai::config::Config as OpenAiConfig;
 pub(crate) enum Provider {
     OpenAi,
     Anthropic,
+    /// OpenRouter speaks OpenAI's chat completions protocol; the OpenAI twin
+    /// serves it on `/v1/chat/completions`, so one twin stands in for both.
+    OpenRouter,
 }
 
 impl Provider {
@@ -36,6 +39,7 @@ impl Provider {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::OpenRouter => "openrouter",
         }
     }
 
@@ -44,6 +48,7 @@ impl Provider {
         match self {
             Self::OpenAi => "OPENAI_API_KEY",
             Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::OpenRouter => "OPENROUTER_API_KEY",
         }
     }
 
@@ -52,6 +57,7 @@ impl Provider {
         match self {
             Self::OpenAi => "responses",
             Self::Anthropic => "messages",
+            Self::OpenRouter => "chat.completions",
         }
     }
 }
@@ -87,7 +93,7 @@ impl Twin {
         let log_path = dir.join(format!("{}-requests.jsonl", provider.id()));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let app = match provider {
-            Provider::OpenAi => {
+            Provider::OpenAi | Provider::OpenRouter => {
                 let mut config = OpenAiConfig::from_lookup(&|_| None).expect("twin-openai config");
                 config.scenarios_path = Some(scenarios_path);
                 config.request_log_path = Some(log_path.clone());
@@ -260,7 +266,7 @@ pub(crate) fn tool_call(id: &str, name: &str, arguments: Value) -> Value {
 /// `shell_command` for GPT-5.6, Claude 5's `Bash`.
 pub(crate) fn shell_tool(provider: Provider) -> &'static str {
     match provider {
-        Provider::OpenAi => "shell_command",
+        Provider::OpenAi | Provider::OpenRouter => "shell_command",
         Provider::Anthropic => "Bash",
     }
 }
@@ -268,7 +274,7 @@ pub(crate) fn shell_tool(provider: Provider) -> &'static str {
 /// The question tool each harness offers.
 pub(crate) fn question_tool(provider: Provider) -> &'static str {
     match provider {
-        Provider::OpenAi => "request_user_input",
+        Provider::OpenAi | Provider::OpenRouter => "request_user_input",
         Provider::Anthropic => "AskUserQuestion",
     }
 }
@@ -278,6 +284,16 @@ pub(crate) fn model(provider: Provider) -> &'static str {
     match provider {
         Provider::OpenAi => "gpt-5.6-sol",
         Provider::Anthropic => "claude-sonnet-5",
+        Provider::OpenRouter => "kimi-k3",
+    }
+}
+
+/// The model name a provider puts on the wire for [`model`]: OpenRouter's
+/// catalog rows carry a vendor-prefixed `api_model`.
+pub(crate) fn wire_model(provider: Provider) -> &'static str {
+    match provider {
+        Provider::OpenAi | Provider::Anthropic => model(provider),
+        Provider::OpenRouter => "moonshotai/kimi-k3",
     }
 }
 
@@ -286,5 +302,6 @@ pub(crate) fn requested_effort(provider: Provider, body: &Value) -> Option<&str>
     match provider {
         Provider::OpenAi => body["reasoning"]["effort"].as_str(),
         Provider::Anthropic => body["output_config"]["effort"].as_str(),
+        Provider::OpenRouter => body["reasoning_effort"].as_str(),
     }
 }
