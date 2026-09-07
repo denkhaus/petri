@@ -40,6 +40,5 @@ axum = "0.8"
 # The pinned Fabro adapter talks to the private Fabro server's HTTP API; the
 # comparison reads decision records and digests bundles.
 reqwest = { workspace = true }
-serde = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
