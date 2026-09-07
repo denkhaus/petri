@@ -25,13 +25,14 @@ a run will execute.
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
 | `[run] goal` (text or `{ file }`) | the run goal when the graph sets no `goal` (the graph attribute wins, as in Fabro) |
-| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. `[run.model.fallbacks]` warns (readiness item 9a) |
+| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one |
+| `[run.model.fallbacks]` `"<model>" = ["provider:model", ...]` | Fabro's model-keyed fallback chains ("Model fallback" under "Native Pebble" below). The frontend checks the shape (a table keyed by a requested model; each entry a bare token, `provider:selector`, or the legacy `provider/selector`; a provider-qualified key is refused as Fabro refuses it, `fabro.model_fallbacks`) and puts the chains on every agent and prompt node config under `fallbacks`; the runner resolves them against its catalog at the first LLM stage |
 | `[run.execution]` `mode`, `approval` | launch defaults in `Graph.params["fabro.launch"]`: `mode = "dry_run"` runs the stub registry, `approval = "auto"` answers every question with its first choice. `--dry-run`, `--auto-approve`, `--interactive` and `--interview-script` win |
 | `[run.environment]` `id` over `[environments.<id>]` | `provider` selects the sandbox backend when `--backend` is not given: `local` is the host, `docker` the Docker plugin, `daytona` the Daytona plugin. `image.docker` becomes the scope's container image under `docker` and `daytona`. `env` is the scope environment; a value that is exactly `{{ secrets.NAME }}` is a `$secret` reference every command resolves at spawn (the standalone runner reads `PETRI_SECRET_NAME`; a missing secret fails the command with `secret_unavailable`) and masks in every log. `resources` size a Daytona runner. `cwd`, `network`, `lifecycle`, `labels` and `image.dockerfile` are platform-only and warn `ignored.workflow_toml.environments.<id>.<key>`; an `id` with no table, or a provider outside the three, is an error |
 | `[run.prepare]` `steps`, `timeout` | setup steps lowered as command nodes `run_prepare_1`, `run_prepare_2`, ... between `start` and its successors, so they run in the selected environment before any node, in order, each with the section's `timeout` (default `5m`), its `env`, and `on_failure="exit"`: a failed step ends the run before the first node. `command` argv is joined with shell quoting; `script` runs as written; `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` render at load. The whole file is validated before any step runs |
 | `[[run.hooks]]` in `workflow.toml`, `.fabro/project.toml` at the repository root, and the host's user settings layer | local hooks ("Hooks" below). Each layer is read on its own and the three merge as Fabro's `combine_hooks` does: settings, then project, then workflow, a higher layer's entry replacing a lower one with the same `id` in place and the rest appending. Every field is validated at load (`fabro.hooks.toml`, `.entry`, `.event`, `.transport`, `.timeout`, `.matcher`); a hooks layer that cannot be read is an error, so a configured hook is never skipped silently. A `checkpoint_saved` hook warns `fabro.hooks.checkpoint_saved` and never runs. The merged list lands in `Graph.params["fabro_hooks"]` and on the `start` and `exit` stages. The user layer (`~/.fabro/settings.toml`) is outside the repository, so the host passes its text as the `fabro.settings_toml` compile variable when it wants one |
 | `[run.agent.mcps.<name>]` in `workflow.toml`, `.fabro/project.toml` and the host's user settings layer | MCP servers for native agent nodes ("MCP servers" under "Native Pebble" below). Each layer is read on its own with Fabro's field rules (`type` is `stdio`, `http` or `sandbox`; exactly one of `script` and `command`; `url`; `port`; `env`, `headers`; `startup_timeout` default `10s`, `tool_timeout` default `60s`; `enabled`), the three merge by name with the higher layer replacing the lower one whole (Fabro's sticky map) and `enabled = false` removing the name, and the merged list is carried on every agent node's config (`mcps`) and into nested workflows. `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` substitute at load; a value under `env` or `headers` that is exactly `{{ secrets.NAME }}` is a `$secret` reference resolved when the server launches. Errors: `fabro.mcps.entry`, `fabro.mcps.type`, `fabro.mcps.shape`, `fabro.mcps.toml` (a layer that names servers and does not parse), `fabro.mcps.unbound`, `fabro.mcps.env_token` (`{{ env.* }}`, refused as Fabro refuses it); `unsupported.workflow_toml.run.agent.mcps.reference` (`id = ...` names a server-managed catalog the standalone runner does not have), `unsupported.workflow_toml.run.agent.mcps.protocol` (`protocol = "sse"`), `unsupported.workflow_toml.run.agent.mcps.secret` (a secret token anywhere but a whole `env` or `headers` value) |
-| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.model.fallbacks]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is a specific `unsupported.workflow_toml.*` error (the MCP row above lists its three). A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
+| other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.clone]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is a specific `unsupported.workflow_toml.*` error (the MCP row above lists its three). A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
 | `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
 | `import="<path>"` | expanded at load as Fabro's import transform expands it (below); the persisted graph carries the imported nodes |
@@ -621,6 +622,95 @@ They sum all settled prompt reports, including repair turns, failed prompts,
 and cancellation. Cost is a known subtotal: null means no response reported a
 cost. These metrics exclude compaction and model calls made inside tools.
 ACP continues to report `acp.turns`.
+
+### Model fallback
+
+`[run.model.fallbacks]` is applied by the native agent and prompt steps
+(`fabro_steps::fallback`). A stage runs on a *plan*: the canonical route its
+`model` and `provider` resolve to, then the targets the chain keyed by that
+canonical model id lists, in order. The chain is resolved once per run as
+Fabro's server resolves it at run start: a key that names a provider, a
+provider-qualified key, two keys that resolve to one model, or an unknown key
+fail the first LLM stage with class `bad_config`; a candidate on a provider
+that is not available (`PETRI_LLM_PROVIDERS`, credentials) is skipped with
+Fabro's `model_fallback_skipped` notice, as is a bare provider with no
+offering of the requested model, a bare model no available provider offers,
+a duplicate target, and (at plan time) a target with no reasoning level near
+the requested effort (`NoNearbyReasoningLevel`). A configured chain left
+with nothing usable warns `model_fallback_chain_empty` and the stage runs on
+its primary alone. Each notice is printed once per run on stderr
+(`warn: ...`) and always carried on the stage's plan event.
+
+The requested reasoning effort maps per target through the catalog: the
+nearest advertised level, a tie going up, as Fabro's `closest_supported`;
+a target whose catalog row advertises no levels keeps the request. `speed`
+and `max_tokens` travel unchanged. The original route is filtered out of its
+own chain.
+
+A model error moves the plan when it is eligible and a target remains:
+eligible are the kinds the reference retries (`rate_limit`, `server`,
+`network`, `stream_decode`, `provider`, `response_decode`), provider
+availability failures (`authentication`, `access_denied`, `not_found`,
+`quota_exceeded`), a `timeout`, and a `content_filter` whose provider code is
+`refusal`. `invalid_request`, `context_length`, any other `content_filter`,
+`configuration`, `model_selection`, `resource_limit`, `middleware`, and an
+unknown kind end the stage with class `llm:<kind>`. Cancellation, the
+driver's attempt budget, and any non-LLM agent error (a tool failure, a
+missing skill) never start fallback. The mapping is written before the
+implementation in `.ai/reviews/fabro-unified/task12-fallback.md`.
+
+The plan is fixed when the stage opens. An output-repair turn runs on the
+route the plan reached; advancing to a target never activates the target's
+own chain; a retained `full` thread carries its plan to the next node, which
+continues on the route reached (position and all) and builds no plan of its
+own; a workflow retry (a new firing) builds a new plan at position 0. ACP
+agents have no plan: the command owns their model.
+
+A native session keeps its conversation across the change: the failed
+session's durable record resumes on the next route with Pebble's
+`ResumeMode::UseModel`, the same session id continuing. Two continuations
+exist. When the failed request carried the prompt itself (the record ends
+with that user turn), the turn is dropped from the record and the prompt is
+sent again on the new route (`replay_prompt`). When work happened first (the
+record ends with tool results or an assistant turn), the next model is asked
+to continue from the state above with an agent-sourced message that names the
+tool results as already applied (`continue_turn`, the text is
+`fallback::CONTINUATION`); the tool that ran is not run again. Fabro rebuilds
+the session from the original prompt on every failover, which would repeat
+the tool; this is an accepted difference. A prompt node re-sends its
+messages, repair history included, on the next route (`replay_prompt`).
+
+Three retry mechanisms exist and each has one owner: the client's own
+same-route retries (`PETRI_LLM_RETRY_ATTEMPTS`, default 3), Pebble's turn
+replay after a broken response stream (`PETRI_AGENT_TURN_REPLAY_ATTEMPTS`,
+unset keeps Pebble's default), and this chain, which starts only once both
+are spent. `PETRI_LLM_TIMEOUT_MS` bounds one client call, retries included;
+its expiry is a `timeout` and eligible.
+
+Recovery: nothing of a plan is durable. A run resumed after a crash starts
+the interrupted node's attempt again with a new plan at position 0, on the
+primary; the thread it may have continued is gone (the node degrades to
+`summary:high` as documented under "Fidelity and threads"). Any model request
+that was in flight when the process died may therefore be sent again, on the
+primary, and a tool effect that ran before the crash may run again: the
+existing at-least-once limit for external effects applies to fallback as to
+every other stage.
+
+Events: five `StepEvent::Custom` kinds, each with `node`, `firing` and
+`attempt`. `fabro.fallback.plan` once per stage (`requested`, `routes[]` with
+`position`, `provider`, `model`, `reasoning_effort`, `speed`, and
+`notices[]` with `code`, `level`, `message`); `fabro.fallback.route` each
+time a route becomes active (`position`, the route, `reused`, `session`);
+`fabro.fallback.usage` after every model turn (`position`, the route,
+`outcome` `ok` or `error`, `usage`, `cost_usd_micros`, `inference_ms`,
+`tool_ms`); `fabro.fallback.failover` on each advance (`position`, `from`,
+`to` with its controls, `original`, `requested_reasoning_effort`, `error`
+with `kind`, `message`, `provider`, `status`, `provider_code`, `retry`,
+`eligible`, and `continuation`); `fabro.fallback.stop` when a model error
+ends the stage (`reason` `ineligible` or `exhausted`, the route, `error`). A
+cancellation emits no stop. The stage metrics carry `fallback.position`,
+`fallback.route` and `fallback.original`. `crates/petri/lib/tests/fallback_events.rs`
+rebuilds a stage's outcome and per-route accounting from the public stream.
 
 ### MCP servers
 

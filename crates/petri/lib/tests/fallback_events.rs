@@ -19,6 +19,7 @@ use petri::execution::host::{self, HostRun};
 use petri::executor::Retention;
 use petri::fabro::fallback::{FAILOVER_EVENT, PLAN_EVENT, ROUTE_EVENT, STOP_EVENT, USAGE_EVENT};
 use petri::fabro::pebble::PebbleClient;
+use petri::fabro::register;
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::{RunStatus, Value};
@@ -120,7 +121,7 @@ async fn run(dir: &RunDir, calls: Vec<ScriptedCall>) -> (Reconstructed, Vec<Stri
     options.grace = Duration::from_millis(200);
     options.retention = Retention::Never;
     options.echo = false;
-    let rt = petri::fabro::register(Runtime::standard().frontend(Fabro::new()))
+    let rt = register(Runtime::standard().frontend(Fabro::new()))
         .capability(PebbleClient(client))
         .options(options);
     fs::write(dir.path().join("wf.fabro"), WORKFLOW).expect("workflow");

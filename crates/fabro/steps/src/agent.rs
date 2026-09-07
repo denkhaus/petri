@@ -344,7 +344,7 @@ impl Step for AgentStep {
         // A retained thread continues on its own plan, at the route it
         // reached; a fresh session starts this node's plan at its original.
         let (mut plan, resume) = match (retained, planned) {
-            (Some(kept), _) => (kept.plan, Resume::Export(kept.export)),
+            (Some(kept), _) => (kept.plan, Resume::Export(Box::new(kept.export))),
             (None, Some(Planned { plan, notices })) => {
                 fallback::Stage::of(&ctx).plan(&plan, &notices).await;
                 let route = plan.current().clone();
@@ -373,7 +373,7 @@ impl Step for AgentStep {
                 .await;
         }
         let mut turns = 0;
-        let result = run_session(
+        let result = Box::pin(run_session(
             &config,
             resolved.fidelity,
             &run_id,
@@ -382,7 +382,7 @@ impl Step for AgentStep {
             &mut session,
             &mut turns,
             &mut plan,
-        )
+        ))
         .await;
         let reason = match &result {
             Ok(_) => ShutdownReason::Completed,
@@ -459,7 +459,7 @@ async fn run_session(
     let (outcome, text) = loop {
         // Every turn, the repair turns included, runs on the same plan: a
         // provider-local failure moves the conversation to the next route.
-        let text = fallback::prompt(session, plan, config, ctx, &prompt).await?;
+        let text = Box::pin(fallback::prompt(session, plan, config, ctx, &prompt)).await?;
         ctx.log(LogStream::Stdout, text.clone()).await;
         *turn_count += 1;
         match validate(contract, &text) {

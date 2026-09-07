@@ -41,15 +41,19 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::env;
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+use std::{env, fmt, iter};
 
 use frontend_fabro::fallbacks::ModelRef;
 use ir::{Attempt, FiringId, LogStream, StepEvent, Value};
 use lithos_llm::Client;
-use lithos_llm::catalog::CatalogModel;
+use lithos_llm::catalog::{CatalogModel, CatalogProvider};
 use lithos_llm::middleware::RetryPolicy;
-use lithos_llm::types::{Error as LlmError, ErrorKind, ReasoningEffort, Request, Speed};
+use lithos_llm::types::{
+    Error as LlmError, ErrorKind, ReasoningEffort, Request, RetryClassification, Speed,
+};
 use pebble_coding_agent::state::{SessionRecord, StoredMessage};
 use pebble_coding_agent::{CodingAgentOptions, Error as PebbleError, InterruptReason};
 use serde::{Deserialize, Serialize};
@@ -197,7 +201,7 @@ impl Plan {
     /// Every route, the original first.
     #[must_use]
     pub fn routes(&self) -> Vec<&Route> {
-        std::iter::once(&self.original)
+        iter::once(&self.original)
             .chain(self.remaining.iter())
             .collect()
     }
@@ -228,8 +232,8 @@ pub struct Target {
     pub model:    String,
 }
 
-impl std::fmt::Display for Target {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.provider, self.model)
     }
 }
@@ -608,7 +612,7 @@ fn resolve_candidate(
             }
             let passthrough = catalog
                 .provider(&primary.provider)
-                .is_ok_and(|provider| provider.allows_passthrough());
+                .is_ok_and(CatalogProvider::allows_passthrough);
             if passthrough {
                 return Ok(Candidate::Target(Target {
                     provider: primary.provider.clone(),
@@ -838,15 +842,9 @@ pub fn eligible(error: &LlmError) -> bool {
         | ErrorKind::QuotaExceeded
         | ErrorKind::Timeout => true,
         ErrorKind::ContentFilter => error.provider_code() == Some("refusal"),
-        ErrorKind::InvalidRequest
-        | ErrorKind::ContextLength
-        | ErrorKind::Configuration
-        | ErrorKind::ModelSelection
-        | ErrorKind::ResourceLimit
-        | ErrorKind::Middleware
-        | ErrorKind::Cancelled
-        | ErrorKind::Unknown(_) => false,
-        // A category this build does not know never enables failover.
+        // `InvalidRequest`, `ContextLength`, `Configuration`,
+        // `ModelSelection`, `ResourceLimit`, `Middleware`, `Cancelled`,
+        // `Unknown`, and any category this build does not know: never.
         _ => false,
     }
 }
@@ -872,9 +870,9 @@ impl ModelFailure {
     #[must_use]
     pub fn from_error(error: &LlmError) -> Self {
         let retry = match error.retry_classification() {
-            lithos_llm::types::RetryClassification::Never => "never",
-            lithos_llm::types::RetryClassification::Safe => "safe",
-            lithos_llm::types::RetryClassification::After { .. } => "after",
+            RetryClassification::Never => "never",
+            RetryClassification::Safe => "safe",
+            RetryClassification::After { .. } => "after",
             _ => "unknown",
         };
         Self {
@@ -895,8 +893,8 @@ impl ModelFailure {
     }
 }
 
-impl std::fmt::Display for ModelFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ModelFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "model request failed ({}): {}", self.kind, self.message)?;
         if let Some(provider) = &self.provider {
             write!(f, " [provider {provider}")?;
@@ -949,7 +947,7 @@ pub fn classify(error: &PebbleError) -> Disposition {
     }
 }
 
-fn error_chain(error: &dyn std::error::Error) -> String {
+fn error_chain(error: &dyn StdError) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -1242,7 +1240,7 @@ pub(crate) async fn prompt(
                 input.agent_sourced(),
                 &mut ctx.control,
                 ctx.env.grace(),
-                config.timeout_ms.map(std::time::Duration::from_millis),
+                config.timeout_ms.map(Duration::from_millis),
             )
             .await;
         if let Some(turn) = session.last_turn() {
@@ -1294,7 +1292,11 @@ pub(crate) async fn prompt(
         )
         .await;
         let route = plan.current().clone();
-        *session = Session::open(config, ctx, Resume::Failover { record, route }).await?;
+        *session = Box::pin(Session::open(config, ctx, Resume::Failover {
+            record,
+            route,
+        }))
+        .await?;
         stage
             .route(plan, false, session.session_id().as_deref())
             .await;
@@ -1351,7 +1353,6 @@ pub fn continuation_for(record: &SessionRecord) -> &'static str {
 #[cfg(test)]
 mod tests {
     use lithos_llm::catalog::Catalog;
-    use lithos_llm::types::RetryClassification;
 
     use super::*;
 

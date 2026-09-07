@@ -66,7 +66,7 @@ pub(crate) enum Resume {
     /// A new conversation on `route`.
     Fresh(Route),
     /// A retained thread's warm export, on the export's own route.
-    Export(CodingAgentExport),
+    Export(Box<CodingAgentExport>),
     /// A failed session's record, continued on another route: the
     /// fallback chain's handoff.
     Failover {
@@ -271,7 +271,7 @@ impl NativeSession {
             // next route; the builder binds this node's services either way.
             let mut builder: CodingAgentBuilder = match resume {
                 Resume::Export(export) => {
-                    CodingAgent::resume_from_export(client.0.clone(), environment, export)
+                    CodingAgent::resume_from_export(client.0.clone(), environment, *export)
                 }
                 Resume::Failover { record, route } => CodingAgent::resume(
                     client.0.clone(),

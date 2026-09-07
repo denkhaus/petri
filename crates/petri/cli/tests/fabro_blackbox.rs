@@ -871,8 +871,10 @@ async fn workflow_toml_inputs_bind_and_unsupported_sections_are_reported() {
     let finished = case.run(&workflow, &[]).await;
     finished.assert_code(0);
     assert_eq!(finished.final_context()["command.output"], json!("bound\n"));
+    // `[run.model.fallbacks]` is read, not warned about (task 12): the
+    // chain waits for an LLM node and this workflow has none.
     assert!(
-        finished
+        !finished
             .stderr
             .contains("ignored.workflow_toml.run.model.fallbacks"),
         "{}",

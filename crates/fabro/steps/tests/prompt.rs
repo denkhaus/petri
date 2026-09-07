@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use execution::host::{self, HostRun};
+use fabro_steps::fallback::{PLAN_EVENT, ROUTE_EVENT, USAGE_EVENT};
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::prompt::{COMPLETED_EVENT, PROMPT_EVENT};
 use fabro_steps::register;
@@ -150,10 +151,10 @@ async fn a_prompt_node_makes_one_tool_free_call_and_writes_the_response() {
     assert_eq!(kv.get("last_stage"), Some(&json!("p")));
     let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
     assert_eq!(kinds, [
-        fabro_steps::fallback::PLAN_EVENT,
-        fabro_steps::fallback::ROUTE_EVENT,
+        PLAN_EVENT,
+        ROUTE_EVENT,
         PROMPT_EVENT,
-        fabro_steps::fallback::USAGE_EVENT,
+        USAGE_EVENT,
         COMPLETED_EVENT
     ]);
     let events: Vec<serde_json::Value> = events

@@ -4,14 +4,16 @@
 
 mod support;
 
+use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lithos_llm::credentials::{Credentials, SecretValue, StaticCredentials};
 use lithos_llm::types::{ErrorKind, Request};
 use petri::{LlmClientConfig, build_llm_client};
 use support::fabro::failures::{error, hang, repeated};
 use support::fabro::twins::{Provider, Twin, model, scenario};
+use tokio::time::timeout;
 
 fn config(twin: &Twin, retry_attempts: u32, timeout: Option<Duration>) -> LlmClientConfig {
     let credentials = StaticCredentials::new().with(
@@ -39,7 +41,7 @@ fn request(model: &str) -> Request {
 /// back keeps its kind.
 #[tokio::test]
 async fn the_client_retries_a_retryable_failure_up_to_its_budget() {
-    let dir = std::env::temp_dir().join(format!("petri-llm-client-retry-{}", testkit::unique_id()));
+    let dir = env::temp_dir().join(format!("petri-llm-client-retry-{}", testkit::unique_id()));
     let twin = Twin::start(Provider::OpenAi, &dir, vec![repeated(
         scenario(
             Provider::OpenAi,
@@ -71,8 +73,7 @@ async fn the_client_retries_a_retryable_failure_up_to_its_budget() {
 /// A call that outlives the budget fails with the timeout kind.
 #[tokio::test]
 async fn the_client_budget_ends_a_hanging_call_with_a_timeout() {
-    let dir =
-        std::env::temp_dir().join(format!("petri-llm-client-timeout-{}", testkit::unique_id()));
+    let dir = env::temp_dir().join(format!("petri-llm-client-timeout-{}", testkit::unique_id()));
     let twin = Twin::start(Provider::OpenAi, &dir, vec![scenario(
         Provider::OpenAi,
         "suite",
@@ -84,8 +85,8 @@ async fn the_client_budget_ends_a_hanging_call_with_a_timeout() {
     .await;
     let client =
         build_llm_client(&config(&twin, 1, Some(Duration::from_millis(500)))).expect("client");
-    let started = std::time::Instant::now();
-    let failure = tokio::time::timeout(
+    let started = Instant::now();
+    let failure = timeout(
         Duration::from_secs(10),
         client.stream(request("openai/gpt-5.6-sol")),
     )

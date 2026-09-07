@@ -51,7 +51,7 @@ use crate::fallback::{self, ModelFailure, PlanError, Requested};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
-use crate::pebble::{PebbleClient, profile_of, speed_of};
+use crate::pebble::{PebbleClient, TurnUsage, profile_of, speed_of};
 use crate::stage::{self, RunInfo};
 use crate::{memory, preamble};
 
@@ -630,8 +630,8 @@ async fn complete(
 }
 
 /// One model call's accounting for the per-route usage event.
-fn turn_usage(usage: Option<&TokenCounts>, cost: Option<u64>) -> crate::pebble::TurnUsage {
-    crate::pebble::TurnUsage {
+fn turn_usage(usage: Option<&TokenCounts>, cost: Option<u64>) -> TurnUsage {
+    TurnUsage {
         usage:           json!(usage),
         cost_usd_micros: cost,
         inference_ms:    0,
