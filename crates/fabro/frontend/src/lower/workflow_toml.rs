@@ -581,10 +581,11 @@ impl Reader<'_> {
         let Some(agent) = item.as_table() else {
             return;
         };
-        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only;
-        // sub-agents (readiness item 9d) need no `workflow.toml` surface: every
-        // native agent gets them (`super::subagents`), and compaction (item 9e)
-        // is always on with Fabro's hardcoded values (`lower::compaction`), so a
+        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only. Neither
+        // sub-agents (readiness item 9d) nor compaction (item 9e) has a
+        // `workflow.toml` surface at the pinned revision: every native agent
+        // gets the sub-agent tools (`super::subagents`), and compaction is
+        // always on with Fabro's hardcoded values (`lower::compaction`), so a
         // key asking for either is refused as Fabro refuses it, never passed
         // silently. `skills` is the standalone
         // runner's own extension (`skills::read`).

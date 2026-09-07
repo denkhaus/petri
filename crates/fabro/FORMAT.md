@@ -626,7 +626,9 @@ own and the `pebble.subagents` metric is the tree's: `{ spawned,
 turns_started, completed, failed, closed, usage, cost_usd_micros, sessions }`,
 where `usage` and `cost_usd_micros` sum every descendant session's committed
 assistant messages and `sessions` maps each child session to `{ parent,
-usage, cost_usd_micros, messages }`. A public consumer reconstructs the same
+usage, cost_usd_micros, messages, compactions }` (a child compacts under the
+parent's settings; its `CompactionStarted`/`CompactionCompleted` events carry
+the child's session, and `compactions` counts them). A public consumer reconstructs the same
 totals from the `agent_activity` events (`AssistantMessage` payloads of
 sessions with a parent).
 

@@ -266,7 +266,7 @@ marked "not verified" with the reason, not "passed".
 | C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback`, commits `240e0c9`..`f0ce08e` and after (evidence `task12-fallback.md`) | passed on the branch with integration merged (tasks 13 to 16 in): selection order and the reference's notices (`fallback::tests`, 9 unit tests); through the binary with both twins injecting failures (`fabro_fallback_blackbox`, 15 cases: primary, qualifying and non-qualifying, a third provider, exhaustion, a tool effect kept across the handoff, cancellation, refusal, timeout, client retries, a workflow retry, effort mapping, repair turns, a retained thread, a prompt node); the outcome and per-route accounting rebuilt from public events (`fallback_events`, 3); the client's own retries and budget (`llm_client`, 2). Reference sequences derived from the pinned source, not captured from the binary |
 | C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp`, commits `b67d3ee`..`72be261` (evidence `task13-mcp.md`) | passed: merged; the MCP suites and the scripted stdio server (`fabro_mcp_blackbox`, `testdata`) pass in the gate (1192) |
 | C3 skills (item 9c, task 14) | versioned fixtures verify skill discovery, precedence, loading, prompt/tool behavior and events without Fabro | `swarm/task14-skills`, commits `c27fc3e`, `bdd5c5a` (evidence `task14-skills.md`) | passed: merged; the skills suites and fixtures (`testdata/skills`) pass in the gate; skill context is loaded into the system prompt, outside the agent history, so compaction cannot remove it (verified below) |
-| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`3cbc1bc` (evidence `task15-subagents.md`) | passed: merged; every native agent has Pebble's sub-agent tools as the pinned Fabro's API agents do; the sub-agent suites (`steps/tests/subagents.rs`, `fabro_subagents_blackbox`) pass in the gate (1213); `[run.agent] subagents` stays refused because Fabro's parser refuses it; two Pebble contract gaps (child project memory, child skill directories) recorded with ignored failing tests; differences above |
+| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`303f682`, `e8d20e1`, `269daca`, `ad2d472`, the merges `bd14208`, `3cbc1bc` and the task 16 merge (evidence `task15-subagents.md`) | passed: every native agent has Pebble's sub-agent tools (the pinned Fabro has no setting either; `[run.agent] subagents` stays refused because Fabro's parser refuses it); a parent delegates a workspace change to a child, hooks block inside a child, a child's failure is the parent's tool result, concurrent children and a grandchild, an interrupt closes the child, a retained thread keeps a child's result, resume restarts the stage, children never count against the invocation ceiling, accounting reconstructs from the public events. In-process `petri-fabro-steps::subagents` (12, two ignored contract tests for child memory and skills), black box `fabro_subagents_blackbox` (8, one with an inherited MCP tool). Accepted differences above: nesting under the open-session bound, no project memory or skills in a child, usage beside the parent's, inherited MCP tools |
 | C5 context compaction (item 9e, task 16) | controlled histories trigger compaction and preserve required conversation/tool state, later thread use, usage, and events | `swarm/task16-compaction`, this branch | passed: the trigger below, at and above the 80 percent threshold; continuation, thread reuse, tool pairing across the boundary, summary failure, cancellation, resume fallback; public events and usage. In-process `petri-fabro-steps::compaction` (7), black box `fabro_compaction_blackbox` (4) |
 
 Skill context across compaction (item 9e's cross-feature check, C3 landed):
@@ -275,9 +275,24 @@ the discovered skills into the session's system prompt and registers the
 `use_skill`/`Skill` tool. The system prompt and the tool registry live on the
 session outside `History`; compaction only ever replaces turns inside
 `History` (`pebble-coding-agent` `compact_from`). So a compacted session keeps
-its skills and its skill tool. Sub-agents (C4) had not merged, so their cross-feature check is deferred: once
-it lands, verify that a sub-agent's supervisor stays available across a
-parent-session compaction, by the same system-prompt/registry argument.
+its skills and its skill tool.
+
+Sub-agents (C4) landed: the supervisor lives on the session outside
+`History`, so a parent that compacts keeps it; verified end to end by
+`petri-fabro-steps::subagents::a_parent_still_delegates_after_its_own_compaction`
+(the turn after the parent's compaction spawns a child and waits for it, and
+the later request carries the summary, not the discarded output). A child
+inherits the parent's compaction settings and policy through Pebble's
+`ChildDeps`: `a_child_compacts_under_the_inherited_settings_and_its_events_name_the_child`
+shows a child crossing the trigger, its own summary call, Pebble's
+`CompactionStarted`/`CompactionCompleted` on the shared stream under the
+child's session naming the parent, and the stage's `pebble.subagents.sessions`
+entry counting the compaction. A child's compaction produces no
+`fabro.compaction` event and no `pebble.compaction_usage`: that event is read
+from the parent agent's own history, and Pebble's `CompactionCompleted`
+carries no usage, so a child's summary usage is unreported at the pin (the
+recommended re-pin below folds it into the child's own usage, which the
+ledger sums).
 
 MCP (C2) landed: MCP tools are registered on the session with Pebble's
 `tools(mcp.tools())` (`pebble.rs`), so they live in the session's tool

@@ -24,10 +24,10 @@ use fabro_steps::skills::FabroHome;
 use fabro_steps::subagents::METRIC;
 use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
-use lithos_llm::types::{ErrorKind, Request, Response};
+use lithos_llm::types::{ErrorKind, Request, Response, TokenCounts};
 use pebble_coding_agent::test_support::{
-    ScriptedCall, ScriptedFailure, multi_tool_call_response, scripted_client, text_response,
-    tool_call_response,
+    ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, client_from,
+    multi_tool_call_response, scripted_client, text_response, tool_call_response, with_usage,
 };
 use runtime::driver::ExecutionReport;
 use runtime::engine::Event;
@@ -928,5 +928,174 @@ async fn a_child_sees_the_skills_its_parent_discovered() {
             && tool_names(&requests[1]).iter().any(|n| n == "use_skill"),
         "the reference child re-discovers the skills: tools {:?}",
         tool_names(&requests[1])
+    );
+}
+
+// ── Compaction (item 9e's cross-feature check) ──────────────────────────────
+
+/// One token above Fabro's trigger for the test catalog's 200,000-token
+/// window, as task 16's compaction suite computes it.
+const ABOVE_THRESHOLD: u64 = 200_000 * 80 / 100 + 1;
+
+/// A tool round for the history a compaction discards.
+fn shell(id: &str, command: &str) -> ScriptedCall {
+    ScriptedCall::response(tool_call_response(
+        "shell",
+        id,
+        json!({ "command": command }),
+    ))
+}
+
+/// A response whose reported usage crosses the trigger once committed.
+fn crossing(response: Response) -> ScriptedCall {
+    ScriptedCall::response(with_usage(response, TokenCounts {
+        input: ABOVE_THRESHOLD - 5,
+        output: 5,
+        ..TokenCounts::default()
+    }))
+}
+
+/// A child inherits the parent's compaction settings: a child whose history
+/// crosses the trigger compacts, its `CompactionStarted`/`CompactionCompleted`
+/// events carry the child's session and name the parent, the summary call is
+/// the child's, and the stage's ledger attributes the compaction to the child
+/// session while the parent's own compaction count stays zero.
+#[tokio::test]
+async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_child() {
+    let dir = RunDir::new("subagents-child-compaction");
+    let provider = ScriptedProvider::new(vec![
+        ScriptedCall::response(spawn_and_wait(&["child: do four things"])),
+        shell("first", "echo FIRST_OUTPUT_MARKER"),
+        shell("second", "echo second"),
+        shell("third", "echo third"),
+        shell("fourth", "echo fourth"),
+        crossing(text_response("Four things done.")),
+        ScriptedCall::response(text_response("The child did four things.")),
+    ])
+    .completing(vec![ScriptedCompletion::response(with_usage(
+        text_response("SUMMARY OF THE CHILD'S WORK"),
+        TokenCounts {
+            input: 70,
+            output: 7,
+            ..TokenCounts::default()
+        },
+    ))]);
+    let (client, provider) = client_from(provider);
+    let report = runtime(dir.path(), client, Retention::Never)
+        .run(graph(&one_agent(""), None))
+        .await
+        .expect("replay");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(
+        output_of(&report, "a")["text"],
+        "The child did four things."
+    );
+    assert_eq!(
+        provider.completion_count(),
+        1,
+        "one summary call, the child's"
+    );
+    let events = pebble_events(&report);
+    let parent_session = events[0]["event"]["session_id"]
+        .as_str()
+        .expect("root")
+        .to_owned();
+    let started = events_of(&events, "CompactionStarted");
+    let completed = events_of(&events, "CompactionCompleted");
+    assert_eq!(started.len(), 1, "{events:?}");
+    assert_eq!(completed.len(), 1);
+    let child_session = completed[0]["event"]["session_id"]
+        .as_str()
+        .expect("child")
+        .to_owned();
+    assert_ne!(
+        child_session, parent_session,
+        "the compaction is the child's"
+    );
+    assert_eq!(completed[0]["event"]["parent_session_id"], parent_session);
+    assert_eq!(completed[0]["node"], "a", "attributed to the parent stage");
+    let custom = metrics(&report, "a");
+    assert_eq!(
+        custom["pebble.compactions"], 0,
+        "the parent did not compact"
+    );
+    assert_eq!(custom[METRIC]["sessions"][&child_session]["compactions"], 1);
+    assert_eq!(
+        custom[METRIC]["sessions"][&child_session]["parent"],
+        parent_session
+    );
+    assert_eq!(custom[METRIC]["spawned"], 1);
+    // The child's summary usage is not in any Petri metric at the pin: Pebble's
+    // `CompactionCompleted` carries none and the child's history is Pebble's.
+    assert_eq!(custom["pebble.compaction_usage"]["input"], 0);
+}
+
+/// A parent whose own history compacts keeps its supervisor: the turn after
+/// the compaction spawns a child and waits for it as before.
+#[tokio::test]
+async fn a_parent_still_delegates_after_its_own_compaction() {
+    let dir = RunDir::new("subagents-parent-compaction");
+    let provider = ScriptedProvider::new(vec![
+        shell("first", "echo FIRST_OUTPUT_MARKER"),
+        shell("second", "echo second"),
+        shell("third", "echo third"),
+        shell("fourth", "echo fourth"),
+        crossing(spawn_and_wait(&["child: finish the work"])),
+        ScriptedCall::response(text_response("Finished.")),
+        ScriptedCall::response(text_response("Delegated after compacting.")),
+    ])
+    .completing(vec![ScriptedCompletion::response(with_usage(
+        text_response("SUMMARY OF THE FIRST EXCHANGE"),
+        TokenCounts {
+            input: 70,
+            output: 7,
+            ..TokenCounts::default()
+        },
+    ))]);
+    let (client, provider) = client_from(provider);
+    let report = runtime(dir.path(), client, Retention::Never)
+        .run(graph(&one_agent(""), None))
+        .await
+        .expect("replay");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(
+        output_of(&report, "a")["text"],
+        "Delegated after compacting."
+    );
+    assert_eq!(provider.completion_count(), 1, "the parent's summary call");
+    let requests = provider.requests();
+    let last = serde_json::to_string(requests.last().expect("request")).expect("request");
+    assert!(
+        last.contains("SUMMARY OF THE FIRST EXCHANGE") && !last.contains("FIRST_OUTPUT_MARKER"),
+        "the parent's later request carries the summary, not the discarded output: {last}"
+    );
+    assert!(last.contains("Agent completed (success: true"), "{last}");
+    let custom = metrics(&report, "a");
+    assert_eq!(custom["pebble.compactions"], 1);
+    assert_eq!(custom[METRIC]["spawned"], 1);
+    assert_eq!(custom[METRIC]["completed"], 1);
+    let events = pebble_events(&report);
+    let parent_session = events[0]["event"]["session_id"]
+        .as_str()
+        .expect("root")
+        .to_owned();
+    let completed = events_of(&events, "CompactionCompleted");
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0]["event"]["session_id"], parent_session);
+    let spawned = events_of(&events, "SubAgentSpawned");
+    assert_eq!(spawned.len(), 1);
+    assert!(
+        completed[0]["event"]["seq"].as_u64() < spawned[0]["event"]["seq"].as_u64(),
+        "the compaction came first"
     );
 }
