@@ -41,6 +41,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::agent::AgentConfig;
 use crate::agent::backend::AgentError;
+use crate::compaction::{self, CompactionPolicyHandle};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
 use crate::mcp::{self, McpServers};
@@ -58,6 +59,8 @@ pub(crate) struct NativeSession {
     /// The node's MCP servers, shut down after the agent.
     mcp:             McpServers,
     questions:       Arc<AgentQuestions>,
+    compaction:      compaction::Accounting,
+    attribution:     compaction::Attribution,
     cancel:          CancellationToken,
     kill:            CancellationToken,
     _cancel_on_drop: DropGuard,
@@ -169,6 +172,7 @@ impl NativeSession {
         )
         .await;
         let hook_service = ctx.capability::<HookServiceHandle>();
+        let compaction_policy = ctx.capability::<CompactionPolicyHandle>();
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
@@ -227,6 +231,7 @@ impl NativeSession {
                 .with_max_tokens(config.max_tokens)
                 .with_memory_files(memory_files)
                 .with_skill_dirs(skills.paths());
+            let options = compaction::options(options, &config.compaction);
             // A resumed export keeps its route and its conversation; the
             // builder binds this node's services to it.
             let mut builder: CodingAgentBuilder = match resume {
@@ -242,6 +247,7 @@ impl NativeSession {
                 .redactor(redactor)
                 .human_input(provider)
                 .tools(mcp.tools());
+            builder = compaction::install(builder, compaction_policy);
             if let Some(middleware) = tool_hooks {
                 builder = builder.tool_middleware(middleware);
             }
@@ -274,7 +280,15 @@ impl NativeSession {
             }
         };
         questions.set_session(agent.snapshot().session_id());
+        let attribution = compaction::Attribution {
+            sender:  ctx.logs.clone(),
+            node:    ctx.node.clone(),
+            firing:  ctx.firing,
+            attempt: ctx.attempt,
+        };
         let mut session = Self {
+            compaction: compaction::Accounting::new(&agent),
+            attribution,
             agent,
             mcp,
             questions,
@@ -328,6 +342,7 @@ impl NativeSession {
             }
         };
         self.record(&report);
+        self.compaction.settle(&self.agent, &self.attribution).await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -348,7 +363,7 @@ impl NativeSession {
     }
 
     pub(crate) fn metrics(&self) -> BTreeMap<SmolStr, Value> {
-        BTreeMap::from([
+        let mut metrics = BTreeMap::from([
             ("pebble.prompts".into(), json!(self.prompts)),
             ("pebble.usage".into(), json!(self.usage)),
             ("pebble.cost_usd_micros".into(), json!(self.cost)),
@@ -358,7 +373,9 @@ impl NativeSession {
             ),
             ("pebble.tool_ms".into(), json!(elapsed_ms(self.tool))),
             (subagents::METRIC.into(), self.subagents.metrics()),
-        ])
+        ]);
+        metrics.extend(self.compaction.metrics());
+        metrics
     }
 
     /// The conversation, warm, for a later node on the same thread.

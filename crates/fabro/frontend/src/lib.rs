@@ -47,10 +47,11 @@ use frontend::{
 };
 pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
 pub use lower::{
-    BRANCH_META_KIND, DEFAULT_MAX_PARALLEL, ENVIRONMENT_PARAM, EnvValue, Environment,
-    FailurePolicy, IMPORT_ERROR, Kind, LAUNCH_PARAM, MAX_CALL_DEPTH, MAX_FIRINGS,
-    MAX_FOR_EACH_ITEMS, MAX_INVOCATIONS, ModelDefaults, PREPARE_NODE_PREFIX, Policy, PrepareStep,
-    ROUTES_KEY, RunSettings, shape_of, subagents,
+    BRANCH_META_KIND, CompactionSettings, DEFAULT_MAX_PARALLEL, DEFAULT_PRESERVE_TURNS,
+    DEFAULT_THRESHOLD_PERCENT, ENVIRONMENT_PARAM, EnvValue, Environment, FailurePolicy,
+    IMPORT_ERROR, Kind, LAUNCH_PARAM, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS,
+    MAX_INVOCATIONS, ModelDefaults, PREPARE_NODE_PREFIX, Policy, PrepareStep, ROUTES_KEY,
+    RunSettings, shape_of, subagents,
 };
 
 /// Parse and lower one workflow. `file` is the repository-relative path the

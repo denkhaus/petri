@@ -164,6 +164,7 @@ diagnostic goes away.
 | `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | supported: `provider` selects the backend when `--backend` is absent (`local` host, `docker` Docker plugin, `daytona` Daytona plugin); `image.docker` is the scope's container image; `env` is the scope environment, with `{{ secrets.NAME }}` a `$secret` reference resolved at spawn from `PETRI_SECRET_NAME` (a missing secret fails the command `secret_unavailable`); `resources` size a Daytona runner. An unknown `id` or provider is an error. `cwd`, `network`, `lifecycle`, `labels`, `image.dockerfile` warn `ignored.workflow_toml.environments.<id>.<key>` (platform-only; the runner builds no image) |
 | `[run.agent]` `fabro_tools` | run-management tools for agents | explicit exclusion: platform-only, warn `ignored.workflow_toml.run.agent.fabro_tools` when `true` |
 | `[run.agent]` `skills` | refused: `[run.agent]` denies unknown keys; skills come from `$FABRO_HOME/skills`, `<root>/.fabro/skills`, `<root>/skills` (`fabro-agent/src/skills.rs`) | a Petri extension (accepted difference below): a list of extra directories searched after Fabro's three, warned `fabro.petri_extension`; any other shape is `unsupported.workflow_toml.run.agent.skills`. Fabro's three directories, their order and precedence are implemented for native agents (`crates/fabro/FORMAT.md`, "Skills"; fixtures `testdata/skills`) |
+| `[run.agent]` `compaction` | refused: `[run.agent]` denies unknown keys; compaction is always on with hardcoded values (`fabro-agent`'s `SessionOptions`: 80 percent trigger, six preserved turns) | refused `unsupported.workflow_toml.key`, with a message naming the values in force; those values are lowered onto every agent node and run through Pebble's automatic compaction (`crates/fabro/FORMAT.md`, "Compaction") |
 | `[run.agent.mcps.<name>]` `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `protocol`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled`; or `id` | MCP servers for agent sessions | supported: every inline field with Fabro's rules and defaults, merged across the settings, project and workflow layers by name (`crates/fabro/FORMAT.md`, "MCP servers"); stdio servers on Petri's host, http servers from the host, sandbox servers on a host-backed scope only; tools registered with Pebble under `mcp__<server>__<tool>` and run through the normal tool path, hooks included; explicit exclusions: `id` (a server-managed catalog reference, `unsupported.workflow_toml.run.agent.mcps.reference`), `protocol = "sse"` (`unsupported.workflow_toml.run.agent.mcps.protocol`), a secret token outside a whole `env`/`headers` value (`unsupported.workflow_toml.run.agent.mcps.secret`); `{{ env.* }}` is an error as in Fabro |
 | `[[run.hooks]]` `id`, `name`, `event`, `matcher`, `blocking`, `timeout`, `sandbox`, and one of `script`/`command`, `url`+`headers`+`tls`, `prompt`+`model`, `agent="enabled"`+`prompt`+`model`+`max_tool_rounds` | local hooks | supported: every field, transport and event, merged with `.fabro/project.toml` and the host's settings layer by `id`, run by the local hook service with Fabro's matching, decisions, placement and timeouts (`crates/fabro/FORMAT.md`, "Hooks"); a layer that cannot be read is an error, so a configured hook is never skipped silently; `checkpoint_saved` warns and does not run (accepted difference below); `stage_retrying` is dispatched (the reference never fires it) |
 | `[run.checkpoint]` `exclude_globs`, `skip_git_hooks`, `commit_timeout` | Git checkpoints | explicit exclusion: platform Git; warn `ignored.workflow_toml.run.checkpoint` |
@@ -216,6 +217,8 @@ reference expectations.
 | Run-level hook reports | `run_complete`, `run_failed` and `sandbox_cleanup` reports are logged, not recorded in the event log (they belong to no firing) | platform events |
 | Terminal echo | a stage's echoed output is bounded at 64 KiB (one marker names the log file, which keeps everything); a branch's lines carry its invocation (`[invocation-N/node#firing]`) | the platform's log viewer |
 | `[run.agent]` keys | `subagents`, `compaction` and any key other than `fabro_tools`, `mcps` and `skills` are refused (`unsupported.workflow_toml.key`): the pinned Fabro's `[run.agent]` denies unknown keys and has no setting for sub-agents or compaction; sub-agents are always on for native agents, so the `subagents` refusal says so | refused by the parser |
+| Context compaction | always on with Fabro's values (80 percent trigger, six preserved turns); Pebble's automatic compaction summarizes and replaces the history, and Petri never rewrites it (`crates/fabro/FORMAT.md`, "Compaction") | identical values, self-contained in `fabro-agent` |
+| Compaction summary usage | the pinned Pebble leaves the summary call out of a prompt's usage, so Petri reports it separately: a `fabro.compaction` event and the `pebble.compaction_*` metrics carry the summary usage read from the `Compaction` turn in Pebble's history. Pebble `861d9bc` folds it into the prompt's usage; recommended re-pin below | the summary usage is dropped entirely (`compact_context` discards `response.usage`) |
 | `[run.agent] skills` | a Petri extension: extra skill directories searched after Fabro's three, warned `fabro.petri_extension` | refused by the parser |
 | Skill files that do not parse | reported: a `fabro.skills.warning` event and a stderr line per malformed or unreadable `SKILL.md`, and per workflow-named directory that does not exist; the file is still skipped, as Pebble skips it | skipped silently |
 | A prompt naming a missing skill (`/name`) | the node fails with class `skill_missing` | the stage fails with an `InvalidState` error |
@@ -241,6 +244,68 @@ reference expectations.
 | MCP `sandbox` transport | launched through the scope's execution environment and reached at `http://localhost:<port>`; a container or remote scope fails the server with a named reason (the plugin protocol exposes no port or preview URL) | a Daytona preview URL; local sandboxes fall back to localhost |
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
 | MCP server lifetime | one set of servers per agent node session, started before the agent and stopped after it (a retained thread's next node starts its own); a resumed run starts them again | one set per agent session; the same |
+
+## Advanced agent milestones (item 9, milestones C1 to C5)
+
+The overall item 9 gate: all five advanced-agent stages pass their own
+acceptance gates. Status at task 16's finishing time (2026-09-07). Task 16
+owns C5 and this checklist; the other four stages ran in parallel, so a stage
+whose branch had not merged onto `swarm/integration` when task 16 finished is
+marked "not verified" with the reason, not "passed".
+
+| Stage | Acceptance gate | Branch / commit | Status at task 16 finish |
+|---|---|---|---|
+| C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback` | not verified: not merged onto `swarm/integration` (head `bdd5c5a`) when task 16 finished |
+| C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp`, commits `b67d3ee`..`72be261` (evidence `task13-mcp.md`) | passed: merged; the MCP suites and the scripted stdio server (`fabro_mcp_blackbox`, `testdata`) pass in the gate (1192) |
+| C3 skills (item 9c, task 14) | versioned fixtures verify skill discovery, precedence, loading, prompt/tool behavior and events without Fabro | `swarm/task14-skills`, commits `c27fc3e`, `bdd5c5a` (evidence `task14-skills.md`) | passed: merged; the skills suites and fixtures (`testdata/skills`) pass in the gate; skill context is loaded into the system prompt, outside the agent history, so compaction cannot remove it (verified below) |
+| C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`303f682`, `e8d20e1`, `269daca`, `ad2d472`, the merges `bd14208`, `3cbc1bc` and the task 16 merge (evidence `task15-subagents.md`) | passed: every native agent has Pebble's sub-agent tools (the pinned Fabro has no setting either; `[run.agent] subagents` stays refused because Fabro's parser refuses it); a parent delegates a workspace change to a child, hooks block inside a child, a child's failure is the parent's tool result, concurrent children and a grandchild, an interrupt closes the child, a retained thread keeps a child's result, resume restarts the stage, children never count against the invocation ceiling, accounting reconstructs from the public events. In-process `petri-fabro-steps::subagents` (12, two ignored contract tests for child memory and skills), black box `fabro_subagents_blackbox` (8, one with an inherited MCP tool). Accepted differences above: nesting under the open-session bound, no project memory or skills in a child, usage beside the parent's, inherited MCP tools |
+| C5 context compaction (item 9e, task 16) | controlled histories trigger compaction and preserve required conversation/tool state, later thread use, usage, and events | `swarm/task16-compaction`, this branch | passed: the trigger below, at and above the 80 percent threshold; continuation, thread reuse, tool pairing across the boundary, summary failure, cancellation, resume fallback; public events and usage. In-process `petri-fabro-steps::compaction` (7), black box `fabro_compaction_blackbox` (4) |
+
+Skill context across compaction (item 9e's cross-feature check, C3 landed):
+skills reach a native session through Pebble's `with_skill_dirs`, which folds
+the discovered skills into the session's system prompt and registers the
+`use_skill`/`Skill` tool. The system prompt and the tool registry live on the
+session outside `History`; compaction only ever replaces turns inside
+`History` (`pebble-coding-agent` `compact_from`). So a compacted session keeps
+its skills and its skill tool.
+
+Sub-agents (C4) landed: the supervisor lives on the session outside
+`History`, so a parent that compacts keeps it; verified end to end by
+`petri-fabro-steps::subagents::a_parent_still_delegates_after_its_own_compaction`
+(the turn after the parent's compaction spawns a child and waits for it, and
+the later request carries the summary, not the discarded output). A child
+inherits the parent's compaction settings and policy through Pebble's
+`ChildDeps`: `a_child_compacts_under_the_inherited_settings_and_its_events_name_the_child`
+shows a child crossing the trigger, its own summary call, Pebble's
+`CompactionStarted`/`CompactionCompleted` on the shared stream under the
+child's session naming the parent, and the stage's `pebble.subagents.sessions`
+entry counting the compaction. A child's compaction produces no
+`fabro.compaction` event and no `pebble.compaction_usage`: that event is read
+from the parent agent's own history, and Pebble's `CompactionCompleted`
+carries no usage, so a child's summary usage is unreported at the pin (the
+recommended re-pin below folds it into the child's own usage, which the
+ledger sums).
+
+MCP (C2) landed: MCP tools are registered on the session with Pebble's
+`tools(mcp.tools())` (`pebble.rs`), so they live in the session's tool
+registry, outside `History`; compaction replaces only `History`, so a compacted
+session keeps its MCP tools. Verified by construction against the reference,
+the same way skills are; an end-to-end MCP-tool-after-compaction black box is a
+follow-up for the combined milestone D coverage (item 10).
+
+## Recommended library re-pin
+
+Pebble `861d9bc` (one commit past the pin `a2fcdda`) is
+"Test coding across compaction and account for summary usage". Its only
+library change folds the automatic-compaction summary call's usage and cost
+into the prompt's `PromptReport.usage`/`cost_usd_micros`, which the pin drops.
+Recommended re-pin for the coordinator's batched library pass after wave 3.
+With it, Petri can drop the `fabro.compaction` usage read and the
+`pebble.compaction_*` metrics and read the summary usage from the prompt
+report like every other call. The failing-at-the-pin contract test is
+`petri-fabro-steps::compaction the_trigger_is_strictly_above_eighty_percent_of_the_window`'s
+usage assertion, which today asserts the prompt usage excludes the summary
+(`pebble.usage.input == 4 * 10 + total - 5`); at `861d9bc` it would include it.
 
 ## Where things are
 

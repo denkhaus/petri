@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 /// completed, failed, closed, usage, cost_usd_micros, sessions }`, where
 /// `usage` and `cost_usd_micros` sum every descendant session's committed
 /// assistant messages and `sessions` maps each child session to `{ parent,
-/// usage, cost_usd_micros, messages }`.
+/// usage, cost_usd_micros, messages, compactions }`.
 pub const METRIC: &str = "pebble.subagents";
 
 /// Give the node's agent the sub-agent tools its configuration asks for.
@@ -58,6 +58,8 @@ pub struct ChildAccount {
     pub cost_usd_micros: Option<u64>,
     /// Committed assistant messages.
     pub messages:        u64,
+    /// Compactions the child performed under the inherited settings.
+    pub compactions:     u64,
 }
 
 #[derive(Default)]
@@ -88,6 +90,20 @@ impl Ledger {
             CodingEvent::SubAgentCompleted { .. } => state.completed += 1,
             CodingEvent::SubAgentFailed { .. } => state.failed += 1,
             CodingEvent::SubAgentClosed { .. } => state.closed += 1,
+            CodingEvent::CompactionCompleted { .. } => {
+                // A descendant's compaction is on the shared stream under its
+                // own session; the parent's own is the compaction module's.
+                if let Some(parent) = &event.parent_session_id {
+                    state
+                        .sessions
+                        .entry(event.session_id.clone())
+                        .or_insert_with(|| ChildAccount {
+                            parent: parent.clone(),
+                            ..ChildAccount::default()
+                        })
+                        .compactions += 1;
+                }
+            }
             CodingEvent::AssistantMessage {
                 usage,
                 cost_usd_micros,
@@ -150,6 +166,7 @@ impl Ledger {
                     "usage": account.usage,
                     "cost_usd_micros": account.cost_usd_micros,
                     "messages": account.messages,
+                    "compactions": account.compactions,
                 }),
             );
         }

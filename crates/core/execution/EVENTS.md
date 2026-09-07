@@ -134,7 +134,13 @@ contract; a host consumes `RunEvent`s and never parses terminal text.
 ## Known backend limits
 
 - The native agent backend (`pebble`) records every `CodingAgentEvent` as a
-  `StepEvent::Custom`; it is in the log and therefore durable.
+  `StepEvent::Custom`; it is in the log and therefore durable. Compaction of
+  the agent's context appears in that stream as Pebble's `CompactionStarted`,
+  `CompactionCompleted`, `CompactionFailed` and `CompactionCancelled`. The
+  pinned Pebble omits the summary call's usage from those events and from the
+  prompt's usage, so the Fabro backend adds one `step_custom` per compaction
+  with `kind = "fabro.compaction"` carrying that usage; see
+  `crates/fabro/FORMAT.md`, "Compaction".
 - The ACP backend records what the external agent sends over ACP; tool calls
   the agent does not report are not observable.
 - Agent facts are Pebble's; Petri adds run, invocation, node and attempt
