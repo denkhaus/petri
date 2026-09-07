@@ -8,8 +8,8 @@
 //! semantics.
 
 mod attrs;
-pub mod fallbacks;
 mod compaction;
+pub mod fallbacks;
 mod hooks;
 mod imports;
 mod mcps;

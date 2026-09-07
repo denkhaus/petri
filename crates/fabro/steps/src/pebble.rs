@@ -49,8 +49,8 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::agent::AgentConfig;
 use crate::agent::backend::AgentError;
-use crate::fallback::{self, Disposition, Route};
 use crate::compaction::{self, CompactionPolicyHandle};
+use crate::fallback::{self, Disposition, Route};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
 use crate::mcp::{self, McpServers};
