@@ -16,6 +16,7 @@ pub(crate) mod policy;
 mod promotion;
 mod routing;
 mod secrets;
+mod skills;
 mod threads;
 mod workflow_toml;
 
@@ -1144,6 +1145,9 @@ impl Ctx<'_> {
             &mut self.diags,
         );
         threads.write(self.b.exprs(), &mut config);
+        if !is_prompt {
+            skills::write(&self.settings.skills, &mut config);
+        }
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {

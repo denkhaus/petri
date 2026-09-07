@@ -44,7 +44,7 @@ use crate::agent::backend::AgentError;
 use crate::compaction::{self, CompactionPolicyHandle};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
-use crate::memory;
+use crate::{memory, skills};
 
 /// Host capability supplied by applications embedding the native backend.
 /// Construct the client with the application's catalog, credentials, and
@@ -203,6 +203,8 @@ impl NativeSession {
                 ctx.attempt,
             ))
         });
+        // Fabro's skill directories, audited and recorded; Pebble discovers.
+        let skills = skills::prepare(config, ctx).await;
         let build = async {
             let environment = PebbleEnvironment::prepare(env, cancel.clone(), kill.clone())
                 .await
@@ -213,7 +215,7 @@ impl NativeSession {
                 .with_speed(speed)
                 .with_max_tokens(config.max_tokens)
                 .with_memory_files(memory_files)
-                .with_skill_dirs([".agents/skills".into(), ".pebble/skills".into()]);
+                .with_skill_dirs(skills.paths());
             let options = compaction::options(options, &config.compaction);
             // A resumed export keeps its route and its conversation; the
             // builder binds this node's services to it.
@@ -325,7 +327,7 @@ impl NativeSession {
         report
             .result
             .map(|output| output.text.unwrap_or_default())
-            .map_err(|e| AgentError::failed("pebble_prompt", e.to_string()))
+            .map_err(|e| AgentError::failed(skills::failure_class(&e), skills::describe(&e)))
     }
 
     fn record(&mut self, report: &PromptReport) {

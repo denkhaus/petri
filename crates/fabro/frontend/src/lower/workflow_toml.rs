@@ -42,6 +42,7 @@ use serde_json::{Value, json};
 
 use super::compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use super::secrets::{InterpolationError, interpolate};
+use super::skills;
 use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow, parse_duration};
 use crate::template::Context;
 
@@ -81,6 +82,8 @@ pub struct RunSettings {
     /// Agent context compaction: Fabro's hardcoded values, since the pinned
     /// Fabro has no setting for it (`lower::compaction`).
     pub compaction:         CompactionSettings,
+    /// `[run.agent] skills`, the workflow's own skill directories.
+    pub skills:             skills::SkillSettings,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -582,13 +585,14 @@ impl Reader<'_> {
         let Some(agent) = item.as_table() else {
             return;
         };
-        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only; skills
-        // and sub-agents (readiness items 9c and 9d) have no `workflow.toml`
-        // surface at the pinned revision, and compaction is always on with
-        // Fabro's hardcoded values (`lower::compaction`), so a key asking for
-        // one is refused as Fabro refuses it, never passed silently.
+        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only;
+        // sub-agents (readiness item 9d) has no `workflow.toml` surface at the
+        // pinned revision, and compaction is always on with Fabro's hardcoded
+        // values (`lower::compaction`), so a key asking for one is refused as
+        // Fabro refuses it, never passed silently. `skills` is the standalone
+        // runner's own extension (`skills::read`).
         for key in agent.keys() {
-            if !matches!(key.as_str(), "fabro_tools" | "mcps") {
+            if !matches!(key.as_str(), "fabro_tools" | "mcps" | "skills") {
                 let path = self.path;
                 let message = if key == "compaction" {
                     format!(
@@ -600,8 +604,8 @@ impl Reader<'_> {
                 } else {
                     format!(
                         "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` table \
-                         accepts (it takes `fabro_tools` and `mcps`); skills and sub-agents have \
-                         no workflow configuration at the pinned Fabro"
+                         accepts (it takes `fabro_tools` and `mcps`); sub-agents have no \
+                         workflow configuration at the pinned Fabro"
                     )
                 };
                 self.unsupported(
@@ -610,6 +614,9 @@ impl Reader<'_> {
                     "remove it; Fabro's settings schema has no such key",
                 );
             }
+        }
+        if let Some(value) = agent.get("skills") {
+            self.settings.skills = skills::read(value, self.path, &self.span, self.diags);
         }
         if agent.get("fabro_tools").and_then(toml::Value::as_bool) == Some(true) {
             let path = self.path;

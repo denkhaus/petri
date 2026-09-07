@@ -89,6 +89,10 @@ pub struct AgentConfig {
     /// (`crate::compaction`).
     #[serde(default)]
     pub compaction:       compaction::CompactionSettings,
+    /// The workflow's own skill directories (`[run.agent] skills`), searched
+    /// after Fabro's conventional ones.
+    #[serde(default)]
+    pub skill_dirs:       Vec<String>,
     /// Every stage of the workflow, for the preamble.
     #[serde(default)]
     pub stages:           Value,
