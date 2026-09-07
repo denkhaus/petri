@@ -116,7 +116,7 @@ script = 'git init -q && printf "draft\n" > notes.txt && printf "keep\n" > prote
 script = 'mkdir -p skills/sign && printf "%s\n" "---" "name: sign" "description: Sign the release note" "---" "SIGN INSTRUCTIONS: append the line -- petri to notes.txt with the shell tool, then report SIGNED." > skills/sign/SKILL.md'
 
 [[run.prepare.steps]]
-script = 'git add -A && git -c user.name=petri -c user.email=petri@example.invalid commit -qm base && git init -q --bare "{remote}" && git remote add origin "{remote}" && echo prepared'
+script = 'git add -A && git -c commit.gpgsign=false -c core.hooksPath=/dev/null -c user.name=petri -c user.email=petri@example.invalid commit -qm base && git init -q --bare "{remote}" && git remote add origin "{remote}" && echo prepared'
 
 [run.agent.mcps.notes]
 type = "stdio"

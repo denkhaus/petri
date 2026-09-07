@@ -1518,6 +1518,7 @@ name = "petri"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "lithos-llm",
  "pebble-coding-agent",
  "petri-execution",
@@ -1535,6 +1536,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "twin-anthropic",
+ "twin-openai",
 ]
 
 [[package]]
