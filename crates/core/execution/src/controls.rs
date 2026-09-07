@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    Recorded, Transition, TransitionError, TransitionReport,
+    Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
 };
 use engine::{EngineState, Event, EventRecord};
 use ir::FiringId;
@@ -102,6 +102,18 @@ impl ExecutionHooks for PauseHooks {
         match &self.inner {
             Some(inner) => inner.transition(transition).await,
             None => Ok(TransitionReport::default()),
+        }
+    }
+
+    async fn run_finished(&self, finished: RunFinished) {
+        if let Some(inner) = &self.inner {
+            inner.run_finished(finished).await;
+        }
+    }
+
+    async fn scope_released(&self, released: ScopeReleased) {
+        if let Some(inner) = &self.inner {
+            inner.scope_released(released).await;
         }
     }
 }

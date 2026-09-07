@@ -707,6 +707,7 @@ impl LocalHooks {
         let (_, report) = self
             .dispatch(point, &context, self.envs.get(released.scope))
             .await;
+        self.envs.remove(released.scope);
         report
     }
 

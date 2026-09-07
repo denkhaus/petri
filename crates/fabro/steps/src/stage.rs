@@ -48,11 +48,24 @@ impl ScopeEnvironments {
         Self::default()
     }
 
+    /// The first environment recorded for a scope stays: a branch child runs
+    /// in the parent's sandbox under its own execution-local scope id, and its
+    /// handle is released when the child ends, so it must not replace the
+    /// run's own. [`remove`](Self::remove) clears a scope when it is released.
     pub fn record(&self, scope: ScopeId, env: Arc<dyn ExecEnv>) {
         self.envs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(scope, env);
+            .entry(scope)
+            .or_insert(env);
+    }
+
+    /// Forget a scope's environment: it is being released.
+    pub fn remove(&self, scope: ScopeId) {
+        self.envs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&scope);
     }
 
     /// The scope's environment, or, when that scope has not run a step yet,
