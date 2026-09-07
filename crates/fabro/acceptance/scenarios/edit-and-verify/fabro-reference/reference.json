@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "scenario": "edit-and-verify",
+  "fabro_repository": "https://github.com/fabro-sh/fabro",
+  "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
+  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
+  "captured_on": "2026-09-07",
+  "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
+  "bundle_digest": "1697ae1a7256a79f8bb8dd56419288900c55ebe1e883575dbabade092d081225",
+  "twins": [
+    "openai"
+  ],
+  "normalization": [
+    "generated run id -> <RUN_ID>",
+    "the run's working directory -> <WORKSPACE>",
+    "blob://sha256/<hex> -> <BLOB_n> (the dump's inline value is compared where the event log offloaded it)",
+    "engine bookkeeping context keys named by the scenario are moved to `bookkeeping`, never dropped"
+  ],
+  "projection": {
+    "engine": "fabro",
+    "status": "succeeded",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "prepare",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "agent",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "verify",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "gate",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "ship",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "forks": [],
+    "context": {
+      "human.gate.gate.answer": "yes",
+      "human.gate.gate.label": "[Y] Yes",
+      "human.gate.gate.question": "Ship it?",
+      "human.gate.label": "[Y] Yes",
+      "human.gate.selected": "Y"
+    },
+    "bookkeeping": {
+      "command.output": "<BLOB_1>",
+      "current_node": "ship",
+      "failure_class": "",
+      "failure_signature": "",
+      "graph.backend": "api",
+      "graph.goal": "Append one word to a file through the agent's shell tool, verify it, and decide through a gate.",
+      "internal.fidelity": "compact",
+      "internal.node_visit_count": 1,
+      "internal.retry_count.agent": 0,
+      "internal.retry_count.gate": 0,
+      "internal.retry_count.prepare": 0,
+      "internal.retry_count.ship": 0,
+      "internal.retry_count.start": 0,
+      "internal.retry_count.verify": 0,
+      "internal.run_id": "<RUN_ID>",
+      "internal.thread_id": "gate",
+      "last_response": "APPENDED: notes.txt now ends with reviewed.",
+      "last_stage": "agent",
+      "outcome": "succeeded",
+      "preferred_label": "[Y] Yes",
+      "response.agent": "APPENDED: notes.txt now ends with reviewed.",
+      "thread.agent.current_node": "verify",
+      "thread.gate.current_node": "ship",
+      "thread.prepare.current_node": "agent",
+      "thread.start.current_node": "prepare",
+      "thread.verify.current_node": "gate"
+    },
+    "artifacts": {
+      "decision.txt": "shipped\n",
+      "notes.txt": "draft\nreviewed\n"
+    },
+    "interviews": [
+      {
+        "node": "gate",
+        "kind": "yes_no",
+        "text": "Ship it?",
+        "options": [
+          "Y",
+          "N"
+        ],
+        "reply": {
+          "kind": "answered",
+          "choice": "Y"
+        },
+        "delivery": "delivered"
+      }
+    ],
+    "requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "scenario": "append"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "scenario": "read-back"
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "scenario": "answer"
+      }
+    ],
+    "platform_requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "effort": null,
+        "scenario": null
+      }
+    ],
+    "counts": {
+      "interviews_asked": 1,
+      "interviews_delivered": 1,
+      "platform_requests": 1,
+      "provider_requests": 3
+    },
+    "identities": {
+      "<BLOB_1>": "<per run>",
+      "<RUN_ID>": "<per run>",
+      "<WORKSPACE>": "<per run>"
+    }
+  }
+}

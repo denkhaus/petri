@@ -396,7 +396,12 @@ async fn an_abandoned_acquire_leaves_no_container() {
             Err(_elapsed) => {
                 // Wait for the owned cleanup's confirmation. An empty daemon
                 // listing alone does not prove a delayed create has settled.
-                time::timeout(Duration::from_secs(15), async {
+                // Sixty seconds, like this file's other container waits: under
+                // the full suite this round shares the daemon with several
+                // long container tests, and a create-then-delete round trip
+                // through the plugin has exceeded fifteen seconds there while
+                // the whole test finishes in under two seconds alone.
+                time::timeout(Duration::from_secs(60), async {
                     loop {
                         let record =
                             LeaseLedger::lookup(&*ledger, SandboxLeaseId::new(0)).expect("ledger");

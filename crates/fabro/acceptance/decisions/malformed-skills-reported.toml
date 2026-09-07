@@ -1,0 +1,9 @@
+id = "malformed-skills-reported"
+title = "Malformed skill files are reported"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Skipped silently."
+petri = "A `fabro.skills.warning` event and a stderr line per malformed or unreadable `SKILL.md`; the file is still skipped."
+user_visible_effect = "Diagnostics only; the loaded skills are the same."
+reason = "Never a silent skip."
+acceptance = "Prompt content compared through the twins is identical."

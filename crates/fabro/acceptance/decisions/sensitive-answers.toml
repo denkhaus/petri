@@ -1,0 +1,9 @@
+id = "sensitive-answers"
+title = "Sensitive answers are a Petri extension"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Not defined."
+petri = "`sensitive=true` answers are stored as secret references and masked."
+user_visible_effect = "Receipts show `$secret` references on Petri."
+reason = "Task 4."
+acceptance = "A sensitive interview scenario compares the masked receipt shape under a scoped entry when it lands."

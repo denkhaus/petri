@@ -1,0 +1,9 @@
+id = "invocation-maximum"
+title = "Petri caps a run at 10,000 invocations"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "No counterpart."
+petri = "A hard 10,000 workflow invocations per run; cannot be raised or disabled."
+user_visible_effect = "A fan-out or manager loop past the ceiling fails on Petri."
+reason = "`execution::MAX_INVOCATIONS`, task 6."
+acceptance = "Covered by the ignored long test; no comparison shape."

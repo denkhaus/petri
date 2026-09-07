@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "scenario": "interview",
+  "fabro_repository": "https://github.com/fabro-sh/fabro",
+  "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
+  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
+  "captured_on": "2026-09-07",
+  "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
+  "bundle_digest": "8d9c7b984453ebeafccbd337941736455a230331b97eb2ceb7b02828637f08a7",
+  "twins": [
+    "openai"
+  ],
+  "normalization": [
+    "generated run id -> <RUN_ID>",
+    "the run's working directory -> <WORKSPACE>",
+    "blob://sha256/<hex> -> <BLOB_n> (the dump's inline value is compared where the event log offloaded it)",
+    "engine bookkeeping context keys named by the scenario are moved to `bookkeeping`, never dropped"
+  ],
+  "projection": {
+    "engine": "fabro",
+    "status": "succeeded",
+    "path": [
+      {
+        "node": "start",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "yes_no",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "confirmation",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "multiple_choice",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "multi_select",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "freeform",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "summarize",
+        "outcome": "succeeded"
+      },
+      {
+        "node": "exit",
+        "outcome": "succeeded"
+      }
+    ],
+    "forks": [],
+    "context": {
+      "human.gate.confirmation.answer": "yes",
+      "human.gate.confirmation.label": "[Y] Continue",
+      "human.gate.confirmation.question": "Confirm that you want to continue into more structured questions.",
+      "human.gate.freeform.answer": "ship on Friday",
+      "human.gate.freeform.question": "Add any final context, constraints, or nuance for the summary.",
+      "human.gate.label": "ship on Friday",
+      "human.gate.multi_select.answer": "B",
+      "human.gate.multi_select.label": "[B] Blockers",
+      "human.gate.multi_select.question": "Which supporting areas should the final summary emphasize?",
+      "human.gate.multiple_choice.answer": "R",
+      "human.gate.multiple_choice.label": "[R] Risks",
+      "human.gate.multiple_choice.question": "Which theme should be the center of the final summary?",
+      "human.gate.selected": "freeform",
+      "human.gate.text": "ship on Friday",
+      "human.gate.yes_no.answer": "yes",
+      "human.gate.yes_no.label": "[Y] Yes",
+      "human.gate.yes_no.question": "Is this interview workflow easy to follow so far?"
+    },
+    "bookkeeping": {
+      "current_node": "summarize",
+      "failure_class": "",
+      "failure_signature": "",
+      "graph.goal": "Run a progressive human interview and summarize the answers",
+      "graph.rankdir": "LR",
+      "internal.fidelity": "summary:high",
+      "internal.node_visit_count": 1,
+      "internal.retry_count.confirmation": 0,
+      "internal.retry_count.freeform": 0,
+      "internal.retry_count.multi_select": 0,
+      "internal.retry_count.multiple_choice": 0,
+      "internal.retry_count.start": 0,
+      "internal.retry_count.summarize": 0,
+      "internal.retry_count.yes_no": 0,
+      "internal.run_id": "<RUN_ID>",
+      "internal.thread_id": "freeform",
+      "last_response": "SUMMARY: easy to follow; continue; risks; blockers; ship on Friday.",
+      "last_stage": "summarize",
+      "outcome": "succeeded",
+      "preferred_label": "[B] Blockers",
+      "response.summarize": "SUMMARY: easy to follow; continue; risks; blockers; ship on Friday.",
+      "thread.confirmation.current_node": "multiple_choice",
+      "thread.freeform.current_node": "summarize",
+      "thread.multi_select.current_node": "freeform",
+      "thread.multiple_choice.current_node": "multi_select",
+      "thread.start.current_node": "yes_no",
+      "thread.yes_no.current_node": "confirmation"
+    },
+    "artifacts": {},
+    "interviews": [
+      {
+        "node": "yes_no",
+        "kind": "yes_no",
+        "text": "Is this interview workflow easy to follow so far?",
+        "options": [
+          "Y",
+          "N"
+        ],
+        "reply": {
+          "kind": "answered",
+          "choice": "Y"
+        },
+        "delivery": "delivered"
+      },
+      {
+        "node": "confirmation",
+        "kind": "confirmation",
+        "text": "Confirm that you want to continue into more structured questions.",
+        "options": [
+          "Y",
+          "N"
+        ],
+        "reply": {
+          "kind": "answered",
+          "choice": "Y"
+        },
+        "delivery": "delivered"
+      },
+      {
+        "node": "multiple_choice",
+        "kind": "multiple_choice",
+        "text": "Which theme should be the center of the final summary?",
+        "options": [
+          "G",
+          "R",
+          "T",
+          "Q"
+        ],
+        "reply": {
+          "kind": "answered",
+          "choice": "R"
+        },
+        "delivery": "delivered"
+      },
+      {
+        "node": "multi_select",
+        "kind": "multi_select",
+        "text": "Which supporting areas should the final summary emphasize?",
+        "options": [
+          "S",
+          "B",
+          "D",
+          "N"
+        ],
+        "reply": {
+          "kind": "answered",
+          "choice": "B",
+          "choices": [
+            "B"
+          ]
+        },
+        "delivery": "delivered"
+      },
+      {
+        "node": "freeform",
+        "kind": "freeform",
+        "text": "Add any final context, constraints, or nuance for the summary.",
+        "options": [],
+        "reply": {
+          "kind": "answered",
+          "text": "ship on Friday"
+        },
+        "delivery": "delivered"
+      }
+    ],
+    "requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": null,
+        "scenario": "summarize"
+      }
+    ],
+    "platform_requests": [
+      {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "effort": null,
+        "scenario": null
+      }
+    ],
+    "counts": {
+      "interviews_asked": 5,
+      "interviews_delivered": 5,
+      "platform_requests": 1,
+      "provider_requests": 1
+    },
+    "identities": {
+      "<RUN_ID>": "<per run>",
+      "<WORKSPACE>": "<per run>"
+    }
+  }
+}

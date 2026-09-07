@@ -1,0 +1,11 @@
+digraph SkillsPrecedence {
+    graph [backend="api", goal="Greet Ada through the greet skill; the repository's copy of the skill must win over the project's and the home directory's."]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    // Fixture state for both engines: Fabro's local environment runs inside
+    // the bundle, where the skill directories already are; Petri's workspace
+    // starts empty and copies them from the staged bundle.
+    setup [shape=parallelogram, script="[ -d skills ] || cp -R {{ inputs.fixture }}/.fabro {{ inputs.fixture }}/skills . ; ls skills | sort | tr '\n' ' '"]
+    agent [prompt="Use the greet skill to greet Ada, then say GREETED.", model="gpt-5.6-sol", provider="openai", on_failure="exit"]
+    start -> setup -> agent -> exit
+}

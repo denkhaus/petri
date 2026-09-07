@@ -1,0 +1,9 @@
+id = "firing-cap"
+title = "Petri caps a looped node at 500 firings"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Unlimited when visit limits are unset or zero."
+petri = "500 firings per looped node; an explicit limit above 500 is refused at load."
+user_visible_effect = "A workflow that loops one node more than 500 times fails on Petri."
+reason = "A bounded run is a Petri engine invariant."
+acceptance = "No required bundle loops that far; the comparison has no shape for it."

@@ -18,6 +18,9 @@
 )]
 
 pub(crate) mod bundle;
+pub(crate) mod compare;
+pub(crate) mod evidence;
+pub(crate) mod fabro_adapter;
 pub(crate) mod failures;
 pub(crate) mod inspect;
 pub(crate) mod interview;

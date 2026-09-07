@@ -1,0 +1,13 @@
+id = "partially-succeed-extension"
+title = "on_failure=\"partially_succeed\" is a Petri extension"
+scenarios = []
+bundles = ["*"]
+fabro = "Refused by the validator (`on_failure_valid`: `route`, `exit`, `succeed`)."
+petri = "Fabro's `succeed` promotion order, but the promoted stage reports `partially_succeeded`, warned `fabro.petri_extension`."
+user_visible_effect = "A workflow that uses the spelling runs on Petri only."
+reason = "Task 7 kept the spelling as a documented extension."
+acceptance = "A scenario using the spelling records Fabro's validator rejection as its reference (`status = rejected`) and lists itself here; none does today."
+
+[[accepts]]
+kind = "status"
+field = "status"

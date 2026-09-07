@@ -1,0 +1,9 @@
+id = "run-agent-skills-extension"
+title = "[run.agent] skills is a Petri extension"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Refused by the parser."
+petri = "Extra skill directories searched after Fabro's three, warned `fabro.petri_extension`."
+user_visible_effect = "A workflow naming the key runs on Petri only."
+reason = "Task 14."
+acceptance = "A scenario using the key records Fabro's rejection; none does today."

@@ -245,6 +245,23 @@ impl HumanConfig {
         })
     }
 
+    /// Whether the gate is a `yes_no` or `confirmation` question, whose
+    /// answer Fabro records as the word `yes` or `no`.
+    fn is_yes_no(&self) -> bool {
+        matches!(
+            self.question_type.as_deref(),
+            Some("yes_no" | "confirmation")
+        )
+    }
+
+    /// Whether a choice is the affirmative one of a yes/no gate, as Fabro
+    /// matches a `yes` answer: key `y` or `yes`, or label `yes`.
+    fn is_affirmative(choice: &Choice) -> bool {
+        choice.key.eq_ignore_ascii_case("y")
+            || choice.key.eq_ignore_ascii_case("yes")
+            || strip_accelerator(&choice.label).eq_ignore_ascii_case("yes")
+    }
+
     /// The choice `human.default_choice` names: a target node first, as
     /// Fabro reads it, else a key.
     fn default_choice(&self) -> Option<Choice> {
@@ -456,10 +473,19 @@ impl Step for HumanStep {
                     .collect()
             };
             if !selected.is_empty() {
-                let answered = if answer.choices.is_empty() {
-                    selected[0].key.clone()
-                } else {
+                // Fabro records the answer word for a yes/no or confirmation
+                // gate (`yes`, `no`), the selected key for one choice, and
+                // the keys joined for a multi-select.
+                let answered = if !answer.choices.is_empty() {
                     answer.choices.join(", ")
+                } else if config.is_yes_no() {
+                    if HumanConfig::is_affirmative(selected[0]) {
+                        "yes".to_owned()
+                    } else {
+                        "no".to_owned()
+                    }
+                } else {
+                    selected[0].key.clone()
                 };
                 return config.selected(&selected, &question.text, &answered);
             }
@@ -474,6 +500,10 @@ impl Step for HumanStep {
                 stage
                     .context_updates
                     .insert(SmolStr::new("human.gate.selected"), json!("freeform"));
+                // Fabro records the free text as the label too.
+                stage
+                    .context_updates
+                    .insert(SmolStr::new("human.gate.label"), text.clone());
                 stage
                     .context_updates
                     .insert(SmolStr::new("human.gate.text"), text.clone());

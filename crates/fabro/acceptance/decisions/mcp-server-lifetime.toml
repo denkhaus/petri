@@ -1,0 +1,9 @@
+id = "mcp-server-lifetime"
+title = "MCP servers live per agent node session"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "One set per agent session."
+petri = "The same: started before the agent and stopped after it."
+user_visible_effect = "None."
+reason = "Recorded for completeness."
+acceptance = "No difference."

@@ -1,0 +1,12 @@
+id = "parallel-branches-in-path"
+title = "Parallel branch stages appear in Petri's path"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Branches are `parallel.branch.*` events with a `parallel_branch_id`; the stage path lists the fork and the join only."
+petri = "Each branch runs as a child invocation whose stage has a final record, and the branch delegate fires in the parent graph, so the path lists the branches between the fork and the join in branch order (oracle case `static_fan_out_joins_all_branches`)."
+user_visible_effect = "The terminal history and `petri inspect` list one line per branch; the join's `parallel.results` are identical."
+reason = "Task 6's design runs branches as child invocations from the fork snapshot; a branch stage is a real firing with its own attribution."
+acceptance = "The comparison removes Petri's branch-delegate stages from the main path (reported as `path.branch_stage`) and compares the causal order inside each branch and the ordered envelopes at the join exactly, with exact counts."
+
+[[accepts]]
+kind = "path.branch_stage"

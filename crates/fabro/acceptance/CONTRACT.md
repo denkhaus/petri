@@ -54,6 +54,51 @@ fixture's `harness.realization` map so a reviewer can see which node ran as an
 ACP agent and which as a human gate. The old in-process generator that linked
 `fabro-workflow` is deleted.
 
+## The differential matrix
+
+Black box phase 5 (`crates/fabro/acceptance/DIFFERENTIAL.md`). Every
+scenario under `crates/fabro/acceptance/scenarios/` runs through the shipped
+`petri` binary and through the pinned Fabro binary
+(`scripts/fabro-provision.sh`, never `PATH`'s `fabro`) with the same bundle,
+inputs, provider twins and interview script, each engine in its own
+workspace, server and twin namespace. The Fabro adapter
+(`crates/petri/cli/tests/support/fabro/fabro_adapter.rs`) uses the same
+public interfaces as the parity harness plus `fabro validate --json`,
+`fabro dump` and `GET /api/v1/runs/{id}/state`, redirects Fabro's providers
+through `[llm.providers.<id>] base_url` in its private `settings.toml`, and
+answers gates through the questions API with `yes`, `no`, `selected`,
+`multi_selected` and `text`.
+
+Comparison rules (`support/fabro/compare.rs`): terminal status; the main
+stage path in order; each fork's branch envelopes in dispatch order and the
+causal order inside each branch, with exact counts; the workflow-owned
+context key by key with named bookkeeping kept beside it; artifacts byte
+for byte; interviews; provider requests (provider, model, effort, matched
+twin scenario) with Fabro's platform requests listed apart; side-effect
+counts. Only generated ids, the working directory and blob references are
+normalized, through an explicit identity map. Each scenario asserts its
+independent expectation on both engines first; a pinned-Fabro violation is
+a recorded baseline defect, never permission for Petri to match it.
+
+A difference is accepted only by a decision record in
+`crates/fabro/acceptance/decisions/` (format in its `README.md`) that names
+the difference kind and the scenario scope. The committed reference of a
+scenario (`fabro-reference/reference.json`) is the baseline the live Fabro
+run must reproduce; `PETRI_FABRO_REFERENCE_RECORD=1` is the only way to
+refresh it. `crates/fabro/acceptance/tests/reference_version.rs` checks
+every fixture, reference, capture, decision and evidence record against the
+pin. `mise run test:fabro:differential` runs the matrix.
+
+Cells captured live from the pinned binary: `parallel-results` (commands,
+two fan-outs), `interview` (the required bundle, five gate kinds and the
+summary prompt node), `edit-and-verify` (a native agent with a real shell
+tool and a gate), `fallback-failover` (task 12's capture: a 503 after a
+completed tool effect and the fall back to Anthropic), `skills-precedence`
+(task 14's capture: the three skill directories, the reference prompt
+section and `use_skill` tool, the repository's copy winning). Baseline defects of
+the pinned Fabro found by the matrix: it repeats a completed tool effect
+on failover (`fallback-repeated-tool-effect`).
+
 ## Required bundles
 
 `crates/fabro/acceptance/bundles.lock.json` (schema version 1) is the
@@ -184,7 +229,23 @@ in the lock file.
 
 ## Tracked departures to retire
 
-None.
+Both found by the differential matrix (task 18) and recorded as decision
+records with their retirement conditions:
+
+- **Command output gains a final newline**
+  (`decisions/command-output-trailing-newline.toml`). The sandbox plugin
+  streams a command's output as line records, so a final line the script
+  did not terminate gains one in `command.output`; Fabro keeps the bytes.
+  Retire when the plugin protocol reports the final line's newline state.
+- **The interview bundle needs a `[run.model]` default**
+  (`decisions/interview-run-model-migration.toml`). Fabro takes the run's
+  model from the launch; the standalone runner has no launch-level model
+  default, so the matrix runs a recorded migration of the bundle's
+  `workflow.toml`. Retire when `petri run` gains a launch-level default.
+
+Resolved by the matrix (Petri fixed, no departure): a `yes_no` or
+`confirmation` gate records `yes`/`no` under `human.gate.<node>.answer` as
+Fabro does, and a freeform answer sets `human.gate.label`.
 
 Retired by task 6: **parallel branch context**. Each branch now runs as a
 child invocation from the fork snapshot, the fan-in publishes
@@ -205,7 +266,12 @@ accepted difference (below).
 ## Accepted differences
 
 These stay in the contract. They are tested as Petri differences, not as
-reference expectations.
+reference expectations. Each row is one decision record under
+`crates/fabro/acceptance/decisions/`, which is the index the differential
+comparison loads; two records found by the matrix have no row here:
+`fabro-run-title-call` (Fabro's run-title request on the provider's small
+default model before the first stage) and `fallback-repeated-tool-effect`
+(a baseline defect, not an accepted Petri behaviour).
 
 | Difference | Petri | Fabro |
 |---|---|---|
@@ -327,3 +393,8 @@ usage assertion, which today asserts the prompt usage excludes the summary
 | Fixture regeneration | `scripts/oracle-regenerate.sh` |
 | Fake ACP agent | `crates/fabro/acceptance/testdata/fake_acp_agent.py` |
 | Dependency direction tests | `crates/petri/lib/tests/fabro_dependencies.rs`, `crates/petri/cli/tests/standalone.rs` |
+| Fabro provisioning | `scripts/fabro-provision.sh` (cache `crates/fabro/corpus/fabro-target/`) |
+| Differential matrix | `crates/petri/cli/tests/fabro_differential.rs`, `tests/support/fabro/{fabro_adapter,compare,evidence}.rs`, `crates/fabro/acceptance/DIFFERENTIAL.md` |
+| Decision records | `crates/fabro/acceptance/decisions/` |
+| Scenario references | `crates/fabro/acceptance/scenarios/<name>/fabro-reference/reference.json` |
+| Reference-version checks | `crates/fabro/acceptance/tests/reference_version.rs` |

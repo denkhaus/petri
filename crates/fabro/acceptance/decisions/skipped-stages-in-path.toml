@@ -1,0 +1,12 @@
+id = "skipped-stages-in-path"
+title = "A skipped stage is a path record in Petri"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "No stage record: a skipped stage leaves no `stage.completed` event."
+petri = "A `skipped` final outcome is recorded (oracle case `skipped_outcome_routes_like_success`), so the path lists the stage."
+user_visible_effect = "`petri inspect` and the terminal history show the skipped stage; the run outcome, routing and context are the same."
+reason = "Petri's engine records one final record per firing; hiding it would make the run log untrustworthy."
+acceptance = "The comparison removes Petri's `skipped` stages from the path before comparing the remaining sequence exactly, and reports each removal as `path.skipped_stage`."
+
+[[accepts]]
+kind = "path.skipped_stage"

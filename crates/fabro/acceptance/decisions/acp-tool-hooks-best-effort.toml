@@ -1,0 +1,9 @@
+id = "acp-tool-hooks-best-effort"
+title = "ACP tool hooks are best effort with a warning"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Ignored silently."
+petri = "Best effort at `session/request_permission`, with a `fabro.hook.warning` naming the unenforceable hook."
+user_visible_effect = "A warning per unenforceable hook on Petri."
+reason = "Never silently skip a configured tool hook (readiness item 1)."
+acceptance = "Events only; no projection difference."
