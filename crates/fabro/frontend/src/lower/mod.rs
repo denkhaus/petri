@@ -8,6 +8,7 @@
 //! semantics.
 
 mod attrs;
+mod compaction;
 mod hooks;
 mod imports;
 mod parallel;
@@ -22,6 +23,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
+pub use compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 pub use imports::IMPORT_ERROR;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::validate::loop_reachable;
@@ -927,7 +929,10 @@ impl Ctx<'_> {
             }
             Kind::Parallel => (None, explicit.unwrap_or(STRUCTURAL_TIMEOUT)),
             Kind::Agent => {
-                let config = self.agent_config(node, kind, workflow, policy, explicit);
+                let mut config = self.agent_config(node, kind, workflow, policy, explicit);
+                if let Some(object) = config.as_object_mut() {
+                    object.insert("compaction".into(), self.settings.compaction.to_json());
+                }
                 (
                     Some(StepRef::new(AGENT_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),

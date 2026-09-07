@@ -28,6 +28,7 @@ use steps::{Step, StepCtx};
 
 use crate::acp::AgentCommand;
 use crate::blobs::{self, OutputStore};
+use crate::compaction;
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
@@ -84,6 +85,10 @@ pub struct AgentConfig {
     pub speed:            Option<String>,
     #[serde(default)]
     pub max_tokens:       Option<i64>,
+    /// Context compaction, Fabro's values unless the frontend says otherwise
+    /// (`crate::compaction`).
+    #[serde(default)]
+    pub compaction:       compaction::CompactionSettings,
     /// Every stage of the workflow, for the preamble.
     #[serde(default)]
     pub stages:           Value,

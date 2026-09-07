@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 use frontend::{Diagnostics, FileSource, Span};
 use serde_json::{Value, json};
 
+use super::compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use super::secrets::{InterpolationError, interpolate};
 use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow, parse_duration};
 use crate::template::Context;
@@ -77,6 +78,9 @@ pub struct RunSettings {
     pub prepare_timeout_ms: u64,
     /// The file's path and text, for the hook loader's `[[run.hooks]]` layer.
     pub hooks_text:         Option<(String, String)>,
+    /// Agent context compaction: Fabro's hardcoded values, since the pinned
+    /// Fabro has no setting for it (`lower::compaction`).
+    pub compaction:         CompactionSettings,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -578,20 +582,31 @@ impl Reader<'_> {
         let Some(agent) = item.as_table() else {
             return;
         };
-        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only; skills,
-        // sub-agents and compaction (readiness items 9c to 9e) have no
-        // `workflow.toml` surface at the pinned revision, so a key asking for
+        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only; skills
+        // and sub-agents (readiness items 9c and 9d) have no `workflow.toml`
+        // surface at the pinned revision, and compaction is always on with
+        // Fabro's hardcoded values (`lower::compaction`), so a key asking for
         // one is refused as Fabro refuses it, never passed silently.
         for key in agent.keys() {
             if !matches!(key.as_str(), "fabro_tools" | "mcps") {
                 let path = self.path;
-                self.unsupported(
-                    "workflow_toml.key",
+                let message = if key == "compaction" {
+                    format!(
+                        "`run.agent.compaction` in `{path}` is not a key Fabro's `[run.agent]` \
+                         table accepts (it takes `fabro_tools` and `mcps`); compaction is always \
+                         on with Fabro's values: a trigger at {DEFAULT_THRESHOLD_PERCENT} percent \
+                         of the context window and {DEFAULT_PRESERVE_TURNS} preserved turns"
+                    )
+                } else {
                     format!(
                         "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` table \
-                         accepts (it takes `fabro_tools` and `mcps`); skills, sub-agents and \
-                         compaction have no workflow configuration at the pinned Fabro"
-                    ),
+                         accepts (it takes `fabro_tools` and `mcps`); skills and sub-agents have \
+                         no workflow configuration at the pinned Fabro"
+                    )
+                };
+                self.unsupported(
+                    "workflow_toml.key",
+                    message,
                     "remove it; Fabro's settings schema has no such key",
                 );
             }
