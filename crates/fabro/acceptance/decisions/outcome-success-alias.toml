@@ -1,0 +1,9 @@
+id = "outcome-success-alias"
+title = "outcome=success is matched as succeeded until 2026-10-04"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Accepted by the parser, never matches."
+petri = "Matched as `succeeded` with a warning until 2026-10-04, then refused."
+user_visible_effect = "An edge written `outcome=success` routes on Petri and never on Fabro."
+reason = "Compatibility with unchanged required bundles during the sunset."
+acceptance = "A scenario whose routing depends on the alias must record the resulting path difference under a scoped entry here; none does today."

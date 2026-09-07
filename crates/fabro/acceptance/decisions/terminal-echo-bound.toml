@@ -1,0 +1,9 @@
+id = "terminal-echo-bound"
+title = "Terminal echo is bounded and branch-tagged"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "The platform's log viewer."
+petri = "A stage's echoed output is bounded at 64 KiB with one marker naming the log; a branch's lines carry `[invocation-N/node#firing]`."
+user_visible_effect = "Presentation only."
+reason = "Readiness item 2."
+acceptance = "Not part of the projection."

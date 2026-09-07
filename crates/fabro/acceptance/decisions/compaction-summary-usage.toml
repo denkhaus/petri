@@ -1,0 +1,9 @@
+id = "compaction-summary-usage"
+title = "Compaction summary usage is reported separately"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "The summary usage is dropped (`compact_context` discards `response.usage`)."
+petri = "A `fabro.compaction` event and `pebble.compaction_*` metrics carry the summary usage read from Pebble's history."
+user_visible_effect = "Petri reports more usage than Fabro for the same run."
+reason = "The pinned Pebble leaves the summary call out of a prompt's usage; re-pin `861d9bc` recommended."
+acceptance = "Usage is not compared; the request count at the twin is."

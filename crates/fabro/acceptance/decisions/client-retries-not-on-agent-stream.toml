@@ -1,0 +1,9 @@
+id = "client-retries-not-on-agent-stream"
+title = "Client retries are not on the agent event stream"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "The client reports its retries."
+petri = "`lithos-llm`'s same-route retries are visible at the twin only; Pebble does not export `RetryEventObserver` at the pin."
+user_visible_effect = "Accounting only; the requests at the twin are the same."
+reason = "Library gap recorded by task 12."
+acceptance = "Request counts at the twin are compared."

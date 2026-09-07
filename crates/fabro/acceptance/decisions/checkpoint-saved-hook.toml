@@ -1,0 +1,9 @@
+id = "checkpoint-saved-hook"
+title = "checkpoint_saved warns and does not run"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Dispatched with no built-in behavior."
+petri = "A warning; the hook does not run."
+user_visible_effect = "A `checkpoint_saved` hook script never runs on Petri."
+reason = "Petri has no checkpoint event of that shape."
+acceptance = "A scenario with such a hook writing a file must list the artifact here; none does today."

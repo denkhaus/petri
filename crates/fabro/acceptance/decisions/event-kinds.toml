@@ -1,0 +1,9 @@
+id = "event-kinds"
+title = "Petri's public events are its own kinds"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "`stage.prompt`, `prompt.completed`, `agent.mcp.*`, `agent.failover`, ..."
+petri = "`StepEvent::Custom` kinds `fabro.prompt`, `fabro.mcp.*`, `fabro.fallback.*`, `fabro.compaction`, `fabro.skills`, ..."
+user_visible_effect = "Event consumers differ; run results do not."
+reason = "Readiness item 1: identical platform events are not required."
+acceptance = "Events are not compared; projections are."

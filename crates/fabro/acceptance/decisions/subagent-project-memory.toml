@@ -1,0 +1,9 @@
+id = "subagent-project-memory"
+title = "A sub-agent gets no project memory or skills"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "A child re-discovers the project documents and skills."
+petri = "A child reads no `AGENTS.md`/profile documents and no skill directories."
+user_visible_effect = "A child's prompt lacks the project memory section on Petri."
+reason = "Pebble's rule; library contract items recorded in task 15's evidence."
+acceptance = "Child prompts are engine-specific; the child's tool effects are compared."

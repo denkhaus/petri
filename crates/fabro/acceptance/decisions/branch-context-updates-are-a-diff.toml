@@ -1,0 +1,9 @@
+id = "branch-context-updates-are-a-diff"
+title = "A branch's context_updates is the diff against the fork snapshot"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Every key the branch wrote is reported, even with the value it already had; a failure with an empty `failure_class` is reported."
+petri = "A key written back with the value the fork snapshot already had is not reported; a failure with an empty `failure_class` is dropped."
+user_visible_effect = "A join sees fewer keys only when a branch rewrote an unchanged value."
+reason = "The result contract (`scenarios/parallel-results/CONTRACT.md`) defines `context_updates` as outcome updates plus the public context diff."
+acceptance = "No comparison rule accepts this shape in general. A scenario that exercises an unchanged write-back must add a scoped `accepts` entry naming the key; a missing key otherwise stays unresolved."
