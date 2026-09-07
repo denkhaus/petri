@@ -180,10 +180,7 @@ impl Accounting {
         [
             ("pebble.compactions".into(), json!(self.count)),
             ("pebble.compaction_usage".into(), json!(self.usage)),
-            (
-                "pebble.compaction_cost_usd_micros".into(),
-                json!(self.cost),
-            ),
+            ("pebble.compaction_cost_usd_micros".into(), json!(self.cost)),
         ]
     }
 }
