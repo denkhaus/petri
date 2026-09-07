@@ -1,0 +1,13 @@
+id = "output-references"
+title = "Output references live in a local blob store"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "`blob://sha256/<hex>` in platform storage; the dump materializes them inline."
+petri = "`blob://sha256/<hex>` under `<run_dir>/blobs`; a structured value's reference carries `#json`."
+user_visible_effect = "A reference string differs in suffix; the logical value is the same."
+reason = "Task 7; the comparison reads Fabro's inline values from the dump."
+acceptance = "Blob references are identities (`<BLOB_n>`) in the projection; the compared values are the inline ones. A `#json` suffix difference is reported as `context.value` and accepted only under this record's field pattern."
+
+[[accepts]]
+kind = "context.value"
+field = "context.*#json*"

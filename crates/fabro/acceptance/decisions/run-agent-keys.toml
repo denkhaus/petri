@@ -1,0 +1,9 @@
+id = "run-agent-keys"
+title = "[run.agent] refuses keys Fabro's parser refuses"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Refused by the parser."
+petri = "`subagents`, `compaction` and any key other than `fabro_tools`, `mcps` and `skills` are refused (`unsupported.workflow_toml.key`)."
+user_visible_effect = "The same refusal, with Petri naming the always-on features."
+reason = "Task 11, 15, 16."
+acceptance = "Load-time diagnostics; no projection difference."

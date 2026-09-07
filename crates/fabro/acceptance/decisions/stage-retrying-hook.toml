@@ -1,0 +1,9 @@
+id = "stage-retrying-hook"
+title = "stage_retrying is dispatched by Petri"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Declared, never dispatched."
+petri = "Dispatched before each retry attempt; its decision is ignored."
+user_visible_effect = "A configured hook script runs on Petri."
+reason = "A declared hook that never runs is a silent skip."
+acceptance = "A scenario with a `stage_retrying` hook that writes a file must list the artifact under a scoped entry; none does today."

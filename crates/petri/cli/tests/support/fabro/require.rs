@@ -10,7 +10,7 @@
 //! | Asset | Variable | Materialized by |
 //! |---|---|---|
 //! | bundles | `PETRI_REQUIRE_FABRO_BUNDLES` | `scripts/corpus-fetch-fabro-bundles.sh` |
-//! | fabro binary | `PETRI_REQUIRE_FABRO_BINARY` | `scripts/fabro-binary.sh` (handed over as `PETRI_FABRO_BIN`) |
+//! | fabro binary | `PETRI_REQUIRE_FABRO_BINARY` | `scripts/fabro-provision.sh` (handed over as `FABRO_BIN`) |
 //! | corpus | `PETRI_REQUIRE_FABRO_CORPUS` | `scripts/corpus-fetch-fabro.sh` |
 //! | Docker | `PETRI_REQUIRE_DOCKER` | a reachable daemon and the Docker plugin |
 
@@ -87,24 +87,26 @@ pub(crate) fn bundle(id: &str) -> Option<PathBuf> {
     .then_some(dir)
 }
 
-/// The pinned `fabro` binary `PETRI_FABRO_BIN` names, or `None` (with a
-/// notice) when it is not provided. `scripts/test-fabro-differential.sh`
-/// sets the variable from `scripts/fabro-binary.sh`, which checks the
-/// binary reports the pinned commit; a `fabro` on `PATH` is never used.
+/// The pinned `fabro` binary `FABRO_BIN` names, or the one at the cache
+/// path `scripts/fabro-provision.sh` builds into, or `None` (with a notice)
+/// when neither exists. The differential adapter (`fabro_adapter.rs`)
+/// checks the binary reports the pinned commit; a `fabro` on `PATH` is
+/// never used.
 ///
 /// # Panics
 ///
 /// Panics when `PETRI_REQUIRE_FABRO_BINARY` is set and the binary is absent.
 pub(crate) fn fabro_binary() -> Option<PathBuf> {
-    let path = env::var_os("PETRI_FABRO_BIN").map(PathBuf::from);
-    let present = path.as_deref().is_some_and(Path::is_file);
+    let path = env::var_os("FABRO_BIN").map_or_else(
+        || workspace_root().join("crates/fabro/corpus/fabro-target/debug/fabro"),
+        PathBuf::from,
+    );
     require_or_skip(
-        present,
+        path.is_file(),
         "PETRI_REQUIRE_FABRO_BINARY",
-        "PETRI_FABRO_BIN does not name the pinned fabro binary (run through \
-         scripts/test-fabro-differential.sh, or scripts/fabro-binary.sh)",
+        "no pinned fabro binary (FABRO_BIN, or the cache scripts/fabro-provision.sh builds into)",
     )
-    .then(|| path.unwrap_or_default())
+    .then_some(path)
 }
 
 /// The fetched Fabro corpus `crates/fabro/corpus/fabro`, or `None` (with a

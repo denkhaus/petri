@@ -1,0 +1,9 @@
+id = "empty-for-each-placeholder"
+title = "An empty for_each fires the template once with a placeholder"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Zero branches; the run jumps to the join."
+petri = "The template fires once with the placeholder item `petri.parallel.empty`; the fan-in strips it and joins zero results with no model call."
+user_visible_effect = "None at the join: `parallel.results` is empty and `parallel.branch_count` is 0 in both engines."
+reason = "Petri's fan-out lowering needs one firing to reach the collector."
+acceptance = "Black box `an_empty_for_each_list_joins_without_calling_the_model`; the projection shows no fork difference, so nothing is accepted here."

@@ -1,0 +1,9 @@
+id = "subagent-usage-separate"
+title = "Sub-agent usage is reported beside the parent's"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Child usage merges into the stage's usage total."
+petri = "The children's usage is the `pebble.subagents` metric."
+user_visible_effect = "Accounting shape only."
+reason = "Task 15."
+acceptance = "Usage is not compared."

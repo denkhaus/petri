@@ -1,0 +1,9 @@
+id = "image-dockerfile-warning"
+title = "[environments.*] image.dockerfile warns"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Builds the image on the platform."
+petri = "A warning; the scope runs on the backend's default runner image or `image.docker`."
+user_visible_effect = "A bundle that needs its Dockerfile's tools fails on Petri's default image."
+reason = "Task 7; the code-review bundle names a Dockerfile."
+acceptance = "The Docker subset declares the tools it needs; no projection difference."

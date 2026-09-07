@@ -1,0 +1,9 @@
+id = "run-level-hook-reports"
+title = "Run-level hook reports are logged, not recorded"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Platform events."
+petri = "`run_complete`, `run_failed` and `sandbox_cleanup` reports are logged, not in the event log (they belong to no firing)."
+user_visible_effect = "No inspectable record of a run-end hook's output on Petri; its effects are the same."
+reason = "Task 11; the run-end points belong to no firing."
+acceptance = "Artifacts written by run-end hooks are compared like any other; no projection difference."
