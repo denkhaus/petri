@@ -925,10 +925,18 @@ preferred label; suggested targets ranked by index; the fallback guarded by the
 entry noop; exit → `Completion::TerminalNode`; `goal_gate` → a `goal_check`
 noop before exit with back arms to the retry-target chain; DFS-classified
 back edges, `Any` joins, `Budget.max_firings` capped at 500;
-`loop_restart` → `EdgeTransition::Restart`; `component` → fan-out groups or
-`Expansion::ForEach` over the template node; `tripleoctagon` → `All` join with
-the ordered branch results as output; `house` → a nested invocation by graph
-digest; `tab` and a prompted `tripleoctagon` → the `fabro/prompt` step;
+`loop_restart` → `EdgeTransition::Restart`; `component` → a fork whose
+branches are synthetic `fabro/branch` delegates (`kind = "parallel.branch"`),
+each running a copy of its target as a child invocation from the fork snapshot
+with no merge back, `Expansion::ForEach` over the delegate for `for_each`;
+`tripleoctagon` → the `fabro/fan_in` step behind an `All` join, publishing
+`parallel.results` and `parallel.branch_count` with the ordered branch
+envelopes as output; `max_parallel` → `AttemptAdmission` on the child
+invocations, one gate per parent execution and fork visit, one slot per
+attempt, held by the driver's attempt slots and released when the attempt
+ends; `RunPolicy.max_invocations = 10,000` → the coordinator's run-wide
+invocation ceiling, checked at create, resume and every declaration; `house`
+→ a nested invocation by graph digest; `tab` and a prompted `tripleoctagon` → the `fabro/prompt` step;
 `import` → expanded at load, so the persisted graph carries the imported
 nodes; `[run.prepare]` → command nodes between start and its successors.
 Conditions lower onto the expression language with Fabro's text comparison,

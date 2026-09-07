@@ -769,7 +769,6 @@
         "code-review/multi-level-fan-out"
       ],
       "blockers": [
-        "parallel branch results lack context_updates (readiness item 3; task 6)",
         "workflow.toml [run.model.fallbacks] is not applied yet (task 12); [run.environment] image.dockerfile warns and the run uses the selected backend's default image"
       ],
       "notes": [
@@ -1136,7 +1135,6 @@
         "security-review/timeout-cancel"
       ],
       "blockers": [
-        "parallel branch results lack context_updates (task 6)",
         "workflow.toml [run.model.fallbacks] is not applied yet (task 12)"
       ],
       "notes": [

@@ -33,8 +33,13 @@ advances `visit`.
 
 `subject.node.meta` is the frontend's node metadata. The Fabro frontend sets
 `label`, `shape`, `kind` (`start`, `exit`, `command`, `agent`, `human`,
-`parallel`, `parallel.fan_in`, `wait`, `stack.manager_loop`, `goal_check`,
-...), `classes`, `span`, and `synthetic: true` on nodes it invented. A host
+`parallel`, `parallel.branch`, `parallel.fan_in`, `wait`, `stack.manager_loop`,
+`goal_check`, ...), `classes`, `span`, and `synthetic: true` on nodes it
+invented. A `parallel.branch` node is the parent-side delegate of one branch;
+its `meta.branch = { fork, target, index }` names the branch, and the branch's
+stage itself runs in the child invocation the delegate starts (the child's
+entry node carries `meta.branch_role = { fork, index }`). A synthetic
+`<fork>.fan_in` is a `parallel.fan_in` with `synthetic: true`. A host
 distinguishes logical stages from lowering artifacts with these fields and
 with `BranchRole`, never with node names.
 

@@ -81,9 +81,10 @@ a warning; the importing workflow's stylesheet governs.
 | `tab` prompt | `fabro/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `fabro.prompt_backend`, and the graph's ACP settings never reach it |
 | `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
 | `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
-| `component` parallel | `noop` with one routing group per branch, or a `for_each` expansion (below) | |
-| `tripleoctagon` fan-in | `noop`, `join: all`; its output is the ordered branch results | |
-| `tripleoctagon` fan-in with a `prompt` | `fabro/prompt`, `join: all`: the ordered barrier, then one model call over the branch results (`sources`, `branch_results`) | |
+| `component` parallel | `noop` fork; each branch target becomes a synthetic `fabro/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation; `for_each` marks the delegate `Expansion::ForEach` (below) | `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `generation` |
+| `tripleoctagon` fan-in | `fabro/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
+| `tripleoctagon` fan-in with a `prompt` | `fabro/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
+| a `component` whose branches share a plain successor | a synthetic `<fork>.fan_in` (`fabro/fan_in`, `synthetic: true`) before that successor | |
 | `insulator` wait | `fabro/wait` | `duration_ms` |
 | `house` manager loop | `fabro/workflow` | the child graph's digest, `manager.*` |
 | `circle`, `doublecircle`, other shapes | `fabro/agent`, with a `fabro.unknown_shape` warning | |
@@ -221,15 +222,80 @@ Every node except a fan-in joins with `Any`.
 
 ## Parallel
 
-A `component` node without `for_each` fans out with one routing group per
-branch; every branch's edge into the `tripleoctagon` carries
-`{ index, value: { id, status, output } }`, and the fan-in's output is those
-values in branch order. `for_each="context.K"` makes the component evaluate
-`get(kv, 'K')` (its precondition enforces Fabro's 1000-item cap) and marks the
-single template node — an agent or prompt — with `Expansion::ForEach` over its
-input, `max_parallel` carried, `fail_fast: false`. Branch results ride tokens;
-`stdin_source="context.parallel.results"` on a later command reads the nearest
-fan-in's output.
+A `component` node is a fork. Petri runs each branch the way Fabro does: as a
+child invocation of a copy of the branch target, started from a snapshot of
+the parent context at the fork and never merged back. Parallel workflows
+therefore need the coordinator path (`host::run_configured`, the CLI, an
+embedding host); `Runtime::run` alone has no child invocations.
+
+Lowering replaces every branch target with a synthetic `fabro/branch`
+delegate in the parent graph (`meta.kind = "parallel.branch"`,
+`meta.branch = { fork, target, index }`, `synthetic: true`, one attempt, no
+retry). The delegate's config names the child graph digest, the fork, the
+branch index, the target's kind and the fork snapshot of `kv`. The child
+graph is the branch target alone with its routes removed, entered through
+`meta.branch_role`, with `result = NodeOutput(<target>)`; its digest is
+pushed with the parent's graph. An agent or prompt target reads the branch's
+`nodes` and item data from the snapshot (`internal.parallel_nodes`,
+`internal.parallel_item`) and runs with `branch: true` (the branch fidelity
+rule). A branch target that is the start, the exit, or a fan-in is
+`fabro.parallel.bad_branch_target`. The same target named by two edges runs
+twice, as `<target>` and `<target>.branch<index>`. A nested `component`
+inside a branch is lowered first, innermost out, so an outer branch's child
+graph carries the inner fork whole.
+
+Branch edges never route. The delegates route to the fork's collector: the
+common direct successor of every branch (an inner fork counts as its own
+join). A `tripleoctagon` there is the `fabro/fan_in` step. A plain successor
+gets a synthetic `<fork>.fan_in` in front of it. No common successor is
+`fabro.parallel.no_join`; an edge that leaves a branch elsewhere is
+`fabro.parallel.branch_edge_ignored`. Every delegate's edge into the collector
+carries `{ index, value }`, so the `All` join sees the results in branch order.
+
+The collector publishes `parallel.results`, the array of branch envelopes
+`{ id, index, item_label, status, context_updates }` in branch order, and
+`parallel.branch_count`. `status` is the branch's final stage outcome (a
+cancelled child is `failed`). `context_updates` is the branch's own change
+set: every public key whose final value differs from the fork snapshot, with
+`internal.*`, `graph.*`, `thread.*` and `current*` excluded. Branch context is
+output only; nothing merges into the parent `kv`. The fan-in's own outcome
+follows Fabro's aggregation: all succeeded (or no branches) is `succeeded`,
+all failed is `failed`, anything else is `partially_succeeded`. An empty
+array of results is the failure `No parallel results to join`
+(`no_parallel_results`); a fan-in that receives no branch at all is
+`fabro.parallel.no_branches` at load. `stdin_source="context.parallel.results"`
+on a later command reads `get(kv, 'parallel.results')`; a command placed
+before any fan-in warns `upstream_fan_in`. The same publication and stripping
+happen in a prompted fan-in before its model call.
+
+`for_each="context.K"` names one template branch. The delegate evaluates
+`get(kv, 'K')` as its expansion input (Fabro's 1000-item cap is a
+precondition, `fail_fast: false`) and each clone carries one item as `item`.
+The item reaches the model after the prompt as fenced untrusted data: a
+notice, then the item's JSON inside `<untrusted-<16 hex>>` tags whose tag is
+derived from the item and never appears in it. `item_label` is the item's
+`name`, else `label`, else its index, sanitized to 80 characters. An empty
+list fires the template once with the placeholder item
+`petri.parallel.empty`; the fan-in strips placeholders and joins zero
+results, so no model call happens. `for_each` inside a `for_each` branch is
+`fabro.for_each.nested`.
+
+`max_parallel` bounds admission per fork occurrence: a missing, non-integer
+or negative value is 4 (`fabro.max_parallel.normalized`), zero is 1. Every
+branch attempt takes one slot before it starts and releases it when the
+attempt ends, so a branch waiting out a retry backoff holds none. The slots
+are one gate per parent execution and fork visit (`AttemptAdmission` on the
+child invocation, rebuilt from the coordinator log on resume). Branch steps
+report `fabro.parallel.branch.started` and `fabro.parallel.branch.completed`,
+the fan-in `fabro.parallel.completed`, as `StepEvent::Custom`.
+
+Every Fabro run has a hard ceiling of 10,000 invocations, root and all
+children counted, finished ones included (`RunPolicy.max_invocations`, set by
+lowering; `execution::MAX_INVOCATIONS`). It cannot be raised or disabled; a
+lower value is allowed. The coordinator refuses the 10,001st declaration with
+`InvokeError::InvocationLimit { total, limit, parent, firing, slot }`, refuses
+to create or resume a run whose policy asks for more, and the count survives
+a resume. Other dialects keep the coordinator's 1,024 default.
 
 ## Nested workflows
 

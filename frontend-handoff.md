@@ -219,9 +219,13 @@ A frontend attaches `Node::meta` (opaque to the engine) and the public event
 contract carries it verbatim on every event about the node. Two keys have a
 shared meaning across frontends: `kind` names the logical role of the node in
 the source format (the Fabro frontend writes `start`, `exit`, `command`,
-`agent`, `human`, `parallel`, `parallel.fan_in`, and so on), and
-`synthetic: true` marks a node the frontend invented during lowering (the
-Fabro `goal_check`). A host uses these, together with the engine's branch
+`agent`, `human`, `parallel`, `parallel.branch`, `parallel.fan_in`, and so
+on), and `synthetic: true` marks a node the frontend invented during lowering
+(the Fabro `goal_check`, a `parallel.branch` delegate that runs its branch in
+a child invocation, a synthetic `<fork>.fan_in`). A third key,
+`branch_role = { fork, index }` (`ir::placeholder::BRANCH_ROLE_META`), lets a
+frontend declare a node's branch membership when the branch runs in another
+invocation, and the engine's `BranchMap` honours it. A host uses these, together with the engine's branch
 role, to tell logical stages from lowering artifacts; it never reads node
 names for that.
 

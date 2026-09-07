@@ -102,13 +102,13 @@ names the task in `.ai/plans/fabro-unified-task-list.md` that owns the fix.
 | `Mdiamond` start, `Msquare` exit, `rankdir`, `label` | all | supported |
 | `parallelogram` command with `script`, `timeout`, `output_schema="routing"`, `stdin_source` | code-review, security-review, fix-ci, implement-plan | supported |
 | `stdin_source="context.internal.run_id"` | code-review, security-review | supported: `kv` carries the run id |
-| `stdin_source="context.parallel.results"` | code-review, security-review | tracked defect (task 6): branch results lack `context_updates`; see the departure below |
+| `stdin_source="context.parallel.results"` | code-review, security-review | supported: the fan-in publishes `parallel.results` (`id, index, item_label, status, context_updates` in branch order) and `parallel.branch_count`; `context_updates` is the branch's diff against the fork snapshot and never merges into the parent (`crates/fabro/acceptance/scenarios/parallel-results/CONTRACT.md`, black box `parallel_*` and `for_each_*`) |
 | agent node (`prompt`, `@prompts/*.j2`, `{% include %}`) | all but fix-ci commands | supported |
 | `output_schema="@schemas/*.json"`, `output_retries` | code-review, security-review | supported |
 | `on_failure="route"`, `"exit"` (node and graph) | code-review, security-review | supported |
 | `on_failure="succeed"` | code-review, security-review | supported with Fabro's promotion order: a failure an explicit route matches stays failed, an unmatched failure is promoted and reports `succeeded` (oracle cases `succeed_*`) |
 | `max_retries`, `default_max_retries` | code-review, security-review, implement-plan | supported |
-| `component` with `for_each`, `max_parallel`, `tripleoctagon` fan-in | code-review, security-review | supported for expansion; `max_parallel` slot lifetime and branch context are tracked defects (task 6) |
+| `component` with `for_each`, `max_parallel`, `tripleoctagon` fan-in | code-review, security-review | supported: each branch is a child invocation from the fork snapshot, `max_parallel` is one slot per attempt (missing or invalid is 4, zero is 1, a branch in backoff holds none), static and `for_each` branches share the fan-in, empty lists join with no model call (`crates/fabro/steps/tests/parallel.rs`, `crates/core/execution/tests/admission.rs`) |
 | `class` with `model_stylesheet` (including `{% set %}`, `{% if %}`, `inputs.*`) | code-review, security-review, implement-issue | supported |
 | `default_fidelity`, `fidelity="truncate"`, `fidelity="summary:high"`, `thread_id`, `default_thread` | code-review, security-review, implement-issue, interview | supported: Fabro's preambles for every mode, resolution edge, node, graph, `compact`; threads resolved edge, node, graph, class, previous node, retained on the native backend at `full` (`crates/fabro/FORMAT.md`, "Fidelity and threads") |
 | `project_memory=false` | code-review, security-review | supported: a prompt node reads no instruction files; agents read Fabro's per-profile files from the Git root to the working directory |
@@ -181,12 +181,14 @@ in the lock file.
 
 ## Tracked departures to retire
 
-1. **Parallel branch context** (task 6). Oracle case
-   `static_fan_out_joins_all_branches`. Fabro keeps a branch's
-   `context_updates` inside `parallel.results` and never merges them into the
-   parent context. Petri merges them into `kv` and its branch results lack
-   `context_updates`, so `parallel_values`-style helpers see nothing. The
-   fixture records Fabro's result and Petri's current result side by side.
+None.
+
+Retired by task 6: **parallel branch context**. Each branch now runs as a
+child invocation from the fork snapshot, the fan-in publishes
+`parallel.results` with every branch's `context_updates`, and nothing merges
+into the parent context. Oracle case `static_fan_out_joins_all_branches`
+records an empty context on both sides; its remaining difference is the path
+(Petri lists the branch stages, Fabro records branch events), listed below.
 
 Retired by task 7: **failure promotion order**. Petri now follows Fabro's
 executor: a failure an explicit route matches stays failed and takes that
@@ -212,6 +214,9 @@ reference expectations.
 | `checkpoint_saved` hook | warning; the hook does not run | dispatched with no built-in behavior |
 | Sensitive answers (`sensitive=true`, `$secret`) | a Petri extension | not defined |
 | Skipped stages in the path | Petri records a `skipped` final outcome (oracle case `skipped_outcome_routes_like_success`) | no stage record |
+| Parallel branches in the path | each branch's stage has a final record in its child invocation, so the path lists the branches in branch order between the fork and the join (oracle case `static_fan_out_joins_all_branches`) | branches are `parallel` events, not stages; the path skips them |
+| `context_updates` of a branch | the diff against the fork snapshot: a key a branch writes back with the value it already had is not reported; a failure with an empty `failure_class` is dropped | every key the branch wrote |
+| `for_each` over an empty list | the template fires once with the placeholder item `petri.parallel.empty`; the fan-in strips it and joins zero results with no model call | zero branches |
 | `on_failure="partially_succeed"` | a Petri extension: Fabro's `succeed` promotion order, but the promoted stage reports `partially_succeeded` (oracle case `partially_succeed_policy_classifies_before_routing`, warned `fabro.petri_extension`) | refused by the validator (`on_failure_valid`) |
 | `[environments.*] image.dockerfile` | a warning; the scope runs on the selected backend's default runner image, or on `image.docker` when named | builds the image on the platform |
 | Workflow secrets | `{{ secrets.NAME }}` resolves from `PETRI_SECRET_NAME` in the standalone runner; an embedding host supplies its own `SecretProvider` | the platform vault |
