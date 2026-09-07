@@ -1017,6 +1017,17 @@ node failing with `pebble_unconfigured`, rather than reaching a live
 endpoint. Fabro prompt nodes (`tab`) use the same client for their one
 tool-free call.
 
+Three retry mechanisms exist and each has one owner. `PETRI_LLM_RETRY_ATTEMPTS`
+(default 3; `1` disables) is the client's own budget for sending one request
+again on the same route after a retryable failure, with exponential backoff and
+the provider's `Retry-After` honored; `PETRI_LLM_TIMEOUT_MS` bounds one call,
+retries included. `PETRI_AGENT_TURN_REPLAY_ATTEMPTS` is Pebble's budget for
+replaying a model turn whose response stream broke (unset keeps Pebble's
+default). Fabro's `[run.model.fallbacks]` chain is Petri's and starts only
+once both are spent; see "Model fallback" in `crates/fabro/FORMAT.md`. A
+workflow retry (`retries` on a node) is a new attempt with a new plan and is
+none of these.
+
 **Workflow secrets.** A Fabro `workflow.toml` environment value written as
 `{{ secrets.NAME }}` is a secret reference. The standalone runner resolves it
 from the environment variable `PETRI_SECRET_NAME` when the command that
