@@ -16,6 +16,7 @@ pub mod acp;
 pub mod agent;
 pub mod blobs;
 pub mod command;
+pub mod compaction;
 pub mod contract;
 pub mod directive;
 pub mod fallback;
@@ -33,6 +34,7 @@ pub mod sessions;
 pub mod skills;
 pub mod stage;
 mod stub;
+pub mod subagents;
 pub mod wait;
 pub mod workflow;
 

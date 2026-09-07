@@ -2056,6 +2056,24 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
     assert_eq!(hooks[0]["sandbox"], json!(false));
 }
 
+/// Every agent node carries Fabro's compaction values (always on, 80
+/// percent of the context window, six preserved turns); a prompt node, which
+/// runs no agent loop, carries none.
+#[test]
+fn agent_nodes_carry_fabros_compaction_settings() {
+    let graph = lower_ok(&dot(r#"
+        graph [backend="api", default_model="openai/gpt-5.6-sol"]
+        a [prompt="Work."]
+        p [shape=tab, prompt="Answer."]
+        start -> a -> p -> exit
+    "#));
+    assert_eq!(
+        node(&graph, "a").step.config["compaction"],
+        json!({"enabled": true, "threshold_percent": 80, "preserve_turns": 6})
+    );
+    assert!(node(&graph, "p").step.config.get("compaction").is_none());
+}
+
 /// `[run.agent.mcps]` from the three settings layers lands on every agent
 /// node (never on a prompt node), merged by name with the higher layer
 /// winning, interpolated, with secrets as `$secret` references; a nested
@@ -2208,4 +2226,57 @@ fn run_agent_skills_is_a_warned_extension() {
             refused.diagnostics
         );
     }
+}
+
+/// Every agent node carries the reference sub-agent configuration (on,
+/// Pebble's open-session bound); a prompt node, which runs no tools, does
+/// not; and the `[run.agent] subagents` key stays refused as Fabro refuses
+/// it, with a hint that says the tools are always on.
+#[test]
+fn agent_nodes_carry_the_reference_subagent_configuration() {
+    use frontend_fabro::subagents::{CONFIG_KEY, DEFAULT_MAX_OPEN_SESSIONS, SubagentConfig};
+    let graph = lower_ok(&dot(r#"
+        graph [backend="api", default_model="test/model"]
+        agent [prompt="delegate"]
+        ask [shape=tab, prompt="summarize"]
+        start -> agent -> ask -> exit
+    "#));
+    let agent = &node(&graph, "agent").step.config;
+    let read: SubagentConfig =
+        serde_json::from_value(agent[CONFIG_KEY].clone()).expect("the configuration reads");
+    assert_eq!(read, SubagentConfig::reference());
+    assert!(read.enabled);
+    assert_eq!(read.max_open_sessions, DEFAULT_MAX_OPEN_SESSIONS);
+    assert!(
+        node(&graph, "ask").step.config.get(CONFIG_KEY).is_none(),
+        "a prompt node runs no tools"
+    );
+
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run.agent]\nsubagents = { enabled = false }\n",
+    )]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [shape=parallelogram, script="true"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    let refusal = lowered
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "unsupported.workflow_toml.key")
+        .expect("the key is refused");
+    assert!(refusal.is_error());
+    assert!(
+        refusal.message.contains("run.agent.subagents")
+            && refusal
+                .message
+                .contains("always available to native agents"),
+        "{}",
+        refusal.message
+    );
 }

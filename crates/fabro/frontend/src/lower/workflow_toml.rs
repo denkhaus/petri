@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 use frontend::{Diagnostics, FileSource, Span};
 use serde_json::{Value, json};
 
+use super::compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use super::secrets::{InterpolationError, interpolate};
 use super::skills;
 use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow, parse_duration};
@@ -78,6 +79,9 @@ pub struct RunSettings {
     pub prepare_timeout_ms: u64,
     /// The file's path and text, for the hook loader's `[[run.hooks]]` layer.
     pub hooks_text:         Option<(String, String)>,
+    /// Agent context compaction: Fabro's hardcoded values, since the pinned
+    /// Fabro has no setting for it (`lower::compaction`).
+    pub compaction:         CompactionSettings,
     /// `[run.agent] skills`, the workflow's own skill directories.
     pub skills:             skills::SkillSettings,
 }
@@ -578,22 +582,46 @@ impl Reader<'_> {
             return;
         };
         // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only;
-        // sub-agents and compaction (readiness items 9d and 9e) have no
-        // `workflow.toml` surface at the pinned revision, so a key asking for
-        // one is refused as Fabro refuses it, never passed silently. `skills`
-        // is the standalone runner's own extension (`skills::read`).
+        // sub-agents (readiness item 9d) need no `workflow.toml` surface: every
+        // native agent gets them (`super::subagents`), and compaction (item 9e)
+        // is always on with Fabro's hardcoded values (`lower::compaction`), so a
+        // key asking for either is refused as Fabro refuses it, never passed
+        // silently. `skills` is the standalone
+        // runner's own extension (`skills::read`).
         for key in agent.keys() {
             if !matches!(key.as_str(), "fabro_tools" | "mcps" | "skills") {
                 let path = self.path;
-                self.unsupported(
-                    "workflow_toml.key",
-                    format!(
-                        "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` table \
-                         accepts (it takes `fabro_tools` and `mcps`); sub-agents and compaction \
-                         have no workflow configuration at the pinned Fabro"
-                    ),
-                    "remove it; Fabro's settings schema has no such key",
-                );
+                let (message, hint) = if key == "compaction" {
+                    (
+                        format!(
+                            "`run.agent.compaction` in `{path}` is not a key Fabro's `[run.agent]` \
+                             table accepts (it takes `fabro_tools` and `mcps`); compaction is \
+                             always on with Fabro's values: a trigger at \
+                             {DEFAULT_THRESHOLD_PERCENT} percent of the context window and \
+                             {DEFAULT_PRESERVE_TURNS} preserved turns"
+                        ),
+                        "remove it; Fabro's settings schema has no such key",
+                    )
+                } else if key == "subagents" {
+                    (
+                        format!(
+                            "`run.agent.subagents` in `{path}` is not a key Fabro's `[run.agent]` \
+                             table accepts (it takes `fabro_tools` and `mcps`); sub-agents are \
+                             always available to native agents"
+                        ),
+                        "remove it; native agents always have the sub-agent tools, as in Fabro, \
+                         and Fabro's settings schema has no such key",
+                    )
+                } else {
+                    (
+                        format!(
+                            "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` \
+                             table accepts (it takes `fabro_tools` and `mcps`)"
+                        ),
+                        "remove it; Fabro's settings schema has no such key",
+                    )
+                };
+                self.unsupported("workflow_toml.key", message, hint);
             }
         }
         if let Some(value) = agent.get("skills") {

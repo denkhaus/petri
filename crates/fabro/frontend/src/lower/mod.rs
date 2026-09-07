@@ -9,6 +9,7 @@
 
 mod attrs;
 pub mod fallbacks;
+mod compaction;
 mod hooks;
 mod imports;
 mod mcps;
@@ -18,12 +19,14 @@ mod promotion;
 mod routing;
 mod secrets;
 mod skills;
+pub mod subagents;
 mod threads;
 mod workflow_toml;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
+pub use compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
 pub use imports::IMPORT_ERROR;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
@@ -948,7 +951,10 @@ impl Ctx<'_> {
             }
             Kind::Parallel => (None, explicit.unwrap_or(STRUCTURAL_TIMEOUT)),
             Kind::Agent => {
-                let config = self.agent_config(node, kind, workflow, policy, explicit);
+                let mut config = self.agent_config(node, kind, workflow, policy, explicit);
+                if let Some(object) = config.as_object_mut() {
+                    object.insert("compaction".into(), self.settings.compaction.to_json());
+                }
                 (
                     Some(StepRef::new(AGENT_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),
@@ -1163,6 +1169,7 @@ impl Ctx<'_> {
         threads.write(self.b.exprs(), &mut config);
         if !is_prompt {
             skills::write(&self.settings.skills, &mut config);
+            subagents::write(&mut config);
         }
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         if !is_prompt {

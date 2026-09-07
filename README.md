@@ -20,7 +20,7 @@ crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tools (`mcp`, over the `rmcp` client), fidelity preambles, retained threads, project memory, Fabro's skill directories, the output store, and the stub registry
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tools (`mcp`, over the `rmcp` client), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
@@ -147,6 +147,10 @@ crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the bin
 crates/fabro/steps/src/fallback.rs (unit)     readiness item 9a: chain resolution keyed by the canonical model, refused keys, skipped candidates with Fabro's notices, per-target reasoning effort with `NoNearbyReasoningLevel` and `ChainEmpty`, the plan's positions, the error mapping for every `lithos-llm` kind and every Pebble error
 crates/fabro/steps/tests/skills.rs           readiness item 9c: Fabro's skill directories in order on real scopes, precedence across the three, the reference prompt section and tool definition, `/name` expansion, `[run.agent] skills`, malformed and missing skills diagnosed (fixtures `crates/fabro/acceptance/testdata/skills`)
 crates/petri/cli/tests/fabro_skills_blackbox.rs  readiness item 9c through the binary: precedence and the reference prompt and tool on both vocabularies, a hook blocking a skill-driven tool call, a `for_each` branch keeping its loaded skill, the warnings on the terminal and in the event log
+crates/fabro/steps/tests/compaction.rs         readiness item 9e: Fabro's compaction on the native backend against a scripted model: the trigger below, at and above the 80 percent threshold, continuation and thread reuse across the boundary, tool pairing, a host `CompactionPolicy`, a failed summary, cancellation, the lost-thread fallback, and the public events and usage
+crates/petri/cli/tests/fabro_compaction_blackbox.rs  readiness item 9e through the binary: a native agent compacts and finishes correct work, a later `full` node reuses the compacted thread, a failed summary call is non-fatal, a lost thread starts at `summary:high`, and a run cancelled during the summary call stops
+crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent delegates to Pebble-built children on real scopes; hooks and the question rule inside a child; the invocation ceiling never counts a child; the open-session bound; child failure, nesting, cancellation, thread reuse, resume; two ignored contract tests for child project memory and skills
+crates/petri/cli/tests/fabro_subagents_blackbox.rs  readiness item 9d through the binary: a parent delegates a workspace change; a hook blocks a child's effect; a child's failure is the parent's tool result; concurrent children and one invocation; a grandchild; an interrupt closes the child; a retained thread carries a child's result; accounting reconstructed from `execution::replay_run`
 crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
@@ -222,8 +226,8 @@ Fabro agent nodes can use Pebble directly as a Rust library. Set
 `backend` and `default_model`. The `petri` distribution reads provider
 credentials from its environment. ACP remains the default. See
 [native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
-requirements, client injection, project memory, tool hooks, retained
-threads, events, and accounting. Fabro's `fidelity` modes, threads and
+requirements, client injection, project memory, skills, context compaction,
+tool hooks, retained threads, sub-agents, events, and accounting. Fabro's `fidelity` modes, threads and
 `[[run.hooks]]` are described under "Steps at run time" on the same page.
 
 `petri inspect --run-dir <dir> [--json]` reconstructs a run from its run

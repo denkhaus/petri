@@ -27,6 +27,7 @@ use backend::{AgentError, Session};
 use frontend_fabro::Policy;
 use frontend_fabro::kinds::{AGENT_KIND, MAX_OUTPUT_RETRIES, StageOutcome};
 use frontend_fabro::mcps::McpServer;
+use frontend_fabro::subagents::SubagentConfig;
 use ir::{LogStream, Metrics, Outcome, StepKindId, Value};
 use pebble_coding_agent::ShutdownReason;
 use serde::Deserialize;
@@ -36,6 +37,7 @@ use steps::{Step, StepCtx};
 
 use crate::acp::AgentCommand;
 use crate::blobs::{self, OutputStore};
+use crate::compaction;
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fallback::{self, Plan, Planned, Route};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
@@ -98,10 +100,18 @@ pub struct AgentConfig {
     /// model, references as written.
     #[serde(default)]
     pub fallbacks:        BTreeMap<String, Vec<String>>,
+    /// Context compaction, Fabro's values unless the frontend says otherwise
+    /// (`crate::compaction`).
+    #[serde(default)]
+    pub compaction:       compaction::CompactionSettings,
     /// The workflow's own skill directories (`[run.agent] skills`), searched
     /// after Fabro's conventional ones.
     #[serde(default)]
     pub skill_dirs:       Vec<String>,
+    /// The sub-agent tools a native session advertises and the bound on its
+    /// agent tree; the lowering writes the reference defaults.
+    #[serde(default)]
+    pub subagents:        SubagentConfig,
     /// Every stage of the workflow, for the preamble.
     #[serde(default)]
     pub stages:           Value,

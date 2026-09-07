@@ -23,6 +23,7 @@ pub(crate) mod inspect;
 pub(crate) mod interview;
 pub(crate) mod launch;
 pub(crate) mod observe;
+pub(crate) mod subagents;
 pub(crate) mod subprocess;
 pub(crate) mod twins;
 

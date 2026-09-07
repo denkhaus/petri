@@ -78,7 +78,7 @@ Execution events (engine log), each attributed to a subject where one exists:
 | `wait_state_changed` | `awaiting_admission`, `running`, `awaiting_answer`, `awaiting_retry`, `cancelling` |
 | `cancel_requested`, `kill_requested` | the two stop tiers, scope or group |
 | `output_line`, `artifact_recorded` | step output and artifacts |
-| `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it |
+| `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it. A native agent's sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`) under the parent's session, a child's own events under the child's session with `parent_session` naming its immediate parent, all attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble") |
 | `budget_paused`, `budget_resumed` | an executor-enforced attempt budget stopped counting (the attempt asked a question; `remaining_ms` is the active-work time left, `pending_questions` how many wait) and counted again (its last pending question was answered); from the driver's durable `budget_paused`/`budget_resumed` notes |
 | `host_note` | a `driver::lifecycle::Note` the host or the driver recorded: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `hook` (a hook service report) |
 | `step_custom` | any other step-defined progress payload |
@@ -87,8 +87,9 @@ Usage and timing: `attempt_finished` and `visit_completed` carry the outcome's
 `metrics` (`duration_ms`, `exit_code`, `custom`). The driver fills
 `duration_ms` with the observed wall-clock duration of the attempt when the step
 kind did not report one. The native agent backend reports `pebble.usage`,
-`pebble.cost_usd_micros`, `pebble.inference_ms` and `pebble.tool_ms` under
-`custom`.
+`pebble.cost_usd_micros`, `pebble.inference_ms`, `pebble.tool_ms` and
+`pebble.subagents` (the node's agent tree: children spawned, completed,
+failed and closed, and their summed usage by session) under `custom`.
 
 ## Ordering and delivery
 
@@ -133,7 +134,13 @@ contract; a host consumes `RunEvent`s and never parses terminal text.
 ## Known backend limits
 
 - The native agent backend (`pebble`) records every `CodingAgentEvent` as a
-  `StepEvent::Custom`; it is in the log and therefore durable.
+  `StepEvent::Custom`; it is in the log and therefore durable. Compaction of
+  the agent's context appears in that stream as Pebble's `CompactionStarted`,
+  `CompactionCompleted`, `CompactionFailed` and `CompactionCancelled`. The
+  pinned Pebble omits the summary call's usage from those events and from the
+  prompt's usage, so the Fabro backend adds one `step_custom` per compaction
+  with `kind = "fabro.compaction"` carrying that usage; see
+  `crates/fabro/FORMAT.md`, "Compaction".
 - The ACP backend records what the external agent sends over ACP; tool calls
   the agent does not report are not observable.
 - Agent facts are Pebble's; Petri adds run, invocation, node and attempt

@@ -587,8 +587,48 @@ session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the
 node's `speed` and `max_tokens`. Tools have full access within the scope's
 policy. Petri's sandbox owns process isolation. This integration does not
-install interactive approvals or subagents. Tool output is bounded by Pebble's
-capture and preview limits. Omitted bytes are discarded and cannot be retrieved.
+install interactive approvals. Tool output is bounded by Pebble's capture and
+preview limits. Omitted bytes are discarded and cannot be retrieved.
+
+Every native session has Pebble's sub-agent tools (`spawn_agent`,
+`send_input`, `wait`, `close_agent`), as every API-backend agent does in
+Fabro, which has no setting to turn them off (the `[run.agent] subagents`
+key is refused, as Fabro refuses it). The lowering puts the reference
+configuration on every agent node (`frontend_fabro::subagents::SubagentConfig`:
+`enabled = true`, `max_open_sessions = 4`, Pebble's bound on the sessions one
+tree holds open at once, the node's own session included) and
+`fabro_steps::subagents::configure` hands it to `CodingAgentBuilder::subagents`.
+Pebble builds and owns the children: each child runs in the parent's scope on
+the parent's model, under the same tool middleware, so the run's
+`pre_tool_use` hooks block inside a child, and the workflow's MCP tools
+(`[run.agent.mcps]`) reach a child through the parent's connection; a child
+never gets the question tool, project memory files, or skill directories; a
+child may delegate again within the open-session bound. `wait` blocks until the child finishes; a
+child's failure is the parent's tool result and never fails the stage; a
+cancelled wait closes the child; the session's shutdown closes every child
+before the node releases its scope. Children are Pebble sessions, not
+workflow invocations: they never count against the run's invocation ceiling.
+Nothing of a child survives a retained thread's export or a resume; a later
+`full` node continues the conversation with the child's result in it and may
+delegate again. Sub-agents reach ACP agents through the agent's own tools,
+not through Petri. Accepted differences from the reference are in
+`crates/fabro/acceptance/CONTRACT.md`.
+
+Sub-agent facts are the `pebble` events (below). Pebble publishes the
+lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`,
+`SubAgentFailed`, `SubAgentClosed`, each with `agent_id`, `depth` and
+`generation`) under the parent's `session_id`; a child's own events carry
+the child's `session_id`, its immediate parent in `parent_session_id`, and
+the tree's one `stream_id` and `seq`. Every event of the tree is attributed
+to the node, firing and attempt that owns the root session. Pebble's prompt
+report excludes descendants, so the node's `pebble.usage` is the parent's
+own and the `pebble.subagents` metric is the tree's: `{ spawned,
+turns_started, completed, failed, closed, usage, cost_usd_micros, sessions }`,
+where `usage` and `cost_usd_micros` sum every descendant session's committed
+assistant messages and `sessions` maps each child session to `{ parent,
+usage, cost_usd_micros, messages }`. A public consumer reconstructs the same
+totals from the `agent_activity` events (`AssistantMessage` payloads of
+sessions with a parent).
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
 follow-up. A delivered core `Answer` naming one of the session's open
@@ -620,8 +660,11 @@ Attempt metrics include `pebble.prompts`, `pebble.usage` (five disjoint token
 buckets), `pebble.cost_usd_micros`, `pebble.inference_ms`, and `pebble.tool_ms`.
 They sum all settled prompt reports, including repair turns, failed prompts,
 and cancellation. Cost is a known subtotal: null means no response reported a
-cost. These metrics exclude compaction and model calls made inside tools.
-ACP continues to report `acp.turns`.
+cost. These metrics exclude the model calls a tool makes. They also exclude
+the compaction summary call, which the pinned Pebble leaves out of a prompt's
+usage; Petri reports it separately as `pebble.compactions`,
+`pebble.compaction_usage` and `pebble.compaction_cost_usd_micros` (below,
+"Compaction"). ACP continues to report `acp.turns`.
 
 ### Model fallback
 
@@ -831,6 +874,53 @@ Events, all `StepEvent::Custom`:
   (`profile`, `source_dirs`, `skills[{name, description}]`) and
   `SkillActivated` (`skill_name`, `source` = `slash` or `tool`), attributed
   to the node, firing, attempt and scope like every Pebble event.
+
+### Compaction
+
+A native agent's conversation is summarized as it approaches the model's
+context window, so a long task stays inside the window. Fabro has no setting
+for this: its agent sessions run with compaction on, a trigger at 80 percent
+of the context window, and the six most recent turns kept verbatim. Petri
+lowers those values onto every agent node (`frontend_fabro::CompactionSettings`)
+and translates them into Pebble's options (`fabro_steps::compaction`). A
+`[run.agent] compaction` key is refused, as Fabro refuses it (below,
+"Refused"). Compaction is separate from workflow fidelity: the `compact`
+fidelity mode is a deterministic preamble with no model call ("Fidelity and
+threads"); this is the agent loop trimming its own history with a model call.
+
+Pebble owns the whole operation. Before and after each model turn it estimates
+the active context: the tokens the model last reported plus a local estimate
+of the turns since, or a local estimate of the system prompt and the whole
+history when no usage has been reported. When the estimate is above
+`window * 80 / 100` (strictly above; exactly at the threshold does not
+compact) it summarizes the older turns and replaces them with the summary,
+keeping the recent turns and never separating a tool call from its result.
+The summary is one non-streaming call on the node's own model; a host may
+supply it instead through Pebble's `CompactionPolicy` (Petri installs a
+`fabro_steps::compaction::CompactionPolicyHandle` capability on every native
+session, resumed ones included). A summary that fails or is cancelled leaves
+the history unchanged and does not fail the node: the agent continues on the
+full history, and one failure is not retried for the rest of that prompt.
+Petri never rewrites Pebble's committed history.
+
+The compacted conversation travels with the session's warm export, so a later
+node at effective `full` fidelity on the same thread continues it. A node
+whose thread lost its conversation (its predecessor failed, or the run
+resumed) starts again at `summary:high`, as after any lost session.
+
+Pebble emits `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
+and `CompactionCancelled` through the `pebble` envelope, and a
+`context_window` warning at the threshold. The pinned Pebble does not carry
+the summary call's usage on those events or in the prompt's usage, so after
+each prompt Petri reads the `Compaction` turns Pebble put in the history and
+emits, per compaction, a `StepEvent::Custom` with `kind = "fabro.compaction"`:
+`{ kind, node, firing, attempt, session, reason, original_turn_count,
+preserved_turn_count, estimated_tokens_before, summary_token_estimate,
+tracked_file_count, summary_truncated, usage, cost_usd_micros }`. The attempt
+metrics `pebble.compactions`, `pebble.compaction_usage` and
+`pebble.compaction_cost_usd_micros` sum those. (Pebble `861d9bc`, one commit
+past the pin, folds the summary usage into the prompt's own usage; the
+recommended re-pin is recorded in `crates/fabro/acceptance/CONTRACT.md`.)
 
 ## Refused
 
