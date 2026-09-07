@@ -10,6 +10,7 @@
 mod attrs;
 mod hooks;
 mod imports;
+mod mcps;
 mod parallel;
 pub(crate) mod policy;
 mod promotion;
@@ -33,6 +34,7 @@ pub use parallel::{BRANCH_META_KIND, DEFAULT_MAX_PARALLEL};
 pub use policy::MAX_INVOCATIONS;
 pub use promotion::ROUTES_KEY;
 pub use routing::{FailurePolicy, Policy};
+pub(crate) use secrets::{InterpolationError, interpolate};
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 pub use workflow_toml::{
@@ -45,6 +47,7 @@ use crate::kinds::{
     AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
     STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
+use crate::mcps::McpServer;
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
 use crate::{condition, dot, labels, model, stylesheet};
@@ -194,6 +197,8 @@ struct Ctx<'a> {
     prepare_envs:     BTreeMap<String, BTreeMap<String, workflow_toml::EnvValue>>,
     /// The run's merged `[[run.hooks]]`, carried on the stage steps.
     hooks:            Vec<HookDefinition>,
+    /// The run's merged `[run.agent.mcps]`, carried on every agent node.
+    mcps:             Vec<McpServer>,
     /// The workflow's name, `FABRO_WORKFLOW` for hooks.
     workflow_name:    String,
 }
@@ -207,10 +212,11 @@ pub(crate) fn lower(
     inputs: &CompileInputs,
     diags: Diagnostics,
 ) -> Lowered {
-    lower_nested(workflow, file, files, inputs, diags, Vec::new())
+    lower_nested(workflow, file, files, inputs, diags, Vec::new(), Vec::new())
 }
 
-/// [`lower`] for a workflow `stack` deep in nested-workflow calls.
+/// [`lower`] for a workflow `stack` deep in nested-workflow calls. A nested
+/// workflow's agents connect to the parent's `inherited_mcps`.
 fn lower_nested(
     mut workflow: Workflow,
     file: &str,
@@ -218,6 +224,7 @@ fn lower_nested(
     inputs: &CompileInputs,
     mut diags: Diagnostics,
     stack: Vec<String>,
+    inherited_mcps: Vec<McpServer>,
 ) -> Lowered {
     let mut template = Context::new(inputs);
     // A nested workflow shares its parent's run settings; only the root reads
@@ -231,6 +238,17 @@ fn lower_nested(
         hooks::load(files, inputs, settings.hooks_text.as_ref(), &mut diags)
     } else {
         Vec::new()
+    };
+    let mcps = if stack.is_empty() {
+        mcps::load(
+            files,
+            inputs,
+            settings.hooks_text.as_ref(),
+            &template,
+            &mut diags,
+        )
+    } else {
+        inherited_mcps
     };
 
     let mut b = GraphBuilder::bare();
@@ -260,6 +278,7 @@ fn lower_nested(
         settings,
         prepare_envs: BTreeMap::new(),
         hooks,
+        mcps,
         workflow_name: workflow.name.clone(),
     };
     ctx.stack.push(file.to_string());
@@ -1140,6 +1159,9 @@ impl Ctx<'_> {
         );
         threads.write(self.b.exprs(), &mut config);
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));
+        if !is_prompt {
+            config.insert("mcps".into(), mcps::param(&self.mcps));
+        }
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {
             let retries = retries.max(0);
@@ -1632,6 +1654,7 @@ impl Ctx<'_> {
             &inputs,
             Diagnostics::new(),
             self.stack.clone(),
+            self.mcps.clone(),
         );
         for diagnostic in lowered.diagnostics.iter() {
             self.diags.push(diagnostic.clone());

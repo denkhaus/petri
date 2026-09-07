@@ -982,9 +982,12 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         codes("[[run.hooks]]\nevent = \"stage.completed\"\nscript = \"true\"\n"),
         ["fabro.hooks.event"]
     );
+    // A malformed MCP entry is an error from the MCP reader (`fabro.mcps.*`);
+    // a well-formed one lowers onto the agent nodes
+    // (`mcps_lower_onto_agent_nodes`).
     assert_eq!(
         codes("[run.agent.mcps.files]\ntype = \"stdio\"\ncommand = \"mcp\"\n"),
-        ["unsupported.workflow_toml.run.agent.mcps"]
+        ["fabro.mcps.entry"]
     );
     // An empty hook list or MCP table asks for nothing.
     assert!(codes("[run]\nhooks = []\n[run.agent.mcps]\n").is_empty());
