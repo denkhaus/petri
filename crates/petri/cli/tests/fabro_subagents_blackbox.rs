@@ -7,10 +7,12 @@
 
 mod support;
 
-use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+use std::{env, fs};
 
+use petri::execution::events::{EventBody, RunEvent};
 use serde_json::json;
 use support::fabro::launch::{Case, Launch};
 use support::fabro::subagents::{
@@ -828,6 +830,144 @@ async fn a_retained_thread_carries_a_childs_result_to_the_next_node() {
     assert_eq!(
         node_metrics(&events, "confirm")["pebble.subagents"]["spawned"],
         1
+    );
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+/// The scripted MCP server task 13 versions under the acceptance crate.
+fn mcp_server_script() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fabro/acceptance/testdata/mcp_server.py")
+        .canonicalize()
+        .expect("the scripted MCP server exists")
+}
+
+/// A configured MCP server's tool is inherited by a child: the child calls
+/// it by Fabro's qualified name through the parent's one connection, the
+/// effect lands in the workspace, the server saw one call, and the tool
+/// event is attributed to the parent node. The pinned Fabro gives a child
+/// no MCP servers; the readiness plan asks for inherited tools, so this is
+/// a recorded difference (`CONTRACT.md`).
+#[tokio::test]
+async fn a_child_calls_an_inherited_mcp_tool() {
+    let mut case = Case::new("subagent-mcp");
+    let model = model(PROVIDER);
+    let log = case.root.join("mcp.log");
+    let args = vec![
+        "python3".to_owned(),
+        mcp_server_script().display().to_string(),
+        "--tag".to_owned(),
+        case.run_dir.display().to_string(),
+    ];
+    let server = format!(
+        "[run.agent.mcps.notes]\ntype = \"stdio\"\ncommand = {}\nenv = {{ MCP_TEST_LOG = {:?} }}\n",
+        serde_json::to_string(&args).expect("argv"),
+        log.display()
+    );
+    let scripts = vec![
+        scenario(
+            PROVIDER,
+            &case.credential,
+            "delegate",
+            model,
+            "Delegate the note",
+            spawn_and_wait(&["child: take the note"]),
+        ),
+        scenario(
+            PROVIDER,
+            &case.credential,
+            "child-writes",
+            model,
+            "child: take the note",
+            one_call(
+                "write",
+                "mcp__notes__write_file",
+                json!({ "path": "note.txt", "content": "hello from the child\n" }),
+            ),
+        ),
+        scenario(
+            PROVIDER,
+            &case.credential,
+            "child-done",
+            model,
+            "wrote 21 bytes to note.txt",
+            text("Noted by the child."),
+        ),
+        scenario(
+            PROVIDER,
+            &case.credential,
+            "synthesize",
+            model,
+            "Noted by the child.",
+            text("The child took the note."),
+        ),
+    ];
+    let twin = Twin::start(PROVIDER, &case.root.join("twins"), scripts).await;
+    case.redirect(&twin);
+    let workflow = case.workflow(&one_agent(model, "Delegate the note.", ""), Some(&server));
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(
+        fs::read_to_string(case.workspace().join("note.txt")).expect("note.txt"),
+        "hello from the child\n",
+        "the child's MCP call landed in the workspace"
+    );
+    assert_eq!(twin.consumed(), [
+        "delegate",
+        "child-writes",
+        "child-done",
+        "synthesize"
+    ]);
+    assert_eq!(twin.unmatched(), 0);
+    let requests = twin.requests_for(&case.credential);
+    let child_request = serde_json::to_string(&requests[1]).expect("request");
+    assert!(
+        child_request.contains("\"mcp__notes__write_file\""),
+        "the child was offered the tool under Fabro's qualified name: {child_request}"
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap_or_default(),
+        "started\ninitialize\ncall write_file\nshutdown\n",
+        "one server, one call from the child, a clean shutdown"
+    );
+    let events = public_events(&case.run_dir);
+    let agent = activities(&events);
+    let parent_session = agent[0].session.clone();
+    let child_call = agent
+        .iter()
+        .find(|a| {
+            a.variant() == "ToolCallStarted" && a.payload()["tool_name"] == "mcp__notes__write_file"
+        })
+        .expect("the child's MCP call is on the stream");
+    assert_eq!(
+        child_call.parent_session.as_deref(),
+        Some(parent_session.as_str()),
+        "the call is the child's"
+    );
+    assert_eq!(child_call.node, "agent");
+    let mcp_tool_events: Vec<&RunEvent> = events
+        .iter()
+        .filter(|e| match &e.body {
+            EventBody::StepCustom { value, .. } => value["kind"] == "fabro.mcp.tool",
+            _ => false,
+        })
+        .collect();
+    assert_eq!(mcp_tool_events.len(), 1, "one proxied call");
+    assert_eq!(
+        mcp_tool_events[0]
+            .subject
+            .as_ref()
+            .map(|s| s.node.name.to_string())
+            .as_deref(),
+        Some("agent"),
+        "attributed to the parent node"
     );
     finished.assert_no_leaked_processes().await;
     twin.stop();
