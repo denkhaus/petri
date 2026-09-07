@@ -167,7 +167,12 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if path.file_name().is_some_and(|name| name == ".git") {
+        // The bundle is what both engines run; the reference capture beside
+        // it and a git directory are not part of it.
+        if path
+            .file_name()
+            .is_some_and(|name| name == ".git" || name == "fabro-reference")
+        {
             continue;
         }
         if path.is_dir() {
@@ -294,7 +299,16 @@ pub(crate) fn check_or_record_reference(
                 path.display()
             ));
         };
-        let mut differences = json_differences(&live, &document["projection"]);
+        // The identity map carries the run's raw ids and paths, which
+        // differ per run by design; everything else must match.
+        let mut live = live.clone();
+        let mut reference = document["projection"].clone();
+        for value in [&mut live, &mut reference] {
+            if let Some(map) = value.as_object_mut() {
+                map.remove("identities");
+            }
+        }
+        let mut differences = json_differences(&live, &reference);
         if document["bundle_digest"].as_str() != Some(bundle_digest) {
             differences.push(format!(
                 "/bundle_digest: run {bundle_digest} vs reference {}",

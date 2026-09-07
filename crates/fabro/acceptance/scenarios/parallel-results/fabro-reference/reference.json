@@ -6,7 +6,7 @@
   "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
   "captured_on": "2026-09-07",
   "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
-  "bundle_digest": "857db754d3ba5881f562ff57c1ae8804567ee7ecdf7991b7cd43b25ccdcb17e2",
+  "bundle_digest": "77bb7d7d149c7da15dc26c884b57557cb7505d9bd6790b6da92fdc5b26a80f62",
   "twins": [],
   "normalization": [
     "generated run id -> <RUN_ID>",
@@ -366,8 +366,8 @@
       "<BLOB_1>": "blob://sha256/29f4c975c15da82103d9d7f2ba61b0bcebaca0d5ab12da704baeb8fca373c144",
       "<BLOB_2>": "blob://sha256/e049fc35ec251f756dfb553b5d54d0d64e4f22f4d4b74f1bff073f9d50723213",
       "<BLOB_3>": "blob://sha256/35c726e9422508b0f00a8ed632f5f74e9aebd4154a867286ddc4d3ed31d28637",
-      "<RUN_ID>": "01M1XKTGRHKJ3DW4HY6A7QQBVV",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-parallel-results-27328-0/fabro/bundle"
+      "<RUN_ID>": "01M1XKYPACEMN6TAPVTPWCDCX9",
+      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-parallel-results-43365-0/fabro/bundle"
     }
   }
 }
