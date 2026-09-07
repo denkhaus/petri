@@ -84,6 +84,7 @@ pub(super) const LAYOUT: &[&str] = &[
 /// Graph-level attributes with workflow meaning.
 pub(super) const GRAPH: &[&str] = &[
     "goal",
+    "default_thread",
     "label",
     "backend",
     "model_stylesheet",
@@ -103,12 +104,10 @@ pub(super) const GRAPH: &[&str] = &[
     "loop_restart_signature_limit",
 ];
 
-/// Graph-level attributes whose meaning belongs to a host policy Petri does
-/// not run in phase one. Each is named in an `ignored.*` warning.
-pub(super) const GRAPH_IGNORED: &[(&str, &str)] = &[(
-    "default_thread",
-    "Petri does not yet preserve agent threads between nodes",
-)];
+/// Graph-level attributes Petri accepts but does not act on, each named in
+/// an `ignored.*` warning. Empty: every graph attribute Fabro defines is
+/// acted on.
+pub(super) const GRAPH_IGNORED: &[(&str, &str)] = &[];
 
 /// Node attributes with workflow meaning.
 pub(super) const NODE: &[&str] = &[
@@ -134,6 +133,10 @@ pub(super) const NODE: &[&str] = &[
     "on_retries_exhausted",
     "allow_partial",
     "fidelity",
+    "thread_id",
+    "project_memory",
+    "speed",
+    "max_tokens",
     "timeout",
     "model",
     "provider",
@@ -154,22 +157,10 @@ pub(super) const NODE: &[&str] = &[
     "manager.stop_condition",
 ];
 
-/// Node attributes carried into the step config untouched but not acted on
-/// in phase one.
-pub(super) const NODE_IGNORED: &[(&str, &str)] = &[
-    (
-        "thread_id",
-        "Petri does not yet preserve agent threads between nodes",
-    ),
-    ("max_tokens", "the ACP agent owns its token limit"),
-    ("speed", "the ACP agent owns its speed setting"),
-    (
-        "project_memory",
-        "project memory is not implemented in phase one",
-    ),
-    ("tool_hooks.pre", "agent tool hooks are a later phase"),
-    ("tool_hooks.post", "agent tool hooks are a later phase"),
-];
+/// Node attributes Petri accepts but does not act on, each named in an
+/// `ignored.*` warning. Empty: every node attribute Fabro defines is acted
+/// on; `tool_hooks.*` is not one and is diagnosed as unknown.
+pub(super) const NODE_IGNORED: &[(&str, &str)] = &[];
 
 /// Edge attributes with workflow meaning.
 pub(super) const EDGE: &[&str] = &[

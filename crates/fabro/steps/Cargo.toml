@@ -16,6 +16,9 @@ name = "fabro_steps"
 
 [dependencies]
 pebble-coding-agent = { workspace = true }
+pebble-agent = { workspace = true }
+reqwest = { workspace = true }
+regex = { workspace = true }
 lithos-llm = { workspace = true, features = ["runtime"] }
 tokio-util = { workspace = true }
 globset = { workspace = true }

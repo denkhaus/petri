@@ -31,10 +31,15 @@ pub const FAN_IN_KIND: StepKindId = StepKindId::new_static("fabro/fan_in");
 /// expands to, so the fan-in still fires. The branch step for it starts no
 /// child and the fan-in drops its envelope.
 pub const EMPTY_BRANCH_MARKER: &str = "petri.parallel.empty";
-/// The context key a branch child reads its rendered fidelity preamble from.
-pub const BRANCH_PREAMBLE_KEY: &str = "internal.parallel_preamble";
+/// The context key a branch child reads the parent's stage records from: the
+/// fork snapshot its preamble is rendered from, since the child's own records
+/// are empty when its target starts.
+pub const BRANCH_NODES_KEY: &str = "internal.parallel_nodes";
 /// The context key a `for_each` branch child reads its fenced item data from.
 pub const BRANCH_ITEM_KEY: &str = "internal.parallel_item";
+/// A structural stage (`start`, `exit`): runs nothing, records where its scope
+/// runs so hooks placed in the sandbox find it, and fires the run-level hooks.
+pub const STAGE_KIND: StepKindId = StepKindId::new_static("fabro/stage");
 /// Reserved name of the synthetic node that enforces goal gates.
 pub const GOAL_CHECK_NODE: &str = "goal_check";
 /// The most repair turns one agent step accepts from configuration.
@@ -53,6 +58,7 @@ pub const ALL: &[&StepKindId] = &[
     &HUMAN_KIND,
     &WAIT_KIND,
     &WORKFLOW_KIND,
+    &STAGE_KIND,
 ];
 
 /// The closed set of stage outcomes a Fabro step may report, and the only

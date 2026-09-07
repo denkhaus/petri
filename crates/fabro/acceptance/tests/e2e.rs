@@ -16,7 +16,7 @@ use std::{env, fs};
 use execution::host::{self, HostRun};
 use fabro_acceptance::runs::fresh_run_dir;
 use fabro_acceptance::{corpus_root, has_corpus, lower_one};
-use fabro_steps::{AGENT_KIND, HUMAN_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
+use fabro_steps::{AGENT_KIND, HUMAN_KIND, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
 use frontend::{CompileInputs, NoFiles};
 use frontend_fabro::load;
 use ir::{ExprOrValue, Graph, RunStatus, Value};
@@ -60,7 +60,7 @@ fn real(dir: &Path) -> Runtime {
 fn commands_and_stubs(dir: &Path) -> Runtime {
     let runtime = Runtime::standard().step(fabro_steps::CommandStep);
     let mut registry = runtime.registry().clone();
-    for kind in [AGENT_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND] {
+    for kind in [AGENT_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND, STAGE_KIND] {
         registry.register_runner(Arc::new(StubStep::new(kind)));
     }
     registry.register(fabro_steps::BranchStep);

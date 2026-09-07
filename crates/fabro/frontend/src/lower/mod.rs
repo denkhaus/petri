@@ -8,12 +8,14 @@
 //! semantics.
 
 mod attrs;
+mod hooks;
 mod imports;
 mod parallel;
 pub(crate) mod policy;
 mod promotion;
 mod routing;
 mod secrets;
+mod threads;
 mod workflow_toml;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -38,9 +40,10 @@ pub use workflow_toml::{
     PrepareStep, RunSettings,
 };
 
+use crate::hooks::HookDefinition;
 use crate::kinds::{
     AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
-    WAIT_KIND, WORKFLOW_KIND,
+    STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
@@ -189,6 +192,10 @@ struct Ctx<'a> {
     settings:         workflow_toml::RunSettings,
     /// The env each synthetic `[run.prepare]` command node carries.
     prepare_envs:     BTreeMap<String, BTreeMap<String, workflow_toml::EnvValue>>,
+    /// The run's merged `[[run.hooks]]`, carried on the stage steps.
+    hooks:            Vec<HookDefinition>,
+    /// The workflow's name, `FABRO_WORKFLOW` for hooks.
+    workflow_name:    String,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -220,6 +227,11 @@ fn lower_nested(
     } else {
         workflow_toml::RunSettings::default()
     };
+    let hooks = if stack.is_empty() {
+        hooks::load(files, inputs, settings.hooks_text.as_ref(), &mut diags)
+    } else {
+        Vec::new()
+    };
 
     let mut b = GraphBuilder::bare();
     let scope = b.add_scope(Scope::new(ScopeId::new(0)));
@@ -247,6 +259,8 @@ fn lower_nested(
         lenient_unbound: inputs.unbound_is_warning,
         settings,
         prepare_envs: BTreeMap::new(),
+        hooks,
+        workflow_name: workflow.name.clone(),
     };
     ctx.stack.push(file.to_string());
 
@@ -302,6 +316,7 @@ fn lower_nested(
         b,
         spans,
         children,
+
         ..
     } = ctx;
     let mut graph = b.build();
@@ -351,6 +366,7 @@ impl Ctx<'_> {
     fn params(&self) -> BTreeMap<SmolStr, Value> {
         let mut params = BTreeMap::new();
         if self.stack.len() == 1 {
+            params.insert(SmolStr::new(hooks::PARAM), hooks::param(&self.hooks));
             params.insert(SmolStr::new(LAUNCH_PARAM), self.settings.launch_param());
             if let Some(environment) = self.settings.environment_param() {
                 params.insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
@@ -377,6 +393,10 @@ impl Ctx<'_> {
             ),
         );
         params.insert(SmolStr::new("goal"), Value::String(self.goal.clone()));
+        params.insert(
+            SmolStr::new("fabro_workflow"),
+            Value::String(self.workflow_name.clone()),
+        );
         params
     }
 
@@ -630,6 +650,7 @@ impl Ctx<'_> {
         for key in ["on_failure", "on_retries_exhausted"] {
             self.check_policy(key, &attrs, &span);
         }
+        threads::check_graph(workflow, &mut self.diags);
     }
 
     /// Diagnose one failure-policy attribute: an unknown spelling is an
@@ -869,7 +890,24 @@ impl Ctx<'_> {
         self.b.set_meta(id, meta);
 
         let (step, timeout) = match kind {
-            Kind::Start | Kind::Exit | Kind::Conditional => (None, STRUCTURAL_TIMEOUT),
+            Kind::Conditional => (None, STRUCTURAL_TIMEOUT),
+            // `start` and `exit` run the stage step: it records the scope's
+            // environment for sandbox-placed hooks and fires the run-level
+            // hooks (`sandbox_ready`, `run_start`, `run_complete`).
+            Kind::Start | Kind::Exit => {
+                let kv = self.b.exprs().var("kv");
+                let mut config = json!({
+                    "node": node.id,
+                    "kind": kind.name(),
+                    "label": label,
+                    "workflow": self.workflow_name,
+                    "kv": placeholder(kv),
+                });
+                if self.stack.len() == 1 {
+                    config["hooks"] = hooks::param(&self.hooks);
+                }
+                (Some(StepRef::new(STAGE_KIND, config)), STRUCTURAL_TIMEOUT)
+            }
             Kind::FanIn => {
                 if node
                     .attrs
@@ -1006,28 +1044,6 @@ impl Ctx<'_> {
         config
     }
 
-    fn fidelity(&mut self, node: &NodeDecl, workflow: &Workflow) -> Option<String> {
-        let (value, span) = match node.attrs.text("fidelity") {
-            Some(value) => (value, node.attrs.span_of("fidelity", &node.span)),
-            None => (
-                workflow.attrs.text("default_fidelity")?,
-                workflow.attrs.span_of("default_fidelity", &workflow.span),
-            ),
-        };
-        if !attrs::FIDELITIES.contains(&value.as_str()) {
-            self.diags.error(
-                "fabro.bad_fidelity",
-                span,
-                format!(
-                    "`{value}` is not a fidelity mode ({})",
-                    attrs::FIDELITIES.join(", ")
-                ),
-            );
-            return None;
-        }
-        Some(value)
-    }
-
     fn agent_config(
         &mut self,
         node: &NodeDecl,
@@ -1114,9 +1130,17 @@ impl Ctx<'_> {
         {
             config.insert("reasoning_effort".into(), Value::String(effort));
         }
-        if let Some(fidelity) = self.fidelity(node, workflow) {
-            config.insert("fidelity".into(), Value::String(fidelity));
-        }
+        let branch_first = threads::is_branch_first(node, workflow, &self.kinds);
+        let default_speed = self.settings.model.speed.clone();
+        let threads = threads::ThreadAttrs::read(
+            node,
+            workflow,
+            branch_first,
+            default_speed.as_deref(),
+            &mut self.diags,
+        );
+        threads.write(self.b.exprs(), &mut config);
+        config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {
             let retries = retries.max(0);
@@ -1738,7 +1762,16 @@ impl Ctx<'_> {
                 false
             }
         };
-        let policy = res.policy;
+        // A `start` that fails (a blocking `run_start` hook) ends the run, as
+        // Fabro's blocked run does; it never routes on.
+        let policy = if res.kind == Kind::Start {
+            FailurePolicy {
+                on_failure:           Policy::Exit,
+                on_retries_exhausted: Policy::Exit,
+            }
+        } else {
+            res.policy
+        };
         let mut lowered = Vec::with_capacity(edges.len());
         for edge in &edges {
             let Some(mut to) = self.ids.get(&edge.to).copied() else {
@@ -1762,6 +1795,14 @@ impl Ctx<'_> {
                 .attrs
                 .bool("loop_restart", &mut self.diags)
                 .unwrap_or(false);
+            let graph_full = workflow.attrs.text("default_fidelity").as_deref() == Some("full");
+            let map = threads::edge_payload(
+                self.b.exprs(),
+                edge,
+                &self.kinds,
+                graph_full,
+                &mut self.diags,
+            );
             lowered.push(routing::OutEdge {
                 to,
                 target: edge.to.clone(),
@@ -1770,7 +1811,7 @@ impl Ctx<'_> {
                 label,
                 weight,
                 restart,
-                map: None,
+                map,
             });
         }
         if lowered.is_empty() {
@@ -1793,6 +1834,19 @@ impl Ctx<'_> {
             res.kind == Kind::Human,
             random,
         );
+        // The edge table hooks read: arm id to target node id and label, so
+        // an `edge_selected` hook names Fabro nodes, never engine ids.
+        let mut edges = Map::new();
+        for (arm, out) in group.arms.iter().zip(&lowered) {
+            edges.insert(
+                arm.id.raw().to_string(),
+                json!({ "to": out.target, "label": out.label }),
+            );
+        }
+        let meta = &mut self.b.node_mut(res.id).meta;
+        if let Value::Object(map) = meta {
+            map.insert("edges".into(), Value::Object(edges));
+        }
         self.b.node_mut(res.id).routing = Routing::groups(vec![group]);
     }
 

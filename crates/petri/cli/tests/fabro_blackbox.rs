@@ -1923,6 +1923,10 @@ async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
 /// branch consumes the other's entry.
 #[tokio::test]
 async fn parallel_gates_bind_each_answer_to_its_own_branch() {
+    // Two human gates as the branches of one parallel node. A branch runs
+    // its target and returns to the join, as Fabro runs it, so each gate's
+    // answer is read from its branch result; the join's successor writes the
+    // results to a file the test reads back.
     let case = Case::new("parallel-gates");
     let workflow = case.workflow(
         r#"digraph G {
@@ -1931,27 +1935,16 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
     fan [shape=component]
     a [shape=hexagon, label="A?", question_type="yes_no"]
     b [shape=hexagon, label="B?", question_type="yes_no"]
-    a_yes [shape=parallelogram, script="echo a-yes > a.txt"]
-    a_no [shape=parallelogram, script="echo a-no > a.txt"]
-    b_yes [shape=parallelogram, script="echo b-yes > b.txt"]
-    b_no [shape=parallelogram, script="echo b-no > b.txt"]
-    a_done [shape=parallelogram, script="cat a.txt"]
-    b_done [shape=parallelogram, script="cat b.txt"]
     join [shape=tripleoctagon]
+    report [shape=parallelogram, script="cat > results.json", stdin_source="context.parallel.results"]
     start -> fan
     fan -> a
     fan -> b
-    a -> a_yes [label="[Y] Yes"]
-    a -> a_no [label="[N] No"]
-    b -> b_yes [label="[Y] Yes"]
-    b -> b_no [label="[N] No"]
-    a_yes -> a_done
-    a_no -> a_done
-    b_yes -> b_done
-    b_no -> b_done
-    a_done -> join
-    b_done -> join
-    join -> exit
+    a -> join [label="[Y] Yes"]
+    a -> join [label="[N] No"]
+    b -> join [label="[Y] Yes"]
+    b -> join [label="[N] No"]
+    join -> report -> exit
 }"#,
         None,
     );
@@ -1971,13 +1964,32 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
         ])
         .await;
     finished.assert_code(0);
+    let results: Value = serde_json::from_str(
+        &fs::read_to_string(case.workspace().join("results.json")).expect("results.json"),
+    )
+    .expect("the fan-in's results are JSON");
+    let results = results.as_array().expect("one envelope per branch");
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0]["id"], json!("a"));
+    assert_eq!(results[0]["index"], json!(0));
     assert_eq!(
-        fs::read_to_string(case.workspace().join("a.txt")).expect("a.txt"),
-        "a-no\n"
+        results[0]["context_updates"]["human.gate.selected"],
+        json!("N"),
+        "{results:?}"
     );
+    assert_eq!(results[1]["id"], json!("b"));
+    assert_eq!(results[1]["index"], json!(1));
     assert_eq!(
-        fs::read_to_string(case.workspace().join("b.txt")).expect("b.txt"),
-        "b-yes\n"
+        results[1]["context_updates"]["human.gate.selected"],
+        json!("Y"),
+        "{results:?}"
+    );
+    // The answers stay in their branches: the parent context has no
+    // `human.gate.selected`.
+    let context = finished.final_context();
+    assert!(
+        !context.contains_key("human.gate.selected"),
+        "{context:?}"
     );
     let receipt = finished.receipt();
     assert_eq!(receipt["errors"], json!([]), "{receipt}");
@@ -1987,8 +1999,19 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
         assert_eq!(question["delivery"], json!("delivered"));
         let expected = if question["node"] == "a" { "N" } else { "Y" };
         assert_eq!(question["reply"]["choice"], json!(expected), "{question}");
+        let index = if question["node"] == "a" { 0 } else { 1 };
+        assert_eq!(
+            question["invocation_path"],
+            json!(format!("/branch:fan:{index}:{}", question["node"].as_str().expect("node"))),
+            "{question}"
+        );
     }
-    assert_ne!(questions[0]["firing"], questions[1]["firing"]);
+    // Each gate fired in its own branch execution; the identity a reply
+    // binds to is the execution and the firing together.
+    assert_ne!(
+        (&questions[0]["execution"], &questions[0]["firing"]),
+        (&questions[1]["execution"], &questions[1]["firing"])
+    );
     for entry in receipt["script"]["entries"].as_array().expect("entries") {
         assert_eq!(entry["consumed"], json!(1), "{entry}");
     }

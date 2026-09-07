@@ -10,9 +10,10 @@ use std::{env, fs, process};
 
 use frontend::print::print_expr;
 use frontend::{CompileInputs, Frontend, NoFiles};
+use frontend_fabro::hooks::SETTINGS_HOOKS_VAR;
 use frontend_fabro::kinds::{
-    AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND,
-    WORKFLOW_KIND,
+    AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, HUMAN_KIND, PROMPT_KIND, STAGE_KIND,
+    WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend_fabro::{Fabro, MAX_FIRINGS, load};
 use ir::placeholder::contains_placeholder;
@@ -35,8 +36,9 @@ fn shapes_lower_to_their_step_kinds() {
         h -> w [label="[Y] Yes"]
         w -> d -> m -> exit
     "#));
-    assert_eq!(node(&graph, "start").step.kind.as_str(), "noop");
-    assert_eq!(node(&graph, "exit").step.kind.as_str(), "noop");
+    assert_eq!(node(&graph, "start").step.kind, STAGE_KIND);
+    assert_eq!(node(&graph, "start").step.config["kind"], json!("start"));
+    assert_eq!(node(&graph, "exit").step.kind, STAGE_KIND);
     assert_eq!(node(&graph, "d").step.kind.as_str(), "noop");
     assert_eq!(node(&graph, "a").step.kind, AGENT_KIND);
     assert_eq!(node(&graph, "p").step.kind, PROMPT_KIND);
@@ -536,12 +538,22 @@ fn branches_lower_to_child_graphs_that_keep_the_target_and_its_role() {
     assert!(target.routing.groups.is_empty(), "a branch follows no edge");
     assert_eq!(child.entry, vec![target.id]);
     assert_eq!(child.result, ir::ResultProjection::NodeOutput(target.id));
-    // A prompt branch carries its fork preamble and item data, and no
-    // explicit routes: its succeed policy applies unconditionally.
+    // A prompt branch reads the parent's stage records from the fork
+    // snapshot, carries its item data, and has no explicit routes: its
+    // succeed policy applies unconditionally.
     let config = &child_of("b").nodes[0].step.config;
     assert!(config.get("routes").is_none());
-    assert!(contains_placeholder(&config["preamble"]));
+    assert_eq!(
+        print_expr(
+            &child_of("b").exprs,
+            ir::ExprId::new(
+                u32::try_from(config["nodes"]["$expr"].as_u64().expect("placeholder")).expect("u32")
+            ),
+        ),
+        "get(kv, 'internal.parallel_nodes')"
+    );
     assert!(contains_placeholder(&config["item_data"]));
+    assert_eq!(config["branch"], json!(true));
     for child in &lowered.children {
         ir::validate(child).expect("child validates");
     }
@@ -963,9 +975,11 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         ["unsupported.workflow_toml.run.prepare"],
         "exactly one of script or command"
     );
+    // A hook whose event Fabro does not know is a specific error; a good one
+    // loads (see `hooks_load_from_every_layer_and_merge_by_id`).
     assert_eq!(
-        codes("[[run.hooks]]\nevent = \"stage.completed\"\ncommand = \"true\"\n"),
-        ["unsupported.workflow_toml.run.hooks"]
+        codes("[[run.hooks]]\nevent = \"stage.completed\"\nscript = \"true\"\n"),
+        ["fabro.hooks.event"]
     );
     assert_eq!(
         codes("[run.agent.mcps.files]\ntype = \"stdio\"\ncommand = \"mcp\"\n"),
@@ -1216,7 +1230,7 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
         "wf/workflow.toml",
         "[run]\ngoal = \"Fix {{ inputs.target }}\"\n[run.inputs]\ntarget = \"main\"\n\
          [run.model]\nprovider = \"openai\"\nname = \"gpt-5.6-sol\"\n\
-         [run.model.controls]\nreasoning_effort = \"low\"\n\
+         [run.model.controls]\nreasoning_effort = \"low\"\nspeed = \"fast\"\n\
          [run.execution]\nmode = \"dry_run\"\napproval = \"auto\"\n\
          [run.environment]\nid = \"review\"\n[run.environment.env]\nOVERRIDE = \"run\"\n\
          [environments.review]\nprovider = \"docker\"\n[environments.review.image]\n\
@@ -1284,6 +1298,7 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
     assert_eq!(a["model"], json!("gpt-5.6-sol"));
     assert_eq!(a["provider"], json!("openai"));
     assert_eq!(a["reasoning_effort"], json!("low"));
+    assert_eq!(a["speed"], json!("fast"));
     // Prepare steps: first after start, in order, with env, timeout, exit.
     assert_eq!(tiers(&graph, "start")[0].1[0].0, "run_prepare_1");
     assert_eq!(tiers(&graph, "run_prepare_1")[0].1[0].0, "run_prepare_2");
@@ -1417,20 +1432,15 @@ fn structural_mistakes_are_specific_errors() {
 #[test]
 fn unused_attributes_warn_and_unbounded_agent_repairs_are_rejected() {
     let diags = diagnostics(&dot(r#"
-        graph [default_thread="shared"]
-        a [prompt="x", speed="fast", thread_id="t"]
+        a [prompt="x", frobnicate="yes"]
         start -> a -> exit
     "#));
-    for code in [
-        "ignored.default_thread",
-        "ignored.speed",
-        "ignored.thread_id",
-    ] {
-        assert!(
-            diags.iter().any(|diagnostic| diagnostic.code == code),
-            "{code}"
-        );
-    }
+    assert!(
+        diags
+            .iter()
+            .any(|diagnostic| diagnostic.code == "fabro.unknown_attribute"),
+        "{diags:?}"
+    );
     assert!(
         codes(&dot(r#"
             a [prompt="x", output_retries=101]
@@ -1789,4 +1799,231 @@ fn a_template_local_set_inside_an_if_renders_and_a_missing_input_is_named() {
         .collect();
     assert_eq!(found, ["fabro.unbound_input"], "{found:?}");
     assert!(lenient.graph.is_some());
+}
+
+#[test]
+fn threads_fidelity_memory_and_controls_lower_onto_agent_nodes_and_edges() {
+    let graph = lower_ok(&dot(r#"
+        graph [default_fidelity="full", default_thread="shared"]
+        plan [prompt="plan", thread_id="impl", class="build"]
+        work [prompt="work", fidelity="summary:low", project_memory=false, speed="fast", max_tokens=2000]
+        start -> plan
+        plan -> work [fidelity="truncate", thread_id="side"]
+        work -> exit
+    "#));
+    let plan = &node(&graph, "plan").step.config;
+    assert!(
+        plan.get("fidelity").is_none(),
+        "the graph default is not the node's own"
+    );
+    assert_eq!(plan["default_fidelity"], json!("full"));
+    assert_eq!(plan["thread_id"], json!("impl"));
+    assert_eq!(plan["default_thread"], json!("shared"));
+    assert_eq!(plan["classes"], json!(["build"]));
+    assert!(plan.get("project_memory").is_none());
+    assert!(contains_placeholder(&plan["incoming"]));
+    assert!(
+        plan["stages"]
+            .as_array()
+            .is_some_and(|s| s.iter().any(|st| st["id"] == "work"))
+    );
+    let work = &node(&graph, "work").step.config;
+    assert_eq!(work["fidelity"], json!("summary:low"));
+    assert_eq!(work["project_memory"], json!(false));
+    assert_eq!(work["speed"], json!("fast"));
+    assert_eq!(work["max_tokens"], json!(2000));
+    // The edge into `work` carries its own fidelity and thread.
+    let plan_node = node(&graph, "plan");
+    let arm = &plan_node.routing.groups[0].arms[0];
+    let map = arm.map.expect("the edge maps its payload");
+    let payload = eval_expr(&graph, map, &statics("success", &json!({})), &[]);
+    assert_eq!(
+        payload,
+        json!({"from": "plan", "fidelity": "truncate", "thread_id": "side"})
+    );
+    assert_eq!(graph.params["fabro_hooks"], json!([]));
+}
+
+#[test]
+fn thread_ids_without_full_fidelity_warn_and_bad_modes_are_errors() {
+    let codes = codes(&dot(r#"
+        graph [default_thread="shared"]
+        a [prompt="x", thread_id="t"]
+        b [prompt="y"]
+        start -> a
+        a -> b [thread_id="u"]
+        b -> exit
+    "#));
+    assert!(
+        codes.contains(&"fabro.thread_id_requires_fidelity_full".to_string()),
+        "{codes:?}"
+    );
+    assert!(
+        !codes.iter().any(|c| c.starts_with("ignored.")),
+        "{codes:?}"
+    );
+    let bad = codes_of(&dot(r#"
+        a [prompt="x", fidelity="loud", speed="warp"]
+        start -> a
+        a -> exit [fidelity="quiet"]
+    "#));
+    assert!(bad.contains(&"fabro.bad_fidelity".to_string()), "{bad:?}");
+    assert!(bad.contains(&"fabro.bad_speed".to_string()), "{bad:?}");
+    // A thread on a parallel branch is inert, and says so.
+    let branch = codes_of(&dot(r#"
+        fork [shape=component]
+        a [prompt="x", thread_id="t", fidelity="full"]
+        join [shape=tripleoctagon]
+        start -> fork -> a -> join -> exit
+    "#));
+    assert!(
+        branch.contains(&"fabro.parallel_branch_inert_attribute".to_string()),
+        "{branch:?}"
+    );
+    // `tool_hooks.*` are not Fabro attributes.
+    let unknown = diagnostics(&dot(r#"
+        a [prompt="x", tool_hooks.pre="echo", tool_hooks.post="echo"]
+        start -> a -> exit
+    "#));
+    let unknown: Vec<&str> = unknown
+        .iter()
+        .filter(|d| d.code == "fabro.unknown_attribute")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(unknown.len(), 2, "{unknown:?}");
+    assert!(
+        unknown.iter().all(|m| m.contains("tool_hooks.")),
+        "{unknown:?}"
+    );
+}
+
+fn codes_of(text: &str) -> Vec<String> {
+    codes(text)
+}
+
+#[test]
+fn an_unparseable_workflow_toml_that_configures_hooks_is_an_error() {
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[[run.hooks]]\nevent = \"stage_start\"\nscript = \"sed 's/\\(x\\)/y/'\"\n",
+    )]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    let codes: Vec<String> = lowered
+        .diagnostics
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect();
+    assert!(codes.contains(&"fabro.hooks.toml".to_string()), "{codes:?}");
+    assert!(
+        lowered.graph.is_none(),
+        "a hook that cannot be read is never skipped silently"
+    );
+    // The same broken file without hooks stays a warning.
+    let plain = self::files(&[("wf/workflow.toml", "[run]\ngoal = \"bad \\( escape\"\n")]);
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x"]
+            start -> a -> exit
+        "#),
+        &plain,
+        &CompileInputs::new(),
+    );
+    assert!(lowered.graph.is_some(), "{:?}", lowered.diagnostics);
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "fabro.workflow_toml")
+    );
+}
+
+#[test]
+fn hooks_load_from_every_layer_and_merge_by_id() {
+    let files = files(&[
+        (
+            ".fabro/project.toml",
+            "[[run.hooks]]\nid = \"guard\"\nevent = \"stage_start\"\nscript = \"project-guard\"\n\
+             [[run.hooks]]\nevent = \"run_complete\"\nurl = \"https://example.test/done\"\n",
+        ),
+        (
+            "wf/workflow.toml",
+            "[[run.hooks]]\nid = \"guard\"\nevent = \"stage_start\"\nscript = \"workflow-guard\"\nmatcher = \"^agent$\"\n\
+             [[run.hooks]]\nevent = \"checkpoint_saved\"\nscript = \"never\"\n",
+        ),
+    ]);
+    let inputs = CompileInputs::new().with_var(
+        SETTINGS_HOOKS_VAR,
+        "[[run.hooks]]\nevent = \"run_start\"\nscript = \"user-start\"\nsandbox = false\n",
+    );
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x"]
+            start -> a -> exit
+        "#),
+        &files,
+        &inputs,
+    );
+    let codes: Vec<String> = lowered
+        .diagnostics
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect();
+    assert!(
+        codes.contains(&"fabro.hooks.checkpoint_saved".to_string()),
+        "{codes:?}"
+    );
+    assert!(lowered.diagnostics.errors().count() == 0, "{codes:?}");
+    let graph = lowered.graph.expect("lowers");
+    let hooks = graph.params["fabro_hooks"]
+        .as_array()
+        .expect("hook list")
+        .clone();
+    let summary: Vec<(String, String, String)> = hooks
+        .iter()
+        .map(|h| {
+            (
+                h["event"].as_str().unwrap_or("?").to_owned(),
+                h["command"]
+                    .as_str()
+                    .or(h["url"].as_str())
+                    .unwrap_or("?")
+                    .to_owned(),
+                h["source"].as_str().unwrap_or("?").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(summary, vec![
+        (
+            "run_start".into(),
+            "user-start".into(),
+            "settings.toml".into()
+        ),
+        (
+            "stage_start".into(),
+            "workflow-guard".into(),
+            "wf/workflow.toml".into()
+        ),
+        (
+            "run_complete".into(),
+            "https://example.test/done".into(),
+            ".fabro/project.toml".into()
+        ),
+        (
+            "checkpoint_saved".into(),
+            "never".into(),
+            "wf/workflow.toml".into()
+        ),
+    ]);
+    assert_eq!(hooks[1]["matcher"], json!("^agent$"));
+    assert_eq!(hooks[0]["sandbox"], json!(false));
 }

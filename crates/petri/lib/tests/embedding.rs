@@ -36,7 +36,8 @@ use petri::execution::{
 };
 use petri::executor::Retention;
 use petri::fabro::{
-    AGENT_KIND, BranchStep, CommandStep, FanInStep, HumanStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
+    AGENT_KIND, BranchStep, CommandStep, FanInStep, HumanStep, StageStep, StubStep, WAIT_KIND,
+    WORKFLOW_KIND,
 };
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
@@ -104,6 +105,7 @@ fn runtime(dir: &RunDir, hooks: Option<Arc<dyn ExecutionHooks>>) -> Runtime {
     }
     registry.register(CommandStep);
     registry.register(HumanStep);
+    registry.register(StageStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
     let rt = Runtime::standard()

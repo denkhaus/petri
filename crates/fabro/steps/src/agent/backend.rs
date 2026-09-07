@@ -1,10 +1,13 @@
 //! The two agent transports share the step's output contract and repair loop.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use execution::hooks::HookServiceHandle;
+use frontend_fabro::hooks::HookEvent;
 use ir::{Control, Value};
-use pebble_coding_agent::ShutdownReason;
+use pebble_coding_agent::{CodingAgentExport, ShutdownReason};
 use serde::Deserialize;
 use smol_str::SmolStr;
 use steps::StepCtx;
@@ -12,7 +15,9 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::AgentConfig;
-use crate::acp::{AcpError, Client};
+use crate::LocalHooksHandle;
+use crate::acp::{AcpError, AcpHooks, Client};
+use crate::hooks::step_view;
 use crate::pebble::NativeSession;
 
 /// How an agent node runs. ACP remains the default.
@@ -58,9 +63,16 @@ impl From<AcpError> for AgentError {
 }
 
 impl Session {
-    pub(crate) async fn open(config: &AgentConfig, ctx: &mut StepCtx) -> Result<Self, AgentError> {
+    /// Open the node's session. `resume` is a retained thread's conversation
+    /// a native node continues; an ACP node ignores it (ACP never reuses
+    /// threads, and the caller has said so).
+    pub(crate) async fn open(
+        config: &AgentConfig,
+        ctx: &mut StepCtx,
+        resume: Option<CodingAgentExport>,
+    ) -> Result<Self, AgentError> {
         match config.backend {
-            AgentBackend::Api => NativeSession::open(config, ctx)
+            AgentBackend::Api => NativeSession::open(config, ctx, resume)
                 .await
                 .map(|session| Self::Pebble(Box::new(session))),
             AgentBackend::Acp => {
@@ -76,6 +88,32 @@ impl Session {
                 let mut client = Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone())
                     .await
                     .map_err(|e| AgentError::failed("spawn_failed", e.to_string()))?;
+                if let Some(handle) = ctx.capability::<HookServiceHandle>()
+                    && let Some(local) = ctx.capability::<LocalHooksHandle>()
+                {
+                    let names = |event: HookEvent| {
+                        local
+                            .0
+                            .hooks_for(event)
+                            .into_iter()
+                            .map(|hook| hook.name)
+                            .collect::<Vec<_>>()
+                    };
+                    let mut post = names(HookEvent::PostToolUse);
+                    post.extend(names(HookEvent::PostToolUseFailure));
+                    let hooks = AcpHooks::new(
+                        handle.0.clone(),
+                        step_view(ctx, "agent", &config.label, &config.kv),
+                        ctx.node.clone(),
+                        ctx.firing,
+                        ctx.attempt,
+                        names(HookEvent::PreToolUse),
+                        post,
+                    );
+                    if hooks.has_tool_hooks() {
+                        client.with_hooks(Arc::new(hooks)).await;
+                    }
+                }
                 if let Err(error) = client.open_session(ctx.env.workspace_path()).await {
                     client.terminate(ctx.env.grace()).await;
                     return Err(error.into());
@@ -130,6 +168,14 @@ impl Session {
                 Ok(())
             }
             Self::Pebble(session) => session.shutdown(reason).await,
+        }
+    }
+    /// The native conversation, warm, for the next node on its thread. An
+    /// ACP session has none.
+    pub(crate) fn export(&self) -> Option<CodingAgentExport> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Pebble(session) => Some(session.export()),
         }
     }
     pub(crate) fn metrics(&self, turns: u64) -> BTreeMap<SmolStr, Value> {

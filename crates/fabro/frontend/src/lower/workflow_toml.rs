@@ -14,9 +14,9 @@
 //! - `[run] goal`: the run goal when the graph sets none (the graph's `goal`
 //!   attribute wins, as in Fabro's run materialization). The `{ file }` form
 //!   reads beside `workflow.toml`.
-//! - `[run.model]`: the default `provider`, `name` and `reasoning_effort` an
-//!   agent or prompt node gets when neither it nor the graph sets one.
-//!   `controls.speed` warns (model fallback and speed are readiness item 9a).
+//! - `[run.model]`: the default `provider`, `name`, `reasoning_effort` and
+//!   `speed` an agent or prompt node gets when neither it nor the graph sets
+//!   one. `[run.model.fallbacks]` warns (model fallback is readiness item 9a).
 //! - `[run.execution]`: `mode = "dry_run"` and `approval = "auto"` become the
 //!   run's launch defaults; `--dry-run` and `--auto-approve` still win.
 //! - `[run.environment]` and `[environments.<id>]`: the `provider` selects the
@@ -31,6 +31,9 @@
 //!   its successors, in the selected environment, before any workflow node.
 //!   Each step gets the section's `timeout` (default five minutes) and
 //!   `on_failure="exit"`, so a failed step ends the run before the nodes.
+//! - `[[run.hooks]]`: the local hook layer beside the workflow, read by
+//!   `lower::hooks` together with `.fabro/project.toml` and the host's settings
+//!   layer.
 
 use std::collections::BTreeMap;
 
@@ -72,6 +75,8 @@ pub struct RunSettings {
     /// `[run.prepare]` steps, in order.
     pub prepare:            Vec<PrepareStep>,
     pub prepare_timeout_ms: u64,
+    /// The file's path and text, for the hook loader's `[[run.hooks]]` layer.
+    pub hooks_text:         Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -79,6 +84,9 @@ pub struct ModelDefaults {
     pub provider:         Option<String>,
     pub name:             Option<String>,
     pub reasoning_effort: Option<String>,
+    /// `controls.speed`: `standard` or `fast`, the default an LLM node gets
+    /// when it names none.
+    pub speed:            Option<String>,
 }
 
 /// One environment value: a literal, or a secret name to resolve at spawn.
@@ -181,7 +189,12 @@ pub(super) fn read(
                 Span::file(&path),
                 format!("`{path}` is not valid TOML and is ignored: {error}"),
             );
-            return RunSettings::default();
+            // The hook loader still sees the text: a configured hook in an
+            // unparseable file is an error there, never a silent skip.
+            return RunSettings {
+                hooks_text: Some((path, text)),
+                ..RunSettings::default()
+            };
         }
     };
     let mut reader = Reader {
@@ -197,7 +210,9 @@ pub(super) fn read(
         },
     };
     reader.top_level(&value);
-    reader.settings
+    let mut settings = reader.settings;
+    settings.hooks_text = Some((path, text));
+    settings
 }
 
 struct Reader<'a> {
@@ -291,28 +306,16 @@ impl Reader<'_> {
         }
         for (key, item) in run {
             match key.as_str() {
-                "inputs" => {}
+                // Inputs were read above. `[[run.hooks]]` is read by
+                // `lower::hooks`, with the project and settings layers, from
+                // the text kept on the settings.
+                "inputs" | "hooks" => {}
                 "goal" => self.goal(item),
                 "model" => self.model(item),
                 "execution" => self.execution(item),
                 "environment" => self.environment(item, environments),
                 "prepare" => self.prepare(item),
                 "agent" => self.agent(item),
-                "hooks" => {
-                    if item.as_array().is_some_and(|hooks| !hooks.is_empty()) {
-                        let path = self.path;
-                        self.unsupported(
-                            "workflow_toml.run.hooks",
-                            format!(
-                                "`[[run.hooks]]` in `{path}` configures hooks, which the \
-                                 standalone runner does not run yet; a configured hook is never \
-                                 skipped silently"
-                            ),
-                            "remove the hooks, or wait for the local hook system (readiness \
-                             item 5)",
-                        );
-                    }
-                }
                 other => self.other_run_key(other),
             }
         }
@@ -518,15 +521,8 @@ impl Reader<'_> {
                     {
                         self.settings.model.reasoning_effort = Some(effort.to_owned());
                     }
-                    if controls.contains_key("speed") {
-                        let path = self.path;
-                        self.warn(
-                            "ignored.workflow_toml.run.model.speed",
-                            format!(
-                                "`[run.model.controls] speed` in `{path}` is ignored: the speed \
-                                 control is readiness item 9a"
-                            ),
-                        );
+                    if let Some(speed) = controls.get("speed").and_then(toml::Value::as_str) {
+                        self.settings.model.speed = Some(speed.to_owned());
                     }
                 }
                 other => {

@@ -25,8 +25,7 @@ use execution::{
     InvocationRequest, InvocationResult, SandboxMode, SecretBindings,
 };
 use frontend_fabro::kinds::{
-    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_PREAMBLE_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND,
-    StageOutcome,
+    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND, StageOutcome,
 };
 use ir::StepKindId;
 use ir::{Control, FailureClass, FailureInfo, Metrics, Outcome, RunStatus, Status, StepEvent, Value};
@@ -35,7 +34,6 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
-use crate::preamble;
 use crate::workflow::ChildInvoker;
 
 pub const BRANCH: StepKindId = BRANCH_KIND;
@@ -93,8 +91,8 @@ pub struct BranchConfig {
     /// starts from.
     #[serde(default)]
     pub kv:           Value,
-    /// The parent's stage records, for the branch preamble of an agent or
-    /// prompt target.
+    /// The parent's stage records at fork time, for the preamble of an agent
+    /// or prompt target.
     #[serde(default)]
     pub nodes:        Value,
     /// The fork visit: repeated visits of one fork get their own gate.
@@ -300,10 +298,8 @@ impl Step for BranchStep {
         let snapshot = snapshot_of(&config.kv);
         let mut context = snapshot.clone();
         if matches!(config.target_kind.as_str(), "agent" | "prompt") {
-            context.insert(
-                SmolStr::new(BRANCH_PREAMBLE_KEY),
-                json!(preamble::previous_stages(&config.nodes)),
-            );
+            // The stage records at fork time, for the child's preamble.
+            context.insert(SmolStr::new(BRANCH_NODES_KEY), config.nodes.clone());
         }
         if let Some(item) = &config.item {
             context.insert(SmolStr::new(BRANCH_ITEM_KEY), json!(fenced_item(item)));

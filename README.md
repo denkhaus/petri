@@ -20,7 +20,7 @@ crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the output store, and the stub registry
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, fidelity preambles, retained threads, project memory, the output store, and the stub registry
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
@@ -135,6 +135,8 @@ crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled cl
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
+crates/fabro/steps/tests/hooks.rs            readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
+crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the binary: a configured hook blocks a real tool effect of a native agent (`a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`); two `full` nodes share one conversation
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
@@ -208,7 +210,9 @@ Fabro agent nodes can use Pebble directly as a Rust library. Set
 `backend` and `default_model`. The `petri` distribution reads provider
 credentials from its environment. ACP remains the default. See
 [native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
-requirements, client injection, events, and accounting.
+requirements, client injection, project memory, tool hooks, retained
+threads, events, and accounting. Fabro's `fidelity` modes, threads and
+`[[run.hooks]]` are described under "Steps at run time" on the same page.
 
 `petri inspect --run-dir <dir> [--json]` reconstructs a run from its run
 directory alone: `run.json`, `coordinator.jsonl`, the registered graphs, and
@@ -1038,6 +1042,11 @@ no platform vocabulary in them:
   hook executor implements (`crates/core/execution/HOOKS.md`); the
   `HookAdapter` is its one caller from workflow points, so the local hook
   executor and a platform's hook service both run each configured hook once.
+  `fabro_steps::hooks::LocalHooks` is the local one: `fabro_steps::register`
+  installs it unless the host installed a service first, and it serves the
+  per-firing points, the native agent's tool boundary, the ACP client's
+  permission requests and the run-level events from one place
+  (`crates/fabro/FORMAT.md`, "Hooks").
 - **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
   on the terminal path.
 

@@ -103,6 +103,15 @@ impl CapabilitiesBuilder {
         self.map.contains_key(&TypeId::of::<T>())
     }
 
+    /// The registered value of this type, if any, so a per-run provisioner
+    /// can hand a runtime-level service to a run-level one.
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        self.map
+            .get(&TypeId::of::<T>())
+            .cloned()
+            .and_then(|value| value.downcast::<T>().ok())
+    }
+
     pub fn build(self) -> Capabilities {
         Capabilities {
             map: Arc::new(self.map),

@@ -665,10 +665,17 @@ impl Ctx<'_> {
             {
                 map.remove(super::ROUTES_KEY);
                 if source.step.kind == crate::kinds::AGENT_KIND || source.step.kind == PROMPT_KIND {
-                    let preamble = context_read(builder.exprs(), crate::kinds::BRANCH_PREAMBLE_KEY);
-                    map.insert("preamble".into(), placeholder(preamble));
+                    // The child's own records are empty when its target
+                    // starts: the preamble renders from the parent's records
+                    // at fork time, which the branch step puts in the
+                    // snapshot.
+                    let nodes = context_read(builder.exprs(), crate::kinds::BRANCH_NODES_KEY);
+                    map.insert("nodes".into(), placeholder(nodes));
                     let item = context_read(builder.exprs(), crate::kinds::BRANCH_ITEM_KEY);
                     map.insert("item_data".into(), placeholder(item));
+                    // Fabro's branch rules: threads are inert and an explicit
+                    // `full` degrades to `summary:high`.
+                    map.insert("branch".into(), Value::Bool(true));
                 }
             }
             let precondition = source

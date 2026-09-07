@@ -200,7 +200,13 @@ async fn parallel_gates_are_answered_out_of_order_and_each_answer_lands_on_its_o
     }
     let seen = interviewer.seen.lock().expect("not poisoned").clone();
     assert_eq!(seen.len(), 2);
-    assert_ne!(seen[0].firing, seen[1].firing);
+    // Each gate ran in its own branch execution; the firing identity a
+    // reply binds to is the execution and the firing together.
+    assert_ne!(seen[0].execution, seen[1].execution);
+    assert_ne!(
+        (seen[0].execution, seen[0].firing),
+        (seen[1].execution, seen[1].firing)
+    );
 }
 
 const SENSITIVE_GATE: &str = r#"digraph G {
