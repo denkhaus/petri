@@ -318,9 +318,7 @@ impl NativeSession {
             }
         };
         self.record(&report);
-        self.compaction
-            .settle(&self.agent, &self.attribution)
-            .await;
+        self.compaction.settle(&self.agent, &self.attribution).await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }

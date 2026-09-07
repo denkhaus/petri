@@ -2048,14 +2048,12 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
 /// runs no agent loop, carries none.
 #[test]
 fn agent_nodes_carry_fabros_compaction_settings() {
-    let graph = lower_ok(&dot(
-        r#"
+    let graph = lower_ok(&dot(r#"
         graph [backend="api", default_model="openai/gpt-5.6-sol"]
         a [prompt="Work."]
         p [shape=tab, prompt="Answer."]
         start -> a -> p -> exit
-    "#,
-    ));
+    "#));
     assert_eq!(
         node(&graph, "a").step.config["compaction"],
         json!({"enabled": true, "threshold_percent": 80, "preserve_turns": 6})

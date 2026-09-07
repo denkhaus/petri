@@ -22,8 +22,8 @@ mod workflow_toml;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
 pub use compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
+use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
 pub use imports::IMPORT_ERROR;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::validate::loop_reachable;
