@@ -8,14 +8,8 @@
   "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
   "bundle_digest": "5aa8447473e162c1277ff29eeade6ba76636344f6f0743a993f6ab246c9c2a2d",
   "twins": [
-    {
-      "provider": "openai",
-      "base_url": "http://127.0.0.1:53424"
-    },
-    {
-      "provider": "anthropic",
-      "base_url": "http://127.0.0.1:53425"
-    }
+    "openai",
+    "anthropic"
   ],
   "normalization": [
     "generated run id -> <RUN_ID>",
@@ -142,9 +136,9 @@
       "provider_requests": 8
     },
     "identities": {
-      "<BLOB_1>": "blob://sha256/7fd4c803ae34813a52e6323303c9c6bedae5397ead13c5ab915038658b715865",
-      "<RUN_ID>": "01M1Y3NWK65R0T9XPN6ESG52Q2",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-fallback-failover-91712-0/fabro/bundle"
+      "<BLOB_1>": "<per run>",
+      "<RUN_ID>": "<per run>",
+      "<WORKSPACE>": "<per run>"
     }
   }
 }

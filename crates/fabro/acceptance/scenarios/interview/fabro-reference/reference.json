@@ -8,10 +8,7 @@
   "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
   "bundle_digest": "8d9c7b984453ebeafccbd337941736455a230331b97eb2ceb7b02828637f08a7",
   "twins": [
-    {
-      "provider": "openai",
-      "base_url": "http://127.0.0.1:53390"
-    }
+    "openai"
   ],
   "normalization": [
     "generated run id -> <RUN_ID>",
@@ -205,8 +202,8 @@
       "provider_requests": 1
     },
     "identities": {
-      "<RUN_ID>": "01M1Y3NVDSNNJVF9XCW74XRZ5Y",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-interview-91711-0/fabro/bundle"
+      "<RUN_ID>": "<per run>",
+      "<WORKSPACE>": "<per run>"
     }
   }
 }

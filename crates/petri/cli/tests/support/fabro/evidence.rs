@@ -314,6 +314,15 @@ pub(crate) fn check_or_record_reference(
             differences.join("\n")
         ));
     }
+    // The committed file carries no per-run values: the identity map keeps
+    // its placeholders only (the raw run id and paths are in the evidence
+    // record), and the twins are named by provider.
+    let mut live = live;
+    if let Some(identities) = live.get_mut("identities").and_then(Value::as_object_mut) {
+        for value in identities.values_mut() {
+            *value = Value::String("<per run>".to_owned());
+        }
+    }
     let document = json!({
         "schema_version": 1,
         "scenario": scenario,

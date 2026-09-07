@@ -8,10 +8,7 @@
   "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
   "bundle_digest": "6828105ee11bddf1f551e1af216c7d3dd13c2ee5362056dfbd342bf5d513f028",
   "twins": [
-    {
-      "provider": "openai",
-      "base_url": "http://127.0.0.1:53831"
-    }
+    "openai"
   ],
   "normalization": [
     "generated run id -> <RUN_ID>",
@@ -94,9 +91,9 @@
       "provider_requests": 2
     },
     "identities": {
-      "<BLOB_1>": "blob://sha256/03ef380fdaf49946cc4a5bda4ec5cd1a3d85097823992b89a64e37f6cefc1a37",
-      "<RUN_ID>": "01M1Y3R01SS3KGAQY29YHG3SFM",
-      "<WORKSPACE>": "/var/folders/nm/bd2dwzy52t1ckn3tklsfmy1c0000gn/T/petri-tests/fabro-blackbox-diff-skills-precedence-2900-0/fabro/bundle"
+      "<BLOB_1>": "<per run>",
+      "<RUN_ID>": "<per run>",
+      "<WORKSPACE>": "<per run>"
     }
   }
 }

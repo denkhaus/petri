@@ -51,6 +51,9 @@ type Check = (String, bool, Value);
 /// A twin's scripts for one namespace.
 type Scripts = fn(&str) -> Vec<Value>;
 
+/// An engine-specific request matcher over raw request bodies.
+type Probe = fn(&[Value]) -> Vec<Check>;
+
 fn check(name: &str, passed: bool, detail: impl Into<Value>) -> Check {
     (name.to_owned(), passed, detail.into())
 }
@@ -80,7 +83,7 @@ struct Cell {
     /// workflow sent (platform requests left out): the same item
     /// assignments, tool actions and call obligations asserted on each
     /// engine where prompt assembly differs.
-    probe:         Option<fn(&[Value]) -> Vec<Check>>,
+    probe:         Option<Probe>,
     /// Baseline defects already recorded for the pinned Fabro: expectation
     /// names Fabro is known to fail. They are reported, never accepted.
     known_defects: Vec<&'static str>,
@@ -390,7 +393,12 @@ async fn run_cell(cell: Cell) {
             binary,
             &source_digest,
             &projection,
-            &twin_pins(&fabro_twins),
+            &json!(
+                fabro_twins
+                    .iter()
+                    .map(|twin| twin.provider.id())
+                    .collect::<Vec<_>>()
+            ),
         ) {
             panic!("{scenario}: {message}");
         }
