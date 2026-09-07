@@ -151,7 +151,7 @@ crates/fabro/steps/tests/skills.rs           readiness item 9c: Fabro's skill di
 crates/petri/cli/tests/fabro_skills_blackbox.rs  readiness item 9c through the binary: precedence and the reference prompt and tool on both vocabularies, a hook blocking a skill-driven tool call, a `for_each` branch keeping its loaded skill, the warnings on the terminal and in the event log
 crates/fabro/steps/tests/compaction.rs         readiness item 9e: Fabro's compaction on the native backend against a scripted model: the trigger below, at and above the 80 percent threshold, continuation and thread reuse across the boundary, tool pairing, a host `CompactionPolicy`, a failed summary, cancellation, the lost-thread fallback, and the public events and usage
 crates/petri/cli/tests/fabro_compaction_blackbox.rs  readiness item 9e through the binary: a native agent compacts and finishes correct work, a later `full` node reuses the compacted thread, a failed summary call is non-fatal, a lost thread starts at `summary:high`, and a run cancelled during the summary call stops
-crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent delegates to Pebble-built children on real scopes; hooks and the question rule inside a child; the invocation ceiling never counts a child; the open-session bound; child failure, nesting, cancellation, thread reuse, resume; two ignored contract tests for child project memory and skills
+crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent delegates to Pebble-built children on real scopes; hooks and the question rule inside a child; the invocation ceiling never counts a child; the open-session bound; child failure, nesting, cancellation, thread reuse, resume; a child re-reads the parent's project memory and re-discovers its skills
 crates/petri/cli/tests/fabro_subagents_blackbox.rs  readiness item 9d through the binary: a parent delegates a workspace change; a hook blocks a child's effect; a child's failure is the parent's tool result; concurrent children and one invocation; a grandchild; an interrupt closes the child; a retained thread carries a child's result; accounting reconstructed from `execution::replay_run`
 crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
@@ -1042,8 +1042,9 @@ again on the same route after a retryable failure, with exponential backoff and
 the provider's `Retry-After` honored; `PETRI_LLM_TIMEOUT_MS` bounds one call,
 retries included. `PETRI_AGENT_TURN_REPLAY_ATTEMPTS` is Pebble's budget for
 replaying a model turn whose response stream broke (unset keeps Pebble's
-default). Fabro's `[run.model.fallbacks]` chain is Petri's and starts only
-once both are spent; see "Model fallback" in `crates/fabro/FORMAT.md`. A
+default). Both report on the agent's event stream as Pebble's `LlmRetry`.
+Fabro's `[run.model.fallbacks]` chain is Petri's and starts only once both
+are spent; see "Model fallback" in `crates/fabro/FORMAT.md`. A
 workflow retry (`retries` on a node) is a new attempt with a new plan and is
 none of these.
 
