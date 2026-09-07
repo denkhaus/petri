@@ -692,6 +692,15 @@ fn project(events: &[RunEvent]) -> Projected {
     out
 }
 
+fn kind_total(projected: &Projected, kind: &str) -> usize {
+    projected
+        .kinds
+        .iter()
+        .filter(|((_, k), _)| k == kind)
+        .map(|(_, n)| n)
+        .sum()
+}
+
 fn count(projected: &Projected, node: &str, kind: &str) -> usize {
     projected
         .kinds
@@ -941,6 +950,21 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     assert_eq!(projected.invocations, BTreeSet::from([0, 1, 2]));
     assert_eq!(projected.expansions, 1);
     assert_eq!(projected.branch_children, 2);
+    assert_eq!(
+        kind_total(&projected, "fabro.parallel.branch.started"),
+        2,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        kind_total(&projected, "fabro.parallel.branch.completed"),
+        2,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        count(&projected, "join", "fabro.parallel.completed"),
+        1,
+        "{projected:#?}"
+    );
     // Every item 9 family, attributed to its stage, as through the binary.
     assert!(
         count(&projected, "plan", "fabro.skills") >= 1,

@@ -693,7 +693,7 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     // The workspace the run reported is the one the files are in.
     assert_eq!(
         finished.reported_workspaces(),
-        std::slice::from_ref(&workspace),
+        slice::from_ref(&workspace),
         "{}",
         finished.stderr
     );
