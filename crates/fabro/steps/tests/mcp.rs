@@ -16,7 +16,7 @@ use fabro_steps::register;
 use frontend::{CompileInputs, MapFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
 use pebble_coding_agent::test_support::{
-    ScriptedCall, scripted_client, text_response, tool_call_response,
+    ScriptedCall, ScriptedProvider, scripted_client, text_response, tool_call_response,
 };
 use runtime::driver::{EventObserver, ExecutionReport};
 use runtime::engine::{EngineState, Event, EventRecord};
@@ -25,6 +25,7 @@ use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, log_lines, output_of};
 use tokio::net::TcpListener;
+use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
 
 /// The scripted server under `crates/fabro/acceptance/testdata`.
@@ -188,7 +189,7 @@ fn call(id: &str, tool: &str, arguments: Value) -> ScriptedCall {
     ScriptedCall::response(tool_call_response(tool, id, arguments))
 }
 
-fn requests_text(provider: &pebble_coding_agent::test_support::ScriptedProvider) -> Vec<String> {
+fn requests_text(provider: &ScriptedProvider) -> Vec<String> {
     provider
         .requests()
         .iter()
@@ -663,7 +664,7 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     let dir = RunDir::new("mcp-http");
     let http_port = free_port().await;
     let sandbox_port = free_port().await;
-    let mut remote = tokio::process::Command::new("python3")
+    let mut remote = TokioCommand::new("python3")
         .arg(server_script())
         .args(["--http", &http_port.to_string()])
         .stdin(Stdio::null())
