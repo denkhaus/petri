@@ -265,7 +265,10 @@ async fn model_failure_keeps_prior_usage_and_known_cost() {
         )),
     ]);
     let report = runtime(&dir, client).run(graph("")).await.expect("replay");
-    assert_eq!(output_of(&report, "a")["failure_class"], "pebble_prompt");
+    assert_eq!(
+        output_of(&report, "a")["failure_class"],
+        "llm:authentication"
+    );
     assert_eq!(metrics(&report)["pebble.usage"]["input"], 10);
     assert_eq!(metrics(&report)["pebble.cost_usd_micros"], 123);
 }

@@ -7,6 +7,7 @@ use std::time::Duration;
 use execution::hooks::HookServiceHandle;
 use frontend_fabro::hooks::HookEvent;
 use ir::{Control, Value};
+use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{CodingAgentExport, ShutdownReason};
 use serde::Deserialize;
 use smol_str::SmolStr;
@@ -17,8 +18,9 @@ use tokio::time::timeout;
 use super::AgentConfig;
 use crate::LocalHooksHandle;
 use crate::acp::{AcpError, AcpHooks, Client};
+use crate::fallback::ModelFailure;
 use crate::hooks::step_view;
-use crate::pebble::NativeSession;
+use crate::pebble::{NativeSession, Resume, TurnUsage};
 
 /// How an agent node runs. ACP remains the default.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -40,6 +42,9 @@ pub(crate) enum AgentError {
     Cancelled,
     #[error("{message}")]
     Failed { class: String, message: String },
+    /// A typed model error, kept whole so the fallback chain can read it.
+    #[error("{0}")]
+    Model(ModelFailure),
 }
 impl AgentError {
     pub(crate) fn failed(class: impl Into<String>, message: impl Into<String>) -> Self {
@@ -63,13 +68,14 @@ impl From<AcpError> for AgentError {
 }
 
 impl Session {
-    /// Open the node's session. `resume` is a retained thread's conversation
-    /// a native node continues; an ACP node ignores it (ACP never reuses
-    /// threads, and the caller has said so).
+    /// Open the node's session. `resume` says where a native conversation
+    /// comes from (a route, a retained export, a failover record); an ACP
+    /// node ignores it (ACP never reuses threads and runs no fallback, and
+    /// the caller has said so).
     pub(crate) async fn open(
         config: &AgentConfig,
         ctx: &mut StepCtx,
-        resume: Option<CodingAgentExport>,
+        resume: Resume,
     ) -> Result<Self, AgentError> {
         match config.backend {
             AgentBackend::Api => NativeSession::open(config, ctx, resume)
@@ -130,6 +136,7 @@ impl Session {
     pub(crate) async fn prompt(
         &mut self,
         text: &str,
+        agent_sourced: bool,
         control: &mut mpsc::Receiver<Control>,
         grace: Duration,
         deadline: Option<Duration>,
@@ -154,7 +161,28 @@ impl Session {
                 };
                 result.map(|turn| turn.text).map_err(Into::into)
             }
-            Self::Pebble(session) => session.prompt(text, control).await,
+            Self::Pebble(session) => session.prompt(text, agent_sourced, control).await,
+        }
+    }
+    /// The last turn's accounting; an ACP turn reports none.
+    pub(crate) fn last_turn(&self) -> Option<TurnUsage> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Pebble(session) => session.last_turn(),
+        }
+    }
+    /// The native conversation's durable record, for a failover. An ACP
+    /// session has none.
+    pub(crate) fn record(&self) -> Option<SessionRecord> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Pebble(session) => Some(session.record()),
+        }
+    }
+    pub(crate) fn session_id(&self) -> Option<String> {
+        match self {
+            Self::Acp(_) => None,
+            Self::Pebble(session) => Some(session.session_id()),
         }
     }
     pub(crate) async fn shutdown(

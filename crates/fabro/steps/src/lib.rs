@@ -18,6 +18,7 @@ pub mod blobs;
 pub mod command;
 pub mod contract;
 pub mod directive;
+pub mod fallback;
 pub mod fidelity;
 pub mod hooks;
 pub mod human;
@@ -60,7 +61,8 @@ pub const BLOBS_DIR: &str = "blobs";
 /// Fabro workflows need: the default output-reference store, the local hook
 /// service (installed as the driver's awaited hooks and as the
 /// `HookServiceHandle` capability, unless the host installed its own), the
-/// retained-session service, and the run identity hooks read.
+/// retained-session service, the model fallback service, and the run
+/// identity hooks read.
 ///
 /// A host that supplies its own `HookService` registers a `HookServiceHandle`
 /// capability and its own `Runtime::hooks` before calling this; the local
@@ -113,7 +115,9 @@ pub fn services(runtime: Runtime) -> Runtime {
                 .set_client(caps.get::<pebble::PebbleClient>().map(|c| (*c).clone()));
         }
         (
-            caps.provide(run).provide(sessions::SessionService::new()),
+            caps.provide(run)
+                .provide(sessions::SessionService::new())
+                .provide(fallback::FallbackService::new()),
             None,
         )
     })

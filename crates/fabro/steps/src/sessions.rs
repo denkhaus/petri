@@ -17,16 +17,23 @@ use std::sync::{Mutex, PoisonError};
 
 use pebble_coding_agent::CodingAgentExport;
 
+use crate::fallback::Plan;
+
 /// One retained conversation.
 pub struct Retained {
     pub export:   CodingAgentExport,
     /// The node that last used it, for events.
     pub node:     String,
-    /// The route the export runs on, `provider/model`, for the warning when
-    /// a later node names another model.
+    /// The route the thread was requested on (the plan's original),
+    /// `provider/model`, for the warning when a later node names another
+    /// model.
     pub selector: String,
     /// How many nodes have used this thread.
     pub uses:     u32,
+    /// The thread's fallback plan, at the position reached: a later node
+    /// continues on the route the thread runs on and never activates that
+    /// route's own chain.
+    pub plan:     Plan,
 }
 
 /// The run's retained sessions by thread id. Registered as a capability by

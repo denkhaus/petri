@@ -10,10 +10,17 @@
 //! and runs its tools through the hook middleware ([`crate::hooks::tools`]).
 //! An ACP agent gets the same prompt; its tool hooks are best effort and it
 //! never reuses a thread.
+//!
+//! A native node runs on a fallback plan ([`crate::fallback`]): the route
+//! its model and provider resolve to, then the targets `[run.model.fallbacks]`
+//! configures for that model. A provider-local model error moves the
+//! conversation to the next route; a retained thread carries its plan to the
+//! next node.
 
 pub(crate) mod backend;
+use std::collections::BTreeMap;
 use std::env;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub use backend::AgentBackend;
 use backend::{AgentError, Session};
@@ -29,8 +36,10 @@ use steps::{Step, StepCtx};
 use crate::acp::AgentCommand;
 use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
+use crate::fallback::{self, Plan, Planned, Route};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
+use crate::pebble::{PebbleClient, Resume};
 use crate::sessions::{Retained, SessionService};
 use crate::stage::{self, RunInfo};
 
@@ -84,6 +93,10 @@ pub struct AgentConfig {
     pub speed:            Option<String>,
     #[serde(default)]
     pub max_tokens:       Option<i64>,
+    /// `[run.model.fallbacks]` as lowered: the chains keyed by the requested
+    /// model, references as written.
+    #[serde(default)]
+    pub fallbacks:        BTreeMap<String, Vec<String>>,
     /// Every stage of the workflow, for the preamble.
     #[serde(default)]
     pub stages:           Value,
@@ -246,20 +259,43 @@ impl Step for AgentStep {
         let sessions = ctx.capability::<SessionService>();
         let mut resolved = config.resolve(false);
         let mut retained: Option<Retained> = None;
+        // A native node's fallback plan: its route, then the configured
+        // chain for that model. An ACP node has no plan (the command owns
+        // its model).
+        let mut planned: Option<Planned> = None;
+        if config.backend == AgentBackend::Api {
+            let Some(client) = ctx.capability::<PebbleClient>() else {
+                return fail(
+                    "Native Pebble requires a PebbleClient capability".into(),
+                    "pebble_unconfigured",
+                );
+            };
+            planned = match fallback::plan_for_agent(&config, &mut ctx, &client.0).await {
+                Ok(planned) => Some(planned),
+                Err(AgentError::Cancelled) => return Outcome::cancelled(),
+                Err(AgentError::Failed { class, message }) => return fail(message, &class),
+                Err(AgentError::Model(failure)) => {
+                    return fail(failure.to_string(), &failure.class());
+                }
+            };
+        }
+        let requested_selector = planned
+            .as_ref()
+            .map(|p| p.plan.original().selector())
+            .unwrap_or_default();
         if config.backend == AgentBackend::Api
             && resolved.fidelity == Fidelity::Full
             && let Some(thread) = resolved.thread.clone()
         {
             retained = sessions.as_ref().and_then(|s| s.take(&thread));
             match &retained {
-                Some(kept) if config.selector().as_deref() != Some(kept.selector.as_str()) => {
+                Some(kept) if requested_selector != kept.selector => {
                     ctx.log(
                         LogStream::Stderr,
                         format!(
-                            "thread `{thread}` was retained on `{}`; this node runs `{}`, so it \
-                             starts a fresh conversation",
+                            "thread `{thread}` was retained on `{}`; this node runs \
+                             `{requested_selector}`, so it starts a fresh conversation",
                             kept.selector,
-                            config.selector().unwrap_or_default()
                         ),
                     )
                     .await;
@@ -297,11 +333,36 @@ impl Step for AgentStep {
                 "backend": match config.backend { AgentBackend::Api => "api", AgentBackend::Acp => "acp" },
             })))
             .await;
-        let mut session = match Session::open(&config, &mut ctx, retained.map(|r| r.export)).await {
+        // A retained thread continues on its own plan, at the route it
+        // reached; a fresh session starts this node's plan at its original.
+        let (mut plan, resume) = match (retained, planned) {
+            (Some(kept), _) => (kept.plan, Resume::Export(kept.export)),
+            (None, Some(Planned { plan, notices })) => {
+                fallback::Stage::of(&ctx).plan(&plan, &notices).await;
+                let route = plan.current().clone();
+                (plan, Resume::Fresh(route))
+            }
+            (None, None) => {
+                let route = Route {
+                    provider:         "acp".into(),
+                    model:            config.model.clone().unwrap_or_default(),
+                    reasoning_effort: None,
+                    speed:            None,
+                };
+                (Plan::single(route.clone()), Resume::Fresh(route))
+            }
+        };
+        let mut session = match Session::open(&config, &mut ctx, resume).await {
             Ok(session) => session,
             Err(AgentError::Cancelled) => return Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => return fail(message, &class),
+            Err(AgentError::Model(failure)) => return fail(failure.to_string(), &failure.class()),
         };
+        if config.backend == AgentBackend::Api {
+            fallback::Stage::of(&ctx)
+                .route(&plan, reused, session.session_id().as_deref())
+                .await;
+        }
         let mut turns = 0;
         let result = run_session(
             &config,
@@ -311,6 +372,7 @@ impl Step for AgentStep {
             &mut ctx,
             &mut session,
             &mut turns,
+            &mut plan,
         )
         .await;
         let reason = match &result {
@@ -330,8 +392,9 @@ impl Step for AgentStep {
                     sessions.retain(thread, Retained {
                         export,
                         node: config.node.clone(),
-                        selector: config.selector().unwrap_or_default(),
+                        selector: plan.original().selector(),
                         uses,
+                        plan: plan.clone(),
                     });
                 }
                 _ => sessions.mark_lost(thread),
@@ -353,16 +416,25 @@ impl Step for AgentStep {
             }
             Err(AgentError::Cancelled) => Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => fail(message, &class),
+            Err(AgentError::Model(failure)) => fail(failure.to_string(), &failure.class()),
         };
+        let mut custom = session.metrics(turns);
+        if config.backend == AgentBackend::Api {
+            custom.extend(fallback::metrics(&plan));
+        }
         outcome.metrics = Metrics {
             duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
-            custom: session.metrics(turns),
+            custom,
             ..Metrics::default()
         };
         outcome
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one stage's fixed inputs; a struct would name them once more"
+)]
 async fn run_session(
     config: &AgentConfig,
     fidelity: Fidelity,
@@ -371,18 +443,14 @@ async fn run_session(
     ctx: &mut StepCtx,
     session: &mut Session,
     turn_count: &mut u64,
+    plan: &mut Plan,
 ) -> Result<Stage, AgentError> {
     let mut prompt = config.assemble(fidelity, run_id, contract);
     let mut repairs = 0_u64;
     let (outcome, text) = loop {
-        let text = session
-            .prompt(
-                &prompt,
-                &mut ctx.control,
-                ctx.env.grace(),
-                config.timeout_ms.map(Duration::from_millis),
-            )
-            .await?;
+        // Every turn, the repair turns included, runs on the same plan: a
+        // provider-local failure moves the conversation to the next route.
+        let text = fallback::prompt(session, plan, config, ctx, &prompt).await?;
         ctx.log(LogStream::Stdout, text.clone()).await;
         *turn_count += 1;
         match validate(contract, &text) {

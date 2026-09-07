@@ -17,6 +17,10 @@
 //! section; here the results ride the fan-in's inputs and are rendered the
 //! same way, with each branch's id, status and updates.
 //!
+//! The one-shot request runs on a fallback plan ([`crate::fallback`]): a
+//! provider-local model error re-sends the same messages on the next
+//! configured route, and the repair turns stay on that plan.
+//!
 //! The step emits two `StepEvent::Custom` payloads a host can map onto
 //! Fabro's `stage.prompt` and `prompt.completed` events, each with a stable
 //! `kind`: [`PROMPT_EVENT`] before the first model call carries the rendered
@@ -24,6 +28,7 @@
 //! after the last call carries the response text, the outcome, the usage,
 //! the cost, the number of calls and the duration.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use frontend_fabro::Policy;
@@ -42,6 +47,7 @@ use tokio::sync::mpsc;
 use crate::agent::AgentBackend;
 use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
+use crate::fallback::{self, ModelFailure, PlanError, Requested};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
@@ -106,6 +112,9 @@ pub struct PromptConfig {
     pub speed:            Option<String>,
     #[serde(default)]
     pub max_tokens:       Option<i64>,
+    /// `[run.model.fallbacks]` as lowered.
+    #[serde(default)]
+    pub fallbacks:        BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub stages:           Value,
     #[serde(default)]
@@ -310,6 +319,24 @@ impl Step for PromptStep {
                 }
             },
         };
+        let requested = Requested {
+            provider: config.provider.as_deref(),
+            model: config.model.as_deref().unwrap_or_default(),
+            reasoning_effort: reasoning,
+            speed,
+        };
+        let planned =
+            match fallback::plan_for(&mut ctx, &client.0, &config.fallbacks, &requested).await {
+                Ok(planned) => planned,
+                Err(PlanError::Config(error)) => return fail(error.to_string(), "bad_config"),
+                Err(error @ PlanError::Primary { .. }) => {
+                    return fail(error.to_string(), "llm:model_selection");
+                }
+            };
+        let mut plan = planned.plan;
+        let stage = fallback::Stage::of(&ctx);
+        stage.plan(&plan, &planned.notices).await;
+        stage.route(&plan, false, None).await;
         // Fabro's prompt handler: with `project_memory` on, the working
         // directory's instruction files for the model's profile become the
         // system prompt.
@@ -370,14 +397,16 @@ impl Step for PromptStep {
         let mut turns = 0_u64;
         let mut repairs = 0_u64;
         let (parsed, text) = loop {
+            let route = plan.current().clone();
+            let selector = route.selector();
             let mut request = Request::builder().model(&selector);
             for message in &messages {
                 request = request.message(message.clone());
             }
-            if let Some(effort) = reasoning {
+            if let Some(effort) = route.reasoning_effort {
                 request = request.reasoning_effort(effort);
             }
-            if let Some(speed) = speed {
+            if let Some(speed) = route.speed {
                 request = request.speed(speed);
             }
             if let Some(tokens) = config.max_tokens.and_then(|t| u32::try_from(t).ok()) {
@@ -403,13 +432,41 @@ impl Step for PromptStep {
                 Ok(Some(response)) => response,
                 Ok(None) => return Outcome::cancelled(),
                 Err(error) => {
-                    let class = format!("llm:{:?}", error.kind()).to_lowercase();
+                    let failure = ModelFailure::from_error(&error);
+                    stage.usage(&plan, &turn_usage(None, None), false).await;
+                    if failure.eligible && plan.has_next() {
+                        // The same messages, on the next route; the repair
+                        // history so far travels with them.
+                        plan.advance();
+                        stage.failover(&plan, &failure, "replay_prompt").await;
+                        ctx.log(
+                            LogStream::Stderr,
+                            format!(
+                                "model fallback: {} failed ({}); continuing on {} (attempt {} of \
+                                 the plan)",
+                                plan.previous().selector(),
+                                failure.kind,
+                                plan.current().selector(),
+                                plan.position()
+                            ),
+                        )
+                        .await;
+                        stage.route(&plan, false, None).await;
+                        continue;
+                    }
+                    let reason = if failure.eligible {
+                        "exhausted"
+                    } else {
+                        "ineligible"
+                    };
+                    stage.stop(&plan, reason, &failure).await;
                     let _ = ctx
                         .logs
                         .send(completed("failed", None, turns, repairs, &usage, cost))
                         .await;
-                    let mut outcome = fail(error.to_string(), &class);
+                    let mut outcome = fail(failure.to_string(), &failure.class());
                     outcome.metrics = metrics(started, turns, &usage, cost);
+                    outcome.metrics.custom.extend(fallback::metrics(&plan));
                     return outcome;
                 }
             };
@@ -418,6 +475,16 @@ impl Step for PromptStep {
             if let Some(response_cost) = &response.cost {
                 cost = Some(cost.unwrap_or(0).saturating_add(response_cost.usd_micros));
             }
+            stage
+                .usage(
+                    &plan,
+                    &turn_usage(
+                        Some(&response.usage),
+                        response.cost.as_ref().map(|c| c.usd_micros),
+                    ),
+                    true,
+                )
+                .await;
             let text = response.text();
             ctx.log(LogStream::Stdout, text.clone()).await;
             match validate(&contract, &text) {
@@ -518,6 +585,7 @@ impl Step for PromptStep {
             .await;
         let mut outcome = stage.into_outcome(&config.node);
         outcome.metrics = metrics(started, turns, &usage, cost);
+        outcome.metrics.custom.extend(fallback::metrics(&plan));
         outcome
     }
 }
@@ -558,6 +626,16 @@ async fn complete(
                 Some(_) => {}
             },
         }
+    }
+}
+
+/// One model call's accounting for the per-route usage event.
+fn turn_usage(usage: Option<&TokenCounts>, cost: Option<u64>) -> crate::pebble::TurnUsage {
+    crate::pebble::TurnUsage {
+        usage:           json!(usage),
+        cost_usd_micros: cost,
+        inference_ms:    0,
+        tool_ms:         0,
     }
 }
 
