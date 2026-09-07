@@ -84,6 +84,10 @@ pub struct AgentConfig {
     pub speed:            Option<String>,
     #[serde(default)]
     pub max_tokens:       Option<i64>,
+    /// The workflow's own skill directories (`[run.agent] skills`), searched
+    /// after Fabro's conventional ones.
+    #[serde(default)]
+    pub skill_dirs:       Vec<String>,
     /// Every stage of the workflow, for the preamble.
     #[serde(default)]
     pub stages:           Value,

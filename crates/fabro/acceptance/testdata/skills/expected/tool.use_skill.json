@@ -1,0 +1,14 @@
+{
+  "name": "use_skill",
+  "description": "Load a skill's instructions by name. Call this when the user's request matches an available skill.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "skill_name": {
+        "type": "string",
+        "description": "Name of the skill to load (without the / prefix)"
+      }
+    },
+    "required": ["skill_name"]
+  }
+}
