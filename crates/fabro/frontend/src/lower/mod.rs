@@ -15,6 +15,7 @@ pub(crate) mod policy;
 mod promotion;
 mod routing;
 mod secrets;
+mod skills;
 pub mod subagents;
 mod threads;
 mod workflow_toml;
@@ -1141,6 +1142,7 @@ impl Ctx<'_> {
         );
         threads.write(self.b.exprs(), &mut config);
         if !is_prompt {
+            skills::write(&self.settings.skills, &mut config);
             subagents::write(&mut config);
         }
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));

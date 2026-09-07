@@ -988,11 +988,13 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     );
     // An empty hook list or MCP table asks for nothing.
     assert!(codes("[run]\nhooks = []\n[run.agent.mcps]\n").is_empty());
-    // The milestone C agent facilities have no `workflow.toml` surface at the
+    // Sub-agents and compaction have no `workflow.toml` surface at the
     // pinned Fabro (its `[run.agent]` accepts `fabro_tools` and `mcps` only),
     // so a request for one is refused as Fabro refuses it, never passed
     // silently; the model fallback chain is the one warned-and-ignored setting.
-    for key in ["skills", "subagents", "compaction", "context_window"] {
+    // `skills` is the runner's own extension
+    // (`run_agent_skills_is_a_warned_extension`).
+    for key in ["subagents", "compaction", "context_window"] {
         assert_eq!(
             codes(&format!("[run.agent]\n{key} = {{ enabled = true }}\n")),
             ["unsupported.workflow_toml.key"],
@@ -2041,6 +2043,78 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
     ]);
     assert_eq!(hooks[1]["matcher"], json!("^agent$"));
     assert_eq!(hooks[0]["sandbox"], json!(false));
+}
+
+/// `[run.agent] skills` names extra skill directories: a Petri extension
+/// Fabro refuses, so it warns, and it reaches agent nodes (not prompt
+/// nodes) as `skill_dirs`. A value that is not a list of paths is refused.
+#[test]
+fn run_agent_skills_is_a_warned_extension() {
+    let lowered = |toml: &str| {
+        let files = files(&[("wf/workflow.toml", toml)]);
+        frontend_fabro::load(
+            "wf/workflow.fabro",
+            &dot(r#"
+                a [prompt="Work."]
+                p [shape=tab, prompt="Summarize."]
+                start -> a -> p -> exit
+            "#),
+            &files,
+            &CompileInputs::new(),
+        )
+    };
+    let good =
+        lowered("_version = 1\n[run.agent]\nskills = [\"own/skills\", \"/shared/skills\"]\n");
+    let codes: Vec<String> = good
+        .diagnostics
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect();
+    assert_eq!(codes, ["fabro.petri_extension"], "{:?}", good.diagnostics);
+    let graph = good.graph.expect("lowers");
+    let config = |name: &str| {
+        graph
+            .body
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .expect("node")
+            .step
+            .config
+            .clone()
+    };
+    assert_eq!(
+        config("a")["skill_dirs"],
+        serde_json::json!(["own/skills", "/shared/skills"])
+    );
+    assert!(
+        config("p").get("skill_dirs").is_none(),
+        "a prompt node has no tools, so no skills"
+    );
+    let none = lowered("_version = 1\n[run.agent]\nskills = []\n");
+    assert!(
+        none.diagnostics.iter().next().is_none(),
+        "{:?}",
+        none.diagnostics
+    );
+    for bad in [
+        "[run.agent]\nskills = { enabled = true }\n",
+        "[run.agent]\nskills = [\"\"]\n",
+        "[run.agent]\nskills = [1]\n",
+    ] {
+        let refused = lowered(bad);
+        let codes: Vec<String> = refused
+            .diagnostics
+            .iter()
+            .map(|d| d.code.to_string())
+            .collect();
+        assert_eq!(
+            codes,
+            ["unsupported.workflow_toml.run.agent.skills"],
+            "{bad}: {:?}",
+            refused.diagnostics
+        );
+    }
 }
 
 /// Every agent node carries the reference sub-agent configuration (on,

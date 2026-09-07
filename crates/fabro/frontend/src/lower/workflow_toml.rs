@@ -41,6 +41,7 @@ use frontend::{Diagnostics, FileSource, Span};
 use serde_json::{Value, json};
 
 use super::secrets::{InterpolationError, interpolate};
+use super::skills;
 use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow, parse_duration};
 use crate::template::Context;
 
@@ -77,6 +78,8 @@ pub struct RunSettings {
     pub prepare_timeout_ms: u64,
     /// The file's path and text, for the hook loader's `[[run.hooks]]` layer.
     pub hooks_text:         Option<(String, String)>,
+    /// `[run.agent] skills`, the workflow's own skill directories.
+    pub skills:             skills::SkillSettings,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -578,13 +581,14 @@ impl Reader<'_> {
         let Some(agent) = item.as_table() else {
             return;
         };
-        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only; skills
-        // and compaction (readiness items 9c and 9e) have no `workflow.toml`
-        // surface at the pinned revision, and sub-agents need none: every
-        // native agent gets them (`super::subagents`). A key asking for one
-        // is refused as Fabro refuses it, never passed silently.
+        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only;
+        // compaction (readiness item 9e) has no `workflow.toml` surface at the
+        // pinned revision, and sub-agents need none: every native agent gets
+        // them (`super::subagents`). A key asking for one is refused as Fabro
+        // refuses it, never passed silently. `skills` is the standalone
+        // runner's own extension (`skills::read`).
         for key in agent.keys() {
-            if !matches!(key.as_str(), "fabro_tools" | "mcps") {
+            if !matches!(key.as_str(), "fabro_tools" | "mcps" | "skills") {
                 let path = self.path;
                 let hint = if key == "subagents" {
                     "remove it; native agents always have the sub-agent tools, as in Fabro, and \
@@ -596,13 +600,16 @@ impl Reader<'_> {
                     "workflow_toml.key",
                     format!(
                         "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` table \
-                         accepts (it takes `fabro_tools` and `mcps`); skills and compaction \
-                         have no workflow configuration at the pinned Fabro, and sub-agents \
-                         are always available to native agents"
+                         accepts (it takes `fabro_tools` and `mcps`); compaction has no \
+                         workflow configuration at the pinned Fabro, and sub-agents are \
+                         always available to native agents"
                     ),
                     hint,
                 );
             }
+        }
+        if let Some(value) = agent.get("skills") {
+            self.settings.skills = skills::read(value, self.path, &self.span, self.diags);
         }
         if agent.get("fabro_tools").and_then(toml::Value::as_bool) == Some(true) {
             let path = self.path;

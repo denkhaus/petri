@@ -196,7 +196,8 @@ pub async fn read(env: &dyn ExecEnv, paths: &[String]) -> Vec<Document> {
     out
 }
 
-async fn run(env: &dyn ExecEnv, script: &str) -> Option<String> {
+/// Run `script` in the scope and return its stdout when it succeeds.
+pub(crate) async fn run(env: &dyn ExecEnv, script: &str) -> Option<String> {
     let spec = ProcessSpec::new("bash", &["-c", script]).with_output(OutputMode::Bytes);
     let mut handle = env.spawn(spec).await.ok()?;
     let mut bytes = handle.bytes()?;
@@ -216,7 +217,7 @@ async fn run(env: &dyn ExecEnv, script: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out).into_owned())
 }
 
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 

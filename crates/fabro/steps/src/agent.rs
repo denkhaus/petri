@@ -85,6 +85,10 @@ pub struct AgentConfig {
     pub speed:            Option<String>,
     #[serde(default)]
     pub max_tokens:       Option<i64>,
+    /// The workflow's own skill directories (`[run.agent] skills`), searched
+    /// after Fabro's conventional ones.
+    #[serde(default)]
+    pub skill_dirs:       Vec<String>,
     /// The sub-agent tools a native session advertises and the bound on its
     /// agent tree; the lowering writes the reference defaults.
     #[serde(default)]
