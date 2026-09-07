@@ -522,6 +522,12 @@ impl LocalHooks {
     }
 
     async fn before_attempt(&self, view: &FiringView) -> HookReport {
+        // `start` is admitted before its scope's environment exists, so the
+        // stage step drives its `stage_start` once the sandbox is ready, in
+        // Fabro's order (`sandbox_ready`, `run_start`, `stage_start`).
+        if handler_type(view).as_deref() == Some("start") && self.env_for(view).is_none() {
+            return HookReport::proceed(HookPoint::BeforeAttempt);
+        }
         let mut context = self.stage_context(HookEvent::StageStart, view);
         context.cwd = self
             .env_for(view)
@@ -645,6 +651,20 @@ impl LocalHooks {
             }
         }
         report
+    }
+
+    /// The `start` stage's own `stage_start`, driven by the stage step with
+    /// the sandbox in place. Returns the raw decision with the report.
+    pub async fn start_stage(&self, ctx: &steps::StepCtx, label: &str) -> (Decision, HookReport) {
+        let mut context = self.context(HookEvent::StageStart);
+        context.node_id = Some(ctx.node.to_string());
+        context.node_label = Some(label.to_owned());
+        context.handler_type = Some("start".into());
+        context.cwd = Some(ctx.env.workspace_path().to_owned());
+        context.attempt = Some(ctx.attempt.raw());
+        context.max_attempts = Some(1);
+        self.dispatch(HookPoint::BeforeAttempt, &context, Some(ctx.env.clone()))
+            .await
     }
 
     /// A tool-boundary point, asked by the agent backend.

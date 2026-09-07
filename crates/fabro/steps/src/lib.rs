@@ -63,14 +63,22 @@ pub const BLOBS_DIR: &str = "blobs";
 /// capability and its own `Runtime::hooks` before calling this; the local
 /// service then steps aside, so no hook runs twice.
 pub fn register(runtime: Runtime) -> Runtime {
-    let runtime = runtime
-        .step(CommandStep)
-        .step(WaitStep)
-        .step(HumanStep)
-        .step(AgentStep)
-        .step(PromptStep)
-        .step(WorkflowStep)
-        .step(StageStep);
+    services(
+        runtime
+            .step(CommandStep)
+            .step(WaitStep)
+            .step(HumanStep)
+            .step(AgentStep)
+            .step(PromptStep)
+            .step(WorkflowStep)
+            .step(StageStep),
+    )
+}
+
+/// The run services alone, for a host or a test that registers its own mix
+/// of real and simulated Fabro steps: the local hook service, the output
+/// store, the retained sessions, and the run identity.
+pub fn services(runtime: Runtime) -> Runtime {
     let runtime = if runtime.installed_hooks().is_some() {
         runtime
     } else {

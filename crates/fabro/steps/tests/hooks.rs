@@ -13,7 +13,10 @@ use std::{env, fs};
 use fabro_steps::agent::THREAD_EVENT;
 use fabro_steps::hooks::{REPORT_EVENT, WARNING_EVENT};
 use fabro_steps::pebble::PebbleClient;
-use fabro_steps::register;
+use fabro_steps::{
+    AGENT_KIND, CommandStep, HumanStep, PROMPT_KIND, StageStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
+    register,
+};
 use frontend::{CompileInputs, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
 use pebble_coding_agent::test_support::{
@@ -150,6 +153,45 @@ async fn run(
     (report, customs)
 }
 
+/// Real commands and stages, simulated agents: what a retry phase needs, as
+/// a real command never requests a retry (Fabro's does not either).
+async fn run_with_stub_agents(dir: &RunDir, graph: Graph) -> (ExecutionReport, Arc<Customs>) {
+    let mut options = RunOptions::new(dir.path());
+    options.grace = Duration::from_millis(200);
+    options.retention = Retention::Always;
+    options.echo = false;
+    let customs = Arc::new(Customs::default());
+    let mut registry = Runtime::standard().registry().clone();
+    for kind in [&AGENT_KIND, &PROMPT_KIND, &WAIT_KIND, &WORKFLOW_KIND] {
+        registry.register_runner(Arc::new(StubStep::new((*kind).clone())));
+    }
+    registry.register(CommandStep);
+    registry.register(HumanStep);
+    registry.register(StageStep);
+    let rt = fabro_steps::services(
+        Runtime::standard()
+            .steps(registry)
+            .observe(customs.clone())
+            .options(options),
+    );
+    let report = rt.run(graph).await.expect("replay is byte-identical");
+    (report, customs)
+}
+
+/// Script a stub node's calls, as the embedding test does.
+fn simulate(graph: &mut Graph, node: &str, calls: Value) {
+    let node = graph
+        .body
+        .nodes
+        .iter_mut()
+        .find(|n| n.name == node)
+        .expect("node");
+    let Value::Object(config) = &mut node.step.config else {
+        panic!("an object config");
+    };
+    config.insert("simulate".into(), json!({ "calls": calls }));
+}
+
 fn workspace(dir: &RunDir) -> PathBuf {
     dir.path().join("scopes/scope-0/work")
 }
@@ -217,12 +259,21 @@ script = "echo never >> hooks.log"
         start [shape=Mdiamond]
         exit [shape=Msquare]
         prepare [shape=parallelogram, script="echo prepared"]
-        flaky [shape=parallelogram, script="test -f tried && exit 0 || { touch tried; echo '{\"outcome\":\"failed\",\"failure_class\":\"retry_requested\"}'; exit 1; }", output_schema="routing", max_retries=1]
+        flaky [prompt="try", max_retries=1]
         start -> prepare -> flaky -> exit
     }"#,
         &toml,
     );
-    let (report, customs) = run(&dir, graph, None).await;
+    let mut graph = graph;
+    simulate(
+        &mut graph,
+        "flaky",
+        json!([
+            { "outcome": "failed", "failure_class": "retry_requested" },
+            { "outcome": "succeeded" }
+        ]),
+    );
+    let (report, customs) = run_with_stub_agents(&dir, graph).await;
     assert_eq!(
         report.status,
         RunStatus::Success,
@@ -288,7 +339,7 @@ script = "echo never >> hooks.log"
     let ctx: Value = serde_json::from_str(&read(&ws.join("ctx.json"))).expect("edge context");
     assert_eq!(ctx["event"], "edge_selected");
     assert_eq!(ctx["workflow_name"], "W");
-    assert_eq!(ctx["handler_type"], "command");
+    assert_eq!(ctx["handler_type"], "agent");
 }
 
 /// Fabro's exit-code rule and the decision points: a `stage_start` skip
@@ -380,6 +431,7 @@ script = "exit 2"
         r#"
 [[run.hooks]]
 event = "stage_start"
+matcher = "^guarded$"
 script = "echo 'no' >&2; exit 2"
 "#,
     );

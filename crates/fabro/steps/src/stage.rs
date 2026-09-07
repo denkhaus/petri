@@ -132,16 +132,39 @@ impl Step for StageStep {
             "start" => &[
                 (HookEvent::SandboxReady, HookPoint::BeforeVisit),
                 (HookEvent::RunStart, HookPoint::BeforeVisit),
+                (HookEvent::StageStart, HookPoint::BeforeAttempt),
             ],
             "exit" => &[(HookEvent::RunComplete, HookPoint::AfterVisit)],
             _ => &[],
         };
         let _ = &handle;
         for (event, point) in events {
-            let context = local.context(*event);
-            let (decision, mut report) = local
-                .dispatch(*point, &context, Some(ctx.env.clone()))
-                .await;
+            let (decision, mut report) = if *event == HookEvent::StageStart {
+                local.start_stage(&ctx, &config.label).await
+            } else {
+                let context = local.context(*event);
+                local
+                    .dispatch(*point, &context, Some(ctx.env.clone()))
+                    .await
+            };
+            if *event == HookEvent::StageStart
+                && let crate::hooks::Decision::Skip { .. } = &decision
+            {
+                report.decision = HookDecision::Skip {
+                    status: ir::Status::Skipped,
+                };
+                let _ = ctx
+                    .logs
+                    .send(report_event(
+                        &ctx.node,
+                        ctx.firing,
+                        ctx.attempt,
+                        *event,
+                        &report,
+                    ))
+                    .await;
+                return Stage::new(StageOutcome::Skipped, None).into_outcome(&config.node);
+            }
             if let crate::hooks::Decision::Block { reason } = &decision {
                 report.decision = HookDecision::Block {
                     reason: reason
