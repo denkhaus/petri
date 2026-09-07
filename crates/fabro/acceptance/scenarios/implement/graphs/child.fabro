@@ -1,0 +1,43 @@
+digraph ImplementPlanFixture {
+    graph [goal="Implement the plan, then verify with the fixture's own check"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    preflight [
+        shape=parallelogram,
+        label="Preflight",
+        script="sh check.sh 2>&1 || echo PREFLIGHT_FAILED",
+        max_retries=0
+    ]
+    implement [
+        label="Implement",
+        prompt="Read plan.md and implement every step. Report the state the check needs under `plan_state`.",
+        on_failure="exit",
+        output_schema="routing",
+        max_visits=3
+    ]
+    apply [
+        shape=parallelogram,
+        label="Apply the implementation",
+        script="cat > state.txt && cat state.txt",
+        stdin_source="context.plan_state"
+    ]
+    verify [
+        shape=parallelogram,
+        label="Verify",
+        script="sh check.sh 2>&1",
+        goal_gate=true,
+        retry_target="fixup",
+        max_visits=3
+    ]
+    fixup [
+        label="Fixup",
+        prompt="The verify step failed. Read the check output from context and report the corrected state under `plan_state`.",
+        output_schema="routing",
+        max_visits=3
+    ]
+    start -> preflight -> implement -> apply -> verify
+    verify -> exit [condition="outcome=succeeded"]
+    verify -> fixup
+    fixup -> apply
+}

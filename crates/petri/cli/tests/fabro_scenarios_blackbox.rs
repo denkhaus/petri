@@ -226,6 +226,45 @@ cell!(
     anthropic
 );
 
+// ── Implement issue and plan ────────────────────────────────────────────────
+
+cell!(
+    implement_child_runs_successfully,
+    "implement/child-runs-successfully",
+    host,
+    openrouter
+);
+cell!(
+    implement_input_model_inheritance,
+    "implement/input-model-inheritance",
+    host,
+    openrouter
+);
+cell!(
+    implement_multiple_manager_cycles,
+    "implement/multiple-manager-cycles",
+    host,
+    openrouter
+);
+cell!(
+    implement_stop_condition,
+    "implement/stop-condition",
+    host,
+    openrouter
+);
+cell!(
+    implement_child_failure,
+    "implement/child-failure",
+    host,
+    openrouter
+);
+cell!(
+    implement_parent_cancellation,
+    "implement/parent-cancellation",
+    host,
+    openrouter
+);
+
 // ── Interview gates ─────────────────────────────────────────────────────────
 
 cell!(
@@ -335,6 +374,21 @@ fn every_scenario_file_loads_and_the_matrix_is_consistent() {
             .iter()
             .any(|cell| cell.scenario.as_deref() == Some(scenario.id.as_str()));
         assert!(listed, "{} is not in matrix.json", path.display());
+    }
+    // Every planned cell names a scenario file that exists, so a coverage
+    // report can only be missing a cell because its test did not run.
+    for cell in &matrix.cells {
+        if cell.status != CellStatus::Planned {
+            continue;
+        }
+        let Some(id) = &cell.scenario else {
+            continue;
+        };
+        assert!(
+            scenarios.iter().any(|(_, scenario)| &scenario.id == id),
+            "planned cell `{}` names no scenario file",
+            cell.name
+        );
     }
 }
 

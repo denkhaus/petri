@@ -1152,7 +1152,7 @@
       ],
       "entry_point": ".fabro/workflows/fix-ci/workflow.fabro",
       "workflow_config": ".fabro/workflows/fix-ci/workflow.toml",
-      "status": "required-blocked",
+      "status": "excluded",
       "classification": "valid-fabro",
       "classification_reason": "The only fix-ci repair loop found under ~/p/; goal-gated command loop with an agent repair node. Read from a working tree with unrelated uncommitted changes; the bundle files match the committed revision.",
       "file_count": 9,
@@ -1290,25 +1290,13 @@
         ],
         "human": []
       },
-      "scenario_obligations": [
-        "fix-ci/initial-check-passes",
-        "fix-ci/fails-then-edit-passes",
-        "fix-ci/repeated-failure-exhausts-budget",
-        "fix-ci/provider-failure",
-        "fix-ci/timeout",
-        "fix-ci/cancellation"
-      ],
-      "blockers": [
-        "fix_ci.py checkout calls the GitHub API (api.github.com) and clones veniceai/interface; the deterministic harness needs a local stand-in (task 17)",
-        "{{ secrets.* }} in [environments.fix-ci.env] resolve from PETRI_SECRET_<NAME> in the standalone runner; the harness must supply RXDB_PREMIUM and VENICE_PACKAGE_REGISTRY_READ_PAT stand-ins (task 17)",
-        "[environments.fix-ci.image] dockerfile is a warning; the scenario must name a prebuilt image or run on the docker backend's default runner image (task 17)",
-        "setup node installs the target's yarn dependencies (network); a fixture target must be offline-installable",
-        "Daytona provider is outside the initial black box scope; run on docker"
-      ],
+      "scenario_obligations": [],
+      "blockers": [],
       "notes": [
         "The workflow updates an existing target branch itself and disables run_branch and pull_request.",
         "The regular Dockerfile is a dependency through workflow.toml's dockerfile path."
-      ]
+      ],
+      "excluded_reason": "owner decision 2026-09-07: no GitHub API stand-in. fix_ci.py resolves its target through api.github.com and clones veniceai/interface, and its setup step needs yarn 4.12.0 through corepack offline; the owner judged a scripted stand-in overkill. The repair loop's non-GitHub behavior (a real deterministic check, a repair turn, an exhausted budget, a provider failure, a timeout, a cancellation) is covered by the provider-fault and routing families."
     },
     {
       "id": "implement-issue",

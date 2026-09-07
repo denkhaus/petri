@@ -20,20 +20,34 @@ scenarios/
   parallel-results/             task 3's regression (its own CONTRACT.md and Fabro capture)
 ```
 
-Families: `code-review`, `security-review`, `fix-ci`, `implement`,
-`interview`, `provider-faults`, `routing`, and `backend` (the
-backend-matrix cases). The family's minimum scenarios
+Families: `code-review`, `security-review`, `implement`, `interview`,
+`provider-faults`, `routing`, and `backend` (the backend-matrix cases). The
+`fix-ci` bundle is excluded by an owner decision of 2026-09-07; `../CONTRACT.md`
+records the reason and where its behavior is covered instead. The family's minimum scenarios
 and critical outcomes are the phase 4 table of
 `.ai/plans/fabro-black-box-e2e.md`; `../CONTRACT.md` records which
 obligation each scenario satisfies and which remain blocked.
 
+## Coverage states
+
+`matrix.json` declares each cell `planned`, `blocked` or `excluded`, and the
+report resolves it to one state: `passed`, `external` (a cell verified by a
+test in another suite, named in the report), `failed`, `skipped` (a gated
+resource was missing), `missing` (a planned cell no test reported, which
+counts as failed), `blocked` (a required cell that cannot run yet, with its
+reason) or `excluded` (not required, with its reason).
+
 ## Running
 
-`mise run test:fabro:blackbox` runs the routine subset: every scenario cell
-of `matrix.json` whose `status` is `planned` on the host backend, plus the
-Docker cells when a daemon is reachable. The bundles must be fetched first
+`mise run test:fabro:blackbox` runs every planned cell of `matrix.json` and
+then the coverage report, allowing a skipped cell (a machine with no Docker).
+`mise run test:fabro:blackbox:strict` requires Docker
+(`PETRI_REQUIRE_DOCKER=1`) and the fetched bundles
+(`PETRI_REQUIRE_FABRO_BUNDLES=1`) and fails on any skipped cell; the nightly
+gate runs it, so the repeated container work stays out of the routine
+subset. The bundles must be fetched first
 (`scripts/corpus-fetch-fabro-bundles.sh`); a missing bundle skips its
-scenarios unless `PETRI_REQUIRE_FABRO_BUNDLES=1`, which fails them.
+scenarios in the routine task and fails them in the strict one.
 
 Each cell is one Nextest test in `crates/petri/cli/tests/fabro_scenarios_blackbox.rs`.
 The test stages the fixture repository under a fresh directory, starts the
@@ -44,11 +58,12 @@ and applies the scenario's `expect` block through
 ## Coverage report
 
 Every test writes its cell's result to `$PETRI_FABRO_COVERAGE_DIR`
-(default `target/fabro-coverage/results/`). `scripts/fabro-coverage-report.py`
-merges those results with `matrix.json` into `coverage.json`: for every
-required cell one of `passed`, `failed`, `blocked`, `excluded`, or
-`missing` (a required cell no test reported, which counts as failed). CI
-publishes that file; a filtered-out or skipped case is therefore visible.
+(default `target/fabro-coverage/results/`) when it starts, as a failure, and
+rewrites it as a pass only when every expectation held, so a panic or a
+killed process leaves a failure on record. `scripts/fabro-coverage-report.py`
+merges those results with `matrix.json` into `coverage.json` and prints the
+table; its exit code is nonzero when a planned cell is not accounted for. CI
+publishes that file.
 
 ## Writing a scenario
 

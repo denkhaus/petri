@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "id": "implement/input-model-inheritance",
+  "family": "implement",
+  "title": "The child inherits the run's model configuration and the parent's summary: the parent declares no model on its nodes, every request carries the model the run's own settings named, and the child's first prompt carries the parent's plan.",
+  "obligation": "implement/input-model-inheritance",
+  "bundle": {
+    "inline": "graphs/parent.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "the fixture the plan changes",
+        "write": {
+          "check.sh": {
+            "file": "fixtures/check.sh",
+            "mode": "0755"
+          },
+          "issue.md": {
+            "file": "fixtures/issue.md"
+          },
+          "state.txt": {
+            "text": "bad\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openrouter\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openrouter"
+  },
+  "services": {
+    "openrouter": [
+      {
+        "scenario_id": "plan",
+        "matcher": {
+          "input_contains": "Read the issue text in issue.md"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"plan_note\": \"Write good into state.txt\\n\"}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "implement",
+        "matcher": {
+          "input_contains": "Read plan.md and implement every step"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"plan_state\": \"good\\n\"}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 180000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "plan",
+        "write_plan",
+        "implement",
+        "report"
+      ],
+      "forbidden_nodes": [
+        "fixup"
+      ],
+      "visits": {
+        "implement": 1,
+        "report": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "plan_note": "Write good into state.txt\n",
+        "command.output": "good\nPARENT_DONE\n"
+      },
+      "absent": [
+        "response.fixup"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "state.txt",
+        "text": "good\n"
+      },
+      {
+        "path": "plan.md",
+        "text": "Write good into state.txt\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openrouter": {
+        "consumed": [
+          "plan",
+          "implement"
+        ],
+        "unmatched": 0,
+        "requests": 2,
+        "model": "{model}",
+        "contains": [
+          {
+            "request": 1,
+            "text": "plan.md"
+          }
+        ]
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

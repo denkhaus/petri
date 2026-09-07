@@ -102,14 +102,21 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
         copy_tree(&source, &repo);
     }
     if let Bundle::Inline { inline, .. } = &scenario.bundle {
-        // The graph lands at the repository root under its own name; a
-        // `workflow.toml` beside it in the scenario directory comes along.
+        // Every graph of the scenario's directory lands flat at the
+        // repository root, so a parent's `stack.child_workflow` names its
+        // child by file name; a `workflow.toml` beside them comes along.
         let source = scenario.dir.join(inline);
-        let name = source.file_name().expect("inline graph name").to_owned();
-        fs::copy(&source, repo.join(&name)).expect("inline graph");
-        let toml = source.with_file_name("workflow.toml");
-        if toml.is_file() {
-            fs::copy(&toml, repo.join("workflow.toml")).expect("inline workflow.toml");
+        let dir = source.parent().unwrap_or(&scenario.dir).to_path_buf();
+        for entry in fs::read_dir(&dir).expect("read the graph directory") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            let name = entry.file_name();
+            let is_graph = path
+                .extension()
+                .is_some_and(|extension| extension == "fabro" || extension == "dot");
+            if is_graph || name == "workflow.toml" {
+                fs::copy(&path, repo.join(&name)).expect("copy the inline graph");
+            }
         }
     }
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -500,8 +507,11 @@ async fn expect(ran: &Ran, requests_at_interrupt: Option<usize>) {
         context_for_errors()
     );
     let history = root_history(&document);
+    // A node the cancel reached before it ran has a `cancelled` record; it
+    // did not run, so it counts for neither list.
     let visited: Vec<String> = history
         .iter()
+        .filter(|entry| entry["status"] != "cancelled")
         .filter_map(|entry| entry["node"].as_str().map(str::to_owned))
         .collect();
     for node in &expect.process.required_nodes {

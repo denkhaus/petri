@@ -1,0 +1,15 @@
+digraph ImplementIssueSlow {
+    graph [goal="Hand long work to the child and wait for it"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    implement [
+        label="Implement",
+        shape=house,
+        stack.child_workflow="slow-child.fabro",
+        manager.max_cycles=100,
+        manager.poll_interval="1s"
+    ]
+    report [shape=parallelogram, script="echo PARENT_DONE > report.txt"]
+    start -> implement -> report -> exit
+}

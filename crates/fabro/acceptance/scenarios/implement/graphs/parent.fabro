@@ -1,0 +1,30 @@
+digraph ImplementIssueFixture {
+    graph [goal="Plan the issue, then hand the plan to the child workflow"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    plan [
+        label="Plan",
+        prompt="Read the issue text in issue.md and report the plan under `plan_note`.",
+        output_schema="routing",
+        on_failure="exit"
+    ]
+    write_plan [
+        shape=parallelogram,
+        label="Write the plan file",
+        script="cat > plan.md && cat plan.md",
+        stdin_source="context.plan_note"
+    ]
+    implement [
+        label="Implement",
+        shape=house,
+        stack.child_workflow="child.fabro",
+        on_failure="exit",
+        manager.max_cycles=100,
+        manager.poll_interval="1s"
+    ]
+    report [shape=parallelogram, script="cat state.txt && echo PARENT_DONE"]
+    start -> plan -> write_plan
+    write_plan -> implement [fidelity="summary:high"]
+    implement -> report -> exit
+}

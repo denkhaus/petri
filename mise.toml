@@ -51,10 +51,24 @@ run = [
 ]
 
 [tasks."test:fabro:blackbox"]
-description = "Run the Fabro black box scenarios on the shipped petri binary"
+description = "Run the Fabro black box scenarios on the shipped petri binary, then report the coverage of every required matrix cell"
 depends = ["plugins:build"]
-env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
-run = "cargo nextest run --locked -p petri-cli --test fabro_blackbox --no-tests=fail"
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_FABRO_COVERAGE_DIR = "{{config_root}}/target/fabro-coverage/results", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
+run = [
+  "rm -rf {{config_root}}/target/fabro-coverage/results",
+  "cargo nextest run --locked -p petri-cli --test fabro_blackbox --test fabro_scenarios_blackbox --no-tests=fail",
+  "python3 {{config_root}}/scripts/fabro-coverage-report.py --allow-skipped",
+]
+
+[tasks."test:fabro:blackbox:strict"]
+description = "The black box scenarios with every gated resource required: Docker, the fetched bundles, and no skipped matrix cell"
+depends = ["plugins:build"]
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_FABRO_COVERAGE_DIR = "{{config_root}}/target/fabro-coverage/results", PETRI_REQUIRE_DOCKER = "1", PETRI_REQUIRE_FABRO_BUNDLES = "1", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
+run = [
+  "rm -rf {{config_root}}/target/fabro-coverage/results",
+  "cargo nextest run --locked -p petri-cli --test fabro_blackbox --test fabro_scenarios_blackbox --no-tests=fail",
+  "python3 {{config_root}}/scripts/fabro-coverage-report.py",
+]
 
 [tasks."test:fabro:differential"]
 description = "Run the differential matrix: every scenario through the shipped petri binary and the pinned Fabro binary (built by scripts/fabro-provision.sh; a missing binary compares Petri against the committed references)"
@@ -122,6 +136,7 @@ depends = ["check"]
 run = [
   "mise run check:msrv",
   "mise run test:long",
+  "mise run test:fabro:blackbox:strict",
   "cargo clean --profile dev",
   "cargo clean --profile test",
   "cargo clean --target-dir target/clippy",

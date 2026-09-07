@@ -33,7 +33,6 @@ pub(crate) const FAMILIES: &[&str] = &[
     "backend",
     "code-review",
     "security-review",
-    "fix-ci",
     "implement",
     "interview",
     "provider-faults",

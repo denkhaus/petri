@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "id": "implement/child-runs-successfully",
+  "family": "implement",
+  "title": "The manager node starts its child workflow once, the child implements the plan and its own deterministic check passes on the first verify, and the child's public context keys (its `plan_state`) reach the parent.",
+  "obligation": "implement/child-runs-successfully",
+  "bundle": {
+    "inline": "graphs/parent.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "the fixture the plan changes",
+        "write": {
+          "check.sh": {
+            "file": "fixtures/check.sh",
+            "mode": "0755"
+          },
+          "issue.md": {
+            "file": "fixtures/issue.md"
+          },
+          "state.txt": {
+            "text": "bad\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openrouter\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openrouter"
+  },
+  "services": {
+    "openrouter": [
+      {
+        "scenario_id": "plan",
+        "matcher": {
+          "input_contains": "Read the issue text in issue.md"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"plan_note\": \"Write good into state.txt\\n\"}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "implement",
+        "matcher": {
+          "input_contains": "Read plan.md and implement every step"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"plan_state\": \"good\\n\"}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 180000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "plan",
+        "write_plan",
+        "implement",
+        "report"
+      ],
+      "forbidden_nodes": [
+        "fixup"
+      ],
+      "visits": {
+        "implement": 1,
+        "report": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "plan_note": "Write good into state.txt\n",
+        "command.output": "good\nPARENT_DONE\n",
+        "plan_state": "good\n"
+      },
+      "absent": [
+        "response.fixup"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "state.txt",
+        "text": "good\n"
+      },
+      {
+        "path": "plan.md",
+        "text": "Write good into state.txt\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openrouter": {
+        "consumed": [
+          "plan",
+          "implement"
+        ],
+        "unmatched": 0,
+        "requests": 2,
+        "model": "{model}"
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

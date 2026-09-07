@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "id": "implement/child-failure",
+  "family": "implement",
+  "title": "The child's implement agent is refused by the provider on every attempt, so the child fails: the manager node reports the child's failure and its reason, the fixture's check still says the state is bad, and the parent's report never runs.",
+  "obligation": "implement/child-failure",
+  "bundle": {
+    "inline": "graphs/parent.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "the fixture the plan changes",
+        "write": {
+          "check.sh": {
+            "file": "fixtures/check.sh",
+            "mode": "0755"
+          },
+          "issue.md": {
+            "file": "fixtures/issue.md"
+          },
+          "state.txt": {
+            "text": "bad\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openrouter\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openrouter"
+  },
+  "services": {
+    "openrouter": [
+      {
+        "scenario_id": "plan",
+        "matcher": {
+          "input_contains": "Read the issue text in issue.md"
+        },
+        "script": {
+          "kind": "success",
+          "response_text": "{\"outcome\": \"succeeded\", \"context_updates\": {\"plan_note\": \"Write good into state.txt\\n\"}}",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+          }
+        }
+      },
+      {
+        "scenario_id": "implement-down",
+        "matcher": {
+          "input_contains": "Read plan.md and implement every step"
+        },
+        "script": {
+          "kind": "error",
+          "status": 400,
+          "error_type": "invalid_request_error",
+          "code": "invalid_request",
+          "message": "the fixture refuses the implement turn"
+        }
+      }
+    ]
+  },
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 180000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "failed",
+      "required_nodes": [
+        "plan",
+        "write_plan",
+        "implement"
+      ],
+      "forbidden_nodes": [
+        "report"
+      ],
+      "visits": {
+        "implement": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "plan_note": "Write good into state.txt\n"
+      },
+      "absent": [
+        "plan_state"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "state.txt",
+        "text": "bad\n"
+      },
+      {
+        "path": "plan.md",
+        "text": "Write good into state.txt\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openrouter": {
+        "consumed": {
+          "$set": [
+            "plan",
+            "implement-down"
+          ]
+        },
+        "unmatched": 0,
+        "requests": 2
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

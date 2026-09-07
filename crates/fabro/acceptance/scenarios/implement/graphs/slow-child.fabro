@@ -1,0 +1,12 @@
+digraph SlowChild {
+    graph [goal="Work long enough for the manager to evaluate its stop condition"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [
+        shape=parallelogram,
+        label="Long work",
+        script="printf 'started\n' > child-started.txt && sleep 60 && printf 'CHILD_FINISHED\n' > child.txt"
+    ]
+    start -> work -> exit
+}

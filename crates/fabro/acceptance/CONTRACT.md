@@ -109,12 +109,28 @@ clean machine and verifies every digest.
 |---|---|---|---|
 | `code-review` | `lithoscomputer/code-review` `0c81ffb4f68039ca56842ab3328fde03b9714350` (private; HEAD, clean) | required | empty diff; findings in multiple branches; no surviving findings; invalid output repaired; repair exhausted; one failed branch; reverse branch completion; multi-level fan-out |
 | `security-review` | `lithoscomputer/security-review` `c14279e9cdac4f7553b5e010718ada1a76e5c1f8` (public; HEAD, clean) | required | no vulnerabilities; several verified; rejected candidate; partial branch failure; malformed response; timeout and cancel |
-| `fix-ci` | `veniceai/factory` `1b50f791ac4811aad62788c2a4282a75d1e92422` (private; bundle files match HEAD, other files in that working tree were dirty) | required, blocked | initial check passes; fails then edit passes; repeated failure exhausts budget; provider failure; timeout; cancellation |
+| `fix-ci` | `veniceai/factory` `1b50f791ac4811aad62788c2a4282a75d1e92422` (private; bundle files match HEAD, other files in that working tree were dirty) | excluded (owner decision 2026-09-07) | none; see below |
 | `implement-issue` (with `implement-plan`) | `fabro-sh/fabro` at the pin | required, blocked | child runs; input and model inheritance; multiple manager cycles; stop condition; child failure; parent cancellation |
 | `interview` | `fabro-sh/fabro` at the pin | required | scripted choice, refusal, free text; repeated and concurrent questions; child interviews; delayed and withheld reply; invalid, unexpected and unused answers; timeout and cancel; terminal EOF |
 
 "Blocked" names a required bundle whose scenarios cannot run yet. The
 blockers are listed per bundle in the lock file. They are not exclusions.
+
+`fix-ci` is excluded by an owner decision of 2026-09-07: `fix_ci.py` resolves
+its target through `api.github.com` and clones `veniceai/interface`, and its
+setup step needs yarn 4.12.0 through corepack with no network, so a
+deterministic run needs a scripted stand-in for the GitHub API and an
+offline-installable Node target. The owner judged that overkill. The repair
+loop's behavior that does not depend on GitHub is covered elsewhere: a real
+deterministic check driving a repair loop until it passes, with the visit
+totals surviving the jump, is `routing/goal-gate-restart-and-visit-limit`;
+a provider failure, an exhausted retry budget, a hanging request and a
+cancellation are the `provider-faults` family; a failing stage's policy is
+`routing/failure-policy`. What stays uncovered is the bundle's own GitHub
+target resolution and its `publish` step's single push after success. The
+bundle keeps its provenance in `bundles.lock.json` with
+`status: "excluded"` and the reason, so the decision is visible and
+reversible.
 
 ### Inventory and classification
 

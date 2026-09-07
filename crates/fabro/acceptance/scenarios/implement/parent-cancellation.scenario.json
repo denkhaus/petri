@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "id": "implement/parent-cancellation",
+  "family": "implement",
+  "title": "The parent is cancelled from the terminal while its child works: the run ends cancelled with the interrupt reason, the child's long work leaves no finished file, no model request follows the cancel, and no process of either level survives.",
+  "obligation": "implement/parent-cancellation",
+  "bundle": {
+    "inline": "graphs/parent-slow.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "the fixture the plan changes",
+        "write": {
+          "check.sh": {
+            "file": "fixtures/check.sh",
+            "mode": "0755"
+          },
+          "issue.md": {
+            "file": "fixtures/issue.md"
+          },
+          "state.txt": {
+            "text": "bad\n"
+          }
+        }
+      }
+    ],
+    "settings": "[run.model]\nprovider = \"openrouter\"\nname = \"{model}\"\n"
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "api:openrouter"
+  },
+  "services": {
+    "openrouter": []
+  },
+  "interviews": [],
+  "controls": {
+    "interrupt_when": {
+      "file": "child-started.txt"
+    }
+  },
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "cancelled",
+      "required_nodes": [],
+      "forbidden_nodes": [
+        "report"
+      ],
+      "visits": {}
+    },
+    "context": {
+      "exact": {},
+      "absent": [
+        "response.implement"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "child-started.txt",
+        "text": "started\n"
+      },
+      {
+        "path": "child.txt",
+        "absent": true
+      },
+      {
+        "path": "report.txt",
+        "absent": true
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {
+      "openrouter": {
+        "consumed": [],
+        "unmatched": 0,
+        "requests": 0
+      }
+    },
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true,
+      "no_requests_after_cancel": true,
+      "cancel_reason": "interrupt"
+    }
+  }
+}

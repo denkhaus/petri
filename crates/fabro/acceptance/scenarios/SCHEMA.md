@@ -19,7 +19,7 @@ of silently disabling an assertion. Task 18's differential adapter and task
 | --- | --- | --- |
 | `schema_version` | yes | `1` |
 | `id` | yes | `<family>/<name>`, equal to the file's path without `.scenario.json` |
-| `family` | yes | one of `code-review`, `security-review`, `fix-ci`, `implement`, `interview`, `provider-faults`, `routing`, `backend` (the backend-matrix cases: what a container scope must do that a host scope already does) |
+| `family` | yes | one of `code-review`, `security-review`, `implement`, `interview`, `provider-faults`, `routing`, `backend` (the backend-matrix cases: what a container scope must do that a host scope already does) |
 | `title` | yes | one sentence |
 | `obligation` | no | the `scenario_obligations` entry of `bundles.lock.json` this scenario satisfies |
 | `bundle` | yes | see "Bundle" |
@@ -195,7 +195,8 @@ Values compare exactly unless the value is a matcher object:
 `process.status` is `success`, `failed`, or `cancelled`, the run's own
 status as `petri inspect` reports it. `visits` are per node, from the node
 records. `required_nodes` and `forbidden_nodes` are node names as the run
-finished them (branch instances are `job#0`, ...).
+finished them (branch instances are `job#0`, ...); a node a cancel reached
+before it ran has a `cancelled` record and counts for neither list.
 
 `context` compares the root invocation's final context: `exact` per key,
 `absent` per key, and with `complete: true` every other key must be listed
