@@ -30,6 +30,7 @@ pub(crate) const BUNDLES_LOCK: &str = "../../fabro/acceptance/bundles.lock.json"
 pub(crate) const BUNDLES_DIR: &str = "../../fabro/acceptance/bundles";
 
 pub(crate) const FAMILIES: &[&str] = &[
+    "backend",
     "code-review",
     "security-review",
     "fix-ci",

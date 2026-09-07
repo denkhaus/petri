@@ -1,0 +1,16 @@
+digraph DynamicFanOut {
+    graph [goal="Fan out over a planned list, each branch an agent that writes its own file"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    plan [
+        shape=parallelogram,
+        output_schema="routing",
+        script="printf '%s' '{\"context_updates\":{\"jobs\":[{\"name\":\"alpha\"},{\"name\":\"beta\"},{\"name\":\"gamma\"}]}}'"
+    ]
+    fan [shape=component, label="Review each item", for_each="context.jobs", max_parallel=2]
+    job [label="Review one item", prompt="Review the item and report one finding.", output_schema="routing"]
+    join [shape=tripleoctagon, label="Gather findings"]
+    report [shape=parallelogram, script="cat > results.json && ls -1 findings-*.txt | sort", stdin_source="context.parallel.results"]
+    start -> plan -> fan -> job -> join -> report -> exit
+}

@@ -171,6 +171,61 @@ cell!(
     anthropic
 );
 
+// ── Routing and configuration ───────────────────────────────────────────────
+
+cell!(
+    routing_bundle_defaults_and_overrides,
+    "routing/bundle-defaults-and-overrides",
+    host,
+    openrouter
+);
+cell!(
+    routing_goal_gate_restart_and_visit_limit,
+    "routing/goal-gate-restart-and-visit-limit",
+    host,
+    none
+);
+cell!(routing_failure_policy, "routing/failure-policy", host, none);
+
+// ── Backend matrix ──────────────────────────────────────────────────────────
+
+cell!(
+    backend_file_and_tool_execution,
+    "backend/file-and-tool-execution",
+    host,
+    openai
+);
+cell!(
+    backend_file_and_tool_execution_docker,
+    "backend/file-and-tool-execution",
+    docker,
+    openai
+);
+cell!(
+    backend_dynamic_parallelism,
+    "backend/dynamic-parallelism",
+    host,
+    openai
+);
+cell!(
+    backend_dynamic_parallelism_docker,
+    "backend/dynamic-parallelism",
+    docker,
+    openai
+);
+cell!(
+    backend_nested_workflow_docker,
+    "interview/child-interviews",
+    docker,
+    openai
+);
+cell!(
+    backend_cancellation_docker,
+    "provider-faults/hanging-response",
+    docker,
+    anthropic
+);
+
 // ── Interview gates ─────────────────────────────────────────────────────────
 
 cell!(

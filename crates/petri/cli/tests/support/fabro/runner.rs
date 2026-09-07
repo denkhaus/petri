@@ -69,6 +69,14 @@ pub(crate) async fn run_cell(cell: &str, id: &str, backend: Backend, agent: Agen
         return None;
     }
     let ran = run(scenario, backend, agent, cell).await;
+    // A Fabro run keeps its workspace, so a container cell leaves a sandbox
+    // behind. The workspace was copied out before the assertions ran, so the
+    // cell prunes its own sandbox and nothing else: three agents share this
+    // daemon.
+    if backend == Backend::Docker && !ran.scenario.expect.lifecycle.prune_removes_sandbox {
+        let (code, stderr) = ran.case.prune().await;
+        assert_eq!(code, Some(0), "the cell prunes its own sandbox: {stderr}");
+    }
     record.pass();
     Some(ran)
 }

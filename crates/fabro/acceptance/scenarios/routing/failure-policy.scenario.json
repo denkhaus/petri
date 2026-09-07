@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "routing/failure-policy",
+  "family": "routing",
+  "title": "Three failure policies in one run: a failed stage with on_failure=route takes its recovery edge, one with on_failure=succeed carries on as a success, and one with on_failure=exit ends the run failed before the node behind it.",
+  "obligation": "routing/failure-policy",
+  "bundle": {
+    "inline": "graphs/failure-policy.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "none"
+  },
+  "services": {},
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "failed",
+      "required_nodes": [
+        "routed",
+        "recovered",
+        "tolerated",
+        "fatal"
+      ],
+      "forbidden_nodes": [
+        "never"
+      ],
+      "visits": {
+        "routed": 1,
+        "recovered": 1,
+        "tolerated": 1,
+        "fatal": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "failure_class": "exit_status:5"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "order.log",
+        "text": "routed\nrecovered\ntolerated\nfatal\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

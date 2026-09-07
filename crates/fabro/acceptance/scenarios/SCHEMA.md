@@ -19,7 +19,7 @@ of silently disabling an assertion. Task 18's differential adapter and task
 | --- | --- | --- |
 | `schema_version` | yes | `1` |
 | `id` | yes | `<family>/<name>`, equal to the file's path without `.scenario.json` |
-| `family` | yes | one of `code-review`, `security-review`, `fix-ci`, `implement`, `interview`, `provider-faults`, `routing` |
+| `family` | yes | one of `code-review`, `security-review`, `fix-ci`, `implement`, `interview`, `provider-faults`, `routing`, `backend` (the backend-matrix cases: what a container scope must do that a host scope already does) |
 | `title` | yes | one sentence |
 | `obligation` | no | the `scenario_obligations` entry of `bundles.lock.json` this scenario satisfies |
 | `bundle` | yes | see "Bundle" |

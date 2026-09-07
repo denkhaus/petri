@@ -1,0 +1,29 @@
+digraph GoalGateLoop {
+    graph [
+        goal="Make the check pass, then leave through the goal gate",
+        max_node_visits=6,
+        retry_target=repair
+    ]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    seed [shape=parallelogram, script="printf 'bad\n' > state.txt && echo seeded"]
+    check [
+        shape=parallelogram,
+        label="Deterministic check",
+        script="grep -qx good state.txt && echo CHECK_PASSED",
+        goal_gate=true,
+        retry_target="repair",
+        max_visits=3
+    ]
+    repair [
+        shape=parallelogram,
+        label="Repair the state",
+        script="printf 'good\n' > state.txt && echo repaired >> repairs.log && echo REPAIRED",
+        max_visits=3
+    ]
+    start -> seed -> check
+    check -> exit [condition="outcome=succeeded"]
+    check -> repair
+    repair -> check
+}

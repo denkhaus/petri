@@ -1,0 +1,16 @@
+digraph FailurePolicy {
+    graph [goal="One failing stage per policy: route, succeed, exit"]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    routed [shape=parallelogram, label="Fails and routes", script="echo routed >> order.log; exit 3", on_failure="route"]
+    recovered [shape=parallelogram, label="Recovery route", script="echo recovered >> order.log && echo RECOVERED"]
+    tolerated [shape=parallelogram, label="Fails and succeeds", script="echo tolerated >> order.log; exit 4", on_failure="succeed"]
+    fatal [shape=parallelogram, label="Fails and exits", script="echo fatal >> order.log; exit 5", on_failure="exit"]
+    never [shape=parallelogram, label="Never runs", script="echo never >> order.log"]
+    start -> routed
+    routed -> recovered [condition="outcome!=succeeded"]
+    routed -> never
+    recovered -> tolerated -> fatal -> never
+    never -> exit
+}

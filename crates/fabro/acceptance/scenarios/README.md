@@ -21,7 +21,8 @@ scenarios/
 ```
 
 Families: `code-review`, `security-review`, `fix-ci`, `implement`,
-`interview`, `provider-faults`, `routing`. The family's minimum scenarios
+`interview`, `provider-faults`, `routing`, and `backend` (the
+backend-matrix cases). The family's minimum scenarios
 and critical outcomes are the phase 4 table of
 `.ai/plans/fabro-black-box-e2e.md`; `../CONTRACT.md` records which
 obligation each scenario satisfies and which remain blocked.
