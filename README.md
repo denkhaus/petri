@@ -131,6 +131,8 @@ crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-a
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
+crates/petri/cli/tests/fabro_differential.rs black box phase 5: every scenario through the shipped binary and the pinned Fabro binary, independent expectations per engine, the committed reference, and the comparison under `tests/support/fabro/compare.rs` with decision records (`crates/fabro/acceptance/decisions/`)
+crates/fabro/acceptance/tests/reference_version.rs  every oracle fixture, scenario reference, decision record, staged bundle and evidence record names the pinned Fabro revision
 crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation, occurrence across a loop, nested invocation paths, the re-ask, expiry
 crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering
 crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
@@ -169,6 +171,11 @@ harness in `crates/fabro/oracle/harness/` builds the pinned `fabro` binary from
 the fetched corpus and drives it as a subprocess through its CLI and server
 API; `scripts/oracle-regenerate.sh` uses it to refresh the oracle fixtures, and
 the routing test rejects a fixture from any other Fabro revision.
+`scripts/fabro-provision.sh` is the one way both harnesses obtain that binary.
+The differential matrix (`crates/fabro/acceptance/DIFFERENTIAL.md`,
+`mise run test:fabro:differential`) runs every scenario through the shipped
+binary and the pinned Fabro, compares the runs under fixed rules, and accepts
+a difference only through a committed decision record.
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over
