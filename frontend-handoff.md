@@ -213,6 +213,18 @@ targets by action name.
 9. End-to-end: at least two real corpus workflows *run* on the executor from
    package 02 (pick ones whose steps are pure `run:` — no action shims yet).
 
+### Node metadata for hosts
+
+A frontend attaches `Node::meta` (opaque to the engine) and the public event
+contract carries it verbatim on every event about the node. Two keys have a
+shared meaning across frontends: `kind` names the logical role of the node in
+the source format (the Fabro frontend writes `start`, `exit`, `command`,
+`agent`, `human`, `parallel`, `parallel.fan_in`, and so on), and
+`synthetic: true` marks a node the frontend invented during lowering (the
+Fabro `goal_check`). A host uses these, together with the engine's branch
+role, to tell logical stages from lowering artifacts; it never reads node
+names for that.
+
 ## 8. Reporting
 
 Same format as packages 01–02. The departures section with reasoning is the

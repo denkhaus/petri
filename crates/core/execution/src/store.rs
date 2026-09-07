@@ -92,6 +92,8 @@ pub struct CoordinatorStore {
     /// Decoded and validated graphs by digest, so repeated loads — restarts of
     /// one invocation, resume-time resource checks — parse and validate once.
     graphs:   BTreeMap<GraphDigest, Arc<Graph>>,
+    /// The records `create` appended before an observer could attach.
+    opening:  Vec<CoordinatorRecord>,
 }
 
 impl CoordinatorStore {
@@ -132,12 +134,14 @@ impl CoordinatorStore {
             state: CoordinatorState::default(),
             next_seq: 0,
             graphs: BTreeMap::new(),
+            opening: Vec::new(),
         };
-        store.append(CoordinatorEvent::RunStarted {
+        let started = store.append(CoordinatorEvent::RunStarted {
             format_version: COORDINATOR_FORMAT_VERSION,
             root: InvocationId::ROOT,
             middleware_chain,
         })?;
+        store.opening.push(started);
         Ok(store)
     }
 
@@ -184,6 +188,7 @@ impl CoordinatorStore {
                 state,
                 next_seq,
                 graphs,
+                opening: Vec::new(),
             },
             decoded.torn,
         ))
@@ -195,6 +200,12 @@ impl CoordinatorStore {
 
     pub fn state(&self) -> &CoordinatorState {
         &self.state
+    }
+
+    /// The records `create` appended before anyone could observe them: the
+    /// run's own start. A resumed store opened with none.
+    pub fn opening_records(&self) -> &[CoordinatorRecord] {
+        &self.opening
     }
 
     pub fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, StoreError> {

@@ -363,8 +363,15 @@ impl Coordinator {
         }
     }
 
+    /// Register an observer of every execution's records and every
+    /// coordinator record. A fresh run's opening record (`RunStarted`) was
+    /// appended before any observer could attach; it is delivered here, so
+    /// the observer sees the coordinator log from its first record.
     #[must_use]
     pub fn observe(mut self, observer: Arc<dyn ExecutionObserver>) -> Self {
+        for record in self.store.opening_records() {
+            observer.on_lifecycle(record);
+        }
         self.observers.push(observer);
         self
     }

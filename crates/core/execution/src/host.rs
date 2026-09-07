@@ -222,10 +222,13 @@ pub async fn resume(rt: &Runtime) -> Result<ExecutionReport, HostError> {
     resume_configured(rt, Vec::new(), Vec::new(), |_, _| {}).await
 }
 
-/// [`resume`] with the host's observers, its own middleware (the same list
-/// the run was started with, after the graph's policy chain), and the handle
-/// hook. The policy chain is rebuilt from the stored root graph before the
-/// coordinator checks the recorded chain.
+/// [`resume`] with the host's own middleware (the same list the run was
+/// started with, after the graph's policy chain, which is rebuilt from the
+/// stored root graph before the coordinator checks the recorded chain), its
+/// observers attached before the first record (a resumed execution replays
+/// its regenerated suffix to them before it dispatches pending work, and the
+/// coordinator's own records reach them as they are appended), and the
+/// handle hook.
 pub async fn resume_configured(
     rt: &Runtime,
     middleware: Vec<Arc<dyn Middleware>>,

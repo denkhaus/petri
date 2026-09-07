@@ -474,6 +474,39 @@ resolves a firing to its node, name and `meta` in place
 callback, deliberately not a broadcast channel: broadcast drops on lag, and a
 store ingest must never lose a record.
 
+**Public event contract.** An observer sees records; a host projects events.
+`execution::events` (`crates/core/execution/EVENTS.md`, versioned) derives one
+`RunEvent` stream from coordinator and engine records with the post-apply
+state, live and from a finished run dir alike (`replay_run`), with stable
+identities `(source log, seq, index)`, parent links across nested executions,
+and subjects that carry the node's `meta` and its branch role. Every event is
+derived from a durable record; the projector's `observed_at` is the one
+live-only field. The pure state machine reads no clock: observed times come
+from the driver (the attempt duration it fills into `metrics.duration_ms` when
+a step kind reported none) and from the projector.
+
+**Awaited extension points.** A host that must finish work before execution
+continues installs `driver::lifecycle::ExecutionHooks`
+(`Runtime::hooks`). The order for a completed node is: node admission
+(`before_attempt`, once per attempt, so a retry-sensitive hook runs per
+attempt; a paused firing keeps its identity, starts no attempt, and a cancel
+settles it) → the attempt → the step's own result policy → result preparation
+(`prepare_result`, before the `StepFinished` record; an adjustment keeps the
+original status and output in a recorded `result_prepared` note) → the
+canonical record → `after_record` → route selection by the decision resolver
+→ `transition` (once per completed firing, no-route completions included; an
+override is traced as an intervention, a fatal error blocks every group, a
+best-effort problem is recorded) → advancement. Each callback runs on its own
+task and re-enters the loop through the signal channel; its notes are appended
+as `StepProgress` records ahead of the record they annotate, so they are
+durable and replayed. Decisions the callbacks influence are the ordinary
+recorded events (`Admitted`, `StepFinished`, `RoutingResolved`); replay
+consumes them and calls nothing; resume reissues only a pending decision under
+its `DecisionId` and re-dispatches an attempt whose finish never landed, so a
+callback may run twice for one operation across a crash and a host with
+external effects deduplicates on that identity. With no hooks installed the
+driver's path is unchanged.
+
 **Persistence surface.** The core's whole persistence surface is `EventLog`'s
 serde plus `EventLog::try_from_records(version, records)` (version checked
 under the standing no-migrator policy; seqs contiguous from 0). How records

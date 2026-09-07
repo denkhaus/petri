@@ -2,19 +2,21 @@
 //! admission, steering into an active stage, and cancellation.
 //!
 //! One [`ControlService`] serves the terminal (`petri run --control <path>`)
-//! and an embedded host alike. It is built from three pieces that already
-//! exist: the coordinator's handle (cancellation and delivery), an admission
-//! middleware ([`PauseGate`]) that holds every new attempt while the run is
-//! paused, and an [`ExecutionObserver`] that keeps the live firing of each
-//! node so a steer can name a stage instead of a firing.
+//! and an embedded host alike. It is built from pieces that already exist:
+//! the coordinator's handle (cancellation and delivery), the driver's awaited
+//! [`ExecutionHooks::before_attempt`] admission point (the pause), and an
+//! [`ExecutionObserver`] that keeps the live firing of each node so a steer
+//! can name a stage instead of a firing.
 //!
 //! # Pause
 //!
-//! A paused run admits no new attempt: the gate's `admit` waits at the
-//! awaited admission point, so a firing that was about to start keeps its
-//! identity and starts no attempt until `resume`. Work already running keeps
-//! running, and cancellation stays responsive: a cancel settles a firing that
-//! is waiting on admission the way the engine always has.
+//! A paused run admits no new attempt: the service's `before_attempt` waits
+//! until the run is unpaused, so a firing that was about to start keeps its
+//! one identity, starts no attempt, and does not count as a visit twice.
+//! Work already running keeps running, and cancellation stays responsive: a
+//! cancel settles a firing that is waiting on admission as `Cancelled`, the
+//! way the engine always has. Pause state is live, not durable: a resumed run
+//! starts unpaused.
 //!
 //! # Steering
 //!
@@ -22,66 +24,42 @@
 //! answer: a human gate ignores it and keeps its question open, and an agent
 //! step queues it as guidance for its session. Control input therefore cannot
 //! consume a pending question's answer.
-//!
-//! Task 10's awaited-admission extension point is the general form of the
-//! gate below; when it lands the gate becomes one adapter over it.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use engine::{Admission, EngineState, Event, EventRecord, MiddlewareKey};
+use driver::lifecycle::{
+    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
+    Recorded, Transition, TransitionError, TransitionReport,
+};
+use engine::{EngineState, Event, EventRecord};
 use ir::FiringId;
-use serde_json::Value;
 use smol_str::SmolStr;
 use steps::Steer;
 use tokio::sync::watch;
 
 use crate::{
-    AdmitCall, AdmitNext, CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, ExecutionId,
-    ExecutionObserver, InvocationId, Middleware, MiddlewareError,
+    CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, ExecutionId, ExecutionObserver,
+    InvocationId,
 };
 
-/// The chain key the pause gate records itself under.
-pub const PAUSE_KEY: &str = "pause-gate";
-
-/// Admission middleware that holds new attempts while paused. Pause state is
-/// live, not durable: a resumed run starts unpaused.
-pub struct PauseGate {
+/// The service's [`ExecutionHooks`]: `before_attempt` holds while paused and
+/// every other point delegates to the host's own hooks, when it has some.
+/// Install it with [`Runtime::hooks`](runtime::Runtime::hooks).
+pub struct PauseHooks {
     paused: watch::Receiver<bool>,
+    inner:  Option<Arc<dyn ExecutionHooks>>,
 }
 
 #[async_trait::async_trait]
-impl Middleware for PauseGate {
-    fn key(&self) -> MiddlewareKey {
-        MiddlewareKey::new(PAUSE_KEY)
-    }
-
-    fn state_version(&self) -> u32 {
-        1
-    }
-
-    fn initial_state(&self) -> Value {
-        Value::Null
-    }
-
-    fn fold(
-        &self,
-        _state: &mut Value,
-        _event: &crate::FoldEvent<'_>,
-    ) -> Result<(), MiddlewareError> {
-        Ok(())
-    }
-
-    async fn admit(
-        &self,
-        call: AdmitCall,
-        next: AdmitNext<'_>,
-    ) -> Result<Admission, MiddlewareError> {
+impl ExecutionHooks for PauseHooks {
+    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
         let mut paused = self.paused.clone();
         if *paused.borrow() {
             tracing::info!(
-                execution = call.address.execution.raw(),
-                decision = ?call.address.decision,
+                firing = request.view.firing.raw(),
+                attempt = request.view.attempt.raw(),
+                node = request.view.node_name(),
                 "admission held: the run is paused"
             );
             // A closed sender means the service is gone; admit rather than
@@ -91,8 +69,40 @@ impl Middleware for PauseGate {
                     break;
                 }
             }
+            tracing::info!(
+                firing = request.view.firing.raw(),
+                node = request.view.node_name(),
+                "admission released"
+            );
         }
-        next.run().await
+        match &self.inner {
+            Some(inner) => inner.before_attempt(request).await,
+            None => AttemptDecision::admit(),
+        }
+    }
+
+    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
+        match &self.inner {
+            Some(inner) => inner.prepare_result(request).await,
+            None => Ok(Prepared::unchanged()),
+        }
+    }
+
+    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
+        match &self.inner {
+            Some(inner) => inner.after_record(recorded).await,
+            None => Vec::new(),
+        }
+    }
+
+    async fn transition(
+        &self,
+        transition: Transition,
+    ) -> Result<TransitionReport, TransitionError> {
+        match &self.inner {
+            Some(inner) => inner.transition(transition).await,
+            None => Ok(TransitionReport::default()),
+        }
     }
 }
 
@@ -136,10 +146,10 @@ impl Inner {
     }
 }
 
-/// The one control service. Construct before the run, take its
-/// [`gate`](Self::gate) into the coordinator's middleware chain, observe a
-/// clone, [`wire`](Self::wire) the handle once the coordinator exists, then
-/// drive it from wherever controls come from.
+/// The one control service. Construct before the run, install its
+/// [`hooks`](Self::hooks) on the runtime, observe a clone, [`wire`](Self::wire)
+/// the handle once the coordinator exists, then drive it from wherever
+/// controls come from.
 #[derive(Clone)]
 pub struct ControlService {
     inner: Arc<Inner>,
@@ -163,11 +173,13 @@ impl ControlService {
         }
     }
 
-    /// The admission middleware that enforces pauses. Install it in the
-    /// coordinator's chain; without it `pause` is recorded but holds nothing.
-    pub fn gate(&self) -> Arc<dyn Middleware> {
-        Arc::new(PauseGate {
+    /// The execution hooks that enforce pauses at `before_attempt`, over the
+    /// host's own hooks when it has some. Without them installed, `pause` is
+    /// recorded but holds nothing.
+    pub fn hooks(&self, inner: Option<Arc<dyn ExecutionHooks>>) -> Arc<dyn ExecutionHooks> {
+        Arc::new(PauseHooks {
             paused: self.inner.paused.subscribe(),
+            inner,
         })
     }
 

@@ -12,8 +12,8 @@ use std::time::Duration;
 use std::{env, fs, io, mem, process};
 
 use driver::{
-    Driver, EventObserver, ExecutionReport, ResumeError, ResumeInfo, RunConfig, RunGuard,
-    SandboxAssignment,
+    Driver, EventObserver, ExecutionHooks, ExecutionReport, ResumeError, ResumeInfo, RunConfig,
+    RunGuard, SandboxAssignment,
 };
 use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
@@ -105,6 +105,7 @@ pub struct Runtime {
     secrets:      Arc<dyn SecretProvider>,
     observers:    Vec<Arc<dyn EventObserver>>,
     progress:     Option<Arc<dyn ProgressSink>>,
+    hooks:        Option<Arc<dyn ExecutionHooks>>,
     caps:         ::steps::CapabilitiesBuilder,
     provisioners: Vec<RunProvisioner>,
     options:      RunOptions,
@@ -137,6 +138,7 @@ impl Runtime {
             secrets:      Arc::new(MapSecrets::empty()),
             observers:    Vec::new(),
             progress:     None,
+            hooks:        None,
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
             options:      RunOptions::new(
@@ -155,6 +157,7 @@ impl Runtime {
             secrets:      Arc::new(MapSecrets::empty()),
             observers:    Vec::new(),
             progress:     None,
+            hooks:        None,
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
             options:      RunOptions::new(
@@ -213,6 +216,15 @@ impl Runtime {
     #[must_use]
     pub fn progress(mut self, sink: Arc<dyn ProgressSink>) -> Self {
         self.progress = Some(sink);
+        self
+    }
+
+    /// Install the host's awaited extension points
+    /// ([`driver::lifecycle`]) on every driver this runtime builds. Without
+    /// them every driver takes the unchanged fast path.
+    #[must_use]
+    pub fn hooks(mut self, hooks: Arc<dyn ExecutionHooks>) -> Self {
+        self.hooks = Some(hooks);
         self
     }
 
@@ -433,6 +445,7 @@ impl Runtime {
             secrets: self.secrets.clone(),
             observers: self.observers.clone(),
             progress: self.progress.clone(),
+            hooks: self.hooks.clone(),
             caps,
             guards,
         }
@@ -544,6 +557,7 @@ pub struct RunRuntime {
     secrets:   Arc<dyn SecretProvider>,
     observers: Vec<Arc<dyn EventObserver>>,
     progress:  Option<Arc<dyn ProgressSink>>,
+    hooks:     Option<Arc<dyn ExecutionHooks>>,
     caps:      ::steps::Capabilities,
     guards:    Vec<RunServiceGuard>,
 }
@@ -555,6 +569,7 @@ impl RunRuntime {
             driver.with_capabilities(self.caps.clone()),
             &self.observers,
             self.progress.as_ref(),
+            self.hooks.as_ref(),
         );
         driver.with_run_guard(Box::new(self))
     }
@@ -616,7 +631,12 @@ impl RunRuntime {
         )
         .with_engine_start(start)
         .with_capabilities(self.caps.clone());
-        attach(driver, &self.observers, self.progress.as_ref())
+        attach(
+            driver,
+            &self.observers,
+            self.progress.as_ref(),
+            self.hooks.as_ref(),
+        )
     }
 
     /// The resume counterpart of [`RunRuntime::driver`].
@@ -645,7 +665,12 @@ impl RunRuntime {
         )?;
         let driver = driver.with_capabilities(self.caps.clone());
         Ok((
-            attach(driver, &self.observers, self.progress.as_ref()),
+            attach(
+                driver,
+                &self.observers,
+                self.progress.as_ref(),
+                self.hooks.as_ref(),
+            ),
             info,
         ))
     }
@@ -703,17 +728,22 @@ fn base_run_config(options: &RunOptions, run_dir: PathBuf) -> RunConfig {
     config
 }
 
-/// Attach the runtime-registered observers and progress sink to a driver.
+/// Attach the runtime-registered observers, progress sink and hooks to a
+/// driver.
 fn attach(
     mut driver: Driver,
     observers: &[Arc<dyn EventObserver>],
     progress: Option<&Arc<dyn ProgressSink>>,
+    hooks: Option<&Arc<dyn ExecutionHooks>>,
 ) -> Driver {
     for observer in observers {
         driver = driver.observe(observer.clone());
     }
     if let Some(progress) = progress {
         driver = driver.with_progress(progress.clone());
+    }
+    if let Some(hooks) = hooks {
+        driver = driver.with_hooks(hooks.clone());
     }
     driver
 }

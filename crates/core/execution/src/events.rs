@@ -1,0 +1,1387 @@
+//! The public event contract: one versioned stream a host projects a run
+//! from, built only from durable records.
+//!
+//! Every [`RunEvent`] is derived from a coordinator record or an engine
+//! record with the post-apply engine state beside it. The same derivation
+//! runs live (as an [`ExecutionObserver`]) and over a finished run dir
+//! ([`replay_run`]), so a host that lost its live subscription rebuilds the
+//! same events, in the same order, with the same identities, from the files
+//! alone. Nothing here reads a clock inside the state machine: `observed_at`
+//! is stamped by the projector when it sees a record live and is absent on
+//! replay.
+//!
+//! # Identity and ordering
+//!
+//! [`EventId`] is `(source, seq, index)`: the log the record came from (the
+//! coordinator log or one execution's engine log), the record's `seq` in
+//! that log, and the ordinal of this event among the events one record
+//! produced. Within one source the order is total. Across sources the
+//! `execution` and `invocation` fields plus [`ParentLink`] tie an execution's
+//! events to the invocation that declared it and to the parent firing that
+//! called it.
+//!
+//! # Delivery
+//!
+//! [`EventProjector`] is the lossless path: the observer callback projects
+//! synchronously and queues; a pump task hands each event to the host's
+//! [`RunEventSink`] and awaits it, so a slow sink delays delivery and never
+//! drops. A sink failure stops the pump; every later event is counted as
+//! undelivered and [`EventProjector::shutdown`] reports the failure. A host
+//! that needs completeness after such a failure calls [`replay_run`].
+//!
+//! Across a resume, the driver replays the regenerated suffix to observers
+//! before dispatching pending work, so events for records the crash kept off
+//! disk arrive again with the same identities: delivery is at-least-once,
+//! deduplicated by [`EventId`]. Records before the loaded prefix are not
+//! re-delivered live; [`replay_run`] covers them. A projector attached at
+//! resume is built with [`EventProjector::primed`], which folds the prefix
+//! into its state without delivering it, so the suffix derives the same
+//! events it would have derived live.
+//!
+//! # Durability
+//!
+//! Every event here is derived from a durable record, log lines included:
+//! the engine log persists `StepProgress`. `observed_at` is the one live-only
+//! field. Agent activity ([`EventBody::AgentActivity`]) carries the backend's
+//! own envelope as recorded; a backend's live stream chunks that never
+//! reached the step's progress channel are not in the contract.
+//!
+//! # Secrets
+//!
+//! Records are masked by the driver before they are appended, so every value
+//! here is post-mask: a secret reference stays `{"$secret": ...}` and a
+//! masked value stays `***`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fs, io};
+
+use driver::lifecycle::Note;
+use driver::{BranchMap, BranchRef, BranchRole};
+use engine::{
+    Admission, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventRecord, GroupDecision,
+    Intervention, RouteApplied, RouteDecision,
+};
+use ir::{
+    Attempt, CancelScopeId, Control, EdgeId, EdgeTransition, FiringId, Generation, Graph,
+    LogStream, Metrics, NodeId, Outcome, RunStatus, Status, StepEvent, Token, Value,
+};
+use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+use steps::{ANSWER_KEY, Question};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::host::EVENTS_FILE;
+use crate::store::execution_relative_dir;
+use crate::{
+    COORDINATOR_FILE, CoordinatorEvent, CoordinatorRecord, CoordinatorState, EngineLogError,
+    ExecutionId, ExecutionObserver, GRAPHS_DIR, InvocationId, InvocationResult, ParentCallKey,
+    SandboxBinding, StateError, StoreError, decode_coordinator_log, read_engine_log,
+};
+
+/// The version of this contract. Bump when an existing field changes meaning
+/// or a variant is removed; adding a variant or an optional field does not.
+pub const EVENT_CONTRACT_VERSION: u32 = 1;
+
+/// The `StepEvent::Custom` key under which a backend's own event envelope
+/// rides, with `kind` naming the backend.
+pub const BACKEND_EVENT_KIND_KEY: &str = "kind";
+
+/// Which durable log an event was derived from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "log", rename_all = "snake_case")]
+pub enum EventSource {
+    Coordinator,
+    Execution { execution: ExecutionId },
+}
+
+/// A stable identity for deduplication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct EventId {
+    pub source: EventSource,
+    /// The record's position in its log.
+    pub seq:    u64,
+    /// Which of the events derived from that one record this is.
+    pub index:  u32,
+}
+
+/// The firing that called a nested invocation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentLink {
+    pub execution: ExecutionId,
+    pub firing:    FiringId,
+    pub attempt:   Attempt,
+    pub slot:      SmolStr,
+}
+
+impl From<&ParentCallKey> for ParentLink {
+    fn from(key: &ParentCallKey) -> Self {
+        Self {
+            execution: key.parent,
+            firing:    key.firing,
+            attempt:   key.attempt,
+            slot:      key.slot.clone(),
+        }
+    }
+}
+
+/// A node, with the frontend's metadata so a host can tell a logical stage
+/// from a synthetic lowering node without knowing the frontend.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeRef {
+    pub id:   NodeId,
+    /// The instance name (`build`, or `build#2` for an expansion clone).
+    pub name: SmolStr,
+    /// The step kind the node runs.
+    pub kind: SmolStr,
+    /// `Node::meta` verbatim. A frontend marks a node it invented with
+    /// `"synthetic": true` and names its role under `"kind"`.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub meta: Value,
+}
+
+/// What an event is about: one firing of one node, or the node alone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Subject {
+    pub node:       NodeRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firing:     Option<FiringId>,
+    /// Which firing of the node this is within its execution, 1-based.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visit:      Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt:    Option<Attempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<Generation>,
+    pub branch:     BranchRole,
+}
+
+/// One event of the public stream.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunEvent {
+    pub id:          EventId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation:  Option<InvocationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution:   Option<ExecutionId>,
+    /// The parent call, for an event of a nested invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent:      Option<ParentLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject:     Option<Subject>,
+    /// Milliseconds since the Unix epoch when the projector saw the record
+    /// live. Absent on replay: the logs carry no clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<u64>,
+    pub body:        EventBody,
+}
+
+/// Where a firing stands between records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitState {
+    /// The host is deciding whether the attempt may start.
+    AwaitingAdmission,
+    Running,
+    /// A question is out and no answer has arrived.
+    AwaitingAnswer,
+    /// Between attempts, waiting out the backoff.
+    AwaitingRetry,
+    /// Told to stop; the outcome is on its way.
+    Cancelling,
+}
+
+/// One routing group's resolution, with the edge target resolved to a node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RouteChoice {
+    pub group:    u32,
+    pub decision: RouteDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target:   Option<NodeRef>,
+    /// Middleware and host interventions, outermost first. An override or
+    /// jump here means the host changed the engine's proposal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace:    Vec<Intervention>,
+    /// Whether the engine drew a random number for a weighted tier.
+    pub weighted: bool,
+}
+
+/// One branch's result as it reached the join.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BranchResult {
+    pub branch:  BranchRef,
+    /// The last node on the branch, whose token reached the join.
+    pub node:    NodeRef,
+    pub firing:  FiringId,
+    pub status:  Status,
+    /// The token payload the branch handed to the join.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
+}
+
+/// A backend's own event, attributed. `envelope` is the backend's envelope
+/// as the step recorded it (for the native agent backend: Pebble's
+/// `CodingAgentEvent`, with `seq`, `stream_id`, `session_id`,
+/// `parent_session_id`, `tool_call_id`, `timestamp`, `event`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentActivity {
+    /// The backend name, from the custom event's `kind`.
+    pub backend:        SmolStr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session:        Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call:      Option<String>,
+    /// The backend's own stream identity and sequence, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream:         Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_seq:     Option<u64>,
+    pub envelope:       Value,
+}
+
+/// What happened.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum EventBody {
+    // ── Run and invocations (coordinator log) ───────────────────────────────
+    RunStarted {
+        root:             InvocationId,
+        middleware_chain: Vec<engine::MiddlewareKey>,
+    },
+    RunFinished {
+        status: RunStatus,
+    },
+    InvocationDeclared {
+        invocation: InvocationId,
+        /// Absent for the root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call:       Option<ParentLink>,
+        graph:      String,
+        sandbox:    SandboxBinding,
+        context:    BTreeMap<SmolStr, Value>,
+    },
+    InvocationFinished {
+        invocation: InvocationId,
+        result:     InvocationResult,
+    },
+    InvocationCancelRequested {
+        invocation: InvocationId,
+    },
+    ExecutionDeclared {
+        execution:       ExecutionId,
+        invocation:      InvocationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        predecessor:     Option<ExecutionId>,
+        execution_index: u32,
+        entry:           EntryPoint,
+    },
+    ExecutionFinished {
+        execution: ExecutionId,
+        exit:      EngineExit,
+    },
+
+    // ── Execution (engine log) ──────────────────────────────────────────────
+    ExecutionStarted {
+        entry:           EntryPoint,
+        execution_index: u32,
+        context:         BTreeMap<SmolStr, Value>,
+    },
+    /// The execution's own admission decision, before any node fires.
+    ExecutionAdmitted {
+        admitted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason:   Option<SmolStr>,
+    },
+    /// A node's join was satisfied and a firing exists, awaiting admission.
+    VisitStarted {
+        inputs: Vec<Token>,
+    },
+    /// The host or middleware decided on an attempt.
+    AttemptAdmitted {
+        decision: Admission,
+        trace:    Vec<engine::MiddlewareKey>,
+    },
+    /// The attempt was dispatched to its step.
+    AttemptStarted,
+    /// An attempt returned. `final` is whether the engine recorded it as the
+    /// firing's outcome; a non-final attempt is followed by a retry.
+    AttemptFinished {
+        outcome:   Outcome,
+        #[serde(rename = "final")]
+        is_final:  bool,
+        /// The retry policy allowed no further attempt and the status was
+        /// retryable: the firing exhausted its retries.
+        exhausted: bool,
+    },
+    RetryScheduled {
+        next_attempt: Attempt,
+        base_delay:   Duration,
+    },
+    RetryElapsed {
+        next_attempt: Attempt,
+    },
+    /// A firing's final record exists: the node completed this visit.
+    /// `executed` is false for a completion the engine synthesized (a false
+    /// precondition, a cancelled scope, a blocked admission).
+    VisitCompleted {
+        outcome:  Outcome,
+        executed: bool,
+        attempts: u32,
+    },
+    RoutesResolved {
+        choices: Vec<RouteChoice>,
+    },
+    RouteApplied {
+        route: AppliedRoute,
+    },
+    /// The routes of a fork node applied: its branches are starting.
+    ForkStarted {
+        branches: Vec<BranchRef>,
+    },
+    /// A branch's final token reached the join.
+    BranchCompleted {
+        result: BranchResult,
+    },
+    /// The join fired: every branch is in, in branch order.
+    ForkCompleted {
+        fork:    NodeRef,
+        results: Vec<BranchResult>,
+    },
+    /// A `for_each` expansion spliced clones in.
+    NodeExpanded {
+        clones:       Vec<CloneRef>,
+        max_parallel: Option<u32>,
+        fail_fast:    bool,
+    },
+    /// A firing asked the host a question.
+    QuestionAsked {
+        question: Question,
+    },
+    /// The host delivered a control into a firing. `deliverable` is whether
+    /// the firing could receive it; a late answer is recorded but not
+    /// deliverable.
+    ControlDelivered {
+        control:     DeliveredControl,
+        deliverable: bool,
+    },
+    /// A firing's wait state changed.
+    WaitStateChanged {
+        state: WaitState,
+    },
+    /// A polite cancel. `scope` names the cancelled scope for a scope
+    /// cancel; `group` names the anchor node for a group cancel.
+    CancelRequested {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<CancelScopeId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<NodeRef>,
+    },
+    KillRequested {
+        scope: CancelScopeId,
+    },
+    OutputLine {
+        stream: LogStream,
+        line:   String,
+    },
+    ArtifactRecorded {
+        name: SmolStr,
+        uri:  String,
+    },
+    AgentActivity(AgentActivity),
+    /// A host extension recorded a fact (`driver::lifecycle::Note`). Kinds
+    /// the driver writes: `result_prepared`, `transition`. Kinds the hook
+    /// adapter writes: `hook`.
+    HostNote {
+        kind:    SmolStr,
+        payload: Value,
+    },
+    /// A step-defined progress payload this contract does not interpret.
+    StepCustom {
+        value: Value,
+    },
+}
+
+/// One applied route.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AppliedRoute {
+    Edge {
+        group:      u32,
+        edge:       EdgeId,
+        target:     NodeRef,
+        transition: EdgeTransition,
+        back:       bool,
+    },
+    Jump {
+        target: NodeRef,
+    },
+    None {
+        group: u32,
+    },
+}
+
+/// One expansion clone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloneRef {
+    pub index: u32,
+    pub entry: NodeRef,
+    pub item:  Value,
+}
+
+/// A control as delivered, decoded when it is an answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveredControl {
+    Answer { answer: steps::Answer },
+    Deliver { value: Value },
+    Cancel,
+    Kill,
+}
+
+// ── Projection ─────────────────────────────────────────────────────────────
+
+/// Per-execution bookkeeping the derivation needs beyond the engine state.
+#[derive(Default)]
+struct ExecutionTrack {
+    invocation: Option<InvocationId>,
+    parent:     Option<ParentLink>,
+    /// Firings seen live, so a new one is a visit start.
+    firings:    BTreeSet<FiringId>,
+    /// Firings whose attempt was dispatched at least once.
+    started:    BTreeSet<FiringId>,
+    /// Firings with a question out.
+    asking:     BTreeSet<FiringId>,
+    history:    usize,
+    branches:   BranchMap,
+    /// Fork firings whose `ForkStarted` was emitted.
+    forks:      BTreeSet<FiringId>,
+}
+
+/// The stateless-by-record derivation, with the little state it needs across
+/// records. One per run; fed both logs.
+#[derive(Default)]
+pub struct Projection {
+    executions:  BTreeMap<ExecutionId, ExecutionTrack>,
+    invocations: BTreeMap<InvocationId, Option<ParentLink>>,
+}
+
+impl Projection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Derive the events of one coordinator record.
+    pub fn lifecycle(&mut self, record: &CoordinatorRecord) -> Vec<RunEvent> {
+        let id = EventId {
+            source: EventSource::Coordinator,
+            seq:    record.seq,
+            index:  0,
+        };
+        let (invocation, execution, body) = match &record.event {
+            CoordinatorEvent::RunStarted {
+                root,
+                middleware_chain,
+                ..
+            } => (Some(*root), None, EventBody::RunStarted {
+                root:             *root,
+                middleware_chain: middleware_chain.clone(),
+            }),
+            CoordinatorEvent::GraphRegistered { .. } => return Vec::new(),
+            CoordinatorEvent::InvocationDeclared {
+                invocation,
+                call,
+                graph,
+                context,
+                sandbox,
+                ..
+            } => {
+                let link = call.as_ref().map(ParentLink::from);
+                self.invocations.insert(*invocation, link.clone());
+                (Some(*invocation), None, EventBody::InvocationDeclared {
+                    invocation: *invocation,
+                    call:       link,
+                    graph:      graph.to_hex(),
+                    sandbox:    *sandbox,
+                    context:    context.clone(),
+                })
+            }
+            CoordinatorEvent::ExecutionDeclared {
+                execution,
+                invocation,
+                predecessor,
+                start,
+                ..
+            } => {
+                let track = self.executions.entry(*execution).or_default();
+                track.invocation = Some(*invocation);
+                track.parent = self.invocations.get(invocation).cloned().flatten();
+                (
+                    Some(*invocation),
+                    Some(*execution),
+                    EventBody::ExecutionDeclared {
+                        execution:       *execution,
+                        invocation:      *invocation,
+                        predecessor:     *predecessor,
+                        execution_index: start.execution_index,
+                        entry:           start.entry,
+                    },
+                )
+            }
+            CoordinatorEvent::ExecutionFinished { execution, exit } => (
+                self.executions
+                    .get(execution)
+                    .and_then(|track| track.invocation),
+                Some(*execution),
+                EventBody::ExecutionFinished {
+                    execution: *execution,
+                    exit:      exit.clone(),
+                },
+            ),
+            CoordinatorEvent::InvocationFinished { invocation, result } => (
+                Some(*invocation),
+                Some(result.final_execution),
+                EventBody::InvocationFinished {
+                    invocation: *invocation,
+                    result:     result.clone(),
+                },
+            ),
+            CoordinatorEvent::InvocationCancelRequested { invocation } => (
+                Some(*invocation),
+                None,
+                EventBody::InvocationCancelRequested {
+                    invocation: *invocation,
+                },
+            ),
+            CoordinatorEvent::RunFinished { status } => {
+                (None, None, EventBody::RunFinished { status: *status })
+            }
+        };
+        let parent = invocation
+            .and_then(|invocation| self.invocations.get(&invocation).cloned())
+            .flatten();
+        vec![RunEvent {
+            id,
+            invocation,
+            execution,
+            parent,
+            subject: None,
+            observed_at: None,
+            body,
+        }]
+    }
+
+    /// Derive the events of one engine record, given the post-apply state.
+    pub fn engine(
+        &mut self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        state: &EngineState,
+    ) -> Vec<RunEvent> {
+        let track = self.executions.entry(execution).or_default();
+        if !track.branches.covers(state.graph()) {
+            track.branches = BranchMap::of(state.graph());
+        }
+        let mut out = Vec::new();
+        let mut emit = |subject: Option<Subject>, body: EventBody| {
+            out.push((subject, body));
+        };
+
+        match &record.event {
+            Event::ExecutionStarted(start) => emit(None, EventBody::ExecutionStarted {
+                entry:           start.entry,
+                execution_index: start.execution_index,
+                context:         start.context.clone(),
+            }),
+            Event::TokenEmitted(_) => {}
+            Event::StepStarted { firing, .. } => {
+                track.started.insert(*firing);
+                emit(subject_of(state, track, *firing), EventBody::AttemptStarted);
+                emit(
+                    subject_of(state, track, *firing),
+                    EventBody::WaitStateChanged {
+                        state: WaitState::Running,
+                    },
+                );
+            }
+            Event::StepProgress { firing, ev } => {
+                let subject = subject_of(state, track, *firing);
+                match ev {
+                    StepEvent::Log { stream, line } => emit(subject, EventBody::OutputLine {
+                        stream: *stream,
+                        line:   line.clone(),
+                    }),
+                    StepEvent::Artifact { name, uri } => {
+                        emit(subject, EventBody::ArtifactRecorded {
+                            name: name.clone(),
+                            uri:  uri.clone(),
+                        });
+                    }
+                    StepEvent::Custom(value) => {
+                        if let Some(question) = Question::from_event(ev) {
+                            track.asking.insert(*firing);
+                            emit(subject.clone(), EventBody::QuestionAsked { question });
+                            emit(subject, EventBody::WaitStateChanged {
+                                state: WaitState::AwaitingAnswer,
+                            });
+                        } else if let Some(note) = Note::from_step_event(ev) {
+                            emit(subject, EventBody::HostNote {
+                                kind:    note.kind,
+                                payload: note.payload,
+                            });
+                        } else if let Some(activity) = agent_activity(value) {
+                            emit(subject, EventBody::AgentActivity(activity));
+                        } else {
+                            emit(subject, EventBody::StepCustom {
+                                value: value.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            Event::StepFinished {
+                firing,
+                attempt,
+                outcome,
+            } => {
+                let is_final = state
+                    .history()
+                    .iter()
+                    .rev()
+                    .any(|entry| entry.firing == *firing && entry.attempt == *attempt);
+                let node = state
+                    .firing_node(*firing)
+                    .and_then(|id| state.graph().node(id));
+                let exhausted = node.is_some_and(|node| {
+                    node.retry.should_retry(&outcome.status)
+                        && !node.retry.has_attempt_after(*attempt)
+                });
+                track.asking.remove(firing);
+                let subject = subject_of(state, track, *firing);
+                emit(subject.clone(), EventBody::AttemptFinished {
+                    outcome: outcome.clone(),
+                    is_final,
+                    exhausted,
+                });
+                if !is_final && let Some(node) = node {
+                    emit(subject.clone(), EventBody::RetryScheduled {
+                        next_attempt: attempt.next(),
+                        base_delay:   node.retry.base_delay(*attempt),
+                    });
+                    emit(subject, EventBody::WaitStateChanged {
+                        state: WaitState::AwaitingRetry,
+                    });
+                }
+            }
+            Event::Admitted {
+                decision_id,
+                decision,
+                trace,
+            } => match decision_id {
+                DecisionId::ExecutionStart => {
+                    let (admitted, reason) = match decision {
+                        Admission::Block { reason } => (false, Some(reason.clone())),
+                        _ => (true, None),
+                    };
+                    emit(None, EventBody::ExecutionAdmitted { admitted, reason });
+                }
+                DecisionId::AttemptStart { firing, .. } => {
+                    emit(
+                        subject_of(state, track, *firing),
+                        EventBody::AttemptAdmitted {
+                            decision: decision.clone(),
+                            trace:    trace.clone(),
+                        },
+                    );
+                }
+                DecisionId::Route { .. } => {}
+            },
+            Event::RoutingResolved {
+                decision_id,
+                groups,
+            } => {
+                if let DecisionId::Route { firing, .. } = decision_id {
+                    let choices = groups
+                        .iter()
+                        .map(|group| route_choice(state, group))
+                        .collect();
+                    emit(
+                        subject_of(state, track, *firing),
+                        EventBody::RoutesResolved { choices },
+                    );
+                }
+            }
+            Event::RouteApplied(applied) => {
+                let firing = applied.firing();
+                let subject = subject_of(state, track, firing);
+                let route = applied_route(state, applied);
+                emit(subject.clone(), EventBody::RouteApplied { route });
+                if let (Some(subject), RouteApplied::Edge { .. }) = (&subject, applied)
+                    && let BranchRole::Fork { branches } = subject.branch
+                    && track.forks.insert(firing)
+                {
+                    // The fork's routing applies group by group; the first
+                    // applied route announces the fork once.
+                    let fork = subject.node.id;
+                    emit(Some(subject.clone()), EventBody::ForkStarted {
+                        branches: (0..branches)
+                            .map(|index| BranchRef { fork, index })
+                            .collect(),
+                    });
+                }
+            }
+            Event::RetryElapsed {
+                firing,
+                next_attempt,
+            } => emit(subject_of(state, track, *firing), EventBody::RetryElapsed {
+                next_attempt: *next_attempt,
+            }),
+            Event::NodeExpanded { node, splice } => {
+                emit(node_subject(state, track, *node), EventBody::NodeExpanded {
+                    clones:       splice
+                        .clones
+                        .iter()
+                        .map(|clone| CloneRef {
+                            index: clone.index,
+                            entry: clone
+                                .nodes
+                                .iter()
+                                .find(|n| n.id == clone.entry)
+                                .map_or_else(
+                                    || NodeRef {
+                                        id:   clone.entry,
+                                        name: SmolStr::new(""),
+                                        kind: SmolStr::new(""),
+                                        meta: Value::Null,
+                                    },
+                                    |n| NodeRef {
+                                        id:   n.id,
+                                        name: n.name.clone(),
+                                        kind: SmolStr::new(n.step.kind.as_str()),
+                                        meta: n.meta.clone(),
+                                    },
+                                ),
+                            item:  clone.item.clone(),
+                        })
+                        .collect(),
+                    max_parallel: splice.max_parallel,
+                    fail_fast:    splice.fail_fast,
+                });
+            }
+            Event::CancelRequested { scope } => emit(None, EventBody::CancelRequested {
+                scope: Some(*scope),
+                group: None,
+            }),
+            Event::CancelGroupRequested { node } => {
+                let group = state.graph().node(*node).map(node_ref);
+                emit(None, EventBody::CancelRequested { scope: None, group });
+            }
+            Event::KillRequested { scope } => {
+                emit(None, EventBody::KillRequested { scope: *scope });
+            }
+            Event::ControlRequested { firing, ctl } => {
+                let deliverable = state
+                    .firing(*firing)
+                    .is_some_and(|f| !f.cancelling && !f.awaiting_retry)
+                    && !state.is_awaiting_admission(*firing);
+                let control = match ctl {
+                    Control::Cancel => DeliveredControl::Cancel,
+                    Control::Kill => DeliveredControl::Kill,
+                    Control::Deliver(value) => match value.get(ANSWER_KEY) {
+                        Some(_) => steps::Answer::from_value(value).map_or_else(
+                            || DeliveredControl::Deliver {
+                                value: value.clone(),
+                            },
+                            |answer| DeliveredControl::Answer { answer },
+                        ),
+                        None => DeliveredControl::Deliver {
+                            value: value.clone(),
+                        },
+                    },
+                    _ => DeliveredControl::Deliver { value: Value::Null },
+                };
+                let answered = matches!(control, DeliveredControl::Answer { .. })
+                    && deliverable
+                    && track.asking.remove(firing);
+                let subject = subject_of(state, track, *firing);
+                emit(subject.clone(), EventBody::ControlDelivered {
+                    control,
+                    deliverable,
+                });
+                if answered {
+                    emit(subject, EventBody::WaitStateChanged {
+                        state: WaitState::Running,
+                    });
+                }
+            }
+        }
+
+        // State-derived facts every record may carry: new firings (visits
+        // starting) and new final records (visits completing).
+        let live: Vec<FiringId> = state.live_firings().map(|f| f.id).collect();
+        for firing in live {
+            if track.firings.insert(firing) {
+                let inputs = state
+                    .firing(firing)
+                    .map(|f| f.inputs.clone())
+                    .unwrap_or_default();
+                let subject = subject_of(state, track, firing);
+                if let Some(subject) = &subject
+                    && let BranchRole::Join { fork } = subject.branch
+                {
+                    let results = branch_results(state, track, fork, &inputs);
+                    for result in &results {
+                        emit(
+                            Some(Subject {
+                                node:       result.node.clone(),
+                                firing:     Some(result.firing),
+                                visit:      None,
+                                attempt:    None,
+                                generation: None,
+                                branch:     BranchRole::Member(result.branch),
+                            }),
+                            EventBody::BranchCompleted {
+                                result: result.clone(),
+                            },
+                        );
+                    }
+                    if let Some(fork_node) = state.graph().node(fork).map(node_ref) {
+                        emit(Some(subject.clone()), EventBody::ForkCompleted {
+                            fork: fork_node,
+                            results,
+                        });
+                    }
+                }
+                emit(subject.clone(), EventBody::VisitStarted { inputs });
+                emit(subject, EventBody::WaitStateChanged {
+                    state: WaitState::AwaitingAdmission,
+                });
+            }
+        }
+        let cancelling: Vec<FiringId> = state
+            .live_firings()
+            .filter(|f| f.cancelling)
+            .map(|f| f.id)
+            .collect();
+        if matches!(
+            &record.event,
+            Event::CancelRequested { .. }
+                | Event::CancelGroupRequested { .. }
+                | Event::KillRequested { .. }
+        ) {
+            for firing in cancelling {
+                emit(
+                    subject_of(state, track, firing),
+                    EventBody::WaitStateChanged {
+                        state: WaitState::Cancelling,
+                    },
+                );
+            }
+        }
+        let history = state.history();
+        if history.len() > track.history {
+            for entry in &history[track.history..] {
+                let executed = track.started.contains(&entry.firing);
+                let attempts = entry.attempt.raw();
+                let subject = state.graph().node(entry.node).map(|node| Subject {
+                    node:       node_ref(node),
+                    firing:     Some(entry.firing),
+                    visit:      Some(state.firing_count(entry.node)),
+                    attempt:    Some(entry.attempt),
+                    generation: Some(entry.generation),
+                    branch:     track.branches.role(entry.node),
+                });
+                emit(subject, EventBody::VisitCompleted {
+                    outcome: entry.outcome.clone(),
+                    executed,
+                    attempts,
+                });
+            }
+            track.history = history.len();
+        }
+
+        let invocation = track.invocation;
+        let parent = track.parent.clone();
+        out.into_iter()
+            .enumerate()
+            .map(|(index, (subject, body))| RunEvent {
+                id: EventId {
+                    source: EventSource::Execution { execution },
+                    seq:    record.seq,
+                    index:  u32::try_from(index).unwrap_or(u32::MAX),
+                },
+                invocation,
+                execution: Some(execution),
+                parent: parent.clone(),
+                subject,
+                observed_at: None,
+                body,
+            })
+            .collect()
+    }
+}
+
+fn node_ref(node: &ir::Node) -> NodeRef {
+    NodeRef {
+        id:   node.id,
+        name: node.name.clone(),
+        kind: SmolStr::new(node.step.kind.as_str()),
+        meta: node.meta.clone(),
+    }
+}
+
+fn node_subject(state: &EngineState, track: &ExecutionTrack, node: NodeId) -> Option<Subject> {
+    state.graph().node(node).map(|n| Subject {
+        node:       node_ref(n),
+        firing:     None,
+        visit:      Some(state.firing_count(node)),
+        attempt:    None,
+        generation: None,
+        branch:     track.branches.role(node),
+    })
+}
+
+/// The subject for a firing, live or retired.
+fn subject_of(state: &EngineState, track: &ExecutionTrack, firing: FiringId) -> Option<Subject> {
+    if let Some(live) = state.firing(firing) {
+        let node = state.graph().node(live.node)?;
+        return Some(Subject {
+            node:       node_ref(node),
+            firing:     Some(firing),
+            visit:      Some(state.firing_count(live.node)),
+            attempt:    Some(live.attempt),
+            generation: Some(live.generation),
+            branch:     track.branches.role(live.node),
+        });
+    }
+    let record = state.history().iter().rev().find(|r| r.firing == firing)?;
+    let node = state.graph().node(record.node)?;
+    Some(Subject {
+        node:       node_ref(node),
+        firing:     Some(firing),
+        visit:      Some(state.firing_count(record.node)),
+        attempt:    Some(record.attempt),
+        generation: Some(record.generation),
+        branch:     track.branches.role(record.node),
+    })
+}
+
+fn route_choice(state: &EngineState, group: &GroupDecision) -> RouteChoice {
+    let target = match &group.decision {
+        RouteDecision::Emit(edge) => state
+            .graph()
+            .edge(*edge)
+            .and_then(|edge| state.graph().node(edge.to))
+            .map(node_ref),
+        RouteDecision::Jump(node) => state.graph().node(*node).map(node_ref),
+        RouteDecision::None | RouteDecision::Block { .. } => None,
+    };
+    RouteChoice {
+        group: group.group,
+        decision: group.decision.clone(),
+        target,
+        trace: group.trace.clone(),
+        weighted: group.draw.is_some(),
+    }
+}
+
+fn applied_route(state: &EngineState, applied: &RouteApplied) -> AppliedRoute {
+    match applied {
+        RouteApplied::Edge { group, edge, .. } => {
+            let arm = state.graph().edge(*edge);
+            let target = arm.and_then(|arm| state.graph().node(arm.to)).map_or_else(
+                || NodeRef {
+                    id:   NodeId::new(u32::MAX),
+                    name: SmolStr::new(""),
+                    kind: SmolStr::new(""),
+                    meta: Value::Null,
+                },
+                node_ref,
+            );
+            AppliedRoute::Edge {
+                group: *group,
+                edge: *edge,
+                target,
+                transition: arm.map_or(EdgeTransition::Continue, |arm| arm.transition),
+                back: arm.is_some_and(|arm| arm.back),
+            }
+        }
+        RouteApplied::Jump { target, .. } => AppliedRoute::Jump {
+            target: state.graph().node(*target).map_or_else(
+                || NodeRef {
+                    id:   *target,
+                    name: SmolStr::new(""),
+                    kind: SmolStr::new(""),
+                    meta: Value::Null,
+                },
+                node_ref,
+            ),
+        },
+        RouteApplied::None { group, .. } => AppliedRoute::None { group: *group },
+    }
+}
+
+/// The branch results a join's inputs carry, in branch order.
+fn branch_results(
+    state: &EngineState,
+    track: &ExecutionTrack,
+    fork: NodeId,
+    inputs: &[Token],
+) -> Vec<BranchResult> {
+    let mut results: Vec<BranchResult> = inputs
+        .iter()
+        .filter_map(|token| {
+            let record = state
+                .history()
+                .iter()
+                .rev()
+                .find(|r| r.firing == token.from)?;
+            let node = state.graph().node(record.node)?;
+            let branch = match track.branches.role(record.node) {
+                BranchRole::Member(branch) if branch.fork == fork => branch,
+                BranchRole::Fork { .. } if record.node == fork => BranchRef { fork, index: 0 },
+                _ => return None,
+            };
+            Some(BranchResult {
+                branch,
+                node: node_ref(node),
+                firing: token.from,
+                status: record.outcome.status.clone(),
+                payload: token.payload.clone(),
+            })
+        })
+        .collect();
+    results.sort_by_key(|result| result.branch.index);
+    results
+}
+
+/// Read a backend's envelope out of a `StepEvent::Custom` value: an object
+/// with a string `kind` and an `event` object is a backend event; its
+/// identities are read from the conventional envelope fields when present.
+fn agent_activity(value: &Value) -> Option<AgentActivity> {
+    let object = value.as_object()?;
+    let backend = object.get(BACKEND_EVENT_KIND_KEY)?.as_str()?;
+    let envelope = object.get("event")?;
+    let text = |key: &str| envelope.get(key).and_then(Value::as_str).map(str::to_owned);
+    Some(AgentActivity {
+        backend:        SmolStr::new(backend),
+        session:        text("session_id"),
+        parent_session: text("parent_session_id"),
+        tool_call:      text("tool_call_id"),
+        stream:         text("stream_id"),
+        stream_seq:     envelope.get("seq").and_then(Value::as_u64),
+        envelope:       envelope.clone(),
+    })
+}
+
+// ── Live delivery ──────────────────────────────────────────────────────────
+
+/// Where projected events go. `deliver` is awaited per event, in order: a
+/// slow sink applies backpressure to the queue behind it, never to the
+/// driver. An error stops the pump.
+#[async_trait::async_trait]
+pub trait RunEventSink: Send + Sync {
+    async fn deliver(&self, event: RunEvent) -> Result<(), SinkError>;
+
+    /// Called once after the last event, before the receipt.
+    async fn finish(&self) -> Result<(), SinkError> {
+        Ok(())
+    }
+}
+
+/// A sink refused or lost an event.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct SinkError {
+    pub message: String,
+}
+
+impl SinkError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// What the projector did over a run.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionReceipt {
+    pub version:     u32,
+    pub projected:   u64,
+    pub delivered:   u64,
+    /// Events the sink never received because it had failed.
+    pub undelivered: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure:     Option<String>,
+}
+
+impl ProjectionReceipt {
+    pub fn is_clean(&self) -> bool {
+        self.failure.is_none() && self.undelivered == 0
+    }
+}
+
+enum PumpMessage {
+    Event(Box<RunEvent>),
+    Finish,
+}
+
+struct PumpState {
+    projected: u64,
+}
+
+/// The live, lossless consumption path: an [`ExecutionObserver`] that
+/// projects each record and queues the result for a pump task, which awaits
+/// the sink per event.
+pub struct EventProjector {
+    projection: Mutex<Projection>,
+    tx:         mpsc::UnboundedSender<PumpMessage>,
+    pump:       Mutex<Option<JoinHandle<ProjectionReceipt>>>,
+    counts:     Mutex<PumpState>,
+}
+
+impl EventProjector {
+    /// A projector for a fresh run.
+    pub fn new(sink: Arc<dyn RunEventSink>) -> Arc<Self> {
+        Self::with_projection(sink, Projection::new())
+    }
+
+    /// A projector for a run being resumed from `run_dir`: the records on
+    /// disk are folded into its state first, and nothing is delivered for
+    /// them. The resumed driver then delivers the regenerated suffix and
+    /// every new record with the identities a fresh run would have given
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// The run dir's logs do not decode or replay.
+    pub fn primed(sink: Arc<dyn RunEventSink>, run_dir: &Path) -> Result<Arc<Self>, ReplayError> {
+        let mut projection = Projection::new();
+        project_run(run_dir, &mut projection)?;
+        Ok(Self::with_projection(sink, projection))
+    }
+
+    fn with_projection(sink: Arc<dyn RunEventSink>, projection: Projection) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PumpMessage>();
+        let pump = tokio::spawn(async move {
+            let mut receipt = ProjectionReceipt {
+                version: EVENT_CONTRACT_VERSION,
+                ..ProjectionReceipt::default()
+            };
+            while let Some(message) = rx.recv().await {
+                match message {
+                    PumpMessage::Event(event) => {
+                        receipt.projected += 1;
+                        if receipt.failure.is_some() {
+                            receipt.undelivered += 1;
+                            continue;
+                        }
+                        match sink.deliver(*event).await {
+                            Ok(()) => receipt.delivered += 1,
+                            Err(error) => {
+                                receipt.undelivered += 1;
+                                receipt.failure = Some(error.message);
+                            }
+                        }
+                    }
+                    PumpMessage::Finish => break,
+                }
+            }
+            if receipt.failure.is_none()
+                && let Err(error) = sink.finish().await
+            {
+                receipt.failure = Some(error.message);
+            }
+            receipt
+        });
+        Arc::new(Self {
+            projection: Mutex::new(projection),
+            tx,
+            pump: Mutex::new(Some(pump)),
+            counts: Mutex::new(PumpState { projected: 0 }),
+        })
+    }
+
+    fn projection(&self) -> MutexGuard<'_, Projection> {
+        self.projection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn push(&self, events: Vec<RunEvent>) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_millis()).ok());
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        for mut event in events {
+            event.observed_at = now;
+            counts.projected += 1;
+            let _ = self.tx.send(PumpMessage::Event(Box::new(event)));
+        }
+    }
+
+    /// End the stream, await the sink's last delivery and `finish`, and
+    /// report. Call once, after the run.
+    pub async fn shutdown(&self) -> ProjectionReceipt {
+        let _ = self.tx.send(PumpMessage::Finish);
+        let pump = self
+            .pump
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match pump {
+            Some(pump) => pump.await.unwrap_or_else(|error| ProjectionReceipt {
+                version: EVENT_CONTRACT_VERSION,
+                failure: Some(format!("the event pump failed: {error}")),
+                ..ProjectionReceipt::default()
+            }),
+            None => ProjectionReceipt {
+                version: EVENT_CONTRACT_VERSION,
+                failure: Some("shutdown was called twice".to_owned()),
+                ..ProjectionReceipt::default()
+            },
+        }
+    }
+}
+
+impl ExecutionObserver for EventProjector {
+    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
+        let events = self.projection().engine(execution, record, state);
+        self.push(events);
+    }
+
+    fn on_lifecycle(&self, record: &CoordinatorRecord) {
+        let events = self.projection().lifecycle(record);
+        self.push(events);
+    }
+}
+
+/// Collects every event it is given, for tests and small hosts.
+#[derive(Default)]
+pub struct CollectingSink {
+    events: Mutex<Vec<RunEvent>>,
+}
+
+impl CollectingSink {
+    pub fn events(&self) -> Vec<RunEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl RunEventSink for CollectingSink {
+    async fn deliver(&self, event: RunEvent) -> Result<(), SinkError> {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event);
+        Ok(())
+    }
+}
+
+// ── Replay ─────────────────────────────────────────────────────────────────
+
+/// Why a run dir could not be projected.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error(transparent)]
+    EngineLog(#[from] EngineLogError),
+    #[error("could not read `{}`", path.display())]
+    Io {
+        path:   PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("graph {digest} does not decode: {source}")]
+    Graph {
+        digest: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// Project every event of a run from its run dir: the coordinator log first,
+/// then each execution's engine log in declaration order, each replayed
+/// external event by external event so the derivation sees the same
+/// post-apply states the live observer saw. Identities equal the live ones.
+pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
+    let mut projection = Projection::new();
+    project_run(run_dir, &mut projection)
+}
+
+/// [`replay_run`] through a caller's projection state.
+fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEvent>, ReplayError> {
+    let coordinator = run_dir.join(COORDINATOR_FILE);
+    let bytes = fs::read(&coordinator).map_err(|source| ReplayError::Io {
+        path: coordinator.clone(),
+        source,
+    })?;
+    let decoded = decode_coordinator_log(&coordinator, &bytes)?;
+    let state = CoordinatorState::replay(&decoded.records)?;
+    let mut events = Vec::new();
+    for record in &decoded.records {
+        events.extend(projection.lifecycle(record));
+    }
+    for (execution, declared) in &state.executions {
+        let invocation = declared.declaration.invocation;
+        let digest = state.invocations[&invocation].declaration.graph;
+        let graph_path = run_dir.join(GRAPHS_DIR).join(format!("{digest}.json"));
+        let graph_bytes = fs::read(&graph_path).map_err(|source| ReplayError::Io {
+            path: graph_path.clone(),
+            source,
+        })?;
+        let graph: Graph =
+            serde_json::from_slice(&graph_bytes).map_err(|source| ReplayError::Graph {
+                digest: digest.to_hex(),
+                source,
+            })?;
+        let log_path = run_dir
+            .join(execution_relative_dir(invocation, *execution))
+            .join(EVENTS_FILE);
+        if !log_path.exists() {
+            continue;
+        }
+        let log = read_engine_log(&log_path)?.log;
+        events.extend(replay_execution(projection, *execution, graph, &log));
+    }
+    Ok(events)
+}
+
+/// Project one execution's log through `projection`, external event by
+/// external event.
+pub fn replay_execution(
+    projection: &mut Projection,
+    execution: ExecutionId,
+    graph: Graph,
+    log: &engine::EventLog,
+) -> Vec<RunEvent> {
+    let mut state = EngineState::new(graph);
+    let mut events = Vec::new();
+    for event in log.external_events() {
+        let before = state.log.len();
+        let (next, _) = engine::apply(state, event.clone());
+        state = next;
+        for record in &state.log.records()[before..] {
+            events.extend(projection.engine(execution, record, &state));
+        }
+    }
+    events
+}
+
+/// Metrics helpers a projection consumer commonly wants.
+pub fn duration_of(metrics: &Metrics) -> Option<Duration> {
+    metrics.duration_ms.map(Duration::from_millis)
+}
