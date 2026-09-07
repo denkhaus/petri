@@ -67,10 +67,12 @@ fn runtime(dir: &RunDir) -> Runtime {
     register(Runtime::standard()).options(options)
 }
 
+/// A one-agent graph on the ACP backend. The backend is named because the
+/// default is the native agent, as Fabro's own default is.
 fn agent_dot(agent: &Path, extra: &str) -> String {
     dot(&format!(
         r#"
-        graph [goal="Greet", acp.command="python3 {} "]
+        graph [goal="Greet", backend="acp", acp.command="python3 {} "]
         a [prompt="Say hello", model="claude-opus"{extra}]
         start -> a -> exit
     "#,
@@ -115,7 +117,7 @@ async fn a_routing_directive_in_the_response_steers_the_edge() {
     // prove the client answers requests mid-turn.
     let graph = lower(&dot(&format!(
         r#"
-        graph [goal="G", acp.command="python3 {}"]
+        graph [goal="G", backend="acp", acp.command="python3 {}"]
         a [prompt="Say hello"]
         start -> a
         a -> exit [label="Done"]
@@ -172,8 +174,10 @@ async fn an_agent_that_exits_early_fails_the_stage_routably() {
 #[tokio::test]
 async fn an_unconfigured_agent_fails_with_a_specific_class() {
     let dir = RunDir::new("fabro-agent-unconfigured");
+    // An ACP node with no command anywhere: the node names the backend,
+    // since the default is the native agent.
     let graph = lower(&dot(r#"
-        a [prompt="Say hello"]
+        a [prompt="Say hello", backend="acp"]
         start -> a -> exit
     "#));
     let report = run(&dir, graph).await;
