@@ -14,12 +14,13 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run;
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::register;
+use fabro_steps::skills::FabroHome;
 use fabro_steps::subagents::METRIC;
 use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
@@ -846,4 +847,77 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
         "the restarted stage is a new session; no child was restored"
     );
     assert_eq!(metrics(&resumed, "a")[METRIC]["spawned"], 1);
+}
+
+// ── Skills ──────────────────────────────────────────────────────────────────
+
+/// The `repo` skills fixture as a Git repository in the run's workspace, or
+/// `None` when Git is unavailable.
+fn skills_repository(dir: &RunDir) -> Option<PathBuf> {
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("target dir");
+        for entry in fs::read_dir(from).expect("fixture dir") {
+            let entry = entry.expect("entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).expect("copy");
+            }
+        }
+    }
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../acceptance/testdata/skills");
+    let ws = workspace(dir);
+    copy_tree(&fixtures.join("repo"), &ws);
+    let git = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&ws)
+        .status();
+    git.is_ok_and(|s| s.success()).then_some(ws)
+}
+
+/// The parent discovers the workspace's skills (task 14's directories); a
+/// child a Fabro agent spawns re-discovers them from the shared sandbox. A
+/// Pebble child is given no skill directories, so the reference behavior
+/// this test states fails at the pinned Pebble; recorded as a library
+/// contract item.
+#[tokio::test]
+#[ignore = "library gap: a Pebble child inherits no skill directories (Fabro's child re-discovers \
+            the skills); see task15-subagents.md"]
+async fn a_child_sees_the_skills_its_parent_discovered() {
+    let dir = RunDir::new("subagents-skills");
+    if skills_repository(&dir).is_none() {
+        return;
+    }
+    let (client, provider) = scripted_client(vec![
+        ScriptedCall::response(spawn_and_wait(&["child: greet Ada"])),
+        ScriptedCall::response(text_response("Greeted.")),
+        ScriptedCall::response(text_response("Done.")),
+    ]);
+    let mut options = RunOptions::new(dir.path());
+    options.grace = Duration::from_millis(200);
+    options.retention = Retention::Always;
+    options.echo = false;
+    let rt = register(
+        Runtime::standard()
+            .options(options)
+            .capability(PebbleClient(client))
+            .capability(FabroHome(dir.path().join("no-home"))),
+    );
+    let report = rt.run(graph(&one_agent(""), None)).await.expect("replay");
+    assert_eq!(report.status, RunStatus::Success);
+    let requests = provider.requests();
+    let parent = serde_json::to_string(&requests[0]).expect("request");
+    assert!(
+        parent.contains("# Available Skills")
+            && tool_names(&requests[0]).iter().any(|n| n == "use_skill"),
+        "the root discovered the repository's skills"
+    );
+    let child = serde_json::to_string(&requests[1]).expect("request");
+    assert!(
+        child.contains("# Available Skills")
+            && tool_names(&requests[1]).iter().any(|n| n == "use_skill"),
+        "the reference child re-discovers the skills: tools {:?}",
+        tool_names(&requests[1])
+    );
 }
