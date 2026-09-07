@@ -49,6 +49,10 @@ export PETRI_FABRO_COVERAGE_DIR="${PETRI_FABRO_COVERAGE_DIR:-$PETRI_EVIDENCE_DIR
 
 status=0
 started=$SECONDS
+# The committed references must come from the pinned Fabro before any of
+# them is used as a baseline.
+cargo nextest run --locked --workspace --all-targets --all-features --profile ci \
+  -E "package(petri-fabro-acceptance) & binary(reference_version)" --no-tests=fail || status=1
 cargo nextest run --locked --workspace --all-targets --all-features --profile ci \
   -E "package(petri-cli) & binary($TEST)" --no-tests=fail "$@" || status=1
 echo "differential run took $((SECONDS - started)) s"
