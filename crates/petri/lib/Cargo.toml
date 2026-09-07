@@ -29,5 +29,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 testkit = { workspace = true }
+# The fallback reconstruction test drives a native agent with a scripted
+# model client.
+pebble-coding-agent = { workspace = true, features = ["test-util"] }
 smol_str = { workspace = true }
 tokio-util = { workspace = true }

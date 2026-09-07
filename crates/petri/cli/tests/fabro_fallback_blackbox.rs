@@ -988,3 +988,316 @@ async fn reasoning_effort_maps_per_target_and_unfit_targets_are_skipped() {
     openai.stop();
     openrouter.stop();
 }
+
+/// Output-repair turns stay on the original model's plan, and advancing
+/// never activates the target's own chain: the primary's answer misses the
+/// contract, the repair turn on the primary fails, the fallback gets the
+/// repair prompt and answers; when the fallback fails too, its own
+/// configured chain is not consulted and the stage is exhausted.
+#[tokio::test]
+async fn repair_turns_stay_on_the_plan_and_a_target_chain_is_inert() {
+    // Part one: the repair turn moves with the plan.
+    let mut case = Case::new("fallback-repair");
+    let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![
+        scenario(
+            OPENAI,
+            &case.credential,
+            "malformed",
+            model(OPENAI),
+            "Say hello",
+            text("not json at all"),
+        ),
+        scenario(
+            OPENAI,
+            &case.credential,
+            "repair-down",
+            model(OPENAI),
+            "did not satisfy the output contract",
+            error(503, "server_error", "service_unavailable", "gone away"),
+        ),
+    ])
+    .await;
+    let anthropic = Twin::start(ANTHROPIC, &case.root.join("twin-anthropic"), vec![
+        scenario(
+            ANTHROPIC,
+            &case.credential,
+            "repairs",
+            model(ANTHROPIC),
+            "did not satisfy the output contract",
+            text(r#"{"outcome": "succeeded", "context_updates": {"fixed": "yes"}}"#),
+        ),
+    ])
+    .await;
+    let openrouter = Twin::start(OPENROUTER, &case.root.join("twin-openrouter"), vec![]).await;
+    case.redirect(&openai);
+    case.redirect(&anthropic);
+    case.redirect(&openrouter);
+    let chains = "[run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"anthropic:claude-sonnet-5\"]\n\"claude-sonnet-5\" = [\"openrouter:kimi-k3\"]\n";
+    let workflow = agent_workflow(&case, OPENAI, ", output_schema=\"routing\"", chains);
+    let finished = case.run_with(&workflow, &[], no_client_retries()).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(openai.consumed(), ["malformed", "repair-down"]);
+    assert_eq!(anthropic.consumed(), ["repairs"]);
+    assert!(requests(&openrouter, &case).is_empty());
+    let sent = serde_json::to_string(&requests(&anthropic, &case)[0]).expect("request");
+    assert!(
+        sent.contains("not json at all") && sent.contains("did not satisfy the output contract"),
+        "the fallback continues the repair conversation: {sent}"
+    );
+    assert_eq!(finished.final_context()["fixed"], json!("yes"));
+    let records = failures::records(&finished.run_dir);
+    assert_eq!(
+        plan_routes(&records),
+        ["openai/gpt-5.6-sol", "anthropic/claude-sonnet-5"],
+        "the plan is the original model's, not extended by the target's chain"
+    );
+    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
+    assert_eq!(failover["continuation"], json!("replay_prompt"));
+    finished.assert_no_leaked_processes().await;
+    openai.stop();
+    anthropic.stop();
+    openrouter.stop();
+
+    // Part two: the target fails too; its own chain (to OpenRouter) is inert.
+    let mut case = Case::new("fallback-target-chain-inert");
+    let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![scenario(
+        OPENAI,
+        &case.credential,
+        "primary-down",
+        model(OPENAI),
+        "Say hello",
+        error(503, "server_error", "service_unavailable", "gone away"),
+    )])
+    .await;
+    let anthropic = Twin::start(ANTHROPIC, &case.root.join("twin-anthropic"), vec![
+        scenario(
+            ANTHROPIC,
+            &case.credential,
+            "target-down",
+            model(ANTHROPIC),
+            "Say hello",
+            error(529, "overloaded_error", "overloaded", "overloaded"),
+        ),
+    ])
+    .await;
+    let openrouter = Twin::start(OPENROUTER, &case.root.join("twin-openrouter"), vec![
+        any_request(
+            OPENROUTER,
+            &case.credential,
+            "never",
+            "moonshotai/kimi-k3",
+            text("Should not be asked."),
+        ),
+    ])
+    .await;
+    case.redirect(&openai);
+    case.redirect(&anthropic);
+    case.redirect(&openrouter);
+    let workflow = agent_workflow(&case, OPENAI, "", chains);
+    let finished = case.run_with(&workflow, &[], no_client_retries()).await;
+    finished.assert_code(1);
+    assert_eq!(openai.consumed(), ["primary-down"]);
+    assert_eq!(anthropic.consumed(), ["target-down"]);
+    assert!(
+        requests(&openrouter, &case).is_empty(),
+        "the target's own chain never activates"
+    );
+    let records = failures::records(&finished.run_dir);
+    let stop = &failures::of_node(&records, "agent", "fabro.fallback.stop")[0];
+    assert_eq!(stop["reason"], json!("exhausted"));
+    assert_eq!(failures::route(stop), "anthropic/claude-sonnet-5");
+    finished.assert_no_leaked_processes().await;
+    openai.stop();
+    anthropic.stop();
+    openrouter.stop();
+}
+
+/// A retained thread carries its plan: after the first node fails over, the
+/// second `full` node on the thread continues on the fallback route without
+/// asking the primary, and a later node off the thread starts a new plan on
+/// the primary.
+#[tokio::test]
+async fn a_retained_thread_continues_on_the_fallback_route() {
+    let mut case = Case::new("fallback-thread");
+    let model_openai = model(OPENAI);
+    let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![
+        scenario(
+            OPENAI,
+            &case.credential,
+            "plan-down",
+            model_openai,
+            "Write a plan",
+            error(503, "server_error", "service_unavailable", "gone away"),
+        ),
+        scenario(
+            OPENAI,
+            &case.credential,
+            "review",
+            model_openai,
+            "Review the work",
+            text("Reviewed on the primary."),
+        ),
+    ])
+    .await;
+    let anthropic = Twin::start(ANTHROPIC, &case.root.join("twin-anthropic"), vec![
+        scenario(
+            ANTHROPIC,
+            &case.credential,
+            "plan",
+            model(ANTHROPIC),
+            "Write a plan",
+            text("PLAN: add a health endpoint"),
+        ),
+        scenario(
+            ANTHROPIC,
+            &case.credential,
+            "implement",
+            model(ANTHROPIC),
+            "Implement the plan",
+            text("IMPLEMENTED on the fallback"),
+        ),
+    ])
+    .await;
+    case.redirect(&openai);
+    case.redirect(&anthropic);
+    let workflow = case.workflow(
+        &format!(
+            r#"digraph Threads {{
+    graph [backend="api", goal="Ship a health endpoint"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    plan [prompt="Write a plan.", model="{model_openai}", provider="openai", fidelity="full", thread_id="impl", on_failure="exit"]
+    implement [prompt="Implement the plan.", model="{model_openai}", provider="openai", fidelity="full", thread_id="impl", on_failure="exit"]
+    review [prompt="Review the work.", model="{model_openai}", provider="openai", fidelity="summary:low", on_failure="exit"]
+    start -> plan -> implement -> review -> exit
+}}"#
+        ),
+        Some(chain_openai_to_anthropic()),
+    );
+    let finished = case.run_with(&workflow, &[], no_client_retries()).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(openai.consumed(), ["plan-down", "review"]);
+    assert_eq!(anthropic.consumed(), ["plan", "implement"]);
+    let on_fallback = requests(&anthropic, &case);
+    let second = serde_json::to_string(&on_fallback[1]).expect("request");
+    assert!(
+        second.contains("PLAN: add a health endpoint") && second.contains("Implement the plan"),
+        "the thread's conversation continues on the fallback route: {second}"
+    );
+    let records = failures::records(&finished.run_dir);
+    assert_eq!(failures::kinds(&records, "plan"), [
+        "plan", "route", "usage", "failover", "route", "usage"
+    ]);
+    assert_eq!(
+        failures::kinds(&records, "implement"),
+        ["route", "usage"],
+        "a reused thread has no plan of its own: {records:?}"
+    );
+    let reused = &failures::of_node(&records, "implement", "fabro.fallback.route")[0];
+    assert_eq!(reused["reused"], json!(true));
+    assert_eq!(reused["position"], json!(1));
+    assert_eq!(failures::route(reused), "anthropic/claude-sonnet-5");
+    assert_eq!(failures::kinds(&records, "review"), [
+        "plan", "route", "usage"
+    ]);
+    let fresh = &failures::of_node(&records, "review", "fabro.fallback.route")[0];
+    assert_eq!(fresh["position"], json!(0));
+    assert_eq!(failures::route(fresh), "openai/gpt-5.6-sol");
+    finished.assert_no_leaked_processes().await;
+    openai.stop();
+    anthropic.stop();
+}
+
+/// A prompt node (`tab`) runs its one-shot request on the same plan: the
+/// primary's error moves the same messages to the next provider, and the
+/// repair turn stays on that plan.
+#[tokio::test]
+async fn a_prompt_node_fails_over_and_repairs_on_its_plan() {
+    let mut case = Case::new("fallback-prompt-node");
+    let model_openai = model(OPENAI);
+    let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![scenario(
+        OPENAI,
+        &case.credential,
+        "primary-down",
+        model_openai,
+        "Summarize",
+        error(
+            429,
+            "rate_limit_error",
+            "insufficient_quota",
+            "credit spent",
+        ),
+    )])
+    .await;
+    let anthropic = Twin::start(ANTHROPIC, &case.root.join("twin-anthropic"), vec![
+        scenario(
+            ANTHROPIC,
+            &case.credential,
+            "malformed",
+            model(ANTHROPIC),
+            "Summarize",
+            text("not json"),
+        ),
+        scenario(
+            ANTHROPIC,
+            &case.credential,
+            "repaired",
+            model(ANTHROPIC),
+            "did not satisfy the output contract",
+            text(r#"{"outcome": "succeeded", "context_updates": {"summary": "short"}}"#),
+        ),
+    ])
+    .await;
+    case.redirect(&openai);
+    case.redirect(&anthropic);
+    let workflow = case.workflow(
+        &format!(
+            r#"digraph Prompted {{
+    graph [backend="api", goal="Summarize the interview"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    summary [shape=tab, prompt="Summarize the interview.", model="{model_openai}", provider="openai", output_schema="routing", on_failure="exit"]
+    start -> summary -> exit
+}}"#
+        ),
+        Some(chain_openai_to_anthropic()),
+    );
+    let finished = case.run_with(&workflow, &[], no_client_retries()).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(openai.consumed(), ["primary-down"]);
+    assert_eq!(anthropic.consumed(), ["malformed", "repaired"]);
+    assert_eq!(finished.final_context()["summary"], json!("short"));
+    let records = failures::records(&finished.run_dir);
+    assert_eq!(failures::kinds(&records, "summary"), [
+        "plan", "route", "usage", "failover", "route", "usage", "usage"
+    ]);
+    let failover = &failures::of_node(&records, "summary", "fabro.fallback.failover")[0];
+    assert_eq!(failover["error"]["kind"], json!("quota_exceeded"));
+    assert_eq!(failover["continuation"], json!("replay_prompt"));
+    let usages = failures::of_node(&records, "summary", "fabro.fallback.usage");
+    assert!(
+        usages[1..].iter().all(|u| u["position"] == json!(1)),
+        "{usages:?}"
+    );
+    finished.assert_no_leaked_processes().await;
+    openai.stop();
+    anthropic.stop();
+}
