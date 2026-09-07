@@ -12,12 +12,13 @@
 //! tool; its `SkillsDiscovered` and `SkillActivated` events reach the run
 //! log in the `pebble` envelope, attributed to the node, firing and attempt.
 //!
-//! Pebble, like Fabro, skips a `SKILL.md` it cannot read or parse without a
-//! word. Petri audits the same files first and records a
-//! [`WARNING_EVENT`] for each, so a broken skill is never a silent absence.
-//! The check mirrors the three failures Pebble's parser knows
-//! ([`problem_of`]); delete it when Pebble reports skipped files itself (a
-//! library gap recorded in the task evidence).
+//! Fabro skips a `SKILL.md` it cannot read or parse without a word. Pebble
+//! skips it too, but reports what it skipped on `SkillsDiscovered`
+//! ([`skipped`]), so Petri records a [`WARNING_EVENT`] and a stderr line for
+//! each and a broken skill is never a silent absence. A directory the
+//! workflow named that does not exist is Petri's own diagnostic
+//! ([`missing_directories`]): Pebble, like Fabro, says nothing about a
+//! directory that is not there.
 //!
 //! Skill loading is separate from the fidelity preamble
 //! (`crate::fidelity`) and from project document selection
@@ -29,11 +30,14 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use executor::ExecEnv;
-use ir::StepEvent;
+use ir::{Attempt, FiringId, StepEvent};
 use pebble_coding_agent::Error as PebbleError;
+use pebble_coding_agent::events::{CodingAgentEvent, CodingEvent, SkippedSkillReason};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use smol_str::SmolStr;
 use steps::StepCtx;
+use tokio::sync::mpsc;
 
 use crate::agent::AgentConfig;
 use crate::memory;
@@ -57,9 +61,6 @@ const PROMPT_CLASS: &str = "pebble_prompt";
 
 /// The environment variable naming the Fabro home, as Fabro reads it.
 pub const HOME_ENV: &str = "FABRO_HOME";
-
-/// The most bytes the audit reads from one `SKILL.md`.
-const AUDIT_READ_LIMIT: usize = 256 * 1024;
 
 /// The Fabro home directory: where the configured skills directory lives.
 ///
@@ -172,6 +173,8 @@ pub enum Reason {
     MissingDirectory,
     /// A `SKILL.md` that cannot be read.
     Unreadable,
+    /// A directory Pebble could not search for skills.
+    Unsearchable,
     /// A `SKILL.md` Pebble's parser rejects.
     Malformed,
 }
@@ -184,93 +187,77 @@ pub struct Problem {
     pub message: String,
 }
 
-/// Why Pebble's `parse_skill` would reject `content`, in its own words.
-/// A mirror of the pinned parser's three failures.
-#[must_use]
-pub fn problem_of(content: &str) -> Option<&'static str> {
-    let Some(after_opening) = content.trim().strip_prefix("---") else {
-        return Some("missing YAML frontmatter delimiters");
-    };
-    let Some(end) = after_opening.find("\n---") else {
-        return Some("missing closing frontmatter delimiter");
-    };
-    let named = after_opening[..end]
-        .lines()
-        .any(|line| line.trim().starts_with("name:"));
-    (!named).then_some("missing required 'name' field in frontmatter")
-}
-
-/// Every file and directory Pebble will skip, found the way Pebble looks:
-/// one shell probe lists `<dir>/*/SKILL.md` per directory, then each file
-/// is read and checked. A conventional directory that does not exist is
-/// ordinary; a workflow-named one that does not exist is reported.
-pub async fn audit(env: &dyn ExecEnv, dirs: &[SkillDir]) -> Vec<Problem> {
-    let script = dirs
+/// The directories a workflow named that do not exist, found with one shell
+/// probe. A conventional directory that is absent is ordinary and silent, as
+/// in Fabro; a directory the workflow asked for is a mistake worth a word.
+pub async fn missing_directories(env: &dyn ExecEnv, dirs: &[SkillDir]) -> Vec<Problem> {
+    let named: Vec<&SkillDir> = dirs
+        .iter()
+        .filter(|dir| dir.source == Source::Workflow)
+        .collect();
+    if named.is_empty() {
+        return Vec::new();
+    }
+    let script = named
         .iter()
         .map(|dir| {
             let d = memory::quote(&dir.path);
-            format!(
-                "if [ -d {d} ]; then for f in {d}/*/SKILL.md; do if [ -e \"$f\" ]; then if [ -r \
-                 \"$f\" ]; then printf 'file\\t%s\\n' \"$f\"; else printf 'unreadable\\t%s\\n' \
-                 \"$f\"; fi; fi; done; else printf 'missing\\t%s\\n' {d}; fi"
-            )
+            format!("if [ ! -d {d} ]; then printf 'missing\\t%s\\n' {d}; fi")
         })
         .collect::<Vec<_>>()
         .join("\n");
     let Some(output) = memory::run(env, &script).await else {
         return Vec::new();
     };
-    let mut problems = Vec::new();
-    for line in output.lines() {
-        let Some((kind, path)) = line.split_once('\t') else {
-            continue;
-        };
-        match kind {
-            "missing" => {
-                let named = dirs
-                    .iter()
-                    .any(|dir| dir.path == path && dir.source == Source::Workflow);
-                if named {
-                    problems.push(Problem {
-                        reason:  Reason::MissingDirectory,
-                        path:    path.to_owned(),
-                        message: "the workflow names a skills directory that does not exist"
-                            .to_owned(),
-                    });
+    output
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(kind, _)| *kind == "missing")
+        .map(|(_, path)| Problem {
+            reason:  Reason::MissingDirectory,
+            path:    path.to_owned(),
+            message: "the workflow names a skills directory that does not exist".to_owned(),
+        })
+        .collect()
+}
+
+/// What discovery skipped, as Pebble reported it on `SkillsDiscovered`, in
+/// Petri's own words. A child session re-discovers the same directories, so
+/// only the root session's report is taken and the stage says each thing once.
+#[must_use]
+pub fn skipped(event: &CodingAgentEvent) -> Vec<Problem> {
+    let CodingEvent::SkillsDiscovered { skipped, .. } = &event.event else {
+        return Vec::new();
+    };
+    if event.parent_session_id.is_some() {
+        return Vec::new();
+    }
+    skipped
+        .iter()
+        .map(|skill| {
+            let (reason, what) = match skill.reason {
+                SkippedSkillReason::Malformed => {
+                    (Reason::Malformed, "not a skill, so it is skipped")
                 }
+                SkippedSkillReason::UnreadableFile => {
+                    (Reason::Unreadable, "cannot be read, so it is skipped")
+                }
+                SkippedSkillReason::UnsearchableDirectory => (
+                    Reason::Unsearchable,
+                    "cannot be searched, so its skills are skipped",
+                ),
+                _ => (Reason::Unreadable, "skipped by discovery"),
+            };
+            Problem {
+                reason,
+                path: skill.path.clone(),
+                message: format!("{what}: {}", skill.message),
             }
-            "unreadable" => problems.push(unreadable(path, "permission denied")),
-            "file" => match env
-                .read_file_limited(Path::new(path), AUDIT_READ_LIMIT)
-                .await
-            {
-                Ok(Some(bytes)) => {
-                    if let Some(why) = problem_of(&String::from_utf8_lossy(&bytes)) {
-                        problems.push(Problem {
-                            reason:  Reason::Malformed,
-                            path:    path.to_owned(),
-                            message: format!("not a skill, so it is skipped: {why}"),
-                        });
-                    }
-                }
-                Ok(None) => problems.push(unreadable(path, "the file disappeared")),
-                Err(error) => problems.push(unreadable(path, &error.to_string())),
-            },
-            _ => {}
-        }
-    }
-    problems
+        })
+        .collect()
 }
 
-fn unreadable(path: &str, why: &str) -> Problem {
-    Problem {
-        reason:  Reason::Unreadable,
-        path:    path.to_owned(),
-        message: format!("cannot be read, so it is skipped: {why}"),
-    }
-}
-
-/// The directories a session gets, and what the audit found.
+/// The directories a session gets, and the ones the workflow named in vain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prepared {
     pub dirs:     Vec<SkillDir>,
@@ -285,16 +272,68 @@ impl Prepared {
     }
 }
 
-/// Resolve and audit the directories for one native session, and record
-/// both on the step's progress channel: [`RESOLVED_EVENT`] once, then one
-/// [`WARNING_EVENT`] and one stderr line per problem.
+/// Where a warning belongs: the node, firing and attempt that own the
+/// session. The step and the Pebble event sink both report through it.
+#[derive(Clone, Debug)]
+pub struct Attribution {
+    pub node:    SmolStr,
+    pub firing:  FiringId,
+    pub attempt: Attempt,
+}
+
+impl Attribution {
+    /// The step's own identity.
+    #[must_use]
+    pub fn of(ctx: &StepCtx) -> Self {
+        Self {
+            node:    ctx.node.clone(),
+            firing:  ctx.firing,
+            attempt: ctx.attempt,
+        }
+    }
+}
+
+/// Record one [`WARNING_EVENT`] and one stderr line per problem, so a
+/// skipped skill reaches the event log and the terminal.
+pub async fn report(logs: &mpsc::Sender<StepEvent>, at: &Attribution, problems: &[Problem]) {
+    for problem in problems {
+        tracing::warn!(
+            node = %at.node,
+            path = %problem.path,
+            reason = ?problem.reason,
+            "skill skipped"
+        );
+        let _ = logs
+            .send(StepEvent::Custom(json!({
+                "kind": WARNING_EVENT,
+                "node": at.node,
+                "firing": at.firing,
+                "attempt": at.attempt,
+                "reason": problem.reason,
+                "path": problem.path,
+                "message": problem.message,
+            })))
+            .await;
+        let _ = logs
+            .send(StepEvent::Log {
+                stream: ir::LogStream::Stderr,
+                line:   format!("skills: {} {}", problem.path, problem.message),
+            })
+            .await;
+    }
+}
+
+/// Resolve the directories for one native session and record them on the
+/// step's progress channel as [`RESOLVED_EVENT`], with a warning for each
+/// directory the workflow named that does not exist. Pebble reports the
+/// files it skipped once it has searched them ([`skipped`]).
 pub async fn prepare(config: &AgentConfig, ctx: &StepCtx) -> Prepared {
     let home = ctx
         .capability::<FabroHome>()
         .map(|home| (*home).clone())
         .or_else(FabroHome::from_env);
     let dirs = resolve(ctx.env.as_ref(), home.as_ref(), &config.skill_dirs).await;
-    let problems = audit(ctx.env.as_ref(), &dirs).await;
+    let problems = missing_directories(ctx.env.as_ref(), &dirs).await;
     let _ = ctx
         .logs
         .send(StepEvent::Custom(json!({
@@ -306,31 +345,7 @@ pub async fn prepare(config: &AgentConfig, ctx: &StepCtx) -> Prepared {
             "dirs": dirs,
         })))
         .await;
-    for problem in &problems {
-        tracing::warn!(
-            node = %ctx.node,
-            path = %problem.path,
-            reason = ?problem.reason,
-            "skill skipped"
-        );
-        let _ = ctx
-            .logs
-            .send(StepEvent::Custom(json!({
-                "kind": WARNING_EVENT,
-                "node": ctx.node,
-                "firing": ctx.firing,
-                "attempt": ctx.attempt,
-                "reason": problem.reason,
-                "path": problem.path,
-                "message": problem.message,
-            })))
-            .await;
-        ctx.log(
-            ir::LogStream::Stderr,
-            format!("skills: {} {}", problem.path, problem.message),
-        )
-        .await;
-    }
+    report(&ctx.logs, &Attribution::of(ctx), &problems).await;
     Prepared { dirs, problems }
 }
 
@@ -416,24 +431,6 @@ mod tests {
         let without_home = order(None, "/repo", "/repo", &[]);
         assert_eq!(without_home.len(), 2);
         assert_eq!(without_home[0].source, Source::ProjectFabro);
-    }
-
-    #[test]
-    fn problem_of_mirrors_pebbles_parser() {
-        assert_eq!(
-            problem_of("Just prose"),
-            Some("missing YAML frontmatter delimiters")
-        );
-        assert_eq!(
-            problem_of("---\nname: x\ndescription: y\nbody"),
-            Some("missing closing frontmatter delimiter")
-        );
-        assert_eq!(
-            problem_of("---\ndescription: y\n---\nbody"),
-            Some("missing required 'name' field in frontmatter")
-        );
-        assert_eq!(problem_of("\n---\nname: x\n---\nbody"), None);
-        assert_eq!(problem_of("---\n  name:  x  \n---\n"), None);
     }
 
     #[test]

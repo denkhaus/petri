@@ -15,7 +15,7 @@
 mod support;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use support::fabro::failures::{self, any_request, error, hang, refusal, repeated};
@@ -35,6 +35,37 @@ fn no_client_retries() -> Launch {
         env: vec![("PETRI_LLM_RETRY_ATTEMPTS".into(), "1".into())],
         ..Launch::default()
     }
+}
+
+/// The bodies of one Pebble event variant in the run's event log, in log
+/// order. Pebble's events reach the log inside the `pebble` envelope.
+fn pebble_events(run_dir: &Path, variant: &str) -> Vec<Value> {
+    fn collect(value: &Value, variant: &str, out: &mut Vec<Value>) {
+        match value {
+            Value::Object(map) => {
+                if map.get("kind").and_then(Value::as_str) == Some("pebble") {
+                    if let Some(body) = map["event"]["event"].get(variant) {
+                        out.push(body.clone());
+                    }
+                    return;
+                }
+                for child in map.values() {
+                    collect(child, variant, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, variant, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let text = fs::read_to_string(run_dir.join("events.json")).unwrap_or_default();
+    let log: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let mut out = Vec::new();
+    collect(&log, variant, &mut out);
+    out
 }
 
 /// An agent workflow on `primary` with `workflow.toml` chains.
@@ -476,7 +507,7 @@ async fn a_tool_effect_is_not_repeated_across_a_failover() {
             &case.credential,
             "continues",
             model(ANTHROPIC),
-            "moved to another model",
+            "APPEND_DONE",
             text("Appended once, as asked."),
         ),
     ])
@@ -511,8 +542,8 @@ async fn a_tool_effect_is_not_repeated_across_a_failover() {
         "the original prompt is in the conversation: {sent}"
     );
     assert!(
-        sent.contains("do not run those tools again"),
-        "the continuation asks the model to go on: {sent}"
+        !sent.contains("do not run those tools again"),
+        "no continuation text: the next model continues from the tool result itself: {sent}"
     );
     let records = failures::records(&finished.run_dir);
     let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
@@ -778,6 +809,13 @@ async fn client_retries_are_spent_before_the_chain_advances() {
         1,
         "one fallback decision, whatever the client retried: {records:?}"
     );
+    // The client's own retry is on the agent's event stream: Petri installs
+    // Pebble's `RetryEventObserver` on the middleware it builds.
+    let retries = pebble_events(&finished.run_dir, "LlmRetry");
+    assert_eq!(retries.len(), 1, "one client retry reported: {retries:?}");
+    assert_eq!(retries[0]["provider"], OPENAI.id());
+    assert_eq!(retries[0]["model"], model(OPENAI));
+    assert_eq!(retries[0]["phase"], "open");
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
