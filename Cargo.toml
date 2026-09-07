@@ -157,7 +157,10 @@ humantime = "2"
 tar = "0.4"
 # `preserve_order`: GHA matrix axes, object filters and outputs follow document
 # order, and a sorted map would silently reorder them.
-serde_json = { version = "1", features = ["preserve_order"] }
+# `float_roundtrip`: a float parsed back from the event log is the float that
+# was written, so a replayed stream equals the live one (backend payloads
+# carry floats such as usage percentages).
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 smol_str = { version = "0.3", features = ["serde"] }
 thiserror = "2"
 # Operator-facing diagnostics. Emitted by internal crates; the subscriber is

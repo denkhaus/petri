@@ -22,7 +22,7 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as GitCommand, Stdio};
 use std::time::Duration;
 use std::{env, fs};
 
@@ -395,7 +395,7 @@ fn read(path: &Path) -> String {
 
 /// `git <args>` in `dir`, stdout trimmed.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
+    let output = GitCommand::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -693,7 +693,7 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     // The workspace the run reported is the one the files are in.
     assert_eq!(
         finished.reported_workspaces(),
-        [workspace.clone()],
+        std::slice::from_ref(&workspace),
         "{}",
         finished.stderr
     );
@@ -783,7 +783,7 @@ fn project(events: &[RunEvent]) -> Projected {
                 out.branch_children += 1;
             }
             EventBody::InvocationCancelRequested { reason, .. } => {
-                out.cancel_reason = reason.clone();
+                out.cancel_reason.clone_from(reason);
             }
             EventBody::RunFinished { status } => out.run_status = Some(format!("{status:?}")),
             _ => {}

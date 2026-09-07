@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as GitCommand, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -49,7 +49,7 @@ use testkit::RunDir;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use twin_anthropic::config::Config as AnthropicConfig;
 use twin_openai::config::Config as OpenAiConfig;
@@ -204,7 +204,7 @@ fn text(text: &str) -> Value {
     })
 }
 
-fn tool_call(id: &str, name: &str, arguments: Value) -> Value {
+fn tool_call(id: &str, name: &str, arguments: &Value) -> Value {
     json!({
         "kind": "success",
         "tool_calls": [{ "id": id, "name": name, "arguments": arguments }],
@@ -359,7 +359,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
         s(
             "plan-load",
             "Plan the release note",
-            tool_call("plan-load", "use_skill", json!({ "skill_name": "sign" })),
+            tool_call("plan-load", "use_skill", &json!({ "skill_name": "sign" })),
         ),
         s(
             "plan-sign",
@@ -367,7 +367,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "plan-sign",
                 SHELL,
-                json!({ "command": "printf -- '-- petri\\n' >> notes.txt && echo SIGNED" }),
+                &json!({ "command": "printf -- '-- petri\\n' >> notes.txt && echo SIGNED" }),
             ),
         ),
         s("plan-done", "SIGNED", text("PLANNED: a signed note")),
@@ -377,7 +377,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "write-protected",
                 "mcp__notes__write_file",
-                json!({ "path": "protected.txt", "content": "overwrite" }),
+                &json!({ "path": "protected.txt", "content": "overwrite" }),
             ),
         ),
         s(
@@ -386,7 +386,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "write-note",
                 "mcp__notes__write_file",
-                json!({ "path": "note.txt", "content": "release note\n" }),
+                &json!({ "path": "note.txt", "content": "release note\n" }),
             ),
         ),
         s(
@@ -405,7 +405,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "child-destroy",
                 SHELL,
-                json!({ "command": "rm -f protected.txt && echo REMOVED" }),
+                &json!({ "command": "rm -f protected.txt && echo REMOVED" }),
             ),
         ),
         s(
@@ -414,7 +414,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "child-write",
                 SHELL,
-                json!({ "command": "printf 'changelog\\n' > CHANGELOG.md && echo CHANGED" }),
+                &json!({ "command": "printf 'changelog\\n' > CHANGELOG.md && echo CHANGED" }),
             ),
         ),
         s("child-done", "CHANGED", text("Wrote CHANGELOG.md.")),
@@ -431,7 +431,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "r1",
                 SHELL,
-                json!({ "command": "printf one > f1.txt && echo OUT1" }),
+                &json!({ "command": "printf one > f1.txt && echo OUT1" }),
             ),
         ),
         s(
@@ -440,7 +440,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "r2",
                 SHELL,
-                json!({ "command": "printf two > f2.txt && echo OUT2" }),
+                &json!({ "command": "printf two > f2.txt && echo OUT2" }),
             ),
         ),
         s(
@@ -449,7 +449,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "r3",
                 SHELL,
-                json!({ "command": "printf three > f3.txt && echo OUT3" }),
+                &json!({ "command": "printf three > f3.txt && echo OUT3" }),
             ),
         ),
         s(
@@ -458,7 +458,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "r4",
                 SHELL,
-                json!({ "command": "printf four > f4.txt && echo OUT4" }),
+                &json!({ "command": "printf four > f4.txt && echo OUT4" }),
             ),
         ),
         heavy(s(
@@ -467,7 +467,7 @@ fn openai_scripts(credential: &str) -> Vec<Value> {
             tool_call(
                 "r5",
                 SHELL,
-                json!({ "command": "printf five > f5.txt && echo OUT5" }),
+                &json!({ "command": "printf five > f5.txt && echo OUT5" }),
             ),
         )),
         s(
@@ -718,7 +718,7 @@ fn read(path: &Path) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
+    let output = GitCommand::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -835,16 +835,16 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
         dispatcher.wire(handle, secrets);
     });
     let ws = dir.path().join("scopes/invocation-0-scope-0/work");
-    let report = match tokio::time::timeout(Duration::from_secs(300), run).await {
-        Ok(report) => report.expect("the run completes"),
-        Err(_) => panic!(
+    let Ok(report) = timeout(Duration::from_secs(300), run).await else {
+        panic!(
             "the run did not finish in time; openai spent {:?} (unmatched {}), anthropic spent {:?}; tool hooks: {:?}",
             openai.consumed(),
             openai.unmatched(),
             anthropic.consumed(),
             fs::read_to_string(ws.join("tool-hooks.log")).unwrap_or_default(),
-        ),
+        );
     };
+    let report = report.expect("the run completes");
     release.await.expect("the releaser ran");
     let interview = dispatcher.shutdown().await;
     let receipt = projector.shutdown().await;
@@ -1014,7 +1014,20 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     // Replay yields the same public stream, identity for identity.
     let mut replayed = replay_run(dir.path()).expect("replays");
     replayed.sort_by_key(|e| e.id);
-    assert_eq!(replayed, normalized(&events));
+    let live = normalized(&events);
+    for (index, (from_replay, from_live)) in replayed.iter().zip(&live).enumerate() {
+        assert!(
+            from_replay == from_live,
+            "event {index} of {} replayed / {} live differs:\nreplay {from_replay:?}\nlive   {from_live:?}",
+            replayed.len(),
+            live.len()
+        );
+    }
+    assert_eq!(
+        replayed.len(),
+        live.len(),
+        "the replay has every live event"
+    );
     openai.stop();
     anthropic.stop();
 }
