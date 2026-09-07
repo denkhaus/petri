@@ -381,10 +381,9 @@ impl NativeSession {
                 // module's class and reason; any other agent error is what
                 // the classifier said.
                 Disposition::Other { class, message } => match &error {
-                    pebble_coding_agent::Error::SkillExpansion(_) => AgentError::failed(
-                        skills::failure_class(&error),
-                        skills::describe(&error),
-                    ),
+                    pebble_coding_agent::Error::SkillExpansion(_) => {
+                        AgentError::failed(skills::failure_class(&error), skills::describe(&error))
+                    }
                     _ => AgentError::failed(class, message),
                 },
             }),

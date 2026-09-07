@@ -18,6 +18,7 @@
 )]
 
 pub(crate) mod bundle;
+pub(crate) mod failures;
 pub(crate) mod inspect;
 pub(crate) mod interview;
 pub(crate) mod launch;

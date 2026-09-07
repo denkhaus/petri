@@ -183,8 +183,19 @@ impl Case {
         args: &[&str],
         launch: Launch,
     ) -> Finished {
-        let catalog = self.root.join("catalog.toml");
-        fs::write(&catalog, self.layers.join("\n")).expect("write the catalog layer");
+        // One file per layer: a layer is a whole catalog document with its
+        // own `schema_version`, and `PETRI_LLM_CATALOG` takes a path list.
+        let layers: Vec<PathBuf> = self
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| {
+                let path = self.root.join(format!("catalog-{index}.toml"));
+                fs::write(&path, layer).expect("write the catalog layer");
+                path
+            })
+            .collect();
+        let catalog = env::join_paths(&layers).expect("catalog paths");
         let path = launch
             .path
             .clone()

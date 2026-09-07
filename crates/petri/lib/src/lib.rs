@@ -41,7 +41,8 @@ use fabro_steps::pebble::PebbleClient;
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 use lithos_llm::catalog::{Catalog, CatalogError};
 use lithos_llm::client::ClientBuildError;
-use lithos_llm::credentials::EnvironmentCredentials;
+use lithos_llm::credentials::{CredentialProvider, EnvironmentCredentials};
+use lithos_llm::middleware::{RetryMiddleware, RetryPolicy};
 pub use runtime::{
     DaytonaResources, DaytonaSandboxKind, RunOptions, Runtime, SandboxBackend, SandboxOptions,
     driver, engine, ir,
@@ -198,6 +199,23 @@ pub const LLM_CATALOG_ENV: &str = "PETRI_LLM_CATALOG";
 /// cannot reach a third provider by accident.
 pub const LLM_PROVIDERS_ENV: &str = "PETRI_LLM_PROVIDERS";
 
+/// The environment variable naming how many times the client sends one
+/// request on the same route before its error reaches the caller: the
+/// provider-request retries `lithos-llm` owns (`RetryMiddleware`, exponential
+/// backoff, `Retry-After` honored). Default [`DEFAULT_LLM_RETRY_ATTEMPTS`];
+/// `1` sends each request once. Model fallback (`[run.model.fallbacks]`) is a
+/// separate policy that starts only once these retries are spent.
+pub const LLM_RETRY_ATTEMPTS_ENV: &str = "PETRI_LLM_RETRY_ATTEMPTS";
+
+/// The client's default request retry budget: three sends of one request.
+pub const DEFAULT_LLM_RETRY_ATTEMPTS: u32 = 3;
+
+/// The environment variable naming the client's per-call budget in
+/// milliseconds, retries and stream consumption included. Unset means no
+/// budget; a request's own timeout overrides it. A call that exceeds it fails
+/// with the `timeout` kind, which model fallback treats as eligible.
+pub const LLM_TIMEOUT_ENV: &str = "PETRI_LLM_TIMEOUT_MS";
+
 /// Why the model client could not be built.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmClientError {
@@ -223,31 +241,104 @@ pub enum LlmClientError {
 /// providers are available at all. Both are read from this process's
 /// environment only; a harness sets them on the child it launches and leaves
 /// the developer's shell alone.
+///
+/// [`LLM_RETRY_ATTEMPTS_ENV`] sets the client's same-route retries and
+/// [`LLM_TIMEOUT_ENV`] its per-call budget. Pebble's `RetryEventObserver`,
+/// which would put those retries on the agent's event stream, is not
+/// exported by the pinned Pebble (its `runtime` module is private), so a
+/// client retry shows in a provider's request log and in the stage's timing,
+/// not as an agent event.
 pub fn llm_client() -> Result<lithos_llm::Client, LlmClientError> {
-    let mut catalog = Catalog::builder().with_builtin();
-    if let Some(layers) = env::var_os(LLM_CATALOG_ENV) {
-        for path in env::split_paths(&layers).filter(|p| !p.as_os_str().is_empty()) {
-            let text = fs::read_to_string(&path).map_err(|source| LlmClientError::ReadLayer {
-                path: path.clone(),
-                source,
-            })?;
-            catalog = catalog
-                .toml_layer(path.display().to_string(), &text)
-                .map_err(LlmClientError::Catalog)?;
+    build_llm_client(&LlmClientConfig::from_env()?)
+}
+
+/// What [`llm_client`] reads from the environment, as a value a host or a
+/// test can build directly.
+#[derive(Clone, Default)]
+pub struct LlmClientConfig {
+    /// Where credentials come from; `None` reads `lithos-llm`'s conventional
+    /// environment variables per request.
+    pub credentials:    Option<Arc<dyn CredentialProvider>>,
+    /// Catalog TOML layers over the built-in catalog: a label and the text.
+    pub layers:         Vec<(String, String)>,
+    /// The providers that may be routed to; `None` leaves every provider.
+    pub providers:      Option<Vec<String>>,
+    /// The client's same-route retry budget, sends of one request.
+    pub retry_attempts: u32,
+    /// The per-call budget, retries included.
+    pub timeout:        Option<Duration>,
+}
+
+impl LlmClientConfig {
+    /// Read [`LLM_CATALOG_ENV`], [`LLM_PROVIDERS_ENV`],
+    /// [`LLM_RETRY_ATTEMPTS_ENV`] and [`LLM_TIMEOUT_ENV`].
+    pub fn from_env() -> Result<Self, LlmClientError> {
+        let mut layers = Vec::new();
+        if let Some(paths) = env::var_os(LLM_CATALOG_ENV) {
+            for path in env::split_paths(&paths).filter(|p| !p.as_os_str().is_empty()) {
+                let text =
+                    fs::read_to_string(&path).map_err(|source| LlmClientError::ReadLayer {
+                        path: path.clone(),
+                        source,
+                    })?;
+                layers.push((path.display().to_string(), text));
+            }
         }
+        let providers = env::var(LLM_PROVIDERS_ENV).ok().map(|providers| {
+            providers
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned)
+                .collect()
+        });
+        let retry_attempts = env::var(LLM_RETRY_ATTEMPTS_ENV)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(DEFAULT_LLM_RETRY_ATTEMPTS);
+        let timeout = env::var(LLM_TIMEOUT_ENV)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis);
+        Ok(Self {
+            credentials: None,
+            layers,
+            providers,
+            retry_attempts,
+            timeout,
+        })
+    }
+}
+
+/// Build the model client from an explicit configuration; [`llm_client`]
+/// with the environment read for you.
+pub fn build_llm_client(config: &LlmClientConfig) -> Result<lithos_llm::Client, LlmClientError> {
+    let mut catalog = Catalog::builder().with_builtin();
+    for (label, text) in &config.layers {
+        catalog = catalog
+            .toml_layer(label.clone(), text)
+            .map_err(LlmClientError::Catalog)?;
     }
     let catalog = catalog.build().map_err(LlmClientError::Catalog)?;
-    let mut builder = lithos_llm::Client::builder()
-        .catalog(catalog)
-        .credentials(EnvironmentCredentials::conventional());
-    if let Ok(providers) = env::var(LLM_PROVIDERS_ENV) {
-        let enabled: Vec<String> = providers
-            .split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_owned)
-            .collect();
-        builder = builder.enabled_providers(enabled);
+    let mut builder = lithos_llm::Client::builder().catalog(catalog);
+    builder = match &config.credentials {
+        Some(credentials) => builder.credentials_arc(credentials.clone()),
+        None => builder.credentials(EnvironmentCredentials::conventional()),
+    };
+    // The client's own retries, on the same route. Pebble's turn replay and
+    // Fabro's model fallback are configured elsewhere and start after these.
+    let attempts = config.retry_attempts.max(1);
+    if attempts > 1 {
+        builder = builder.middleware(RetryMiddleware::new(
+            RetryPolicy::exponential().max_attempts(attempts),
+        ));
+    }
+    if let Some(budget) = config.timeout {
+        builder = builder.default_timeout(budget);
+    }
+    if let Some(providers) = &config.providers {
+        builder = builder.enabled_providers(providers.iter().cloned());
     }
     let build = builder.build().map_err(LlmClientError::Client)?;
     for issue in &build.issues {
