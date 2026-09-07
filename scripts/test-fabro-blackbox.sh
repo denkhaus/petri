@@ -35,7 +35,9 @@ mkdir -p "$PETRI_EVIDENCE_DIR"
 matrix=${PETRI_SCENARIO_MATRIX:-crates/fabro/acceptance/scenarios/matrix.json}
 export PETRI_FABRO_COVERAGE_DIR="${PETRI_FABRO_COVERAGE_DIR:-$PETRI_EVIDENCE_DIR/cells}"
 
-filter='package(petri-cli) & (binary(/^fabro_.*blackbox$/) | binary(standalone) | binary(fabro_cli))'
+# The routing oracle cell of the matrix is satisfied by the acceptance
+# crate's oracle test, which writes its own cell record, so it runs here too.
+filter='(package(petri-cli) & (binary(/^fabro_.*blackbox$/) | binary(standalone) | binary(fabro_cli))) | (package(petri-fabro-acceptance) & test(every_case_matches_the_fabro_oracle))'
 # Schedules for repeated runs: the default parallelism, one test at a time,
 # then a narrow pool. Different interleavings shake out shared-resource races.
 schedules=("" "--test-threads=1" "--test-threads=2")

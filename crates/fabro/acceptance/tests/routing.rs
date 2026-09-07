@@ -10,11 +10,12 @@
 //! departure recorded.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 use fabro_acceptance::pin;
 use fabro_acceptance::runs::{Case, RunResult, result_json};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn oracle_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../oracle")
@@ -183,6 +184,7 @@ async fn succeed_promotes_only_a_failure_no_explicit_route_matches() {
     reason = "a missing fixture is reported on stderr with the command that generates it"
 )]
 async fn every_case_matches_the_fabro_oracle() {
+    let cell = CoverageCell::start("routing/tiers-oracle@host/none");
     let expected_dir = oracle_dir().join("expected");
     let record = env::var("PETRI_ORACLE_RECORD").is_ok_and(|v| !v.is_empty());
     let pinned = pin();
@@ -256,4 +258,61 @@ async fn every_case_matches_the_fabro_oracle() {
         "oracle mismatches:\n{}",
         mismatches.join("\n")
     );
+    cell.pass();
+}
+
+/// The black box coverage report's per-cell record for the matrix cell this
+/// test satisfies. The shape is the one `crates/petri/cli/tests/support/fabro/
+/// scenario.rs` writes: a `failed` record on start, so a panic leaves a
+/// failure on file, and `passed` at the end. The report only counts `passed`.
+struct CoverageCell {
+    path:   PathBuf,
+    cell:   &'static str,
+    passed: bool,
+}
+
+impl CoverageCell {
+    fn start(cell: &'static str) -> Self {
+        let dir = env::var_os("PETRI_FABRO_COVERAGE_DIR").map_or_else(
+            || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/fabro-coverage/results"),
+            PathBuf::from,
+        );
+        let _ = fs::create_dir_all(&dir);
+        let record = Self {
+            path: dir.join(format!("{}.json", cell.replace(['/', '@'], "__"))),
+            cell,
+            passed: false,
+        };
+        record.write("failed", Some("the test did not report a pass"));
+        record
+    }
+
+    fn pass(mut self) {
+        self.passed = true;
+        self.write("passed", None);
+    }
+
+    fn write(&self, status: &str, note: Option<&str>) {
+        let record = json!({
+            "cell": self.cell,
+            "status": status,
+            "note": note,
+            "recorded_at": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default(),
+        });
+        let _ = fs::write(
+            &self.path,
+            serde_json::to_vec_pretty(&record).unwrap_or_default(),
+        );
+    }
+}
+
+impl Drop for CoverageCell {
+    fn drop(&mut self) {
+        if !self.passed {
+            self.write("failed", Some("the test ended without reporting a pass"));
+        }
+    }
 }
