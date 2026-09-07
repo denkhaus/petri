@@ -19,6 +19,7 @@ engine = { workspace = true }
 testkit = { workspace = true }
 executor-sandbox = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [dependencies]
 ir = { workspace = true }
