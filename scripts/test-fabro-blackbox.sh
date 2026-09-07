@@ -47,8 +47,10 @@ for ((i = 1; i <= repeat; i++)); do
     export PETRI_EVIDENCE_REPEAT="$i"
   fi
   started=$SECONDS
-  if ! cargo nextest run --locked -p petri-cli --profile ci -E "$filter" --no-tests=fail \
-      ${args[@]+"${args[@]}"} "$@"; then
+  # The same build as `mise run test` (workspace, all targets, all features),
+  # narrowed by the filter, so the two share one build cache.
+  if ! cargo nextest run --locked --workspace --all-targets --all-features --profile ci \
+      -E "$filter" --no-tests=fail ${args[@]+"${args[@]}"} "$@"; then
     status=1
   fi
   echo "black box run took $((SECONDS - started)) s"

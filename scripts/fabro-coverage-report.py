@@ -26,7 +26,8 @@ Each required scenario-and-backend cell gets exactly one result:
   blocked  the manifest says the scenario is required but blocked
   excluded the manifest excludes the scenario
 Only "passed" counts as a pass. With --strict the exit status is 1 unless
-every required cell passed.
+every required cell passed and at least one record exists: an empty run is
+not a passing gate.
 
 Manifest shape (schema_version 1; the coverage task owns the final format):
   {"schema_version": 1,
@@ -195,7 +196,7 @@ def main() -> int:
         if entry["status"] == "required":
             totals["required"] += 1
         totals[entry["result"]] += 1
-    ok = all(e["result"] == "passed" for e in entries if e["status"] == "required")
+    ok = bool(entries) and all(e["result"] == "passed" for e in entries if e["status"] == "required")
 
     pins = {}
     for record in records:
@@ -254,7 +255,8 @@ def main() -> int:
     if mixed_pins:
         print(f"coverage: records disagree on pins {sorted(mixed_pins)}", file=sys.stderr)
     if args.strict and not ok:
-        print("coverage: the gate is not passed (a required cell is not passed)", file=sys.stderr)
+        reason = "no evidence records were written" if not entries else "a required cell is not passed"
+        print(f"coverage: the gate is not passed ({reason})", file=sys.stderr)
         return 1
     return 0
 

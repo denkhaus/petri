@@ -48,7 +48,8 @@ fi
 
 status=0
 started=$SECONDS
-cargo nextest run --locked -p petri-cli --profile ci --test "$TEST" --no-tests=fail "$@" || status=1
+cargo nextest run --locked --workspace --all-targets --all-features --profile ci \
+  -E "package(petri-cli) & binary($TEST)" --no-tests=fail "$@" || status=1
 echo "differential run took $((SECONDS - started)) s"
 [ -f target/nextest/ci/junit.xml ] && cp target/nextest/ci/junit.xml "$PETRI_EVIDENCE_DIR/junit-differential.xml"
 

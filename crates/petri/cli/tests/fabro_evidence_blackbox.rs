@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 use std::{env, fs, panic, process};
 
 use serde_json::{Value, json};
-use support::fabro::evidence::{Backend, Recorder, outcomes};
+use support::fabro::evidence::{Backend, Recorder, directory, outcomes};
 use support::fabro::launch::Case;
 use support::fabro::require;
 use support::fabro::twins::{Provider, Twin, model, scenario, text};
@@ -60,7 +60,6 @@ fn prepare_and_answer(provider: Provider) -> String {
 async fn a_host_scenario_writes_a_complete_evidence_record() {
     let provider = Provider::OpenAi;
     let mut case = Case::new("evidence-host");
-    let evidence = case.root.join("evidence");
     let twin = Twin::start(provider, &case.root.join("twins"), vec![scenario(
         provider,
         &case.credential,
@@ -73,7 +72,8 @@ async fn a_host_scenario_writes_a_complete_evidence_record() {
     case.redirect(&twin);
     let workflow = case.workflow(&prepare_and_answer(provider), None);
     let test = format!("{TEST_FILE}::a_host_scenario_writes_a_complete_evidence_record");
-    let mut record = Recorder::start_in(&evidence, "evidence-smoke", Backend::Host, &test);
+    // Into this run's evidence directory, like every scenario: CI keeps it.
+    let mut record = Recorder::start("evidence-smoke", Backend::Host, &test);
     record.scenario_meta("evidence", None);
     record.launch(&workflow, &[], &[]);
 
@@ -106,6 +106,7 @@ async fn a_host_scenario_writes_a_complete_evidence_record() {
     finished.assert_no_leaked_processes().await;
     record.cleanup("clean", "no process launched for the case is still alive");
     let path = record.finish();
+    assert!(path.starts_with(directory()), "{}", path.display());
 
     // The record, read back the way the coverage report reads it.
     let record = read_json(&path);
@@ -185,7 +186,18 @@ async fn a_host_scenario_writes_a_complete_evidence_record() {
     assert!(!bundle.join("case").exists());
     assert!(record["bundle"]["case"].is_null());
 
-    // The pin check accepts the record; the coverage report passes the run.
+    // The pin check accepts the record and the coverage report passes the
+    // run, checked on a private copy of this one record so other scenarios
+    // recording into the same run cannot change the counts.
+    let evidence = case.root.join("evidence");
+    fs::create_dir_all(evidence.join("records")).expect("evidence copy");
+    fs::copy(
+        &path,
+        evidence
+            .join("records")
+            .join(path.file_name().expect("name")),
+    )
+    .expect("copy the record");
     let pins = script("check-pins.py", &[
         "--evidence",
         evidence.to_str().expect("utf-8"),
@@ -392,6 +404,27 @@ fn the_coverage_report_counts_only_passed_cells() {
     assert_eq!(report["totals"]["passed"], json!(0));
     assert_eq!(report["totals"]["failed"], json!(1));
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_empty_evidence_run_is_not_a_passing_gate() {
+    let evidence = env::temp_dir().join(format!(
+        "petri-evidence-empty-{}-{}",
+        process::id(),
+        testkit::unique_id()
+    ));
+    fs::create_dir_all(&evidence).expect("evidence dir");
+    let strict = script("fabro-coverage-report.py", &[
+        "--evidence",
+        evidence.to_str().expect("utf-8"),
+        "--strict",
+    ]);
+    assert_eq!(strict.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(stderr.contains("no evidence records"), "{stderr}");
+    let report = read_json(&evidence.join("coverage.json"));
+    assert_eq!(report["ok"], json!(false));
+    let _ = fs::remove_dir_all(&evidence);
 }
 
 #[test]
