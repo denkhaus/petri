@@ -347,3 +347,212 @@ async fn a_cancelled_run_ends_the_pending_wait_and_shutdown_leaves_no_task_behin
         receipt.errors
     );
 }
+
+// ── Readiness item 6: identity across loops, nesting, re-asks and expiry ────
+
+/// A gate inside a loop asks once per firing: the second question is the
+/// same node's second occurrence, each with `ask: 1`.
+#[tokio::test]
+async fn a_repeated_gate_in_a_loop_advances_its_occurrence() {
+    const LOOPED: &str = r#"digraph G {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        gate [shape=hexagon, label="Again?", max_visits=3]
+        again [shape=parallelogram, script="echo again"]
+        start -> gate
+        gate -> again [label="[A] Again"]
+        gate -> exit [label="[D] Done"]
+        again -> gate
+    }"#;
+    let dir = RunDir::new("interview-occurrence");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, LOOPED);
+    let count = Arc::new(Mutex::new(0_u32));
+    let mut answers: BTreeMap<&'static str, Reply> = BTreeMap::new();
+    let counter = count.clone();
+    answers.insert(
+        "gate",
+        Box::new(move |_| {
+            let mut count = counter.lock().expect("not poisoned");
+            *count += 1;
+            InterviewReply::Answered(Answer::choice(if *count == 1 { "A" } else { "D" }))
+        }),
+    );
+    let interviewer = Arc::new(ByNode {
+        answers,
+        seen: Mutex::new(Vec::new()),
+        after: None,
+    });
+    let (report, receipt) = run(&rt, lowered, interviewer).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(receipt.is_clean(), "{:?}", receipt.errors);
+    let occurrences: Vec<(u32, u32)> = receipt
+        .questions
+        .iter()
+        .map(|q| (q.occurrence, q.ask))
+        .collect();
+    assert_eq!(occurrences, [(1, 1), (2, 1)]);
+    assert_ne!(receipt.questions[0].firing, receipt.questions[1].firing);
+    assert_ne!(receipt.questions[0].question, receipt.questions[1].question);
+}
+
+/// A gate inside a nested workflow carries the nested invocation's path,
+/// `/<node>` (the manager loop's one durable call site per attempt), and its
+/// own invocation id.
+#[tokio::test]
+async fn a_nested_gate_carries_its_invocation_path() {
+    const NESTED: &str = r#"digraph P {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        m [shape=house, stack.child_dot_source="digraph C { start [shape=Mdiamond] exit [shape=Msquare] inner [shape=hexagon, label=\"Inner?\"] ok [shape=parallelogram, script=\"echo ok\"] start -> inner inner -> ok [label=\"[Y] Yes\"] ok -> exit }"]
+        outer [shape=hexagon, label="Outer?"]
+        start -> m -> outer
+        outer -> exit [label="[Y] Yes"]
+    }"#;
+    let dir = RunDir::new("interview-nested");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, NESTED);
+    let mut answers: BTreeMap<&'static str, Reply> = BTreeMap::new();
+    answers.insert(
+        "inner",
+        Box::new(|_| InterviewReply::Answered(Answer::choice("Y"))),
+    );
+    answers.insert(
+        "outer",
+        Box::new(|_| InterviewReply::Answered(Answer::choice("Y"))),
+    );
+    let interviewer = Arc::new(ByNode {
+        answers,
+        seen: Mutex::new(Vec::new()),
+        after: None,
+    });
+    let (report, receipt) = run(&rt, lowered, interviewer).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(receipt.is_clean(), "{:?}", receipt.errors);
+    let inner = receipt
+        .questions
+        .iter()
+        .find(|q| q.node == "inner")
+        .expect("the inner gate");
+    let outer = receipt
+        .questions
+        .iter()
+        .find(|q| q.node == "outer")
+        .expect("the outer gate");
+    assert_eq!(inner.invocation_path, "/m");
+    assert_eq!(outer.invocation_path, "/");
+    assert_ne!(inner.invocation, outer.invocation);
+    assert_ne!(inner.execution, outer.execution);
+}
+
+/// An answer the gate rejects is re-asked as the same occurrence with
+/// `ask: 2`; the second reply routes.
+#[tokio::test]
+async fn an_invalid_answer_is_re_asked_with_the_next_ask_count() {
+    let dir = RunDir::new("interview-reask");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, ONE_GATE);
+    let mut answers: BTreeMap<&'static str, Reply> = BTreeMap::new();
+    answers.insert(
+        "gate",
+        Box::new(|request| {
+            InterviewReply::Answered(Answer::choice(if request.ask == 1 { "maybe" } else { "N" }))
+        }),
+    );
+    let interviewer = Arc::new(ByNode {
+        answers,
+        seen: Mutex::new(Vec::new()),
+        after: None,
+    });
+    let (report, receipt) = run(&rt, lowered, interviewer).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(receipt.is_clean(), "{:?}", receipt.errors);
+    let asks: Vec<(u32, u32, &str)> = receipt
+        .questions
+        .iter()
+        .map(|q| (q.occurrence, q.ask, q.question.as_str()))
+        .collect();
+    assert_eq!(asks.len(), 2, "{asks:?}");
+    assert_eq!((asks[0].0, asks[0].1), (1, 1));
+    assert_eq!((asks[1].0, asks[1].1), (1, 2));
+    assert_eq!(asks[0].2, asks[1].2, "the same question id, asked again");
+    let ran: Vec<_> = report
+        .state
+        .history()
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect();
+    assert!(ran.contains(&"no"), "{ran:?}");
+}
+
+/// The gate's answer deadline ends the interviewer's wait: the question
+/// expires in the step, the dispatcher records the reply as cancelled and
+/// not delivered, and the gate takes its default choice.
+#[tokio::test]
+async fn an_expired_question_ends_the_interviewers_wait() {
+    const TIMED: &str = r#"digraph G {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        gate [shape=hexagon, label="Go?", timeout="300ms", human.default_choice="no"]
+        yes [shape=parallelogram, script="echo yes"]
+        no [shape=parallelogram, script="echo no"]
+        start -> gate
+        gate -> yes [label="[Y] Yes"]
+        gate -> no [label="[N] No"]
+        yes -> exit
+        no -> exit
+    }"#;
+    let dir = RunDir::new("interview-expiry");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, TIMED);
+    let token: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+    let (report, receipt) = run(&rt, lowered, Arc::new(Silent(token.clone()))).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let ran: Vec<_> = report
+        .state
+        .history()
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect();
+    assert!(ran.contains(&"no") && !ran.contains(&"yes"), "{ran:?}");
+    assert!(
+        token
+            .lock()
+            .expect("not poisoned")
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled),
+        "the wait was ended when the question expired"
+    );
+    assert!(
+        receipt.is_clean(),
+        "an expiry is not an interviewer error: {:?}",
+        receipt.errors
+    );
+    assert_eq!(receipt.questions.len(), 1);
+    assert_eq!(receipt.questions[0].timeout_ms, Some(300));
+    assert!(matches!(receipt.questions[0].reply, ReplyRecord::Cancelled));
+    assert!(matches!(
+        receipt.questions[0].delivery,
+        Delivery::Late | Delivery::Shutdown
+    ));
+}

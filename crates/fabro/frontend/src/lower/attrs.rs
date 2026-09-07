@@ -100,20 +100,14 @@ pub(super) const GRAPH: &[&str] = &[
     "selection",
     "acp.command",
     "acp.config",
+    "stall_timeout",
+    "loop_restart_signature_limit",
 ];
 
-/// Graph-level attributes whose meaning belongs to a host policy Petri does
-/// not run in phase one. Each is named in an `ignored.*` warning.
-pub(super) const GRAPH_IGNORED: &[(&str, &str)] = &[
-    (
-        "loop_restart_signature_limit",
-        "the circuit breaker is routing middleware, a later phase",
-    ),
-    (
-        "stall_timeout",
-        "the stall watchdog is host policy over the event stream, a later phase",
-    ),
-];
+/// Graph-level attributes Petri accepts but does not act on, each named in
+/// an `ignored.*` warning. Empty: every graph attribute Fabro defines is
+/// acted on.
+pub(super) const GRAPH_IGNORED: &[(&str, &str)] = &[];
 
 /// Node attributes with workflow meaning.
 pub(super) const NODE: &[&str] = &[
@@ -153,6 +147,8 @@ pub(super) const NODE: &[&str] = &[
     "class",
     "question_type",
     "sensitive",
+    "review_target",
+    "human.default_choice",
     "duration",
     "stack.child_workflow",
     "stack.child_dot_source",
@@ -161,12 +157,10 @@ pub(super) const NODE: &[&str] = &[
     "manager.stop_condition",
 ];
 
-/// Node attributes carried into the step config untouched but not acted on
-/// in phase one.
-pub(super) const NODE_IGNORED: &[(&str, &str)] = &[(
-    "review_target",
-    "human review targets are not implemented in phase one",
-)];
+/// Node attributes Petri accepts but does not act on, each named in an
+/// `ignored.*` warning. Empty: every node attribute Fabro defines is acted
+/// on; `tool_hooks.*` is not one and is diagnosed as unknown.
+pub(super) const NODE_IGNORED: &[(&str, &str)] = &[];
 
 /// Edge attributes with workflow meaning.
 pub(super) const EDGE: &[&str] = &[

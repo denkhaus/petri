@@ -10,6 +10,7 @@
 mod attrs;
 mod hooks;
 mod imports;
+pub(crate) mod policy;
 mod promotion;
 mod routing;
 mod secrets;
@@ -259,6 +260,7 @@ fn lower_nested(
     let workflow_name = workflow.name.clone();
 
     ctx.graph_attrs(&mut workflow);
+    let run_policy = policy::run_policy(&workflow, &mut ctx.diags);
     let Some(structure) = ctx.structure(&workflow) else {
         return Lowered::rejected(ctx.diags);
     };
@@ -317,6 +319,7 @@ fn lower_nested(
     } = ctx;
     let mut graph = b.build();
     graph.completion = Completion::TerminalNode(exit);
+    graph.policy = run_policy;
     if stack.len() == 1 {
         graph
             .params
@@ -992,7 +995,8 @@ impl Ctx<'_> {
         if let Some(step) = step {
             self.b.node_mut(id).step = step;
         }
-        self.b.node_mut(id).budget = Budget::new(1, timeout);
+        self.b.node_mut(id).budget = Budget::new(1, timeout)
+            .with_timeout_policy(policy::timeout_policy(kind, node, workflow));
         self.b.node_mut(id).retry = routing::retry_policy(node, workflow, policy, &mut self.diags);
         Resolved { kind, id, policy }
     }
@@ -1445,6 +1449,25 @@ impl Ctx<'_> {
         }
         if let Some(sensitive) = node.attrs.bool("sensitive", &mut self.diags) {
             config.insert("sensitive".into(), Value::Bool(sensitive));
+        }
+        if let Some(review) = node.attrs.bool("review_target", &mut self.diags) {
+            config.insert("review_target".into(), Value::Bool(review));
+        }
+        if let Some(default) = node.attrs.text("human.default_choice") {
+            if !choices.iter().any(|choice| {
+                choice["key"] == Value::String(default.clone())
+                    || choice["to"] == Value::String(default.clone())
+            }) {
+                self.diags.error(
+                    "fabro.bad_default_choice",
+                    node.attrs.span_of("human.default_choice", &node.span),
+                    format!(
+                        "`human.default_choice=\"{default}\"` names none of the gate's \
+                         choices or targets"
+                    ),
+                );
+            }
+            config.insert("default_choice".into(), Value::String(default));
         }
         config.insert("choices".into(), Value::Array(choices));
         if let Some(target) = freeform_target {
@@ -2168,12 +2191,15 @@ impl Ctx<'_> {
                     ),
                 );
             }
-            let timeout = self
+            let budget = self
                 .b
                 .graph()
                 .node(res.id)
-                .map_or(STRUCTURAL_TIMEOUT, |n| n.budget.timeout);
-            self.b.set_budget(res.id, Budget::new(max_firings, timeout));
+                .map_or_else(|| Budget::new(1, STRUCTURAL_TIMEOUT), |n| n.budget);
+            self.b.set_budget(res.id, Budget {
+                max_firings,
+                ..budget
+            });
         }
         // The synthetic goal check, when it exists, loops too.
         if let Some(check) = goal_check {

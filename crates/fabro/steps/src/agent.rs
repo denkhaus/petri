@@ -3,7 +3,7 @@
 
 pub(crate) mod backend;
 use std::env;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub use backend::AgentBackend;
 use backend::{AgentError, Session};
@@ -192,7 +192,12 @@ async fn run_session(
     let mut repairs = 0_u64;
     let (outcome, text) = loop {
         let text = session
-            .prompt(&prompt, &mut ctx.control, ctx.env.grace())
+            .prompt(
+                &prompt,
+                &mut ctx.control,
+                ctx.env.grace(),
+                config.timeout_ms.map(Duration::from_millis),
+            )
             .await?;
         ctx.log(LogStream::Stdout, text.clone()).await;
         *turn_count += 1;

@@ -4,17 +4,18 @@
 
 mod support;
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 use std::{env, fs, process};
 
 use frontend::print::print_expr;
 use frontend::{CompileInputs, Frontend};
 use frontend_fabro::kinds::{
-    AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND, WORKFLOW_KIND,
+    AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend_fabro::{Fabro, MAX_FIRINGS};
 use ir::placeholder::contains_placeholder;
-use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy};
+use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy, TimeoutPolicy};
 use serde_json::json;
 use support::*;
 
@@ -1221,10 +1222,10 @@ fn structural_mistakes_are_specific_errors() {
 #[test]
 fn unused_attributes_warn_and_unbounded_agent_repairs_are_rejected() {
     let diags = diagnostics(&dot(r#"
-        a [prompt="x", review_target=true, stall_timeout="1m"]
+        a [prompt="x", frobnicate="yes"]
         start -> a -> exit
     "#));
-    for code in ["ignored.review_target", "fabro.unknown_attribute"] {
+    for code in ["fabro.unknown_attribute"] {
         assert!(
             diags.iter().any(|diagnostic| diagnostic.code == code),
             "{code} in {diags:?}"
@@ -1252,6 +1253,127 @@ fn timeouts_lower_to_per_attempt_budgets_with_fabro_defaults() {
         json!(1_200_000)
     );
     assert_eq!(node(&graph, "c").budget.timeout, Duration::from_secs(600));
+}
+
+/// Who enforces each node's timeout follows Fabro's handler policies: the
+/// command sends its deadline to the sandbox, the human gate owns its answer
+/// deadline, an ACP agent hands the deadline to its turn, and a native API
+/// agent, a prompt on the native backend, a wait and a nested workflow keep
+/// the driver's interview-aware timer.
+#[test]
+fn timeout_policy_follows_the_handler() {
+    let graph = lower_ok(&dot(r#"
+        acp [prompt="x"]
+        api [prompt="x", backend="api", model="m"]
+        p [shape=tab, prompt="say", backend="api", model="m"]
+        c [shape=parallelogram, script="true"]
+        h [shape=hexagon, label="Ok?"]
+        w [shape=insulator, duration="1s"]
+        start -> acp -> api -> p -> c -> h
+        h -> w [label="[Y] Yes"]
+        w -> exit
+    "#));
+    let policy = |name: &str| node(&graph, name).budget.timeout_policy;
+    assert_eq!(policy("acp"), TimeoutPolicy::HandlerManaged);
+    assert_eq!(policy("api"), TimeoutPolicy::ExecutorEnforced);
+    assert_eq!(policy("p"), TimeoutPolicy::ExecutorEnforced);
+    assert_eq!(policy("c"), TimeoutPolicy::HandlerManaged);
+    assert_eq!(policy("h"), TimeoutPolicy::HandlerManaged);
+    assert_eq!(policy("w"), TimeoutPolicy::ExecutorEnforced);
+    assert_eq!(policy("start"), TimeoutPolicy::ExecutorEnforced);
+}
+
+/// `stall_timeout` and `loop_restart_signature_limit` lower to the graph's
+/// run policy with Fabro's defaults; zero disables the watchdog and a limit
+/// below one is refused.
+#[test]
+fn run_policies_lower_with_fabro_defaults() {
+    let graph = lower_ok(&dot(r#"
+        a [prompt="x"]
+        start -> a -> exit
+    "#));
+    assert_eq!(
+        graph.policy.stall_timeout,
+        Some(Duration::from_secs(30 * 60))
+    );
+    assert_eq!(
+        graph
+            .policy
+            .loop_restart_signature_limit
+            .map(NonZeroU32::get),
+        Some(3)
+    );
+    let graph = lower_ok(&dot(r#"
+        graph [stall_timeout="0s", loop_restart_signature_limit=5]
+        a [prompt="x"]
+        start -> a -> exit
+    "#));
+    assert_eq!(graph.policy.stall_timeout, None);
+    assert_eq!(
+        graph
+            .policy
+            .loop_restart_signature_limit
+            .map(NonZeroU32::get),
+        Some(5)
+    );
+    let graph = lower_ok(&dot(r#"
+        graph [stall_timeout="90s"]
+        a [prompt="x"]
+        start -> a -> exit
+    "#));
+    assert_eq!(graph.policy.stall_timeout, Some(Duration::from_secs(90)));
+    let codes = codes(&dot(r#"
+        graph [loop_restart_signature_limit=0]
+        a [prompt="x"]
+        start -> a -> exit
+    "#));
+    assert!(
+        codes.contains(&"fabro.bad_signature_limit".to_string()),
+        "{codes:?}"
+    );
+    let diags = diagnostics(&dot(r#"
+        graph [stall_timeout="5m", loop_restart_signature_limit=2]
+        a [prompt="x"]
+        start -> a -> exit
+    "#));
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.starts_with("ignored.stall_timeout")
+                || d.code.starts_with("ignored.loop_restart")),
+        "{diags:?}"
+    );
+}
+
+/// A human gate's review target and default choice lower into its config;
+/// a default that names none of the gate's choices is refused.
+#[test]
+fn human_gate_review_target_and_default_choice_lower() {
+    let graph = lower_ok(&dot(r#"
+        h [shape=hexagon, label="Ok?", review_target=true, human.default_choice="deploy", timeout="90s"]
+        deploy [shape=parallelogram, script="true"]
+        hold [shape=parallelogram, script="true"]
+        start -> h
+        h -> deploy [label="[D] Deploy"]
+        h -> hold [label="[H] Hold"]
+        deploy -> exit
+        hold -> exit
+    "#));
+    let config = &node(&graph, "h").step.config;
+    assert_eq!(config["review_target"], json!(true));
+    assert_eq!(config["default_choice"], json!("deploy"));
+    assert_eq!(config["timeout_ms"], json!(90_000));
+    let codes = codes(&dot(r#"
+        h [shape=hexagon, label="Ok?", human.default_choice="nowhere"]
+        a [shape=parallelogram, script="true"]
+        start -> h
+        h -> a [label="[A] A"]
+        a -> exit
+    "#));
+    assert!(
+        codes.contains(&"fabro.bad_default_choice".to_string()),
+        "{codes:?}"
+    );
 }
 
 #[test]

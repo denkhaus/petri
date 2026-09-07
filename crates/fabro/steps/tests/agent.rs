@@ -5,14 +5,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fabro_steps::register;
 use frontend_fabro::load;
 use runtime::driver::ExecutionReport;
 use runtime::executor::Retention;
 use runtime::frontend::{CompileInputs, NoFiles};
-use runtime::ir::{CancelScopeId, ExprOrValue, Graph, RunStatus};
+use runtime::ir::{CancelScopeId, ExprOrValue, Graph, RunStatus, TimeoutPolicy};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
@@ -210,5 +210,49 @@ async fn cancelling_a_turn_sends_session_cancel_and_stops_the_agent() {
         fs::read_to_string(&record).ok().as_deref().map(str::trim),
         Some("session/cancel"),
         "the agent saw session/cancel"
+    );
+}
+
+/// An ACP node's `timeout` is handed to the turn (`HandlerManaged`): a turn
+/// that outlives it is terminated and the stage fails with class `timeout`,
+/// well before the driver's structural budget.
+#[tokio::test]
+async fn an_acp_turn_that_outlives_the_node_timeout_fails_with_class_timeout() {
+    let dir = RunDir::new("fabro-agent-timeout");
+    let agent = fake_agent(&dir);
+    let graph = with_env(
+        lower(&agent_dot(
+            &agent,
+            r#", timeout="500ms", on_failure="exit""#,
+        )),
+        &[("ACP_MODE", "timeout")],
+    );
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "a")
+            .expect("a")
+            .budget
+            .timeout_policy,
+        TimeoutPolicy::HandlerManaged
+    );
+    let started = Instant::now();
+    let report = runtime(&dir)
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the deadline ended the turn: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(report.status, RunStatus::Failed);
+    assert_eq!(status_of(&report, "a").as_deref(), Some("failure"));
+    let output = output_of(&report, "a");
+    assert_eq!(output["failure_class"], json!("timeout"));
+    assert_eq!(
+        output["failure_reason"],
+        json!("the agent turn timed out after 500ms")
     );
 }

@@ -1340,7 +1340,7 @@ async fn recovery_redelivers_with_stable_identities() {
     let second = Arc::new(CollectingSink::default());
     let projector = EventProjector::primed(second.clone(), dir.path()).expect("primes");
     let rt = runtime(&dir, None);
-    let resumed = host::resume_configured(&rt, vec![projector.clone()])
+    let resumed = host::resume_configured(&rt, Vec::new(), vec![projector.clone()], |_, _| {})
         .await
         .expect("resumes");
     assert_eq!(resumed.status, RunStatus::Success);

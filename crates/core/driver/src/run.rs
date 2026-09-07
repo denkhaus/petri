@@ -1,6 +1,6 @@
 //! The driver loop.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Debug;
 use std::mem;
@@ -362,9 +362,12 @@ enum Signal {
         attempt: Attempt,
         outcome: Outcome,
     },
+    /// An attempt timer expired. `timer` names the arming; a timer that was
+    /// paused or re-armed since is stale and ignored.
     Timeout {
         firing:  FiringId,
         attempt: Attempt,
+        timer:   u64,
     },
     RetryDue {
         firing:       FiringId,
@@ -474,6 +477,23 @@ struct Task {
     workers:  JoinSet<()>,
     deadline: Option<AbortHandle>,
     reason:   Option<CancelReason>,
+    /// The attempt's active-work budget, when the driver enforces it.
+    budget:   Option<AttemptBudget>,
+}
+
+/// The per-attempt timer for an `ExecutorEnforced` node (§10). It counts
+/// active work only: while the step has a question pending with the host the
+/// clock stops, and it resumes with the remaining time once every pending
+/// question is answered. Each arming has its own id, so an expiry from a
+/// timer that was paused or re-armed in the meantime is ignored as stale.
+struct AttemptBudget {
+    remaining: Duration,
+    /// When the running timer was armed; `None` while paused.
+    armed_at:  Option<time::Instant>,
+    timer:     Option<AbortHandle>,
+    timer_id:  u64,
+    /// Question ids awaiting an answer from the host.
+    pending:   BTreeSet<String>,
 }
 
 /// A per-run host service riding a run's lifetime — an object-store listener,
@@ -529,6 +549,8 @@ pub struct Driver {
     releases:         Vec<JoinHandle<ReleaseReport>>,
     /// Armed by the first root cancel; expiry feeds back `KillRequested`.
     cleanup_timer:    Option<AbortHandle>,
+    /// One id per attempt-timer arming, so a stale expiry is recognizable.
+    next_timer_id:    u64,
     decision_tasks:   HashMap<DecisionId, AbortHandle>,
     /// The host's awaited extension points, when installed.
     hooks:            Option<Arc<dyn ExecutionHooks>>,
@@ -727,6 +749,7 @@ impl Driver {
             guard_teardown: None,
             releases: Vec::new(),
             cleanup_timer: None,
+            next_timer_id: 0,
             decision_tasks: HashMap::new(),
             hooks: None,
             branches: BranchMap::default(),
@@ -990,6 +1013,7 @@ impl Driver {
             Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack),
             Signal::Progress { firing, event } => {
                 let event = self.mask_progress(firing, event).await;
+                self.note_question(firing, &event);
                 self.feed(Event::StepProgress { firing, ev: event });
             }
             Signal::Finished {
@@ -1006,7 +1030,11 @@ impl Driver {
                 };
                 self.finish(firing, attempt, outcome, origin).await;
             }
-            Signal::Timeout { firing, attempt } => self.on_timeout(firing, attempt),
+            Signal::Timeout {
+                firing,
+                attempt,
+                timer,
+            } => self.on_timeout(firing, attempt, timer),
             Signal::RetryDue {
                 firing,
                 next_attempt,
@@ -2064,16 +2092,26 @@ impl Driver {
             .instrument(span.clone()),
         );
 
-        // The per-attempt timeout. `Budget.timeout` is per attempt, not per firing.
-        if let Some(limit) = self.engine.graph().node(node).map(|n| n.budget.timeout)
-            && !limit.is_zero()
-        {
-            let tx = self.tx.clone();
-            workers.spawn(async move {
-                time::sleep(limit).await;
-                let _ = tx.send(Signal::Timeout { firing, attempt }).await;
+        // The per-attempt timeout. `Budget.timeout` is per attempt, not per
+        // firing, and only an `ExecutorEnforced` node gets the driver's timer:
+        // a `HandlerManaged` step consumes its timeout itself, and a second
+        // wrapper around it would time out work the step already bounds.
+        let budget = self
+            .engine
+            .graph()
+            .node(node)
+            .map(|n| n.budget)
+            .filter(|budget| {
+                !budget.timeout.is_zero()
+                    && budget.timeout_policy == ir::TimeoutPolicy::ExecutorEnforced
+            })
+            .map(|budget| AttemptBudget {
+                remaining: budget.timeout,
+                armed_at:  None,
+                timer:     None,
+                timer_id:  0,
+                pending:   BTreeSet::new(),
             });
-        }
 
         self.tasks.insert(firing, Task {
             name,
@@ -2085,7 +2123,143 @@ impl Driver {
             workers,
             deadline: None,
             reason: None,
+            budget,
         });
+        self.arm_budget(firing);
+    }
+
+    /// Start (or restart) the attempt timer with whatever budget remains.
+    fn arm_budget(&mut self, firing: FiringId) {
+        let Some(task) = self.tasks.get_mut(&firing) else {
+            return;
+        };
+        let attempt = task.attempt;
+        let Some(budget) = task.budget.as_mut() else {
+            return;
+        };
+        if budget.armed_at.is_some() || !budget.pending.is_empty() {
+            return;
+        }
+        self.next_timer_id += 1;
+        let timer_id = self.next_timer_id;
+        budget.timer_id = timer_id;
+        budget.armed_at = Some(time::Instant::now());
+        let remaining = budget.remaining;
+        let tx = self.tx.clone();
+        budget.timer = Some(task.workers.spawn(async move {
+            time::sleep(remaining).await;
+            let _ = tx
+                .send(Signal::Timeout {
+                    firing,
+                    attempt,
+                    timer: timer_id,
+                })
+                .await;
+        }));
+        tracing::debug!(
+            parent: &task.span,
+            firing = firing.raw(),
+            attempt = attempt.raw(),
+            remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+            "attempt timer armed"
+        );
+    }
+
+    /// Stop the attempt timer and bank the time it had left.
+    fn pause_budget(task: &mut Task) {
+        let Task {
+            span,
+            attempt,
+            budget,
+            ..
+        } = task;
+        let Some(budget) = budget.as_mut() else {
+            return;
+        };
+        let Some(armed_at) = budget.armed_at.take() else {
+            return;
+        };
+        if let Some(timer) = budget.timer.take() {
+            timer.abort();
+        }
+        budget.remaining = budget.remaining.saturating_sub(armed_at.elapsed());
+        tracing::debug!(
+            parent: &*span,
+            attempt = attempt.raw(),
+            remaining_ms = u64::try_from(budget.remaining.as_millis()).unwrap_or(u64::MAX),
+            pending_questions = budget.pending.len(),
+            "attempt timer paused"
+        );
+    }
+
+    /// A step asked the host a question: an interaction wait begins for this
+    /// firing and attempt, and an executor-enforced budget stops counting.
+    /// A repeated question id while the first is pending is one wait.
+    fn note_question(&mut self, firing: FiringId, event: &StepEvent) {
+        let Some(question) = steps::Question::from_event(event) else {
+            return;
+        };
+        let Some(task) = self.tasks.get_mut(&firing) else {
+            return;
+        };
+        tracing::info!(
+            parent: &task.span,
+            firing = firing.raw(),
+            attempt = task.attempt.raw(),
+            question = %question.id,
+            "interaction wait started"
+        );
+        if let Some(budget) = task.budget.as_mut() {
+            budget.pending.insert(question.id);
+            Self::pause_budget(task);
+        }
+    }
+
+    /// A host answered one of a step's questions: the wait ends, and once no
+    /// question of this attempt is pending the budget resumes.
+    fn note_answer(&mut self, firing: FiringId, payload: &Value) {
+        let Some(answer) = steps::Answer::from_value(payload) else {
+            return;
+        };
+        let Some(id) = answer.question.as_deref() else {
+            return;
+        };
+        let Some(task) = self.tasks.get_mut(&firing) else {
+            return;
+        };
+        let Task {
+            span,
+            attempt,
+            budget,
+            ..
+        } = task;
+        let attempt = attempt.raw();
+        let Some(budget) = budget.as_mut() else {
+            tracing::info!(
+                parent: &*span,
+                firing = firing.raw(),
+                attempt,
+                question = id,
+                "interaction wait ended"
+            );
+            return;
+        };
+        if !budget.pending.remove(id) {
+            // An answer to a question this attempt never asked, or one already
+            // answered: stale, and no wait to end.
+            return;
+        }
+        tracing::info!(
+            parent: &*span,
+            firing = firing.raw(),
+            attempt,
+            question = id,
+            pending_questions = budget.pending.len(),
+            "interaction wait ended"
+        );
+        if budget.pending.is_empty() {
+            self.arm_budget(firing);
+        }
     }
 
     fn fail_now(&mut self, firing: FiringId, attempt: Attempt, message: &str, class: FailureClass) {
@@ -2239,6 +2413,7 @@ impl Driver {
                 return;
             }
         };
+        self.note_answer(firing, &payload);
         let forward = Forward {
             ctl: Control::Deliver(payload),
             ack,
@@ -2311,12 +2486,16 @@ impl Driver {
         }
     }
 
-    fn on_timeout(&mut self, firing: FiringId, attempt: Attempt) {
-        let still_running = self
-            .tasks
-            .get(&firing)
-            .is_some_and(|task| task.attempt == attempt);
-        if !still_running {
+    fn on_timeout(&mut self, firing: FiringId, attempt: Attempt, timer: u64) {
+        let current = self.tasks.get(&firing).is_some_and(|task| {
+            task.attempt == attempt
+                && task
+                    .budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.armed_at.is_some() && budget.timer_id == timer)
+        });
+        if !current {
+            // A timer paused or re-armed after this expiry was queued.
             return;
         }
         self.stop_step(firing, Control::Cancel, CancelReason::TimedOut);
@@ -2679,6 +2858,7 @@ mod teardown_tests {
             workers,
             deadline: None,
             reason: None,
+            budget: None,
         });
         let mut finishing = Box::pin(driver.finish(
             firing,

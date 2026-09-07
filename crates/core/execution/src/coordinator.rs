@@ -1534,6 +1534,11 @@ fn rebuild_middleware(
             &record.event,
             |firing, attempt| final_attempts.contains(&(firing, attempt)),
             |firing| nodes_by_firing.get(&firing).copied(),
+            |edge| {
+                graph
+                    .edge(edge)
+                    .is_some_and(|edge| edge.transition == ir::EdgeTransition::Restart)
+            },
         );
         if let Some(event) = fold {
             pipeline.fold(&event)?;

@@ -30,9 +30,11 @@
 //! node, 1-based), `ask` (which time this exact question was asked, 1-based;
 //! greater than one only after the step rejected an answer), `kind` (the
 //! format's question type), `text` (exact), `text_contains`, `options` (the
-//! offered keys, in order), `default`, `freeform`, `sensitive`. A question
-//! that matches no entry, or more than one, fails the interview; so does a
-//! matching entry that has already answered `count` times.
+//! offered keys, in order), `default`, `freeform`, `sensitive`,
+//! `reference_url_contains` (the question carries a review reference whose
+//! URL contains the text). A question that matches no entry, or more than
+//! one, fails the interview; so does a matching entry that has already
+//! answered `count` times.
 //!
 //! Actions: `choice` (`value`: a key or label), `choices` (`values`: keys or
 //! labels, for `multi_select`), `text` (`value`), `negative` (the option
@@ -92,6 +94,18 @@ fn plain_label(label: &str) -> &str {
         return trimmed[end + 1..].trim();
     }
     trimmed
+}
+
+/// A deadline in the largest whole unit that fits: `90s`, `15m`, `2h`.
+fn render_deadline(ms: u64) -> String {
+    let seconds = ms.div_ceil(1000);
+    if seconds >= 3600 && seconds.is_multiple_of(3600) {
+        format!("{}h", seconds / 3600)
+    } else if seconds >= 60 && seconds.is_multiple_of(60) {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// `--auto-approve`: the question's default choice, else the empty text.
@@ -172,6 +186,12 @@ impl TerminalInterviewer {
             format!("{}/{}", request.invocation_path, request.node)
         };
         let _ = writeln!(out, "question [{where_}]: {}", question.text);
+        if let Some(reference) = &question.reference {
+            let _ = writeln!(out, "  review: {} <{}>", reference.label, reference.url);
+        }
+        if let Some(ms) = question.timeout_ms {
+            let _ = writeln!(out, "  (answer within {})", render_deadline(ms));
+        }
         match question.kind.as_deref() {
             Some("yes_no" | "confirmation") => {
                 let keys = question
@@ -355,27 +375,30 @@ fn yes() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Matcher {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node:            Option<String>,
+    pub node:                   Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invocation_path: Option<String>,
+    pub invocation_path:        Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub occurrence:      Option<u32>,
+    pub occurrence:             Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ask:             Option<u32>,
+    pub ask:                    Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind:            Option<String>,
+    pub kind:                   Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text:            Option<String>,
+    pub text:                   Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_contains:   Option<String>,
+    pub text_contains:          Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options:         Option<Vec<String>>,
+    pub options:                Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default:         Option<String>,
+    pub default:                Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub freeform:        Option<bool>,
+    pub freeform:               Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitive:       Option<bool>,
+    pub sensitive:              Option<bool>,
+    /// The question carries a review reference whose URL contains this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_url_contains: Option<String>,
 }
 
 impl Matcher {
@@ -407,6 +430,11 @@ impl Matcher {
                 .is_none_or(|d| Some(d) == q.default.as_ref())
             && self.freeform.is_none_or(|f| f == q.freeform)
             && self.sensitive.is_none_or(|s| s == q.sensitive)
+            && self.reference_url_contains.as_deref().is_none_or(|needle| {
+                q.reference
+                    .as_ref()
+                    .is_some_and(|reference| reference.url.contains(needle))
+            })
     }
 }
 
@@ -684,6 +712,7 @@ impl Interviewer for ScriptedInterviewer {
 mod tests {
     use execution::{ExecutionId, InvocationId};
     use runtime::ir::{Attempt, FiringId};
+    use runtime::steps::QuestionReference;
     use tokio::time::timeout;
 
     use super::*;
@@ -699,19 +728,21 @@ mod tests {
             occurrence:      1,
             ask:             1,
             question:        Question {
-                id:        format!("{node}#1"),
-                text:      "Ship it?".into(),
-                options:   options
+                id:         format!("{node}#1"),
+                text:       "Ship it?".into(),
+                options:    options
                     .iter()
                     .map(|(key, label)| QuestionOption {
                         key:   (*key).into(),
                         label: (*label).into(),
                     })
                     .collect(),
-                default:   options.first().map(|(key, _)| (*key).into()),
-                freeform:  false,
-                sensitive: false,
-                kind:      kind.map(Into::into),
+                default:    options.first().map(|(key, _)| (*key).into()),
+                freeform:   false,
+                sensitive:  false,
+                kind:       kind.map(Into::into),
+                reference:  None,
+                timeout_ms: None,
             },
         }
     }
@@ -841,6 +872,31 @@ mod tests {
                 .text,
             Some(json!("ship it"))
         );
+    }
+
+    #[test]
+    fn a_review_reference_and_a_deadline_are_shown_with_the_question() {
+        let mut request = request("gate", Some("yes_no"), &[("Y", "[Y] Yes"), ("N", "[N] No")]);
+        request.question.reference = Some(QuestionReference {
+            label: "the plan".into(),
+            url:   "https://example.com/plan".into(),
+            kind:  Some("document".into()),
+        });
+        request.question.timeout_ms = Some(90_000);
+        let rendered = TerminalInterviewer::render(&request);
+        assert!(
+            rendered.contains("review: the plan <https://example.com/plan>"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("(answer within 90s)"), "{rendered}");
+        assert_eq!(render_deadline(3_600_000), "1h");
+        assert_eq!(render_deadline(900_000), "15m");
+        let matcher: Matcher =
+            serde_json::from_value(json!({ "reference_url_contains": "example.com" })).unwrap();
+        assert!(matcher.matches(&request));
+        let other: Matcher =
+            serde_json::from_value(json!({ "reference_url_contains": "elsewhere" })).unwrap();
+        assert!(!other.matches(&request));
     }
 
     #[test]

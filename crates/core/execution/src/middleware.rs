@@ -30,6 +30,8 @@ pub enum FoldEvent<'a> {
     RouteApplied {
         firing:   FiringId,
         decision: RouteDecision,
+        /// The applied edge restarts the execution (`EdgeTransition::Restart`).
+        restart:  bool,
     },
 }
 
@@ -43,6 +45,7 @@ pub(crate) fn derive_fold_event(
     event: &Event,
     is_final_attempt: impl Fn(FiringId, Attempt) -> bool,
     node_of: impl Fn(FiringId) -> Option<NodeId>,
+    is_restart_edge: impl Fn(ir::EdgeId) -> bool,
 ) -> Option<FoldEvent<'_>> {
     match event {
         Event::ExecutionStarted(_) => Some(FoldEvent::ExecutionStarted),
@@ -57,10 +60,15 @@ pub(crate) fn derive_fold_event(
                 outcome,
             })
         }
-        Event::RouteApplied(applied) => Some(FoldEvent::RouteApplied {
-            firing:   applied.firing(),
-            decision: applied.decision(),
-        }),
+        Event::RouteApplied(applied) => {
+            let decision = applied.decision();
+            let restart = matches!(decision, RouteDecision::Emit(edge) if is_restart_edge(edge));
+            Some(FoldEvent::RouteApplied {
+                firing: applied.firing(),
+                decision,
+                restart,
+            })
+        }
         _ => None,
     }
 }
@@ -529,6 +537,12 @@ impl driver::EventObserver for MiddlewareFoldObserver {
                     .any(|entry| entry.firing == firing && entry.attempt == attempt)
             },
             |firing| state.firing_node(firing),
+            |edge| {
+                state
+                    .graph()
+                    .edge(edge)
+                    .is_some_and(|edge| edge.transition == ir::EdgeTransition::Restart)
+            },
         );
         if let Some(event) = fold {
             self.apply_fold(&event);

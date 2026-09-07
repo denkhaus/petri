@@ -44,6 +44,7 @@ use frontend::{
     CompileInputs, Diagnostics, FileSource, Frontend, LaunchSettings, Lowered, NoFiles,
     WorkspaceRetention,
 };
+pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
 pub use lower::{
     ENVIRONMENT_PARAM, EnvValue, Environment, FailurePolicy, IMPORT_ERROR, Kind, LAUNCH_PARAM,
     MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, ModelDefaults, PREPARE_NODE_PREFIX, Policy,

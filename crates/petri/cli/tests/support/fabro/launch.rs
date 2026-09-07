@@ -12,6 +12,7 @@
 //! Nextest.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -184,6 +185,31 @@ impl Case {
                 }
             });
         }
+        let appends = launch.append_when;
+        let appender = (!appends.is_empty()).then(|| {
+            tokio::spawn(async move {
+                for (marker, file, text, delay) in appends {
+                    let deadline = Instant::now() + RUN_DEADLINE;
+                    while !marker.exists() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the append marker {} never appeared",
+                            marker.display()
+                        );
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    sleep(delay).await;
+                    let mut handle = fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&file)
+                        .expect("open the control file");
+                    handle
+                        .write_all(text.as_bytes())
+                        .expect("append to the control file");
+                }
+            })
+        });
         let interrupt = launch.interrupt_when.map(|marker| {
             tokio::spawn(async move {
                 let deadline = Instant::now() + RUN_DEADLINE;
@@ -222,6 +248,9 @@ impl Case {
         .await;
         if let Some(interrupt) = interrupt {
             interrupt.abort();
+        }
+        if let Some(appender) = appender {
+            appender.abort();
         }
         let (stdout, stderr, status, timed_out) = if let Ok((out, err, status)) = waited {
             (out, err, Some(status), false)
@@ -266,6 +295,11 @@ pub(crate) struct Launch {
     pub(crate) interrupt_when: Option<PathBuf>,
     /// The child's `PATH`. Defaults to the harness's own.
     pub(crate) path:           Option<String>,
+    /// Append lines to a file once a marker exists: how a case drives
+    /// `--control` the way a person at the terminal would. Entries run in
+    /// order on one task; each is (marker, file, text, delay after the
+    /// previous entry, or after the marker for the first).
+    pub(crate) append_when:    Vec<(PathBuf, PathBuf, String, Duration)>,
     /// Extra environment variables for the child: what a case hands the run
     /// beyond the isolated baseline, such as a `PETRI_SECRET_*` value.
     pub(crate) env:            Vec<(String, String)>,

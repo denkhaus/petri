@@ -34,6 +34,10 @@ pub struct ProcessSpec {
     pub stdin:   StdinMode,
     /// Select line logs or lossless byte chunks.
     pub output:  OutputMode,
+    /// The executor ends the process after this long. The step that sets it
+    /// owns the deadline: the driver arms no timer around such a step. `None`
+    /// is no deadline.
+    pub timeout: Option<Duration>,
 }
 
 /// How a process delivers output. Only the selected receiver is available.
@@ -87,7 +91,14 @@ impl ProcessSpec {
             cwd:     None,
             stdin:   StdinMode::Null,
             output:  OutputMode::Lines,
+            timeout: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     #[must_use]
@@ -124,6 +135,7 @@ impl fmt::Debug for ProcessSpec {
             .field("cwd", &self.cwd)
             .field("stdin", &self.stdin)
             .field("output", &self.output)
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -172,28 +184,41 @@ impl Sig {
 /// How a process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExitStatus {
-    pub code:   Option<i32>,
+    pub code:      Option<i32>,
     /// The signal that killed it, when it was killed.
-    pub signal: Option<i32>,
+    pub signal:    Option<i32>,
+    /// The executor ended it at the [`ProcessSpec::timeout`] deadline.
+    pub timed_out: bool,
 }
 
 impl ExitStatus {
     pub fn code(code: i32) -> Self {
         Self {
-            code:   Some(code),
-            signal: None,
+            code:      Some(code),
+            signal:    None,
+            timed_out: false,
         }
     }
 
     pub fn signalled(signal: i32) -> Self {
         Self {
-            code:   None,
-            signal: Some(signal),
+            code:      None,
+            signal:    Some(signal),
+            timed_out: false,
+        }
+    }
+
+    /// Ended by the executor at its deadline, with the signal it used.
+    pub fn timed_out(signal: i32) -> Self {
+        Self {
+            code:      None,
+            signal:    Some(signal),
+            timed_out: true,
         }
     }
 
     pub fn is_success(&self) -> bool {
-        self.code == Some(0) && self.signal.is_none()
+        self.code == Some(0) && self.signal.is_none() && !self.timed_out
     }
 }
 
@@ -207,8 +232,9 @@ impl From<process::ExitStatus> for ExitStatus {
             (Some(code), _) => Self::code(code),
             (None, Some(signal)) => Self::signalled(signal),
             (None, None) => Self {
-                code:   None,
-                signal: None,
+                code:      None,
+                signal:    None,
+                timed_out: false,
             },
         }
     }

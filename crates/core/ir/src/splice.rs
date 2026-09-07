@@ -214,10 +214,12 @@ impl GraphBuilder<Local> {
     pub fn build_fragment(self, exits: impl IntoIterator<Item = NodeId<Local>>) -> GraphFragment {
         let Graph {
             body,
+            policy,
             params,
             completion,
             result,
         } = self.build();
+        assert!(policy.is_default(), "a fragment carries no run policy");
         assert!(
             params.is_empty(),
             "a graph fragment cannot carry run params"

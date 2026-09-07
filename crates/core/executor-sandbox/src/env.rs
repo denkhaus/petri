@@ -64,30 +64,45 @@ pub(crate) struct SandboxEnv {
 /// provider that stopped the command but could not observe how (Daytona ends
 /// a session without seeing the child's status).
 fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>) -> ExitStatus {
+    // The provider's own deadline ended the command: the step reads it as a
+    // timeout, whatever signal the provider observed on the way.
+    if termination == Termination::TimedOut {
+        return ExitStatus::timed_out(signal.unwrap_or_else(|| Sig::Kill.number()));
+    }
     if let Some(signal) = signal {
         return ExitStatus::signalled(signal);
     }
     match termination {
-        Termination::Killed | Termination::TimedOut => ExitStatus::signalled(Sig::Kill.number()),
+        Termination::Killed => ExitStatus::signalled(Sig::Kill.number()),
         // The step's ladder decides cancel vs timeout; the handle only needs a
         // plausible signalled status for a stop it did not exit from.
         Termination::Cancelled => ExitStatus::signalled(Sig::Term.number()),
         // Exited, Unknown, and any future variant: report the code as-is.
-        _ => ExitStatus { code, signal: None },
+        _ => ExitStatus {
+            code,
+            signal: None,
+            timed_out: false,
+        },
     }
 }
 
 /// Retained bytes are deliberately omitted, but delivery to the line pumps
 /// must be complete before Petri can report the command's exit status.
 fn streaming_exit_status(streaming: &ExecStreamingResult) -> Result<ExitStatus, String> {
-    if streaming.stdout_capture.truncated || streaming.stderr_capture.truncated {
-        return Err("sandbox command output delivery was incomplete".to_owned());
-    }
-    Ok(exit_status(
+    let status = exit_status(
         streaming.result.termination,
         streaming.result.exit_code,
         streaming.result.signal,
-    ))
+    );
+    // A command the provider killed at its deadline has its output cut off
+    // by design; the timeout is the status, not an incomplete delivery.
+    if status.timed_out {
+        return Ok(status);
+    }
+    if streaming.stdout_capture.truncated || streaming.stderr_capture.truncated {
+        return Err("sandbox command output delivery was incomplete".to_owned());
+    }
+    Ok(status)
 }
 
 /// What one streamed job runs: a step's exec, or an action's container.
@@ -270,9 +285,14 @@ impl ExecEnv for SandboxEnv {
         // The step's program and arguments go to the sandbox as given: the
         // exec contract is an argument vector, so nothing is quoted or
         // interpreted on the way.
-        let mut exec_spec = ExecSpec::new(spec.program.as_str())
-            .args(spec.args.iter().map(SmolStr::as_str))
-            .no_timeout();
+        // The step's deadline rides to the provider, which ends the command
+        // itself; a step that sets none runs until it exits or is stopped.
+        let mut exec_spec =
+            ExecSpec::new(spec.program.as_str()).args(spec.args.iter().map(SmolStr::as_str));
+        exec_spec = match spec.timeout {
+            Some(timeout) => exec_spec.timeout(timeout),
+            None => exec_spec.no_timeout(),
+        };
         if let Some(dir) = working_dir {
             exec_spec = exec_spec.working_dir(dir);
         }

@@ -26,7 +26,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::fabro::interview;
@@ -1725,4 +1725,535 @@ fn contract_helper_merges_both_findings_into_the_report() {
             "{CONTRACT} {node} ran: {history:?}"
         );
     }
+}
+
+// ── Readiness item 6 through the binary (task 9) ────────────────────────────
+
+/// A scripted `invalid` answer is rejected by the gate and the re-ask
+/// (`ask: 2`) is answered by its own entry; both land in the receipt.
+#[tokio::test]
+async fn an_invalid_scripted_answer_is_re_asked_and_the_second_entry_routes() {
+    let case = Case::new("reask");
+    let workflow = case.workflow(GATE_ONLY, None);
+    let script = interview::write(&case.root, "reask", &[
+        interview::entry_matching(
+            "first-try",
+            json!({ "node": "gate", "ask": 1 }),
+            1,
+            json!({ "kind": "invalid", "value": "maybe" }),
+        ),
+        interview::entry_matching(
+            "second-try",
+            json!({ "node": "gate", "ask": 2 }),
+            1,
+            interview::negative(),
+        ),
+    ]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    let questions = receipt["questions"].as_array().expect("questions");
+    assert_eq!(questions.len(), 2, "{receipt}");
+    assert_eq!(questions[0]["ask"], json!(1));
+    assert_eq!(questions[0]["occurrence"], json!(1));
+    assert_eq!(questions[0]["reply"]["choice"], json!("maybe"));
+    assert_eq!(questions[1]["ask"], json!(2));
+    assert_eq!(questions[1]["occurrence"], json!(1));
+    assert_eq!(questions[1]["reply"]["choice"], json!("N"));
+    assert_eq!(questions[0]["question"], questions[1]["question"]);
+    assert_eq!(finished.final_context()["human.gate.selected"], json!("N"));
+    assert!(
+        finished
+            .echoed()
+            .iter()
+            .any(|(node, line)| node == "gate" && line.contains("names no choice")),
+        "{}",
+        finished.stderr
+    );
+    finished.assert_no_leaked_processes().await;
+}
+
+/// A delayed reply lands on its gate after the delay.
+#[tokio::test]
+async fn a_delayed_reply_lands_on_its_gate() {
+    let case = Case::new("delayed");
+    let workflow = case.workflow(GATE_ONLY, None);
+    let script = interview::write(&case.root, "delayed", &[json!({
+        "id": "later",
+        "match": { "node": "gate" },
+        "delay_ms": 800,
+        "action": { "kind": "choice", "value": "Y" }
+    })]);
+    let started = Instant::now();
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert!(started.elapsed() >= Duration::from_millis(800));
+    assert_eq!(
+        finished.receipt()["questions"][0]["reply"]["choice"],
+        json!("Y")
+    );
+    assert_eq!(finished.final_context()["human.gate.selected"], json!("Y"));
+    finished.assert_no_leaked_processes().await;
+}
+
+const TIMED_GATE: &str = r#"digraph Gate {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Ship it?", question_type="yes_no", timeout="1s", human.default_choice="hold"]
+    ship [shape=parallelogram, script="echo shipped"]
+    hold [shape=parallelogram, script="echo held"]
+    start -> gate
+    gate -> ship [label="[Y] Yes"]
+    gate -> hold [label="[N] No"]
+    ship -> exit
+    hold -> exit
+}"#;
+
+/// A withheld reply lets the gate's answer deadline expire; the gate takes
+/// `human.default_choice`, and the receipt records the withheld question as
+/// cancelled and not delivered.
+#[tokio::test]
+async fn a_withheld_reply_expires_into_the_default_choice() {
+    let case = Case::new("withheld-default");
+    let workflow = case.workflow(TIMED_GATE, None);
+    let script = interview::write(&case.root, "withhold", &[json!({
+        "id": "never",
+        "match": { "node": "gate" },
+        "action": { "kind": "withhold" }
+    })]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    let nodes: Vec<String> = finished
+        .finished_nodes()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    assert!(nodes.contains(&"hold".to_owned()), "{nodes:?}");
+    assert!(!nodes.contains(&"ship".to_owned()), "{nodes:?}");
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    assert_eq!(receipt["questions"][0]["reply"]["kind"], json!("cancelled"));
+    assert_ne!(receipt["questions"][0]["delivery"], json!("delivered"));
+    assert_eq!(receipt["questions"][0]["timeout_ms"], json!(1000));
+    let context = finished.final_context();
+    assert_eq!(context["human.gate.selected"], json!("N"));
+    assert_eq!(context["human.gate.gate.answer"], json!("timeout"));
+    assert!(
+        finished
+            .echoed()
+            .iter()
+            .any(|(node, line)| node == "gate" && line.contains("the question expired")),
+        "{}",
+        finished.stderr
+    );
+    finished.assert_no_leaked_processes().await;
+}
+
+/// Without a default, an expired gate fails with Fabro's retry outcome and
+/// the run ends failed; the withheld reply is not an interview error.
+#[tokio::test]
+async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
+    let case = Case::new("withheld-retry");
+    let workflow = case.workflow(
+        r#"digraph Gate {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Ship it?", question_type="yes_no", timeout="500ms"]
+    ship [shape=parallelogram, script="echo shipped"]
+    start -> gate
+    gate -> ship [label="[Y] Yes"]
+    ship -> exit
+}"#,
+        None,
+    );
+    let script = interview::write(&case.root, "withhold", &[json!({
+        "id": "never",
+        "match": { "node": "gate" },
+        "action": { "kind": "withhold" }
+    })]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(1);
+    assert_eq!(
+        finished.status_line(),
+        Some("failed"),
+        "{}",
+        finished.stderr
+    );
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    let document = finished.inspect();
+    let gate = &document["executions"][0]["engine"]["context"]["nodes"]["gate"];
+    assert_eq!(
+        gate["failure"]["class"],
+        json!("retry_requested"),
+        "{document}"
+    );
+    finished.assert_no_leaked_processes().await;
+}
+
+/// Two gates in parallel branches: each answer is bound to its own
+/// question by node, the late one lands after the early one, and neither
+/// branch consumes the other's entry.
+#[tokio::test]
+async fn parallel_gates_bind_each_answer_to_its_own_branch() {
+    let case = Case::new("parallel-gates");
+    let workflow = case.workflow(
+        r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    fan [shape=component]
+    a [shape=hexagon, label="A?", question_type="yes_no"]
+    b [shape=hexagon, label="B?", question_type="yes_no"]
+    a_yes [shape=parallelogram, script="echo a-yes > a.txt"]
+    a_no [shape=parallelogram, script="echo a-no > a.txt"]
+    b_yes [shape=parallelogram, script="echo b-yes > b.txt"]
+    b_no [shape=parallelogram, script="echo b-no > b.txt"]
+    a_done [shape=parallelogram, script="cat a.txt"]
+    b_done [shape=parallelogram, script="cat b.txt"]
+    join [shape=tripleoctagon]
+    start -> fan
+    fan -> a
+    fan -> b
+    a -> a_yes [label="[Y] Yes"]
+    a -> a_no [label="[N] No"]
+    b -> b_yes [label="[Y] Yes"]
+    b -> b_no [label="[N] No"]
+    a_yes -> a_done
+    a_no -> a_done
+    b_yes -> b_done
+    b_no -> b_done
+    a_done -> join
+    b_done -> join
+    join -> exit
+}"#,
+        None,
+    );
+    let script = interview::write(&case.root, "parallel", &[
+        json!({
+            "id": "a-late",
+            "match": { "node": "a" },
+            "delay_ms": 600,
+            "action": { "kind": "negative" }
+        }),
+        interview::entry("b-now", "b", interview::choice("Y")),
+    ]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        fs::read_to_string(case.workspace().join("a.txt")).expect("a.txt"),
+        "a-no\n"
+    );
+    assert_eq!(
+        fs::read_to_string(case.workspace().join("b.txt")).expect("b.txt"),
+        "b-yes\n"
+    );
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    let questions = receipt["questions"].as_array().expect("questions");
+    assert_eq!(questions.len(), 2);
+    for question in questions {
+        assert_eq!(question["delivery"], json!("delivered"));
+        let expected = if question["node"] == "a" { "N" } else { "Y" };
+        assert_eq!(question["reply"]["choice"], json!(expected), "{question}");
+    }
+    assert_ne!(questions[0]["firing"], questions[1]["firing"]);
+    for entry in receipt["script"]["entries"].as_array().expect("entries") {
+        assert_eq!(entry["consumed"], json!(1), "{entry}");
+    }
+    finished.assert_no_leaked_processes().await;
+}
+
+/// A `multi_select` gate takes several keys: the first routes, and every
+/// selected key and label is recorded, as Fabro records them.
+#[tokio::test]
+async fn a_multi_select_answer_routes_on_the_first_key_and_records_all() {
+    let case = Case::new("multi-select");
+    let workflow = case.workflow(
+        r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    pick [shape=hexagon, label="Which?", question_type="multi_select"]
+    apply [shape=parallelogram, script="echo apply"]
+    review [shape=parallelogram, script="echo review"]
+    start -> pick
+    pick -> apply [label="[A] Apply"]
+    pick -> review [label="[R] Review"]
+    apply -> exit
+    review -> exit
+}"#,
+        None,
+    );
+    let script = interview::write(&case.root, "multi", &[interview::entry_matching(
+        "both",
+        json!({ "node": "pick", "kind": "multi_select", "options": ["A", "R"] }),
+        1,
+        json!({ "kind": "choices", "values": ["A", "R"] }),
+    )]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    let context = finished.final_context();
+    assert_eq!(context["human.gate.selected"], json!("A,R"));
+    assert_eq!(context["human.gate.label"], json!("[A] Apply, [R] Review"));
+    let receipt = finished.receipt();
+    assert_eq!(
+        receipt["questions"][0]["reply"]["choices"],
+        json!(["A", "R"])
+    );
+    assert_eq!(receipt["questions"][0]["reply"]["choice"], json!("A"));
+    let nodes: Vec<String> = finished
+        .finished_nodes()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    assert!(nodes.contains(&"apply".to_owned()) && !nodes.contains(&"review".to_owned()));
+    finished.assert_no_leaked_processes().await;
+}
+
+/// A `review_target` gate asks Fabro's review question, shows the URL in the
+/// terminal, and the script matches on the reference.
+#[tokio::test]
+async fn a_review_target_gate_shows_its_reference_in_the_terminal() {
+    let case = Case::new("review-target");
+    let target = r#"{\"context_updates\":{\"review_target\":{\"label\":\"the plan\",\"url\":\"https://quarry.lithos.computer/tmp/abc\",\"kind\":\"document\"}}}"#;
+    let workflow = case.workflow(
+        &format!(
+            r#"digraph G {{
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prep [shape=parallelogram, output_schema="routing", script="echo '{target}'"]
+    gate [shape=hexagon, label="Ship it?", review_target=true]
+    ship [shape=parallelogram, script="echo shipped"]
+    hold [shape=parallelogram, script="echo held"]
+    start -> prep -> gate
+    gate -> ship [label="[Y] Yes"]
+    gate -> hold [label="[N] No"]
+    ship -> exit
+    hold -> exit
+}}"#
+        ),
+        None,
+    );
+    let script = interview::write(&case.root, "review", &[interview::entry_matching(
+        "reviewed",
+        json!({
+            "node": "gate",
+            "text_contains": "Review the the plan document",
+            "reference_url_contains": "quarry.lithos.computer/tmp/abc"
+        }),
+        1,
+        interview::choice("Y"),
+    )]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert!(
+        finished.echoed().iter().any(|(node, line)| {
+            node == "gate" && line == "review: the plan <https://quarry.lithos.computer/tmp/abc>"
+        }),
+        "{}",
+        finished.stderr
+    );
+    let receipt = finished.receipt();
+    assert_eq!(
+        receipt["questions"][0]["reference"]["label"],
+        json!("the plan")
+    );
+    assert_eq!(
+        receipt["questions"][0]["reference"]["url"],
+        json!("https://quarry.lithos.computer/tmp/abc")
+    );
+    assert_eq!(
+        receipt["questions"][0]["text"],
+        json!("Review the the plan document, then choose the next action.")
+    );
+    finished.assert_no_leaked_processes().await;
+}
+
+/// `--control`: a paused run admits nothing until `unpause`; a `steer` while
+/// a gate waits reaches the stage and does not answer it.
+#[tokio::test]
+async fn the_control_file_pauses_unpauses_and_steers_without_answering() {
+    let case = Case::new("control-file");
+    let workflow = case.workflow(
+        r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prepare [shape=parallelogram, script="echo started > started.txt; echo prepared"]
+    gate [shape=hexagon, label="Ship it?", question_type="yes_no"]
+    ship [shape=parallelogram, script="echo shipped"]
+    hold [shape=parallelogram, script="echo held"]
+    start -> prepare -> gate
+    gate -> ship [label="[Y] Yes"]
+    gate -> hold [label="[N] No"]
+    ship -> exit
+    hold -> exit
+}"#,
+        None,
+    );
+    let control = case.root.join("controls.txt");
+    fs::write(&control, "").expect("control file");
+    // The gate's answer waits for the steer to have landed.
+    let script = interview::write(&case.root, "gate", &[json!({
+        "id": "hold-it",
+        "match": { "node": "gate" },
+        "delay_ms": 1500,
+        "action": { "kind": "negative" }
+    })]);
+    let started = case.workspace().join("started.txt");
+    let control_arg = control.to_str().expect("utf-8").to_owned();
+    let finished = case
+        .run_with(
+            &workflow,
+            &[
+                "--interview-script",
+                script.to_str().expect("utf-8"),
+                "--control",
+                &control_arg,
+            ],
+            Launch {
+                append_when: vec![
+                    // Pause right after `prepare` starts: `gate` is held.
+                    (
+                        started.clone(),
+                        control.clone(),
+                        "pause\n".into(),
+                        Duration::from_millis(0),
+                    ),
+                    (
+                        started.clone(),
+                        control.clone(),
+                        "unpause\n".into(),
+                        Duration::from_millis(900),
+                    ),
+                    // The gate is now waiting on its (delayed) answer.
+                    (
+                        started,
+                        control,
+                        "steer gate please decide\nsteer nobody hi\ndance\n".into(),
+                        Duration::from_millis(500),
+                    ),
+                ],
+                ..Launch::default()
+            },
+        )
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    let mut position = 0;
+    for expected in [
+        "control: paused",
+        "control: unpaused",
+        "control: steered gate",
+        "control: no stage named `nobody` is running",
+        "control: `dance` is not a control",
+    ] {
+        let found = finished.stderr[position..]
+            .find(expected)
+            .unwrap_or_else(|| panic!("{expected} in order\n{}", finished.stderr));
+        position += found + expected.len();
+    }
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    assert_eq!(receipt["questions"][0]["reply"]["choice"], json!("N"));
+    assert_eq!(finished.final_context()["human.gate.selected"], json!("N"));
+    // The steer and the answer both reached the gate's firing.
+    let document = finished.inspect();
+    let deliveries = document["executions"][0]["engine"]["deliveries"]
+        .as_array()
+        .expect("deliveries");
+    assert_eq!(deliveries.len(), 2, "{deliveries:?}");
+    assert!(
+        deliveries[0]["payload"].get("$steer").is_some(),
+        "{deliveries:?}"
+    );
+    assert!(
+        deliveries[1]["payload"].get("$answer").is_some(),
+        "{deliveries:?}"
+    );
+    finished.assert_no_leaked_processes().await;
+}
+
+/// `stall_timeout`: a run with no execution activity for the budget is
+/// cancelled and the terminal says why.
+#[tokio::test]
+async fn a_stalled_run_is_cancelled_by_the_watchdog() {
+    let case = Case::new("stall");
+    let workflow = case.workflow(
+        r#"digraph G {
+    graph [stall_timeout="500ms"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    long [shape=parallelogram, script="sleep 30"]
+    start -> long -> exit
+}"#,
+        None,
+    );
+    let started = Instant::now();
+    let finished = case.run(&workflow, &["--auto-approve"]).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    finished.assert_code(1);
+    assert_eq!(
+        finished.status_line(),
+        Some("cancelled"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        finished
+            .stderr
+            .contains("stall watchdog: no execution activity"),
+        "{}",
+        finished.stderr
+    );
+    finished.assert_no_leaked_processes().await;
 }

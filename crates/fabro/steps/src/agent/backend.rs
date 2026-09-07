@@ -9,6 +9,7 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 use steps::StepCtx;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 
 use super::AgentConfig;
 use crate::acp::{AcpError, Client};
@@ -83,18 +84,38 @@ impl Session {
             }
         }
     }
+    /// One prompt turn. `deadline` is the node's `timeout`, which an ACP
+    /// agent consumes itself (`TimeoutPolicy::HandlerManaged`, as Fabro hands
+    /// its `timeout_ms` to the ACP turn): a turn that outlives it is
+    /// terminated and fails with class `timeout`. A native Pebble session
+    /// ignores it; the driver's interview-aware timer owns that deadline.
     pub(crate) async fn prompt(
         &mut self,
         text: &str,
         control: &mut mpsc::Receiver<Control>,
         grace: Duration,
+        deadline: Option<Duration>,
     ) -> Result<String, AgentError> {
         match self {
-            Self::Acp(client) => client
-                .prompt(text, control, grace)
-                .await
-                .map(|turn| turn.text)
-                .map_err(Into::into),
+            Self::Acp(client) => {
+                let turn = client.prompt(text, control, grace);
+                let result = match deadline {
+                    Some(deadline) => timeout(deadline, turn).await.ok(),
+                    None => Some(turn.await),
+                };
+                let Some(result) = result else {
+                    client.terminate(grace).await;
+                    return Err(AgentError::failed(
+                        "timeout",
+                        format!(
+                            "the agent turn timed out after {}ms",
+                            deadline
+                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                        ),
+                    ));
+                };
+                result.map(|turn| turn.text).map_err(Into::into)
+            }
             Self::Pebble(session) => session.prompt(text, control).await,
         }
     }

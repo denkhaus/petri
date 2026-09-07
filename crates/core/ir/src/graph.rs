@@ -309,16 +309,45 @@ impl StepRef {
     }
 }
 
+/// Who enforces a node's per-attempt `timeout`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutPolicy {
+    /// The driver arms the attempt timer and cancels the step when it
+    /// expires. The timer counts active work only: while the step has a
+    /// question pending with the host, the clock stops and resumes with the
+    /// remaining time once every pending question is answered.
+    #[default]
+    ExecutorEnforced,
+    /// The step consumes the timeout itself (a command deadline sent to the
+    /// sandbox, an agent's own turn deadline, a human gate's answer
+    /// deadline). The driver arms no timer of its own around it.
+    HandlerManaged,
+}
+
+impl TimeoutPolicy {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's `skip_serializing_if` passes the field by reference"
+    )]
+    fn is_default(&self) -> bool {
+        *self == Self::ExecutorEnforced
+    }
+}
+
 /// Hard limits on a node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
     /// Hard cap on **firings** of this node across all generations. Must be at
     /// least 1. Retries do not count: a firing that takes four attempts is
     /// still one firing.
-    pub max_firings: u32,
+    pub max_firings:    u32,
     /// Applies **per attempt**, not per firing. Node-total wall clock is not a
     /// thing the core tracks.
-    pub timeout:     Duration,
+    pub timeout:        Duration,
+    /// Who enforces `timeout`. The default keeps the driver's timer.
+    #[serde(default, skip_serializing_if = "TimeoutPolicy::is_default")]
+    pub timeout_policy: TimeoutPolicy,
 }
 
 impl Budget {
@@ -328,7 +357,15 @@ impl Budget {
         Self {
             max_firings,
             timeout,
+            timeout_policy: TimeoutPolicy::ExecutorEnforced,
         }
+    }
+
+    /// The same budget, enforced by the step instead of the driver.
+    #[must_use]
+    pub fn with_timeout_policy(mut self, policy: TimeoutPolicy) -> Self {
+        self.timeout_policy = policy;
+        self
     }
 
     /// A node that fires once, with a one-hour ceiling.
@@ -972,11 +1009,37 @@ impl<S> GraphBody<S> {
     }
 }
 
+/// Run-wide policies a host enforces around the engine: they never change
+/// routing or the log, only when a run is cancelled or a route is blocked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPolicy {
+    /// Cancel the run after this long with no execution event at all. A
+    /// pending human question parks the clock. `None` disables the watchdog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_timeout:                Option<Duration>,
+    /// How many times one node may fail with the same deterministic or
+    /// structural failure signature before the run fails, and how many times
+    /// one restart edge may be taken for the same signature before it is
+    /// blocked. `None` disables the circuit breaker. At least 1 when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_restart_signature_limit: Option<NonZeroU32>,
+}
+
+impl RunPolicy {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A whole workflow: the reusable graph body plus run-level configuration.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Graph<S = Live> {
     #[serde(flatten)]
     pub body:       GraphBody<S>,
+    /// Host-enforced run policies (§10): the stall watchdog and the failure
+    /// circuit breaker. Empty for formats that declare none.
+    #[serde(default, skip_serializing_if = "RunPolicy::is_default")]
+    pub policy:     RunPolicy,
     /// Per-run parameters, visible to every expression as a static binding of
     /// the same name — the GHA `github`, `vars` and `runner` contexts, a
     /// native format's `params`. Frontends leave this empty; the host fills

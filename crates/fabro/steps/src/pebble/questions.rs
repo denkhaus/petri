@@ -108,6 +108,8 @@ fn translate(id: String, question: &PebbleQuestion) -> Question {
             }
             .to_owned(),
         ),
+        reference: None,
+        timeout_ms: None,
     }
 }
 

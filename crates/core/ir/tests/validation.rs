@@ -352,6 +352,7 @@ fn structural_problems_are_reported() {
             exprs:  ExprTable::default(),
             entry:  vec![],
         },
+        policy:     ir::RunPolicy::default(),
         params:     BTreeMap::default(),
         completion: Completion::default(),
         result:     ir::ResultProjection::None,
