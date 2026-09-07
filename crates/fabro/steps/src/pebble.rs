@@ -44,6 +44,7 @@ use crate::agent::backend::AgentError;
 use crate::compaction::{self, CompactionPolicyHandle};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
+use crate::mcp::{self, McpServers};
 use crate::{memory, skills};
 
 /// Host capability supplied by applications embedding the native backend.
@@ -54,6 +55,8 @@ pub struct PebbleClient(pub Client);
 
 pub(crate) struct NativeSession {
     agent:           CodingAgent,
+    /// The node's MCP servers, shut down after the agent.
+    mcp:             McpServers,
     questions:       Arc<AgentQuestions>,
     compaction:      compaction::Accounting,
     attribution:     compaction::Attribution,
@@ -203,9 +206,16 @@ impl NativeSession {
                 ctx.attempt,
             ))
         });
+        let mcps = config.mcps.clone();
+        let secrets = ctx.secrets.clone();
+        let attribution = mcp::Attribution::of(ctx);
         // Fabro's skill directories, audited and recorded; Pebble discovers.
         let skills = skills::prepare(config, ctx).await;
         let build = async {
+            // The node's MCP servers start first, on Petri's side of the
+            // agent, so their tools are registered with the builder.
+            let mut mcp =
+                McpServers::start(&mcps, env.clone(), secrets, attribution, &cancel).await;
             let environment = PebbleEnvironment::prepare(env, cancel.clone(), kill.clone())
                 .await
                 .map_err(|e| AgentError::failed("pebble_environment", e.to_string()))?;
@@ -230,20 +240,24 @@ impl NativeSession {
                 .permission_level(PermissionLevel::Full)
                 .event_sink(sink)
                 .redactor(redactor)
-                .human_input(provider);
+                .human_input(provider)
+                .tools(mcp.tools());
             builder = compaction::install(builder, compaction_policy);
             if let Some(middleware) = tool_hooks {
                 builder = builder.tool_middleware(middleware);
             }
-            builder
-                .build()
-                .await
-                .map_err(|e| AgentError::failed("pebble_config", e.to_string()))
+            match builder.build().await {
+                Ok(agent) => Ok((agent, mcp)),
+                Err(e) => {
+                    mcp.shutdown().await;
+                    Err(AgentError::failed("pebble_config", e.to_string()))
+                }
+            }
         };
         tokio::pin!(build);
         let mut pending = Vec::new();
         let mut closed = false;
-        let agent = loop {
+        let (agent, mcp) = loop {
             tokio::select! {
                 result = &mut build => break match result { Err(_) if cancel.is_cancelled() => return Err(AgentError::Cancelled), other => other? },
                 control = ctx.control.recv(), if !closed => {
@@ -270,6 +284,7 @@ impl NativeSession {
             compaction: compaction::Accounting::new(&agent),
             attribution,
             agent,
+            mcp,
             questions,
             cancel: cancel.clone(),
             kill: kill.clone(),
@@ -361,11 +376,15 @@ impl NativeSession {
     }
 
     pub(crate) async fn shutdown(&mut self, reason: ShutdownReason) -> Result<(), AgentError> {
-        self.agent
+        let result = self
+            .agent
             .shutdown(reason)
             .await
             .map(|_| ())
-            .map_err(|e| AgentError::failed("pebble_shutdown", e.to_string()))
+            .map_err(|e| AgentError::failed("pebble_shutdown", e.to_string()));
+        // The servers outlive the agent's last tool call and nothing else.
+        self.mcp.shutdown().await;
+        result
     }
 }
 

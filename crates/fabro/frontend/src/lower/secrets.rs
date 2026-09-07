@@ -7,15 +7,15 @@ use crate::template::Context;
 
 /// What a settings string interpolates to.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Interpolated {
-    pub(super) text:   String,
+pub(crate) struct Interpolated {
+    pub(crate) text:   String,
     /// The secret the whole value names, when it is exactly one
     /// `{{ secrets.NAME }}` token.
-    pub(super) secret: Option<String>,
+    pub(crate) secret: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum InterpolationError {
+pub(crate) enum InterpolationError {
     /// A `{{ secrets.NAME }}` token where none may appear, or one mixed with
     /// other text.
     SecretNotAllowed { name: String },
@@ -31,7 +31,7 @@ fn is_name(name: &str) -> bool {
 
 /// Interpolate `text`. With `secret_value` the whole text may be one secret
 /// token, which comes back as `secret`; otherwise a secret token is an error.
-pub(super) fn interpolate(
+pub(crate) fn interpolate(
     text: &str,
     context: &Context,
     secret_value: bool,

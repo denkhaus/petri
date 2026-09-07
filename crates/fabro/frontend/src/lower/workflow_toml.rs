@@ -628,21 +628,8 @@ impl Reader<'_> {
                 ),
             );
         }
-        if agent
-            .get("mcps")
-            .and_then(toml::Value::as_table)
-            .is_some_and(|mcps| !mcps.is_empty())
-        {
-            let path = self.path;
-            self.unsupported(
-                "workflow_toml.run.agent.mcps",
-                format!(
-                    "`[run.agent.mcps]` in `{path}` configures MCP servers, which the standalone \
-                     runner does not start yet"
-                ),
-                "remove the servers, or wait for MCP support (readiness item 9b)",
-            );
-        }
+        // `[run.agent.mcps]` is read by `lower::mcps` from this file's text,
+        // together with the other settings layers.
     }
 
     /// `[run.environment]` over `[environments.<id>]`, Fabro's `combine`: the
