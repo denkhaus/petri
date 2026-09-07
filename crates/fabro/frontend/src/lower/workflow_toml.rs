@@ -586,33 +586,46 @@ impl Reader<'_> {
             return;
         };
         // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only;
-        // sub-agents (readiness item 9d) has no `workflow.toml` surface at the
-        // pinned revision, and compaction is always on with Fabro's hardcoded
-        // values (`lower::compaction`), so a key asking for one is refused as
-        // Fabro refuses it, never passed silently. `skills` is the standalone
+        // sub-agents (readiness item 9d) need no `workflow.toml` surface: every
+        // native agent gets them (`super::subagents`), and compaction (item 9e)
+        // is always on with Fabro's hardcoded values (`lower::compaction`), so a
+        // key asking for either is refused as Fabro refuses it, never passed
+        // silently. `skills` is the standalone
         // runner's own extension (`skills::read`).
         for key in agent.keys() {
             if !matches!(key.as_str(), "fabro_tools" | "mcps" | "skills") {
                 let path = self.path;
-                let message = if key == "compaction" {
-                    format!(
-                        "`run.agent.compaction` in `{path}` is not a key Fabro's `[run.agent]` \
-                         table accepts (it takes `fabro_tools` and `mcps`); compaction is always \
-                         on with Fabro's values: a trigger at {DEFAULT_THRESHOLD_PERCENT} percent \
-                         of the context window and {DEFAULT_PRESERVE_TURNS} preserved turns"
+                let (message, hint) = if key == "compaction" {
+                    (
+                        format!(
+                            "`run.agent.compaction` in `{path}` is not a key Fabro's `[run.agent]` \
+                             table accepts (it takes `fabro_tools` and `mcps`); compaction is \
+                             always on with Fabro's values: a trigger at \
+                             {DEFAULT_THRESHOLD_PERCENT} percent of the context window and \
+                             {DEFAULT_PRESERVE_TURNS} preserved turns"
+                        ),
+                        "remove it; Fabro's settings schema has no such key",
+                    )
+                } else if key == "subagents" {
+                    (
+                        format!(
+                            "`run.agent.subagents` in `{path}` is not a key Fabro's `[run.agent]` \
+                             table accepts (it takes `fabro_tools` and `mcps`); sub-agents are \
+                             always available to native agents"
+                        ),
+                        "remove it; native agents always have the sub-agent tools, as in Fabro, \
+                         and Fabro's settings schema has no such key",
                     )
                 } else {
-                    format!(
-                        "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` table \
-                         accepts (it takes `fabro_tools` and `mcps`); sub-agents have no \
-                         workflow configuration at the pinned Fabro"
+                    (
+                        format!(
+                            "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` \
+                             table accepts (it takes `fabro_tools` and `mcps`)"
+                        ),
+                        "remove it; Fabro's settings schema has no such key",
                     )
                 };
-                self.unsupported(
-                    "workflow_toml.key",
-                    message,
-                    "remove it; Fabro's settings schema has no such key",
-                );
+                self.unsupported("workflow_toml.key", message, hint);
             }
         }
         if let Some(value) = agent.get("skills") {

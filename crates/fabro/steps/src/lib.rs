@@ -33,6 +33,7 @@ pub mod sessions;
 pub mod skills;
 pub mod stage;
 mod stub;
+pub mod subagents;
 pub mod wait;
 pub mod workflow;
 

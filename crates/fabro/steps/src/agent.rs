@@ -20,6 +20,7 @@ use backend::{AgentError, Session};
 use frontend_fabro::Policy;
 use frontend_fabro::kinds::{AGENT_KIND, MAX_OUTPUT_RETRIES, StageOutcome};
 use frontend_fabro::mcps::McpServer;
+use frontend_fabro::subagents::SubagentConfig;
 use ir::{LogStream, Metrics, Outcome, StepKindId, Value};
 use pebble_coding_agent::ShutdownReason;
 use serde::Deserialize;
@@ -94,6 +95,10 @@ pub struct AgentConfig {
     /// after Fabro's conventional ones.
     #[serde(default)]
     pub skill_dirs:       Vec<String>,
+    /// The sub-agent tools a native session advertises and the bound on its
+    /// agent tree; the lowering writes the reference defaults.
+    #[serde(default)]
+    pub subagents:        SubagentConfig,
     /// Every stage of the workflow, for the preamble.
     #[serde(default)]
     pub stages:           Value,

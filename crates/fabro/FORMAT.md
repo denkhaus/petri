@@ -586,8 +586,48 @@ session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the
 node's `speed` and `max_tokens`. Tools have full access within the scope's
 policy. Petri's sandbox owns process isolation. This integration does not
-install interactive approvals or subagents. Tool output is bounded by Pebble's
-capture and preview limits. Omitted bytes are discarded and cannot be retrieved.
+install interactive approvals. Tool output is bounded by Pebble's capture and
+preview limits. Omitted bytes are discarded and cannot be retrieved.
+
+Every native session has Pebble's sub-agent tools (`spawn_agent`,
+`send_input`, `wait`, `close_agent`), as every API-backend agent does in
+Fabro, which has no setting to turn them off (the `[run.agent] subagents`
+key is refused, as Fabro refuses it). The lowering puts the reference
+configuration on every agent node (`frontend_fabro::subagents::SubagentConfig`:
+`enabled = true`, `max_open_sessions = 4`, Pebble's bound on the sessions one
+tree holds open at once, the node's own session included) and
+`fabro_steps::subagents::configure` hands it to `CodingAgentBuilder::subagents`.
+Pebble builds and owns the children: each child runs in the parent's scope on
+the parent's model, under the same tool middleware, so the run's
+`pre_tool_use` hooks block inside a child, and the workflow's MCP tools
+(`[run.agent.mcps]`) reach a child through the parent's connection; a child
+never gets the question tool, project memory files, or skill directories; a
+child may delegate again within the open-session bound. `wait` blocks until the child finishes; a
+child's failure is the parent's tool result and never fails the stage; a
+cancelled wait closes the child; the session's shutdown closes every child
+before the node releases its scope. Children are Pebble sessions, not
+workflow invocations: they never count against the run's invocation ceiling.
+Nothing of a child survives a retained thread's export or a resume; a later
+`full` node continues the conversation with the child's result in it and may
+delegate again. Sub-agents reach ACP agents through the agent's own tools,
+not through Petri. Accepted differences from the reference are in
+`crates/fabro/acceptance/CONTRACT.md`.
+
+Sub-agent facts are the `pebble` events (below). Pebble publishes the
+lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`,
+`SubAgentFailed`, `SubAgentClosed`, each with `agent_id`, `depth` and
+`generation`) under the parent's `session_id`; a child's own events carry
+the child's `session_id`, its immediate parent in `parent_session_id`, and
+the tree's one `stream_id` and `seq`. Every event of the tree is attributed
+to the node, firing and attempt that owns the root session. Pebble's prompt
+report excludes descendants, so the node's `pebble.usage` is the parent's
+own and the `pebble.subagents` metric is the tree's: `{ spawned,
+turns_started, completed, failed, closed, usage, cost_usd_micros, sessions }`,
+where `usage` and `cost_usd_micros` sum every descendant session's committed
+assistant messages and `sessions` maps each child session to `{ parent,
+usage, cost_usd_micros, messages }`. A public consumer reconstructs the same
+totals from the `agent_activity` events (`AssistantMessage` payloads of
+sessions with a parent).
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
 follow-up. A delivered core `Answer` naming one of the session's open

@@ -45,6 +45,7 @@ use crate::compaction::{self, CompactionPolicyHandle};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
 use crate::mcp::{self, McpServers};
+use crate::subagents::{self, Ledger};
 use crate::{memory, skills};
 
 /// Host capability supplied by applications embedding the native backend.
@@ -63,6 +64,8 @@ pub(crate) struct NativeSession {
     cancel:          CancellationToken,
     kill:            CancellationToken,
     _cancel_on_drop: DropGuard,
+    /// What the session's children spent and did, for the metrics.
+    subagents:       Arc<Ledger>,
     usage:           TokenUsage,
     cost:            Option<u64>,
     inference:       Duration,
@@ -181,6 +184,8 @@ impl NativeSession {
             scope:   ctx.scope,
             node:    ctx.node.clone(),
         });
+        let ledger = Arc::new(Ledger::default());
+        let sink = subagents::observe(sink, ledger.clone());
         let redactor = Arc::new(PetriRedactor(ctx.secrets.masker()));
         // Agent questions ride the same progress and control channels a human
         // gate uses, so the host's one interviewer answers both.
@@ -246,6 +251,7 @@ impl NativeSession {
             if let Some(middleware) = tool_hooks {
                 builder = builder.tool_middleware(middleware);
             }
+            builder = subagents::configure(builder, &config.subagents);
             match builder.build().await {
                 Ok(agent) => Ok((agent, mcp)),
                 Err(e) => {
@@ -289,6 +295,7 @@ impl NativeSession {
             cancel: cancel.clone(),
             kill: kill.clone(),
             _cancel_on_drop: guard,
+            subagents: ledger,
             usage: TokenUsage::default(),
             cost: None,
             inference: Duration::ZERO,
@@ -365,6 +372,7 @@ impl NativeSession {
                 json!(elapsed_ms(self.inference)),
             ),
             ("pebble.tool_ms".into(), json!(elapsed_ms(self.tool))),
+            (subagents::METRIC.into(), self.subagents.metrics()),
         ]);
         metrics.extend(self.compaction.metrics());
         metrics
