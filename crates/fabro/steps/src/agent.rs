@@ -26,6 +26,7 @@ pub use backend::AgentBackend;
 use backend::{AgentError, Session};
 use frontend_fabro::Policy;
 use frontend_fabro::kinds::{AGENT_KIND, MAX_OUTPUT_RETRIES, StageOutcome};
+use frontend_fabro::mcps::McpServer;
 use ir::{LogStream, Metrics, Outcome, StepKindId, Value};
 use pebble_coding_agent::ShutdownReason;
 use serde::Deserialize;
@@ -110,6 +111,9 @@ pub struct AgentConfig {
     pub output_retries:   u64,
     #[serde(default)]
     pub acp:              Option<Value>,
+    /// The run's `[run.agent.mcps]` servers a native session connects to.
+    #[serde(default)]
+    pub mcps:             Vec<McpServer>,
     #[serde(default)]
     pub on_failure:       Option<Policy>,
     /// The node's explicit routes, for failure promotion.
@@ -356,7 +360,8 @@ impl Step for AgentStep {
                 (Plan::single(route.clone()), Resume::Fresh(route))
             }
         };
-        let mut session = match Session::open(&config, &mut ctx, resume).await {
+        let open = Box::pin(Session::open(&config, &mut ctx, resume));
+        let mut session = match open.await {
             Ok(session) => session,
             Err(AgentError::Cancelled) => return Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => return fail(message, &class),

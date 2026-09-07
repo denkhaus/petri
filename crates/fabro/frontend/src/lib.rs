@@ -35,6 +35,7 @@ pub mod kinds;
 pub mod labels;
 mod lower;
 pub use lower::fallbacks;
+pub mod mcps;
 pub mod model;
 pub mod stylesheet;
 pub mod template;
