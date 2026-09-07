@@ -38,16 +38,9 @@ pin=$(awk '$1 !~ /^#/ && NF { print $1; exit }' "$PIN_FILE")
 commit=$(git -C "$CORPUS" rev-parse HEAD)
 [ "$commit" = "$pin" ] || { echo "error: the corpus is at $commit but the pin is $pin; run scripts/corpus-fetch-fabro.sh" >&2; exit 1; }
 
-if [ -z "${FABRO_BIN:-}" ]; then
-  echo "building fabro-cli from $CORPUS at $commit into $TARGET" >&2
-  (cd "$CORPUS" && CARGO_TARGET_DIR="$TARGET" cargo build --locked -q -p fabro-cli)
-  FABRO_BIN="$TARGET/debug/fabro"
-fi
-version=$("$FABRO_BIN" --version)
-case "$version" in
-  *"${commit:0:7}"*) ;;
-  *) echo "error: $FABRO_BIN reports '$version', not the pinned commit $commit" >&2; exit 1 ;;
-esac
+# scripts/fabro-provision.sh builds the binary into $TARGET (or checks
+# FABRO_BIN) and refuses one that does not report the pinned commit.
+FABRO_BIN=$(FABRO_ORACLE_TARGET_DIR="$TARGET" scripts/fabro-provision.sh)
 
 if [ "$REFRESH_FAKE_AGENT" -eq 1 ]; then
   python3 - "$CORPUS/lib/components/fabro-acp/src/test_support.rs" crates/fabro/acceptance/testdata/fake_acp_agent.py <<'EOF'
