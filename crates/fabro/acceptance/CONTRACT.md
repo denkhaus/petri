@@ -327,7 +327,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | MCP catalog references | `[run.agent.mcps.<name>] id = "..."` is refused at load: the standalone runner has no server-managed catalog | resolved from the server's catalog |
 | MCP legacy SSE | `protocol = "sse"` is refused at load; only streamable HTTP is spoken (the pinned `rmcp` has no legacy SSE client; Fabro carries its own) | supported |
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
-| MCP `sandbox` transport | launched through the scope's execution environment and reached at `http://localhost:<port>`; a container or remote scope fails the server with a named reason (the plugin protocol exposes no port or preview URL) | a Daytona preview URL; local sandboxes fall back to localhost |
+| MCP `sandbox` transport | launched through the scope's execution environment and reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward into the container, Daytona's preview link with its token header); a provider without preview URLs fails the server with a named reason | a Daytona preview URL; local sandboxes fall back to localhost |
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
 | Model fallback: session handoff | the failed session's record resumes on the next route (`ResumeMode::UseModel`, same session id); the next model continues the unfinished turn with no new input (Pebble's `continue_prompt`), so a tool effect that already ran is never repeated | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
 | Model fallback: provider-only candidates | a bare provider in a chain resolves to the same model id on that provider when its catalog lists it, else `NoCompatibleModel` | picks the provider's closest model by feature profile and price |
@@ -425,7 +425,7 @@ fails when any of them disagree. The row names are the keys of a record's
 |---|---|---|---|
 | `pebble` | `7ae5b27f64fac15f4b5758366b8ea1fb5ffdab71` | `lithoscomputer/pebble` (private) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `4aab27d7d42e7f762a8b6a3871c3db86816b0721` | `lithoscomputer/lithos-llm` (private) | provider transport and request retries |
-| `sandbox_driver` | `a5674bab7d048cb599e4564e243c509e571e8d2b` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `a225832ebb234b09e339e2b6cd30fedfe17a1818` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 
