@@ -93,7 +93,9 @@ jobs:
       # (crates/petri/cli/tests/support/fabro/evidence.rs) and the coverage
       # report. The steps below keep it as a job artifact.
       - name: Name the evidence directory
-        run: echo "PETRI_EVIDENCE_DIR=$RUNNER_TEMP/fabro-evidence" >> "$GITHUB_ENV"
+        run: |
+          echo "PETRI_EVIDENCE_DIR=$RUNNER_TEMP/fabro-evidence" >> "$GITHUB_ENV"
+          echo "PETRI_FABRO_COVERAGE_DIR=$RUNNER_TEMP/fabro-evidence/cells" >> "$GITHUB_ENV"
 
       # The pinned fabro binary the comparison matrix launches, built from the
       # fetched corpus (never taken from PATH). Only the binary is cached, by
@@ -108,7 +110,7 @@ jobs:
       - name: Build the pinned fabro binary
         run: |
           started=$SECONDS
-          scripts/fabro-binary.sh
+          scripts/fabro-provision.sh
           echo "fabro binary ready in $((SECONDS - started)) s"
         env:
           # Parity is required on Linux x86_64, where the routine job proves
@@ -142,10 +144,12 @@ jobs:
       # passed cell counts, and a run with no records is not a passing gate.
       - name: Write the coverage report
         if: always()
+        env:
+          REQUIRED_BACKENDS: ${{ matrix.docker == 'required' && 'host,docker' || 'host' }}
         run: |
-          args=(--evidence "$PETRI_EVIDENCE_DIR" --strict)
-          manifest=crates/fabro/acceptance/scenarios/manifest.json
-          [ -f "$manifest" ] && args+=(--manifest "$manifest")
+          args=(--evidence "$PETRI_EVIDENCE_DIR" --strict --backends "$REQUIRED_BACKENDS")
+          matrix=crates/fabro/acceptance/scenarios/matrix.json
+          [ -f "$matrix" ] && args+=(--matrix "$matrix")
           python3 scripts/fabro-coverage-report.py "${args[@]}"
           cat "$PETRI_EVIDENCE_DIR/coverage.md" >> "$GITHUB_STEP_SUMMARY"
 

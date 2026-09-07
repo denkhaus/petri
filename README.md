@@ -186,7 +186,7 @@ which also checks that no `petri-` container is left behind. The provider
 twins are `petri-cli` dev-dependencies pinned by revision in the public
 `lithoscomputer/twins` repository, so a build is their fetch. A second required
 job, `fabro compatibility`, builds the pinned `fabro` binary from the fetched
-corpus (`scripts/fabro-binary.sh`; only the binary is cached, keyed by the pin
+corpus (`scripts/fabro-provision.sh`; only the binary is cached, keyed by the pin
 and the toolchain; about three minutes on a miss) and runs the comparison
 matrix through `mise run test:fabro:differential` with
 `PETRI_REQUIRE_FABRO_BINARY` set. The Nightly workflow repeats the black box
@@ -205,7 +205,7 @@ through `petri inspect --json`; artifacts; process output; assertions;
 compatibility decisions; the cleanup result; and links to the owning
 library's contract tests. A failed record keeps the whole case directory; a
 test that panics before finishing still leaves a failed record.
-`scripts/fabro-coverage-report.py` folds the records, the scenario manifest,
+`scripts/fabro-coverage-report.py` folds the records, the scenario matrix (`matrix.json`), the per-cell results,
 and Nextest's JUnit output into `coverage.json` and `coverage.md` with
 required, passed, failed, skipped, missing, blocked, and excluded cells. Only
 `passed` counts; a skip, an exclusion, or an empty run never does, and a runner

@@ -14,8 +14,8 @@ use std::process::{Command, Output};
 use std::{env, fs, panic, process};
 
 use serde_json::{Value, json};
-use support::fabro::record::{Backend, Recorder, directory, outcomes};
 use support::fabro::launch::Case;
+use support::fabro::record::{Backend, Recorder, directory, outcomes};
 use support::fabro::require;
 use support::fabro::twins::{Provider, Twin, model, scenario, text};
 
@@ -315,33 +315,67 @@ fn the_coverage_report_counts_only_passed_cells() {
         testkit::unique_id()
     ));
     let evidence = root.join("evidence");
-    Recorder::start_in(&evidence, "alpha", Backend::Host, "t::alpha_host").finish();
-    Recorder::start_in(&evidence, "alpha", Backend::Docker, "t::alpha_docker")
+    // Scenario records (this module), a per-cell result (the scenario
+    // tests' `CellRecord`), and a per-engine record (the differential
+    // matrix) all feed the same report.
+    Recorder::start_in(&evidence, "alpha/one", Backend::Host, "alpha_one").finish();
+    Recorder::start_in(&evidence, "alpha/one", Backend::Docker, "alpha_one_docker")
         .skipped("no Docker daemon");
-    Recorder::start_in(&evidence, "delta", Backend::Host, "t::delta").blocked("fixture missing");
-    let manifest = root.join("manifest.json");
+    fs::create_dir_all(evidence.join("cells")).expect("cells dir");
     fs::write(
-        &manifest,
+        evidence.join("cells").join("beta__one@host__openai.json"),
+        serde_json::to_vec_pretty(
+            &json!({ "cell": "beta/one@host/openai", "status": "passed", "note": null }),
+        )
+        .expect("cell"),
+    )
+    .expect("write cell");
+    fs::create_dir_all(evidence.join("epsilon/one")).expect("engine dir");
+    fs::write(
+        evidence.join("epsilon/one").join("petri.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1, "scenario": "epsilon/one", "engine": "petri",
+            "pins": { "pebble": "a" },
+            "assertions": [{ "name": "status", "passed": false, "detail": "failed" }]
+        }))
+        .expect("engine record"),
+    )
+    .expect("write engine record");
+    let matrix = root.join("matrix.json");
+    fs::write(
+        &matrix,
         serde_json::to_vec_pretty(&json!({
             "schema_version": 1,
-            "scenarios": [
-                { "id": "alpha", "status": "required", "backends": ["host", "docker"], "tests": ["t::alpha_host", "t::alpha_docker"] },
-                { "id": "beta", "status": "required", "backends": ["host"], "tests": ["t::beta"] },
-                { "id": "gamma", "status": "excluded", "backends": ["host"], "reason": "not in the replacement set" },
-                { "id": "delta", "status": "blocked", "backends": ["host"], "reason": "needs a fixture repository" },
+            "cells": [
+                { "cell": "alpha/one@host/openai", "scenario": "alpha/one", "backend": "host", "agent": "api:openai", "required": true, "status": "planned", "reason": null, "test": "alpha_one" },
+                { "cell": "alpha/one@docker/openai", "scenario": "alpha/one", "backend": "docker", "agent": "api:openai", "required": true, "status": "planned", "reason": null, "test": "alpha_one_docker" },
+                { "cell": "beta/one@host/openai", "scenario": "beta/one", "backend": "host", "agent": "api:openai", "required": true, "status": "planned", "reason": null, "test": "beta_one" },
+                { "cell": "gamma/one@host/none", "scenario": "gamma/one", "backend": "host", "agent": "none", "required": true, "status": "planned", "reason": null, "test": "gamma_one" },
+                { "cell": "delta/one@host/none", "scenario": "delta/one", "backend": "host", "agent": "none", "required": false, "status": "excluded", "reason": "not in the replacement set", "test": null },
+                { "cell": "zeta/one@docker/none", "scenario": "zeta/one", "backend": "docker", "agent": "none", "required": true, "status": "blocked", "reason": "needs a fixture repository", "test": null },
+                { "cell": "epsilon/one@host/none", "scenario": "epsilon/one", "backend": "host", "agent": "none", "required": true, "status": "planned", "reason": null, "test": "epsilon_one" },
             ]
         }))
-        .expect("manifest"),
+        .expect("matrix"),
     )
-    .expect("write manifest");
+    .expect("write matrix");
+    let args = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec![
+            "--evidence".to_owned(),
+            evidence.to_str().expect("utf-8").to_owned(),
+            "--matrix".to_owned(),
+            matrix.to_str().expect("utf-8").to_owned(),
+        ];
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        args
+    };
 
     // Not strict: exit 0 and the counts.
-    let output = script("fabro-coverage-report.py", &[
-        "--evidence",
-        evidence.to_str().expect("utf-8"),
-        "--manifest",
-        manifest.to_str().expect("utf-8"),
-    ]);
+    let plain = args(&[]);
+    let output = script(
+        "fabro-coverage-report.py",
+        &plain.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -350,59 +384,87 @@ fn the_coverage_report_counts_only_passed_cells() {
     let report = read_json(&evidence.join("coverage.json"));
     assert_eq!(
         report["totals"]["required"],
-        json!(3),
+        json!(6),
         "{}",
         report["totals"]
     );
-    assert_eq!(report["totals"]["passed"], json!(1));
+    assert_eq!(report["totals"]["passed"], json!(2));
     assert_eq!(report["totals"]["skipped"], json!(1));
     assert_eq!(report["totals"]["missing"], json!(1));
     assert_eq!(report["totals"]["blocked"], json!(1));
     assert_eq!(report["totals"]["excluded"], json!(1));
-    assert_eq!(report["totals"]["failed"], json!(0));
+    assert_eq!(report["totals"]["failed"], json!(1));
     assert_eq!(report["ok"], json!(false));
+    assert_eq!(report["ci_ok"], json!(false));
     let markdown = fs::read_to_string(evidence.join("coverage.md")).expect("coverage.md");
     assert!(
-        markdown.contains("| alpha | docker | required | skipped |"),
+        markdown.contains("| alpha/one@docker/openai | required | skipped |"),
         "{markdown}"
     );
     assert!(
-        markdown.contains("| beta | host | required | missing |"),
+        markdown.contains("| gamma/one@host/none | required | missing |"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("| epsilon/one@host/none | required | failed |"),
         "{markdown}"
     );
     assert!(markdown.contains("Gate: NOT passed"), "{markdown}");
 
-    // Strict: the same run is a failure.
-    let strict = script("fabro-coverage-report.py", &[
-        "--evidence",
-        evidence.to_str().expect("utf-8"),
-        "--manifest",
-        manifest.to_str().expect("utf-8"),
-        "--strict",
-    ]);
+    // Strict: the same run fails.
+    let strict = args(&["--strict"]);
+    let strict = script(
+        "fabro-coverage-report.py",
+        &strict.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     assert_eq!(strict.status.code(), Some(1));
 
-    // A JUnit failure overrides a passed record: two engines agreeing on a
+    // A runner failure overrides a passed record: two engines agreeing on a
     // wrong report still fail when the runner said so.
     let junit = root.join("junit.xml");
     fs::write(
         &junit,
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<testsuites><testsuite name="petri-cli::t"><testcase classname="petri-cli::t" name="alpha_host"><failure message="assertion"/></testcase></testsuite></testsuites>"#,
+<testsuites><testsuite name="petri-cli::t"><testcase classname="petri-cli::t" name="alpha_one"><failure message="assertion"/></testcase></testsuite></testsuites>"#,
     )
     .expect("junit");
-    let output = script("fabro-coverage-report.py", &[
-        "--evidence",
-        evidence.to_str().expect("utf-8"),
-        "--manifest",
-        manifest.to_str().expect("utf-8"),
-        "--junit",
-        junit.to_str().expect("utf-8"),
-    ]);
+    let with_junit = args(&["--junit", junit.to_str().expect("utf-8")]);
+    let output = script(
+        "fabro-coverage-report.py",
+        &with_junit.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     assert!(output.status.success());
     let report = read_json(&evidence.join("coverage.json"));
-    assert_eq!(report["totals"]["passed"], json!(0));
-    assert_eq!(report["totals"]["failed"], json!(1));
+    assert_eq!(report["totals"]["passed"], json!(1));
+    assert_eq!(report["totals"]["failed"], json!(2));
+
+    // A runner responsible for the host backend only: the Docker cells are
+    // excluded there, and a blocked cell alone keeps the run clean while the
+    // gate stays not passed.
+    fs::remove_file(evidence.join("epsilon/one").join("petri.json")).expect("remove");
+    Recorder::start_in(&evidence, "gamma/one", Backend::Host, "gamma_one").finish();
+    Recorder::start_in(&evidence, "epsilon/one", Backend::Host, "epsilon_one").finish();
+    let host_only = args(&["--strict", "--backends", "host"]);
+    let output = script(
+        "fabro-coverage-report.py",
+        &host_only.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = read_json(&evidence.join("coverage.json"));
+    assert_eq!(
+        report["totals"]["required"],
+        json!(4),
+        "{}",
+        report["totals"]
+    );
+    assert_eq!(report["totals"]["passed"], json!(4));
+    assert_eq!(report["totals"]["excluded"], json!(3));
+    assert_eq!(report["ci_ok"], json!(true));
+    assert_eq!(report["ok"], json!(true));
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -14,8 +14,10 @@
 #   PETRI_EVIDENCE_DIR     where records go; default target/fabro-evidence/<run id>
 #                          (target/fabro-evidence/latest links to the newest default run)
 #   PETRI_EVIDENCE_RUN     the run id used for the default directory
-#   PETRI_SCENARIO_MANIFEST the scenario manifest the coverage report reads;
-#                          default crates/fabro/acceptance/scenarios/manifest.json
+#   PETRI_SCENARIO_MATRIX  the scenario matrix the coverage report reads;
+#                          default crates/fabro/acceptance/scenarios/matrix.json
+#   PETRI_FABRO_COVERAGE_DIR where the scenario tests write per-cell results;
+#                          default <evidence dir>/cells
 #   PETRI_BLACKBOX_REPEAT  run the set this many times in fresh processes,
 #                          each under a different test schedule (nightly); default 1
 #   PETRI_REQUIRE_*        turn a skipped asset into a failure (see README.md)
@@ -30,7 +32,8 @@ if [ -z "${PETRI_EVIDENCE_DIR:-}" ]; then
   ln -sfn "$PETRI_EVIDENCE_DIR" target/fabro-evidence/latest
 fi
 mkdir -p "$PETRI_EVIDENCE_DIR"
-manifest=${PETRI_SCENARIO_MANIFEST:-crates/fabro/acceptance/scenarios/manifest.json}
+matrix=${PETRI_SCENARIO_MATRIX:-crates/fabro/acceptance/scenarios/matrix.json}
+export PETRI_FABRO_COVERAGE_DIR="${PETRI_FABRO_COVERAGE_DIR:-$PETRI_EVIDENCE_DIR/cells}"
 
 filter='package(petri-cli) & (binary(/^fabro_.*blackbox$/) | binary(standalone) | binary(fabro_cli))'
 # Schedules for repeated runs: the default parallelism, one test at a time,
@@ -60,7 +63,7 @@ for ((i = 1; i <= repeat; i++)); do
 done
 
 report=(python3 scripts/fabro-coverage-report.py --evidence "$PETRI_EVIDENCE_DIR" --strict)
-[ -f "$manifest" ] && report+=(--manifest "$manifest")
+[ -f "$matrix" ] && report+=(--matrix "$matrix")
 [ -f "$PETRI_EVIDENCE_DIR/junit.xml" ] && report+=(--junit "$PETRI_EVIDENCE_DIR/junit.xml")
 "${report[@]}" || status=1
 echo "evidence: $PETRI_EVIDENCE_DIR"

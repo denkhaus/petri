@@ -202,7 +202,7 @@ fetches the Fabro corpus at the pin in `crates/fabro/corpus-pin.txt`.
 private sources need SSH read access, or `FABRO_BUNDLE_SOURCE_<OWNER>_<REPO>`
 pointing at a local checkout (for example
 `FABRO_BUNDLE_SOURCE_LITHOSCOMPUTER_CODE_REVIEW=../code-review`).
-`scripts/fabro-binary.sh` builds the pinned `fabro` binary from the fetched
+`scripts/fabro-provision.sh` builds the pinned `fabro` binary from the fetched
 corpus into `crates/fabro/corpus/fabro-target/` and checks it reports the pin;
 a `fabro` on `PATH` is never used.
 
