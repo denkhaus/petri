@@ -278,6 +278,13 @@ impl Runtime {
         &self.options
     }
 
+    /// The awaited extension points installed with [`Runtime::hooks`], for a
+    /// host that wraps them (a control service holding admission while paused
+    /// delegates every other point to these).
+    pub fn installed_hooks(&self) -> Option<Arc<dyn ExecutionHooks>> {
+        self.hooks.clone()
+    }
+
     /// The step registry, for lookups (`type_known`-style lints, validation).
     pub fn registry(&self) -> &::steps::Registry {
         &self.steps

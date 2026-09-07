@@ -16,6 +16,7 @@
 //! has a special case for one format.
 
 pub mod answer;
+pub mod control;
 mod inspect;
 
 use std::error::Error;
@@ -26,7 +27,9 @@ use std::{env, fs};
 
 use answer::{AutoApproveInterviewer, ScriptedInterviewer, TerminalInterviewer};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use execution::controls::ControlService;
 use execution::host::HostRun;
+use execution::watchdog::StallWatchdog;
 use execution::{
     CoordinatorHandle, InterviewDispatcher, InterviewReceipt, Interviewer, LeaseState,
     RECEIPT_FILE, ResourceStore, host, prune as sandbox_prune,
@@ -40,6 +43,7 @@ use runtime::{
     SandboxOptions,
 };
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::field::{Empty, display};
 
 #[derive(Parser)]
@@ -235,6 +239,11 @@ enum Command {
         /// other formats: on-failure).
         #[arg(long, value_name = "POLICY")]
         retain:           Option<Retain>,
+        /// Read run controls from this file while the run is live: one
+        /// `pause`, `unpause`, `steer <node> <text>` or `cancel` per appended
+        /// line. See `cli::control` for the format.
+        #[arg(long, value_name = "FILE")]
+        control:          Option<PathBuf>,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
         /// choice.
@@ -355,6 +364,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             auto_approve,
             interview_script,
             retain,
+            control,
             dry_run,
             provider,
             runner,
@@ -367,6 +377,12 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 RuntimeMode::Real
             };
             let rt = make(runtime_mode);
+            // One control service for the terminal's control file and an
+            // embedded host alike; its pause hook wraps the hooks the
+            // distribution installed, so both run at admission.
+            let controls = ControlService::new();
+            let hooks = controls.hooks(rt.installed_hooks());
+            let rt = rt.hooks(hooks);
             let mut options = RunOptions::new(&run_dir);
             options.echo = !quiet;
             options.retention = retain
@@ -390,7 +406,15 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 (_, true, None) => Some(Answers::AutoApprove),
                 _ => None,
             };
-            Box::pin(run(&rt.options(options), &target, &run_dir, answers)).await
+            Box::pin(run(
+                &rt.options(options),
+                &target,
+                &run_dir,
+                answers,
+                controls,
+                control,
+            ))
+            .await
         }
         Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
         Command::Inspect { run_dir, json } => inspect::inspect(&run_dir, json),
@@ -567,6 +591,8 @@ async fn run(
     target: &FileArgs,
     run_dir: &Path,
     answers: Option<Answers>,
+    controls: ControlService,
+    control: Option<PathBuf>,
 ) -> ExitCode {
     let interviewer: Option<Arc<dyn Interviewer>> = match answers {
         None => None,
@@ -601,7 +627,17 @@ async fn run(
 
     eprintln!("run dir: {}", run_dir.display());
     let mut ctrl_c = None;
-    let mut host_run = HostRun::new(graph).with_children(lowered.children);
+    let mut control_task = None;
+    let stop_controls = CancellationToken::new();
+    let mut host_run = HostRun::new(graph)
+        .with_children(lowered.children)
+        .observe(Arc::new(controls.clone()));
+    // The stall watchdog, when the graph declares a budget.
+    let watchdog = host_run.graph.policy.stall_timeout.map(StallWatchdog::new);
+    let mut watchdog_task = None;
+    if let Some(watchdog) = &watchdog {
+        host_run = host_run.observe(Arc::new(watchdog.clone()));
+    }
     let dispatcher = interviewer.map(InterviewDispatcher::new);
     if let Some(dispatcher) = &dispatcher {
         host_run = host_run.observe(Arc::new(dispatcher.clone()));
@@ -610,11 +646,37 @@ async fn run(
         if let Some(dispatcher) = &dispatcher {
             dispatcher.wire(handle.clone(), secrets);
         }
+        controls.wire(handle.clone());
+        if let Some(watchdog) = &watchdog {
+            watchdog_task = Some(watchdog.start(handle.clone()));
+        }
+        if let Some(path) = control {
+            control_task = Some(tokio::spawn(control::drive(
+                path,
+                controls.clone(),
+                stop_controls.clone(),
+            )));
+        }
         ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(handle)));
     })
     .await;
     if let Some(task) = ctrl_c {
         task.abort();
+    }
+    stop_controls.cancel();
+    if let Some(task) = control_task {
+        let _ = task.await;
+    }
+    if let Some(task) = watchdog_task {
+        task.stop().await;
+    }
+    if let Some(stall) = watchdog.as_ref().and_then(StallWatchdog::tripped) {
+        eprintln!(
+            "stall watchdog: no execution activity for {} s (stall_timeout {} s); the run was \
+             cancelled",
+            stall.idle_ms / 1000,
+            stall.stall_timeout_ms / 1000
+        );
     }
     // The receipt is written whatever the run did: a failed run's interviews
     // are evidence too.

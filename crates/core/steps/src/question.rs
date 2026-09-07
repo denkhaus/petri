@@ -290,6 +290,31 @@ mod tests {
         assert_eq!(Answer::from_value(&json!(3)), None);
     }
 
+    /// The pinned Fabro reference answers a `multi_select` question over
+    /// its API as `{"kind": "multi_selected", "option_keys": [...]}`. Petri's
+    /// `choices` is that list; the first key doubles as `choice` so a step
+    /// that routes on one choice routes on the first, as Fabro's gate does.
+    #[test]
+    fn a_multi_select_answer_carries_every_key_and_routes_on_the_first() {
+        let fabro_wire = json!({ "kind": "multi_selected", "option_keys": ["approve", "notify"] });
+        let keys: Vec<String> = serde_json::from_value(fabro_wire["option_keys"].clone()).unwrap();
+        let answer = Answer::choices(keys.clone());
+        assert_eq!(answer.choices, keys);
+        assert_eq!(answer.choice.as_deref(), Some("approve"));
+        let Control::Deliver(value) = answer.to_control() else {
+            panic!("deliver");
+        };
+        assert_eq!(
+            value[ANSWER_KEY]["choices"],
+            json!(["approve", "notify"]),
+            "the wire carries the whole selection"
+        );
+        assert_eq!(Answer::from_value(&value), Some(answer));
+        // One key selected is still a multi-select answer, not a bare choice.
+        let one = Answer::choices(["approve"]);
+        assert_eq!(one.choices, vec!["approve".to_owned()]);
+    }
+
     #[test]
     fn a_steer_is_never_read_as_an_answer() {
         let steer = Steer::new("check the edge cases");

@@ -29,7 +29,6 @@
 | `fabro.unknown_attribute` | 31 |
 | `fabro.unreachable_failure_edge` | 1 |
 | `ignored.project_memory` | 5 |
-| `ignored.stall_timeout` | 1 |
 | `ignored.thread_id` | 2 |
 | `ignored.workflow_toml.environments` | 2 |
 | `ignored.workflow_toml.run.artifacts` | 1 |
@@ -48,7 +47,7 @@
 |---|---|---|---|
 | `.fabro/workflows/card-game-fast/workflow.fabro` | warnings | 7 | `info.budget.default` |
 | `.fabro/workflows/card-game/workflow.fabro` | warnings | 21 | `info.budget.default` |
-| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `deprecated.on_failure.succeed`, `fabro.internal_context`, `ignored.project_memory`, `ignored.stall_timeout`, `ignored.workflow_toml.environments`, `ignored.workflow_toml.run.artifacts`, `ignored.workflow_toml.run.checkpoint`, `ignored.workflow_toml.run.clone`, `ignored.workflow_toml.run.environment`, `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.model.fallbacks`, `ignored.workflow_toml.run.pull_request`, `ignored.workflow_toml.run.run_branch` |
+| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `deprecated.on_failure.succeed`, `fabro.internal_context`, `ignored.project_memory`, `ignored.workflow_toml.environments`, `ignored.workflow_toml.run.artifacts`, `ignored.workflow_toml.run.checkpoint`, `ignored.workflow_toml.run.clone`, `ignored.workflow_toml.run.environment`, `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.model.fallbacks`, `ignored.workflow_toml.run.pull_request`, `ignored.workflow_toml.run.run_branch` |
 | `.fabro/workflows/context-demo/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/daytona-medium/workflow.fabro` | warnings | 4 | `ignored.workflow_toml.environments`, `ignored.workflow_toml.run.environment`, `info.budget.default` |
 | `.fabro/workflows/gh-list/workflow.fabro` | warnings | 4 | `ignored.workflow_toml.run.integrations` |

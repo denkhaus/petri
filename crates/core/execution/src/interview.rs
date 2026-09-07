@@ -41,6 +41,28 @@
 //! with the same `occurrence` and a higher `ask`, so a scripted fixture can
 //! tell a re-ask from a new question.
 //!
+//! # Wait accounting
+//!
+//! The dispatcher decides nothing about time. The driver records the wait
+//! itself: a question on a firing's progress channel starts an interaction
+//! wait for that firing and attempt, the delivered answer ends it, and an
+//! `ExecutorEnforced` attempt budget stops counting in between
+//! ([`ir::TimeoutPolicy`]). The watchdog
+//! ([`StallWatchdog`](crate::watchdog::StallWatchdog)) parks on the same
+//! facts. A `HandlerManaged` step (a human gate) owns its own answer deadline
+//! and expires the question itself; the dispatcher then sees the firing
+//! finish and ends the interviewer's wait as cancelled.
+//!
+//! # Answer shapes
+//!
+//! A single choice is `Answer::choice(key)`. A `multi_select` answer is
+//! `Answer::choices(keys)`: `choices` carries every selected key, and
+//! `choice` repeats the first so a step that routes on one choice still
+//! routes. This is the shape the pinned Fabro reference sends over its API
+//! as `{"kind": "multi_selected", "option_keys": [...]}`; `choices` is
+//! `option_keys`. Free text is `Answer::text`; a refusal is the negative
+//! choice; `Answer::cancelled()` is the host's "no answer".
+//!
 //! # Errors and refusal
 //!
 //! [`InterviewReply::Failed`] means the interviewer itself could not answer:
@@ -225,6 +247,13 @@ pub struct InterviewRecord {
     pub text:            String,
     pub options:         Vec<String>,
     pub sensitive:       bool,
+    /// What the question asked the person to review, when it named
+    /// something (a `review_target` gate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference:       Option<steps::QuestionReference>,
+    /// The step's answer deadline, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms:      Option<u64>,
     pub reply:           ReplyRecord,
     pub delivery:        Delivery,
 }
@@ -481,6 +510,8 @@ impl Inner {
                 .map(|option| option.key.clone())
                 .collect(),
             sensitive:       request.question.sensitive,
+            reference:       request.question.reference.clone(),
+            timeout_ms:      request.question.timeout_ms,
             reply:           ReplyRecord::Cancelled,
             delivery:        Delivery::Shutdown,
         };

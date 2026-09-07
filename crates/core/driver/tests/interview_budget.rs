@@ -9,7 +9,7 @@
 mod support;
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use driver::{DeliverDisposition, Driver, EventObserver, ExecutionReport, RunConfig};
