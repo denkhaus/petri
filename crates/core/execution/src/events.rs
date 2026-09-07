@@ -1121,7 +1121,9 @@ fn branch_results(
 fn agent_activity(value: &Value) -> Option<AgentActivity> {
     let object = value.as_object()?;
     let backend = object.get(BACKEND_EVENT_KIND_KEY)?.as_str()?;
-    let envelope = object.get("event")?;
+    // A step's own payload may carry a string `event` (a hook report names
+    // its hook event); only an object is a backend envelope.
+    let envelope = object.get("event").filter(|event| event.is_object())?;
     let text = |key: &str| envelope.get(key).and_then(Value::as_str).map(str::to_owned);
     Some(AgentActivity {
         backend:        SmolStr::new(backend),
@@ -1551,6 +1553,28 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn only_an_event_object_is_a_backend_envelope() {
+        let envelope = json!({
+            "kind": "pebble",
+            "event": { "session_id": "ses_1", "seq": 3, "event": { "TurnStarted": {} } },
+        });
+        let activity = agent_activity(&envelope).expect("a backend envelope");
+        assert_eq!(activity.backend, "pebble");
+        assert_eq!(activity.session.as_deref(), Some("ses_1"));
+        assert_eq!(activity.stream_seq, Some(3));
+        // A hook report names its hook event in a string `event`; it is the
+        // step's own payload, a `step_custom`, not agent activity.
+        let report = json!({
+            "kind": "fabro.hook",
+            "node": "write",
+            "event": "pre_tool_use",
+            "report": { "decision": { "decision": "block" }, "hooks": [] },
+        });
+        assert!(agent_activity(&report).is_none());
+        assert!(agent_activity(&json!({ "kind": "fabro.skills", "dirs": [] })).is_none());
+    }
 
     #[test]
     fn budget_notes_project_to_their_own_bodies_and_other_notes_stay_host_notes() {
