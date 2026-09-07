@@ -106,6 +106,9 @@ pub struct StageConfig {
     pub workflow: String,
     /// The run context at spawn.
     pub kv:       Value,
+    /// `[run.clone]` and the repository the host bound, on the root
+    /// `start` stage: the workspace is checked out from it first.
+    pub checkout: Value,
     #[serde(flatten)]
     pub rest:     serde_json::Map<String, Value>,
 }
@@ -119,6 +122,7 @@ impl Default for StageConfig {
             hooks:    Value::Null,
             workflow: String::new(),
             kv:       Value::Null,
+            checkout: Value::Null,
             rest:     serde_json::Map::new(),
         }
     }
@@ -139,6 +143,18 @@ impl Step for StageStep {
 
     async fn run(&self, config: StageConfig, mut ctx: StepCtx) -> Outcome {
         record(&ctx);
+        // The checkout comes first: the sandbox is "ready" once the
+        // repository is in it, as Fabro's clone precedes `sandbox_ready`.
+        if config.kind == "start"
+            && let Err(error) = crate::checkout::seed(&ctx, &config.checkout).await
+        {
+            return Stage::failed(
+                format!("checkout: {error}"),
+                crate::checkout::CLASS,
+                Some(frontend_fabro::Policy::Exit),
+            )
+            .into_outcome(&config.node);
+        }
         let Some(handle) = ctx.capability::<HookServiceHandle>() else {
             return Outcome::success(Value::Object(config.rest));
         };

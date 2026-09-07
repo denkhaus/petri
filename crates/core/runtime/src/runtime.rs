@@ -20,8 +20,10 @@ use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
 use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
-use frontend::{CompileInputs, DirFiles, Frontend, Lowered, Span};
+use frontend::{CompileInputs, DirFiles, Frontend, Lowered, REPOSITORY_VAR, Span};
 use ir::Graph;
+use serde_json::Value;
+use smol_str::SmolStr;
 use tracing::field::Empty;
 
 /// The knobs a run gets, with the defaults the driver documents.
@@ -347,8 +349,25 @@ impl Runtime {
             .unwrap_or(file)
             .to_string_lossy()
             .into_owned();
+        // The repository root, absolute, for a format whose runs check it
+        // out. A caller that bound the variable itself keeps its value.
+        let mut inputs = inputs.clone();
+        if !inputs.vars.contains_key(REPOSITORY_VAR) {
+            // A relative file's root can be the empty path, the current
+            // directory; canonicalize needs a name for it.
+            let base = if repo.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                repo.as_path()
+            };
+            let absolute = fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+            inputs.vars.insert(
+                SmolStr::new(REPOSITORY_VAR),
+                Value::String(absolute.to_string_lossy().into_owned()),
+            );
+        }
         let files = DirFiles { root: repo };
-        let lowered = frontend.load(&name, &text, &files, inputs);
+        let lowered = frontend.load(&name, &text, &files, &inputs);
         if let Some(graph) = &lowered.graph {
             span.record("node_count", graph.nodes.len());
         }

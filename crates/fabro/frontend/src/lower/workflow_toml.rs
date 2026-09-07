@@ -84,6 +84,26 @@ pub struct RunSettings {
     pub compaction:         CompactionSettings,
     /// `[run.agent] skills`, the workflow's own skill directories.
     pub skills:             skills::SkillSettings,
+    /// `[run.clone]`: whether the run starts from a checkout of the
+    /// repository and how much history it carries.
+    pub clone:              CloneSettings,
+}
+
+/// `[run.clone]`, with Fabro's defaults: enabled, 100 commits of history.
+/// `depth = 0` is the full history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloneSettings {
+    pub enabled: bool,
+    pub depth:   i64,
+}
+
+impl Default for CloneSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            depth:   100,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -150,11 +170,18 @@ pub struct PrepareStep {
 }
 
 impl RunSettings {
-    /// The launch settings the persisted graph carries.
-    pub fn launch_param(&self) -> Value {
+    /// The launch settings the persisted graph carries. `repository` is the
+    /// absolute root the run checks out when `[run.clone]` is enabled, when
+    /// the host bound one.
+    pub fn launch_param(&self, repository: Option<&str>) -> Value {
         json!({
             "dry_run": self.dry_run,
             "auto_approve": self.auto_approve,
+            "clone": {
+                "enabled": self.clone.enabled,
+                "depth": self.clone.depth,
+                "repository": repository,
+            },
             "sandbox_backend": self.environment.as_ref().map(Environment::sandbox_backend),
             "cpu_cores": self.environment.as_ref().and_then(|e| e.cpu_cores),
             "memory_mb": self.environment.as_ref().and_then(|e| e.memory_mb),
@@ -326,6 +353,7 @@ impl Reader<'_> {
                 "environment" => self.environment(item, environments),
                 "prepare" => self.prepare(item),
                 "agent" => self.agent(item),
+                "clone" => self.clone_section(item),
                 other => self.other_run_key(other),
             }
         }
@@ -534,6 +562,40 @@ impl Reader<'_> {
                         "workflow_toml.key",
                         format!("`run.model.{other}` in `{path}` is not a key Fabro accepts"),
                         "use `provider`, `name`, `controls` or `fallbacks`",
+                    );
+                }
+            }
+        }
+    }
+
+    /// `[run.clone]`: `enabled` and `depth`, as Fabro's `RunCloneLayer`
+    /// reads them. A negative depth is Fabro's full history (0).
+    fn clone_section(&mut self, item: &toml::Value) {
+        let Some(clone) = item.as_table() else {
+            return;
+        };
+        for (key, value) in clone {
+            match (key.as_str(), value) {
+                ("enabled", toml::Value::Boolean(enabled)) => {
+                    self.settings.clone.enabled = *enabled;
+                }
+                ("depth", toml::Value::Integer(depth)) => {
+                    self.settings.clone.depth = (*depth).max(0);
+                }
+                ("enabled" | "depth", _) => {
+                    let path = self.path;
+                    self.unsupported(
+                        "workflow_toml.key",
+                        format!("`run.clone.{key}` in `{path}` has the wrong type"),
+                        "`enabled` is a boolean, `depth` an integer",
+                    );
+                }
+                (other, _) => {
+                    let path = self.path;
+                    self.unsupported(
+                        "workflow_toml.key",
+                        format!("`run.clone.{other}` in `{path}` is not a key Fabro accepts"),
+                        "use `enabled` or `depth`",
                     );
                 }
             }
@@ -1059,11 +1121,6 @@ const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
         "the working directory is the sandbox workspace the run was given",
     ),
     ("metadata", "run metadata is a Fabro platform record"),
-    (
-        "clone",
-        "the standalone runner does not clone a repository; the workspace is what the run \
-         starts with",
-    ),
     (
         "run_branch",
         "the standalone runner performs no Git operations of its own",

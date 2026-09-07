@@ -151,7 +151,7 @@ pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<Artifact>) {
     };
     let inputs = CompileInputs::new();
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        Fabro.load(file, &text, &files, &inputs)
+        Fabro::new().load(file, &text, &files, &inputs)
     }));
     match result {
         Err(payload) => {

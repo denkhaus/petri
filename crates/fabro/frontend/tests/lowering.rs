@@ -925,7 +925,6 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     );
     let platform_codes: Vec<String> = platform_only.iter().map(|d| d.code.to_string()).collect();
     for code in [
-        "ignored.workflow_toml.run.clone",
         "ignored.workflow_toml.run.run_branch",
         "ignored.workflow_toml.run.pull_request",
         "ignored.workflow_toml.run.integrations",
@@ -943,6 +942,7 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     // Sections the runner now applies do not warn.
     for code in [
         "ignored.workflow_toml.run.goal",
+        "ignored.workflow_toml.run.clone",
         "ignored.workflow_toml.run.model",
         "ignored.workflow_toml.run.model.fallbacks",
         "ignored.workflow_toml.run.environment",
@@ -2279,4 +2279,143 @@ fn agent_nodes_carry_the_reference_subagent_configuration() {
         "{}",
         refusal.message
     );
+}
+
+/// `[run.clone]` lowers onto the launch parameter with Fabro's defaults
+/// (enabled, 100 commits), the repository the host bound rides beside it,
+/// and the root `start` stage reads the same entry as its `checkout`.
+#[test]
+fn run_clone_lands_on_the_launch_param_with_the_bound_repository() {
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
+        &files(&[("wf/workflow.toml", "_version = 1\n")]),
+        &CompileInputs::new(),
+    );
+    let graph = lowered.graph.expect("lowers");
+    assert_eq!(
+        graph.params["fabro.launch"]["clone"],
+        json!({ "enabled": true, "depth": 100, "repository": null }),
+        "Fabro's defaults, no repository when the host bound none"
+    );
+    let checkout = &node(&graph, "start").step.config["checkout"];
+    assert!(
+        checkout.is_object(),
+        "the start stage reads the clone entry through an expression: {checkout}"
+    );
+
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
+        &files(&[(
+            "wf/workflow.toml",
+            "_version = 1\n[run.clone]\nenabled = false\ndepth = 0\n",
+        )]),
+        &CompileInputs::new().with_var(frontend::REPOSITORY_VAR, "/srv/repo"),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    assert!(
+        !lowered
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "ignored.workflow_toml.run.clone"),
+        "[run.clone] is applied, not ignored"
+    );
+    let graph = lowered.graph.expect("lowers");
+    assert_eq!(
+        graph.params["fabro.launch"]["clone"],
+        json!({ "enabled": false, "depth": 0, "repository": "/srv/repo" })
+    );
+
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
+        &files(&[(
+            "wf/workflow.toml",
+            "_version = 1\n[run.clone]\nmirror = true\n",
+        )]),
+        &CompileInputs::new(),
+    );
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "unsupported.workflow_toml.key"),
+        "a key Fabro's clone table refuses is refused: {:?}",
+        lowered.diagnostics
+    );
+}
+
+/// `[run.model]` from the settings and project layers fills what
+/// `workflow.toml` left unset, in Fabro's order: workflow over project over
+/// settings.
+#[test]
+fn run_model_defaults_come_from_the_project_and_settings_layers() {
+    let layered = files(&[
+        (
+            ".fabro/project.toml",
+            "_version = 1\n[run.model]\nname = \"project-model\"\n[run.model.controls]\nreasoning_effort = \"low\"\n",
+        ),
+        (
+            "wf/workflow.toml",
+            "_version = 1\n[run.model.controls]\nreasoning_effort = \"high\"\n",
+        ),
+    ]);
+    let inputs = CompileInputs::new().with_var(
+        SETTINGS_HOOKS_VAR,
+        "[run.model]\nprovider = \"openai\"\nname = \"settings-model\"\n[run.model.controls]\nspeed = \"fast\"\n",
+    );
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot("a [prompt=\"x\"]\nstart -> a -> exit"),
+        &layered,
+        &inputs,
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    let config = &node(&graph, "a").step.config;
+    assert_eq!(
+        config["model"],
+        json!("project-model"),
+        "project over settings"
+    );
+    assert_eq!(
+        config["provider"],
+        json!("openai"),
+        "settings fills what no layer above set"
+    );
+    assert_eq!(
+        config["reasoning_effort"],
+        json!("high"),
+        "workflow over project"
+    );
+    assert_eq!(config["speed"], json!("fast"));
+
+    // A bundle that declares no model at all takes the settings layer's.
+    let lowered = frontend_fabro::load(
+        "wf/workflow.fabro",
+        &dot("a [prompt=\"x\"]\nstart -> a -> exit"),
+        &files(&[("wf/workflow.toml", "_version = 1\n")]),
+        &CompileInputs::new().with_var(
+            SETTINGS_HOOKS_VAR,
+            "[run.model]\nprovider = \"anthropic\"\nname = \"claude-sonnet-5\"\n",
+        ),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    let config = &node(&graph, "a").step.config;
+    assert_eq!(config["model"], json!("claude-sonnet-5"));
+    assert_eq!(config["provider"], json!("anthropic"));
 }
