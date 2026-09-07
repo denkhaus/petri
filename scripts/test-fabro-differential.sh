@@ -54,8 +54,10 @@ cargo nextest run --locked --workspace --all-targets --all-features --profile ci
 echo "differential run took $((SECONDS - started)) s"
 [ -f target/nextest/ci/junit.xml ] && cp target/nextest/ci/junit.xml "$PETRI_EVIDENCE_DIR/junit-differential.xml"
 
-report=(python3 scripts/fabro-coverage-report.py --evidence "$PETRI_EVIDENCE_DIR" --strict)
+# Informational here: the matrix's own cells fail through Nextest above; the
+# routine gate (scripts/test-fabro-blackbox.sh, CI's check jobs) is strict.
+report=(python3 scripts/fabro-coverage-report.py --evidence "$PETRI_EVIDENCE_DIR")
 [ -f "$matrix" ] && report+=(--matrix "$matrix")
-"${report[@]}" || status=1
+"${report[@]}" || true
 echo "evidence: $PETRI_EVIDENCE_DIR"
 exit "$status"

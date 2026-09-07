@@ -275,12 +275,12 @@ jobs:
           PETRI_REQUIRE_FABRO_BUNDLES: '1'
           PETRI_REQUIRE_DOCKER: '1'
 
-      # Required, passed, failed, skipped, missing, blocked, excluded: only a
-      # passed cell counts, and a run with no records is not a passing gate.
+      # Informational for this job: the matrix's cells fail through Nextest
+      # above, and the routine check jobs hold the strict coverage gate.
       - name: Write the coverage report
         if: always()
         run: |
-          args=(--evidence "$PETRI_EVIDENCE_DIR" --strict)
+          args=(--evidence "$PETRI_EVIDENCE_DIR")
           matrix=crates/fabro/acceptance/scenarios/matrix.json
           [ -f "$matrix" ] && args+=(--matrix "$matrix")
           python3 scripts/fabro-coverage-report.py "${args[@]}"
