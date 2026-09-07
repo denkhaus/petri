@@ -535,29 +535,33 @@ impl Timeline {
             let synthetic = event.subject.as_ref().is_some_and(|subject| {
                 subject.node.meta.get("synthetic") == Some(&Value::Bool(true))
             });
-            let node = event.subject.as_ref().filter(|_| !synthetic).map(|subject| {
-                let entry = timeline
-                    .nodes
-                    .entry(subject.node.name.to_string())
-                    .or_default();
-                subject
-                    .node
-                    .meta
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .clone_into(&mut entry.kind);
-                if let Some(visit) = subject.visit {
-                    entry.visits = entry.visits.max(visit);
-                }
-                entry.branch = Some(match &subject.branch {
-                    BranchRole::None => "none".to_owned(),
-                    BranchRole::Fork { branches } => format!("fork:{branches}"),
-                    BranchRole::Member(branch) => format!("member:{}", branch.index),
-                    BranchRole::Join { .. } => "join".to_owned(),
+            let node = event
+                .subject
+                .as_ref()
+                .filter(|_| !synthetic)
+                .map(|subject| {
+                    let entry = timeline
+                        .nodes
+                        .entry(subject.node.name.to_string())
+                        .or_default();
+                    subject
+                        .node
+                        .meta
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .clone_into(&mut entry.kind);
+                    if let Some(visit) = subject.visit {
+                        entry.visits = entry.visits.max(visit);
+                    }
+                    entry.branch = Some(match &subject.branch {
+                        BranchRole::None => "none".to_owned(),
+                        BranchRole::Fork { branches } => format!("fork:{branches}"),
+                        BranchRole::Member(branch) => format!("member:{}", branch.index),
+                        BranchRole::Join { .. } => "join".to_owned(),
+                    });
+                    entry
                 });
-                entry
-            });
             match (&event.body, node) {
                 (EventBody::RunFinished { status }, _) => timeline.run_status = Some(*status),
                 (EventBody::AttemptFinished { outcome, .. }, Some(entry)) => {

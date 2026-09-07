@@ -16,7 +16,7 @@ use frontend_fabro::kinds::{
     WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend_fabro::{Fabro, MAX_FIRINGS, load};
-use ir::placeholder::contains_placeholder;
+use ir::placeholder::{BRANCH_ROLE_META, contains_placeholder};
 use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy, TimeoutPolicy};
 use serde_json::json;
 use support::*;
@@ -532,7 +532,7 @@ fn branches_lower_to_child_graphs_that_keep_the_target_and_its_role() {
     );
     assert_eq!(target.meta["kind"], json!("command"));
     assert_eq!(
-        target.meta[ir::placeholder::BRANCH_ROLE_META],
+        target.meta[BRANCH_ROLE_META],
         json!({ "fork": node_id(&graph, "fork").raw(), "index": 0 })
     );
     assert!(target.routing.groups.is_empty(), "a branch follows no edge");
@@ -547,7 +547,8 @@ fn branches_lower_to_child_graphs_that_keep_the_target_and_its_role() {
         print_expr(
             &child_of("b").exprs,
             ir::ExprId::new(
-                u32::try_from(config["nodes"]["$expr"].as_u64().expect("placeholder")).expect("u32")
+                u32::try_from(config["nodes"]["$expr"].as_u64().expect("placeholder"))
+                    .expect("u32")
             ),
         ),
         "get(kv, 'internal.parallel_nodes')"

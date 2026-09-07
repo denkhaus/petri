@@ -11,7 +11,9 @@ use std::time::Duration;
 use std::{env, fs, process};
 
 use execution::host::{self, HostRun};
-use execution::{CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver, InvocationId};
+use execution::{
+    CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver, InvocationId,
+};
 use fabro_steps::{Simulate, StubScripts, reported_outcome};
 use frontend_fabro::BRANCH_META_KIND;
 use frontend_fabro::kinds::GOAL_CHECK_NODE;
@@ -127,45 +129,50 @@ impl PathObserver {
             .unwrap_or_default();
         let mut out = Vec::new();
         for execution in root {
-            self.assemble(execution, &records, &invocations, &calls, &mut out);
+            assemble(execution, &records, &invocations, &calls, &mut out);
         }
         out
     }
+}
 
-    fn assemble(
-        &self,
-        execution: ExecutionId,
-        records: &BTreeMap<ExecutionId, Vec<Recorded>>,
-        invocations: &BTreeMap<InvocationId, Vec<ExecutionId>>,
-        calls: &BTreeMap<InvocationId, (ExecutionId, FiringId)>,
-        out: &mut Vec<Visit>,
-    ) {
-        let mut delegates: Vec<&Recorded> = Vec::new();
-        let flush = |delegates: &mut Vec<&Recorded>, out: &mut Vec<Visit>| {
-            delegates.sort_by_key(|record| record.branch);
-            for delegate in delegates.drain(..) {
-                let child = calls
-                    .iter()
-                    .find(|(_, (parent, firing))| *parent == execution && *firing == delegate.firing)
-                    .map(|(child, _)| *child);
-                let Some(child) = child else {
-                    continue;
-                };
-                for child_execution in invocations.get(&child).cloned().unwrap_or_default() {
-                    self.assemble(child_execution, records, invocations, calls, out);
-                }
-            }
-        };
-        for record in records.get(&execution).map(Vec::as_slice).unwrap_or_default() {
-            if record.branch.is_some() {
-                delegates.push(record);
+/// Appends the visits of `execution` to `out`, replacing each run of branch
+/// delegates by the visits of their child invocations in branch order.
+fn assemble(
+    execution: ExecutionId,
+    records: &BTreeMap<ExecutionId, Vec<Recorded>>,
+    invocations: &BTreeMap<InvocationId, Vec<ExecutionId>>,
+    calls: &BTreeMap<InvocationId, (ExecutionId, FiringId)>,
+    out: &mut Vec<Visit>,
+) {
+    let mut delegates: Vec<&Recorded> = Vec::new();
+    let flush = |delegates: &mut Vec<&Recorded>, out: &mut Vec<Visit>| {
+        delegates.sort_by_key(|record| record.branch);
+        for delegate in delegates.drain(..) {
+            let child = calls
+                .iter()
+                .find(|(_, (parent, firing))| *parent == execution && *firing == delegate.firing)
+                .map(|(child, _)| *child);
+            let Some(child) = child else {
                 continue;
+            };
+            for child_execution in invocations.get(&child).cloned().unwrap_or_default() {
+                assemble(child_execution, records, invocations, calls, out);
             }
-            flush(&mut delegates, out);
-            out.push(record.visit.clone());
+        }
+    };
+    for record in records
+        .get(&execution)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if record.branch.is_some() {
+            delegates.push(record);
+            continue;
         }
         flush(&mut delegates, out);
+        out.push(record.visit.clone());
     }
+    flush(&mut delegates, out);
 }
 
 impl ExecutionObserver for PathObserver {
@@ -179,12 +186,14 @@ impl ExecutionObserver for PathObserver {
             for record in &history[*seen..] {
                 let meta = state.graph().node(record.node).map(|node| &node.meta);
                 let branch = meta
-                    .filter(|meta| meta.get("kind").and_then(Value::as_str) == Some(BRANCH_META_KIND))
+                    .filter(|meta| {
+                        meta.get("kind").and_then(Value::as_str) == Some(BRANCH_META_KIND)
+                    })
                     .and_then(|meta| meta["branch"]["index"].as_u64());
                 // Synthetic nodes other than a branch delegate (the goal check,
                 // a synthetic fan-in) are lowering artifacts, not stages.
-                let synthetic = meta
-                    .is_some_and(|meta| meta.get("synthetic") == Some(&Value::Bool(true)));
+                let synthetic =
+                    meta.is_some_and(|meta| meta.get("synthetic") == Some(&Value::Bool(true)));
                 if record.name == GOAL_CHECK_NODE || (synthetic && branch.is_none()) {
                     continue;
                 }

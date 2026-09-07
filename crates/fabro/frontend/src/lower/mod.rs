@@ -26,12 +26,12 @@ pub use imports::IMPORT_ERROR;
 use ir::placeholder::EXPR_PLACEHOLDER_KEY;
 use ir::validate::loop_reachable;
 use ir::{
-    Budget, Completion, Edge, EdgeId, ExprId, GraphBuilder, JoinPolicy, NodeId,
-    Routing, Scope, ScopeId, StepRef,
+    Budget, Completion, Edge, EdgeId, ExprId, GraphBuilder, JoinPolicy, NodeId, Routing, Scope,
+    ScopeId, StepRef,
 };
-pub use promotion::ROUTES_KEY;
 pub use parallel::{BRANCH_META_KIND, DEFAULT_MAX_PARALLEL};
 pub use policy::MAX_INVOCATIONS;
+pub use promotion::ROUTES_KEY;
 pub use routing::{FailurePolicy, Policy};
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
@@ -316,7 +316,6 @@ fn lower_nested(
         b,
         spans,
         children,
-
         ..
     } = ctx;
     let mut graph = b.build();

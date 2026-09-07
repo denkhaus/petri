@@ -27,8 +27,10 @@ use execution::{
 use frontend_fabro::kinds::{
     BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND, StageOutcome,
 };
-use ir::StepKindId;
-use ir::{Control, FailureClass, FailureInfo, Metrics, Outcome, RunStatus, Status, StepEvent, Value};
+use ir::{
+    Control, FailureClass, FailureInfo, Metrics, Outcome, RunStatus, Status, StepEvent, StepKindId,
+    Value,
+};
 use serde::Deserialize;
 use serde_json::{Map, json};
 use smol_str::SmolStr;
@@ -48,7 +50,8 @@ pub const BRANCH_COUNT_KEY: &str = "parallel.branch_count";
 /// child starts: `{ kind, fork, branch, index, item_label, invocation }`.
 pub const BRANCH_STARTED_EVENT: &str = "fabro.parallel.branch.started";
 /// The `kind` of the payload a branch emits when its child finished:
-/// `{ kind, fork, branch, index, item_label, invocation, status, duration_ms }`.
+/// `{ kind, fork, branch, index, item_label, invocation, status, duration_ms
+/// }`.
 pub const BRANCH_COMPLETED_EVENT: &str = "fabro.parallel.branch.completed";
 /// The `kind` of the payload the fan-in emits: `{ kind, node, branch_count,
 /// success_count, failure_count, status }`.
@@ -144,7 +147,11 @@ pub fn sanitize_label(label: &str) -> String {
     }
     let trimmed = cleaned.trim();
     if trimmed.chars().count() > MAX_LABEL {
-        trimmed.chars().take(MAX_LABEL).chain(Some('\u{2026}')).collect()
+        trimmed
+            .chars()
+            .take(MAX_LABEL)
+            .chain(Some('\u{2026}'))
+            .collect()
     } else {
         trimmed.to_string()
     }
@@ -267,9 +274,9 @@ impl Step for BranchStep {
 
     async fn run(&self, config: BranchConfig, mut ctx: StepCtx) -> Outcome {
         let started = Instant::now();
-        let label = config.for_each.then(|| {
-            item_label(config.item.as_ref().unwrap_or(&Value::Null), config.index)
-        });
+        let label = config
+            .for_each
+            .then(|| item_label(config.item.as_ref().unwrap_or(&Value::Null), config.index));
         if config.item.as_ref().is_some_and(is_placeholder) {
             // The one item an empty list expands to: no branch, no child. The
             // fan-in drops this envelope.
@@ -305,7 +312,7 @@ impl Step for BranchStep {
             context.insert(SmolStr::new(BRANCH_ITEM_KEY), json!(fenced_item(item)));
         }
         let request = InvocationRequest {
-            site:      CallSite {
+            site: CallSite {
                 firing:  ctx.firing,
                 attempt: ctx.attempt,
                 slot:    SmolStr::new(format!(
@@ -313,10 +320,10 @@ impl Step for BranchStep {
                     config.fork, config.index, config.node
                 )),
             },
-            graph:     config.child_digest,
+            graph: config.child_digest,
             context,
-            secrets:   SecretBindings::Inherit,
-            sandbox:   SandboxMode::Inherit { scope: ctx.scope },
+            secrets: SecretBindings::Inherit,
+            sandbox: SandboxMode::Inherit { scope: ctx.scope },
             admission: Some(AttemptAdmission {
                 gate:         SmolStr::new(format!("{}@{}", config.fork, config.generation)),
                 max_parallel: config.max_parallel,
@@ -337,25 +344,22 @@ impl Step for BranchStep {
                 "invocation": handle.id().raw(),
             })))
             .await;
-        let result = match handle.result_with_control(&mut ctx.control).await {
-            Some(result) => result,
-            None => {
-                // The parent is stopping. The coordinator cancels the child;
-                // wait for it to settle so the branch's work is over when this
-                // step returns, unless the stop was a kill.
-                let killed = matches!(ctx.control.try_recv(), Ok(Control::Kill));
-                if !killed {
-                    let _ = handle.result().await;
-                }
-                let output = envelope(
-                    &config.node,
-                    config.index,
-                    label.as_deref(),
-                    StageOutcome::Failed,
-                    Map::new(),
-                );
-                return Outcome::new(Status::Cancelled, output);
+        let Some(result) = handle.result_with_control(&mut ctx.control).await else {
+            // The parent is stopping. The coordinator cancels the child; wait
+            // for it to settle so the branch's work is over when this step
+            // returns, unless the stop was a kill.
+            let killed = matches!(ctx.control.try_recv(), Ok(Control::Kill));
+            if !killed {
+                let _ = handle.result().await;
             }
+            let output = envelope(
+                &config.node,
+                config.index,
+                label.as_deref(),
+                StageOutcome::Failed,
+                Map::new(),
+            );
+            return Outcome::new(Status::Cancelled, output);
         };
         let status = branch_status(&result);
         let updates = if result.status == RunStatus::Cancelled {
@@ -363,7 +367,13 @@ impl Step for BranchStep {
         } else {
             context_updates(&snapshot, &result.context)
         };
-        let output = envelope(&config.node, config.index, label.as_deref(), status, updates);
+        let output = envelope(
+            &config.node,
+            config.index,
+            label.as_deref(),
+            status,
+            updates,
+        );
         let _ = ctx
             .logs
             .send(StepEvent::Custom(json!({
@@ -381,12 +391,11 @@ impl Step for BranchStep {
             StageOutcome::Succeeded => Status::Success,
             StageOutcome::PartiallySucceeded => Status::partial_clean(),
             StageOutcome::Skipped => Status::Skipped,
-            StageOutcome::Failed => Status::Failure(
-                result
-                    .failure
-                    .clone()
-                    .unwrap_or_else(|| FailureInfo::new(format!("branch `{}` failed", config.node))),
-            ),
+            StageOutcome::Failed => {
+                Status::Failure(result.failure.clone().unwrap_or_else(|| {
+                    FailureInfo::new(format!("branch `{}` failed", config.node))
+                }))
+            }
         };
         let mut outcome = Outcome::new(engine_status, output);
         outcome.metrics = Metrics {
@@ -452,7 +461,8 @@ impl Step for FanInStep {
             _ => {
                 return Outcome::new(
                     Status::Failure(
-                        FailureInfo::new("No parallel results to join").with_class(NO_RESULTS_CLASS),
+                        FailureInfo::new("No parallel results to join")
+                            .with_class(NO_RESULTS_CLASS),
                     ),
                     Value::Null,
                 );
@@ -511,7 +521,10 @@ mod tests {
     fn labels_follow_name_then_label_then_index() {
         assert_eq!(item_label(&json!({ "name": " auth " }), 3), "auth");
         assert_eq!(item_label(&json!({ "label": "L" }), 3), "L");
-        assert_eq!(item_label(&json!({ "name": "\u{1b}[31m\u{1b}[0m" }), 3), "3");
+        assert_eq!(
+            item_label(&json!({ "name": "\u{1b}[31m\u{1b}[0m" }), 3),
+            "3"
+        );
         assert_eq!(item_label(&json!("scalar"), 7), "7");
         let long = "x".repeat(90);
         let label = item_label(&json!({ "name": long }), 0);
@@ -545,9 +558,15 @@ mod tests {
         let bad = json!({ "status": "failed" });
         let partial = json!({ "status": "partially_succeeded" });
         assert_eq!(aggregate(&[]), StageOutcome::Succeeded);
-        assert_eq!(aggregate(&[ok.clone(), ok.clone()]), StageOutcome::Succeeded);
+        assert_eq!(
+            aggregate(&[ok.clone(), ok.clone()]),
+            StageOutcome::Succeeded
+        );
         assert_eq!(aggregate(&[bad.clone(), bad.clone()]), StageOutcome::Failed);
-        assert_eq!(aggregate(&[ok.clone(), bad]), StageOutcome::PartiallySucceeded);
+        assert_eq!(
+            aggregate(&[ok.clone(), bad]),
+            StageOutcome::PartiallySucceeded
+        );
         assert_eq!(aggregate(&[ok, partial]), StageOutcome::PartiallySucceeded);
     }
 

@@ -41,7 +41,10 @@ use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 
 use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, placeholder};
-use crate::kinds::{BRANCH_KIND, EMPTY_BRANCH_MARKER, FAN_IN_KIND, PROMPT_KIND};
+use crate::kinds::{
+    AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND,
+    PROMPT_KIND,
+};
 use crate::model::{AttrValue, EdgeDecl, NodeDecl, Workflow};
 
 /// Fabro's `max_parallel` when the attribute is missing, not an integer, or
@@ -186,7 +189,15 @@ impl Ctx<'_> {
                 joins,
             )
         } else {
-            self.static_branches(node, &edges, max_parallel, workflow, exit, goal_check, joins)
+            self.static_branches(
+                node,
+                &edges,
+                max_parallel,
+                workflow,
+                exit,
+                goal_check,
+                joins,
+            )
         }
     }
 
@@ -259,7 +270,12 @@ impl Ctx<'_> {
         joins: &HashMap<String, String>,
     ) -> Option<(NodeId, String)> {
         // A branch that is itself a parallel node continues from its own join.
-        let exit_of = |target: &str| joins.get(target).cloned().unwrap_or_else(|| target.to_owned());
+        let exit_of = |target: &str| {
+            joins
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.to_owned())
+        };
         let mut common: Option<HashSet<String>> = None;
         for branch in branches {
             let targets: HashSet<String> = workflow
@@ -696,19 +712,20 @@ impl Ctx<'_> {
                 continue;
             };
             let id = remap[old];
-            let mut config = copier.copy_config(&parent.exprs, &source.step.config, builder.exprs());
+            let mut config =
+                copier.copy_config(&parent.exprs, &source.step.config, builder.exprs());
             if position == 0
                 && let Value::Object(map) = &mut config
             {
                 map.remove(super::ROUTES_KEY);
-                if source.step.kind == crate::kinds::AGENT_KIND || source.step.kind == PROMPT_KIND {
+                if source.step.kind == AGENT_KIND || source.step.kind == PROMPT_KIND {
                     // The child's own records are empty when its target
                     // starts: the preamble renders from the parent's records
                     // at fork time, which the branch step puts in the
                     // snapshot.
-                    let nodes = context_read(builder.exprs(), crate::kinds::BRANCH_NODES_KEY);
+                    let nodes = context_read(builder.exprs(), BRANCH_NODES_KEY);
                     map.insert("nodes".into(), placeholder(nodes));
-                    let item = context_read(builder.exprs(), crate::kinds::BRANCH_ITEM_KEY);
+                    let item = context_read(builder.exprs(), BRANCH_ITEM_KEY);
                     map.insert("item_data".into(), placeholder(item));
                     // Fabro's branch rules: threads are inert and an explicit
                     // `full` degrades to `summary:high`.
@@ -740,7 +757,8 @@ impl Ctx<'_> {
                     };
                     let mut edge = Edge::always(builder.next_edge_id(), to);
                     if let ir::Guard::Expr(guard) = arm.guard {
-                        edge.guard = ir::Guard::Expr(copier.copy(&parent.exprs, guard, builder.exprs()));
+                        edge.guard =
+                            ir::Guard::Expr(copier.copy(&parent.exprs, guard, builder.exprs()));
                     }
                     edge.map = arm
                         .map
@@ -770,7 +788,7 @@ impl Ctx<'_> {
             node.join = source.join;
             node.precondition = precondition;
             node.routing = Routing::groups(groups);
-            node.budget = source.budget.clone();
+            node.budget = source.budget;
             node.retry = source.retry.clone();
             node.run_on_cancel = source.run_on_cancel;
             node.tolerates_failure = source.tolerates_failure;

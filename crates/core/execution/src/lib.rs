@@ -30,8 +30,7 @@ pub use coordinator::{
 };
 pub use event::{
     AttemptAdmission, COORDINATOR_FORMAT_VERSION, CoordinatorEvent, CoordinatorRecord,
-    InvocationResult, InvocationStatus, SandboxBinding, SandboxMode, SecretBinding,
-    SecretBindings,
+    InvocationResult, InvocationStatus, SandboxBinding, SandboxMode, SecretBinding, SecretBindings,
 };
 pub use id::{
     CallSite, ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxAllocationKey,

@@ -190,7 +190,7 @@ async fn parallel_gates_are_answered_out_of_order_and_each_answer_lands_on_its_o
             record.invocation_path,
             format!(
                 "/branch:fan:{}:{}",
-                if record.node == "a" { 0 } else { 1 },
+                i32::from(record.node != "a"),
                 record.node
             )
         );

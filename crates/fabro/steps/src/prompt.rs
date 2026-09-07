@@ -44,6 +44,7 @@ use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
+use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, strip_placeholders};
 use crate::pebble::{PebbleClient, profile_of, speed_of};
 use crate::stage::{self, RunInfo};
 use crate::{memory, preamble};
@@ -279,7 +280,7 @@ impl Step for PromptStep {
             Some(store) => blobs::hydrate(config.branch_results.clone(), store.0.as_ref()).await,
             None => config.branch_results.clone(),
         };
-        crate::parallel::strip_placeholders(&mut results);
+        strip_placeholders(&mut results);
         let started = Instant::now();
         stage::record(&ctx);
         let run_id = ctx
@@ -466,12 +467,11 @@ impl Step for PromptStep {
             );
             // The prompted fan-in is the barrier too: it publishes the
             // results the plain fan-in would have.
+            stage
+                .context_updates
+                .insert(SmolStr::new(RESULTS_KEY), results.clone());
             stage.context_updates.insert(
-                SmolStr::new(crate::parallel::RESULTS_KEY),
-                results.clone(),
-            );
-            stage.context_updates.insert(
-                SmolStr::new(crate::parallel::BRANCH_COUNT_KEY),
+                SmolStr::new(BRANCH_COUNT_KEY),
                 json!(results.as_array().map_or(0, Vec::len)),
             );
         }

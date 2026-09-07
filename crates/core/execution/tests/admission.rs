@@ -19,8 +19,8 @@ use execution::{
     InvocationRequest, InvokeError, MAX_INVOCATIONS, SandboxMode, SecretBindings,
 };
 use ir::{
-    Backoff, FailureClass, FailureInfo, GraphBuilder, Outcome, RetryOn, RetryPolicy, RunStatus,
-    ScopeId, Status, StepRef, Value,
+    Backoff, FailureClass, FailureInfo, GraphBuilder, Outcome, ResultProjection, RetryOn,
+    RetryPolicy, RunStatus, ScopeId, Status, StepRef, Value,
 };
 use runtime::steps::{Step, StepCtx};
 use runtime::{RunOptions, Runtime};
@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::json;
 use testkit::RunDir;
 use tokio::sync::Notify;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 /// What the traced steps saw: `(label, when)` in the order they happened.
 #[derive(Clone, Default)]
@@ -57,8 +57,10 @@ impl Trace {
             .expect("not poisoned")
             .iter()
             .find(|(l, _)| l == label)
-            .map(|(_, when)| *when)
-            .unwrap_or_else(|| panic!("`{label}` in {:?}", self.labels()))
+            .map_or_else(
+                || panic!("`{label}` in {:?}", self.labels()),
+                |(_, when)| *when,
+            )
     }
 }
 
@@ -95,7 +97,7 @@ impl Step for TraceStep {
             started.0.notify_one();
         }
         if config.hold_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(config.hold_ms)).await;
+            sleep(Duration::from_millis(config.hold_ms)).await;
         }
         trace.record(format!("{}:{attempt}:end", config.name));
         if config.fail_first && attempt == 1 {
@@ -235,8 +237,9 @@ fn invoke(graph: GraphDigest, slot: &str, gate: Option<&str>, max_parallel: u32)
     )
 }
 
-/// `max_parallel = 1`: branch A fails its first attempt and backs off; B, queued
-/// behind the one slot, runs during A's backoff; A's second attempt follows.
+/// `max_parallel = 1`: branch A fails its first attempt and backs off; B,
+/// queued behind the one slot, runs during A's backoff; A's second attempt
+/// follows.
 #[tokio::test]
 async fn a_backoff_releases_the_fork_slot_so_a_queued_branch_runs_first() {
     let directory = RunDir::new("admission-backoff");
@@ -358,16 +361,17 @@ async fn one_slot_serializes_the_attempts_of_a_fork_and_two_slots_let_them_overl
         !overlap_under(1).await,
         "with one slot the second attempt starts after the first ends"
     );
-    assert!(overlap_under(2).await, "with two slots the attempts overlap");
+    assert!(
+        overlap_under(2).await,
+        "with two slots the attempts overlap"
+    );
 }
 
 #[test]
 fn a_limit_of_zero_or_above_the_ceiling_is_refused() {
     assert_eq!(MAX_INVOCATIONS, 10_000);
     assert_eq!(
-        CoordinatorOptions::default()
-            .with_max_invocations(0)
-            .err(),
+        CoordinatorOptions::default().with_max_invocations(0).err(),
         Some(InvocationLimitError::Disabled)
     );
     assert_eq!(
@@ -495,16 +499,8 @@ async fn nested_invocations_count_against_the_same_limit() {
         .register_graph(&noop_child())
         .expect("grandchild registers");
     let mut child = GraphBuilder::new();
-    let one = child.add_node(
-        "one",
-        ScopeId::new(0),
-        invoke(grandchild, "one", None, 0),
-    );
-    let two = child.add_node(
-        "two",
-        ScopeId::new(0),
-        invoke(grandchild, "two", None, 0),
-    );
+    let one = child.add_node("one", ScopeId::new(0), invoke(grandchild, "one", None, 0));
+    let two = child.add_node("two", ScopeId::new(0), invoke(grandchild, "two", None, 0));
     child.link(one, two);
     let child = coordinator
         .register_graph(&child.build())
@@ -667,7 +663,7 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
             json!({ "graph": child, "count": MAX_INVOCATIONS }),
         ),
     );
-    parent.graph_mut().result = ir::ResultProjection::NodeOutput(flood);
+    parent.graph_mut().result = ResultProjection::NodeOutput(flood);
     let parent = coordinator
         .register_graph(&parent.build())
         .expect("parent registers");

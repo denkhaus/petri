@@ -280,15 +280,15 @@ impl Step for InvokeStep {
         };
         let mut handle = match client
             .start_or_attach(InvocationRequest {
-                site:    CallSite {
+                site:      CallSite {
                     firing:  ctx.firing,
                     attempt: ctx.attempt,
                     slot:    "child".into(),
                 },
-                graph:   config.graph,
-                context: BTreeMap::from([("seed".into(), json!("from-parent"))]),
-                secrets: SecretBindings::None,
-                sandbox: SandboxMode::Isolated,
+                graph:     config.graph,
+                context:   BTreeMap::from([("seed".into(), json!("from-parent"))]),
+                secrets:   SecretBindings::None,
+                sandbox:   SandboxMode::Isolated,
                 admission: None,
             })
             .await

@@ -1482,7 +1482,6 @@ const SCENARIO: &str = "parallel-results";
 const FINDERS: [&str; 2] = ["finder_a", "finder_b"];
 const CONTRACT: &str = "parallel result contract:";
 
-
 /// The report the pinned helper writes when both findings survive, as Fabro
 /// produced it (`fabro-reference/raw/report.md`).
 fn expected_report() -> String {
@@ -1918,10 +1917,7 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
     // The answers stay in their branches: the parent context has no
     // `human.gate.selected`.
     let context = finished.final_context();
-    assert!(
-        !context.contains_key("human.gate.selected"),
-        "{context:?}"
-    );
+    assert!(!context.contains_key("human.gate.selected"), "{context:?}");
     let receipt = finished.receipt();
     assert_eq!(receipt["errors"], json!([]), "{receipt}");
     let questions = receipt["questions"].as_array().expect("questions");
@@ -1930,10 +1926,13 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
         assert_eq!(question["delivery"], json!("delivered"));
         let expected = if question["node"] == "a" { "N" } else { "Y" };
         assert_eq!(question["reply"]["choice"], json!(expected), "{question}");
-        let index = if question["node"] == "a" { 0 } else { 1 };
+        let index = i32::from(question["node"] != "a");
         assert_eq!(
             question["invocation_path"],
-            json!(format!("/branch:fan:{index}:{}", question["node"].as_str().expect("node"))),
+            json!(format!(
+                "/branch:fan:{index}:{}",
+                question["node"].as_str().expect("node")
+            )),
             "{question}"
         );
     }
@@ -2305,7 +2304,11 @@ async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
         .map(|(_, node)| node)
         .filter(|node| node.starts_with("job#"))
         .collect();
-    assert_eq!(finished_jobs.last().map(String::as_str), Some("job#0"), "{finished_jobs:?}");
+    assert_eq!(
+        finished_jobs.last().map(String::as_str),
+        Some("job#0"),
+        "{finished_jobs:?}"
+    );
     let mut consumed = twin.consumed();
     consumed.sort();
     assert_eq!(consumed, ["alpha", "beta", "gamma"]);
@@ -2318,11 +2321,9 @@ async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
 #[tokio::test]
 async fn a_for_each_over_one_item_is_one_branch() {
     let mut case = Case::new("for-each-one");
-    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![finding_for(
-        &case.credential,
-        "solo",
-        0,
-    )])
+    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![
+        finding_for(&case.credential, "solo", 0),
+    ])
     .await;
     case.redirect(&twin);
     let workflow = case.workflow(&for_each_workflow(r#"[{\"name\":\"solo\"}]"#), None);
@@ -2332,7 +2333,10 @@ async fn a_for_each_over_one_item_is_one_branch() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["item_label"], json!("solo"));
     assert_eq!(results[0]["index"], json!(0));
-    assert_eq!(results[0]["context_updates"]["output.finder"]["found"], json!("solo"));
+    assert_eq!(
+        results[0]["context_updates"]["output.finder"]["found"],
+        json!("solo")
+    );
     assert_eq!(finished.final_context()["parallel.branch_count"], json!(1));
     finished.assert_no_leaked_processes().await;
     twin.stop();
@@ -2347,7 +2351,12 @@ async fn an_empty_for_each_list_joins_without_calling_the_model() {
     let workflow = case.workflow(&for_each_workflow("[]"), None);
     let finished = case.run(&workflow, &[]).await;
     finished.assert_code(0);
-    assert_eq!(finished.status_line(), Some("success"), "{}", finished.stderr);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
     assert_eq!(results_file(&case), Vec::<Value>::new());
     let context = finished.final_context();
     assert_eq!(context["parallel.branch_count"], json!(0));
@@ -2364,11 +2373,9 @@ async fn an_empty_for_each_list_joins_without_calling_the_model() {
 async fn a_failed_branch_keeps_its_identity_without_success_data() {
     let mut case = Case::new("for-each-failed");
     // No scenario for `beta`: its call is unmatched and its agent fails.
-    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![finding_for(
-        &case.credential,
-        "alpha",
-        0,
-    )])
+    let twin = Twin::start(Provider::OpenAi, &case.root.join("twins"), vec![
+        finding_for(&case.credential, "alpha", 0),
+    ])
     .await;
     case.redirect(&twin);
     let workflow = case.workflow(
@@ -2380,7 +2387,10 @@ async fn a_failed_branch_keeps_its_identity_without_success_data() {
     let results = results_file(&case);
     assert_eq!(results.len(), 2, "{results:?}");
     assert_eq!(results[0]["status"], json!("succeeded"));
-    assert_eq!(results[0]["context_updates"]["output.finder"]["found"], json!("alpha"));
+    assert_eq!(
+        results[0]["context_updates"]["output.finder"]["found"],
+        json!("alpha")
+    );
     let failed = &results[1];
     assert_eq!(failed["id"], json!("job"));
     assert_eq!(failed["index"], json!(1));
@@ -2395,7 +2405,10 @@ async fn a_failed_branch_keeps_its_identity_without_success_data() {
         .into_iter()
         .filter(|(_, node)| node == "join")
         .collect();
-    assert_eq!(joins, vec![("partial_success".to_owned(), "join".to_owned())]);
+    assert_eq!(joins, vec![(
+        "partial_success".to_owned(),
+        "join".to_owned()
+    )]);
     assert!(twin.unmatched() >= 1);
     finished.assert_no_leaked_processes().await;
     twin.stop();
@@ -2439,7 +2452,10 @@ async fn nested_joins_report_the_inner_results_inside_the_outer_envelope() {
     assert_eq!(results[0]["id"], json!("x"));
     assert_eq!(results[0]["context_updates"]["output.x"], json!("x"));
     assert_eq!(results[1]["id"], json!("inner"));
-    assert_eq!(results[1]["context_updates"]["parallel.branch_count"], json!(2));
+    assert_eq!(
+        results[1]["context_updates"]["parallel.branch_count"],
+        json!(2)
+    );
     let inner = results[1]["context_updates"]["parallel.results"]
         .as_array()
         .cloned()
@@ -2450,7 +2466,10 @@ async fn nested_joins_report_the_inner_results_inside_the_outer_envelope() {
     assert_eq!(inner[1]["id"], json!("q"));
     let context = finished.final_context();
     for key in ["output.x", "output.p", "output.q"] {
-        assert!(!context.contains_key(key), "{key} stays in its branch: {context:?}");
+        assert!(
+            !context.contains_key(key),
+            "{key} stays in its branch: {context:?}"
+        );
     }
     assert_eq!(context["parallel.branch_count"], json!(2));
     finished.assert_no_leaked_processes().await;

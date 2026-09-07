@@ -14,6 +14,7 @@ use std::time::Duration;
 use std::{env, fs};
 
 use execution::host::{self, HostRun};
+use execution::inspect::inspect_run;
 use fabro_acceptance::runs::fresh_run_dir;
 use fabro_acceptance::{corpus_root, has_corpus, lower_one};
 use fabro_steps::{AGENT_KIND, HUMAN_KIND, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
@@ -355,6 +356,10 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
     assert_eq!(results.len(), 1000);
     assert_eq!(results[999]["item_label"], json!("job-999"));
     assert_eq!(results[999]["index"], json!(999));
-    let inspection = execution::inspect::inspect_run(&dir).expect("inspects");
-    assert_eq!(inspection.invocations.len(), 2001, "the root and 2,000 branches");
+    let inspection = inspect_run(&dir).expect("inspects");
+    assert_eq!(
+        inspection.invocations.len(),
+        2001,
+        "the root and 2,000 branches"
+    );
 }

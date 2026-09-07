@@ -211,15 +211,15 @@ impl Step for WorkflowStep {
         // and nothing else, so a re-dispatch of this attempt reattaches to the
         // child it declared, and a later attempt starts a fresh child.
         let request = InvocationRequest {
-            site:    CallSite {
+            site:      CallSite {
                 firing:  ctx.firing,
                 attempt: ctx.attempt,
                 slot:    SmolStr::new(config.node.as_str()),
             },
-            graph:   config.child_digest,
-            context: parent_context.clone(),
-            secrets: SecretBindings::Inherit,
-            sandbox: SandboxMode::Inherit { scope: ctx.scope },
+            graph:     config.child_digest,
+            context:   parent_context.clone(),
+            secrets:   SecretBindings::Inherit,
+            sandbox:   SandboxMode::Inherit { scope: ctx.scope },
             admission: None,
         };
         let mut handle = match client.start_or_attach(request).await {

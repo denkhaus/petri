@@ -85,7 +85,7 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
                 context:         context.clone(),
                 secret_bindings: SecretBindings::None,
                 sandbox:         SandboxBinding::Isolated,
-                admission: None,
+                admission:       None,
             })
             .expect("invocation declaration persists");
         store
@@ -230,15 +230,15 @@ impl Step for InvokeStep {
         };
         let mut handle = match client
             .start_or_attach(InvocationRequest {
-                site:    CallSite {
+                site:      CallSite {
                     firing:  ctx.firing,
                     attempt: ctx.attempt,
                     slot:    "child".into(),
                 },
-                graph:   config.graph,
-                context: BTreeMap::new(),
-                secrets: SecretBindings::None,
-                sandbox: if config.inherit {
+                graph:     config.graph,
+                context:   BTreeMap::new(),
+                secrets:   SecretBindings::None,
+                sandbox:   if config.inherit {
                     SandboxMode::Inherit { scope: ctx.scope }
                 } else {
                     SandboxMode::Isolated

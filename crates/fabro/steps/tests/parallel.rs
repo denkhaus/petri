@@ -6,7 +6,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use execution::host::{self, HostRun};
@@ -113,19 +113,33 @@ async fn static_branches_return_envelopes_that_never_merge_into_the_parent() {
     let dir = RunDir::new("parallel-static");
     let rt = runtime(dir.path());
     let report = run(&rt, lower(&dot(FINDERS))).await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let results = published_results(&report);
     assert_eq!(results.len(), 2);
     for (index, (envelope, found)) in results.iter().zip(["a", "b"]).enumerate() {
         assert_eq!(envelope["id"], json!(found));
         assert_eq!(envelope["index"], json!(index));
         assert_eq!(envelope["status"], json!("succeeded"));
-        assert!(envelope.get("item_label").is_none(), "static branches have no label");
-        assert_eq!(envelope["context_updates"]["output.finder"]["found"], json!(found));
+        assert!(
+            envelope.get("item_label").is_none(),
+            "static branches have no label"
+        );
+        assert_eq!(
+            envelope["context_updates"]["output.finder"]["found"],
+            json!(found)
+        );
         assert!(envelope["context_updates"]["command.output"].is_string());
     }
     let kv = report.state.run_context();
-    assert!(kv.get("output.finder").is_none(), "branch keys stay out of the parent");
+    assert!(
+        kv.get("output.finder").is_none(),
+        "branch keys stay out of the parent"
+    );
     assert_eq!(kv.get("parallel.branch_count"), Some(&json!(2)));
     assert_eq!(output_of(&report, "merge"), Value::Array(results.clone()));
     let stdin: Value = serde_json::from_str(
@@ -135,7 +149,11 @@ async fn static_branches_return_envelopes_that_never_merge_into_the_parent() {
     )
     .expect("stdin is the results JSON");
     assert_eq!(stdin, Value::Array(results));
-    assert_eq!(invocation_count(dir.path()), 3, "the root and one child per branch");
+    assert_eq!(
+        invocation_count(dir.path()),
+        3,
+        "the root and one child per branch"
+    );
 }
 
 #[tokio::test]
@@ -158,8 +176,16 @@ async fn mixed_failures_join_partially_and_all_failed_fails_the_fan_in() {
     "#)),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
-    assert_eq!(status_of(&report, "merge").as_deref(), Some("partial_success"));
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(
+        status_of(&report, "merge").as_deref(),
+        Some("partial_success")
+    );
     assert_eq!(status_of(&report, "bad").as_deref(), Some("failure"));
     let results = published_results(&report);
     assert_eq!(results[0]["status"], json!("succeeded"));
@@ -198,7 +224,12 @@ async fn mixed_failures_join_partially_and_all_failed_fails_the_fan_in() {
     "#)),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     assert_eq!(status_of(&report, "merge").as_deref(), Some("failure"));
     let merge = report
         .state
@@ -207,7 +238,11 @@ async fn mixed_failures_join_partially_and_all_failed_fails_the_fan_in() {
         .find(|r| r.name == "merge")
         .expect("merge ran");
     assert_eq!(
-        merge.outcome.status.failure_info().map(|f| f.message.as_str()),
+        merge
+            .outcome
+            .status
+            .failure_info()
+            .map(|f| f.message.as_str()),
         Some("All parallel branches failed")
     );
     assert_eq!(status_of(&report, "recover").as_deref(), Some("success"));
@@ -234,7 +269,12 @@ async fn a_succeed_policy_promotes_a_failed_branch_before_collection() {
     "#)),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let results = published_results(&report);
     assert_eq!(results[1]["id"], json!("soft"));
     assert_eq!(
@@ -264,7 +304,12 @@ async fn duplicate_targets_are_separate_branches_with_their_own_index() {
     "#)),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let results = published_results(&report);
     assert_eq!(results.len(), 2);
     assert_eq!(results[0]["id"], json!("a"));
@@ -289,7 +334,12 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
     let dir = RunDir::new("parallel-empty");
     let rt = runtime(dir.path());
     let report = run(&rt, lower(&dot(&FOR_EACH.replace("JOBS", "[]")))).await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     assert_eq!(published_results(&report), Vec::<Value>::new());
     assert_eq!(
         report.state.run_context().get("parallel.branch_count"),
@@ -307,7 +357,12 @@ async fn for_each_items_are_labelled_and_ordered_by_index() {
     let rt = runtime(dir.path());
     let jobs = r#"[{\"name\":\"alpha\"},{\"label\":\"second\"},\"third\"]"#;
     let report = run(&rt, lower(&dot(&FOR_EACH.replace("JOBS", jobs)))).await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let results = published_results(&report);
     assert_eq!(results.len(), 3);
     for (index, (envelope, label)) in results.iter().zip(["alpha", "second", "2"]).enumerate() {
@@ -342,7 +397,12 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
     "#)),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let merges = report
         .state
         .history()
@@ -387,7 +447,12 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
     "#)),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let results = published_results(&report);
     assert_eq!(results.len(), 2);
     assert_eq!(results[0]["id"], json!("x"));
@@ -398,7 +463,10 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
     let inner_results = inner["parallel.results"].as_array().expect("inner results");
     assert_eq!(inner_results[0]["id"], json!("p"));
     assert_eq!(inner_results[1]["id"], json!("q"));
-    assert_eq!(inner_results[1]["context_updates"]["command.output"], json!("q\n"));
+    assert_eq!(
+        inner_results[1]["context_updates"]["command.output"],
+        json!("q\n")
+    );
     // Root, x, inner, p, q.
     assert_eq!(invocation_count(dir.path()), 5);
 }
@@ -423,9 +491,9 @@ async fn cancelling_the_run_settles_every_branch_child() {
     let report = run_with(&rt, lowered, |handle| {
         let workspace = workspace.clone();
         thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + Duration::from_secs(20);
             while !(workspace.join("started_a").exists() && workspace.join("started_b").exists()) {
-                assert!(std::time::Instant::now() < deadline, "both branches started");
+                assert!(Instant::now() < deadline, "both branches started");
                 thread::sleep(Duration::from_millis(20));
             }
             handle.cancel_root();
@@ -495,7 +563,12 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
         merge -> exit
     "#);
     let report = run(&rt, lower(&text)).await;
-    assert_eq!(report.status, RunStatus::Success, "{:?}", report.state.errors());
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
     let inspection = inspect_run(dir.path()).expect("inspects");
     let child_of = |slot: &str| {
         inspection
@@ -526,19 +599,40 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
 
     let rt = runtime_retaining(dir.path(), Retention::Always);
     let resumed = host::resume(&rt).await.expect("resumes");
-    assert_eq!(resumed.status, RunStatus::Success, "{:?}", resumed.state.errors());
+    assert_eq!(
+        resumed.status,
+        RunStatus::Success,
+        "{:?}",
+        resumed.state.errors()
+    );
     let inspection = inspect_run(dir.path()).expect("inspects");
-    assert_eq!(inspection.invocations.len(), 3, "no branch was declared again");
+    assert_eq!(
+        inspection.invocations.len(),
+        3,
+        "no branch was declared again"
+    );
     assert_eq!(
         fs::read_to_string(log_of(child_a)).expect("a's log"),
         a_log_before,
         "the finished branch was not run again"
     );
     let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
-    assert_eq!(fs::read_to_string(workspace.join("a_runs")).expect("a ran"), "a\n");
-    assert_eq!(fs::read_to_string(workspace.join("b_runs")).expect("b ran"), "b\nb\n");
+    assert_eq!(
+        fs::read_to_string(workspace.join("a_runs")).expect("a ran"),
+        "a\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("b_runs")).expect("b ran"),
+        "b\nb\n"
+    );
     let results = published_results(&resumed);
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["context_updates"]["command.output"], json!("a\n"));
-    assert_eq!(results[1]["context_updates"]["command.output"], json!("b\n"));
+    assert_eq!(
+        results[0]["context_updates"]["command.output"],
+        json!("a\n")
+    );
+    assert_eq!(
+        results[1]["context_updates"]["command.output"],
+        json!("b\n")
+    );
 }
