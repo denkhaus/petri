@@ -321,13 +321,15 @@ async fn random_selection_routes_on_a_recorded_draw() {
 /// so the second fork's snapshot (copied into each of its 1,000 children)
 /// carries a blob reference, not the list.
 ///
-/// Ignored: on 2026-09-07 the first fork alone had declared 708 children after
-/// 10 minutes at 9.3 GB RSS (every child's `InvocationDeclared` and
-/// `ExecutionDeclared` record carries the 88 KB fork snapshot, and all 1,000
-/// child drivers are live at once while `max_parallel` gates their attempts).
-/// [`fork_scaling_probe`] measures one fork at a chosen size.
+/// Ignored: on 2026-09-07, with live children bounded to `max_parallel`, one
+/// 1,000-item fork still had 207 children finished after 280 s at 7.4 GB RSS.
+/// The remaining cost is the O(N) fork snapshot copied per child: every
+/// child's `InvocationDeclared`, `ExecutionDeclared` and `InvocationFinished`
+/// record carries it, as do the resolved config and the waiting branch
+/// firing on the parent side. [`fork_scaling_probe`] measures one fork at a
+/// chosen size.
 #[tokio::test]
-#[ignore = "declares 2,001 durable invocations and holds 1,000 live child drivers; run by hand"]
+#[ignore = "declares 2,001 durable invocations, each copying the O(N) fork snapshot; run by hand"]
 async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
     let text = r#"digraph T {
         start [shape=Mdiamond]

@@ -932,9 +932,10 @@ with no merge back, `Expansion::ForEach` over the delegate for `for_each`;
 `tripleoctagon` → the `fabro/fan_in` step behind an `All` join, publishing
 `parallel.results` and `parallel.branch_count` with the ordered branch
 envelopes as output; `max_parallel` → `AttemptAdmission` on the child
-invocations, one gate per parent execution and fork visit, one slot per
-attempt, held by the driver's attempt slots and released when the attempt
-ends; `RunPolicy.max_invocations = 10,000` → the coordinator's run-wide
+invocations, one gate per parent execution and fork visit, one slot per live
+child, taken before the child's driver starts (in declaration order), held
+until the child's end is recorded and handed back during a retry backoff;
+`RunPolicy.max_invocations = 10,000` → the coordinator's run-wide
 invocation ceiling, checked at create, resume and every declaration; `house`
 → a nested invocation by graph digest; `tab` and a prompted `tripleoctagon` → the `fabro/prompt` step;
 `import` → expanded at load, so the persisted graph carries the imported
