@@ -251,7 +251,7 @@ marked "not verified" with the reason, not "passed".
 | Stage | Acceptance gate | Branch / commit | Status at task 16 finish |
 |---|---|---|---|
 | C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback` | not verified: not merged onto `swarm/integration` (head `bdd5c5a`) when task 16 finished |
-| C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp` | not verified: not merged onto `swarm/integration` when task 16 finished; `[run.agent.mcps]` still errors `unsupported.workflow_toml.run.agent.mcps` |
+| C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp`, commits `b67d3ee`..`72be261` (evidence `task13-mcp.md`) | passed: merged; the MCP suites and the scripted stdio server (`fabro_mcp_blackbox`, `testdata`) pass in the gate (1192) |
 | C3 skills (item 9c, task 14) | versioned fixtures verify skill discovery, precedence, loading, prompt/tool behavior and events without Fabro | `swarm/task14-skills`, commits `c27fc3e`, `bdd5c5a` (evidence `task14-skills.md`) | passed: merged; the skills suites and fixtures (`testdata/skills`) pass in the gate; skill context is loaded into the system prompt, outside the agent history, so compaction cannot remove it (verified below) |
 | C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents` | not verified: not merged onto `swarm/integration` when task 16 finished; `[run.agent] subagents` still refused |
 | C5 context compaction (item 9e, task 16) | controlled histories trigger compaction and preserve required conversation/tool state, later thread use, usage, and events | `swarm/task16-compaction`, this branch | passed: the trigger below, at and above the 80 percent threshold; continuation, thread reuse, tool pairing across the boundary, summary failure, cancellation, resume fallback; public events and usage. In-process `petri-fabro-steps::compaction` (7), black box `fabro_compaction_blackbox` (4) |
@@ -262,10 +262,16 @@ the discovered skills into the session's system prompt and registers the
 `use_skill`/`Skill` tool. The system prompt and the tool registry live on the
 session outside `History`; compaction only ever replaces turns inside
 `History` (`pebble-coding-agent` `compact_from`). So a compacted session keeps
-its skills and its skill tool. MCP (C2) and sub-agents (C4) had not merged, so
-their cross-feature checks are deferred: once they land, verify that an MCP
-tool stays registered and a sub-agent's supervisor stays available across a
+its skills and its skill tool. Sub-agents (C4) had not merged, so their cross-feature check is deferred: once
+it lands, verify that a sub-agent's supervisor stays available across a
 parent-session compaction, by the same system-prompt/registry argument.
+
+MCP (C2) landed: MCP tools are registered on the session with Pebble's
+`tools(mcp.tools())` (`pebble.rs`), so they live in the session's tool
+registry, outside `History`; compaction replaces only `History`, so a compacted
+session keeps its MCP tools. Verified by construction against the reference,
+the same way skills are; an end-to-end MCP-tool-after-compaction black box is a
+follow-up for the combined milestone D coverage (item 10).
 
 ## Recommended library re-pin
 
