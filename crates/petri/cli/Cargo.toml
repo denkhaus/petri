@@ -22,6 +22,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The black box scenario loader (`tests/support/fabro/scenario.rs`).
+serde = { workspace = true }
+regex = { workspace = true }
 testkit = { workspace = true }
 # The in-process client test builds requests and reads error kinds.
 lithos-llm = { workspace = true, features = ["runtime"] }
