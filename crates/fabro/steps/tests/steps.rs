@@ -2,6 +2,7 @@
 //! a routing directive, `fabro/wait`, and `fabro/human` answered through
 //! `Control::Deliver` — with byte-identical replay on every run.
 
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -76,18 +77,62 @@ async fn a_command_runs_in_bash_and_reports_its_output() {
     );
 }
 
+/// Output above Fabro's 100 KiB offload threshold leaves the context and the
+/// record as a durable `blob://sha256/…` reference; a later command that
+/// reads it through `stdin_source` gets the logical value back. Output at
+/// the threshold stays inline.
 #[tokio::test]
-async fn a_command_keeps_only_a_bounded_output_tail() {
+async fn large_command_output_is_offloaded_and_reads_back_logically() {
     let graph = lower(&dot(r#"
-        c [shape=parallelogram, script="printf '%070000d' 0"]
-        start -> c -> exit
+        big [shape=parallelogram, script="yes 0123456789 | head -n 20000"]
+        count [shape=parallelogram, script="wc -c | tr -d ' '", stdin_source="context.command.output"]
+        start -> big -> count -> exit
     "#));
-    let report = run(graph, "fabro-command-output-cap").await;
-    let result = output_of(&report, "c");
-    let output = result["stdout"].as_str().expect("string output");
-    assert!(output.starts_with("\n… [output truncated]\n"));
-    assert!(output.len() <= OUTPUT_CAP + 24, "{}", output.len());
+    let dir = RunDir::new("fabro-command-offload");
+    let rt = runtime(&dir);
+    let report = rt.run(graph).await.expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let recorded = output_of(&report, "big")["stdout"]
+        .as_str()
+        .expect("string output")
+        .to_string();
+    assert!(
+        recorded.starts_with("blob://sha256/"),
+        "the record holds a reference, not 200 KiB: {}",
+        &recorded[..recorded.len().min(80)]
+    );
+    let digest = recorded.trim_start_matches("blob://sha256/");
+    let stored = dir.path().join("blobs").join(digest);
+    assert_eq!(
+        fs::read(&stored).expect("the blob file").len(),
+        220_000,
+        "the store holds the whole output"
+    );
+    assert_eq!(
+        output_of(&report, "count")["stdout"],
+        json!("220000\n"),
+        "the next command read the logical value"
+    );
+    let small = lower(&dot(r#"
+        s [shape=parallelogram, script="printf '%01000d' 7"]
+        start -> s -> exit
+    "#));
+    let report = run(small, "fabro-command-inline").await;
+    let inline = output_of(&report, "s")["stdout"]
+        .as_str()
+        .expect("string")
+        .to_string();
+    assert_eq!(inline.trim_end().len(), 1000, "a small output stays inline");
 }
+
+/// The in-memory cap sits above the offload threshold, so a value the store
+/// takes was never truncated first.
+const _: () = assert!(OUTPUT_CAP > 200_000);
 
 #[tokio::test]
 async fn a_failing_command_fails_with_its_exit_status_and_routes() {
@@ -328,12 +373,14 @@ async fn a_cancelled_gate_fails_closed() {
     );
 }
 
-/// The `succeed` shim: the failed command keeps its failure on the record as
-/// a partial status, reports `succeeded`, and its `outcome=succeeded` edge is
-/// taken. REMOVE AFTER 2026-10-04 with the shim.
+/// Fabro's promotion order: an explicit `outcome=failed` edge on a `succeed`
+/// node is taken and the failure stays a failure; without a matching
+/// explicit route the failure is promoted, keeps its evidence on the record
+/// as a partial status, reports `succeeded`, and the `outcome=succeeded` edge
+/// is taken.
 #[tokio::test]
-async fn a_succeed_policy_reports_succeeded_and_keeps_the_failure_on_record() {
-    let graph = lower(&dot(r#"
+async fn succeed_promotes_only_a_failure_no_explicit_route_matches() {
+    let explicit = lower(&dot(r#"
         c [shape=parallelogram, script="echo boom; exit 3", on_failure="succeed"]
         ok [shape=parallelogram, script="true"]
         bad [shape=parallelogram, script="true"]
@@ -344,7 +391,27 @@ async fn a_succeed_policy_reports_succeeded_and_keeps_the_failure_on_record() {
         ok -> exit
         bad -> exit
     "#));
-    let report = run(graph, "fabro-command-succeed-shim").await;
+    let report = run(explicit, "fabro-command-succeed-explicit").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(status_of(&report, "c").as_deref(), Some("failure"));
+    assert_eq!(output_of(&report, "c")["outcome"], json!("failed"));
+    assert_eq!(status_of(&report, "bad").as_deref(), Some("success"));
+    assert_eq!(status_of(&report, "ok"), None);
+
+    let promoted = lower(&dot(r#"
+        c [shape=parallelogram, script="echo boom; exit 3", on_failure="succeed"]
+        ok [shape=parallelogram, script="true"]
+        start -> c
+        c -> ok [condition="outcome=succeeded"]
+        c -> exit
+        ok -> exit
+    "#));
+    let report = run(promoted, "fabro-command-succeed-promoted").await;
     assert_eq!(
         report.status,
         RunStatus::Success,
@@ -355,6 +422,11 @@ async fn a_succeed_policy_reports_succeeded_and_keeps_the_failure_on_record() {
     let output = output_of(&report, "c");
     assert_eq!(output["outcome"], json!("succeeded"));
     assert_eq!(output["failure_class"], json!("exit_status:3"));
+    assert!(
+        output["promoted"]
+            .as_str()
+            .is_some_and(|note| note.contains("promoted")),
+        "{output}"
+    );
     assert_eq!(status_of(&report, "ok").as_deref(), Some("success"));
-    assert_eq!(status_of(&report, "bad"), None);
 }

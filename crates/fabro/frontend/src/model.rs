@@ -228,6 +228,37 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// A workflow from its parts, with the indexes rebuilt: what an import
+    /// expansion produces after it splices nodes and edges.
+    pub fn from_parts(
+        name: String,
+        attrs: Attrs,
+        nodes: Vec<NodeDecl>,
+        edges: Vec<EdgeDecl>,
+        span: Span,
+    ) -> Self {
+        let mut workflow = Self {
+            name,
+            attrs,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            span,
+            node_index: HashMap::new(),
+            outgoing_index: HashMap::new(),
+            incoming_index: HashMap::new(),
+        };
+        for node in nodes {
+            workflow
+                .node_index
+                .insert(node.id.clone(), workflow.nodes.len());
+            workflow.nodes.push(node);
+        }
+        for edge in edges {
+            workflow.push_edge(edge);
+        }
+        workflow
+    }
+
     pub fn node(&self, id: &str) -> Option<&NodeDecl> {
         self.node_index.get(id).map(|index| &self.nodes[*index])
     }

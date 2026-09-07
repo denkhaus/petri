@@ -9,7 +9,9 @@ use std::{env, fs, process};
 
 use frontend::print::print_expr;
 use frontend::{CompileInputs, Frontend};
-use frontend_fabro::kinds::{AGENT_KIND, COMMAND_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND};
+use frontend_fabro::kinds::{
+    AGENT_KIND, COMMAND_KIND, HUMAN_KIND, PROMPT_KIND, WAIT_KIND, WORKFLOW_KIND,
+};
 use frontend_fabro::{Fabro, MAX_FIRINGS};
 use ir::placeholder::contains_placeholder;
 use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy};
@@ -35,7 +37,7 @@ fn shapes_lower_to_their_step_kinds() {
     assert_eq!(node(&graph, "exit").step.kind.as_str(), "noop");
     assert_eq!(node(&graph, "d").step.kind.as_str(), "noop");
     assert_eq!(node(&graph, "a").step.kind, AGENT_KIND);
-    assert_eq!(node(&graph, "p").step.kind, AGENT_KIND);
+    assert_eq!(node(&graph, "p").step.kind, PROMPT_KIND);
     assert_eq!(node(&graph, "p").step.config["kind"], json!("prompt"));
     assert_eq!(node(&graph, "c").step.kind, COMMAND_KIND);
     assert_eq!(node(&graph, "inferred").step.kind, COMMAND_KIND);
@@ -241,27 +243,42 @@ fn partially_succeed_and_allow_partial_lower_to_accept_partial() {
     )]);
 }
 
+/// A promoting policy hands the step the node's explicit routes, so the step
+/// can keep a failure an explicit route matches, as Fabro's executor does.
 #[test]
-fn the_unreachable_failure_edge_is_linted() {
-    let diags = diagnostics(&dot(r#"
-        a [prompt="x", on_failure="partially_succeed"]
+fn promoting_policies_carry_the_explicit_routes() {
+    let graph = lower_ok(&dot(r#"
+        a [prompt="x", on_failure="succeed"]
         b [prompt="x"]
+        c [prompt="x"]
+        d [prompt="x", on_failure="route"]
         start -> a
         a -> b [condition="outcome=failed"]
+        a -> c [label="[C] Continue"]
         a -> exit
         b -> exit
+        c -> d -> exit
+    "#));
+    let routes = &node(&graph, "a").step.config["routes"];
+    assert_eq!(routes["conditions"], json!(["outcome=failed"]));
+    assert_eq!(routes["labels"], json!(["continue"]));
+    assert_eq!(routes["targets"], json!(["c", "exit"]));
+    assert!(
+        node(&graph, "d").step.config.get("routes").is_none(),
+        "a routing policy needs no promotion check"
+    );
+    let found = codes(&dot(r#"
+        a [prompt="x", on_failure="partially_succeed"]
+        start -> a -> exit
     "#));
     assert!(
-        diags
-            .iter()
-            .any(|d| d.code == "fabro.unreachable_failure_edge"),
-        "{diags:?}"
+        found.contains(&"fabro.petri_extension".to_string()),
+        "the Petri-only spelling is named: {found:?}"
     );
 }
 
 #[test]
-fn deprecated_success_spellings_lower_with_dated_warnings() {
-    // REMOVE AFTER 2026-10-04: both spellings go back to `unsupported.*`.
+fn succeed_is_supported_and_auto_status_is_a_warned_alias() {
     let text = dot(r#"
         a [prompt="x", on_failure="succeed"]
         b [prompt="x", auto_status=true]
@@ -269,18 +286,12 @@ fn deprecated_success_spellings_lower_with_dated_warnings() {
     "#);
     let found = codes(&text);
     assert!(
-        found.contains(&"deprecated.on_failure.succeed".to_string()),
-        "{found:?}"
+        !found.iter().any(|code| code.contains("succeed")),
+        "`on_failure=\"succeed\"` is supported without a warning: {found:?}"
     );
     assert!(
         found.contains(&"deprecated.auto_status".to_string()),
         "{found:?}"
-    );
-    assert!(
-        diagnostics(&text)
-            .iter()
-            .all(|d| d.message.contains("2026-10-04") || !d.code.starts_with("deprecated.")),
-        "every shim warning names its sunset"
     );
     let graph = lower_ok(&text);
     assert_eq!(
@@ -693,7 +704,8 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
          id = \"review\"\n[run.integrations.github.permissions]\npull_requests = \"write\"\n\
          [run.checkpoint]\nexclude_globs = []\n[run.artifacts]\ninclude = []\n\
          [run.execution]\nmode = \"normal\"\n[run.agent]\nfabro_tools = true\n\
-         [environments.review]\nprovider = \"docker\"\n",
+         [environments.review]\nprovider = \"docker\"\n[environments.review.network]\n\
+         mode = \"none\"\n[environments.review.image]\ndockerfile = { path = \"Dockerfile\" }\n",
     );
     assert!(
         platform_only.iter().all(|d| !d.is_error()),
@@ -701,23 +713,33 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     );
     let platform_codes: Vec<String> = platform_only.iter().map(|d| d.code.to_string()).collect();
     for code in [
-        "ignored.workflow_toml.run.goal",
         "ignored.workflow_toml.run.clone",
         "ignored.workflow_toml.run.run_branch",
         "ignored.workflow_toml.run.pull_request",
         "ignored.workflow_toml.run.model.fallbacks",
-        "ignored.workflow_toml.run.model",
-        "ignored.workflow_toml.run.environment",
         "ignored.workflow_toml.run.integrations",
         "ignored.workflow_toml.run.checkpoint",
         "ignored.workflow_toml.run.artifacts",
-        "ignored.workflow_toml.run.execution",
         "ignored.workflow_toml.run.agent.fabro_tools",
-        "ignored.workflow_toml.environments",
+        "ignored.workflow_toml.environments.review.network",
+        "ignored.workflow_toml.environments.review.image.dockerfile",
     ] {
         assert!(
             platform_codes.contains(&code.to_string()),
             "{code} in {platform_codes:?}"
+        );
+    }
+    // Sections the runner now applies do not warn.
+    for code in [
+        "ignored.workflow_toml.run.goal",
+        "ignored.workflow_toml.run.model",
+        "ignored.workflow_toml.run.environment",
+        "ignored.workflow_toml.run.execution",
+        "ignored.workflow_toml.environments",
+    ] {
+        assert!(
+            !platform_codes.contains(&code.to_string()),
+            "{code} is applied, not ignored: {platform_codes:?}"
         );
     }
     assert!(
@@ -728,9 +750,20 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     );
 
     // Requirements the standalone runner cannot meet: specific errors.
-    assert_eq!(codes("[run.prepare]\nsteps = [{ script = \"make\" }]\n"), [
-        "unsupported.workflow_toml.run.prepare"
-    ]);
+    assert_eq!(
+        codes("[run.environment]\nid = \"nowhere\"\n"),
+        ["unsupported.workflow_toml.run.environment"],
+        "an environment id with no table is refused, as Fabro refuses it"
+    );
+    assert_eq!(
+        codes("[run.environment]\nid = \"e\"\n[environments.e]\nprovider = \"k8s\"\n"),
+        ["unsupported.workflow_toml.environments.provider"]
+    );
+    assert_eq!(
+        codes("[run.prepare]\nsteps = [{ script = \"a\", command = [\"b\"] }]\n"),
+        ["unsupported.workflow_toml.run.prepare"],
+        "exactly one of script or command"
+    );
     assert_eq!(
         codes("[[run.hooks]]\nevent = \"stage.completed\"\ncommand = \"true\"\n"),
         ["unsupported.workflow_toml.run.hooks"]
@@ -855,7 +888,8 @@ fn structural_mistakes_are_specific_errors() {
         a [prompt="x", import="other.fabro"]
         start -> a -> exit
     "#))
-        .contains(&"unsupported.import".to_string())
+        .contains(&"fabro.import".to_string()),
+        "a missing import file is an import error"
     );
     assert!(
         codes(&dot(r#"

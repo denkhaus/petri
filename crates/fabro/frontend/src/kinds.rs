@@ -7,9 +7,11 @@
 use ir::StepKindId;
 use serde::{Deserialize, Serialize};
 
-/// An agent or prompt node (`box`, `tab`): one turn of an agent over ACP or
-/// native Pebble.
+/// An agent node (`box`): one turn of an agent over ACP or native Pebble.
 pub const AGENT_KIND: StepKindId = StepKindId::new_static("fabro/agent");
+/// A prompt node (`tab`, or a `tripleoctagon` with a `prompt`): one model
+/// call through the application's model client, with no agent tools.
+pub const PROMPT_KIND: StepKindId = StepKindId::new_static("fabro/prompt");
 /// A command node (`parallelogram`, or any node with a `script`).
 pub const COMMAND_KIND: StepKindId = StepKindId::new_static("fabro/command");
 /// A human gate (`hexagon`).
@@ -26,6 +28,7 @@ pub const MAX_OUTPUT_RETRIES: u64 = 100;
 /// Every kind the frontend emits, for a registry that stubs them all.
 pub const ALL: &[&StepKindId] = &[
     &AGENT_KIND,
+    &PROMPT_KIND,
     &COMMAND_KIND,
     &HUMAN_KIND,
     &WAIT_KIND,
@@ -72,10 +75,11 @@ impl StageOutcome {
 /// class the lowered retry policy retries on.
 pub const RETRY_REQUESTED_CLASS: &str = "retry_requested";
 
-/// The day the 30-day Fabro compatibility shims expire: the `succeed`
-/// failure policy (`on_failure="succeed"`, `auto_status=true`) and the
-/// `outcome=success` condition alias. Every shim names this date in its
-/// warning and carries a `REMOVE AFTER 2026-10-04` comment.
+/// The day the `outcome=success` condition alias expires. The alias names
+/// this date in its warning and carries a `REMOVE AFTER 2026-10-04` comment.
+/// `on_failure="succeed"` and `auto_status` are no longer shims: Fabro's
+/// reference revision supports both, so Petri keeps them for as long as the
+/// reference does.
 ///
-/// REMOVE AFTER 2026-10-04: delete the shims and this constant together.
+/// REMOVE AFTER 2026-10-04: delete the alias and this constant together.
 pub const COMPAT_SUNSET: &str = "2026-10-04";
