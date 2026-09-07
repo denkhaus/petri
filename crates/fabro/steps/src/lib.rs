@@ -30,6 +30,7 @@ pub mod prompt;
 pub mod sessions;
 pub mod stage;
 mod stub;
+pub mod subagents;
 pub mod wait;
 pub mod workflow;
 

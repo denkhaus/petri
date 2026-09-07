@@ -578,21 +578,29 @@ impl Reader<'_> {
         let Some(agent) = item.as_table() else {
             return;
         };
-        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only; skills,
-        // sub-agents and compaction (readiness items 9c to 9e) have no
-        // `workflow.toml` surface at the pinned revision, so a key asking for
-        // one is refused as Fabro refuses it, never passed silently.
+        // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only; skills
+        // and compaction (readiness items 9c and 9e) have no `workflow.toml`
+        // surface at the pinned revision, and sub-agents need none: every
+        // native agent gets them (`super::subagents`). A key asking for one
+        // is refused as Fabro refuses it, never passed silently.
         for key in agent.keys() {
             if !matches!(key.as_str(), "fabro_tools" | "mcps") {
                 let path = self.path;
+                let hint = if key == "subagents" {
+                    "remove it; native agents always have the sub-agent tools, as in Fabro, and \
+                     Fabro's settings schema has no such key"
+                } else {
+                    "remove it; Fabro's settings schema has no such key"
+                };
                 self.unsupported(
                     "workflow_toml.key",
                     format!(
                         "`run.agent.{key}` in `{path}` is not a key Fabro's `[run.agent]` table \
-                         accepts (it takes `fabro_tools` and `mcps`); skills, sub-agents and \
-                         compaction have no workflow configuration at the pinned Fabro"
+                         accepts (it takes `fabro_tools` and `mcps`); skills and compaction \
+                         have no workflow configuration at the pinned Fabro, and sub-agents \
+                         are always available to native agents"
                     ),
-                    "remove it; Fabro's settings schema has no such key",
+                    hint,
                 );
             }
         }

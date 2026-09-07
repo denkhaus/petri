@@ -16,6 +16,7 @@ mod promotion;
 mod routing;
 mod secrets;
 mod threads;
+pub mod subagents;
 mod workflow_toml;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1139,6 +1140,9 @@ impl Ctx<'_> {
             &mut self.diags,
         );
         threads.write(self.b.exprs(), &mut config);
+        if !is_prompt {
+            subagents::write(&mut config);
+        }
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {

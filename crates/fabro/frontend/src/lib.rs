@@ -45,6 +45,7 @@ use frontend::{
     WorkspaceRetention,
 };
 pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
+pub use lower::subagents;
 pub use lower::{
     BRANCH_META_KIND, DEFAULT_MAX_PARALLEL, ENVIRONMENT_PARAM, EnvValue, Environment,
     FailurePolicy, IMPORT_ERROR, Kind, LAUNCH_PARAM, MAX_CALL_DEPTH, MAX_FIRINGS,
