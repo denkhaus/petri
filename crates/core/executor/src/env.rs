@@ -270,6 +270,15 @@ pub trait ProcessHandle: Send {
     async fn signal(&mut self, sig: Sig) -> Result<(), EnvError>;
 }
 
+/// How the driver's machine reaches a port a process listens on inside an
+/// environment: a URL on this machine, and the headers a request to it must
+/// carry. The reverse direction of [`ExecEnv::host_address`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewUrl {
+    pub url:     String,
+    pub headers: BTreeMap<String, String>,
+}
+
 /// The capability a step kind receives: somewhere to run a process, and a
 /// workspace reached only through this interface.
 ///
@@ -360,6 +369,24 @@ pub trait ExecEnv: Send + Sync {
     /// a remote environment shares nothing at all — so `false` is the default.
     fn shares_host_filesystem(&self) -> bool {
         false
+    }
+
+    /// A URL on the driver's machine that reaches `port` inside this
+    /// environment, with the headers its requests need: a host process's own
+    /// loopback, a forward the executor opens into a container, a remote
+    /// provider's preview link. `Ok(None)` when the environment offers no
+    /// route to its ports, which is all the default can promise. The route
+    /// stays open until [`Self::release_preview_url`] or the scope's release.
+    async fn preview_url(&self, port: u16) -> Result<Option<PreviewUrl>, EnvError> {
+        let _ = port;
+        Ok(None)
+    }
+
+    /// End the route [`Self::preview_url`] opened for `port`. Idempotent: a
+    /// port never routed, or released twice, succeeds.
+    async fn release_preview_url(&self, port: u16) -> Result<(), EnvError> {
+        let _ = port;
+        Ok(())
     }
 }
 

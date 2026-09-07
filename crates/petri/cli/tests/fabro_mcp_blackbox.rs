@@ -697,3 +697,109 @@ async fn unsupported_mcp_settings_are_refused_before_the_run() {
         );
     }
 }
+
+/// A `sandbox` server inside a Docker scope. Petri launches the server in
+/// the container and reaches it through the route the Docker plugin opens
+/// (a forward on Petri's loopback bridged into the container; nothing is
+/// published on the daemon); the tool's effect lands in the container's
+/// workspace, the result reaches the next model request, and the server is
+/// stopped before the next stage runs.
+#[tokio::test]
+async fn a_sandbox_server_in_a_docker_scope_is_reached_through_the_plugins_forward() {
+    if !testkit::is_docker_ready().await {
+        return;
+    }
+    let provider = Provider::OpenAi;
+    let mut case = Case::new("mcp-docker-sandbox").docker();
+    let scripts = vec![
+        scenario(
+            provider,
+            &case.credential,
+            "write",
+            model(provider),
+            "Take a note",
+            tool_call(
+                "write",
+                "mcp__scoped__write_file",
+                json!({ "path": "note.txt", "content": "hello from the box\n" }),
+            ),
+        ),
+        scenario(
+            provider,
+            &case.credential,
+            "answer",
+            model(provider),
+            "wrote 19 bytes to note.txt",
+            text("Noted in the box."),
+        ),
+    ];
+    let twin = Twin::start(provider, &case.root.join("twins"), scripts).await;
+    case.redirect(&twin);
+    // The container's workspace starts empty and nothing on the host mirrors
+    // it, so a prepare step writes the scripted server into it first.
+    let script = fs::read_to_string(server_script()).expect("the scripted server is readable");
+    assert!(
+        !script.contains("'''") && !script.lines().any(|line| line == "PETRI_MCP_SERVER"),
+        "the script embeds as a TOML literal and a heredoc"
+    );
+    let toml = format!(
+        "[[run.prepare.steps]]\nscript = '''cat > mcp_server.py <<'PETRI_MCP_SERVER'\n{}\nPETRI_MCP_SERVER\n'''\n\n[run.agent.mcps.scoped]\ntype = \"sandbox\"\ncommand = [\"python3\", \"mcp_server.py\", \"--http\", \"8765\"]\nport = 8765\nenv = {{ MCP_TEST_LOG = \"mcp.log\" }}\nstartup_timeout = \"60s\"\n",
+        script.trim_end()
+    );
+    let workflow = case.workflow(
+        &agent_workflow(
+            provider,
+            "",
+            r#"verify [shape=parallelogram, script="cat note.txt; cat mcp.log"]
+    start -> agent -> verify -> exit"#,
+        ),
+        Some(&toml),
+    );
+    let finished = case.run(&workflow, &["--retain", "never"]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(twin.consumed(), ["write", "answer"]);
+    assert_eq!(twin.unmatched(), 0);
+    let requests = twin.requests_for(&case.credential);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        tool_outputs(provider, &requests[1]),
+        ["wrote 19 bytes to note.txt"],
+        "the tool result reached the next request: {}",
+        requests[1]
+    );
+    let echoed = finished.echoed();
+    assert!(
+        !echoed
+            .iter()
+            .any(|(_, line)| line.contains("failed to start")),
+        "the server started through the forward: {echoed:?}"
+    );
+    let verify: Vec<&str> = echoed
+        .iter()
+        .filter(|(node, _)| node == "verify")
+        .map(|(_, line)| line.as_str())
+        .collect();
+    assert_eq!(
+        verify,
+        [
+            "hello from the box",
+            "started",
+            "initialize",
+            "call write_file"
+        ],
+        "the effect and the server's own log are in the container's workspace: {}",
+        finished.stderr
+    );
+    assert_eq!(
+        finished.final_context()["response.agent"],
+        json!("Noted in the box.")
+    );
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}

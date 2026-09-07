@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use executor::lines::{LINE_CHANNEL_CAPACITY, pump};
 use executor::{
     ByteStream, ContainerImage, ContainerRunner, DirectoryEntry, EnvError, ExecEnv, ExitStatus,
-    LineStream, OneShotContainer, OutputChunk, OutputMode, ProcessHandle, ProcessSpec, Sig,
-    StdinMode, StdinWriter,
+    LineStream, OneShotContainer, OutputChunk, OutputMode, PreviewUrl, ProcessHandle, ProcessSpec,
+    Sig, StdinMode, StdinWriter,
 };
 use sandbox_driver::{
     Error as DriverError, ExecControls, ExecSpec, ExecStreamingResult, OneShotImage, OneShotSpec,
@@ -332,6 +332,35 @@ impl ExecEnv for SandboxEnv {
 
     fn shares_host_filesystem(&self) -> bool {
         self.host
+    }
+
+    /// The provider's preview URL for the port: the Host provider answers
+    /// with its own loopback, the Docker provider opens a forward on the
+    /// plugin's loopback bridged into the container (nothing is published on
+    /// the daemon), Daytona returns its preview link and token header. A
+    /// provider without the facet offers no route.
+    async fn preview_url(&self, port: u16) -> Result<Option<PreviewUrl>, EnvError> {
+        let Some(previews) = self.sandbox.preview_urls() else {
+            return Ok(None);
+        };
+        let preview = previews
+            .preview_url(port)
+            .await
+            .map_err(|error| facet_error("preview_url", &error))?;
+        Ok(Some(PreviewUrl {
+            url:     preview.url,
+            headers: preview.headers,
+        }))
+    }
+
+    async fn release_preview_url(&self, port: u16) -> Result<(), EnvError> {
+        match self.sandbox.preview_urls() {
+            Some(previews) => previews
+                .release_preview_url(port)
+                .await
+                .map_err(|error| facet_error("release_preview_url", &error)),
+            None => Ok(()),
+        }
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {

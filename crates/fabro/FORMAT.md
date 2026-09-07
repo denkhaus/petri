@@ -780,11 +780,18 @@ backend), else Petri's own, and it gets the entry's `env` on top of Petri's
 environment. An `http` server is reached from the host over streamable HTTP
 with the entry's `headers`. A `sandbox` server is launched in the scope's
 execution environment (`bash -c` for a `script`) and reached over streamable
-HTTP at `http://localhost:<port>` once the port accepts connections, within
-`startup_timeout`; this needs a port the host can reach, so it works on a
-host-backed scope and fails with a named reason on a container or remote
-scope (the sandbox-driver plugin protocol exposes no port or preview URL; a
-recorded plugin gap). The legacy `sse` protocol is not spoken.
+HTTP through the environment's route to its port, which the sandbox provider
+supplies as a preview URL (`ExecEnv::preview_url`, the sandbox-driver
+`access/preview_url` operation): the host's own loopback on a host scope; a
+forward the Docker plugin opens on Petri's loopback and bridges into the
+container, so nothing is published on the daemon and a remote daemon works
+the same; Daytona's preview link with its token header, which rides on the
+request. Petri polls that route with an HTTP request until the server
+answers, within `startup_timeout`, because a forward accepts a connection
+before the port inside does. The route is released when the server stops
+(`access/preview_release`). A provider that offers no preview URL fails the
+server with a named reason (`no route from Petri to port <port> ...`). The
+legacy `sse` protocol is not spoken.
 
 Failure behavior follows Fabro. A server that does not start (a launch error,
 no handshake within `startup_timeout`, a protocol error, an unavailable

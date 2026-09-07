@@ -5,18 +5,19 @@
 //! and lists its tools. [`Connection::call`] forwards one call with the
 //! server's tool timeout and the caller's cancellation, sending the protocol's
 //! `notifications/cancelled` when either ends the wait. [`Connection::close`]
-//! ends the session and stops the process the connection owns.
+//! ends the session, stops the process the connection owns and releases the
+//! route it opened to a `sandbox` server's port.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use executor::{ExecEnv, OutputMode, ProcessHandle, ProcessSpec, SecretProvider, Sig};
+use executor::{ExecEnv, OutputMode, PreviewUrl, ProcessHandle, ProcessSpec, SecretProvider, Sig};
 use frontend_fabro::mcps::{McpServer, McpTransport, McpValue};
 use ir::Value;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{CONNECTION, HeaderMap, HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotification,
     CancelledNotificationParam, ClientCapabilities, ClientInfo, ClientRequest, Implementation,
@@ -32,7 +33,6 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use serde_json::Map;
 use smol_str::SmolStr;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
@@ -42,6 +42,10 @@ use tokio_util::sync::CancellationToken;
 const STDERR_TAIL_BYTES: usize = 4096;
 /// How often a `sandbox` server's port is probed while it starts.
 const PORT_POLL: Duration = Duration::from_millis(100);
+/// How long one readiness probe of a `sandbox` server's route may take. A
+/// forward into a container accepts the connection before anything listens
+/// inside, so readiness is an HTTP answer, not an accepted connection.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a stopped process gets after `SIGKILL`.
 const KILL_WAIT: Duration = Duration::from_secs(5);
 
@@ -84,6 +88,8 @@ pub(super) enum StartError {
     Handshake { reason: String, tail: String },
     #[error("listing the server's tools failed: {reason}")]
     ListTools { reason: String },
+    #[error("no route from Petri to port {port} in the scope's execution environment: {reason}")]
+    Route { port: u16, reason: String },
     #[error("{0}")]
     Unsupported(String),
     #[error("the server exited while starting (status {status}){tail}")]
@@ -122,6 +128,64 @@ fn tail_suffix(tail: Option<&SharedTail>) -> String {
     }
 }
 
+/// The route the scope's execution environment opened from Petri to a
+/// `sandbox` server's port, released when the connection closes.
+struct Route {
+    env:  Arc<dyn ExecEnv>,
+    port: u16,
+}
+
+impl Route {
+    /// Open the route and answer with its address. `Ok(None)` from the
+    /// environment is a named refusal: this environment offers no way to
+    /// reach its ports.
+    async fn open(
+        env: &Arc<dyn ExecEnv>,
+        port: u16,
+        server: &str,
+    ) -> Result<(Self, PreviewUrl), StartError> {
+        let preview = match env.preview_url(port).await {
+            Ok(Some(preview)) => preview,
+            Ok(None) => {
+                return Err(StartError::Route {
+                    port,
+                    reason: format!(
+                        "the sandbox provider offers no preview URL, so `{server}` cannot be \
+                         reached from Petri"
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(StartError::Route {
+                    port,
+                    reason: error.to_string(),
+                });
+            }
+        };
+        Ok((
+            Self {
+                env: Arc::clone(env),
+                port,
+            },
+            preview,
+        ))
+    }
+
+    /// End the route. Best effort: the scope's release closes it anyway, so
+    /// a failure is logged and nothing else.
+    async fn release(&self) {
+        if let Err(error) = self.env.release_preview_url(self.port).await {
+            tracing::warn!(port = self.port, error = %error, "releasing the MCP server's route failed");
+        }
+    }
+}
+
+async fn release_route(route: Option<&Route>) {
+    if let Some(route) = route {
+        route.release().await;
+    }
+}
+
 /// The live connection to one server.
 pub(super) struct Connection {
     peer:         Peer<RoleClient>,
@@ -129,6 +193,8 @@ pub(super) struct Connection {
     tool_timeout: Duration,
     /// The process a `sandbox` server runs in, launched in the scope.
     process:      Mutex<Option<Box<dyn ProcessHandle>>>,
+    /// The route to a `sandbox` server's port.
+    route:        Option<Route>,
     grace:        Duration,
     disconnected: AtomicBool,
     reported:     AtomicBool,
@@ -138,7 +204,7 @@ impl Connection {
     /// Launch or reach the server, complete the handshake and list its tools.
     pub(super) async fn start(
         server: &McpServer,
-        env: &dyn ExecEnv,
+        env: &Arc<dyn ExecEnv>,
         secrets: &dyn SecretProvider,
         cancel: &CancellationToken,
     ) -> Result<(Self, Vec<DiscoveredTool>), StartError> {
@@ -150,6 +216,7 @@ impl Connection {
         )
         .with_protocol_version(ProtocolVersion::V_2025_03_26);
         let mut process: Option<Box<dyn ProcessHandle>> = None;
+        let mut route: Option<Route> = None;
         let mut tail: Option<SharedTail> = None;
         let began = Instant::now();
         let handshake = match &server.transport {
@@ -210,16 +277,6 @@ impl Connection {
                 port,
                 env: vars,
             } => {
-                if !env.shares_host_filesystem() {
-                    return Err(StartError::Unsupported(format!(
-                        "the `sandbox` transport needs a port the host can reach; the scope's \
-                         execution environment does not share the host network, and the \
-                         sandbox-driver plugin protocol exposes no port or preview URL for a \
-                         container (a recorded plugin gap), so `{}` cannot be reached from \
-                         Petri",
-                        server.name
-                    )));
-                }
                 let vars = resolve_values(vars, secrets, "env")?;
                 let (program, args) = command.split_first().ok_or_else(|| StartError::Launch {
                     program: String::new(),
@@ -251,20 +308,50 @@ impl Connection {
                     });
                 }
                 tail = Some(shared);
-                // Fabro polls the port for up to the startup window, then
-                // connects to `http://localhost:<port>` when no preview URL
-                // exists.
+                // The address Petri reaches the port at is the environment's
+                // route to it: the host's own loopback, the Docker plugin's
+                // forward into the container, Daytona's preview link. Fabro
+                // polls the port for the startup window and then connects;
+                // Petri polls the route with a request, since a forward
+                // accepts a connection before the port inside answers.
+                let (opened, preview) = match Route::open(env, *port, &server.name).await {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        stop_process(handle.as_mut(), env.grace()).await;
+                        return Err(error);
+                    }
+                };
+                let mut headers: HeaderMap = header_map(&preview.headers)?.into_iter().collect();
+                // Each probe closes its connection: a single-threaded server
+                // (or a forward's bridge) must be free for the handshake.
+                headers.insert(CONNECTION, HeaderValue::from_static("close"));
+                let probe = reqwest::Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .timeout(PROBE_TIMEOUT)
+                    .build()
+                    .map_err(|error| StartError::Route {
+                        port:   *port,
+                        reason: format!("building the readiness probe: {error}"),
+                    })?;
                 let deadline = began + startup;
                 loop {
                     if cancel.is_cancelled() {
                         stop_process(handle.as_mut(), env.grace()).await;
+                        opened.release().await;
                         return Err(StartError::Cancelled);
                     }
-                    if TcpStream::connect(("127.0.0.1", *port)).await.is_ok() {
+                    if probe
+                        .get(&preview.url)
+                        .headers(headers.clone())
+                        .send()
+                        .await
+                        .is_ok()
+                    {
                         break;
                     }
                     if Instant::now() >= deadline {
                         stop_process(handle.as_mut(), env.grace()).await;
+                        opened.release().await;
                         return Err(StartError::HandshakeTimeout {
                             timeout: startup,
                             tail:    tail_suffix(tail.as_ref()),
@@ -273,15 +360,17 @@ impl Connection {
                     if let Ok(status) = timeout(PORT_POLL, handle.wait()).await {
                         let status = status
                             .map_or_else(|error| error.to_string(), |status| format!("{status:?}"));
+                        opened.release().await;
                         return Err(StartError::Exited {
                             status,
                             tail: tail_suffix(tail.as_ref()),
                         });
                     }
                 }
+                drop(probe);
                 process = Some(handle);
-                let transport =
-                    http_transport(&format!("http://localhost:{port}"), &BTreeMap::new())?;
+                let transport = http_transport(&preview.url, &preview.headers)?;
+                route = Some(opened);
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 timeout(
                     remaining,
@@ -296,6 +385,7 @@ impl Connection {
                 if let Some(mut handle) = process {
                     stop_process(handle.as_mut(), env.grace()).await;
                 }
+                release_route(route.as_ref()).await;
                 if cancel.is_cancelled() {
                     return Err(StartError::Cancelled);
                 }
@@ -308,6 +398,7 @@ impl Connection {
                 if let Some(mut handle) = process {
                     stop_process(handle.as_mut(), env.grace()).await;
                 }
+                release_route(route.as_ref()).await;
                 return Err(StartError::HandshakeTimeout {
                     timeout: startup,
                     tail:    tail_suffix(tail.as_ref()),
@@ -325,11 +416,19 @@ impl Connection {
         let tools = match timeout(tool_timeout, service.list_all_tools()).await {
             Ok(Ok(tools)) => tools,
             Ok(Err(error)) => {
+                if let Some(mut handle) = process {
+                    stop_process(handle.as_mut(), env.grace()).await;
+                }
+                release_route(route.as_ref()).await;
                 return Err(StartError::ListTools {
                     reason: error.to_string(),
                 });
             }
             Err(_) => {
+                if let Some(mut handle) = process {
+                    stop_process(handle.as_mut(), env.grace()).await;
+                }
+                release_route(route.as_ref()).await;
                 return Err(StartError::ListTools {
                     reason: format!("no answer within {}s", tool_timeout.as_secs()),
                 });
@@ -349,6 +448,7 @@ impl Connection {
                 service: Mutex::new(Some(service)),
                 tool_timeout,
                 process: Mutex::new(process),
+                route,
                 grace: env.grace(),
                 disconnected: AtomicBool::new(false),
                 reported: AtomicBool::new(false),
@@ -427,8 +527,9 @@ impl Connection {
         self.disconnected.load(Ordering::Acquire) && !self.reported.swap(true, Ordering::AcqRel)
     }
 
-    /// End the session and stop the owned process. Bounded by `limit` for
-    /// the protocol's close and by the scope's grace for the process.
+    /// End the session, stop the owned process and release the route to its
+    /// port. Bounded by `limit` for the protocol's close and by the scope's
+    /// grace for the process.
     pub(super) async fn close(&self, limit: Duration) {
         let service = self.service.lock().await.take();
         if let Some(mut service) = service {
@@ -449,6 +550,7 @@ impl Connection {
         if let Some(mut handle) = process {
             stop_process(handle.as_mut(), self.grace).await;
         }
+        release_route(self.route.as_ref()).await;
     }
 }
 
@@ -520,11 +622,12 @@ fn resolve_values(
     Ok(out)
 }
 
-fn http_transport(
-    url: &str,
+/// The configured (or route-provided) headers, parsed, in the shape the
+/// `rmcp` transport config takes.
+fn header_map(
     headers: &BTreeMap<String, String>,
-) -> Result<StreamableHttpClientTransport<reqwest::Client>, StartError> {
-    let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned());
+) -> Result<HashMap<HeaderName, HeaderValue>, StartError> {
+    let mut map = HashMap::new();
     for (key, value) in headers {
         let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
             StartError::Unsupported(format!("invalid header name `{key}`: {error}"))
@@ -532,8 +635,17 @@ fn http_transport(
         let value = HeaderValue::from_str(value).map_err(|error| {
             StartError::Unsupported(format!("invalid header value for `{key}`: {error}"))
         })?;
-        config.custom_headers.insert(name, value);
+        map.insert(name, value);
     }
+    Ok(map)
+}
+
+fn http_transport(
+    url: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<StreamableHttpClientTransport<reqwest::Client>, StartError> {
+    let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned());
+    config.custom_headers = header_map(headers)?;
     Ok(StreamableHttpClientTransport::with_client(
         reqwest::Client::new(),
         config,

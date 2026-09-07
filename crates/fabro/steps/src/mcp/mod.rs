@@ -15,10 +15,11 @@
 //! host (Fabro's run worker), never of the sandbox; its working directory is
 //! the scope's workspace when the scope shares the host filesystem, else
 //! Petri's own. An `http` server is reached from the host. A `sandbox` server
-//! is launched in the scope's execution environment and reached over HTTP on
-//! its port, which needs a port the host can connect to: today only a
-//! host-backed scope, because the sandbox-driver plugin protocol exposes no
-//! port or preview URL for a container (a recorded plugin gap).
+//! is launched in the scope's execution environment and reached over HTTP
+//! through the environment's route to its port (`ExecEnv::preview_url`): the
+//! host's own loopback, the Docker plugin's forward into the container, or
+//! Daytona's preview link with its token header. The route is released when
+//! the server stops.
 //!
 //! Failure behavior follows Fabro: a server that does not start (a spawn
 //! error, a handshake timeout, a protocol error) is reported and skipped, and
@@ -173,7 +174,10 @@ impl McpServers {
                 .attribution
                 .server(server, "starting", json!({}))
                 .await;
-            match Connection::start(server, env.as_ref(), secrets.as_ref(), cancel).await {
+            // Boxed: the start future carries the readiness probe and the
+            // route, and it would otherwise weigh on every session future
+            // above it.
+            match Box::pin(Connection::start(server, &env, secrets.as_ref(), cancel)).await {
                 Ok((connection, tools)) => {
                     let connection = Arc::new(connection);
                     let mut summaries: Vec<Value> = tools

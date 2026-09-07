@@ -2,8 +2,8 @@ id = "mcp-catalog-and-transports"
 title = "MCP catalog references, legacy SSE and in-string secrets are refused"
 scenarios = ["*"]
 bundles = ["*"]
-fabro = "Catalog ids resolve from the server; `protocol = \"sse\"` is supported; secrets resolve anywhere in transport strings; `sandbox` servers get a Daytona preview URL."
-petri = "`id = ...` and `sse` are refused at load; `{{ secrets.* }}` only as whole `env`/`headers` values; `sandbox` servers on host scopes only."
+fabro = "Catalog ids resolve from the server; `protocol = \"sse\"` is supported; secrets resolve anywhere in transport strings."
+petri = "`id = ...` and `sse` are refused at load; `{{ secrets.* }}` only as whole `env`/`headers` values. `sandbox` servers are reached through the provider's preview URL on every backend (host, Docker, Daytona), as in Fabro."
 user_visible_effect = "A bundle using those forms loads on Fabro only."
-reason = "Task 13; the standalone runner has no server catalog and the plugin protocol no port forward."
+reason = "Task 13; the standalone runner has no server catalog. The port-forward gap closed with the sandbox-driver re-pin (`a225832`)."
 acceptance = "A scenario using such a form records Fabro's success against Petri's load failure under a scoped entry; none does today."
