@@ -1,0 +1,13 @@
+id = "interview-run-model-migration"
+title = "The interview bundle runs with a [run.model] default on both engines"
+scenarios = ["interview"]
+bundles = ["interview"]
+fabro = "The pinned bundle's workflow.toml is `_version = 1` only; its `tab` node names no model, and the run supplies one from the launch (`fabro run --provider openai` picks the provider's default model, gpt-5.6-sol)."
+petri = "A prompt node with no model fails at the stage: `prompt node names no model: set model, the graph's default_model, or [run.model] name in workflow.toml`. The standalone runner has no launch-level model default."
+user_visible_effect = "The unchanged interview bundle runs on Fabro with a launch-time model and does not run on Petri. With `[run.model] provider = \"openai\", name = \"gpt-5.6-sol\"` in workflow.toml both engines run it identically, so the matrix runs that migrated bundle."
+reason = "Fabro's model default is a launch concern (`--provider`, `--model`); Petri's is a bundle concern. Recorded for the owner: a launch-level model default in `petri run` (or `PETRI_LLM_DEFAULT_MODEL`) would let the unchanged bundle run."
+acceptance = "The migrated bundle's other files are byte-identical to bundles.lock.json (`.fabro/project.toml` 9978b0b3..., `workflow.fabro` 3addabc4...). Retire this record and restore the original workflow.toml when Petri gains a launch-level model default."
+
+[migration]
+old_bundle = "interview workflow.toml sha256 3e36400144c71037b064b809d592299e4da4319a2d82277d01b3be63a07ebce4 (bundles.lock.json, source fabro-sh/fabro at the pin)"
+new_bundle = "interview workflow.toml sha256 dff36b0cf918d277d2997980d8cf1a687b9bf933363d668a014f38d6c75605bb (crates/fabro/acceptance/scenarios/interview)"

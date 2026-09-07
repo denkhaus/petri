@@ -1,0 +1,16 @@
+digraph EditAndVerify {
+    graph [backend="api", goal="Append one word to a file through the agent's shell tool, verify it, and decide through a gate."]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prepare [shape=parallelogram, script="printf 'draft\n' > notes.txt && echo prepared"]
+    agent [prompt="Append the word reviewed to notes.txt, then read it back and say APPENDED.", model="gpt-5.6-sol", provider="openai", reasoning_effort="high", on_failure="exit"]
+    verify [shape=parallelogram, script="cat notes.txt"]
+    gate [shape=hexagon, label="Ship it?", question_type="yes_no"]
+    ship [shape=parallelogram, script="printf 'shipped\n' > decision.txt && cat decision.txt"]
+    hold [shape=parallelogram, script="printf 'held\n' > decision.txt && cat decision.txt"]
+    start -> prepare -> agent -> verify -> gate
+    gate -> ship [label="[Y] Yes"]
+    gate -> hold [label="[N] No"]
+    ship -> exit
+    hold -> exit
+}

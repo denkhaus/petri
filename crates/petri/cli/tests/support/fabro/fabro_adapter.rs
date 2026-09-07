@@ -506,20 +506,29 @@ impl FabroServer {
         run
     }
 
-    /// Stop the server and reap its process group.
+    /// Stop the server and reap its process group. Only the group this
+    /// server was started in is signalled, and only while the server is
+    /// still alive, so no other process on the machine can be reached.
     pub(crate) async fn stop(mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            kill_group(self.pid);
+        }
         let _ = self.child.start_kill();
-        kill_group(self.pid);
         let _ = timeout(Duration::from_secs(20), self.child.wait()).await;
     }
 }
 
 impl Drop for FabroServer {
     fn drop(&mut self) {
-        kill_group(self.pid);
+        if self.child.try_wait().ok().flatten().is_none() {
+            kill_group(self.pid);
+        }
     }
 }
 
+/// Kill the process group whose id is `pid`: the server this adapter
+/// spawned with `process_group(0)` and its workers, nothing else. Never a
+/// pattern match on process names.
 fn kill_group(pid: u32) {
     #[cfg(unix)]
     {
@@ -893,6 +902,7 @@ impl Interviews {
         entry.consumed += 1;
         entry.questions.push(qid.clone());
         record["entry"] = json!(entry.id);
+        // The record's position once pushed below.
         self.decided.insert(qid.clone(), self.questions.len());
         let action = entry.action.clone();
         let action_kind = action["kind"].as_str().unwrap_or_default();
@@ -932,7 +942,13 @@ impl Interviews {
                     .collect();
                 match mapped {
                     Some(option_keys) => {
-                        record["reply"] = json!({ "kind": "answered", "choices": values });
+                        // Petri's receipt records the first key as `choice`
+                        // beside every key under `choices`.
+                        record["reply"] = json!({
+                            "kind": "answered",
+                            "choice": values.first().cloned().unwrap_or_default(),
+                            "choices": values,
+                        });
                         Disposition::Answer(
                             json!({ "kind": "multi_selected", "option_keys": option_keys }),
                         )
@@ -992,7 +1008,7 @@ impl Interviews {
         let Some(index) = self.decided.get(qid).copied() else {
             return;
         };
-        let Some(record) = self.questions.get_mut(index.wrapping_sub(1)) else {
+        let Some(record) = self.questions.get_mut(index) else {
             return;
         };
         match result {

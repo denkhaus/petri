@@ -28,5 +28,9 @@ smol_str = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# The reference-version test parses decision records and digests staged
+# bundle files.
+sha2 = { workspace = true }
+toml = { workspace = true }
 testkit = { workspace = true }
 steps = { workspace = true }

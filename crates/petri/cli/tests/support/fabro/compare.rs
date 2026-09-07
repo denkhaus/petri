@@ -108,18 +108,24 @@ pub(crate) struct Request {
 /// The semantic projection of one run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Projection {
-    pub(crate) engine:      String,
-    pub(crate) status:      String,
-    pub(crate) path:        Vec<Stage>,
-    pub(crate) forks:       Vec<Fork>,
-    pub(crate) context:     BTreeMap<String, Value>,
-    pub(crate) bookkeeping: BTreeMap<String, Value>,
-    pub(crate) artifacts:   BTreeMap<String, Option<String>>,
-    pub(crate) interviews:  Vec<Interview>,
-    pub(crate) requests:    Vec<Request>,
-    pub(crate) counts:      BTreeMap<String, u64>,
+    pub(crate) engine:            String,
+    pub(crate) status:            String,
+    pub(crate) path:              Vec<Stage>,
+    pub(crate) forks:             Vec<Fork>,
+    pub(crate) context:           BTreeMap<String, Value>,
+    pub(crate) bookkeeping:       BTreeMap<String, Value>,
+    pub(crate) artifacts:         BTreeMap<String, Option<String>>,
+    pub(crate) interviews:        Vec<Interview>,
+    /// The workflow's own model requests, in arrival order.
+    pub(crate) requests:          Vec<Request>,
+    /// Requests a platform makes outside any stage (Fabro's run-title
+    /// call), listed apart from the workflow's and counted under
+    /// `counts.platform_requests`. Named by [`platform_request`].
+    #[serde(default)]
+    pub(crate) platform_requests: Vec<Request>,
+    pub(crate) counts:            BTreeMap<String, u64>,
     /// The identity mapping applied: placeholder to the raw value.
-    pub(crate) identities:  BTreeMap<String, String>,
+    pub(crate) identities:        BTreeMap<String, String>,
 }
 
 /// Petri's run status word in the shared vocabulary.
@@ -173,25 +179,43 @@ fn read_artifacts(workspace: &Path, rules: &Rules) -> BTreeMap<String, Option<St
         .collect()
 }
 
-/// Requests one engine made to its twins, in arrival order across twins.
-pub(crate) fn requests_of(twins: &[&Twin], credential: &str) -> Vec<Request> {
-    let mut out = Vec::new();
+/// The platform call a request is, if any: the pinned Fabro asks the
+/// provider's small default model for a run title before the first stage.
+/// The prompt's opening sentence names it; nothing else is classified.
+pub(crate) fn platform_request(log_record: &Value) -> Option<&'static str> {
+    let text = log_record["input_text"].as_str().unwrap_or_default();
+    text.starts_with("Generate a concise, human-readable title for this Fabro workflow run")
+        .then_some("fabro.run_title")
+}
+
+/// Requests one engine made to its twins, in arrival order across twins:
+/// the workflow's own, and the platform's apart.
+pub(crate) fn requests_of(twins: &[&Twin], credential: &str) -> (Vec<Request>, Vec<Request>) {
+    let mut own = Vec::new();
+    let mut platform = Vec::new();
     for twin in twins {
         let log = twin.request_log();
         let bodies = twin.requests_for(credential);
-        for (index, body) in bodies.iter().enumerate() {
-            out.push(Request {
+        // The twin's log covers every namespace; align by arrival order of
+        // this credential's bodies within the log.
+        let mut log_index = 0;
+        for body in &bodies {
+            let record = log.get(log_index).cloned().unwrap_or(Value::Null);
+            log_index += 1;
+            let request = Request {
                 provider: twin.provider.id().to_owned(),
                 model:    body["model"].as_str().unwrap_or_default().to_owned(),
                 effort:   super::twins::requested_effort(twin.provider, body).map(str::to_owned),
-                scenario: log
-                    .get(index)
-                    .and_then(|record| record["scenario_id"].as_str())
-                    .map(str::to_owned),
-            });
+                scenario: record["scenario_id"].as_str().map(str::to_owned),
+            };
+            if platform_request(&record).is_some() {
+                platform.push(request);
+            } else {
+                own.push(request);
+            }
         }
     }
-    out
+    (own, platform)
 }
 
 /// Project a finished Petri run through `petri inspect --json`, the
@@ -317,9 +341,13 @@ pub(crate) fn project_petri(
         .unwrap_or_default();
     let (context, bookkeeping) = split_context(&raw_context, rules);
     let interviews = interviews_of(&document["interviews"]);
-    let requests = requests_of(twins, credential);
+    let (requests, platform_requests) = requests_of(twins, credential);
     let mut counts = BTreeMap::new();
     counts.insert("provider_requests".to_owned(), requests.len() as u64);
+    counts.insert(
+        "platform_requests".to_owned(),
+        platform_requests.len() as u64,
+    );
     counts.insert("interviews_asked".to_owned(), interviews.len() as u64);
     counts.insert(
         "interviews_delivered".to_owned(),
@@ -343,6 +371,7 @@ pub(crate) fn project_petri(
         artifacts: read_artifacts(workspace, rules),
         interviews,
         requests,
+        platform_requests,
         counts,
         identities,
     };
@@ -496,9 +525,13 @@ pub(crate) fn project_fabro(
     }
     let (context, bookkeeping) = split_context(&context_values, rules);
     let interviews = interviews_of(&run.receipt);
-    let requests = requests_of(twins, credential);
+    let (requests, platform_requests) = requests_of(twins, credential);
     let mut counts = BTreeMap::new();
     counts.insert("provider_requests".to_owned(), requests.len() as u64);
+    counts.insert(
+        "platform_requests".to_owned(),
+        platform_requests.len() as u64,
+    );
     counts.insert("interviews_asked".to_owned(), interviews.len() as u64);
     counts.insert(
         "interviews_delivered".to_owned(),
@@ -525,6 +558,7 @@ pub(crate) fn project_fabro(
         artifacts: read_artifacts(&run.workspace, rules),
         interviews,
         requests,
+        platform_requests,
         counts,
         identities,
     };
@@ -1015,7 +1049,10 @@ impl Decisions {
         self.records
             .iter()
             .find(|decision| {
-                decision.scenarios.iter().any(|s| s == "*" || s == scenario)
+                decision
+                    .scenarios
+                    .iter()
+                    .any(|pattern| glob_matches(pattern, scenario))
                     && decision.accepts.iter().any(|accepts| {
                         accepts.kind == difference.kind
                             && accepts

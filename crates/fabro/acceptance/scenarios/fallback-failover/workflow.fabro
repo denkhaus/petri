@@ -1,0 +1,9 @@
+digraph FallbackFailover {
+    graph [backend="api", goal="Append one word through the agent's shell tool; the primary model fails after the tool ran and the chain falls back to Anthropic."]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prepare [shape=parallelogram, script="printf 'draft\n' > notes.txt && echo prepared"]
+    agent [prompt="Append the word reviewed to notes.txt, then read it back and say APPENDED.", model="gpt-5.6-sol", provider="openai", on_failure="exit"]
+    verify [shape=parallelogram, script="cat notes.txt"]
+    start -> prepare -> agent -> verify -> exit
+}

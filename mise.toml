@@ -68,6 +68,15 @@ depends = ["plugins:build"]
 env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
 run = "scripts/test-fabro-differential.sh"
 
+[tasks."test:fabro:differential"]
+description = "Run the differential matrix: every scenario through the shipped petri binary and the pinned Fabro binary (built by scripts/fabro-provision.sh; a missing binary compares Petri against the committed references)"
+depends = ["plugins:build"]
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
+run = [
+  "cargo nextest run --locked -p petri-fabro-acceptance --test reference_version --no-tests=fail",
+  "cargo nextest run --locked -p petri-cli --test fabro_differential --no-tests=fail",
+]
+
 [tasks."test:release"]
 description = "Run all Rust tests in release mode"
 depends = ["plugins:build"]
