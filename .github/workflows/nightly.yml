@@ -119,6 +119,7 @@ jobs:
       # tests, three repeated black box runs under different schedules, the
       # pinned Fabro comparison matrix, and the release-mode suite.
       - name: Verify extended checks
+        id: verify
         run: mise run check:nightly
         env:
           PETRI_REQUIRE_DOCKER: ${{ matrix.docker == 'required' && '1' || '' }}
@@ -129,8 +130,10 @@ jobs:
 
       # Required, passed, failed, skipped, missing, blocked, excluded: only a
       # passed cell counts, and a run with no records is not a passing gate.
+      # Only after the tests ran: a setup failure has no records to report
+      # and must fail once, at the step that failed.
       - name: Write the coverage report
-        if: always()
+        if: always() && (steps.verify.conclusion == 'success' || steps.verify.conclusion == 'failure')
         env:
           REQUIRED_BACKENDS: ${{ matrix.docker == 'required' && 'host,docker' || 'host' }}
         run: |
@@ -142,9 +145,10 @@ jobs:
 
       # A failed run keeps everything: every record, every bundle with the
       # process output, the inspect document, the twin logs, and the copied
-      # case directories of the failed scenarios.
+      # case directories of the failed scenarios. Only when the evidence
+      # directory was named: before that step there is nothing to upload.
       - name: Keep the full evidence of a failed run
-        if: failure()
+        if: failure() && env.PETRI_EVIDENCE_DIR != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: fabro-evidence-nightly-${{ matrix.runner }}-failed

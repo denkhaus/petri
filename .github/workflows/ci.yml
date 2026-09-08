@@ -102,6 +102,7 @@ jobs:
         run: mise run plugins:build
 
       - name: Verify routine changes
+        id: verify
         run: mise run check
         env:
           # On a runner that has Docker, a skipped Docker test is a failure: the
@@ -117,8 +118,10 @@ jobs:
 
       # Required, passed, failed, skipped, missing, blocked, excluded: only a
       # passed cell counts, and a run with no records is not a passing gate.
+      # Only after the tests ran: a setup failure has no records to report
+      # and must fail once, at the step that failed.
       - name: Write the coverage report
-        if: always()
+        if: always() && (steps.verify.conclusion == 'success' || steps.verify.conclusion == 'failure')
         env:
           # The Docker subset is Linux's job; macOS reports host cells only.
           REQUIRED_BACKENDS: ${{ matrix.docker == 'required' && 'host,docker' || 'host' }}
@@ -131,9 +134,10 @@ jobs:
 
       # A failed run keeps everything: every record, every bundle with the
       # process output, the inspect document, the twin logs, and the copied
-      # case directories of the failed scenarios.
+      # case directories of the failed scenarios. Only when the evidence
+      # directory was named: before that step there is nothing to upload.
       - name: Keep the full evidence of a failed run
-        if: failure()
+        if: failure() && env.PETRI_EVIDENCE_DIR != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: fabro-evidence-${{ matrix.runner }}-failed
@@ -241,6 +245,7 @@ jobs:
         run: mise run plugins:build
 
       - name: Run the comparison matrix
+        id: matrix
         run: mise run test:fabro:differential
         env:
           PETRI_REQUIRE_FABRO_BINARY: '1'
@@ -249,9 +254,10 @@ jobs:
           PETRI_REQUIRE_DOCKER: '1'
 
       # Informational for this job: the matrix's cells fail through Nextest
-      # above, and the routine check jobs hold the strict coverage gate.
+      # above, and the routine check jobs hold the strict coverage gate. Only
+      # after the matrix ran: a setup failure has no records to report.
       - name: Write the coverage report
-        if: always()
+        if: always() && (steps.matrix.conclusion == 'success' || steps.matrix.conclusion == 'failure')
         run: |
           args=(--evidence "$PETRI_EVIDENCE_DIR")
           matrix=crates/fabro/acceptance/scenarios/matrix.json
@@ -261,9 +267,10 @@ jobs:
 
       # A failed run keeps everything: every record, every bundle with the
       # process output, the inspect document, the twin logs, and the copied
-      # case directories of the failed scenarios.
+      # case directories of the failed scenarios. Only when the evidence
+      # directory was named: before that step there is nothing to upload.
       - name: Keep the full evidence of a failed run
-        if: failure()
+        if: failure() && env.PETRI_EVIDENCE_DIR != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: fabro-evidence-compatibility-failed
