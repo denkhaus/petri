@@ -547,7 +547,7 @@ fails when any of them disagree. The row names are the keys of a record's
 |---|---|---|---|
 | `pebble` | `a7a1302a896436aec5475ca1ba574488604d4fe3` | `lithoscomputer/pebble` (private) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `4aab27d7d42e7f762a8b6a3871c3db86816b0721` | `lithoscomputer/lithos-llm` (private) | provider transport and request retries |
-| `sandbox_driver` | `a533568fb5f557af87de9db6518343b436b2dcb8` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `5b9f9dae506560f030ca4ef43d0facbe7baa99dc` | `lithoscomputer/sandbox-driver` (private) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `df708f910111` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since this revision) |
@@ -556,7 +556,7 @@ A change to Pebble, lithos-llm, or an MCP client library runs the owning
 repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The library batch
 the readiness work asked for is pinned (Pebble `a7a1302a`, sandbox-driver
-`a533568`); the twins are pinned in both test crates that serve them.
+`5b9f9da`); the twins are pinned in both test crates that serve them.
 
 ## Readiness gate checklist
 
