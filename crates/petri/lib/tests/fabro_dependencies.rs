@@ -151,8 +151,15 @@ fn skip_dir(path: &Path, root: &Path) -> bool {
     if matches!(name, "target" | ".git" | ".ai" | "node_modules") {
         return true;
     }
+    // A nested git checkout is not this repository's build input: a worktree
+    // under `.claude/worktrees/` (with its own fetched corpus), the Fabro
+    // corpus checkout itself, or a fetched bundle source. `.git` is a
+    // directory in a plain checkout and a file in a worktree.
+    if path != root && path.join(".git").exists() {
+        return true;
+    }
     // Fetched data, never a build input: the Fabro corpus checkout and the
-    // black box bundle sources.
+    // black box bundle sources, even before they are checkouts.
     path.strip_prefix(root).is_ok_and(|rel| {
         rel.starts_with("crates/fabro/corpus") || rel.starts_with("crates/fabro/acceptance/bundles")
     })
@@ -485,6 +492,20 @@ fn nested_manifests_and_build_scripts_are_scanned_and_the_corpus_is_skipped() {
     write(
         "crates/fabro/acceptance/bundles/.sources/fabro-sh/fabro/Cargo.toml",
         "fabro-core = { path = \"lib/foundation/fabro-core\" }\n",
+    );
+    // A nested worktree is its own checkout (`.git` is a file there) and
+    // carries its own fetched corpus; the scan must not enter it.
+    write(
+        ".claude/worktrees/wt/.git",
+        "gitdir: /elsewhere/.git/worktrees/wt\n",
+    );
+    write(
+        ".claude/worktrees/wt/crates/fabro/corpus/fabro/Cargo.toml",
+        "fabro-core = { path = \"lib/foundation/fabro-core\" }\n",
+    );
+    write(
+        ".claude/worktrees/wt/tools/gen/Cargo.toml",
+        "fabro-workflow = { path = \"../../crates/fabro/corpus/fabro/lib/components/fabro-workflow\" }\n",
     );
     let findings = forbidden_fabro_manifests(&root);
     let _ = fs::remove_dir_all(&root);
