@@ -790,8 +790,8 @@ impl Step for FloodStep {
 
 /// The literal ceiling: 9,999 children after the root are admitted and the
 /// 10,001st invocation is refused before its step runs. Every child is a
-/// durable invocation with its own execution log, so this takes about seven
-/// minutes; it runs in the extended gate.
+/// durable invocation with its own execution log and five `fsync`s, so this
+/// takes about five minutes; it runs in the extended gate.
 #[tokio::test]
 #[ignore = "declares 10,000 durable invocations; run in the extended gate"]
 async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused() {

@@ -321,15 +321,18 @@ async fn random_selection_routes_on_a_recorded_draw() {
 /// so the second fork's snapshot (copied into each of its 1,000 children)
 /// carries a blob reference, not the list.
 ///
-/// Ignored: on 2026-09-07, with live children bounded to `max_parallel`, one
-/// 1,000-item fork still had 207 children finished after 280 s at 7.4 GB RSS.
-/// The remaining cost is the O(N) fork snapshot copied per child: every
+/// Ignored: on 2026-09-07, once the coordinator store applied records in
+/// place instead of cloning its whole state per append, the run completes:
+/// 2,001 children in 132 s (release build) but at 39 GB peak RSS with a
+/// 1.66 GB `coordinator.jsonl`, and the offload assertion below fails. The
+/// second fork's `parallel.results` is inline, not a blob reference, so each
+/// of its 1,000 children copied the first fork's 1,000 envelopes (about
+/// 830 KB per child). The remaining cost is the O(N) fork snapshot in every
 /// child's `InvocationDeclared`, `ExecutionDeclared` and `InvocationFinished`
-/// record carries it, as do the resolved config and the waiting branch
-/// firing on the parent side. [`fork_scaling_probe`] measures one fork at a
-/// chosen size.
+/// record, the resolved config and the waiting branch firing on the parent
+/// side. [`fork_scaling_probe`] measures one fork at a chosen size.
 #[tokio::test]
-#[ignore = "declares 2,001 durable invocations, each copying the O(N) fork snapshot; run by hand"]
+#[ignore = "2,001 durable invocations, each copying the O(N) fork snapshot (39 GB RSS, a 1.66 GB log), and the second fork's results are not offloaded; run by hand"]
 async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
     let text = r#"digraph T {
         start [shape=Mdiamond]
