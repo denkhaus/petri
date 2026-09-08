@@ -55,6 +55,15 @@ never carries a resolved secret. Child secret bindings show as names only. A
 sensitive human-gate answer therefore appears twice: as the `$secret`
 reference in `deliveries`, and as `***` wherever the step echoed the value.
 
+## Offloaded values
+
+A context value, an output, or a `context_updates` entry may be the string
+`blob://sha256/<hex>` (with a `#json` suffix for a structured value) when a
+step offloaded it to the run's output store. The document shows the
+reference as the log recorded it and never resolves it; the bytes are under
+`<run_dir>/blobs/<hex>` in the standalone runner's store. The field shapes
+are unchanged: a reference is a string where the value would be.
+
 ## Fields
 
 Ids are plain integers: invocation and execution ids, firing ids, node ids,

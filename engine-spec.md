@@ -925,10 +925,12 @@ preferred label; suggested targets ranked by index; the fallback guarded by the
 entry noop; exit → `Completion::TerminalNode`; `goal_gate` → a `goal_check`
 noop before exit with back arms to the retry-target chain; DFS-classified
 back edges, `Any` joins, `Budget.max_firings` capped at 500;
-`loop_restart` → `EdgeTransition::Restart`; `component` → a fork whose
-branches are synthetic `fabro/branch` delegates (`kind = "parallel.branch"`),
-each running a copy of its target as a child invocation from the fork snapshot
-with no merge back, `Expansion::ForEach` over the delegate for `for_each`;
+`loop_restart` → `EdgeTransition::Restart`; `component` → the `fabro/fork`
+step (it takes the fork snapshot of `kv` once and offloads what a fan-out
+would copy per child to the output store) whose branches are synthetic
+`fabro/branch` delegates (`kind = "parallel.branch"`), each running a copy of
+its target as a child invocation from that snapshot with no merge back,
+`Expansion::ForEach` over the delegate for `for_each`;
 `tripleoctagon` → the `fabro/fan_in` step behind an `All` join, publishing
 `parallel.results` and `parallel.branch_count` with the ordered branch
 envelopes as output; `max_parallel` → `AttemptAdmission` on the child

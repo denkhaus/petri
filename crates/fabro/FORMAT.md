@@ -91,7 +91,7 @@ a warning; the importing workflow's stylesheet governs.
 | `tab` prompt | `fabro/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `fabro.prompt_backend`, and the graph's ACP settings never reach it |
 | `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
 | `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
-| `component` parallel | `noop` fork; each branch target becomes a synthetic `fabro/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation; `for_each` marks the delegate `Expansion::ForEach` (below) | `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `generation` |
+| `component` parallel | `fabro/fork`: takes the fork snapshot of `kv` (and of the stage records for agent or prompt targets) once per visit, offloads the `for_each` source list and every other value above 4 KiB to the output store, and outputs `{ snapshot, nodes }`; each branch target becomes a synthetic `fabro/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation from that snapshot; `for_each` marks the delegate `Expansion::ForEach` (below) | fork: `label`, `node`, `kv`, `nodes`, `source`, `inline`; branch: `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `nodes`, `generation` |
 | `tripleoctagon` fan-in | `fabro/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
 | `tripleoctagon` fan-in with a `prompt` | `fabro/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
 | a `component` whose branches share a plain successor | a synthetic `<fork>.fan_in` (`fabro/fan_in`, `synthetic: true`) before that successor | |
@@ -238,11 +238,30 @@ the parent context at the fork and never merged back. Parallel workflows
 therefore need the coordinator path (`host::run_configured`, the CLI, an
 embedding host); `Runtime::run` alone has no child invocations.
 
+The parallel node itself is the `fabro/fork` step. It runs once per visit,
+before any branch, and takes the fork snapshot: the parent's `kv` and, when
+a branch target is an agent or prompt node, the parent's stage records. It
+offloads the `for_each` source list at any size and every other snapshot
+value above 4 KiB (`fabro_steps::blobs::FAN_OUT_OFFLOAD_THRESHOLD`) to the
+run's output store, so the snapshot holds `blob://sha256/<hex>` references
+in their place, one blob per value for the whole fork; the parent's own
+`kv` is not changed. Its output is `{ snapshot, nodes }`, which the branch
+delegates read as their `kv` and `nodes`, and which every clone of a
+`for_each` template receives as its input token. A branch child's request,
+its `InvocationDeclared`, `ExecutionDeclared` and `InvocationFinished`
+records, its own `ExecutionStarted` context and the parent's per-clone
+tokens are therefore bounded by the threshold, not by the item count. A
+snapshot key a branch's own graph reads by expression (the source list of a
+`for_each` nested inside a static branch) is named in the fork's `inline`
+list and stays inline. With no output store the fork keeps every value
+inline.
+
 Lowering replaces every branch target with a synthetic `fabro/branch`
 delegate in the parent graph (`meta.kind = "parallel.branch"`,
 `meta.branch = { fork, target, index }`, `synthetic: true`, one attempt, no
 retry). The delegate's config names the child graph digest, the fork, the
-branch index, the target's kind and the fork snapshot of `kv`. The child
+branch index, the target's kind and the fork snapshot of `kv` (from the
+fork's output). The child
 graph is the branch target alone with its routes removed, entered through
 `meta.branch_role`, with `result = NodeOutput(<target>)`; its digest is
 pushed with the parent's graph. An agent or prompt target reads the branch's
@@ -261,6 +280,10 @@ gets a synthetic `<fork>.fan_in` in front of it. No common successor is
 `fabro.parallel.no_join`; an edge that leaves a branch elsewhere is
 `fabro.parallel.branch_edge_ignored`. Every delegate's edge into the collector
 carries `{ index, value }`, so the `All` join sees the results in branch order.
+The collector publishes a result list above 4 KiB as a reference, before it
+reaches the parent's `kv`, so a later fork snapshots the reference and not
+the list; `stdin_source`, a prompted fan-in and the agent and prompt
+preambles read the list back through the store.
 
 The collector publishes `parallel.results`, the array of branch envelopes
 `{ id, index, item_label, status, context_updates }` in branch order, and
@@ -278,9 +301,10 @@ on a later command reads `get(kv, 'parallel.results')`; a command placed
 before any fan-in warns `upstream_fan_in`. The same publication and stripping
 happen in a prompted fan-in before its model call.
 
-`for_each="context.K"` names one template branch. The delegate evaluates
-`get(kv, 'K')` as its expansion input (Fabro's 1000-item cap is a
-precondition, `fail_fast: false`) and each clone carries one item as `item`.
+`for_each="context.K"` names one template branch. The template's expansion
+evaluates `get(kv, 'K')` from the context itself, never from the fork's
+output (Fabro's 1000-item cap is a precondition on the fork, `fail_fast:
+false`), and each clone carries one item as `item`.
 The item reaches the model after the prompt as fenced untrusted data: a
 notice, then the item's JSON inside `<untrusted-<16 hex>>` tags whose tag is
 derived from the item and never appears in it. `item_label` is the item's
@@ -451,7 +475,17 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   `LocalBlobStore` under `<run_dir>/blobs` unless the host registered its own
   before the run, so a Fabro host replaces it with platform storage without
   changing node semantics. The store is content addressed, so a resumed run
-  reads the same references.
+  reads the same references. Two Petri-only rules use the same store below
+  Fabro's threshold, for the values a fan-out multiplies: a fork offloads
+  what it would otherwise copy into every branch child (the `for_each`
+  source list at any size, every other snapshot value above 4 KiB), and a
+  fan-in publishes `parallel.results` above 4 KiB as a reference. Readers
+  that show Fabro's view of the context (the agent and prompt preambles, a
+  nested workflow's starting context) put back every reference whose blob is
+  at most 100 KiB, which only these rules create, so the model sees the
+  value Fabro's model sees; a route or a condition still sees the reference
+  text. `petri inspect` shows the references as recorded; they resolve under
+  `<run_dir>/blobs/<hex>`.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
   gate takes its first choice, as Fabro's `--dry-run` does.
 
