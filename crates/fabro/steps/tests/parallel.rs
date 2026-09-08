@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use execution::host::{self, HostRun};
-use execution::inspect::inspect_run;
+use execution::inspect::{InvocationInspection, RunInspection, inspect_run};
 use fabro_steps::blobs::{holds_ref, hydrate};
 use fabro_steps::{
     AGENT_KIND, BLOBS_DIR, BranchStep, CommandStep, FanInStep, ForkStep, HUMAN_KIND,
@@ -660,10 +660,7 @@ fn fan_out_over(n: usize) -> String {
 }
 
 /// The branch children of `fork`, in declaration order.
-fn children_of<'a>(
-    inspection: &'a execution::inspect::RunInspection,
-    fork: &str,
-) -> Vec<&'a execution::inspect::InvocationInspection> {
+fn children_of<'a>(inspection: &'a RunInspection, fork: &str) -> Vec<&'a InvocationInspection> {
     let prefix = format!("branch:{fork}:");
     inspection
         .invocations

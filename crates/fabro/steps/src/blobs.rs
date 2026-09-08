@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{io, process};
+use std::{io, mem, process};
 
 use ir::Value;
 use smol_str::SmolStr;
@@ -34,6 +34,11 @@ pub const OFFLOAD_THRESHOLD: usize = 100 * 1024;
 /// definition. Readers that show Fabro's view of the context restore these
 /// values through [`restore_small`].
 pub const FAN_OUT_OFFLOAD_THRESHOLD: usize = 4 * 1024;
+
+const _: () = assert!(FAN_OUT_OFFLOAD_THRESHOLD < OFFLOAD_THRESHOLD);
+
+/// Distinguishes the partial files of concurrent writers in one process.
+static PARTIALS: AtomicU64 = AtomicU64::new(0);
 
 /// The reference prefix, Fabro's spelling.
 pub const BLOB_REF_PREFIX: &str = "blob://sha256/";
@@ -120,7 +125,6 @@ impl BlobStore for LocalBlobStore {
         // Write beside, then rename: a reader never sees a torn blob. Two
         // writers of one digest in one process (two forks snapshotting the
         // same value at once) each get their own partial file.
-        static PARTIALS: AtomicU64 = AtomicU64::new(0);
         let partial = self.dir.join(format!(
             "{digest}.partial-{}-{}",
             process::id(),
@@ -340,7 +344,7 @@ pub async fn restore_small<'a>(values: impl Iterator<Item = &'a mut Value>, stor
             }
         };
         if small {
-            let taken = std::mem::take(value);
+            let taken = mem::take(value);
             *value = hydrate(taken, store).await;
         }
     }
@@ -356,7 +360,7 @@ pub async fn restore_fabro_view(kv: &mut Value, nodes: &mut Value, store: &dyn B
         restore_small(map.values_mut(), store).await;
     }
     if nodes.is_string() {
-        let taken = std::mem::take(nodes);
+        let taken = mem::take(nodes);
         *nodes = hydrate(taken, store).await;
     }
 }
@@ -373,6 +377,8 @@ pub fn holds_ref(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs as std_fs};
+
     use super::*;
 
     #[test]
@@ -393,8 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn the_fan_out_threshold_is_below_fabros() {
-        assert!(FAN_OUT_OFFLOAD_THRESHOLD < OFFLOAD_THRESHOLD);
+    fn the_fan_out_size_test_follows_fabros_measure() {
         let list: Value = (0..300)
             .map(|i| serde_json::json!({ "name": format!("job-{i}") }))
             .collect();
@@ -406,8 +411,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_small_reference_is_restored_and_a_large_one_is_kept() {
-        let dir = std::env::temp_dir().join(format!("petri-blobs-restore-{}", process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = env::temp_dir().join(format!("petri-blobs-restore-{}", process::id()));
+        let _ = std_fs::remove_dir_all(&dir);
         let store = LocalBlobStore::new(&dir);
         let list: Value = (0..300)
             .map(|i| serde_json::json!({ "name": format!("job-{i}") }))
@@ -440,6 +445,6 @@ mod tests {
             Some(serde_json::to_vec(&list).expect("json").len() as u64),
             "the store sizes a blob without reading it"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std_fs::remove_dir_all(&dir);
     }
 }

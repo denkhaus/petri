@@ -15,6 +15,7 @@
 
 mod support;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -2378,7 +2379,7 @@ async fn a_fifty_item_fork_declares_small_children_and_prompts_still_see_the_lis
         })
         .collect();
     assert_eq!(children.len(), 50);
-    let mut list_refs = std::collections::BTreeSet::new();
+    let mut list_refs = BTreeSet::new();
     for child in &children {
         let declared = serde_json::to_string(&child["context"]).expect("json");
         assert!(
