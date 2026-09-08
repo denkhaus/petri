@@ -311,9 +311,12 @@ pub(crate) fn project_petri(
             stages_of(&histories(id)),
         ));
     }
+    // A joined list above Petri's fan-out threshold is published as a
+    // reference; the comparison is of the logical list.
     let joins: Vec<Value> = root_history
         .iter()
         .filter_map(|record| record["context_updates"].get("parallel.results").cloned())
+        .map(|value| inspect::resolve_reference(value, &finished.run_dir))
         .collect();
     let mut forks = Vec::new();
     for (position, fork) in fork_order.iter().enumerate() {

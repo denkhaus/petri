@@ -248,7 +248,10 @@ impl Step for PromptStep {
     const NAME: &'static str = "fabro/prompt";
     type Config = PromptConfig;
 
-    async fn run(&self, config: PromptConfig, mut ctx: StepCtx) -> Outcome {
+    async fn run(&self, mut config: PromptConfig, mut ctx: StepCtx) -> Outcome {
+        if let Some(store) = ctx.capability::<OutputStore>() {
+            blobs::restore_fabro_view(&mut config.kv, &mut config.nodes, store.0.as_ref()).await;
+        }
         let on_failure = config.on_failure;
         let routes = config.explicit_routes.clone();
         let kv = config.kv.clone();
@@ -571,6 +574,12 @@ impl Step for PromptStep {
         }
         if let Some(store) = &store {
             blobs::offload_updates(&mut stage.context_updates, store.0.as_ref()).await;
+            // The joined list follows the plain fan-in's rule: above the
+            // fan-out threshold it is published as a reference.
+            if let Some(results) = stage.context_updates.get_mut(RESULTS_KEY) {
+                blobs::offload_above(results, store.0.as_ref(), blobs::FAN_OUT_OFFLOAD_THRESHOLD)
+                    .await;
+            }
         }
         let _ = ctx
             .logs

@@ -65,6 +65,7 @@ fn commands_and_stubs(dir: &Path) -> Runtime {
     for kind in [AGENT_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND, STAGE_KIND] {
         registry.register_runner(Arc::new(StubStep::new(kind)));
     }
+    registry.register(fabro_steps::ForkStep);
     registry.register(fabro_steps::BranchStep);
     registry.register(fabro_steps::FanInStep);
     fabro_steps::services(runtime.steps(registry).options(options(dir)))

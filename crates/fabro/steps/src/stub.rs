@@ -24,7 +24,7 @@ use smol_str::SmolStr;
 use steps::{Step, StepCtx, StepRunner};
 
 use crate::outcome::{ExplicitRoutes, Stage};
-use crate::parallel::{BranchStep, FanInStep};
+use crate::parallel::{BranchStep, FanInStep, ForkStep};
 
 /// What a stub is told to return.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -259,8 +259,10 @@ pub fn register_stubs(runtime: Runtime) -> Runtime {
             calls.clone(),
         )));
     }
-    // The structural steps run for real: a dry run still starts each branch
-    // child (whose stages are simulated) and still joins the results.
+    // The structural steps run for real: a dry run still takes each fork's
+    // snapshot, still starts each branch child (whose stages are simulated)
+    // and still joins the results.
+    registry.register(ForkStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
     runtime.steps(registry)

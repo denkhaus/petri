@@ -3,9 +3,9 @@
 //! logs itself: what the command prints is what a user or an embedding host
 //! can see.
 
-use std::env;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::{env, fs};
 
 use serde_json::Value;
 
@@ -39,6 +39,36 @@ pub(crate) fn inspect(run_dir: &Path) -> Value {
             String::from_utf8_lossy(&output.stdout)
         )
     })
+}
+
+/// A value as a user resolves it: a `blob://sha256/<hex>` reference (Petri's
+/// output store, `<run_dir>/blobs/<hex>`, `#json` for a structured value) is
+/// read back; anything else is returned as it is. The blob directory is the
+/// one part of the run directory a reader opens by hand, because the inspect
+/// document shows the reference and names where it resolves.
+pub(crate) fn resolve_reference(value: Value, run_dir: &Path) -> Value {
+    let Value::String(text) = &value else {
+        return value;
+    };
+    let (body, json) = match text.strip_suffix("#json") {
+        Some(body) => (body, true),
+        None => (text.as_str(), false),
+    };
+    let Some(hex) = body.strip_prefix("blob://sha256/") else {
+        return value;
+    };
+    let path = run_dir.join("blobs").join(hex);
+    let bytes = fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "the reference {text} resolves under {}: {error}",
+            path.display()
+        )
+    });
+    if json {
+        serde_json::from_slice(&bytes).expect("a structured blob is JSON")
+    } else {
+        Value::String(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 /// The root invocation's final context from an inspect document.

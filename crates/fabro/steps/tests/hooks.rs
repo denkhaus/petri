@@ -16,8 +16,8 @@ use fabro_steps::agent::THREAD_EVENT;
 use fabro_steps::hooks::{REPORT_EVENT, WARNING_EVENT};
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::{
-    AGENT_KIND, BranchStep, CommandStep, FanInStep, HumanStep, PROMPT_KIND, StageStep, StubStep,
-    WAIT_KIND, WORKFLOW_KIND, register,
+    AGENT_KIND, BranchStep, CommandStep, FanInStep, ForkStep, HumanStep, PROMPT_KIND, StageStep,
+    StubStep, WAIT_KIND, WORKFLOW_KIND, register,
 };
 use frontend::{CompileInputs, Lowered, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
@@ -150,6 +150,7 @@ async fn run_coordinated(dir: &RunDir, lowered: Lowered) -> (ExecutionReport, Ar
     registry.register(CommandStep);
     registry.register(HumanStep);
     registry.register(StageStep);
+    registry.register(ForkStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
     let rt = fabro_steps::services(

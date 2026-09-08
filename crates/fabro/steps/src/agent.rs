@@ -242,7 +242,10 @@ impl Step for AgentStep {
     const NAME: &'static str = "fabro/agent";
     type Config = AgentConfig;
 
-    async fn run(&self, config: AgentConfig, mut ctx: StepCtx) -> Outcome {
+    async fn run(&self, mut config: AgentConfig, mut ctx: StepCtx) -> Outcome {
+        if let Some(store) = ctx.capability::<OutputStore>() {
+            blobs::restore_fabro_view(&mut config.kv, &mut config.nodes, store.0.as_ref()).await;
+        }
         let on_failure = config.on_failure;
         let routes = config.explicit_routes.clone();
         let kv = config.kv.clone();

@@ -51,7 +51,7 @@ pub use frontend_fabro::kinds::{
 };
 pub use human::HumanStep;
 pub use outcome::{ExplicitRoutes, Stage, fabro_outcome, reported_outcome};
-pub use parallel::{BranchStep, FanInStep};
+pub use parallel::{BranchStep, FanInStep, ForkStep};
 pub use prompt::PromptStep;
 use runtime::Runtime;
 pub use stage::StageStep;
@@ -82,6 +82,7 @@ pub fn register(runtime: Runtime) -> Runtime {
             .step(PromptStep)
             .step(WorkflowStep)
             .step(StageStep)
+            .step(ForkStep)
             .step(BranchStep)
             .step(FanInStep),
     )

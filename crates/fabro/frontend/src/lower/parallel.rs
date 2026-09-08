@@ -17,6 +17,17 @@
 //! expands to one placeholder item so the fan-in still fires and reports
 //! zero branches.
 //!
+//! The parallel node itself is the `fabro/fork` step. It runs once per
+//! visit, before any branch, and takes the fork snapshot of `kv` and, for
+//! agent or prompt targets, of the stage records. It offloads the `for_each`
+//! source list and every other large value to the run's output store, so
+//! the snapshot every branch child is declared from, and every clone's input
+//! token, hold references instead of O(items) copies. Its output is
+//! `{ snapshot, nodes }`, and the branch delegates read their `kv` and
+//! `nodes` from it. A snapshot key a branch's own graph reads by expression
+//! (the source list of a `for_each` nested inside a static branch) is named
+//! in the fork's `inline` list and stays inline.
+//!
 //! The fan-in the branches join at collects the envelopes in branch order,
 //! publishes `parallel.results` and `parallel.branch_count`, and takes the
 //! aggregate status. A join that is not a `tripleoctagon` gets a synthetic
@@ -28,7 +39,7 @@
 //! waiting out a retry backoff holds no slot. Fabro's normalization applies:
 //! missing, non-integer or negative is 4, zero is 1.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use frontend::Span;
@@ -43,7 +54,7 @@ use smol_str::SmolStr;
 use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, placeholder};
 use crate::kinds::{
     AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND,
-    PROMPT_KIND,
+    FORK_KIND, FORK_NODES_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
 };
 use crate::model::{AttrValue, EdgeDecl, NodeDecl, Workflow};
 
@@ -88,6 +99,9 @@ impl Ctx<'_> {
         // Each lowered parallel node's join, so an outer fork whose branch is
         // an inner fork continues from where the inner branches converged.
         let mut joins: HashMap<String, String> = HashMap::new();
+        // The snapshot keys each lowered parallel node's branch graphs read by
+        // expression, so an outer fork keeps them inline in its snapshot.
+        let mut reads: HashMap<String, BTreeSet<String>> = HashMap::new();
         while !pending.is_empty() {
             let ready = pending.iter().position(|node| {
                 workflow.outgoing(&node.id).iter().all(|edge| {
@@ -109,8 +123,11 @@ impl Ctx<'_> {
                 return;
             };
             let node = pending.remove(position);
-            if let Some(join) = self.lower_parallel(node, workflow, exit, goal_check, &joins) {
+            if let Some((join, inline)) =
+                self.lower_parallel(node, workflow, exit, goal_check, &joins, &reads)
+            {
                 joins.insert(node.id.clone(), join);
+                reads.insert(node.id.clone(), inline);
             }
             done.insert(node.id.clone());
         }
@@ -145,7 +162,8 @@ impl Ctx<'_> {
     }
 
     /// Lower one parallel node. Returns the workflow node its branches join
-    /// at, when it has one.
+    /// at, when it has one, and the snapshot keys its branch graphs read by
+    /// expression.
     fn lower_parallel(
         &mut self,
         node: &NodeDecl,
@@ -153,7 +171,8 @@ impl Ctx<'_> {
         exit: NodeId,
         goal_check: Option<NodeId>,
         joins: &HashMap<String, String>,
-    ) -> Option<String> {
+        reads: &HashMap<String, BTreeSet<String>>,
+    ) -> Option<(String, BTreeSet<String>)> {
         let edges = workflow.outgoing(&node.id);
         for edge in &edges {
             if edge
@@ -188,6 +207,7 @@ impl Ctx<'_> {
                 goal_check,
                 joins,
             )
+            .map(|join| (join, BTreeSet::new()))
         } else {
             self.static_branches(
                 node,
@@ -197,8 +217,42 @@ impl Ctx<'_> {
                 exit,
                 goal_check,
                 joins,
+                reads,
             )
         }
+    }
+
+    /// The `fabro/fork` step on the parallel node: the fork-time snapshot of
+    /// `kv` (and of the stage records when a branch target renders a
+    /// preamble), the `for_each` source key it offloads at any size, and the
+    /// keys it must keep inline.
+    fn fork_step(
+        &mut self,
+        fork_id: NodeId,
+        fork: &NodeDecl,
+        source: Option<&str>,
+        inline: &BTreeSet<String>,
+        with_nodes: bool,
+    ) {
+        let mut config = Map::new();
+        config.insert(
+            "label".into(),
+            Value::String(fork.attrs.text("label").unwrap_or_else(|| fork.id.clone())),
+        );
+        config.insert("node".into(), Value::String(fork.id.clone()));
+        let kv = self.b.exprs().var("kv");
+        config.insert("kv".into(), placeholder(kv));
+        if with_nodes {
+            let nodes = self.b.exprs().var("nodes");
+            config.insert("nodes".into(), placeholder(nodes));
+        }
+        if let Some(source) = source {
+            config.insert("source".into(), Value::String(source.to_owned()));
+        }
+        if !inline.is_empty() {
+            config.insert("inline".into(), json!(inline));
+        }
+        self.b.node_mut(fork_id).step = StepRef::new(FORK_KIND, Value::Object(config));
     }
 
     /// Fabro's `max_parallel`: missing, non-integer or negative is 4; zero
@@ -380,7 +434,8 @@ impl Ctx<'_> {
         exit: NodeId,
         goal_check: Option<NodeId>,
         joins: &HashMap<String, String>,
-    ) -> Option<String> {
+        reads: &HashMap<String, BTreeSet<String>>,
+    ) -> Option<(String, BTreeSet<String>)> {
         let mut ok = true;
         for edge in edges {
             let kind = self.kinds.get(&edge.to).copied();
@@ -403,6 +458,20 @@ impl Ctx<'_> {
         let (collector, join) =
             self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
         let fork_id = self.ids[&fork.id];
+        // A nested fork's branch graphs read their `for_each` lists from the
+        // context by expression, which cannot see through a reference: those
+        // keys stay inline in this fork's snapshot.
+        let mut inline: BTreeSet<String> = BTreeSet::new();
+        for edge in edges {
+            if self.kinds.get(&edge.to) != Some(&Kind::Parallel) {
+                continue;
+            }
+            inline.extend(workflow.node(&edge.to).and_then(for_each_key));
+            if let Some(nested) = reads.get(&edge.to) {
+                inline.extend(nested.iter().cloned());
+            }
+        }
+        let with_nodes = edges.iter().any(|edge| self.kinds[&edge.to].is_llm());
         // Every child graph first: a branch node is rewritten into its branch
         // step only after every branch copied its target as lowered, so a
         // duplicate target's child copies the stage and not a branch step.
@@ -456,7 +525,8 @@ impl Ctx<'_> {
             branch_nodes.push(branch_node);
         }
         self.b.fan_out(fork_id, &branch_nodes);
-        Some(join)
+        self.fork_step(fork_id, fork, None, &inline, with_nodes);
+        Some((join, inline))
     }
 
     #[expect(
@@ -475,11 +545,7 @@ impl Ctx<'_> {
         joins: &HashMap<String, String>,
     ) -> Option<String> {
         let span = fork.attrs.span_of("for_each", &fork.span);
-        let key = source
-            .strip_prefix("context.")
-            .unwrap_or(source)
-            .trim()
-            .to_string();
+        let key = source_key(source);
         if key.is_empty() {
             self.diags.error(
                 "fabro.for_each.source",
@@ -529,9 +595,11 @@ impl Ctx<'_> {
         let child = self.branch_child(&template.to, &[target], None)?;
         let fork_id = self.ids[&fork.id];
 
-        // The parallel node evaluates the item array and hands it on. An
-        // empty array becomes one placeholder item, so the template still
-        // fires once (starting no child) and the fan-in still joins.
+        // The expansion reads the item array from the context itself, so
+        // the fork's output (the snapshot every clone receives as its input
+        // token) never carries the list. An empty array becomes one
+        // placeholder item, so the template still fires once (starting no
+        // child) and the fan-in still joins.
         let items = {
             let exprs = self.b.exprs();
             let kv = exprs.var("kv");
@@ -547,7 +615,7 @@ impl Ctx<'_> {
             let placeholder_list = exprs.array(vec![marker]);
             exprs.cond(both, placeholder_list, items)
         };
-        self.b.node_mut(fork_id).step = StepRef::new("noop", placeholder(items));
+        self.fork_step(fork_id, fork, Some(&key), &BTreeSet::new(), true);
         let cap = {
             let exprs = self.b.exprs();
             let kv = exprs.var("kv");
@@ -569,8 +637,7 @@ impl Ctx<'_> {
             collector,
             kind,
         );
-        let input = self.b.exprs().var("input");
-        ir::parallel_for_each(&mut self.b, target, input, ExpandTarget::Node, None, false);
+        ir::parallel_for_each(&mut self.b, target, items, ExpandTarget::Node, None, false);
         Some(join)
     }
 
@@ -642,12 +709,23 @@ impl Ctx<'_> {
         config.insert("max_parallel".into(), Value::from(max_parallel));
         config.insert("child_digest".into(), Value::String(child.to_string()));
         config.insert("target_kind".into(), Value::String(kind.name().into()));
-        let kv = self.b.exprs().var("kv");
+        // The fork snapshot, from the fork step's output on the incoming
+        // token: the same object for every branch, with its large values
+        // offloaded once.
+        let kv = {
+            let exprs = self.b.exprs();
+            let input = exprs.var("input");
+            exprs.field(input, FORK_SNAPSHOT_FIELD)
+        };
         config.insert("kv".into(), placeholder(kv));
         let generation = self.b.exprs().var("generation");
         config.insert("generation".into(), placeholder(generation));
         if kind.is_llm() {
-            let nodes = self.b.exprs().var("nodes");
+            let nodes = {
+                let exprs = self.b.exprs();
+                let input = exprs.var("input");
+                exprs.field(input, FORK_NODES_FIELD)
+            };
             config.insert("nodes".into(), placeholder(nodes));
         }
         let payload = {
@@ -831,6 +909,23 @@ impl Ctx<'_> {
         self.children.push(graph);
         Some(digest)
     }
+}
+
+/// The context key a `for_each` attribute names: `context.K` or `K`.
+fn source_key(source: &str) -> String {
+    source
+        .strip_prefix("context.")
+        .unwrap_or(source)
+        .trim()
+        .to_string()
+}
+
+/// The `for_each` source key of a parallel node, when it has a non-empty one.
+fn for_each_key(node: &NodeDecl) -> Option<String> {
+    node.attrs
+        .text("for_each")
+        .map(|source| source_key(&source))
+        .filter(|key| !key.is_empty())
 }
 
 /// `get(kv, key)` in `table`.

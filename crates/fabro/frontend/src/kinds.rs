@@ -20,6 +20,11 @@ pub const HUMAN_KIND: StepKindId = StepKindId::new_static("fabro/human");
 pub const WAIT_KIND: StepKindId = StepKindId::new_static("fabro/wait");
 /// A manager loop (`house`): a nested workflow.
 pub const WORKFLOW_KIND: StepKindId = StepKindId::new_static("fabro/workflow");
+/// A parallel node (`component`) itself: the fork. It runs once per visit,
+/// takes the fork-time snapshot of the parent's context and stage records,
+/// offloads what a fan-out would otherwise copy into every branch child, and
+/// hands the snapshot to the branches as its output.
+pub const FORK_KIND: StepKindId = StepKindId::new_static("fabro/fork");
 /// One branch of a parallel node (`component`): the branch target runs in
 /// a child invocation with its own context and the parent's sandbox, and
 /// the step returns the branch's result envelope.
@@ -27,6 +32,12 @@ pub const BRANCH_KIND: StepKindId = StepKindId::new_static("fabro/branch");
 /// A plain fan-in (`tripleoctagon`): the barrier that collects the branch
 /// envelopes in branch order and publishes `parallel.results`.
 pub const FAN_IN_KIND: StepKindId = StepKindId::new_static("fabro/fan_in");
+/// The field of a fork's output that carries the fork snapshot of `kv`; the
+/// branch delegates read it as their `kv`.
+pub const FORK_SNAPSHOT_FIELD: &str = "snapshot";
+/// The field of a fork's output that carries the fork-time stage records,
+/// when a branch target is an agent or prompt node.
+pub const FORK_NODES_FIELD: &str = "nodes";
 /// The key of the one placeholder item a `for_each` over an empty list
 /// expands to, so the fan-in still fires. The branch step for it starts no
 /// child and the fan-in drops its envelope.
@@ -46,9 +57,10 @@ pub const GOAL_CHECK_NODE: &str = "goal_check";
 pub const MAX_OUTPUT_RETRIES: u64 = 100;
 
 /// The structural kinds a parallel node lowers to. A dry run registers the
-/// real steps for these: a branch still invokes its child, and a fan-in still
-/// collects, while the stages inside them are simulated.
-pub const STRUCTURAL: &[&StepKindId] = &[&BRANCH_KIND, &FAN_IN_KIND];
+/// real steps for these: a fork still takes its snapshot, a branch still
+/// invokes its child, and a fan-in still collects, while the stages inside
+/// them are simulated.
+pub const STRUCTURAL: &[&StepKindId] = &[&FORK_KIND, &BRANCH_KIND, &FAN_IN_KIND];
 
 /// Every stage kind the frontend emits, for a registry that stubs them all.
 pub const ALL: &[&StepKindId] = &[

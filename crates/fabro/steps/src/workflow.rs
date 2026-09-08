@@ -32,6 +32,7 @@ use steps::{Step, StepCtx};
 use tokio::sync::mpsc;
 use tokio::time;
 
+use crate::blobs::{self, OutputStore};
 use crate::outcome::Stage;
 
 pub const KIND: StepKindId = WORKFLOW_KIND;
@@ -206,7 +207,14 @@ impl Step for WorkflowStep {
                 .filter(|ms| *ms > 0)
                 .unwrap_or(DEFAULT_POLL_INTERVAL_MS),
         );
-        let parent_context = public_context(&config.kv);
+        let mut parent_context = public_context(&config.kv);
+        if let Some(store) = ctx.capability::<OutputStore>() {
+            // Inside a parallel branch the parent's context holds the fork's
+            // references; the child workflow starts from Fabro's view, so its
+            // own expressions (a `for_each` over an inherited list) read
+            // values.
+            blobs::restore_small(parent_context.values_mut(), store.0.as_ref()).await;
+        }
         // One durable call site per manager attempt: the slot names the node
         // and nothing else, so a re-dispatch of this attempt reattaches to the
         // child it declared, and a later attempt starts a fresh child.

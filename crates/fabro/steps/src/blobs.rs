@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{io, process};
 
 use ir::Value;
@@ -23,6 +24,16 @@ use tokio::fs;
 /// Fabro's offload threshold: a value whose serialized form is larger than
 /// this leaves the context for the blob store.
 pub const OFFLOAD_THRESHOLD: usize = 100 * 1024;
+
+/// Petri's lower threshold for the values a fan-out multiplies: a fork
+/// snapshot value is copied into every branch child's request and records,
+/// and the joined `parallel.results` list is copied into every later fork's
+/// snapshot. Above this size such a value leaves the context for the store so
+/// that the bytes per child do not grow with the item count. The `for_each`
+/// source list itself is offloaded at any size: it is O(items) by
+/// definition. Readers that show Fabro's view of the context restore these
+/// values through [`restore_small`].
+pub const FAN_OUT_OFFLOAD_THRESHOLD: usize = 4 * 1024;
 
 /// The reference prefix, Fabro's spelling.
 pub const BLOB_REF_PREFIX: &str = "blob://sha256/";
@@ -42,6 +53,13 @@ pub trait BlobStore: Send + Sync {
     async fn materialize(&self, digest: &str) -> Result<Option<PathBuf>, BlobError> {
         let _ = digest;
         Ok(None)
+    }
+
+    /// The size of the bytes behind a digest, or `None` when the store has
+    /// none. The default reads the blob; a store that can answer from
+    /// metadata overrides it.
+    async fn len(&self, digest: &str) -> Result<Option<u64>, BlobError> {
+        Ok(self.get(digest).await?.map(|bytes| bytes.len() as u64))
     }
 }
 
@@ -99,8 +117,15 @@ impl BlobStore for LocalBlobStore {
                 path: self.dir.clone(),
                 source,
             })?;
-        // Write beside, then rename: a reader never sees a torn blob.
-        let partial = self.dir.join(format!("{digest}.partial-{}", process::id()));
+        // Write beside, then rename: a reader never sees a torn blob. Two
+        // writers of one digest in one process (two forks snapshotting the
+        // same value at once) each get their own partial file.
+        static PARTIALS: AtomicU64 = AtomicU64::new(0);
+        let partial = self.dir.join(format!(
+            "{digest}.partial-{}-{}",
+            process::id(),
+            PARTIALS.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::write(&partial, bytes)
             .await
             .map_err(|source| BlobError::Io {
@@ -138,6 +163,20 @@ impl BlobStore for LocalBlobStore {
         let path = self.path_of(digest);
         Ok(fs::try_exists(&path).await.unwrap_or(false).then_some(path))
     }
+
+    async fn len(&self, digest: &str) -> Result<Option<u64>, BlobError> {
+        let path = self.path_of(digest);
+        match fs::metadata(&path).await {
+            Ok(meta) => Ok(Some(meta.len())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(BlobError::Io {
+                action: "stat",
+                digest: digest.to_string(),
+                path,
+                source,
+            }),
+        }
+    }
 }
 
 /// The durable reference for a digest.
@@ -156,16 +195,21 @@ pub fn parse_blob_ref(text: &str) -> Option<&str> {
 /// so a short string costs no serialization; anything else by its compact
 /// JSON size.
 pub fn is_large(value: &Value) -> bool {
+    is_larger_than(value, OFFLOAD_THRESHOLD)
+}
+
+/// Fabro's size test against a chosen threshold in bytes of compact JSON.
+pub fn is_larger_than(value: &Value, threshold: usize) -> bool {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
         Value::String(text) => {
-            if text.len().saturating_mul(6).saturating_add(2) <= OFFLOAD_THRESHOLD {
+            if text.len().saturating_mul(6).saturating_add(2) <= threshold {
                 return false;
             }
-            serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() > OFFLOAD_THRESHOLD)
+            serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() > threshold)
         }
         Value::Array(_) | Value::Object(_) => {
-            serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() > OFFLOAD_THRESHOLD)
+            serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() > threshold)
         }
     }
 }
@@ -184,7 +228,17 @@ fn encode(value: &Value) -> (Vec<u8>, bool) {
 /// that the store refuses, stays inline: offloading is best effort, as in
 /// Fabro, and the logical value is never lost.
 pub async fn offload_value(value: &mut Value, store: &dyn BlobStore) -> Option<String> {
-    if !is_large(value) {
+    offload_above(value, store, OFFLOAD_THRESHOLD).await
+}
+
+/// [`offload_value`] against a chosen threshold. A threshold of zero
+/// offloads every string, array and object; a scalar never leaves.
+pub async fn offload_above(
+    value: &mut Value,
+    store: &dyn BlobStore,
+    threshold: usize,
+) -> Option<String> {
+    if !is_larger_than(value, threshold) {
         return None;
     }
     let (bytes, is_text) = encode(value);
@@ -261,6 +315,52 @@ pub async fn hydrate(value: Value, store: &dyn BlobStore) -> Value {
     }
 }
 
+/// Fabro's view of a context: put back inline every top-level value that is
+/// a reference to a blob of at most [`OFFLOAD_THRESHOLD`] bytes. Fabro never
+/// offloads a value that small, so such a reference is Petri's own (a fork
+/// snapshot value, a `for_each` source list, a joined result list), and a
+/// reader that renders the context as Fabro would (an agent's preamble, a
+/// nested workflow's starting context) sees the value Fabro's reader sees.
+/// A reference to a larger blob stays a reference, as it is in Fabro. A
+/// value the store cannot find or read stays as it is.
+pub async fn restore_small<'a>(values: impl Iterator<Item = &'a mut Value>, store: &dyn BlobStore) {
+    for value in values {
+        let Value::String(text) = &*value else {
+            continue;
+        };
+        let Some((digest, _)) = split_ref(text) else {
+            continue;
+        };
+        let small = match store.len(digest).await {
+            Ok(Some(len)) => usize::try_from(len).is_ok_and(|len| len <= OFFLOAD_THRESHOLD),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(error = %error, "offloaded value could not be sized");
+                false
+            }
+        };
+        if small {
+            let taken = std::mem::take(value);
+            *value = hydrate(taken, store).await;
+        }
+    }
+}
+
+/// What an agent or prompt step renders its preamble from, as Fabro's would
+/// see it: the small references in `kv` restored ([`restore_small`]), and the
+/// fork-time stage records hydrated when the fork offloaded them whole (a
+/// Petri-only value, so its size does not matter). References inside a
+/// stage record stay references, as the preamble names them.
+pub async fn restore_fabro_view(kv: &mut Value, nodes: &mut Value, store: &dyn BlobStore) {
+    if let Value::Object(map) = kv {
+        restore_small(map.values_mut(), store).await;
+    }
+    if nodes.is_string() {
+        let taken = std::mem::take(nodes);
+        *nodes = hydrate(taken, store).await;
+    }
+}
+
 /// Whether a value is, or contains, a stored reference.
 pub fn holds_ref(value: &Value) -> bool {
     match value {
@@ -290,5 +390,56 @@ mod tests {
         assert_eq!(parse_blob_ref(&blob_ref(&digest)), Some(digest.as_str()));
         assert_eq!(parse_blob_ref("blob://sha256/short"), None);
         assert_eq!(parse_blob_ref("file:///x"), None);
+    }
+
+    #[test]
+    fn the_fan_out_threshold_is_below_fabros() {
+        assert!(FAN_OUT_OFFLOAD_THRESHOLD < OFFLOAD_THRESHOLD);
+        let list: Value = (0..300)
+            .map(|i| serde_json::json!({ "name": format!("job-{i}") }))
+            .collect();
+        assert!(is_larger_than(&list, FAN_OUT_OFFLOAD_THRESHOLD));
+        assert!(!is_large(&list));
+        assert!(is_larger_than(&serde_json::json!([]), 0));
+        assert!(!is_larger_than(&Value::from(7), 0));
+    }
+
+    #[tokio::test]
+    async fn a_small_reference_is_restored_and_a_large_one_is_kept() {
+        let dir = std::env::temp_dir().join(format!("petri-blobs-restore-{}", process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = LocalBlobStore::new(&dir);
+        let list: Value = (0..300)
+            .map(|i| serde_json::json!({ "name": format!("job-{i}") }))
+            .collect();
+        let mut small = list.clone();
+        let reference = offload_above(&mut small, &store, 0)
+            .await
+            .expect("offloaded");
+        assert!(reference.ends_with("#json"));
+        let mut big = Value::String("x".repeat(OFFLOAD_THRESHOLD + 1));
+        let big_ref = offload_value(&mut big, &store).await.expect("offloaded");
+        let mut scalar = Value::from(3);
+        assert_eq!(offload_above(&mut scalar, &store, 0).await, None);
+        let mut kv = serde_json::Map::new();
+        kv.insert("jobs".into(), small.clone());
+        kv.insert("big".into(), big.clone());
+        kv.insert("n".into(), scalar);
+        restore_small(kv.values_mut(), &store).await;
+        assert_eq!(kv["jobs"], list, "the fork-sized value is back inline");
+        assert_eq!(
+            kv["big"],
+            Value::String(big_ref),
+            "Fabro's own offload stays"
+        );
+        assert_eq!(kv["n"], Value::from(3));
+        let (digest, json) = split_ref(&reference).expect("a structured reference");
+        assert!(json);
+        assert_eq!(
+            store.len(digest).await.expect("stat"),
+            Some(serde_json::to_vec(&list).expect("json").len() as u64),
+            "the store sizes a blob without reading it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

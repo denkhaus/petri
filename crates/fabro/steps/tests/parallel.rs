@@ -12,8 +12,8 @@ use std::{fs, thread};
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run;
 use fabro_steps::{
-    AGENT_KIND, BranchStep, CommandStep, FanInStep, HUMAN_KIND, STAGE_KIND, StubStep, WAIT_KIND,
-    WORKFLOW_KIND,
+    AGENT_KIND, BranchStep, CommandStep, FanInStep, ForkStep, HUMAN_KIND, STAGE_KIND, StubStep,
+    WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend::{CompileInputs, Lowered, NoFiles};
 use runtime::driver::ExecutionReport;
@@ -56,6 +56,7 @@ fn runtime_retaining(dir: &Path, retention: Retention) -> Runtime {
     for kind in [AGENT_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND, STAGE_KIND] {
         registry.register_runner(Arc::new(StubStep::new(kind)));
     }
+    registry.register(ForkStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
     runtime.steps(registry).options(options)
