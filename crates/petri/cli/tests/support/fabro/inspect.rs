@@ -41,6 +41,33 @@ pub(crate) fn inspect(run_dir: &Path) -> Value {
     })
 }
 
+/// The `petri inspect --json` document for a run that may still be under
+/// way or interrupted: exit 0 (complete) and exit 1 (incomplete) both carry
+/// a document; anything else is a failure.
+pub(crate) fn inspect_incomplete(run_dir: &Path) -> Value {
+    let path = env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+    let output = Command::new(env!("CARGO_BIN_EXE_petri"))
+        .env_clear()
+        .env("PATH", path)
+        .args(["inspect", "--json", "--run-dir"])
+        .arg(run_dir)
+        .stdin(Stdio::null())
+        .output()
+        .expect("petri inspect runs");
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "petri inspect --run-dir {} failed:\n{}",
+        run_dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "petri inspect printed something other than JSON: {error}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
 /// A value as a user resolves it: a `blob://sha256/<hex>` reference (Petri's
 /// output store, `<run_dir>/blobs/<hex>`, `#json` for a structured value) is
 /// read back; anything else is returned as it is. The blob directory is the

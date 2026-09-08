@@ -188,6 +188,16 @@ impl Case {
         args: &[&str],
         launch: Launch,
     ) -> Finished {
+        self.launch(Target::Run(workflow), args, launch).await
+    }
+
+    /// `petri resume --run-dir <run dir> <args…>` on this case's run
+    /// directory, with the same isolated environment as [`Case::run`].
+    pub(crate) async fn resume_with(&self, args: &[&str], launch: Launch) -> Finished {
+        self.launch(Target::Resume, args, launch).await
+    }
+
+    async fn launch(&self, target: Target<'_>, args: &[&str], launch: Launch) -> Finished {
         // One file per layer: a layer is a whole catalog document with its
         // own `schema_version`, and `PETRI_LLM_CATALOG` takes a path list.
         let layers: Vec<PathBuf> = self
@@ -226,15 +236,18 @@ impl Case {
             };
             command.env(variable, &self.credential);
         }
-        command.arg("run");
+        command.arg(match target {
+            Target::Run(_) => "run",
+            Target::Resume => "resume",
+        });
         if self.docker_link.is_some() {
             command.args(["--backend", "docker"]);
         }
+        command.args(args).arg("--run-dir").arg(&self.run_dir);
+        if let Target::Run(workflow) = target {
+            command.arg(workflow);
+        }
         command
-            .args(args)
-            .arg("--run-dir")
-            .arg(&self.run_dir)
-            .arg(workflow)
             .stdin(if launch.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -322,6 +335,32 @@ impl Case {
                 }
             })
         });
+        // SIGKILL the `petri` process itself, by pid, once a marker exists:
+        // the crash a resume recovers from. Only the child this launch
+        // spawned is signalled; its sandbox plugin and scripts are left to
+        // notice the closed transport on their own.
+        let killer = launch.kill_when.map(|(marker, delay)| {
+            tokio::spawn(async move {
+                let deadline = Instant::now() + RUN_DEADLINE;
+                while !marker.exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the kill marker {} never appeared",
+                        marker.display()
+                    );
+                    sleep(Duration::from_millis(50)).await;
+                }
+                sleep(delay).await;
+                #[cfg(unix)]
+                {
+                    let _ = Command::new("kill")
+                        .args(["-KILL", &pid.to_string()])
+                        .stdin(Stdio::null())
+                        .status()
+                        .await;
+                }
+            })
+        });
         let mut stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let stderr_needle = launch.interrupt_when_stderr.clone();
@@ -356,6 +395,9 @@ impl Case {
         .await;
         if let Some(interrupt) = interrupt {
             interrupt.abort();
+        }
+        if let Some(killer) = killer {
+            killer.abort();
         }
         if let Some(appender) = appender {
             appender.abort();
@@ -423,6 +465,18 @@ pub(crate) struct Launch {
     /// Send SIGINT once a stderr line contains this text: the cancel a
     /// person sends when they see a gate waiting.
     pub(crate) interrupt_when_stderr: Option<String>,
+    /// SIGKILL the `petri` process, by pid, this long after the marker file
+    /// exists: the crash `petri resume` recovers from. The launch then ends
+    /// with no exit code.
+    pub(crate) kill_when: Option<(PathBuf, Duration)>,
+}
+
+/// Which command a launch runs.
+enum Target<'a> {
+    /// `petri run … <workflow>`.
+    Run(&'a Path),
+    /// `petri resume` on the case's run directory.
+    Resume,
 }
 
 /// A `PATH` with an empty directory in front and only the system binaries

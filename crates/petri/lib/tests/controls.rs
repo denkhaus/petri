@@ -33,6 +33,7 @@ use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
 use testkit::RunDir;
+use tokio::sync::Notify;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -527,7 +528,6 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     let starts = Arc::new(Starts::default());
     let sink = Arc::new(CollectingSink::default());
     let projector = EventProjector::new(sink.clone());
-    projector.follow_controls(&controls);
     let host_run = HostRun::new(lowered.graph.expect("lowers"))
         .observe(Arc::new(controls.clone()))
         .observe(projector.clone() as Arc<dyn ExecutionObserver>)
@@ -562,8 +562,8 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     }
     let receipt = projector.shutdown().await;
     assert!(receipt.is_clean(), "{receipt:?}");
-    // The pause and the unpause are live-only host notices with their own
-    // identity source, in order, before the first attempt started.
+    // The pause and the unpause are durable coordinator records, in order,
+    // before the first attempt started.
     let events = sink.events();
     let notices: Vec<_> = events
         .iter()
@@ -575,7 +575,7 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     assert!(
         notices
             .iter()
-            .all(|e| e.id.source == EventSource::Host && e.subject.is_none()),
+            .all(|e| e.id.source == EventSource::Coordinator && e.subject.is_none()),
         "{notices:#?}"
     );
     assert!(notices[0].id.seq < notices[1].id.seq);
@@ -589,11 +589,15 @@ async fn pause_holds_admission_and_unpause_releases_it() {
         .expect("unpaused");
     assert!(unpaused < first_attempt, "{events:#?}");
     let replayed = replay_run(dir.path()).expect("replays");
-    assert!(
-        !replayed
-            .iter()
-            .any(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused)),
-        "notices are live-only"
+    let durable: Vec<_> = replayed
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused))
+        .map(|e| e.body.clone())
+        .collect();
+    assert_eq!(
+        durable,
+        [EventBody::RunPaused, EventBody::RunUnpaused],
+        "replay carries both controls"
     );
 }
 
@@ -705,4 +709,193 @@ async fn a_steer_reaches_the_stage_and_does_not_answer_its_question() {
         Err(ControlError::NoSuchStage("gate".into()))
     );
     let _: BTreeMap<_, _> = controls.stages();
+}
+
+// ── Durable pause across resume ─────────────────────────────────────────────
+
+const PAUSE_TWO: &str = r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    a [shape=parallelogram, script="echo a > a.txt"]
+    b [shape=parallelogram, script="echo b > b.txt"]
+    start -> a -> b -> exit
+}"#;
+
+/// Pause the run the moment `node` starts, and say when it has finished.
+struct PauseOnStart {
+    node:     &'static str,
+    controls: ControlService,
+    finished: Arc<Notify>,
+}
+
+impl ExecutionObserver for PauseOnStart {
+    fn on_engine_record(&self, _: ExecutionId, record: &EventRecord, state: &EngineState) {
+        let named = |firing: &petri::ir::FiringId| {
+            state
+                .firing_node(*firing)
+                .and_then(|id| state.graph().node(id))
+                .is_some_and(|node| node.name == self.node)
+        };
+        match &record.event {
+            Event::StepStarted { firing, .. } if named(firing) => self.controls.pause(),
+            Event::StepFinished { firing, .. } if named(firing) => self.finished.notify_one(),
+            _ => {}
+        }
+    }
+
+    fn on_lifecycle(&self, _: &CoordinatorRecord) {}
+}
+
+/// Run [`PAUSE_TWO`] until `a` has finished under a pause taken as `a`
+/// started, then drop the run mid-flight: the crash. Returns the nodes that
+/// were admitted before it.
+async fn crash_while_paused(dir: &RunDir) -> Vec<String> {
+    let controls = ControlService::new();
+    let rt = runtime(dir).hooks(controls.hooks(None));
+    let lowered = lower(&rt, dir, PAUSE_TWO);
+    let finished = Arc::new(Notify::new());
+    let starts = Arc::new(Starts::default());
+    let host_run = HostRun::new(lowered.graph.expect("lowers"))
+        .observe(Arc::new(controls.clone()))
+        .observe(Arc::new(PauseOnStart {
+            node:     "a",
+            controls: controls.clone(),
+            finished: finished.clone(),
+        }))
+        .observe(starts.clone());
+    let wired = controls.clone();
+    let run = Box::pin(host::run_configured(&rt, host_run, |handle, _| {
+        wired.wire(handle);
+    }));
+    tokio::select! {
+        report = run => panic!(
+            "the run finished while paused: {:?}",
+            report.map(|report| report.status)
+        ),
+        () = async {
+            finished.notified().await;
+            // `b` reaches admission and is held; the pause record is durable.
+            sleep(Duration::from_millis(400)).await;
+        } => {}
+    }
+    assert!(controls.is_paused());
+    let started = starts.0.lock().expect("not poisoned").clone();
+    assert_eq!(started, ["start", "a"], "`b` was held at admission");
+    started
+}
+
+/// What a resumed run admitted during its first `wait`, and whether its
+/// control service came back paused.
+#[derive(Default)]
+struct ResumeObservation {
+    admitted: Vec<String>,
+    paused:   bool,
+}
+
+/// A pause survives the crash: the resumed run admits nothing until an
+/// unpause arrives through the new control service, then finishes.
+#[tokio::test]
+async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
+    let dir = RunDir::new("controls-pause-resume");
+    crash_while_paused(&dir).await;
+
+    let controls = ControlService::new();
+    let rt = runtime(&dir).hooks(controls.hooks(None));
+    let starts = Arc::new(Starts::default());
+    let observed = Arc::new(Mutex::new(ResumeObservation::default()));
+    let releaser = controls.clone();
+    let seen = starts.clone();
+    let record = observed.clone();
+    let report = host::resume_configured(
+        &rt,
+        Vec::new(),
+        vec![Arc::new(controls.clone()), starts.clone()],
+        |handle, _| {
+            releaser.wire(handle);
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(700)).await;
+                *record.lock().expect("not poisoned") = ResumeObservation {
+                    admitted: seen.0.lock().expect("not poisoned").clone(),
+                    paused:   releaser.is_paused(),
+                };
+                releaser.unpause();
+            });
+        },
+    )
+    .await
+    .expect("resumes");
+    let observed = observed.lock().expect("not poisoned");
+    assert!(
+        observed.paused,
+        "the resumed control service starts paused: the last recorded control was a pause"
+    );
+    assert_eq!(
+        observed.admitted,
+        Vec::<String>::new(),
+        "nothing was admitted while the resumed run waited for the unpause"
+    );
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let started = starts.0.lock().expect("not poisoned").clone();
+    assert_eq!(started, ["b", "exit"], "the resume continued at `b`");
+    for record in report.state.history() {
+        assert_eq!(record.attempt.raw(), 1, "{}", record.name);
+    }
+    assert!(dir.workspace().join("a.txt").exists());
+    assert!(dir.workspace().join("b.txt").exists());
+    // Both controls are durable coordinator records: the pause from the
+    // first process, the unpause from the second.
+    let replayed = replay_run(dir.path()).expect("replays");
+    let controls_seen: Vec<_> = replayed
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused))
+        .collect();
+    assert_eq!(controls_seen.len(), 2, "{replayed:#?}");
+    assert!(matches!(controls_seen[0].body, EventBody::RunPaused));
+    assert!(matches!(controls_seen[1].body, EventBody::RunUnpaused));
+    assert!(
+        controls_seen
+            .iter()
+            .all(|e| e.id.source == EventSource::Coordinator),
+        "{controls_seen:#?}"
+    );
+}
+
+/// A resumed run that came back paused can still be cancelled: the held
+/// firing settles as cancelled and no attempt starts.
+#[tokio::test]
+async fn a_paused_resumed_run_can_be_cancelled() {
+    let dir = RunDir::new("controls-pause-resume-cancel");
+    crash_while_paused(&dir).await;
+
+    let controls = ControlService::new();
+    let rt = runtime(&dir).hooks(controls.hooks(None));
+    let starts = Arc::new(Starts::default());
+    let canceller = controls.clone();
+    let report = host::resume_configured(
+        &rt,
+        Vec::new(),
+        vec![Arc::new(controls.clone()), starts.clone()],
+        |handle, _| {
+            canceller.wire(handle);
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(300)).await;
+                assert!(canceller.is_paused());
+                canceller.cancel().expect("the run is live");
+            });
+        },
+    )
+    .await
+    .expect("resumes");
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert_eq!(
+        starts.0.lock().expect("not poisoned").clone(),
+        Vec::<String>::new(),
+        "no attempt started"
+    );
+    assert!(!dir.workspace().join("b.txt").exists());
 }
