@@ -31,7 +31,7 @@ a run will execute.
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
 | `[run] goal` (text or `{ file }`) | the run goal when the graph sets no `goal` (the graph attribute wins, as in Fabro) |
-| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one |
+| `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. Below every file layer sits the launch: `petri run --model`, `--provider` (bound as the `petri.launch_model` and `petri.launch_provider` compile variables) fill the name and provider nothing else set, and a provider alone runs its default model from the runner's catalog, as `fabro run --provider` does. The pinned Fabro puts its launch layer above `workflow.toml`; Petri keeps the file layers in charge and uses the launch only as the last default |
 | `[run.model.fallbacks]` `"<model>" = ["provider:model", ...]` | Fabro's model-keyed fallback chains ("Model fallback" under "Native Pebble" below). The frontend checks the shape (a table keyed by a requested model; each entry a bare token, `provider:selector`, or the legacy `provider/selector`; a provider-qualified key is refused as Fabro refuses it, `fabro.model_fallbacks`) and puts the chains on every agent and prompt node config under `fallbacks`; the runner resolves them against its catalog at the first LLM stage |
 | `[run.execution]` `mode`, `approval` | launch defaults in `Graph.params["fabro.launch"]`: `mode = "dry_run"` runs the stub registry, `approval = "auto"` answers every question with its first choice. `--dry-run`, `--auto-approve`, `--interactive` and `--interview-script` win |
 | `[run.clone]` `enabled`, `depth` | the server clones the repository into the sandbox before the first stage | the root `start` stage checks the repository out into its workspace before anything runs there: a clone of the repository the run was loaded from (`--repo`, else the bundle root above the workflow file; the runtime binds it as the `petri.repository` compile variable, absolute) at `depth` commits (Fabro's default 100; `0` is the full history), packed on the host and delivered through the scope's executor to the environment's own `tar`, so a Docker workspace receives the same files as a host one. The clone's `origin` is the repository's own `origin` when it has one; nothing is fetched. `enabled = false` starts from an empty workspace. A file outside a Git work tree, or a host that lowers in memory without binding the variable, also starts empty, with a `checkout:` log line saying so. The launch parameter carries `clone` (`enabled`, `depth`, `repository`); a delivered checkout logs `checkout: <root> at <commit> (depth N)` and emits a `fabro.checkout` `StepEvent::Custom` (`repository`, `commit`, `depth`, `files`) |
@@ -48,9 +48,11 @@ a run will execute.
 Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
 `goal`), so the persisted graph is self-describing for replay. The launch
 settings `workflow.toml` declared land in `Graph.params["fabro.launch"]`
-(`sandbox_backend`, `dry_run`, `auto_approve`, the Daytona sizes) and the
-resolved environment in `Graph.params["fabro.environment"]`; the CLI reads
-them back through `Frontend::launch_settings` when it starts the run.
+(`sandbox_backend`, `dry_run`, `auto_approve`, the Daytona sizes), beside the
+launch-level model default as the host gave it (`model`, `provider`; `null`
+when the launch named none), and the resolved environment in
+`Graph.params["fabro.environment"]`; the CLI reads them back through
+`Frontend::launch_settings` when it starts the run.
 
 ## Imports
 
@@ -382,7 +384,9 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   the project instruction files of the working directory alone, selected by
   the model's agent profile as for an agent node, as a system message;
   `project_memory=false` reads none. `model` (or `default_model`, or
-  `[run.model] name`) is required; `provider` qualifies it; `reasoning_effort`,
+  `[run.model] name`, or `--model`/`--provider` at launch) is required;
+  `provider` qualifies it, and a provider with no model runs the provider's
+  catalog default; `reasoning_effort`,
   `speed` (`standard`, `fast`) and `max_tokens` ride the request; a JSON
   response format is requested when the catalog row offers it. A
   response that misses the contract gets a repair turn (the failed reply and
@@ -407,7 +411,9 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   `backend="api"` is the default, as Fabro's `select_run_backend` picks the
   native agent for a node that names no backend (the pinned bundles name
   none). It runs the Pebble Rust library in Petri. `model` (or graph
-  `default_model`, or `[run.model] name`) is required. `backend="acp"` starts
+  `default_model`, or `[run.model] name`, or `--model`/`--provider` at
+  launch; a provider with no model runs its catalog default) is required.
+  `backend="acp"` starts
   the Agent Client Protocol command from `acp.command` / `acp.config` (node,
   graph, then `PETRI_ACP_COMMAND`). The ACP command owns model selection;
   model settings are observer metadata. `provider` (or `default_provider`) qualifies the

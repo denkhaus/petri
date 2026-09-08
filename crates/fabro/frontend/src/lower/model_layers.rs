@@ -8,9 +8,13 @@
 //!
 //! This is how a bundle that declares no model, such as the pinned
 //! interview workflow, gets one: the operator's settings name it, as they
-//! do for a Fabro server.
+//! do for a Fabro server. Below every file layer sits the launch itself
+//! ([`LaunchModel`]): `petri run --model` and `--provider`, as `fabro run`
+//! takes them.
 
-use frontend::{CompileInputs, Diagnostics, FileSource, Span};
+use frontend::{
+    CompileInputs, Diagnostics, FileSource, LAUNCH_MODEL_VAR, LAUNCH_PROVIDER_VAR, Span,
+};
 use serde_json::Value;
 
 use super::workflow_toml::ModelDefaults;
@@ -29,6 +33,46 @@ pub(super) fn apply(
     }
     if let Some(Value::String(text)) = inputs.vars.get(SETTINGS_HOOKS_VAR) {
         fill(text, "settings.toml", model, diags);
+    }
+}
+
+/// The launch-level model default the host bound (`petri run --model`,
+/// `--provider`). It fills the model name and provider the file layers
+/// left unset, and the launch parameter records it as given, so the
+/// persisted graph says what the run was launched with. A provider alone
+/// leaves the name unset: the runner picks the provider's default model
+/// from its catalog, as Fabro's `--provider` does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaunchModel {
+    pub model:    Option<String>,
+    pub provider: Option<String>,
+}
+
+impl LaunchModel {
+    /// What the host bound, read from the compile variables.
+    pub fn from_inputs(inputs: &CompileInputs) -> Self {
+        let text = |name: &str| {
+            inputs
+                .vars
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned)
+        };
+        Self {
+            model:    text(LAUNCH_MODEL_VAR),
+            provider: text(LAUNCH_PROVIDER_VAR),
+        }
+    }
+
+    /// Fill `model`'s unset name and provider from the launch.
+    pub fn fill(&self, model: &mut ModelDefaults) {
+        if model.name.is_none() {
+            model.name.clone_from(&self.model);
+        }
+        if model.provider.is_none() {
+            model.provider.clone_from(&self.provider);
+        }
     }
 }
 

@@ -291,6 +291,18 @@ impl Step for AgentStep {
                     "pebble_unconfigured",
                 );
             };
+            // A provider with no model (`--provider` alone, or a bare
+            // `default_provider`) runs the provider's default model.
+            if let Err(message) = fallback::fill_provider_default(
+                &client.0,
+                &mut config.model,
+                config.provider.as_deref(),
+            ) {
+                return fail(
+                    format!("agent node `{}`: {message}", config.node),
+                    "bad_config",
+                );
+            }
             planned = match fallback::plan_for_agent(&config, &mut ctx, &client.0).await {
                 Ok(planned) => Some(planned),
                 Err(AgentError::Cancelled) => return Outcome::cancelled(),

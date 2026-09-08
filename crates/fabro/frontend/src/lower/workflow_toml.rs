@@ -41,6 +41,7 @@ use frontend::{Diagnostics, FileSource, Span};
 use serde_json::{Value, json};
 
 use super::compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
+use super::model_layers::LaunchModel;
 use super::secrets::{InterpolationError, interpolate};
 use super::skills;
 use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow, parse_duration};
@@ -69,6 +70,9 @@ pub struct RunSettings {
     pub goal:               Option<String>,
     /// `[run.model]` defaults for LLM nodes.
     pub model:              ModelDefaults,
+    /// The launch-level model default the host bound, as given; already
+    /// folded into `model` below the file layers.
+    pub launch:             LaunchModel,
     /// `[run.execution]`.
     pub dry_run:            bool,
     pub auto_approve:       bool,
@@ -177,6 +181,8 @@ impl RunSettings {
         json!({
             "dry_run": self.dry_run,
             "auto_approve": self.auto_approve,
+            "model": self.launch.model,
+            "provider": self.launch.provider,
             "clone": {
                 "enabled": self.clone.enabled,
                 "depth": self.clone.depth,

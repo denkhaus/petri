@@ -2478,3 +2478,93 @@ fn run_model_defaults_come_from_the_project_and_settings_layers() {
     assert_eq!(config["model"], json!("claude-sonnet-5"));
     assert_eq!(config["provider"], json!("anthropic"));
 }
+
+/// The launch-level model default (`petri run --model`, `--provider`, bound
+/// as the `petri.launch_*` compile variables) sits below every other layer:
+/// a node's own attribute, the graph's `default_model`, then `[run.model]`
+/// all beat it, and it fills only what none of them set. The launch
+/// parameter records what the launch gave, as given.
+#[test]
+fn the_launch_model_default_sits_below_every_layer() {
+    let launch = CompileInputs::new()
+        .with_var(frontend::LAUNCH_MODEL_VAR, "launch-model")
+        .with_var(frontend::LAUNCH_PROVIDER_VAR, "launch-provider");
+    let lower = |workflow_toml: &str, body: &str, inputs: &CompileInputs| {
+        let lowered = frontend_fabro::load(
+            "wf/workflow.fabro",
+            &dot(body),
+            &files(&[("wf/workflow.toml", workflow_toml)]),
+            inputs,
+        );
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        lowered.graph.expect("lowers")
+    };
+
+    // The node's attribute, then `[run.model]`, beat the launch.
+    let graph = lower(
+        "_version = 1\n[run.model]\nname = \"wf-model\"\n",
+        "a [prompt=\"x\", model=\"node-model\"]\nb [prompt=\"x\"]\nstart -> a -> b -> exit",
+        &launch,
+    );
+    assert_eq!(node(&graph, "a").step.config["model"], json!("node-model"));
+    assert_eq!(node(&graph, "b").step.config["model"], json!("wf-model"));
+    assert_eq!(
+        node(&graph, "b").step.config["provider"],
+        json!("launch-provider"),
+        "the launch fills the provider no layer set"
+    );
+    assert_eq!(
+        graph.params["fabro.launch"]["model"],
+        json!("launch-model"),
+        "the launch parameter records the launch as given"
+    );
+    assert_eq!(
+        graph.params["fabro.launch"]["provider"],
+        json!("launch-provider")
+    );
+
+    // The graph's `default_model` beats the launch.
+    let graph = lower(
+        "_version = 1\n",
+        "graph [default_model=\"graph-model\"]\na [prompt=\"x\"]\nstart -> a -> exit",
+        &launch,
+    );
+    assert_eq!(node(&graph, "a").step.config["model"], json!("graph-model"));
+
+    // Nothing else named a model: the launch's model and provider apply.
+    let graph = lower(
+        "_version = 1\n",
+        "a [prompt=\"x\"]\nstart -> a -> exit",
+        &launch,
+    );
+    let config = &node(&graph, "a").step.config;
+    assert_eq!(config["model"], json!("launch-model"));
+    assert_eq!(config["provider"], json!("launch-provider"));
+
+    // A provider alone: the node carries the provider and no model; the
+    // runner picks the provider's default model from its catalog.
+    let graph = lower(
+        "_version = 1\n",
+        "a [prompt=\"x\"]\nstart -> a -> exit",
+        &CompileInputs::new().with_var(frontend::LAUNCH_PROVIDER_VAR, "openai"),
+    );
+    let config = &node(&graph, "a").step.config;
+    assert_eq!(config.get("model"), None, "{config}");
+    assert_eq!(config["provider"], json!("openai"));
+    assert_eq!(graph.params["fabro.launch"]["model"], json!(null));
+    assert_eq!(graph.params["fabro.launch"]["provider"], json!("openai"));
+
+    // No launch: the parameter says so, and the node names nothing.
+    let graph = lower(
+        "_version = 1\n",
+        "a [prompt=\"x\"]\nstart -> a -> exit",
+        &CompileInputs::new(),
+    );
+    assert_eq!(node(&graph, "a").step.config.get("model"), None);
+    assert_eq!(graph.params["fabro.launch"]["model"], json!(null));
+    assert_eq!(graph.params["fabro.launch"]["provider"], json!(null));
+}
