@@ -116,15 +116,17 @@ impl ExecutionHooks for PauseHooks {
         }
     }
 
-    async fn run_finished(&self, finished: RunFinished) {
-        if let Some(inner) = &self.inner {
-            inner.run_finished(finished).await;
+    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
+        match &self.inner {
+            Some(inner) => inner.run_finished(finished).await,
+            None => Vec::new(),
         }
     }
 
-    async fn scope_released(&self, released: ScopeReleased) {
-        if let Some(inner) = &self.inner {
-            inner.scope_released(released).await;
+    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
+        match &self.inner {
+            Some(inner) => inner.scope_released(released).await,
+            None => Vec::new(),
         }
     }
 }

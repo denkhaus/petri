@@ -351,7 +351,7 @@ impl ExecutionHooks for HookAdapter {
         }
     }
 
-    async fn run_finished(&self, finished: RunFinished) {
+    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
         let report = self
             .run_level(HookPoint::RunFinished, RunFinishedPayload {
                 status:  finished.status,
@@ -359,9 +359,10 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         Self::log_run_level(&report);
+        Self::note(&report).into_iter().collect()
     }
 
-    async fn scope_released(&self, released: ScopeReleased) {
+    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
         let report = self
             .run_level(HookPoint::ScopeReleased, ScopeReleasedPayload {
                 scope:   released.scope,
@@ -372,13 +373,16 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         Self::log_run_level(&report);
+        Self::note(&report).into_iter().collect()
     }
 }
 
 impl HookAdapter {
     /// A point with no firing: the payload is the whole request. No decision
-    /// is consumed; the report is logged, not recorded (there is no firing
-    /// to record it under).
+    /// is consumed. The report comes back as the same `hook` note a firing's
+    /// report is; the driver hands it to the coordinator, which records it
+    /// at run level (`CoordinatorEvent::RunNote`), so `replay_run` and
+    /// `petri inspect` show it.
     async fn run_level(&self, point: HookPoint, payload: impl Serialize) -> HookReport {
         self.service
             .run(HookRequest {

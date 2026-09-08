@@ -642,6 +642,7 @@ impl Coordinator {
             )?;
             let report = driver.run().await;
             Self::check_report(execution, &report)?;
+            self.append_run_notes(execution, &report)?;
             if report.exit != recorded {
                 return Err(CoordinatorError::ConflictingExit { execution });
             }
@@ -807,6 +808,7 @@ impl Coordinator {
                     self.active_handles.remove(&done.execution);
                     self.execution_leases.remove(&done.execution);
                     Self::check_report(done.execution, &done.report)?;
+                    self.append_run_notes(done.execution, &done.report)?;
                     self.settle_descendants(done.invocation, running).await?;
                     self.drop_idle_gates();
                     completed.insert(done.invocation, done);
@@ -1061,6 +1063,23 @@ impl Coordinator {
                     self.last_root_report = Some(report);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Record what the execution's run-level hook points noted, in their
+    /// order, before the run's own finish is recorded.
+    fn append_run_notes(
+        &mut self,
+        execution: ExecutionId,
+        report: &driver::ExecutionReport,
+    ) -> Result<(), CoordinatorError> {
+        for note in &report.run_notes {
+            self.append(CoordinatorEvent::RunNote {
+                execution: Some(execution),
+                kind:      note.kind.clone(),
+                payload:   note.payload.clone(),
+            })?;
         }
         Ok(())
     }

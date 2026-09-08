@@ -259,6 +259,11 @@ fn lower_nested(
     };
     if stack.is_empty() {
         model_layers::apply(files, inputs, &mut settings.model, &mut diags);
+        // The launch itself, below every file layer: a node that names no
+        // model, in a graph with no default, in a run whose configuration
+        // names none, runs on what `petri run --model`/`--provider` gave.
+        settings.launch = model_layers::LaunchModel::from_inputs(inputs);
+        settings.launch.fill(&mut settings.model);
     }
     let repository = inputs
         .vars

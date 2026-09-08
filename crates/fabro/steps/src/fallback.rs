@@ -637,6 +637,42 @@ fn route_of(client: &Client, selector: &str) -> Option<Target> {
 
 /// The canonical provider and model id of a request: what the client would
 /// route to, else what any catalog provider lists under the selector.
+/// The model a node runs on when it names none but its provider is known:
+/// the provider's default model in the catalog, as Fabro's `--provider`
+/// alone picks the provider's default offering. `Err` says why there is
+/// none.
+pub(crate) fn provider_default_model(client: &Client, provider: &str) -> Result<String, String> {
+    let catalog = client.catalog();
+    let Ok(row) = catalog.provider(provider) else {
+        return Err(format!(
+            "provider `{provider}` is not in the catalog; set `model`, the graph's \
+             `default_model`, `[run.model] name` in workflow.toml, or `--model` at launch"
+        ));
+    };
+    row.default_model().map(str::to_owned).ok_or_else(|| {
+        format!(
+            "provider `{provider}` names no default model in the catalog; set `model`, the \
+             graph's `default_model`, `[run.model] name` in workflow.toml, or `--model` at launch"
+        )
+    })
+}
+
+/// Fill a node's model from its provider's catalog default when the node,
+/// the graph, the run configuration and the launch named a provider but no
+/// model. A node with a model, or with neither, is left as it is.
+pub(crate) fn fill_provider_default(
+    client: &Client,
+    model: &mut Option<String>,
+    provider: Option<&str>,
+) -> Result<(), String> {
+    if model.as_deref().is_none_or(|s| s.trim().is_empty())
+        && let Some(provider) = provider
+    {
+        *model = Some(provider_default_model(client, provider)?);
+    }
+    Ok(())
+}
+
 fn canonical_model(client: &Client, provider: Option<&str>, model: &str) -> Option<Target> {
     let selector = match provider {
         Some(provider) if !model.starts_with(&format!("{provider}/")) => {

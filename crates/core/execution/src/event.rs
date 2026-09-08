@@ -152,6 +152,19 @@ pub enum CoordinatorEvent {
     /// A run control released held and future attempts. Additive since
     /// format version 2.
     RunUnpaused,
+    /// A note from a run-level hook point (`run_finished`, `scope_released`):
+    /// no firing owns it, so it lives beside the run, appended from the
+    /// execution's report before `RunFinished`. Additive since format
+    /// version 2: a log without it replays as before, and `payload` reads
+    /// as `null` when absent.
+    RunNote {
+        /// The execution whose driver ran the point, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution: Option<ExecutionId>,
+        kind:      SmolStr,
+        #[serde(default)]
+        payload:   Value,
+    },
     RunFinished {
         status: RunStatus,
     },

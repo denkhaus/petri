@@ -56,9 +56,11 @@ subset; the unconfigured path stays the standalone runner.
   loop generation. A retry keeps the firing and advances `attempt`; a loop
   starts a new firing and advances `visit`.
 - **Branches.** `BranchRole` (`none`, `fork {branches}`, `member {fork,
-  index}`, `join {fork}`) on every subject of a static fan-out; for a
-  `for_each` fan-out the branch index is in the child invocation's
-  `meta.branch_role` and in the `fabro.parallel.*` payloads.
+  index}`, `join {fork}`) on every subject of a fan-out, static or
+  `for_each`: the parallel node is the fork, each branch node or clone a
+  member of its index, the fan-in the join. `fork_started`,
+  `branch_completed` and `fork_completed` carry the same `BranchRef {fork,
+  index}` for both; the `fabro.parallel.*` payloads carry the index as well.
 - **Interactions.** A question's identity is the node, the firing, its
   occurrence within the run, and the invocation path; `InterviewRequest` and
   `question_asked` carry it, `control_delivered {Answer}` closes it, and the

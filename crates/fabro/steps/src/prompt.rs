@@ -171,7 +171,7 @@ impl PromptConfig {
             .ok_or_else(|| {
                 format!(
                     "prompt node `{}` names no model: set `model`, the graph's `default_model`, \
-                     or `[run.model] name` in workflow.toml",
+                     `[run.model] name` in workflow.toml, or `--model`/`--provider` at launch",
                     self.node
                 )
             })?;
@@ -277,6 +277,18 @@ impl Step for PromptStep {
             Ok(contract) => contract,
             Err(message) => return fail(message, "bad_config"),
         };
+        // A provider with no model (`--provider` alone, or a bare
+        // `default_provider`) runs the provider's default model.
+        if let Err(message) = fallback::fill_provider_default(
+            &client.0,
+            &mut config.model,
+            config.provider.as_deref(),
+        ) {
+            return fail(
+                format!("prompt node `{}`: {message}", config.node),
+                "bad_config",
+            );
+        }
         let selector = match config.selector() {
             Ok(selector) => selector,
             Err(message) => return fail(message, "bad_config"),

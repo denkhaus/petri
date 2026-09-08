@@ -107,6 +107,21 @@ pub struct CoordinatorState {
     /// with admission held when it is.
     #[serde(default)]
     pub paused:           bool,
+    /// Every run-level note, in record order: the reports of hook points
+    /// that belong to no firing.
+    #[serde(default)]
+    pub run_notes:        Vec<RunNote>,
+}
+
+/// A run-level note as recorded: a hook report from a point with no firing
+/// (`run_finished`, `scope_released`), and the execution whose driver ran it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunNote {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionId>,
+    pub kind:      SmolStr,
+    #[serde(default)]
+    pub payload:   Value,
 }
 
 impl CoordinatorState {
@@ -304,8 +319,10 @@ impl CoordinatorState {
             }
             // A repeated pause or unpause is accepted and changes nothing:
             // the coordinator skips the redundant record, and a log that
-            // carries one still replays.
-            CoordinatorEvent::RunPaused | CoordinatorEvent::RunUnpaused => {}
+            // carries one still replays. A run-level note constrains nothing.
+            CoordinatorEvent::RunPaused
+            | CoordinatorEvent::RunUnpaused
+            | CoordinatorEvent::RunNote { .. } => {}
             CoordinatorEvent::RunFinished { status } => {
                 if self.run_status.is_some() {
                     return Err(StateError::DuplicateRunFinish);
@@ -422,6 +439,15 @@ impl CoordinatorState {
             }
             CoordinatorEvent::RunPaused => self.paused = true,
             CoordinatorEvent::RunUnpaused => self.paused = false,
+            CoordinatorEvent::RunNote {
+                execution,
+                kind,
+                payload,
+            } => self.run_notes.push(RunNote {
+                execution: *execution,
+                kind:      kind.clone(),
+                payload:   payload.clone(),
+            }),
             CoordinatorEvent::RunFinished { status } => {
                 self.run_status = Some(*status);
             }

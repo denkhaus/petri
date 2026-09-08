@@ -24,6 +24,16 @@ use crate::files::FileSource;
 /// it at load; a host that lowers in memory leaves it unset.
 pub const REPOSITORY_VAR: &str = "petri.repository";
 
+/// The compile variables `petri run --model` and `--provider` bind: a
+/// launch-level default for a format whose LLM nodes may name no model. A
+/// format that has such nodes reads them below its own defaults (a node's
+/// attribute, the graph's default, the run configuration) and records them
+/// in its launch parameter, so the persisted graph carries the launch. A
+/// provider alone means the provider's default model in the runner's
+/// catalog. Unset when the launch named none.
+pub const LAUNCH_MODEL_VAR: &str = "petri.launch_model";
+pub const LAUNCH_PROVIDER_VAR: &str = "petri.launch_provider";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompileInputs {
     pub inputs:             BTreeMap<SmolStr, Value>,

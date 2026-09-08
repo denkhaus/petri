@@ -71,6 +71,9 @@ fn summary(inspection: &RunInspection) -> String {
             "paused: yes (a resume holds admission until an unpause)"
         );
     }
+    if !inspection.notes.is_empty() {
+        let _ = writeln!(out, "notes: {} run-level note(s)", inspection.notes.len());
+    }
     let _ = writeln!(
         out,
         "root: invocation {} final execution {}",

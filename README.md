@@ -1134,6 +1134,17 @@ how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
 `{"$secret": "answer:<id>"}` reference. A non-empty `errors` list is exit
 code 4, whatever the engine status; the persisted run is not rewritten.
 
+**Model default.** `petri run --provider <id>` and `--model <name>` supply the
+model for a prompt or agent node that names none, in a graph with no
+`default_model`, in a run whose `workflow.toml` (and the project and settings
+layers) names none. `--provider` alone runs the provider's default model from
+the runner's catalog (`openai` is `gpt-5.6-sol`), as `fabro run --provider`
+does; the pinned interview bundle relies on this. The launch lands in the
+persisted root graph's `fabro.launch` parameter (`model`, `provider`, as
+given), so `petri inspect` and a replay see it; `petri replay` takes the same
+options so the graph lowers the same. `petri resume` needs nothing: the
+stored graph already carries the default.
+
 **Retention.** `--retain always|on-failure|never` decides what happens to the
 run's workspaces at teardown. The default is the workflow format's: Fabro
 keeps every workspace (its result is the files), other formats keep a failed

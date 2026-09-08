@@ -32,7 +32,8 @@ use execution::prune as sandbox_prune;
 use runtime::engine::{self, EventLog};
 use runtime::executor::Retention;
 use runtime::frontend::{
-    self, CompileInputs, Frontend, LaunchSettings, Lowered, WorkspaceRetention,
+    self, CompileInputs, Frontend, LAUNCH_MODEL_VAR, LAUNCH_PROVIDER_VAR, LaunchSettings, Lowered,
+    WorkspaceRetention,
 };
 use runtime::ir::Graph;
 use runtime::{DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
@@ -139,6 +140,35 @@ impl FileArgs {
     }
 }
 
+/// `--model` and `--provider`: the launch-level model default. A format
+/// whose LLM nodes may name no model reads them below its own defaults (the
+/// node, the graph, the run configuration); a format without such nodes
+/// ignores them.
+#[derive(Args, Default)]
+struct ModelArgs {
+    /// The model a prompt or agent node runs on when neither it, the graph
+    /// nor the workflow's run configuration names one.
+    #[arg(long)]
+    model:    Option<String>,
+    /// The provider of that model. Alone, the provider's default model in
+    /// the runner's catalog.
+    #[arg(long)]
+    provider: Option<String>,
+}
+
+impl ModelArgs {
+    /// Bind the launch default as compile variables, for the format to read.
+    fn bind(&self, mut inputs: CompileInputs) -> CompileInputs {
+        if let Some(model) = &self.model {
+            inputs = inputs.with_var(LAUNCH_MODEL_VAR, model.as_str());
+        }
+        if let Some(provider) = &self.provider {
+            inputs = inputs.with_var(LAUNCH_PROVIDER_VAR, provider.as_str());
+        }
+        inputs
+    }
+}
+
 #[derive(Args)]
 struct ProviderArgs {
     /// Where workflow processes run: host, docker, or daytona. Defaults to
@@ -229,6 +259,8 @@ enum Command {
         #[arg(long)]
         dry_run:  bool,
         #[command(flatten)]
+        model:    ModelArgs,
+        #[command(flatten)]
         provider: ProviderArgs,
         #[command(flatten)]
         runner:   RunnerArgs,
@@ -277,6 +309,10 @@ enum Command {
         target: FileArgs,
         /// The `events.json` a run wrote.
         log:    PathBuf,
+        /// The launch default the original run was given, so the graph
+        /// lowers the same.
+        #[command(flatten)]
+        model:  ModelArgs,
     },
 }
 
@@ -352,6 +388,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             run_dir,
             session,
             dry_run,
+            model,
             provider,
             runner,
         } => {
@@ -362,10 +399,11 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             // `[run.environment]`) supplies the defaults an explicit option
             // does not override. Both registries validate the same kinds, so
             // the graph is the same under either.
-            let lowered = match lowered_graph(&make(RuntimeMode::Real), &target, false, false) {
-                Ok(lowered) => lowered,
-                Err(code) => return code,
-            };
+            let lowered =
+                match lowered_graph(&make(RuntimeMode::Real), &target, &model, false, false) {
+                    Ok(lowered) => lowered,
+                    Err(code) => return code,
+                };
             let launch = launch_settings(&make(RuntimeMode::Real), &target, &lowered);
             let runtime_mode = if dry_run || launch.dry_run {
                 RuntimeMode::DryRun
@@ -412,7 +450,9 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             ))
             .await
         }
-        Command::Replay { target, log } => replay(&make(RuntimeMode::Real), &target, &log),
+        Command::Replay { target, log, model } => {
+            replay(&make(RuntimeMode::Real), &target, &model, &log)
+        }
         Command::Inspect { run_dir, json } => inspect::inspect(&run_dir, json),
         Command::Sandbox(SandboxCommand::Prune { run_dir, provider }) => {
             let mut options = RunOptions::new(&run_dir);
@@ -477,11 +517,12 @@ fn error_chain(error: &dyn Error) -> String {
 fn lowered_graph(
     rt: &Runtime,
     target: &FileArgs,
+    model: &ModelArgs,
     json: bool,
     validate_only: bool,
 ) -> Result<Lowered, ExitCode> {
     let mut inputs = match target.compile_inputs() {
-        Ok(inputs) => inputs,
+        Ok(inputs) => model.bind(inputs),
         Err(message) => {
             eprintln!("error: {message}");
             return Err(ExitCode::from(2));
@@ -537,7 +578,7 @@ fn lowered_graph(
     )
 )]
 fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> ExitCode {
-    let lowered = match lowered_graph(rt, target, json, true) {
+    let lowered = match lowered_graph(rt, target, &ModelArgs::default(), json, true) {
         Ok(lowered) => lowered,
         Err(code) => return code,
     };
@@ -613,8 +654,8 @@ async fn run(
     skip_all,
     fields(workflow_file = %target.file.display(), event_log = %log_path.display())
 )]
-fn replay(rt: &Runtime, target: &FileArgs, log_path: &Path) -> ExitCode {
-    let lowered = match lowered_graph(rt, target, false, false) {
+fn replay(rt: &Runtime, target: &FileArgs, model: &ModelArgs, log_path: &Path) -> ExitCode {
+    let lowered = match lowered_graph(rt, target, model, false, false) {
         Ok(lowered) => lowered,
         Err(code) => return code,
     };

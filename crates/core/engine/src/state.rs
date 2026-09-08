@@ -1026,6 +1026,16 @@ impl EngineState {
             .and_then(|runtime| runtime.clone_bindings.as_ref())
     }
 
+    /// The `for_each` item index a node was cloned for, when it is an
+    /// expansion clone: its position in the items array, the `index` bound
+    /// inside the clone. `None` for every other node.
+    pub fn clone_index(&self, node: NodeId) -> Option<u32> {
+        self.clone_bindings_for(node)?
+            .get("index")?
+            .as_u64()
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
     pub(crate) fn supersede(&mut self, node: NodeId) {
         if let Some(runtime) = self.node_runtime.get_mut(node.index()) {
             runtime.superseded = true;

@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use engine::EngineState;
+use engine::{EngineState, SpliceOrigin};
 use ir::{Attempt, FiringId, Generation, Graph, Node, NodeId, RunContext, ScopeId, Token, Value};
 
 /// One firing at one decision point, read-only.
@@ -96,13 +96,16 @@ pub use ir::placeholder::BRANCH_ROLE_META;
 /// the fork itself, is the join. Nodes after the join have no role from this
 /// fork. Back edges and restart edges are not followed, so a loop around the
 /// fork does not pull its predecessors into a branch. Nested forks keep the
-/// outer assignment for nodes both forks classify. Expansion clones are not
-/// analysed: a clone's role comes from its splice, which is the
-/// coordinator's business.
+/// outer assignment for nodes both forks classify. A `for_each` expansion's
+/// clones are not in the graph's static shape; [`Self::with_expansions`]
+/// reads them from the engine's splice records, so a map over a live state
+/// classifies both kinds of fan-out by one rule.
 #[derive(Clone, Debug, Default)]
 pub struct BranchMap {
-    roles: BTreeMap<NodeId, BranchRole>,
-    nodes: usize,
+    roles:      BTreeMap<NodeId, BranchRole>,
+    /// Expanded templates and the fork each one belongs to.
+    expansions: BTreeMap<NodeId, NodeId>,
+    nodes:      usize,
 }
 
 impl BranchMap {
@@ -185,8 +188,88 @@ impl BranchMap {
         }
         Self {
             roles,
+            expansions: BTreeMap::new(),
             nodes: graph.nodes.len(),
         }
+    }
+
+    /// Add the roles of every `for_each` expansion the engine has applied,
+    /// from its splice records. An expansion is a fork like a static one:
+    /// the fork is the one node whose forward arm reaches the expanded
+    /// template (the fan-out node a frontend lowers before it; Fabro's
+    /// `parallel` node), else the template itself when no single node does.
+    /// Each clone's nodes are members of the branch its item index names,
+    /// in item order, and the nodes outside the clones that a clone's
+    /// forward edges reach are the join. A node that already has a role
+    /// keeps it, as with nested static forks.
+    #[must_use]
+    pub fn with_expansions(mut self, state: &EngineState) -> Self {
+        let graph = state.graph();
+        for batch in state.splices() {
+            if batch.origin != SpliceOrigin::Expansion {
+                continue;
+            }
+            let template = batch.owner;
+            let mut clones: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
+            for node in &batch.nodes {
+                if let Some(index) = state.clone_index(*node) {
+                    clones.entry(index).or_default().push(*node);
+                }
+            }
+            let mut predecessors = graph
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.id != template
+                        && node
+                            .routing
+                            .edges()
+                            .any(|edge| forward(edge) && edge.to == template)
+                })
+                .map(|node| node.id);
+            let fork = match (predecessors.next(), predecessors.next()) {
+                (Some(fork), None) => fork,
+                _ => template,
+            };
+            let clone_nodes: BTreeSet<NodeId> = clones.values().flatten().copied().collect();
+            let mut joins: BTreeSet<NodeId> = BTreeSet::new();
+            for (index, nodes) in &clones {
+                for node in nodes {
+                    self.roles
+                        .entry(*node)
+                        .or_insert(BranchRole::Member(BranchRef {
+                            fork,
+                            index: *index,
+                        }));
+                    if let Some(node) = graph.node(*node) {
+                        joins.extend(
+                            node.routing
+                                .edges()
+                                .filter(|edge| {
+                                    forward(edge)
+                                        && edge.to != template
+                                        && !clone_nodes.contains(&edge.to)
+                                })
+                                .map(|edge| edge.to),
+                        );
+                    }
+                }
+            }
+            self.roles.entry(fork).or_insert(BranchRole::Fork {
+                branches: u32::try_from(clones.len()).unwrap_or(u32::MAX),
+            });
+            for join in joins {
+                self.roles.entry(join).or_insert(BranchRole::Join { fork });
+            }
+            self.expansions.insert(template, fork);
+        }
+        self
+    }
+
+    /// The fork an expansion belongs to, by the template it cloned; `None`
+    /// for a node no applied expansion cloned.
+    pub fn expansion_fork(&self, template: NodeId) -> Option<NodeId> {
+        self.expansions.get(&template).copied()
     }
 
     pub fn role(&self, node: NodeId) -> BranchRole {

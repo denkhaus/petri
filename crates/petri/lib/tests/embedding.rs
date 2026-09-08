@@ -1507,6 +1507,19 @@ async fn the_milestone_workflow_runs_through_the_embedding_boundary() {
     assert_eq!(timeline.node("fan").visits, 1);
     assert_eq!(timeline.node("fan").attempts.len(), 1);
 
+    // The `for_each` fan-out is a fork on the typed stream, with the same
+    // identities a static fork has: `fork_started` on the parallel node once
+    // the expansion knows its two items, each clone a member of its item's
+    // branch, `branch_completed` per clone and `fork_completed` at the
+    // fan-in in item order.
+    assert_eq!(timeline.node("fan").branch.as_deref(), Some("fork:2"));
+    assert_eq!(timeline.node("join").branch.as_deref(), Some("join"));
+    assert_eq!(timeline.forks, vec![("parallel".to_owned(), 2)]);
+    assert_eq!(timeline.joins, vec![("fan".to_owned(), vec![
+        (0, "job#0".to_owned(), "success".to_owned()),
+        (1, "job#1".to_owned(), "success".to_owned()),
+    ])]);
+
     // Result preparation: the check's failure became a partial success with
     // the original evidence recorded beside it, and the run went on.
     let check = timeline.node("check");

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use petri::execution::events::{EventBody, replay_run};
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Launch, sanitized_path};
@@ -2262,6 +2263,68 @@ fn finding_for(namespace: &str, item: &str, delay_ms: u64) -> Value {
     )
 }
 
+/// The typed fork lifecycle of a `for_each` fan-out, read back through the
+/// public event stream: one `fork_started` on the parallel node `fan` with
+/// one branch per item, one `branch_completed` per clone in item order, and
+/// one `fork_completed` at the fan-in with the results in the same order.
+fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
+    let events = replay_run(run_dir).expect("the run replays");
+    let mut forks = Vec::new();
+    let mut branches = Vec::new();
+    let mut joins = Vec::new();
+    for event in &events {
+        let node = event
+            .subject
+            .as_ref()
+            .map(|subject| subject.node.name.to_string())
+            .unwrap_or_default();
+        let kind = event
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.node.meta["kind"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        match &event.body {
+            EventBody::ForkStarted { branches: refs } => {
+                forks.push((node, kind, refs.iter().map(|b| b.index).collect::<Vec<_>>()));
+            }
+            EventBody::BranchCompleted { result } => {
+                branches.push((
+                    result.branch.index,
+                    result.node.name.to_string(),
+                    result.status.tag().to_owned(),
+                ));
+            }
+            EventBody::ForkCompleted { fork, results } => {
+                joins.push((
+                    node,
+                    kind,
+                    fork.name.to_string(),
+                    results.iter().map(|r| r.branch.index).collect::<Vec<_>>(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let indices: Vec<u32> = (0..items).collect();
+    assert_eq!(
+        forks,
+        vec![("fan".to_owned(), "parallel".to_owned(), indices.clone())],
+        "{events:#?}"
+    );
+    let expected: Vec<(u32, String, String)> = indices
+        .iter()
+        .map(|index| (*index, format!("job#{index}"), "success".to_owned()))
+        .collect();
+    assert_eq!(branches, expected);
+    assert_eq!(joins, vec![(
+        "join".to_owned(),
+        "parallel.fan_in".to_owned(),
+        "fan".to_owned(),
+        indices
+    )]);
+}
+
 fn results_file(case: &Case) -> Vec<Value> {
     let text = fs::read_to_string(case.workspace().join("results.json")).expect("results.json");
     serde_json::from_str::<Value>(&text)
@@ -2290,6 +2353,7 @@ async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
     );
     let finished = case.run(&workflow, &[]).await;
     finished.assert_code(0);
+    assert_for_each_fork_events(&finished.run_dir, 3);
     let results = results_file(&case);
     assert_eq!(results.len(), 3, "{results:?}");
     for (index, (envelope, item)) in results.iter().zip(["alpha", "beta", "gamma"]).enumerate() {
@@ -2585,4 +2649,168 @@ async fn nested_joins_report_the_inner_results_inside_the_outer_envelope() {
     }
     assert_eq!(context["parallel.branch_count"], json!(2));
     finished.assert_no_leaked_processes().await;
+}
+
+/// The pinned interview bundle names no model, and Fabro runs it with a
+/// launch-level default (`fabro run --provider openai` picks the provider's
+/// default model). `petri run --provider openai` does the same through the
+/// runner's catalog: the `summarize` prompt runs on `gpt-5.6-sol`, and the
+/// persisted root graph's `fabro.launch` parameter records the launch. With
+/// no launch default the prompt node fails and names the options.
+#[tokio::test]
+async fn the_unchanged_interview_bundle_runs_with_a_launch_provider() {
+    use support::fabro::bundle::Scenario;
+
+    let bundle = Scenario::stage("interview");
+    let workflow = bundle.file(".fabro/workflows/interview/workflow.fabro");
+    let workflow_toml = fs::read_to_string(bundle.file(".fabro/workflows/interview/workflow.toml"))
+        .expect("workflow.toml");
+    assert_eq!(
+        workflow_toml.trim(),
+        "_version = 1",
+        "the pinned bundle names no model"
+    );
+    let provider = Provider::OpenAi;
+    let entries = [
+        interview::entry("easy", "yes_no", interview::choice("Y")),
+        interview::entry("continue", "confirmation", interview::choice("Y")),
+        interview::entry("risks", "multiple_choice", interview::choice("R")),
+        interview::entry(
+            "blockers",
+            "multi_select",
+            json!({ "kind": "choices", "values": ["B"] }),
+        ),
+        interview::entry("nuance", "freeform", interview::text("ship on Friday")),
+    ];
+    let summarize = |namespace: &str| {
+        vec![scenario(
+            provider,
+            namespace,
+            "summarize",
+            model(provider),
+            "Summarize the full human interview",
+            text("SUMMARY: ship on Friday."),
+        )]
+    };
+
+    // `--provider openai`: the provider's default model.
+    let mut case = Case::new("launch-provider");
+    let twin = Twin::start(
+        provider,
+        &case.root.join("twins"),
+        summarize(&case.credential),
+    )
+    .await;
+    case.redirect(&twin);
+    let script = interview::write(&case.root, "interview", &entries);
+    let finished = case
+        .run(&workflow, &[
+            "--provider",
+            "openai",
+            "--interview-script",
+            script.to_str().expect("utf-8 path"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(twin.consumed(), ["summarize"]);
+    let requests = twin.requests_for(&case.credential);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["model"], json!("gpt-5.6-sol"));
+    let launch = launch_param(&finished.run_dir);
+    assert_eq!(launch["provider"], json!("openai"));
+    assert_eq!(launch["model"], json!(null));
+    twin.stop();
+
+    // `--provider` with `--model`: the named model, recorded as given.
+    let mut case = Case::new("launch-model");
+    let twin = Twin::start(
+        provider,
+        &case.root.join("twins"),
+        summarize(&case.credential),
+    )
+    .await;
+    case.redirect(&twin);
+    let script = interview::write(&case.root, "interview", &entries);
+    let finished = case
+        .run(&workflow, &[
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.6-sol",
+            "--interview-script",
+            script.to_str().expect("utf-8 path"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert_eq!(twin.consumed(), ["summarize"]);
+    let launch = launch_param(&finished.run_dir);
+    assert_eq!(launch["provider"], json!("openai"));
+    assert_eq!(launch["model"], json!("gpt-5.6-sol"));
+    twin.stop();
+
+    // No launch default: the prompt node fails before any model call and
+    // names the launch options. The bundle routes the failed `summarize` to
+    // `exit`, so the run itself still finishes.
+    let mut case = Case::new("launch-none");
+    let twin = Twin::start(
+        provider,
+        &case.root.join("twins"),
+        summarize(&case.credential),
+    )
+    .await;
+    case.redirect(&twin);
+    let script = interview::write(&case.root, "interview", &entries);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8 path"),
+        ])
+        .await;
+    assert!(!finished.timed_out, "the run exceeded its deadline");
+    assert!(
+        finished
+            .finished_nodes()
+            .contains(&("failure".to_owned(), "summarize".to_owned())),
+        "{}",
+        finished.stderr
+    );
+    let document = finished.inspect();
+    let failure =
+        document["executions"][0]["engine"]["context"]["nodes"]["summarize"]["failure"].to_string();
+    assert!(
+        failure.contains("names no model") && failure.contains("--provider"),
+        "{failure}"
+    );
+    assert_eq!(twin.consumed(), Vec::<String>::new());
+    let launch = launch_param(&finished.run_dir);
+    assert_eq!(launch["provider"], json!(null));
+    assert_eq!(launch["model"], json!(null));
+    twin.stop();
+}
+
+/// The `fabro.launch` parameter of the run's persisted root graph
+/// (`<run_dir>/graphs/<digest>.json`): the graph that carries it.
+fn launch_param(run_dir: &Path) -> Value {
+    let graphs = fs::read_dir(run_dir.join("graphs")).expect("the run's graphs directory");
+    let mut found = Vec::new();
+    for entry in graphs {
+        let path = entry.expect("graph entry").path();
+        let graph: Value =
+            serde_json::from_slice(&fs::read(&path).expect("graph file")).expect("graph JSON");
+        if let Some(launch) = graph["params"].get("fabro.launch") {
+            found.push(launch.clone());
+        }
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "one root graph carries the launch: {found:?}"
+    );
+    found.remove(0)
 }

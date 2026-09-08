@@ -402,14 +402,19 @@ pub trait ExecutionHooks: Send + Sync {
 
     /// The run ended, before its environments are released. Awaited: the
     /// release waits for it.
-    async fn run_finished(&self, finished: RunFinished) {
+    /// The notes come back to the driver, which hands them to its host in
+    /// the [`ExecutionReport`](crate::ExecutionReport) (`run_notes`); a
+    /// coordinator records them at run level, since no firing owns them.
+    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
         let _ = finished;
+        Vec::new()
     }
 
     /// A scope's environment is about to be released. Awaited: the release
-    /// waits for it.
-    async fn scope_released(&self, released: ScopeReleased) {
+    /// waits for it. Notes travel as for [`Self::run_finished`].
+    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
         let _ = released;
+        Vec::new()
     }
 }
 

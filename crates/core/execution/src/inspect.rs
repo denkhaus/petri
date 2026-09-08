@@ -42,6 +42,7 @@ use smol_str::SmolStr;
 
 use crate::host::EVENTS_FILE;
 use crate::interview::{InterviewReceipt, RECEIPT_FILE};
+use crate::state::RunNote;
 use crate::store::{execution_relative_dir, verify_graph_registry};
 use crate::{
     COORDINATOR_FILE, COORDINATOR_FORMAT_VERSION, CancelReason, CoordinatorState, EngineLogError,
@@ -130,6 +131,11 @@ pub struct RunInspection {
     /// Whether the last recorded run control was a pause: a resume starts
     /// with admission held. Additive in format version 1.
     pub paused: bool,
+    /// Every run-level note, in record order: a `hook` note is a run-level
+    /// hook report (`run_finished`, `scope_released`), with the execution
+    /// whose driver ran the point. Additive in format version 1.
+    #[serde(default)]
+    pub notes: Vec<RunNote>,
     pub root: RootInspection,
     pub middleware_chain: Vec<MiddlewareKey>,
     /// Every registered graph digest, in digest order.
@@ -481,6 +487,7 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
         status: state.run_status.map(|status| status.to_string()),
         incomplete,
         paused: state.paused,
+        notes: state.run_notes.clone(),
         root: RootInspection {
             invocation:       root_id,
             final_execution:  root.result.as_ref().map(|result| result.final_execution),

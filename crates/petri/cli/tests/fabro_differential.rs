@@ -195,7 +195,14 @@ async fn run_cell(cell: Cell) {
         .as_ref()
         .map(|entries| support::fabro::interview::write(&case.root, scenario, entries));
     let inputs = resolve_inputs(&cell.inputs, &petri_bundle.dir);
-    let mut args: Vec<String> = Vec::new();
+    // The launch-level model default, the same on both engines: Fabro gets
+    // `--provider` below, and a bundle that names no model (the pinned
+    // interview workflow) runs on the provider's default model.
+    let launch_provider = cell
+        .twins
+        .first()
+        .map_or("openai", |(provider, _)| provider.id());
+    let mut args: Vec<String> = vec!["--provider".into(), launch_provider.into()];
     for (key, value) in &inputs {
         args.push("--input".into());
         args.push(format!("{key}={value}"));
@@ -300,10 +307,7 @@ async fn run_cell(cell: Cell) {
             dir:      &fabro_bundle.dir,
             workflow: cell.workflow,
             inputs:   &input_refs,
-            provider: cell
-                .twins
-                .first()
-                .map_or("openai", |(provider, _)| provider.id()),
+            provider: launch_provider,
             script:   script_path.as_deref(),
             deadline: RUN_DEADLINE,
         };
