@@ -276,10 +276,12 @@ pub async fn resume_configured(
     finish_root(rt, coordinator, digest, graph).await
 }
 
-/// The root invocation's registered graph, read without taking the run
-/// lease: what a resume needs before the coordinator exists. `None` when the
-/// log has no root invocation yet.
-fn stored_root_graph(run_dir: &Path) -> Result<Option<Graph>, HostError> {
+/// The run's replayed coordinator state, read without taking the run
+/// lease: what a host checks before it resumes (has the run finished, is it
+/// paused) and what a resume needs before the coordinator exists. A torn
+/// final line is dropped, as the store would; a record that does not decode
+/// is the error.
+pub fn stored_state(run_dir: &Path) -> Result<CoordinatorState, HostError> {
     let log_path = run_dir.join(crate::COORDINATOR_FILE);
     let bytes = fs::read(&log_path).map_err(|e| HostError::Io {
         action: "read",
@@ -287,8 +289,14 @@ fn stored_root_graph(run_dir: &Path) -> Result<Option<Graph>, HostError> {
         source: e,
     })?;
     let decoded = decode_coordinator_log(&log_path, &bytes).map_err(CoordinatorError::from)?;
-    let state = CoordinatorState::replay(&decoded.records)
-        .map_err(|error| CoordinatorError::from(crate::StoreError::State(error)))?;
+    CoordinatorState::replay(&decoded.records)
+        .map_err(|error| CoordinatorError::from(crate::StoreError::State(error)).into())
+}
+
+/// The root invocation's registered graph, read without taking the run
+/// lease. `None` when the log has no root invocation yet.
+pub fn stored_root_graph(run_dir: &Path) -> Result<Option<Graph>, HostError> {
+    let state = stored_state(run_dir)?;
     let Some(root) = state.invocations.get(&InvocationId::ROOT) else {
         return Ok(None);
     };

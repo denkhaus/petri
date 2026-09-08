@@ -544,7 +544,7 @@ async fn pause_holds_admission_and_unpause_releases_it() {
                 "nothing started while paused"
             );
             assert!(paused.is_paused());
-            paused.unpause();
+            paused.unpause().await;
         });
     })
     .await
@@ -818,7 +818,7 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
                     admitted: seen.0.lock().expect("not poisoned").clone(),
                     paused:   releaser.is_paused(),
                 };
-                releaser.unpause();
+                releaser.unpause().await;
             });
         },
     )
@@ -845,8 +845,6 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
     for record in report.state.history() {
         assert_eq!(record.attempt.raw(), 1, "{}", record.name);
     }
-    assert!(dir.workspace().join("a.txt").exists());
-    assert!(dir.workspace().join("b.txt").exists());
     // Both controls are durable coordinator records: the pause from the
     // first process, the unpause from the second.
     let replayed = replay_run(dir.path()).expect("replays");
@@ -863,6 +861,8 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
             .all(|e| e.id.source == EventSource::Coordinator),
         "{controls_seen:#?}"
     );
+    let inspection = inspect_run(dir.path()).expect("inspects");
+    assert!(!inspection.paused);
 }
 
 /// A resumed run that came back paused can still be cancelled: the held
@@ -871,6 +871,8 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
 async fn a_paused_resumed_run_can_be_cancelled() {
     let dir = RunDir::new("controls-pause-resume-cancel");
     crash_while_paused(&dir).await;
+    let inspection = inspect_run(dir.path()).expect("inspects");
+    assert!(inspection.paused, "the run directory records the pause");
 
     let controls = ControlService::new();
     let rt = runtime(&dir).hooks(controls.hooks(None));

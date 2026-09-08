@@ -127,6 +127,9 @@ pub struct RunInspection {
     pub status: Option<String>,
     /// Every reason `complete` is false, in the order found.
     pub incomplete: Vec<String>,
+    /// Whether the last recorded run control was a pause: a resume starts
+    /// with admission held. Additive in format version 1.
+    pub paused: bool,
     pub root: RootInspection,
     pub middleware_chain: Vec<MiddlewareKey>,
     /// Every registered graph digest, in digest order.
@@ -477,6 +480,7 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
         complete: incomplete.is_empty(),
         status: state.run_status.map(|status| status.to_string()),
         incomplete,
+        paused: state.paused,
         root: RootInspection {
             invocation:       root_id,
             final_execution:  root.result.as_ref().map(|result| result.final_execution),

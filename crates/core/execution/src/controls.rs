@@ -15,8 +15,19 @@
 //! one identity, starts no attempt, and does not count as a visit twice.
 //! Work already running keeps running, and cancellation stays responsive: a
 //! cancel settles a firing that is waiting on admission as `Cancelled`, the
-//! way the engine always has. Pause state is live, not durable: a resumed run
-//! starts unpaused.
+//! way the engine always has.
+//!
+//! The pause is durable. Each pause and unpause is a coordinator record
+//! (`RunPaused`, `RunUnpaused`), so `replay_run` carries `run_paused` and
+//! `run_unpaused`, `petri inspect` reports `paused`, and a resume whose last
+//! recorded control was a pause starts with admission held: the service is
+//! handed the replayed state ([`ExecutionObserver::on_resumed`]) before the
+//! first attempt is admitted, and nothing runs until an unpause arrives. The
+//! two controls order themselves against the record differently. A pause
+//! holds admission at once and records after: holding early is safe. An
+//! unpause records first and releases after, so a crash right after an
+//! unpause never resumes paused; [`ControlService::unpause`] is therefore
+//! `async` and returns once the record is durable.
 //!
 //! # Steering
 //!
@@ -39,8 +50,8 @@ use steps::Steer;
 use tokio::sync::watch;
 
 use crate::{
-    CancelReason, CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, ExecutionId,
-    ExecutionObserver, InvocationId,
+    CancelReason, CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, CoordinatorState,
+    ExecutionId, ExecutionObserver, InvocationId,
 };
 
 /// The service's [`ExecutionHooks`]: `before_attempt` holds while paused and
@@ -195,12 +206,18 @@ impl ControlService {
         })
     }
 
+    /// Hand the service the run's handle. A pause taken before this point is
+    /// recorded now; a redundant record (the run resumed paused) is skipped
+    /// by the coordinator.
     pub fn wire(&self, handle: CoordinatorHandle) {
         *self
             .inner
             .handle
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(handle);
+            .unwrap_or_else(PoisonError::into_inner) = Some(handle.clone());
+        if self.is_paused() {
+            tokio::spawn(async move { handle.set_paused(true).await });
+        }
     }
 
     fn handle(&self) -> Result<CoordinatorHandle, ControlError> {
@@ -223,19 +240,32 @@ impl ControlService {
     }
 
     /// Hold every attempt not yet admitted. Running work is not interrupted.
+    /// The hold is immediate; the durable record follows through the
+    /// coordinator when the service is wired (else when it is).
     pub fn pause(&self) {
         if self.inner.paused.send_replace(true) {
             return;
         }
         tracing::info!("run paused: new attempts are held at admission");
+        if let Ok(handle) = self.handle() {
+            tokio::spawn(async move { handle.set_paused(true).await });
+        }
     }
 
-    /// Let held and future attempts through.
-    pub fn unpause(&self) {
-        if !self.inner.paused.send_replace(false) {
+    /// Let held and future attempts through. The unpause is recorded first
+    /// and admission is released once the record is durable, so a crash in
+    /// between resumes paused, never the other way round. Without a live
+    /// coordinator the release is immediate.
+    pub async fn unpause(&self) {
+        if !*self.inner.paused.borrow() {
             return;
         }
-        tracing::info!("run resumed");
+        if let Ok(handle) = self.handle() {
+            handle.set_paused(false).await;
+        }
+        if self.inner.paused.send_replace(false) {
+            tracing::info!("run resumed");
+        }
     }
 
     /// The live firing of a node instance, by name.
@@ -326,6 +356,21 @@ impl ExecutionObserver for ControlService {
         } = &record.event
         {
             self.inner.live().executions.insert(*execution, *invocation);
+        }
+    }
+
+    /// Start where the log left the run: held at admission when the last
+    /// recorded control was a pause, and knowing every declared execution.
+    fn on_resumed(&self, state: &CoordinatorState) {
+        {
+            let mut live = self.inner.live();
+            for (execution, declared) in &state.executions {
+                live.executions
+                    .insert(*execution, declared.declaration.invocation);
+            }
+        }
+        if state.paused && !self.inner.paused.send_replace(true) {
+            tracing::info!("resumed paused: attempts are held until an unpause");
         }
     }
 }

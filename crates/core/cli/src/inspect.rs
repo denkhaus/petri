@@ -65,6 +65,12 @@ fn summary(inspection: &RunInspection) -> String {
             " (incomplete)"
         }
     );
+    if inspection.paused {
+        let _ = writeln!(
+            out,
+            "paused: yes (a resume holds admission until an unpause)"
+        );
+    }
     let _ = writeln!(
         out,
         "root: invocation {} final execution {}",

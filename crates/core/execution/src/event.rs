@@ -145,6 +145,13 @@ pub enum CoordinatorEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason:     Option<CancelReason>,
     },
+    /// A run control held every attempt not yet admitted. Additive since
+    /// format version 2: a log without it replays as before, and a resume
+    /// starts paused when this is the last control recorded.
+    RunPaused,
+    /// A run control released held and future attempts. Additive since
+    /// format version 2.
+    RunUnpaused,
     RunFinished {
         status: RunStatus,
     },

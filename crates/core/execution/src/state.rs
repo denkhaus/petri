@@ -103,6 +103,10 @@ pub struct CoordinatorState {
     pub executions:       BTreeMap<ExecutionId, ExecutionState>,
     pub calls:            BTreeMap<ParentCallKey, InvocationId>,
     pub run_status:       Option<RunStatus>,
+    /// Whether the last recorded run control was a pause. A resume starts
+    /// with admission held when it is.
+    #[serde(default)]
+    pub paused:           bool,
 }
 
 impl CoordinatorState {
@@ -298,6 +302,10 @@ impl CoordinatorState {
                     return Err(StateError::UnknownInvocation(*invocation));
                 }
             }
+            // A repeated pause or unpause is accepted and changes nothing:
+            // the coordinator skips the redundant record, and a log that
+            // carries one still replays.
+            CoordinatorEvent::RunPaused | CoordinatorEvent::RunUnpaused => {}
             CoordinatorEvent::RunFinished { status } => {
                 if self.run_status.is_some() {
                     return Err(StateError::DuplicateRunFinish);
@@ -412,6 +420,8 @@ impl CoordinatorState {
                     state.cancel_reason.clone_from(reason);
                 }
             }
+            CoordinatorEvent::RunPaused => self.paused = true,
+            CoordinatorEvent::RunUnpaused => self.paused = false,
             CoordinatorEvent::RunFinished { status } => {
                 self.run_status = Some(*status);
             }

@@ -56,7 +56,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{fs, io, mem};
+use std::{fs, io};
 
 use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use driver::{BranchMap, BranchRef, BranchRole};
@@ -74,7 +74,6 @@ use steps::{ANSWER_KEY, Question};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::controls::ControlService;
 use crate::host::EVENTS_FILE;
 use crate::store::execution_relative_dir;
 use crate::{
@@ -96,13 +95,7 @@ pub const BACKEND_EVENT_KIND_KEY: &str = "kind";
 #[serde(tag = "log", rename_all = "snake_case")]
 pub enum EventSource {
     Coordinator,
-    Execution {
-        execution: ExecutionId,
-    },
-    /// A live-only notice the host's run services raised (a pause, an
-    /// unpause). Not in any log, so absent on replay; `seq` counts the
-    /// projector's notices.
-    Host,
+    Execution { execution: ExecutionId },
 }
 
 /// A stable identity for deduplication.
@@ -289,10 +282,12 @@ pub enum EventBody {
         stall_timeout_ms: u64,
         idle_ms:          u64,
     },
-    /// The run is paused: attempts not yet admitted are held. Live-only, from
-    /// the control service.
+    /// The run is paused: attempts not yet admitted are held. From the
+    /// coordinator's `RunPaused` record, so replay carries it and a resume
+    /// starts paused when it is the last control recorded.
     RunPaused,
-    /// The run is unpaused: held attempts proceed. Live-only.
+    /// The run is unpaused: held attempts proceed. From the coordinator's
+    /// `RunUnpaused` record.
     RunUnpaused,
     /// An executor-enforced attempt budget stopped counting: the attempt asked
     /// a question. `remaining_ms` is the active-work time left.
@@ -616,6 +611,8 @@ impl Projection {
                 }
                 return events;
             }
+            CoordinatorEvent::RunPaused => (None, None, EventBody::RunPaused),
+            CoordinatorEvent::RunUnpaused => (None, None, EventBody::RunUnpaused),
             CoordinatorEvent::RunFinished { status } => {
                 (None, None, EventBody::RunFinished { status: *status })
             }
@@ -1191,8 +1188,6 @@ enum PumpMessage {
 
 struct PumpState {
     projected: u64,
-    /// Live-only host notices published so far: their `seq`.
-    notices:   u64,
 }
 
 /// The live, lossless consumption path: an [`ExecutionObserver`] that
@@ -1203,8 +1198,6 @@ pub struct EventProjector {
     tx:         mpsc::UnboundedSender<PumpMessage>,
     pump:       Mutex<Option<JoinHandle<ProjectionReceipt>>>,
     counts:     Mutex<PumpState>,
-    /// Tasks that turn live host state into notices; ended at shutdown.
-    followers:  Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl EventProjector {
@@ -1265,11 +1258,7 @@ impl EventProjector {
             projection: Mutex::new(projection),
             tx,
             pump: Mutex::new(Some(pump)),
-            counts: Mutex::new(PumpState {
-                projected: 0,
-                notices:   0,
-            }),
-            followers: Mutex::new(Vec::new()),
+            counts: Mutex::new(PumpState { projected: 0 }),
         })
     }
 
@@ -1295,14 +1284,6 @@ impl EventProjector {
     /// End the stream, await the sink's last delivery and `finish`, and
     /// report. Call once, after the run.
     pub async fn shutdown(&self) -> ProjectionReceipt {
-        for follower in mem::take(
-            &mut *self
-                .followers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        ) {
-            follower.abort();
-        }
         let _ = self.tx.send(PumpMessage::Finish);
         let pump = self
             .pump
@@ -1321,63 +1302,6 @@ impl EventProjector {
                 ..ProjectionReceipt::default()
             },
         }
-    }
-}
-
-impl EventProjector {
-    /// Publish a live-only notice from the host's run services, with a
-    /// `Host` identity. Nothing durable backs it: replay does not carry it.
-    pub fn notice(&self, body: EventBody) {
-        let seq = {
-            let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
-            counts.notices += 1;
-            counts.notices
-        };
-        self.push(vec![RunEvent {
-            id: EventId {
-                source: EventSource::Host,
-                seq,
-                index: 0,
-            },
-            invocation: None,
-            execution: None,
-            parent: None,
-            subject: None,
-            observed_at: None,
-            body,
-        }]);
-    }
-
-    /// Publish `run_paused` and `run_unpaused` as the control service's
-    /// paused state changes, until the projector shuts down or the service
-    /// is dropped.
-    pub fn follow_controls(self: &Arc<Self>, controls: &ControlService) {
-        let mut paused = controls.paused_changes();
-        // The state as of now, taken before the task runs, so a change that
-        // lands in between is the first one reported.
-        let mut last = *paused.borrow_and_update();
-        let projector = Arc::downgrade(self);
-        let task = tokio::spawn(async move {
-            while paused.changed().await.is_ok() {
-                let now = *paused.borrow_and_update();
-                if now == last {
-                    continue;
-                }
-                last = now;
-                let Some(projector) = projector.upgrade() else {
-                    return;
-                };
-                projector.notice(if now {
-                    EventBody::RunPaused
-                } else {
-                    EventBody::RunUnpaused
-                });
-            }
-        });
-        self.followers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(task);
     }
 }
 

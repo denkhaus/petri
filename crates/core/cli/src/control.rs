@@ -153,7 +153,7 @@ async fn apply(service: &ControlService, line: &str) {
             Ok(())
         }
         ControlLine::Unpause => {
-            service.unpause();
+            service.unpause().await;
             Ok(())
         }
         ControlLine::Steer { node, text } => service.steer(node, text.clone()).await,

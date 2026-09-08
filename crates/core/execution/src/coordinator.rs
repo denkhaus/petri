@@ -265,11 +265,19 @@ struct ControlRequest {
     reply:     oneshot::Sender<driver::DeliverDisposition>,
 }
 
+/// A request to record a run-level pause or unpause. The reply fires once
+/// the record is durable, or at once when the state already says so.
+struct PauseRequest {
+    paused: bool,
+    reply:  oneshot::Sender<()>,
+}
+
 /// A cloneable control path for a coordinator that is currently running.
 #[derive(Clone)]
 pub struct CoordinatorHandle {
     cancel:  mpsc::UnboundedSender<CancelRequest>,
     control: mpsc::UnboundedSender<ControlRequest>,
+    pause:   mpsc::UnboundedSender<PauseRequest>,
 }
 
 impl CoordinatorHandle {
@@ -316,6 +324,20 @@ impl CoordinatorHandle {
             return driver::DeliverDisposition::NotLive;
         }
         result.await.unwrap_or(driver::DeliverDisposition::NotLive)
+    }
+
+    /// Record a run-level pause (`true`) or unpause (`false`) durably. The
+    /// returned future completes once the record is on disk and every
+    /// observer has seen it, so a caller that releases admission afterwards
+    /// never releases before the unpause is durable. A redundant request
+    /// (the state already says so) records nothing. Completes at once when
+    /// the coordinator is gone: nothing is left to record against.
+    pub async fn set_paused(&self, paused: bool) {
+        let (reply, recorded) = oneshot::channel();
+        if self.pause.send(PauseRequest { paused, reply }).is_err() {
+            return;
+        }
+        let _ = recorded.await;
     }
 }
 
@@ -389,6 +411,8 @@ pub struct Coordinator {
     cancel_rx:        mpsc::UnboundedReceiver<CancelRequest>,
     control_tx:       mpsc::UnboundedSender<ControlRequest>,
     control_rx:       mpsc::UnboundedReceiver<ControlRequest>,
+    pause_tx:         mpsc::UnboundedSender<PauseRequest>,
+    pause_rx:         mpsc::UnboundedReceiver<PauseRequest>,
     admit_tx:         mpsc::UnboundedSender<AdmittedSlot>,
     admit_rx:         mpsc::UnboundedReceiver<AdmittedSlot>,
     statuses:         BTreeMap<InvocationId, watch::Sender<InvocationStatus>>,
@@ -405,6 +429,9 @@ pub struct Coordinator {
     /// for one. Rebuilt on demand, so a resume recovers the accounting from
     /// the children it redispatches.
     gates:            BTreeMap<GateKey, ForkGate>,
+    /// Whether this coordinator continues a stored run: an observer that
+    /// attaches then is handed the replayed state first.
+    resumed:          bool,
     #[cfg(test)]
     release_gate:     Option<Arc<tests::ReleaseGate>>,
 }
@@ -422,7 +449,7 @@ impl Coordinator {
         let store = CoordinatorStore::create(runtime.run_dir(), keys)?;
         let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
         Ok(Self::assemble(
-            store, resources, runtime, middleware, options,
+            store, resources, runtime, middleware, options, false,
         ))
     }
 
@@ -456,7 +483,7 @@ impl Coordinator {
             resources.resolve(lease)?;
         }
         Ok((
-            Self::assemble(store, resources, runtime, middleware, options),
+            Self::assemble(store, resources, runtime, middleware, options, true),
             torn,
         ))
     }
@@ -467,10 +494,12 @@ impl Coordinator {
         runtime: RunRuntime,
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
+        resumed: bool,
     ) -> Self {
         let (start_tx, start_rx) = mpsc::channel(128);
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (pause_tx, pause_rx) = mpsc::unbounded_channel();
         let (admit_tx, admit_rx) = mpsc::unbounded_channel();
         // The records are the executor's ledger from here on: every
         // container scope it allocates is written here before it exists.
@@ -487,6 +516,8 @@ impl Coordinator {
             cancel_rx,
             control_tx,
             control_rx,
+            pause_tx,
+            pause_rx,
             admit_tx,
             admit_rx,
             statuses: BTreeMap::new(),
@@ -497,6 +528,7 @@ impl Coordinator {
             resources,
             execution_leases: BTreeMap::new(),
             gates: BTreeMap::new(),
+            resumed,
             #[cfg(test)]
             release_gate: None,
         }
@@ -515,6 +547,9 @@ impl Coordinator {
     pub fn observe(mut self, observer: Arc<dyn ExecutionObserver>) -> Self {
         for record in self.store.opening_records() {
             observer.on_lifecycle(record);
+        }
+        if self.resumed {
+            observer.on_resumed(self.store.state());
         }
         self.observers.push(observer);
         self
@@ -537,6 +572,7 @@ impl Coordinator {
         CoordinatorHandle {
             cancel:  self.cancel_tx.clone(),
             control: self.control_tx.clone(),
+            pause:   self.pause_tx.clone(),
         }
     }
 
@@ -804,6 +840,11 @@ impl Coordinator {
                 request = self.control_rx.recv() => {
                     if let Some(request) = request {
                         self.handle_control(request);
+                    }
+                }
+                request = self.pause_rx.recv() => {
+                    if let Some(request) = request {
+                        self.handle_pause(request)?;
                     }
                 }
             }
@@ -1463,6 +1504,23 @@ impl Coordinator {
             invocation,
             is_new: true,
         })
+    }
+
+    /// Record a pause or unpause when it changes the recorded state, then
+    /// tell the requester. The reply is sent after the append and after
+    /// every observer saw the record, so an observer-derived event is queued
+    /// before the requester acts on it.
+    fn handle_pause(&mut self, request: PauseRequest) -> Result<(), CoordinatorError> {
+        let PauseRequest { paused, reply } = request;
+        if self.store.state().paused != paused {
+            self.append(if paused {
+                CoordinatorEvent::RunPaused
+            } else {
+                CoordinatorEvent::RunUnpaused
+            })?;
+        }
+        let _ = reply.send(());
+        Ok(())
     }
 
     async fn handle_cancel(&mut self, request: CancelRequest) -> Result<(), CoordinatorError> {

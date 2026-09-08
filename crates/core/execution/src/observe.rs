@@ -11,13 +11,22 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::jsonl::clean_lines;
-use crate::{CoordinatorRecord, ExecutionId};
+use crate::{CoordinatorRecord, CoordinatorState, ExecutionId};
 
 #[async_trait::async_trait]
 pub trait ExecutionObserver: Send + Sync {
     fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState);
 
     fn on_lifecycle(&self, record: &CoordinatorRecord);
+
+    /// The replayed coordinator state an observer attaches to on resume, so
+    /// state it keeps from coordinator records (a pause, the live executions)
+    /// starts where the log left it. Records already on disk are not
+    /// redelivered; only records appended from here on reach `on_lifecycle`.
+    /// Not called on a fresh run.
+    fn on_resumed(&self, state: &CoordinatorState) {
+        let _ = state;
+    }
 }
 
 pub struct AddressedObserver {
