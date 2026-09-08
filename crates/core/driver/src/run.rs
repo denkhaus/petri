@@ -1238,7 +1238,7 @@ impl Driver {
     /// The branch roles over the graph as it stands now.
     fn branch_map(&mut self) -> BranchMap {
         if !self.branches.covers(self.engine.graph()) {
-            self.branches = BranchMap::of(self.engine.graph());
+            self.branches = BranchMap::of(self.engine.graph()).with_expansions(&self.engine);
         }
         self.branches.clone()
     }

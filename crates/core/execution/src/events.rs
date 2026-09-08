@@ -640,7 +640,7 @@ impl Projection {
     ) -> Vec<RunEvent> {
         let track = self.executions.entry(execution).or_default();
         if !track.branches.covers(state.graph()) {
-            track.branches = BranchMap::of(state.graph());
+            track.branches = BranchMap::of(state.graph()).with_expansions(state);
         }
         let mut out = Vec::new();
         let mut emit = |subject: Option<Subject>, body: EventBody| {
@@ -824,6 +824,40 @@ impl Projection {
                     max_parallel: splice.max_parallel,
                     fail_fast:    splice.fail_fast,
                 });
+                // An expansion is a fork: its clones are the branches, in
+                // item order, and the node that fanned out into the template
+                // (the branch map's fork for it) announces them once. The
+                // records of one engine turn are derived against the state
+                // after the whole turn, so the fork's own `route_applied`
+                // may already see its role and announce it above; the guard
+                // is the same firing set, so whichever record comes first
+                // announces and the other stays quiet. The join derives
+                // `branch_completed` and `fork_completed` from the same roles
+                // the static path uses.
+                if let Some(fork) = track.branches.expansion_fork(*node) {
+                    let firing = state
+                        .history()
+                        .iter()
+                        .rev()
+                        .find(|record| record.node == fork)
+                        .map(|record| record.firing);
+                    let announced = firing.is_some_and(|firing| !track.forks.insert(firing));
+                    let subject = firing
+                        .and_then(|firing| subject_of(state, track, firing))
+                        .or_else(|| node_subject(state, track, fork));
+                    let mut branches: Vec<BranchRef> = splice
+                        .clones
+                        .iter()
+                        .map(|clone| BranchRef {
+                            fork,
+                            index: clone.index,
+                        })
+                        .collect();
+                    branches.sort_by_key(|branch| branch.index);
+                    if !announced {
+                        emit(subject, EventBody::ForkStarted { branches });
+                    }
+                }
             }
             Event::CancelRequested { scope } => emit(None, EventBody::CancelRequested {
                 scope: Some(*scope),

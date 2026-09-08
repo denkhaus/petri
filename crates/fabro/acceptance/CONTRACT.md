@@ -504,9 +504,11 @@ names the decision record under `decisions/`; "gap" names the owner.
 6. The two deploy keys (`CODE_REVIEW_DEPLOY_KEY`, `FACTORY_DEPLOY_KEY`) do
    not exist; the owner creates them. Hosted CI has not run; the first run's
    required results are listed under the readiness gate checklist.
-7. A `for_each` fan-out emits no typed `fork_started`, `branch_completed`,
-   `fork_completed` (the `fabro.parallel.*` kinds and the invocation links
-   carry the facts). Owner Petri core (`execution::events`).
+7. Retired: a `for_each` fan-out emits `fork_started`, `branch_completed`
+   and `fork_completed` with the identities a static fork has (the parallel
+   node is the fork, the clones are members by item index, the fan-in is the
+   join), derived from the engine's applied splices by the same branch map
+   the static path uses (`EVENTS.md`).
 8. Pebble does not export its project-memory loader; `fabro_steps::memory`
    mirrors it for prompt nodes. Owner Pebble.
 9. Retired: the interview bundle's launch-level model default is

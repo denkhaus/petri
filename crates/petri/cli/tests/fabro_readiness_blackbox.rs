@@ -942,17 +942,14 @@ fn assert_public_projection(events: &[RunEvent]) {
     // The interaction and the fan-out. A `for_each` fan-out is an expansion:
     // the stream carries `node_expanded` with the clones and one
     // `invocation_declared` per branch child with its parent link and
-    // `meta.branch_role`; the `fork_started`/`branch_completed`/
-    // `fork_completed` derivation covers static forks only (a recorded gap
-    // of the event matrix, `EVENTS.md`).
+    // `meta.branch_role`; the expansion is a fork on the typed stream too:
+    // one `fork_started` on the parallel node, one `fork_completed` at the
+    // fan-in (`EVENTS.md`).
     assert_eq!(projected.questions, ["gate"]);
     assert_eq!(projected.expansions, 1, "{projected:#?}");
     assert_eq!(projected.branch_children, 2, "{projected:#?}");
-    assert_eq!(
-        projected.forks, 0,
-        "static-fork derivation, none for an expansion: {projected:#?}"
-    );
-    assert_eq!(projected.joins, 0, "{projected:#?}");
+    assert_eq!(projected.forks, 1, "{projected:#?}");
+    assert_eq!(projected.joins, 1, "{projected:#?}");
     assert!(projected.cancel_reason.is_none());
 }
 

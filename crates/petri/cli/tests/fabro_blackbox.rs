@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use petri::execution::events::{EventBody, replay_run};
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Launch, sanitized_path};
@@ -2262,6 +2263,68 @@ fn finding_for(namespace: &str, item: &str, delay_ms: u64) -> Value {
     )
 }
 
+/// The typed fork lifecycle of a `for_each` fan-out, read back through the
+/// public event stream: one `fork_started` on the parallel node `fan` with
+/// one branch per item, one `branch_completed` per clone in item order, and
+/// one `fork_completed` at the fan-in with the results in the same order.
+fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
+    let events = replay_run(run_dir).expect("the run replays");
+    let mut forks = Vec::new();
+    let mut branches = Vec::new();
+    let mut joins = Vec::new();
+    for event in &events {
+        let node = event
+            .subject
+            .as_ref()
+            .map(|subject| subject.node.name.to_string())
+            .unwrap_or_default();
+        let kind = event
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.node.meta["kind"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        match &event.body {
+            EventBody::ForkStarted { branches: refs } => {
+                forks.push((node, kind, refs.iter().map(|b| b.index).collect::<Vec<_>>()));
+            }
+            EventBody::BranchCompleted { result } => {
+                branches.push((
+                    result.branch.index,
+                    result.node.name.to_string(),
+                    result.status.tag().to_owned(),
+                ));
+            }
+            EventBody::ForkCompleted { fork, results } => {
+                joins.push((
+                    node,
+                    kind,
+                    fork.name.to_string(),
+                    results.iter().map(|r| r.branch.index).collect::<Vec<_>>(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let indices: Vec<u32> = (0..items).collect();
+    assert_eq!(
+        forks,
+        vec![("fan".to_owned(), "parallel".to_owned(), indices.clone())],
+        "{events:#?}"
+    );
+    let expected: Vec<(u32, String, String)> = indices
+        .iter()
+        .map(|index| (*index, format!("job#{index}"), "success".to_owned()))
+        .collect();
+    assert_eq!(branches, expected);
+    assert_eq!(joins, vec![(
+        "join".to_owned(),
+        "parallel.fan_in".to_owned(),
+        "fan".to_owned(),
+        indices
+    )]);
+}
+
 fn results_file(case: &Case) -> Vec<Value> {
     let text = fs::read_to_string(case.workspace().join("results.json")).expect("results.json");
     serde_json::from_str::<Value>(&text)
@@ -2290,6 +2353,7 @@ async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
     );
     let finished = case.run(&workflow, &[]).await;
     finished.assert_code(0);
+    assert_for_each_fork_events(&finished.run_dir, 3);
     let results = results_file(&case);
     assert_eq!(results.len(), 3, "{results:?}");
     for (index, (envelope, item)) in results.iter().zip(["alpha", "beta", "gamma"]).enumerate() {
