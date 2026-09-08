@@ -264,7 +264,7 @@ run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
 revisions" table (Pebble `408638fe`, lithos-llm `4aab27d`, sandbox-driver
 `5b9f9da`, twins `fedab8e`, Fabro `b648291`, the runner image
-`df708f910111`); `mise run check:pins` keeps every citation in agreement.
+`506a3433f7af`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
 `petri/readiness-batch` in each repository and is pinned: Pebble's
 summary-call usage accounting, `continue_prompt` for a failover with no

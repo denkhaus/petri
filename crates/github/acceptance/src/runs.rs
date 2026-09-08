@@ -42,15 +42,15 @@ use smol_str::SmolStr;
 /// (linux/amd64 and linux/arm64), so the daemon runs its own architecture
 /// natively and `runner.arch` reports it — an arm64 host is GitHub's
 /// `ubuntu-*-arm` runner, an amd64 host its `ubuntu-*` one.
-pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-df708f910111";
-pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-df708f910111";
-pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-df708f910111";
+pub const RUNNER_IMAGE_2404: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:slim-506a3433f7af";
+pub const RUNNER_IMAGE_2204: &str = "ghcr.io/lithoscomputer/ubuntu-22.04:slim-506a3433f7af";
+pub const RUNNER_IMAGE_2604: &str = "ghcr.io/lithoscomputer/ubuntu-26.04:slim-506a3433f7af";
 
 /// The dind flavor of the 24.04 runner: slim plus a Docker engine and its
 /// `start-docker` helper. The daemon is not running when the container starts
 /// — the session prologue brings it up lazily on the first step — and it needs
 /// `--privileged` ([`privilege`]). Only the 24.04 flavor is built.
-pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-df708f910111";
+pub const RUNNER_IMAGE_2404_DIND: &str = "ghcr.io/lithoscomputer/ubuntu-24.04:dind-506a3433f7af";
 
 /// The full 24.04 runner capture — GitHub's own runner filesystem, ~20 GB to
 /// pull once. Each architecture is a capture of GitHub's runner for that
