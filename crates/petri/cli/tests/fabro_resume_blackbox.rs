@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Launch};
+use tokio::time::{Instant, sleep};
 
 /// Three command nodes. `first` records each execution outside the
 /// workspace, `second` blocks on `marker` and records whether `unpaused`
@@ -60,14 +61,14 @@ fn root_nodes(document: &Value) -> &Value {
 
 /// Wait until `path` exists, within the harness deadline.
 async fn wait_for(path: &Path) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !path.exists() {
         assert!(
-            tokio::time::Instant::now() < deadline,
+            Instant::now() < deadline,
             "{} never appeared",
             path.display()
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -202,7 +203,7 @@ async fn a_paused_run_stays_paused_across_resume_until_unpaused() {
                     case.run_dir.join("run.json"),
                     case.root.join("unpaused"),
                     "yes\n".into(),
-                    Duration::from_millis(3000),
+                    Duration::from_secs(3),
                 ),
                 (
                     case.run_dir.join("run.json"),
@@ -261,7 +262,7 @@ async fn inspect_reports_a_paused_run_as_paused() {
                         Duration::from_millis(800),
                     ),
                 ],
-                kill_when: Some((case.root.join("first.log"), Duration::from_millis(1000))),
+                kill_when: Some((case.root.join("first.log"), Duration::from_secs(1))),
                 ..Launch::default()
             },
         )

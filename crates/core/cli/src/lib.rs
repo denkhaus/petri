@@ -31,7 +31,9 @@ use execution::controls::ControlService;
 use execution::prune as sandbox_prune;
 use runtime::engine::{self, EventLog};
 use runtime::executor::Retention;
-use runtime::frontend::{self, CompileInputs, LaunchSettings, Lowered, WorkspaceRetention};
+use runtime::frontend::{
+    self, CompileInputs, Frontend, LaunchSettings, Lowered, WorkspaceRetention,
+};
 use runtime::ir::Graph;
 use runtime::{DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
 use session::{Session, SessionArgs, Start};
@@ -380,7 +382,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             let default_retention = rt
                 .frontend_for(&target.file, target.format.as_deref())
                 .ok()
-                .map(|frontend| frontend.default_retention());
+                .map(Frontend::default_retention);
             let options =
                 session.run_options(&run_dir, default_retention, &launch, provider, runner);
             let answers = session.answers(&launch);

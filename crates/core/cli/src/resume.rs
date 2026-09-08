@@ -25,7 +25,7 @@ use std::process::ExitCode;
 use execution::controls::ControlService;
 use execution::{StoreError, hold_run_lease, host};
 use runtime::Runtime;
-use runtime::frontend::LaunchSettings;
+use runtime::frontend::{Frontend, LaunchSettings};
 
 use crate::control::TailFrom;
 use crate::session::{self, Session, SessionArgs, Start};
@@ -99,7 +99,7 @@ pub(crate) async fn resume(
     let launch = frontend.map_or_else(LaunchSettings::default, |frontend| {
         frontend.launch_settings(&graph)
     });
-    let default_retention = frontend.map(|frontend| frontend.default_retention());
+    let default_retention = frontend.map(Frontend::default_retention);
     let runtime_mode = if dry_run || launch.dry_run {
         RuntimeMode::DryRun
     } else {

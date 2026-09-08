@@ -28,7 +28,7 @@ use petri::fabro::{
 };
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
-use petri::ir::{Graph, RunStatus, Status, Value};
+use petri::ir::{FiringId, Graph, RunStatus, Status, Value};
 use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
@@ -730,7 +730,7 @@ struct PauseOnStart {
 
 impl ExecutionObserver for PauseOnStart {
     fn on_engine_record(&self, _: ExecutionId, record: &EventRecord, state: &EngineState) {
-        let named = |firing: &petri::ir::FiringId| {
+        let named = |firing: &FiringId| {
             state
                 .firing_node(*firing)
                 .and_then(|id| state.graph().node(id))
