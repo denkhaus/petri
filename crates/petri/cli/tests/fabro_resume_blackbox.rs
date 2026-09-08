@@ -117,8 +117,10 @@ async fn a_killed_run_resumes_without_repeating_finished_work() {
         ["once"],
         "`first` ran exactly once across the crash"
     );
+    // `second` was in flight at the crash, so the resume dispatches it again
+    // and it records "before" twice; the finished `first` is not repeated.
     assert_eq!(lines(&case.root.join("order")), [
-        "before", "second", "third"
+        "before", "before", "second", "third"
     ]);
 
     let document = resumed.inspect();
@@ -313,10 +315,11 @@ async fn a_gate_waiting_at_the_crash_asks_again_on_resume() {
         )
         .await;
     assert_eq!(killed.code, None, "killed by a signal\n{}", killed.stderr);
-    assert!(
-        killed.stderr.contains("Ship it?"),
-        "the gate asked before the crash\n{}",
-        killed.stderr
+    let interrupted = support::fabro::inspect::inspect_incomplete(&case.run_dir);
+    assert_eq!(
+        interrupted["executions"][0]["engine"]["live"][0]["node"],
+        json!("gate"),
+        "the gate was waiting when the process died\n{interrupted}"
     );
     assert!(!case.root.join("order").exists());
 

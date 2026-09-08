@@ -131,6 +131,14 @@ pub trait Frontend: Send + Sync {
         Vec::new()
     }
 
+    /// Whether `graph` is this format's own lowering, read from the graph
+    /// alone (a marker in its `params`). A host that holds only a stored
+    /// graph, such as `petri resume`, asks this to find the format whose
+    /// launch settings and defaults apply. Default: no.
+    fn claims_graph(&self, _graph: &ir::Graph) -> bool {
+        false
+    }
+
     /// The launch settings the workflow's own configuration declares, read
     /// from the lowered graph (its `params`), so a persisted graph carries
     /// them. Default: none.

@@ -140,6 +140,11 @@ impl Frontend for Fabro {
 
     /// The launch settings `workflow.toml` declared, read back from the
     /// persisted graph's `fabro.launch` parameter.
+    /// Every root graph this frontend lowers carries the launch parameter.
+    fn claims_graph(&self, graph: &ir::Graph) -> bool {
+        graph.params.contains_key(LAUNCH_PARAM)
+    }
+
     fn launch_settings(&self, graph: &ir::Graph) -> LaunchSettings {
         let Some(launch) = graph.params.get(LAUNCH_PARAM) else {
             return LaunchSettings::default();

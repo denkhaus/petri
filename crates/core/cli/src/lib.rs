@@ -18,33 +18,26 @@
 pub mod answer;
 pub mod control;
 mod inspect;
+mod resume;
+mod session;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
-use std::sync::Arc;
 use std::{env, fs};
 
-use answer::{AutoApproveInterviewer, ScriptedInterviewer, TerminalInterviewer};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use execution::controls::ControlService;
-use execution::host::HostRun;
-use execution::watchdog::StallWatchdog;
-use execution::{
-    CoordinatorHandle, InterviewDispatcher, InterviewReceipt, Interviewer, LeaseState,
-    RECEIPT_FILE, ResourceStore, host, prune as sandbox_prune,
-};
+use execution::prune as sandbox_prune;
 use runtime::engine::{self, EventLog};
 use runtime::executor::Retention;
 use runtime::frontend::{self, CompileInputs, LaunchSettings, Lowered, WorkspaceRetention};
-use runtime::ir::{Graph, RunStatus};
-use runtime::{
-    DaytonaResources, DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend,
-    SandboxOptions,
-};
-use tokio::signal;
-use tokio_util::sync::CancellationToken;
-use tracing::field::{Empty, display};
+use runtime::ir::Graph;
+use runtime::{DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
+use session::{Session, SessionArgs, Start};
+use tracing::field::Empty;
+
+use crate::control::TailFrom;
 
 #[derive(Parser)]
 #[command(name = "petri", version, about = "A token-flow workflow engine")]
@@ -221,45 +214,41 @@ enum Command {
     /// Run a workflow file to completion.
     Run {
         #[command(flatten)]
-        target:           FileArgs,
+        target:   FileArgs,
         /// Where workspaces, logs and `events.json` go. Defaults to a fresh
         /// directory under the system temp dir, printed at start.
         #[arg(long)]
-        run_dir:          Option<PathBuf>,
-        /// Do not echo step output.
-        #[arg(long)]
-        quiet:            bool,
-        /// Answer a step's question — a human gate — from the terminal:
-        /// the question is printed and one line is read from stdin.
-        #[arg(long, conflicts_with_all = ["auto_approve", "interview_script"])]
-        interactive:      bool,
-        /// Answer every step's question with its default choice.
-        #[arg(long, conflicts_with = "interview_script")]
-        auto_approve:     bool,
-        /// Answer every step's question from a JSON interview script, and
-        /// fail the run when a question matches no entry or a required entry
-        /// goes unused. See `cli::answer` for the format.
-        #[arg(long, value_name = "FILE")]
-        interview_script: Option<PathBuf>,
-        /// When to keep the run's workspaces: always, on-failure, or never.
-        /// Defaults to what the workflow's format declares (Fabro: always;
-        /// other formats: on-failure).
-        #[arg(long, value_name = "POLICY")]
-        retain:           Option<Retain>,
-        /// Read run controls from this file while the run is live: one
-        /// `pause`, `unpause`, `steer <node> <text>` or `cancel` per appended
-        /// line. See `cli::control` for the format.
-        #[arg(long, value_name = "FILE")]
-        control:          Option<PathBuf>,
+        run_dir:  Option<PathBuf>,
+        #[command(flatten)]
+        session:  SessionArgs,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
         /// choice.
         #[arg(long)]
-        dry_run:          bool,
+        dry_run:  bool,
         #[command(flatten)]
-        provider:         ProviderArgs,
+        provider: ProviderArgs,
         #[command(flatten)]
-        runner:           RunnerArgs,
+        runner:   RunnerArgs,
+    },
+    /// Continue an interrupted run from its run directory. Needs no workflow
+    /// file: the run directory is the record. Finished work is not repeated;
+    /// a gate that was waiting asks again; a paused run stays paused until an
+    /// unpause arrives through `--control`. Refuses a finished run, a run
+    /// another process holds, and a run directory that does not decode.
+    Resume {
+        /// The run's directory.
+        #[arg(long)]
+        run_dir:  PathBuf,
+        #[command(flatten)]
+        session:  SessionArgs,
+        /// Continue with the simulated step kinds, as `run --dry-run` would.
+        #[arg(long)]
+        dry_run:  bool,
+        #[command(flatten)]
+        provider: ProviderArgs,
+        #[command(flatten)]
+        runner:   RunnerArgs,
     },
     /// Reconstruct a run from its run directory's durable files and print
     /// the result. Read-only: nothing starts, nothing is written.
@@ -334,13 +323,6 @@ impl From<WorkspaceRetention> for Retain {
     }
 }
 
-/// How `petri run` answers questions.
-enum Answers {
-    Interactive,
-    AutoApprove,
-    Scripted(PathBuf),
-}
-
 /// Which runtime a command wants from the factory it is handed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -366,12 +348,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
         Command::Run {
             target,
             run_dir,
-            quiet,
-            interactive,
-            auto_approve,
-            interview_script,
-            retain,
-            control,
+            session,
             dry_run,
             provider,
             runner,
@@ -400,49 +377,36 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             let controls = ControlService::new();
             let hooks = controls.hooks(rt.installed_hooks());
             let rt = rt.hooks(hooks);
-            let mut options = RunOptions::new(&run_dir);
-            options.echo = !quiet;
-            options.retention = retain
-                .or_else(|| {
-                    rt.frontend_for(&target.file, target.format.as_deref())
-                        .ok()
-                        .map(|frontend| frontend.default_retention().into())
-                })
-                .map_or(options.retention, Retention::from);
-            let backend_given = provider.backend_given();
-            options.sandbox = provider.options();
-            if !backend_given
-                && let Some(backend) = launch.sandbox_backend.as_deref()
-                && let Ok(backend) = backend.parse::<SandboxBackend>()
-            {
-                // The frontend diagnosed any spelling it does not know.
-                options.sandbox.backend = backend;
-            }
-            options.sandbox.runner_images = runner.images.into_iter().collect();
-            options.sandbox.daytona_kind = runner.daytona_kind;
-            options.sandbox.daytona_resources = DaytonaResources {
-                cpu_cores: runner.daytona_cpus,
-                memory_mb: runner.daytona_memory_mb,
-                disk_mb:   runner.daytona_disk_mb,
-            };
-            let answers = match (
-                interactive,
-                auto_approve || launch.auto_approve,
-                interview_script,
-            ) {
-                (_, _, Some(script)) => Some(Answers::Scripted(script)),
-                (true, _, None) => Some(Answers::Interactive),
-                (_, true, None) => Some(Answers::AutoApprove),
-                _ => None,
+            let default_retention = rt
+                .frontend_for(&target.file, target.format.as_deref())
+                .ok()
+                .map(|frontend| frontend.default_retention());
+            let options =
+                session.run_options(&run_dir, default_retention, &launch, provider, runner);
+            let answers = session.answers(&launch);
+            let session = Session {
+                answers,
+                controls,
+                control_file: session.control.map(|path| (path, TailFrom::Start)),
             };
             Box::pin(run(
                 &rt.options(options),
                 &target,
                 &run_dir,
                 lowered,
-                answers,
-                controls,
-                control,
+                session,
+            ))
+            .await
+        }
+        Command::Resume {
+            run_dir,
+            session,
+            dry_run,
+            provider,
+            runner,
+        } => {
+            Box::pin(resume::resume(
+                &make, run_dir, dry_run, session, provider, runner,
             ))
             .await
         }
@@ -607,7 +571,7 @@ fn check(rt: &Runtime, target: &FileArgs, print_graph: bool, json: bool) -> Exit
 
 #[expect(
     clippy::print_stderr,
-    reason = "the CLI reports the run dir, each step and the final status to the user on stderr"
+    reason = "the CLI reports a rejected workflow to the user on stderr"
 )]
 // The run dir is the user's first line of output; it is not repeated in the
 // span.
@@ -621,28 +585,8 @@ async fn run(
     target: &FileArgs,
     run_dir: &Path,
     lowered: Lowered,
-    answers: Option<Answers>,
-    controls: ControlService,
-    control: Option<PathBuf>,
+    session: Session,
 ) -> ExitCode {
-    let interviewer: Option<Arc<dyn Interviewer>> = match answers {
-        None => None,
-        Some(Answers::AutoApprove) => Some(Arc::new(AutoApproveInterviewer)),
-        Some(Answers::Interactive) => match TerminalInterviewer::start() {
-            Ok(terminal) => Some(Arc::new(terminal)),
-            Err(error) => {
-                eprintln!("error: could not read the terminal: {error}");
-                return ExitCode::from(2);
-            }
-        },
-        Some(Answers::Scripted(path)) => match ScriptedInterviewer::load(&path) {
-            Ok(script) => Some(Arc::new(script)),
-            Err(error) => {
-                eprintln!("error: {}", error_chain(&error));
-                return ExitCode::from(2);
-            }
-        },
-    };
     let Some(mut graph) = lowered.graph else {
         eprintln!(
             "rejected: {} error(s); nothing to run",
@@ -651,203 +595,11 @@ async fn run(
         return ExitCode::FAILURE;
     };
     default_params(rt, target, &mut graph);
-
-    eprintln!("run dir: {}", run_dir.display());
-    let mut ctrl_c = None;
-    let mut control_task = None;
-    let stop_controls = CancellationToken::new();
-    let mut host_run = HostRun::new(graph)
-        .with_children(lowered.children)
-        .observe(Arc::new(controls.clone()));
-    // The stall watchdog, when the graph declares a budget.
-    let watchdog = host_run.graph.policy.stall_timeout.map(StallWatchdog::new);
-    let mut watchdog_task = None;
-    if let Some(watchdog) = &watchdog {
-        host_run = host_run.observe(Arc::new(watchdog.clone()));
-    }
-    let dispatcher = interviewer.map(InterviewDispatcher::new);
-    if let Some(dispatcher) = &dispatcher {
-        host_run = host_run.observe(Arc::new(dispatcher.clone()));
-    }
-    let outcome = host::run_configured(rt, host_run, |handle, secrets| {
-        if let Some(dispatcher) = &dispatcher {
-            dispatcher.wire(handle.clone(), secrets);
-        }
-        controls.wire(handle.clone());
-        if let Some(watchdog) = &watchdog {
-            watchdog_task = Some(watchdog.start(handle.clone()));
-        }
-        if let Some(path) = control {
-            control_task = Some(tokio::spawn(control::drive(
-                path,
-                controls.clone(),
-                stop_controls.clone(),
-            )));
-        }
-        ctrl_c = Some(tokio::spawn(cancel_on_ctrl_c(handle)));
-    })
-    .await;
-    if let Some(task) = ctrl_c {
-        task.abort();
-    }
-    stop_controls.cancel();
-    if let Some(task) = control_task {
-        let _ = task.await;
-    }
-    if let Some(task) = watchdog_task {
-        task.stop().await;
-    }
-    if let Some(stall) = watchdog.as_ref().and_then(StallWatchdog::tripped) {
-        eprintln!(
-            "stall watchdog: no execution activity for {} s (stall_timeout {} s); the run was \
-             cancelled",
-            stall.idle_ms / 1000,
-            stall.stall_timeout_ms / 1000
-        );
-    }
-    // The receipt is written whatever the run did: a failed run's interviews
-    // are evidence too.
-    let receipt = match &dispatcher {
-        Some(dispatcher) => Some(dispatcher.shutdown().await),
-        None => None,
+    let start = Start::Fresh {
+        graph,
+        children: lowered.children,
     };
-    if let Some(receipt) = &receipt {
-        write_receipt(run_dir, receipt);
-    }
-    let report = match outcome {
-        Ok(report) => report,
-        Err(error) => {
-            eprintln!("error: {}", error_chain(&error));
-            return ExitCode::from(3);
-        }
-    };
-
-    let log_path = run_dir.join("events.json");
-    match serde_json::to_vec_pretty(&report.state.log) {
-        Ok(bytes) => {
-            if let Err(e) = fs::write(&log_path, bytes) {
-                eprintln!("warning: could not write {}: {e}", log_path.display());
-            } else {
-                eprintln!("event log: {}", log_path.display());
-            }
-        }
-        Err(e) => eprintln!("warning: could not encode the event log: {e}"),
-    }
-
-    for record in report.state.history() {
-        eprintln!("  {} {}", record.outcome.status.tag(), record.name);
-    }
-    report_workspaces(run_dir, rt.run_options().retention);
-    let status = report.status;
-    tracing::Span::current().record("status", display(status));
-    eprintln!("run: {status}");
-    if let Some(receipt) = &receipt
-        && !receipt.is_clean()
-    {
-        // The engine's status stands as persisted; the interview is what
-        // failed, and the exit code says so.
-        eprintln!(
-            "interview verification failed: {} problem(s); see {}",
-            receipt.errors.len(),
-            run_dir.join(RECEIPT_FILE).display()
-        );
-        for error in &receipt.errors {
-            eprintln!("  {error}");
-        }
-        return ExitCode::from(4);
-    }
-    if status == RunStatus::Success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
-/// Persist the interview receipt beside the run.
-#[expect(
-    clippy::print_stderr,
-    reason = "the CLI reports where the receipt went, and a failure to write it, on stderr"
-)]
-fn write_receipt(run_dir: &Path, receipt: &InterviewReceipt) {
-    let path = run_dir.join(RECEIPT_FILE);
-    match serde_json::to_vec_pretty(receipt) {
-        Ok(bytes) => {
-            if let Err(error) = fs::write(&path, bytes) {
-                eprintln!("warning: could not write {}: {error}", path.display());
-            } else if !receipt.questions.is_empty() || !receipt.errors.is_empty() {
-                eprintln!("interviews: {}", path.display());
-            }
-        }
-        Err(error) => eprintln!("warning: could not encode the interview receipt: {error}"),
-    }
-}
-
-/// Say where the retained workspaces are, or how to reach them. A host
-/// workspace is a directory under the run dir; a container's lives on its
-/// provider and is reached through the sandbox, or deleted with
-/// `petri sandbox prune`.
-#[expect(
-    clippy::print_stderr,
-    reason = "the retained workspace path is the run's result for the user, on stderr"
-)]
-fn report_workspaces(run_dir: &Path, retention: Retention) {
-    let store = match ResourceStore::load(run_dir.join(execution::RESOURCES_DIR)) {
-        Ok(store) => store,
-        Err(error) => {
-            tracing::debug!(error = %error, "no sandbox resource records to report");
-            return;
-        }
-    };
-    for record in store.records() {
-        match record.state {
-            LeaseState::Deleted => {}
-            LeaseState::Allocating | LeaseState::Live | LeaseState::Stopped => {
-                if record.provider == execution::HOST_PROVIDER {
-                    let path = run_dir
-                        .join("scopes")
-                        .join(record.workspace.as_str())
-                        .join("work");
-                    eprintln!("workspace: {}", path.display());
-                } else {
-                    eprintln!(
-                        "workspace: {} on {} sandbox {} (delete with `petri sandbox prune \
-                         --run-dir {}`)",
-                        record.workspace,
-                        record.provider,
-                        record.resource_id.as_deref().unwrap_or("?"),
-                        run_dir.display()
-                    );
-                }
-            }
-        }
-    }
-    if retention == Retention::Never {
-        tracing::debug!("workspaces deleted by retention policy");
-    }
-}
-
-/// Map Ctrl-C onto the run's two-tier stop: the first cancels the run —
-/// cleanup steps and release still happen — and any further Ctrl-C reaches
-/// the drivers' kill tier. The task holds no cleanup-sensitive state; the run
-/// aborts it once the report is in.
-#[expect(
-    clippy::print_stderr,
-    reason = "the CLI tells the user what each Ctrl-C did on stderr"
-)]
-async fn cancel_on_ctrl_c(handle: CoordinatorHandle) {
-    let mut cancelled = false;
-    loop {
-        if signal::ctrl_c().await.is_err() {
-            return;
-        }
-        if cancelled {
-            eprintln!("killing the run");
-        } else {
-            eprintln!("cancelling the run; Ctrl-C again to kill");
-            cancelled = true;
-        }
-        handle.cancel_root_for(execution::CancelReason::Interrupt);
-    }
+    session::drive(rt, run_dir, start, session).await
 }
 
 #[expect(

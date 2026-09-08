@@ -296,6 +296,16 @@ impl Runtime {
 
     /// The frontend for a file: by `name` when given, else the first that
     /// claims the path.
+    /// The frontend that recognizes `graph` as its own lowering, if any: how
+    /// a host that holds only a stored graph (a resume) finds the format's
+    /// launch settings and defaults.
+    pub fn frontend_for_graph(&self, graph: &Graph) -> Option<&dyn Frontend> {
+        self.frontends
+            .iter()
+            .map(AsRef::as_ref)
+            .find(|frontend| frontend.claims_graph(graph))
+    }
+
     pub fn frontend_for(
         &self,
         path: &Path,

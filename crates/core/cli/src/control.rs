@@ -17,6 +17,9 @@
 //! Answers travel through the interviewer (`--interactive`,
 //! `--interview-script`), so a control line cannot consume a pending answer.
 //!
+//! A `petri resume` tails the same file from its current end: lines the
+//! earlier process already applied are not applied again.
+//!
 //! An embedded host drives the same [`ControlService`] directly.
 
 use std::io::{self, SeekFrom};
@@ -31,6 +34,15 @@ use tokio_util::sync::CancellationToken;
 
 /// How often the file is checked for new lines.
 const POLL: Duration = Duration::from_millis(100);
+
+/// Where the tail begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailFrom {
+    /// The first line: a fresh run applies whatever the file already holds.
+    Start,
+    /// The current end: a resume applies only lines appended from now on.
+    End,
+}
 
 /// One parsed control line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +95,12 @@ impl ControlLine {
     clippy::print_stderr,
     reason = "the terminal is told what each control line did on stderr, beside the run's output"
 )]
-pub async fn drive(path: PathBuf, service: ControlService, stop: CancellationToken) {
+pub async fn drive(
+    path: PathBuf,
+    service: ControlService,
+    stop: CancellationToken,
+    from: TailFrom,
+) {
     let mut file = match open(&path).await {
         Ok(file) => file,
         Err(error) => {
@@ -94,7 +111,19 @@ pub async fn drive(path: PathBuf, service: ControlService, stop: CancellationTok
             return;
         }
     };
-    let mut offset = 0_u64;
+    let mut offset = match from {
+        TailFrom::Start => 0_u64,
+        TailFrom::End => match file.metadata().await {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                eprintln!(
+                    "warning: could not size the control file {}: {error}",
+                    path.display()
+                );
+                0
+            }
+        },
+    };
     let mut partial = String::new();
     loop {
         tokio::select! {
