@@ -208,9 +208,13 @@ impl CoordinatorStore {
         &self.opening
     }
 
+    /// Validate, write, sync, then apply. A rejected event is a
+    /// [`StoreError::State`] and changes nothing; a failed write or sync
+    /// changes nothing; the state holds a record only once it is durable.
+    /// The check borrows the state and the apply mutates it in place, so an
+    /// append costs the record, not a copy of every declared invocation.
     pub fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, StoreError> {
-        let mut next_state = self.state.clone();
-        next_state.apply(&event)?;
+        self.state.check(&event)?;
         let record = CoordinatorRecord {
             seq: self.next_seq,
             event,
@@ -223,7 +227,8 @@ impl CoordinatorStore {
             .and_then(|()| self.log.flush())
             .and_then(|()| self.log.sync_data())
             .map_err(|source| io_error("append", &path, source))?;
-        self.state = next_state;
+        // Nothing touched the state since `check` accepted the event.
+        self.state.apply_checked(&record.event);
         self.next_seq += 1;
         self.write_invocation_projection(&record.event)?;
         Ok(record)
@@ -516,5 +521,106 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> StoreError 
         action,
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File, OpenOptions};
+
+    use testkit::RunDir;
+
+    use super::{COORDINATOR_FILE, CoordinatorStore, StoreError, decode_coordinator_log};
+    use crate::{CoordinatorEvent, CoordinatorState, ExecutionId, GraphDigest, StateError};
+
+    /// The state, `next_seq`, and the log's bytes: everything an append may
+    /// change.
+    fn snapshot(store: &CoordinatorStore) -> (Vec<u8>, u64, Vec<u8>) {
+        let state = serde_json::to_vec(store.state()).expect("the state encodes");
+        let log = fs::read(store.root().join(COORDINATOR_FILE)).expect("the log reads");
+        (state, store.next_seq, log)
+    }
+
+    fn replayed(store: &CoordinatorStore) -> CoordinatorState {
+        let path = store.root().join(COORDINATOR_FILE);
+        let bytes = fs::read(&path).expect("the log reads");
+        let decoded = decode_coordinator_log(&path, &bytes).expect("the log decodes");
+        assert!(!decoded.torn);
+        CoordinatorState::replay(&decoded.records).expect("the log replays")
+    }
+
+    #[test]
+    fn a_rejected_event_leaves_the_state_and_the_log_untouched() {
+        let directory = RunDir::new("store-rejected");
+        let mut store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+        let digest = GraphDigest::from_bytes([7; 32]);
+        store
+            .append(CoordinatorEvent::GraphRegistered { digest })
+            .expect("the first registration");
+        let before = snapshot(&store);
+
+        let duplicate = store
+            .append(CoordinatorEvent::GraphRegistered { digest })
+            .expect_err("a duplicate graph is rejected");
+        assert!(matches!(
+            duplicate,
+            StoreError::State(StateError::DuplicateGraph(found)) if found == digest
+        ));
+        let unknown = store
+            .append(CoordinatorEvent::ExecutionFinished {
+                execution: ExecutionId::new(9),
+                exit:      engine::EngineExit::Terminal {
+                    status: ir::RunStatus::Success,
+                },
+            })
+            .expect_err("an unknown execution is rejected");
+        assert!(matches!(
+            unknown,
+            StoreError::State(StateError::UnknownExecution(found)) if found == ExecutionId::new(9)
+        ));
+
+        assert_eq!(snapshot(&store), before, "a rejected event changes nothing");
+        let record = store
+            .append(CoordinatorEvent::GraphRegistered {
+                digest: GraphDigest::from_bytes([8; 32]),
+            })
+            .expect("the store still accepts events");
+        assert_eq!(record.seq, 2, "rejected events take no sequence number");
+        assert_eq!(replayed(&store), *store.state());
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_state_unchanged_and_is_reported() {
+        let directory = RunDir::new("store-unwritable");
+        let mut store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+        let log_path = store.root().join(COORDINATOR_FILE);
+        let before = snapshot(&store);
+
+        // A read-only handle on the log: every write fails.
+        store.log = File::open(&log_path).expect("the log opens read-only");
+        let digest = GraphDigest::from_bytes([7; 32]);
+        let failure = store
+            .append(CoordinatorEvent::GraphRegistered { digest })
+            .expect_err("a write on a read-only handle fails");
+        assert!(
+            matches!(&failure, StoreError::Io { action: "append", path, .. } if *path == log_path),
+            "{failure}"
+        );
+        assert_eq!(snapshot(&store), before, "a failed write changes nothing");
+        assert!(
+            !store.state().graphs.contains(&digest),
+            "the graph is not in the state before it is durable"
+        );
+
+        store.log = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("the log opens for appends");
+        let record = store
+            .append(CoordinatorEvent::GraphRegistered { digest })
+            .expect("the append succeeds once the log is writable");
+        assert_eq!(record.seq, 1, "the failed append took no sequence number");
+        assert!(store.state().graphs.contains(&digest));
+        assert_eq!(replayed(&store), *store.state());
     }
 }

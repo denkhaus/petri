@@ -160,7 +160,11 @@ impl CoordinatorState {
         invocation.executions.get(index + 1).copied()
     }
 
-    pub fn apply(&mut self, event: &CoordinatorEvent) -> Result<(), StateError> {
+    /// Validate `event` against this state without changing it: every
+    /// rejection `apply` can make, and nothing else. A store checks an event
+    /// here before it writes the record, then applies it in place once the
+    /// record is durable, so no append copies the whole state.
+    pub fn check(&self, event: &CoordinatorEvent) -> Result<(), StateError> {
         if self.root.is_none() && !matches!(event, CoordinatorEvent::RunStarted { .. }) {
             return Err(StateError::MissingRunStart);
         }
@@ -171,7 +175,7 @@ impl CoordinatorState {
             CoordinatorEvent::RunStarted {
                 format_version,
                 root,
-                middleware_chain,
+                middleware_chain: _,
             } => {
                 if self.root.is_some() {
                     return Err(StateError::DuplicateRunStart);
@@ -185,11 +189,9 @@ impl CoordinatorState {
                 if *root != InvocationId::ROOT {
                     return Err(StateError::InvalidRootInvocation);
                 }
-                self.root = Some(*root);
-                self.middleware_chain.clone_from(middleware_chain);
             }
             CoordinatorEvent::GraphRegistered { digest } => {
-                if !self.graphs.insert(*digest) {
+                if self.graphs.contains(digest) {
                     return Err(StateError::DuplicateGraph(*digest));
                 }
             }
@@ -197,10 +199,7 @@ impl CoordinatorState {
                 invocation,
                 call,
                 graph,
-                context,
-                secret_bindings,
-                sandbox,
-                admission,
+                ..
             } => {
                 if !self.graphs.contains(graph) {
                     return Err(StateError::UnknownGraph(*graph));
@@ -218,30 +217,14 @@ impl CoordinatorState {
                     if let Some(existing) = self.calls.get(call) {
                         return Err(StateError::DuplicateCall(*existing));
                     }
-                    self.calls.insert(call.clone(), *invocation);
                 }
-                self.invocations.insert(*invocation, InvocationState {
-                    declaration:   InvocationDeclaration {
-                        id:              *invocation,
-                        call:            call.clone(),
-                        graph:           *graph,
-                        context:         context.clone(),
-                        secret_bindings: secret_bindings.clone(),
-                        sandbox:         *sandbox,
-                        admission:       admission.clone(),
-                    },
-                    executions:    Vec::new(),
-                    result:        None,
-                    cancelled:     false,
-                    cancel_reason: None,
-                });
             }
             CoordinatorEvent::ExecutionDeclared {
                 execution,
                 invocation,
                 predecessor,
                 start,
-                middleware_state,
+                middleware_state: _,
             } => {
                 if self.executions.contains_key(execution) {
                     return Err(StateError::DuplicateExecution(*execution));
@@ -273,30 +256,15 @@ impl CoordinatorState {
                         });
                     }
                 }
-                self.executions.insert(*execution, ExecutionState {
-                    declaration: ExecutionDeclaration {
-                        id:               *execution,
-                        invocation:       *invocation,
-                        start:            start.clone(),
-                        middleware_state: middleware_state.clone(),
-                    },
-                    exit:        None,
-                });
-                self.invocations
-                    .get_mut(invocation)
-                    .expect("the invocation was checked above")
-                    .executions
-                    .push(*execution);
             }
-            CoordinatorEvent::ExecutionFinished { execution, exit } => {
+            CoordinatorEvent::ExecutionFinished { execution, exit: _ } => {
                 let state = self
                     .executions
-                    .get_mut(execution)
+                    .get(execution)
                     .ok_or(StateError::UnknownExecution(*execution))?;
                 if state.exit.is_some() {
                     return Err(StateError::DuplicateExecutionFinish(*execution));
                 }
-                state.exit = Some(exit.clone());
             }
             CoordinatorEvent::InvocationFinished { invocation, result } => {
                 let state = self
@@ -321,19 +289,13 @@ impl CoordinatorState {
                         execution:  result.final_execution,
                     });
                 }
-                self.invocations
-                    .get_mut(invocation)
-                    .expect("the invocation was checked above")
-                    .result = Some(result.clone());
             }
-            CoordinatorEvent::InvocationCancelRequested { invocation, reason } => {
-                let state = self
-                    .invocations
-                    .get_mut(invocation)
-                    .ok_or(StateError::UnknownInvocation(*invocation))?;
-                state.cancelled = true;
-                if state.cancel_reason.is_none() {
-                    state.cancel_reason.clone_from(reason);
+            CoordinatorEvent::InvocationCancelRequested {
+                invocation,
+                reason: _,
+            } => {
+                if !self.invocations.contains_key(invocation) {
+                    return Err(StateError::UnknownInvocation(*invocation));
                 }
             }
             CoordinatorEvent::RunFinished { status } => {
@@ -341,24 +303,118 @@ impl CoordinatorState {
                     return Err(StateError::DuplicateRunFinish);
                 }
                 let root = self.root.ok_or(StateError::MissingRunStart)?;
-                if self
+                let result = self
                     .invocations
                     .get(&root)
                     .and_then(|invocation| invocation.result.as_ref())
-                    .is_none()
-                {
-                    return Err(StateError::RootNotFinished);
-                }
-                if self.invocations[&root]
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result.status != *status)
-                {
+                    .ok_or(StateError::RootNotFinished)?;
+                if result.status != *status {
                     return Err(StateError::RunStatusMismatch);
                 }
-                self.run_status = Some(*status);
             }
         }
         Ok(())
+    }
+
+    /// Validate `event` and, when it is accepted, apply it. A rejected event
+    /// leaves the state unchanged.
+    pub fn apply(&mut self, event: &CoordinatorEvent) -> Result<(), StateError> {
+        self.check(event)?;
+        self.apply_checked(event);
+        Ok(())
+    }
+
+    /// Apply an event [`check`](Self::check) has accepted against this same
+    /// state. Only the mutations; the lookups `check` made are invariants
+    /// here, so calling this with an unchecked event is a bug.
+    pub(crate) fn apply_checked(&mut self, event: &CoordinatorEvent) {
+        match event {
+            CoordinatorEvent::RunStarted {
+                format_version: _,
+                root,
+                middleware_chain,
+            } => {
+                self.root = Some(*root);
+                self.middleware_chain.clone_from(middleware_chain);
+            }
+            CoordinatorEvent::GraphRegistered { digest } => {
+                self.graphs.insert(*digest);
+            }
+            CoordinatorEvent::InvocationDeclared {
+                invocation,
+                call,
+                graph,
+                context,
+                secret_bindings,
+                sandbox,
+                admission,
+            } => {
+                if let Some(call) = call {
+                    self.calls.insert(call.clone(), *invocation);
+                }
+                self.invocations.insert(*invocation, InvocationState {
+                    declaration:   InvocationDeclaration {
+                        id:              *invocation,
+                        call:            call.clone(),
+                        graph:           *graph,
+                        context:         context.clone(),
+                        secret_bindings: secret_bindings.clone(),
+                        sandbox:         *sandbox,
+                        admission:       admission.clone(),
+                    },
+                    executions:    Vec::new(),
+                    result:        None,
+                    cancelled:     false,
+                    cancel_reason: None,
+                });
+            }
+            CoordinatorEvent::ExecutionDeclared {
+                execution,
+                invocation,
+                predecessor: _,
+                start,
+                middleware_state,
+            } => {
+                self.executions.insert(*execution, ExecutionState {
+                    declaration: ExecutionDeclaration {
+                        id:               *execution,
+                        invocation:       *invocation,
+                        start:            start.clone(),
+                        middleware_state: middleware_state.clone(),
+                    },
+                    exit:        None,
+                });
+                self.invocations
+                    .get_mut(invocation)
+                    .expect("`check` found the invocation")
+                    .executions
+                    .push(*execution);
+            }
+            CoordinatorEvent::ExecutionFinished { execution, exit } => {
+                self.executions
+                    .get_mut(execution)
+                    .expect("`check` found the execution")
+                    .exit = Some(exit.clone());
+            }
+            CoordinatorEvent::InvocationFinished { invocation, result } => {
+                self.invocations
+                    .get_mut(invocation)
+                    .expect("`check` found the invocation")
+                    .result = Some(result.clone());
+            }
+            CoordinatorEvent::InvocationCancelRequested { invocation, reason } => {
+                let state = self
+                    .invocations
+                    .get_mut(invocation)
+                    .expect("`check` found the invocation");
+                state.cancelled = true;
+                if state.cancel_reason.is_none() {
+                    state.cancel_reason.clone_from(reason);
+                }
+            }
+            CoordinatorEvent::RunFinished { status } => {
+                self.run_status = Some(*status);
+            }
+        }
     }
 }
