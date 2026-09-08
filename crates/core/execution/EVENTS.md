@@ -60,6 +60,13 @@ the coordinator. Replay carries them, and a resume whose last recorded control
 is a pause starts with admission held. The records are additive to coordinator
 format version 2.
 
+Run-level notes (coordinator log): a `host_note` with no subject, derived from
+a `RunNote` record: the report of a hook point that belongs to no firing
+(`run_finished`, `scope_released`), with the execution whose driver ran it.
+The coordinator appends them from the execution's report, in the order the
+points ran, before it records `RunFinished`. Additive to coordinator format
+version 2.
+
 Execution events (engine log), each attributed to a subject where one exists:
 
 | Event | When |
@@ -81,7 +88,7 @@ Execution events (engine log), each attributed to a subject where one exists:
 | `output_line`, `artifact_recorded` | step output and artifacts |
 | `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it. A native agent's sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`) under the parent's session, a child's own events under the child's session with `parent_session` naming its immediate parent, all attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble") |
 | `budget_paused`, `budget_resumed` | an executor-enforced attempt budget stopped counting (the attempt asked a question; `remaining_ms` is the active-work time left, `pending_questions` how many wait) and counted again (its last pending question was answered); from the driver's durable `budget_paused`/`budget_resumed` notes |
-| `host_note` | a `driver::lifecycle::Note` the host or the driver recorded: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `hook` (a hook service report) |
+| `host_note` | a `driver::lifecycle::Note` the host or the driver recorded: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `hook` (a hook service report). A run-level hook report is the same `hook` note from the coordinator log, with no subject |
 | `step_custom` | any other step-defined progress payload |
 
 Usage and timing: `attempt_finished` and `visit_completed` carry the outcome's
@@ -166,7 +173,7 @@ also carries `node`, `firing` and `attempt` beside the event's `subject`.
 | local setup (`[run.prepare]`, `[run.clone]`) | the `run_prepare_N` stages' events; `step_custom` kind `fabro.checkout` (repository, commit, depth, files) on `start` | node, firing | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary`, `fabro_scenarios_blackbox` (checkout) |
 | hook decisions (workflow points) | `host_note {kind: "hook"}` with the `HookReport` (point, decision, each hook's state and duration, fail-open warnings); a report that ran no hook is silent | node, firing, attempt | durable | `embedding::a_hook_service_runs_each_hook_once_at_its_point`, `petri-fabro-steps::hooks` |
 | hook decisions (tool boundary) | `step_custom` kind `fabro.hook` (`event` = `pre_tool_use`, `post_tool_use`, `post_tool_use_failure`, and the report), one per tool hook that ran, a child's under the parent stage | node, firing, attempt | durable | `fabro_readiness_blackbox`, `embedding_readiness` (counts per stage, two `block` decisions) |
-| run-level hooks (`run_complete`, `run_failed`, `sandbox_cleanup`) | not on the stream: they belong to no firing; their reports are logged (accepted difference `run-level-hook-reports`); the run's own end is `run_finished` | | | `fabro_milestone_blackbox` (the hooks' effects) |
+| run-level hooks (`run_complete`, `run_failed`, `sandbox_cleanup`) | `host_note {kind: "hook"}` from the coordinator log's `RunNote` records, with no subject and the execution named: one per run-level point that ran a hook (`point` is `run_finished` or `scope_released`), in the order the points ran, before `run_finished`; the run's own end is `run_finished` | execution | durable (coordinator log) | `fabro_milestone_blackbox` (`assert_run_level_notes`: the reports through `replay_run` and `petri inspect` on a succeeded, a failed and a cancelled run, beside the hooks' effects) |
 | local sandbox, retention, output references | `invocation_declared.sandbox` (the binding), the reported workspace in `petri inspect`, `output_line`, `artifact_recorded`, `blob://sha256/…` references in outputs; the acquisition progress lines are terminal-only | invocation, scope | durable (the binding and outputs), live-only (progress lines) | `inspect_cli`, `petri-fabro-steps::steps::large_command_output_is_offloaded_and_reads_back_logically` |
 | budget pause and resume | `budget_paused {remaining_ms, pending_questions}`, `budget_resumed {remaining_ms}` from the driver's notes | node, firing, attempt | durable | `petri-driver::interview_budget::the_waiting_stage_pays_only_for_active_work` |
 | pause and unpause | `run_paused`, `run_unpaused` from the coordinator's `RunPaused` and `RunUnpaused` records | run | durable; a resume starts paused when the last control recorded is a pause | `controls::pause_holds_admission_and_unpause_releases_it`, `controls::a_pause_survives_resume_and_holds_admission_until_unpaused`, `fabro_resume_blackbox::a_paused_run_stays_paused_across_resume_until_unpaused` |

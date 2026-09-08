@@ -613,6 +613,16 @@ impl Projection {
             }
             CoordinatorEvent::RunPaused => (None, None, EventBody::RunPaused),
             CoordinatorEvent::RunUnpaused => (None, None, EventBody::RunUnpaused),
+            // A run-level hook report: the same `host_note` a firing's hook
+            // report is, with no subject, since no firing owns it.
+            CoordinatorEvent::RunNote {
+                execution,
+                kind,
+                payload,
+            } => (None, *execution, EventBody::HostNote {
+                kind:    kind.clone(),
+                payload: payload.clone(),
+            }),
             CoordinatorEvent::RunFinished { status } => {
                 (None, None, EventBody::RunFinished { status: *status })
             }

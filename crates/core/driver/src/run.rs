@@ -269,6 +269,11 @@ pub struct ExecutionReport {
     pub status:          RunStatus,
     pub state:           EngineState,
     pub releases:        Vec<ReleaseReport>,
+    /// What the host's run-level hook points noted (`run_finished`, then
+    /// each `scope_released`), masked, in the order they ran. No firing owns
+    /// them, so the driver records nothing itself; a coordinator appends
+    /// them at run level.
+    pub run_notes:       Vec<Note>,
     /// What each failing observer's `finish` reported. Never changes `status`:
     /// a host with fatal-sink semantics watches its own observer and cancels.
     pub observer_errors: Vec<ObserveError>,
@@ -621,7 +626,7 @@ pub struct Driver {
     /// the run ends, when their teardown is awaited.
     run_guards:       Vec<Box<dyn RunGuard>>,
     guard_teardown:   Option<JoinHandle<()>>,
-    releases:         Vec<JoinHandle<ReleaseReport>>,
+    releases:         Vec<JoinHandle<(ReleaseReport, Vec<Note>)>>,
     /// Opened once the run-end hook has run: a release spawned at the run's
     /// end waits for it, so `run_finished` precedes `scope_released`.
     end_gate:         watch::Sender<bool>,
@@ -1018,7 +1023,7 @@ impl Driver {
 
         // The run-end hook runs while every environment is still usable, then
         // the releases held for it proceed.
-        self.report_run_finished().await;
+        let mut run_notes = self.report_run_finished().await;
         let _ = self.end_gate.send_replace(true);
 
         // Release is best effort and never fails the run, but the run should not
@@ -1026,7 +1031,7 @@ impl Driver {
         let mut releases = Vec::new();
         while let Some(handle) = self.releases.last_mut() {
             match handle.await {
-                Ok(report) => {
+                Ok((report, notes)) => {
                     if !report.is_clean() {
                         tracing::warn!(
                             problem_count = report.problems.len(),
@@ -1036,11 +1041,17 @@ impl Driver {
                         );
                     }
                     releases.push(report);
+                    run_notes.extend(notes);
                 }
                 Err(error) => tracing::warn!(error = ?error, "environment release task panicked"),
             }
             self.releases.pop();
         }
+        // Masked like every note the driver records, before they leave it.
+        let run_notes: Vec<Note> = run_notes
+            .into_iter()
+            .map(|note| Note::new(note.kind, self.sink.mask_value(&note.payload)))
+            .collect();
 
         // Every record has been handed over; what remains is the observers'
         // own queues and files.
@@ -1094,6 +1105,7 @@ impl Driver {
             status,
             state: mem::replace(&mut self.engine, EngineState::new(Graph::new())),
             releases,
+            run_notes,
             observer_errors,
         }
     }
@@ -2100,6 +2112,7 @@ impl Driver {
         let hooks = self.hooks.clone().zip(scope).filter(|_| !inherited);
         let mut gate = self.engine.is_finished().then(|| self.end_gate.subscribe());
         self.releases.push(tokio::spawn(async move {
+            let mut notes = Vec::new();
             if let Some((hooks, scope)) = hooks {
                 if let Some(gate) = gate.as_mut() {
                     while !*gate.borrow_and_update() {
@@ -2108,23 +2121,24 @@ impl Driver {
                         }
                     }
                 }
-                hooks.scope_released(ScopeReleased { scope, outcome }).await;
+                notes = hooks.scope_released(ScopeReleased { scope, outcome }).await;
             }
-            executor.release(handle, outcome).await
+            (executor.release(handle, outcome).await, notes)
         }));
     }
 
     /// Tell the host the run ended, when this execution owns the run and its
-    /// exit is terminal (a restart hands the run on; nothing ended).
-    async fn report_run_finished(&self) {
+    /// exit is terminal (a restart hands the run on; nothing ended). The
+    /// host's notes come back for the report.
+    async fn report_run_finished(&self) -> Vec<Note> {
         if !self.config.run_owner {
-            return;
+            return Vec::new();
         }
         let Some(hooks) = &self.hooks else {
-            return;
+            return Vec::new();
         };
         if matches!(self.engine.exit(), Some(EngineExit::Restart { .. })) {
-            return;
+            return Vec::new();
         }
         let status = self.engine.folded_status();
         let failure = self
@@ -2134,7 +2148,7 @@ impl Driver {
             .rev()
             .find_map(|record| record.outcome.status.failure_info())
             .map(|info| info.message.clone());
-        hooks.run_finished(RunFinished { status, failure }).await;
+        hooks.run_finished(RunFinished { status, failure }).await
     }
 
     /// Stop unfinished acquires, then collect any successful result that raced

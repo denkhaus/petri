@@ -42,8 +42,8 @@ workflow point, so no hook runs twice whoever serves it.
 | `RouteSelected` | `HookAdapter::transition` | `Override`, `Block` |
 | `ForkStarted` | the local service, from `BeforeAttempt` of a node whose Fabro kind is `parallel` (a static fork or a `for_each` fork), once per fork visit | none |
 | `ForkCompleted` | the fan-in step itself (plain, synthetic, or prompted), through the local service, once every branch is in and before the results are published | none |
-| `RunFinished` | `HookAdapter::run_finished`, from the driver that owns the run (a bare driver, or the coordinator's root invocation) at a terminal exit, before any environment is released; no firing view, payload `RunFinishedPayload { status, failure }` | none |
-| `ScopeReleased` | `HookAdapter::scope_released`, from the driver just before a scope's own environment is released (an inherited sandbox's release reports nothing); a release that is part of the run's end waits for `RunFinished`; no firing view, payload `ScopeReleasedPayload { scope, outcome }` | none |
+| `RunFinished` | `HookAdapter::run_finished`, from the driver that owns the run (a bare driver, or the coordinator's root invocation) at a terminal exit, before any environment is released; no firing view, payload `RunFinishedPayload { status, failure }`; the report comes back as a note the coordinator records at run level | none |
+| `ScopeReleased` | `HookAdapter::scope_released`, from the driver just before a scope's own environment is released (an inherited sandbox's release reports nothing); a release that is part of the run's end waits for `RunFinished`; no firing view, payload `ScopeReleasedPayload { scope, outcome }`; the report comes back as a note the coordinator records at run level | none |
 | `BeforeToolUse`, `AfterToolUse`, `AfterToolFailure` | the agent backend's tool middleware, through the `HookServiceHandle` capability, at the actual tool boundary | `Block` at `BeforeToolUse` |
 
 A decision a point does not consume is ignored; the report is still recorded.
@@ -55,12 +55,21 @@ retries included); `stage_complete`/`stage_failed` to `AfterVisit`;
 neither for a cancelled run, as Fabro's `on_run_end` does); `sandbox_cleanup`
 to `ScopeReleased`. `run_start` and `sandbox_ready` are driven by the
 `fabro/stage` step at `start`, with the sandbox in place. The two run-level
-points carry no firing, so their reports are logged (`tracing`) rather than
-recorded as notes.
+points carry no firing, so the driver records nothing for them itself:
+`ExecutionHooks::run_finished` and `scope_released` return the adapter's
+`hook` notes, the driver hands them to its host in
+`ExecutionReport::run_notes` (masked, `run_finished` first, then each
+release), and the coordinator appends one `CoordinatorEvent::RunNote` per
+note before it records `RunFinished`. `replay_run` derives them as
+`host_note {kind: "hook"}` with no subject and the execution named, and
+`petri inspect` lists them under `notes`. The record is additive to
+coordinator format version 2: a log without it replays as before. A
+`sandbox_cleanup` report of an environment released after the run's finish
+(a prune after a crash) has no driver and is not recorded.
 
 `ExecutionHooks` wrappers (the control service's pause hooks are one) must
-forward `run_finished` and `scope_released` as they forward the other points,
-or the run-level hooks never run.
+forward `run_finished` and `scope_released` as they forward the other points
+and return the inner notes, or the run-level hooks never run or never record.
 
 ## Recording
 

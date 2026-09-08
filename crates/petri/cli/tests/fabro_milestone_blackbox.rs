@@ -13,6 +13,8 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use petri::execution::ExecutionId;
+use petri::execution::events::{EventBody, replay_run};
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Finished, Launch};
@@ -328,8 +330,54 @@ async fn the_milestone_workflow_runs_end_to_end_through_the_binary() {
         read(&case.workspace().join("run-end.log")),
         "run_complete\nsandbox_cleanup\n"
     );
+    assert_run_level_notes(&finished, &["run_finished", "scope_released"]);
     finished.assert_no_leaked_processes().await;
     twin.stop();
+}
+
+/// The run-level hook reports are durable: `replay_run` carries one
+/// `host_note {kind: "hook"}` per run-level point that ran a hook, with no
+/// subject (no firing owns it) and the root execution named, in the order
+/// the points ran; `petri inspect` lists the same reports under `notes`.
+fn assert_run_level_notes(finished: &Finished, points: &[&str]) {
+    let events = replay_run(&finished.run_dir).expect("the run replays");
+    let reports: Vec<&Value> = events
+        .iter()
+        .filter(|event| event.subject.is_none())
+        .filter_map(|event| match &event.body {
+            EventBody::HostNote { kind, payload } if kind == "hook" => {
+                assert_eq!(event.execution.map(ExecutionId::raw), Some(0), "{event:?}");
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect();
+    let replayed: Vec<&str> = reports
+        .iter()
+        .filter_map(|report| report["point"].as_str())
+        .collect();
+    assert_eq!(replayed, points, "{reports:#?}");
+    for report in &reports {
+        assert_eq!(
+            report["hooks"].as_array().map(Vec::len),
+            Some(1),
+            "{report}"
+        );
+        assert_eq!(report["hooks"][0]["state"], json!("executed"), "{report}");
+    }
+    let document = finished.inspect();
+    let notes = document["notes"]
+        .as_array()
+        .expect("inspect lists the run-level notes");
+    let inspected: Vec<&str> = notes
+        .iter()
+        .map(|note| {
+            assert_eq!(note["kind"], json!("hook"), "{note}");
+            assert_eq!(note["execution"], json!(0), "{note}");
+            note["payload"]["point"].as_str().expect("a point")
+        })
+        .collect();
+    assert_eq!(inspected, points, "{notes:#?}");
 }
 
 /// The same workflow with a failing final check: the run fails, `run_failed`
@@ -385,6 +433,7 @@ async fn the_milestone_workflow_reports_a_failure_and_keeps_its_work() {
         read(&case.workspace().join("run-end.log")),
         "run_failed\nsandbox_cleanup\n"
     );
+    assert_run_level_notes(&finished, &["run_finished", "scope_released"]);
     assert_eq!(finished.reported_workspaces(), [case.workspace()]);
     finished.assert_no_leaked_processes().await;
     twin.stop();
@@ -436,6 +485,7 @@ async fn the_milestone_workflow_is_cancelled_and_keeps_its_work() {
         "sandbox_cleanup\n",
         "no run_complete or run_failed on a cancelled run"
     );
+    assert_run_level_notes(&finished, &["scope_released"]);
     let document = finished.inspect();
     assert_eq!(document["status"], json!("cancelled"));
     assert_eq!(finished.reported_workspaces(), [case.workspace()]);

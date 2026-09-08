@@ -57,7 +57,7 @@ pub use resource::{
 pub use secret::InvocationSecrets;
 pub use state::{
     CoordinatorState, ExecutionDeclaration, ExecutionState, InvocationDeclaration, InvocationState,
-    StateError,
+    RunNote, StateError,
 };
 pub use store::{
     COORDINATOR_FILE, CoordinatorStore, DecodedCoordinatorLog, GRAPHS_DIR, INVOCATIONS_DIR,

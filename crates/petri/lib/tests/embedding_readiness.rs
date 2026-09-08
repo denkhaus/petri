@@ -611,12 +611,12 @@ impl ExecutionHooks for EmbeddingHost {
         Ok(report)
     }
 
-    async fn run_finished(&self, finished: RunFinished) {
-        self.inner.run_finished(finished).await;
+    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
+        self.inner.run_finished(finished).await
     }
 
-    async fn scope_released(&self, released: ScopeReleased) {
-        self.inner.scope_released(released).await;
+    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
+        self.inner.scope_released(released).await
     }
 }
 
