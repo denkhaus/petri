@@ -17,5 +17,5 @@ tmp
 !/crates/fabro/corpus/REPORT.md
 !/crates/fabro/corpus/RUNS.md
 /crates/fabro/corpus/fabro-target/
-/crates/fabro/acceptance/bundles/
+/crates/fabro/acceptance/bundles/.sources/
 .env

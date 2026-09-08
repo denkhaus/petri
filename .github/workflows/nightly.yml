@@ -70,10 +70,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # The Fabro replacement set: every bundle in bundles.lock.json, fetched
-      # at its locked revision and verified digest by digest. A source that
-      # cannot be reached (a missing deploy key) fails here, loudly.
-      - name: Fetch and verify the Fabro bundles
+      # The Fabro replacement set is vendored under crates/fabro/acceptance/bundles
+      # with its provenance in bundles.lock.json. Verify every tracked file
+      # against its locked digest before anything runs it; no bundle is fetched.
+      - name: Verify the vendored Fabro bundles
         run: scripts/corpus-fetch-fabro-bundles.sh
 
       # One directory per run for the scenario evidence records

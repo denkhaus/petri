@@ -168,8 +168,9 @@ crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs 
 
 `crates/fabro/acceptance/CONTRACT.md` freezes the Fabro reference revision
 (`crates/fabro/corpus-pin.txt`), the required workflow bundles
-(`crates/fabro/acceptance/bundles.lock.json`, materialized and verified by
-`scripts/corpus-fetch-fabro-bundles.sh`), the feature matrix for every
+(`crates/fabro/acceptance/bundles.lock.json`; their files are vendored under
+`crates/fabro/acceptance/bundles/` with their provenance and verified against
+the lock by `scripts/corpus-fetch-fabro-bundles.sh`), the feature matrix for every
 construct and `workflow.toml` option those bundles use, and the accepted
 differences. Petri production code never links or launches Fabro. The parity
 harness in `crates/fabro/oracle/harness/` builds the pinned `fabro` binary from
@@ -191,7 +192,7 @@ observation, written before the run. `crates/fabro/acceptance/scenarios/matrix.j
 lists every required (scenario, backend, agent) cell with its state, so a
 filtered or skipped case stays visible; `mise run test:fabro:blackbox` runs
 them and reports the coverage, and `mise run test:fabro:blackbox:strict`
-(in `check:nightly`) requires Docker, the fetched bundles, and no skipped
+(in `check:nightly`) requires Docker, the vendored bundles, and no skipped
 cell.
 
 ### The integration handoff
@@ -209,10 +210,10 @@ required row is in `crates/fabro/acceptance/CONTRACT.md`.
 ### CI, evidence, and the readiness gate
 
 Required CI (`.github/workflows/ci.yml`, job `check` on Linux and macOS)
-fetches the GitHub Actions corpus, the Fabro corpus, and the Fabro bundle set
-(`scripts/corpus-fetch-fabro-bundles.sh`: every bundle at its locked revision,
-digest by digest, never skipped; an unreachable private source fails with the
-name of the missing deploy key), builds the sandbox plugins, and runs
+fetches the GitHub Actions corpus and the Fabro corpus, verifies the vendored
+Fabro bundle set (`scripts/corpus-fetch-fabro-bundles.sh`: every tracked file
+against its locked digest, never skipped, no fetch), builds the sandbox
+plugins, and runs
 `mise run check` with `PETRI_REQUIRE_CORPUS`, `PETRI_REQUIRE_FABRO_CORPUS`,
 `PETRI_REQUIRE_FABRO_BUNDLES` and, on Linux, `PETRI_REQUIRE_DOCKER` set, so a
 missing asset, binary, scenario, or backend fails instead of skipping. Every

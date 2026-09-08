@@ -536,11 +536,14 @@ fn a_required_asset_fails_instead_of_skipping_when_ci_asks() {
 }
 
 #[test]
-fn the_materialized_bundles_are_found_or_skipped_visibly() {
-    // The bundles are fetched data. When they are present the helper names
-    // the bundle directory; when absent it skips (or fails under the
-    // require variable, which CI sets after fetching).
+fn the_vendored_bundles_are_found_or_skipped_visibly() {
+    // The bundles are tracked in the repository. The helper names the bundle
+    // directory when it exists; on an incomplete checkout it skips (or fails
+    // under the require variable, which CI sets).
     if let Some(dir) = require::bundle("interview") {
-        assert!(dir.join("MANIFEST.txt").is_file() || dir.is_dir());
+        assert!(
+            dir.join(".fabro/workflows/interview/workflow.fabro")
+                .is_file()
+        );
     }
 }

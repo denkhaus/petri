@@ -102,16 +102,25 @@ on failover (`fallback-repeated-tool-effect`).
 ## Required bundles
 
 `crates/fabro/acceptance/bundles.lock.json` (schema version 1) is the
-replacement set. `scripts/corpus-fetch-fabro-bundles.sh` materializes it on a
-clean machine and verifies every digest.
+replacement set. Every bundle's files are vendored in this repository under
+`crates/fabro/acceptance/bundles/<id>/<path>` (the file's path in its source
+repository), copied once from the source at the locked revision;
+`crates/fabro/acceptance/bundles/PROVENANCE.md` records the copy and the
+sources' license files. The lock keeps each source's repository, revision,
+working-tree state, and every file's mode, size, and SHA-256, with
+`vendored: true` on the source. `scripts/corpus-fetch-fabro-bundles.sh`
+(`mise run check:bundles`, in the routine gate and in every CI job) verifies
+the tracked tree against those digests and fails on a missing, changed, or
+extra file; it fetches nothing. The two private sources needed no deploy key
+after this: CI reads only this repository.
 
 | Bundle | Source and revision | Status | Scenario obligations |
 |---|---|---|---|
-| `code-review` | `lithoscomputer/code-review` `0c81ffb4f68039ca56842ab3328fde03b9714350` (private; HEAD, clean) | required | empty diff; findings in multiple branches; no surviving findings; invalid output repaired; repair exhausted; one failed branch; reverse branch completion; multi-level fan-out |
-| `security-review` | `lithoscomputer/security-review` `c14279e9cdac4f7553b5e010718ada1a76e5c1f8` (public; HEAD, clean) | required | no vulnerabilities; several verified; rejected candidate; partial branch failure; malformed response; timeout and cancel |
-| `fix-ci` | `veniceai/factory` `1b50f791ac4811aad62788c2a4282a75d1e92422` (private; bundle files match HEAD, other files in that working tree were dirty) | excluded (owner decision 2026-09-07) | none; see below |
-| `implement-issue` (with `implement-plan`) | `fabro-sh/fabro` at the pin | required, blocked | child runs; input and model inheritance; multiple manager cycles; stop condition; child failure; parent cancellation |
-| `interview` | `fabro-sh/fabro` at the pin | required | scripted choice, refusal, free text; repeated and concurrent questions; child interviews; delayed and withheld reply; invalid, unexpected and unused answers; timeout and cancel; terminal EOF |
+| `code-review` | `lithoscomputer/code-review` `0c81ffb4f68039ca56842ab3328fde03b9714350` (private source, vendored; HEAD, clean) | required | empty diff; findings in multiple branches; no surviving findings; invalid output repaired; repair exhausted; one failed branch; reverse branch completion; multi-level fan-out |
+| `security-review` | `lithoscomputer/security-review` `c14279e9cdac4f7553b5e010718ada1a76e5c1f8` (public source, vendored; HEAD, clean) | required | no vulnerabilities; several verified; rejected candidate; partial branch failure; malformed response; timeout and cancel |
+| `fix-ci` | `veniceai/factory` `1b50f791ac4811aad62788c2a4282a75d1e92422` (internal source, vendored; bundle files match HEAD, other files in that working tree were dirty) | excluded (owner decision 2026-09-07) | none; see below |
+| `implement-issue` (with `implement-plan`) | `fabro-sh/fabro` at the pin (public source, vendored) | required, blocked | child runs; input and model inheritance; multiple manager cycles; stop condition; child failure; parent cancellation |
+| `interview` | `fabro-sh/fabro` at the pin (public source, vendored) | required | scripted choice, refusal, free text; repeated and concurrent questions; child interviews; delayed and withheld reply; invalid, unexpected and unused answers; timeout and cancel; terminal EOF |
 
 "Blocked" names a required bundle whose scenarios cannot run yet. The
 blockers are listed per bundle in the lock file. They are not exclusions.
@@ -496,9 +505,11 @@ names the decision record under `decisions/`; "gap" names the owner.
 4. Docker coverage is thin (four cases, five cells); ACP and Daytona are
    gated separately and not claimed.
 5. `fix-ci` is excluded by the owner's decision of 2026-09-07.
-6. The two deploy keys (`CODE_REVIEW_DEPLOY_KEY`, `FACTORY_DEPLOY_KEY`) do
-   not exist; the owner creates them. Hosted CI has not run; the first run's
-   required results are listed under the readiness gate checklist.
+6. Hosted CI's first run (2026-09-08) failed at its dependency setup: the
+   private-dependency deploy keys did not exist. The owner made Pebble,
+   lithos-llm, and sandbox-driver public and had the bundle files vendored,
+   so CI needs no key; a passing hosted run is still pending. The first
+   run's required results are listed under the readiness gate checklist.
 7. A `for_each` fan-out emits no typed `fork_started`, `branch_completed`,
    `fork_completed` (the `fabro.parallel.*` kinds and the invocation links
    carry the facts). Owner Petri core (`execution::events`).
@@ -572,7 +583,7 @@ it.
 | Extended variations and repeated process-isolation runs in `check:nightly` | `test:fabro:blackbox:repeat` (three runs under different schedules), `test:long`, `test:fabro:blackbox:strict`, `test:fabro:differential`, `check:msrv`, `test:release` | met |
 | Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` (the runner image included) | met; the batch is pinned |
 | Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox::a_tool_effect_is_not_repeated_across_a_failover`, `client_retries_are_spent_before_the_chain_advances`, `a_workflow_retry_is_not_a_failover`, `fallback_events.rs` | met |
-| Required CI fetches and verifies pinned bundles and twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs` | partial: wired and verified locally; the two deploy keys do not exist, so the first hosted run fails at the bundle step until the owner creates them; hosted CI has not run |
+| Required CI verifies the vendored bundles and the pinned twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs`; `mise run check:bundles` | partial: wired and verified locally; CI needs no private access; the first hosted run failed at the deploy-key setup that has since been removed, so a passing hosted run is pending |
 | Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux; every planned cell of `matrix.json` has a test | met locally; hosted run pending |
 | The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)`: cached pinned build, `test:fabro:differential` (five live cells, zero unresolved differences) | met locally; hosted run pending |
 | A machine-readable record per scenario | `tests/support/fabro/record.rs`, one record per scenario cell, `compatibility.differential` from the engine records | met |
@@ -586,8 +597,8 @@ it.
 | Inspection and replay trustworthy; cancellation and timeout leave no leak | `inspect_cli.rs`, `inspect.rs`, the milestone and readiness cancellation cases, `assert_no_leaked_processes`, the "No containers left behind" CI step, replay equal to the live stream (`embedding_readiness`) | met |
 | Additional cutover requirements (ACP, Daytona, crash resume) gated separately | out of the initial scope by decision; not claimed | not claimed |
 
-What the first hosted run must show, in order: the bundle step passes on
-every job once the two deploy keys exist (until then it fails naming them);
+What the first passing hosted run must show, in order: "Verify the vendored
+Fabro bundles" passes on every job with no fetch and no key;
 the compatibility job restores or builds the pinned `fabro` binary and the
 "Build the pinned fabro binary" step reports its time; `test:fabro:differential`
 passes its five cells; every `check` job writes `coverage.md` to the summary
@@ -601,7 +612,8 @@ its 90-minute budget.
 |---|---|
 | Pin | `crates/fabro/corpus-pin.txt` |
 | Bundle manifest | `crates/fabro/acceptance/bundles.lock.json` |
-| Bundle fetcher | `scripts/corpus-fetch-fabro-bundles.sh` |
+| Vendored bundles and their provenance | `crates/fabro/acceptance/bundles/<id>/`, `crates/fabro/acceptance/bundles/PROVENANCE.md` |
+| Bundle verifier | `scripts/corpus-fetch-fabro-bundles.sh` (`mise run check:bundles`) |
 | Fabro fetcher | `scripts/corpus-fetch-fabro.sh` |
 | Parity harness | `crates/fabro/oracle/harness/` (`oracle_harness.py`, `scripted_acp_agent.py`) |
 | Fixture regeneration | `scripts/oracle-regenerate.sh` |

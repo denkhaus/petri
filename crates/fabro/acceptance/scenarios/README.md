@@ -42,11 +42,12 @@ reason) or `excluded` (not required, with its reason).
 `mise run test:fabro:blackbox` runs every planned cell of `matrix.json` and
 then the coverage report, allowing a skipped cell (a machine with no Docker).
 `mise run test:fabro:blackbox:strict` requires Docker
-(`PETRI_REQUIRE_DOCKER=1`) and the fetched bundles
+(`PETRI_REQUIRE_DOCKER=1`) and the vendored bundles
 (`PETRI_REQUIRE_FABRO_BUNDLES=1`) and fails on any skipped cell; the nightly
 gate runs it, so the repeated container work stays out of the routine
-subset. The bundles must be fetched first
-(`scripts/corpus-fetch-fabro-bundles.sh`); a missing bundle skips its
+subset. The bundles are tracked under `../bundles/<id>/` (provenance in
+`../bundles/PROVENANCE.md`); `mise run check:bundles` verifies them against
+`../bundles.lock.json`. A bundle missing from the checkout skips its
 scenarios in the routine task and fails them in the strict one.
 
 Each cell is one Nextest test in `crates/petri/cli/tests/fabro_scenarios_blackbox.rs`.

@@ -26,7 +26,7 @@ pub(crate) const SCENARIOS_DIR: &str = "../../fabro/acceptance/scenarios";
 /// The bundle manifest, relative to this crate's manifest.
 pub(crate) const BUNDLES_LOCK: &str = "../../fabro/acceptance/bundles.lock.json";
 
-/// The fetched bundles, relative to this crate's manifest.
+/// The vendored bundles, relative to this crate's manifest.
 pub(crate) const BUNDLES_DIR: &str = "../../fabro/acceptance/bundles";
 
 pub(crate) const FAMILIES: &[&str] = &[

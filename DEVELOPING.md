@@ -40,6 +40,18 @@ checkouts; commit a pushed revision in `Cargo.toml` and regenerate `Cargo.lock`
 before sharing the integration. The twins (`lithoscomputer/twins`) are pinned
 the same way in the two test crates that serve them.
 
+## Fabro bundles
+
+The Fabro workflow bundles the black box battery runs are vendored under
+`crates/fabro/acceptance/bundles/<id>/`, one directory per bundle, with each
+file at its path in the source repository. `bundles.lock.json` beside them
+records the source repository, revision, and every file's digest;
+`bundles/PROVENANCE.md` records the copy and the sources' licenses. Two of
+the sources are not public, so nothing fetches them: `mise run check:bundles`
+(part of `mise run check` and of every CI job) verifies the tracked files
+against the lock and fails on a missing, changed, or extra file. To update a
+bundle, follow "Updating a bundle" in `PROVENANCE.md`.
+
 Native Pebble tests use a scripted model and real execution scopes. They need
 no provider credentials. `crates/fabro/steps/tests/pebble.rs` covers tool
 execution, output repair, model selection, accounting, steering, cancellation,
@@ -56,6 +68,7 @@ bounded output capture, and the Pebble environment contract on Host and Docker.
 | `mise run test` | Run the routine suite with Nextest, then run doctests |
 | `mise run check:msrv` | Check all targets with Rust 1.89 |
 | `mise run check` | Run the complete routine verification gate |
+| `mise run check:bundles` | Verify the vendored Fabro bundles against `bundles.lock.json`, digest by digest |
 | `mise run check:pins` | Check that the manifests, `CONTRACT.md`, and the latest evidence records cite the same revisions |
 | `mise run test:fabro:blackbox` | Run the required Fabro black box scenarios and write their evidence records and coverage report |
 | `mise run test:fabro:blackbox:repeat` | The same set three times, each in fresh processes under a different schedule |

@@ -158,8 +158,8 @@ fn skip_dir(path: &Path, root: &Path) -> bool {
     if path != root && path.join(".git").exists() {
         return true;
     }
-    // Fetched data, never a build input: the Fabro corpus checkout and the
-    // black box bundle sources, even before they are checkouts.
+    // Test data, never a build input: the Fabro corpus checkout, the vendored
+    // black box bundles, and a fetched bundle source under `.sources`.
     path.strip_prefix(root).is_ok_and(|rel| {
         rel.starts_with("crates/fabro/corpus") || rel.starts_with("crates/fabro/acceptance/bundles")
     })

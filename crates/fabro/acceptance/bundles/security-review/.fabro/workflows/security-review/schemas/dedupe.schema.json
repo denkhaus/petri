@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "required": ["duplicates"],
+  "additionalProperties": false,
+  "properties": {
+    "duplicates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding", "duplicateOf", "reasoning"],
+        "additionalProperties": false,
+        "properties": {
+          "finding": { "type": "string" },
+          "duplicateOf": { "type": "string" },
+          "reasoning": { "type": "string" }
+        }
+      }
+    }
+  }
+}

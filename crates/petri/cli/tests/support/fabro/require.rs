@@ -9,7 +9,7 @@
 //!
 //! | Asset | Variable | Materialized by |
 //! |---|---|---|
-//! | bundles | `PETRI_REQUIRE_FABRO_BUNDLES` | `scripts/corpus-fetch-fabro-bundles.sh` |
+//! | bundles | `PETRI_REQUIRE_FABRO_BUNDLES` | tracked under `crates/fabro/acceptance/bundles/<id>`; `scripts/corpus-fetch-fabro-bundles.sh` verifies the tree |
 //! | fabro binary | `PETRI_REQUIRE_FABRO_BINARY` | `scripts/fabro-provision.sh` (handed over as `FABRO_BIN`) |
 //! | corpus | `PETRI_REQUIRE_FABRO_CORPUS` | `scripts/corpus-fetch-fabro.sh` |
 //! | Docker | `PETRI_REQUIRE_DOCKER` | a reachable daemon and the Docker plugin |
@@ -63,10 +63,13 @@ pub(crate) fn workspace_root() -> PathBuf {
     root.canonicalize().unwrap_or(root)
 }
 
-/// The materialized bundle `crates/fabro/acceptance/bundles/<id>`, or `None`
-/// (with a notice) when the bundle set is not fetched. The set is verified
-/// as a whole: `MANIFEST.txt` exists only after every bundle passed its
-/// digest check.
+/// The vendored bundle `crates/fabro/acceptance/bundles/<id>`, or `None`
+/// (with a notice) when its directory is absent. The bundles are tracked in
+/// the repository, so an absent one means an incomplete checkout, not a
+/// fetch that did not run. Their digests are checked against
+/// `bundles.lock.json` by `scripts/corpus-fetch-fabro-bundles.sh`
+/// (`mise run check:bundles`) and by the acceptance crate's
+/// `staged_bundles_match_the_lock_file_or_a_recorded_migration`.
 ///
 /// # Panics
 ///
@@ -74,13 +77,11 @@ pub(crate) fn workspace_root() -> PathBuf {
 pub(crate) fn bundle(id: &str) -> Option<PathBuf> {
     let root = workspace_root().join("crates/fabro/acceptance/bundles");
     let dir = root.join(id);
-    let present = root.join("MANIFEST.txt").is_file() && dir.is_dir();
     require_or_skip(
-        present,
+        dir.is_dir(),
         "PETRI_REQUIRE_FABRO_BUNDLES",
         &format!(
-            "the Fabro bundle `{id}` is not materialized under {} (run \
-             scripts/corpus-fetch-fabro-bundles.sh)",
+            "the Fabro bundle `{id}` is not under {} (the vendored tree is incomplete)",
             root.display()
         ),
     )

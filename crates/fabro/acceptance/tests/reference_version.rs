@@ -243,13 +243,13 @@ fn every_decision_record_is_complete() {
     );
 }
 
-/// A bundle the fetcher staged keeps its files byte-identical to
+/// Every vendored bundle keeps its files byte-identical to
 /// `bundles.lock.json`, except a file a migration decision names by its new
-/// digest. The scenarios read the staged bundle
-/// (`crates/fabro/acceptance/bundles/<id>`, written by
-/// `scripts/corpus-fetch-fabro-bundles.sh`) rather than committing a second
-/// copy, so that is what this checks; with no bundle fetched there is
-/// nothing to compare.
+/// digest. The scenarios read the vendored tree
+/// (`crates/fabro/acceptance/bundles/<id>`, tracked in the repository with
+/// its provenance in `PROVENANCE.md` there), so that is what this checks. A
+/// missing bundle directory is a failure: the tree is tracked, so nothing
+/// fetches it.
 #[test]
 fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
     let lock = json(&root().join("crates/fabro/acceptance/bundles.lock.json"));
@@ -263,9 +263,11 @@ fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
     for bundle in lock["bundles"].as_array().expect("bundles") {
         let id = bundle["id"].as_str().unwrap_or_default();
         let dir = root().join("crates/fabro/acceptance/bundles").join(id);
-        if !dir.is_dir() {
-            continue;
-        }
+        assert!(
+            dir.is_dir(),
+            "{}: the vendored bundle `{id}` is missing",
+            dir.display()
+        );
         for file in bundle["files"].as_array().expect("files") {
             let relative = file["path"].as_str().unwrap_or_default();
             let expected = file["sha256"].as_str().unwrap_or_default();
@@ -285,10 +287,7 @@ fn staged_bundles_match_the_lock_file_or_a_recorded_migration() {
             );
         }
     }
-    assert!(
-        checked > 0 || !root().join("crates/fabro/acceptance/bundles").is_dir(),
-        "the bundles are fetched but no staged bundle matched a lock entry"
-    );
+    assert!(checked > 0, "the lock lists no bundle files");
 }
 
 /// Evidence records a differential run left (under `PETRI_EVIDENCE_DIR` or
