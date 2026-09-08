@@ -511,7 +511,11 @@ fidelity is `fabro.thread_id_requires_fidelity_full` at load. The first
 node of a parallel branch has no thread and an explicit `full` reads as
 `summary:high` (Fabro's branch rule); a node whose thread's conversation was
 discarded (its predecessor on the thread failed, or the run resumed) also
-reads `full` as `summary:high`, once, and starts the thread again.
+reads `full` as `summary:high`, once, and starts the thread again. This is
+Fabro's own rule for a restart: its `AgentApiBackend` keeps full-fidelity
+sessions in an in-memory map per worker, so a resumed node runs from the
+`summary:high` preamble there too. Petri does not persist retained threads
+across `petri resume` for the same reason.
 
 The native backend retains a successful node's conversation per thread for
 the run (`fabro_steps::sessions::SessionService`, one per invocation). A
@@ -1052,6 +1056,27 @@ a count. Both maps live in the middleware state, so they survive a restart
 successor and are restored on resume. Node visit totals also survive a
 `loop_restart` (the successor starts with the predecessor's firing counts)
 while the context is replaced; the run-wide invocation total never resets.
+
+## Pause and resume
+
+A run control's pause (`petri run --control <FILE>`, the line `pause`, or an
+embedding host's `ControlService::pause`) holds every attempt not yet
+admitted; running work continues. Each pause and unpause is a coordinator
+record (`RunPaused`, `RunUnpaused`), so the pause is durable the way the
+pinned Fabro persists `Paused` as a run status: `petri inspect` reports
+`paused`, `replay_run` carries `run_paused` and `run_unpaused`, and a resume
+of a run whose last recorded control was a pause starts with admission held
+until an `unpause` arrives. A pause holds at once and records after; an
+unpause records first and releases after, so a crash between the two never
+resumes paused.
+
+`petri resume --run-dir <dir>` continues an interrupted run from its run
+directory alone, with the same session options as `petri run`. Finished
+nodes are not repeated; the node in flight at the crash starts again; a human
+gate that was waiting asks again and the resumed interviewer answers it. A
+retained agent thread is not restored (above). The command refuses a
+finished run, a run another process holds, a paused run given no `--control`
+file, and a run directory that does not decode, at exit 2 before any work.
 
 ## Syntax both runners reject, and Petri's stricter diagnostics
 

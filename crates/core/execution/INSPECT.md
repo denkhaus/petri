@@ -11,7 +11,8 @@ The command reads only these files:
 
 - `run.json`: the run's format version and root invocation id.
 - `coordinator.jsonl`: graph registrations, invocation and execution
-  declarations, exits, results, cancellation requests, and the run's finish.
+  declarations, exits, results, cancellation requests, pause and unpause
+  controls, and the run's finish.
 - `graphs/<digest>.json`: every registered graph, byte-exact.
 - `invocations/<invocation>/executions/<execution>/events.jsonl`: one engine
   log per execution.
@@ -81,6 +82,7 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 | `complete` | `true` only when `incomplete` is empty. |
 | `status` | The recorded run status, or `null` until the run finished. |
 | `incomplete` | Every reason `complete` is `false`, in the order found. |
+| `paused` | Whether the last recorded run control was a pause (`RunPaused` with no later `RunUnpaused`). A `petri resume` of such a run holds admission until an unpause. Additive in format version 1. |
 | `root` | `invocation`, `final_execution` (the execution the root's result names, or `null`), `latest_execution` (the root's newest execution). |
 | `middleware_chain` | The configured decision middleware, by key. |
 | `graphs` | Every registered graph digest, sorted. |

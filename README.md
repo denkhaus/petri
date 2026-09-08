@@ -129,13 +129,14 @@ crates/fabro/steps/tests/prompt.rs           readiness item 4: `fabro/prompt` ag
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, two 1,000-item forks in one run, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
+crates/petri/cli/tests/fabro_resume_blackbox.rs  `petri resume` through the binary: a run killed with SIGKILL continues without repeating finished work, a paused run stays paused across the resume until an unpause, a waiting gate asks again, `inspect` reports `paused`, and the refusals (finished, leased, missing, corrupt)
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
 crates/petri/cli/tests/fabro_scenarios_blackbox.rs black box phase 4: every required (scenario, backend, agent) cell of `crates/fabro/acceptance/scenarios/matrix.json`, each a scenario file in the versioned format `scenarios/SCHEMA.md` documents, run through the shipped binary with provider twins, a fixture repository with real local Git remotes, and a scripted interviewer; `scripts/fabro-coverage-report.py` merges the per-cell records into `coverage.json`
 crates/petri/cli/tests/fabro_differential.rs black box phase 5: every scenario through the shipped binary and the pinned Fabro binary, independent expectations per engine, the committed reference, and the comparison under `tests/support/fabro/compare.rs` with decision records (`crates/fabro/acceptance/decisions/`)
 crates/fabro/acceptance/tests/reference_version.rs  every oracle fixture, scenario reference, decision record, staged bundle and evidence record names the pinned Fabro revision
 crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation, occurrence across a loop, nested invocation paths, the re-ask, expiry
-crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering
+crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering; the durable pause (a pause survives a dropped coordinator and holds admission on resume until an unpause; a paused resumed run can be cancelled)
 crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
@@ -293,8 +294,9 @@ explicitly through workflow environment settings.
 `petri run --backend host|docker|daytona` selects the execution backend.
 Host is the default, unless the workflow's own configuration asks for another
 (a Fabro `workflow.toml` `[environments.<id>] provider`, read back from the
-lowered graph through `Frontend::launch_settings`); an explicit `--backend`
-always wins. Docker runs process jobs in a pinned slim runner image.
+lowered graph through `Frontend::launch_settings`; `petri resume` finds the
+format from the stored graph through `Frontend::claims_graph`); an explicit
+`--backend` always wins. Docker runs process jobs in a pinned slim runner image.
 Daytona runs them in a VM with nested Docker; container jobs, services, and
 Docker actions stay inside that VM. `--runner-image LABEL=IMAGE` overrides a
 runner label. Docker defaults cover Ubuntu 22.04, 24.04, and 26.04. Daytona's
@@ -1085,6 +1087,32 @@ is reported as `control: ...` on stderr; a line that is not a command or names
 a stage that is not running is reported and skipped. An embedded host drives
 the same `execution::controls::ControlService`.
 
+The pause is durable. Each `pause` and `unpause` is a coordinator record
+(`RunPaused`, `RunUnpaused`), so `petri inspect` reports `paused` and a resume
+of a run whose last control was a pause starts with admission held.
+
+**Resuming.** `petri resume --run-dir <dir>` continues a run whose process
+died. It needs only the run directory: not the workflow file, not its inputs.
+The workflow's format is found from the stored root graph
+(`Frontend::claims_graph`), and its launch settings and default retention
+apply as they did to `petri run`. The session options are given again and
+apply to the resumed session: `--interactive`, `--auto-approve`,
+`--interview-script`, `--control`, `--retain`, `--quiet`, `--dry-run`, and the
+provider and runner options. Finished work is not repeated; the node that was
+in flight at the crash starts again. A gate that was waiting asks again, and
+the resumed interviewer answers it; the interview receipt written beside the
+run is the resumed session's. A paused run stays paused until an `unpause`
+arrives through `--control`, which a resume tails from its current end, so
+lines the earlier process applied are not applied again. Before anything
+starts, the command reads the coordinator log without the lease and refuses
+with exit code 2 and no work done: a run that already finished (`already
+finished (<status>); nothing to resume`), a run another process holds (the
+lease on `run.json`), a paused run given no `--control` file, and a run
+directory that is missing or does not decode. What a resume does not restore:
+an agent node's retained thread. As in Fabro, whose `AgentApiBackend` keeps
+full-fidelity sessions in memory per worker, a node that was mid-turn starts a
+fresh session from the `summary:high` preamble.
+
 **Policies.** A Fabro graph's `stall_timeout` (default 30 minutes) cancels a
 run that emits no execution event for that long; a pending question parks the
 clock, and the terminal prints `stall watchdog: no execution activity for N
@@ -1209,4 +1237,6 @@ successors, and final results. Each execution keeps an independent engine log. `
 A restart creates a successor execution in the same invocation. It starts at the
 selected target with empty context and carried firing budgets. Nested workflow calls
 create invocations, not separately managed runs. The coordinator holds an exclusive
-lease on `run.json` while it creates or resumes the run.
+lease on `run.json` while it creates or resumes the run. `petri resume --run-dir`
+continues the run from this layout alone; `RunPaused` and `RunUnpaused` records in
+`coordinator.jsonl` make a pause durable across it.

@@ -54,10 +54,11 @@ beside the cancel request the stall watchdog made, with the budget and the
 idle time), `execution_declared` (predecessor, index, entry),
 `execution_finished` (the engine exit: terminal status or restart).
 
-Live-only host notices (`EventSource::Host`, `seq` counting the projector's
-notices): `run_paused`, `run_unpaused`, published by a projector that follows
-the control service (`EventProjector::follow_controls`). Nothing durable backs
-them, so replay does not carry them.
+Run controls (coordinator log): `run_paused`, `run_unpaused`, derived from
+the `RunPaused` and `RunUnpaused` records the control service appends through
+the coordinator. Replay carries them, and a resume whose last recorded control
+is a pause starts with admission held. The records are additive to coordinator
+format version 2.
 
 Execution events (engine log), each attributed to a subject where one exists:
 
@@ -112,12 +113,11 @@ failed and closed, and their summed usage by session) under `custom`.
   identities; delivery is at-least-once, deduplicated by `EventId`. A
   projector attached at resume is built with `EventProjector::primed`, which
   folds the on-disk prefix into its state without delivering it.
-- Every event is derived from a durable record, output lines included, except
-  the `Host`-sourced notices (`run_paused`, `run_unpaused`), which are
-  live-only by design. The one live-only field on a derived event is
-  `observed_at` (milliseconds since the epoch when the projector saw the
-  record), absent on replay. A backend's live stream chunks that never reached
-  the step's progress channel are not in the contract.
+- Every event is derived from a durable record, output lines included. The
+  one live-only field on a derived event is `observed_at` (milliseconds since
+  the epoch when the projector saw the record), absent on replay. A backend's
+  live stream chunks that never reached the step's progress channel are not
+  in the contract.
 
 ## Secrets
 
@@ -169,7 +169,7 @@ also carries `node`, `firing` and `attempt` beside the event's `subject`.
 | run-level hooks (`run_complete`, `run_failed`, `sandbox_cleanup`) | not on the stream: they belong to no firing; their reports are logged (accepted difference `run-level-hook-reports`); the run's own end is `run_finished` | | | `fabro_milestone_blackbox` (the hooks' effects) |
 | local sandbox, retention, output references | `invocation_declared.sandbox` (the binding), the reported workspace in `petri inspect`, `output_line`, `artifact_recorded`, `blob://sha256/…` references in outputs; the acquisition progress lines are terminal-only | invocation, scope | durable (the binding and outputs), live-only (progress lines) | `inspect_cli`, `petri-fabro-steps::steps::large_command_output_is_offloaded_and_reads_back_logically` |
 | budget pause and resume | `budget_paused {remaining_ms, pending_questions}`, `budget_resumed {remaining_ms}` from the driver's notes | node, firing, attempt | durable | `petri-driver::interview_budget::the_waiting_stage_pays_only_for_active_work` |
-| pause and unpause | `run_paused`, `run_unpaused` (`EventSource::Host`) | run | live-only by design (replay does not carry them) | `controls::pause_holds_admission_and_unpause_releases_it` |
+| pause and unpause | `run_paused`, `run_unpaused` from the coordinator's `RunPaused` and `RunUnpaused` records | run | durable; a resume starts paused when the last control recorded is a pause | `controls::pause_holds_admission_and_unpause_releases_it`, `controls::a_pause_survives_resume_and_holds_admission_until_unpaused`, `fabro_resume_blackbox::a_paused_run_stays_paused_across_resume_until_unpaused` |
 | platform lifecycle, `checkpoint.*`, `git.*`, `pull_request.*`, product projections | not emitted; a host performs them in its `transition` and records `host_note {kind: "transition"}` | | | `embedding::adapters_run_in_order_and_checkpoint_work_follows_source_metadata` |
 
 Replay equality: `embedding_readiness::the_combined_workflow_runs_through_the_embedding_boundary`
