@@ -18,7 +18,6 @@ env:
 jobs:
   check:
     name: check (${{ matrix.runner }})
-    environment: sandbox-driver-read
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
@@ -41,18 +40,6 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-
-      - name: Configure private dependency access
-        uses: ./.github/actions/private-dependencies
-        with:
-          sandbox-driver-key: ${{ secrets.SANDBOX_DRIVER_DEPLOY_KEY }}
-          pebble-key: ${{ secrets.PEBBLE_DEPLOY_KEY }}
-          lithos-llm-key: ${{ secrets.LITHOS_LLM_DEPLOY_KEY }}
-          # The two private Fabro bundle sources (scripts/corpus-fetch-fabro-bundles.sh).
-          # Until the owner creates these read-only deploy keys the bundle
-          # fetch fails with a message naming them; it never skips a bundle.
-          code-review-key: ${{ secrets.CODE_REVIEW_DEPLOY_KEY }}
-          factory-key: ${{ secrets.FACTORY_DEPLOY_KEY }}
 
       - name: Free disk space for Rust and Docker
         if: runner.os == 'Linux'
@@ -179,10 +166,6 @@ jobs:
           fi
           echo "clean"
 
-      - name: Remove dependency credentials
-        if: always()
-        run: rm -rf -- "$RUNNER_TEMP/petri-dependencies"
-
   # The pinned Fabro comparison matrix: the shipped petri binary and the
   # pinned fabro binary run the same scenarios and are compared under
   # crates/fabro/acceptance/CONTRACT.md. A separate required job on the same
@@ -191,7 +174,6 @@ jobs:
   # Nightly repeats this; it is never the only place the matrix runs.
   fabro-compatibility:
     name: fabro compatibility (ubuntu-24.04)
-    environment: sandbox-driver-read
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -202,18 +184,6 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-
-      - name: Configure private dependency access
-        uses: ./.github/actions/private-dependencies
-        with:
-          sandbox-driver-key: ${{ secrets.SANDBOX_DRIVER_DEPLOY_KEY }}
-          pebble-key: ${{ secrets.PEBBLE_DEPLOY_KEY }}
-          lithos-llm-key: ${{ secrets.LITHOS_LLM_DEPLOY_KEY }}
-          # The two private Fabro bundle sources (scripts/corpus-fetch-fabro-bundles.sh).
-          # Until the owner creates these read-only deploy keys the bundle
-          # fetch fails with a message naming them; it never skips a bundle.
-          code-review-key: ${{ secrets.CODE_REVIEW_DEPLOY_KEY }}
-          factory-key: ${{ secrets.FACTORY_DEPLOY_KEY }}
 
       - name: Free disk space for Rust and Docker
         run: |
@@ -321,7 +291,3 @@ jobs:
             exit 1
           fi
           echo "clean"
-
-      - name: Remove dependency credentials
-        if: always()
-        run: rm -rf -- "$RUNNER_TEMP/petri-dependencies"

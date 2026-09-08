@@ -321,10 +321,10 @@ been run against the hosted preview service.
 Release archives bundle the Docker, Host, and Daytona plugin executables from
 the pinned revision. Petri embeds their SHA-256 digests at release build time.
 `scripts/release-verify.sh` checks the archive, runs Host and Docker workflows
-without development mode, and verifies rejection of modified plugins. The CI,
-nightly, and release jobs use separate read-only deploy keys for sandbox-driver,
-Pebble, and lithos-llm from the `sandbox-driver-read` environment. See
-[private dependency setup](DEVELOPING.md#private-dependencies).
+without development mode, and verifies rejection of modified plugins.
+sandbox-driver, Pebble, and lithos-llm are public repositories pinned by
+revision and fetched over HTTPS, so no job needs a deploy key. See
+[git dependencies](DEVELOPING.md#git-dependencies).
 
 Fabro agent nodes can use Pebble directly as a Rust library. Set
 `backend="api"` and `model="provider/model"` on the node, or set graph

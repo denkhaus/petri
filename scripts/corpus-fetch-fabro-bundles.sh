@@ -12,10 +12,8 @@
 # differs, a bundle hash that differs, or a source that cannot be fetched fails
 # the script. No bundle is skipped silently.
 #
-# Private sources are reached over SSH. CI configures deploy keys through
-# .github/actions/private-dependencies, which rewrites
-# ssh://git@github.com/<owner>/<repo> to a per-repository host alias. A
-# developer machine uses its own SSH agent. FABRO_BUNDLE_SOURCE_<OWNER>_<REPO>
+# Private sources are reached over SSH with the developer's own SSH agent; CI
+# has no key for them. FABRO_BUNDLE_SOURCE_<OWNER>_<REPO>
 # (for example FABRO_BUNDLE_SOURCE_LITHOSCOMPUTER_CODE_REVIEW) overrides one
 # source URL with a local path, for offline use.
 set -euo pipefail
@@ -57,9 +55,7 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
         echo "  visibility: $visibility"
         echo "  access: $access"
         if [ "$visibility" = private ]; then
-          echo "  In CI, pass the matching *-key input of .github/actions/private-dependencies from"
-          echo "  the repository secret named above (DEVELOPING.md, \"Private dependencies\")."
-          echo "  Locally, use an SSH agent with read access, or set $env_name to a checkout."
+          echo "  Use an SSH agent with read access, or set $env_name to a local checkout."
         fi
         echo "  The bundle set is required: no bundle is skipped."
       } >&2
