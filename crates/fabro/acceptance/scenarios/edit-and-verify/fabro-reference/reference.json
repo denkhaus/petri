@@ -3,8 +3,8 @@
   "scenario": "edit-and-verify",
   "fabro_repository": "https://github.com/fabro-sh/fabro",
   "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
-  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-08 debug)",
-  "captured_on": "2026-09-08",
+  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
+  "captured_on": "2026-09-07",
   "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
   "bundle_digest": "1697ae1a7256a79f8bb8dd56419288900c55ebe1e883575dbabade092d081225",
   "twins": [

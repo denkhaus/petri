@@ -3,8 +3,8 @@
   "scenario": "skills-precedence",
   "fabro_repository": "https://github.com/fabro-sh/fabro",
   "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
-  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-08 debug)",
-  "captured_on": "2026-09-08",
+  "fabro_version": "fabro 0.347.0-nightly.0 (b648291 2026-09-07 debug)",
+  "captured_on": "2026-09-07",
   "captured_by": "crates/petri/cli/tests/fabro_differential.rs through tests/support/fabro/fabro_adapter.rs",
   "bundle_digest": "6828105ee11bddf1f551e1af216c7d3dd13c2ee5362056dfbd342bf5d513f028",
   "twins": [
