@@ -12,8 +12,8 @@ use frontend::print::print_expr;
 use frontend::{CompileInputs, Frontend, NoFiles};
 use frontend_fabro::hooks::SETTINGS_HOOKS_VAR;
 use frontend_fabro::kinds::{
-    AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, HUMAN_KIND, PROMPT_KIND, STAGE_KIND,
-    WAIT_KIND, WORKFLOW_KIND,
+    AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, FORK_KIND, HUMAN_KIND, PROMPT_KIND,
+    STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend_fabro::{Fabro, MAX_FIRINGS, load};
 use ir::placeholder::{BRANCH_ROLE_META, contains_placeholder};
@@ -717,6 +717,56 @@ fn a_duplicate_branch_target_gets_its_own_branch_node_and_index() {
     ir::validate(&graph).expect("validates");
 }
 
+/// A `for_each` nested in a static branch reads its list from the context by
+/// expression inside the child, which cannot see through a reference: the
+/// outer fork keeps that key inline in its snapshot, and the inner fork
+/// offloads it from its own children.
+#[test]
+fn a_static_fork_keeps_a_nested_for_each_list_inline_in_its_snapshot() {
+    let lowered = load(
+        "w.fabro",
+        &dot(r#"
+        plan [shape=parallelogram, script="echo"]
+        outer [shape=component]
+        inner [shape=component, for_each="context.jobs"]
+        job [prompt="x"]
+        inner_join [shape=tripleoctagon]
+        other [shape=parallelogram, script="true"]
+        join [shape=tripleoctagon]
+        start -> plan -> outer
+        outer -> inner -> job -> inner_join -> join
+        outer -> other -> join
+        join -> exit
+    "#),
+        &NoFiles,
+        &CompileInputs::new(),
+    );
+    let graph = lowered
+        .graph
+        .unwrap_or_else(|| panic!("{:?}", lowered.diagnostics));
+    let outer = node(&graph, "outer");
+    assert_eq!(outer.step.kind, FORK_KIND);
+    assert_eq!(outer.step.config["inline"], json!(["jobs"]));
+    assert!(outer.step.config.get("source").is_none());
+    assert!(
+        outer.step.config.get("nodes").is_none(),
+        "no direct branch target renders a preamble"
+    );
+    // The parent holds the branch delegate for `inner`; the inner fork itself
+    // runs in that branch's child graph, where it offloads the list from its
+    // own children.
+    assert_eq!(node(&graph, "inner").step.kind, BRANCH_KIND);
+    let inner = lowered
+        .children
+        .iter()
+        .flat_map(|child| child.nodes.iter())
+        .find(|n| n.name == "inner" && n.step.kind == FORK_KIND)
+        .expect("the inner fork step in a child graph");
+    assert_eq!(inner.step.config["source"], json!("jobs"));
+    assert!(inner.step.config.get("inline").is_none());
+    assert!(contains_placeholder(&inner.step.config["nodes"]));
+}
+
 #[test]
 fn for_each_lowers_to_an_expansion_on_the_template_node() {
     let graph = lower_ok(&dot(r#"
@@ -746,11 +796,20 @@ fn for_each_lowers_to_an_expansion_on_the_template_node() {
     assert_eq!(job.step.config["for_each"], json!(true));
     assert!(contains_placeholder(&job.step.config["item"]));
     assert!(contains_placeholder(&job.step.config["index"]));
-    assert!(
-        node(&graph, "fan").precondition.is_some(),
-        "the item cap is a precondition"
-    );
-    assert!(contains_placeholder(&node(&graph, "fan").step.config));
+    // The branch reads its snapshot from the fork's output, not the live
+    // context.
+    assert!(contains_placeholder(&job.step.config["kv"]));
+    assert!(contains_placeholder(&job.step.config["nodes"]));
+    let fan = node(&graph, "fan");
+    assert!(fan.precondition.is_some(), "the item cap is a precondition");
+    // The parallel node is the fork step: it snapshots `kv` and the stage
+    // records once, and offloads the source list at any size.
+    assert_eq!(fan.step.kind, FORK_KIND);
+    assert_eq!(fan.step.config["source"], json!("jobs"));
+    assert_eq!(fan.step.config["node"], json!("fan"));
+    assert!(contains_placeholder(&fan.step.config["kv"]));
+    assert!(contains_placeholder(&fan.step.config["nodes"]));
+    assert!(fan.step.config.get("inline").is_none());
     assert!(
         codes(&dot(r#"
         fan [shape=component, for_each="context.jobs"]

@@ -2325,6 +2325,109 @@ async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
     twin.stop();
 }
 
+/// Fifty items, each a name and a 100-character brief: every branch child is
+/// declared from a reference to the list, not a copy; the model's prompt in
+/// each branch still shows the list (the preamble restores what the fork
+/// offloaded); the joined results are published as a reference that the
+/// downstream command reads back whole and the inspect document shows.
+#[tokio::test]
+async fn a_fifty_item_fork_declares_small_children_and_prompts_still_see_the_list() {
+    let mut case = Case::new("for-each-fifty");
+    let items: Vec<String> = (0..50).map(|i| format!("job-{i}")).collect();
+    let twin = Twin::start(
+        Provider::OpenAi,
+        &case.root.join("twins"),
+        items
+            .iter()
+            .map(|item| finding_for(&case.credential, item, 0))
+            .collect(),
+    )
+    .await;
+    case.redirect(&twin);
+    let brief = "x".repeat(100);
+    let jobs = items
+        .iter()
+        .map(|item| format!(r#"{{\"name\":\"{item}\",\"brief\":\"{brief}\"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let workflow = case.workflow(&for_each_workflow(&format!("[{jobs}]")), None);
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    let results = results_file(&case);
+    assert_eq!(results.len(), 50, "the report read the whole list on stdin");
+    for (index, (envelope, item)) in results.iter().zip(&items).enumerate() {
+        assert_eq!(envelope["index"], json!(index), "{envelope}");
+        assert_eq!(envelope["item_label"], json!(item), "{envelope}");
+        assert_eq!(
+            envelope["context_updates"]["output.finder"]["found"],
+            json!(item),
+            "{envelope}"
+        );
+    }
+    // The inspect document: every child declared from the same reference to
+    // the list, none from a copy; the joined results a reference too.
+    let document = finished.inspect();
+    let children: Vec<&Value> = document["invocations"]
+        .as_array()
+        .expect("invocations")
+        .iter()
+        .filter(|i| {
+            i["parent"]["slot"]
+                .as_str()
+                .is_some_and(|slot| slot.starts_with("branch:fan:"))
+        })
+        .collect();
+    assert_eq!(children.len(), 50);
+    let mut list_refs = std::collections::BTreeSet::new();
+    for child in &children {
+        let declared = serde_json::to_string(&child["context"]).expect("json");
+        assert!(
+            declared.len() < 2 * 1024,
+            "a child's declared context is small: {declared}"
+        );
+        assert_eq!(
+            declared.matches("job-").count(),
+            1,
+            "the only item in a child's context is its own: {declared}"
+        );
+        let jobs = child["context"]["jobs"]
+            .as_str()
+            .expect("the list is a reference");
+        assert!(jobs.starts_with("blob://sha256/"), "{jobs}");
+        list_refs.insert(jobs.to_owned());
+    }
+    assert_eq!(list_refs.len(), 1, "one blob, shared: {list_refs:?}");
+    let context = finished.final_context();
+    let stored = context["parallel.results"]
+        .as_str()
+        .expect("the joined results are a reference");
+    assert!(stored.starts_with("blob://sha256/"), "{stored}");
+    assert_eq!(context["parallel.branch_count"], json!(50));
+    // The model saw the list in every branch: the preamble's context row is
+    // the restored value, not the reference the child's context holds.
+    let bodies = twin.requests_for(&case.credential);
+    assert_eq!(bodies.len(), 50);
+    for body in &bodies {
+        let text = serde_json::to_string(body).expect("json");
+        assert!(
+            text.contains("- jobs: [{"),
+            "the prompt shows the list: {text}"
+        );
+        assert!(
+            !text.contains("- jobs: blob://"),
+            "the prompt never shows the reference: {text}"
+        );
+    }
+    let mut consumed = twin.consumed();
+    consumed.sort();
+    let mut expected = items.clone();
+    expected.sort();
+    assert_eq!(consumed, expected);
+    assert_eq!(twin.unmatched(), 0);
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
 /// One item is one branch.
 #[tokio::test]
 async fn a_for_each_over_one_item_is_one_branch() {

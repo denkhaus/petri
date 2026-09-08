@@ -318,22 +318,17 @@ async fn random_selection_routes_on_a_recorded_draw() {
 
 /// Two successive `for_each` fan-outs over 1,000 items each: 2,001 invocations,
 /// well under the run-wide ceiling of 10,000, every branch a durable child
-/// invocation. The first fork's 1,000 envelopes exceed the offload threshold,
-/// so the second fork's snapshot (copied into each of its 1,000 children)
-/// carries a blob reference, not the list.
+/// invocation. The first fork's 1,000 envelopes exceed the fan-out offload
+/// threshold, so the second fork's snapshot (copied into each of its 1,000
+/// children) carries a blob reference, not the list, and every child's
+/// declared context stays small.
 ///
-/// Ignored: on 2026-09-07, once the coordinator store applied records in
-/// place instead of cloning its whole state per append, the run completes:
-/// 2,001 children in 132 s (release build) but at 39 GB peak RSS with a
-/// 1.66 GB `coordinator.jsonl`, and the offload assertion below fails. The
-/// second fork's `parallel.results` is inline, not a blob reference, so each
-/// of its 1,000 children copied the first fork's 1,000 envelopes (about
-/// 830 KB per child). The remaining cost is the O(N) fork snapshot in every
-/// child's `InvocationDeclared`, `ExecutionDeclared` and `InvocationFinished`
-/// record, the resolved config and the waiting branch firing on the parent
-/// side. [`fork_scaling_probe`] measures one fork at a chosen size.
+/// On 2026-09-07 this took 71 s in a debug build at 337 MB peak RSS with a
+/// 5.7 MB `coordinator.jsonl` (58 s in release). Before the fork snapshot was
+/// offloaded it took 132 s in release at 39 GB with a 1.66 GB log and failed
+/// the offload assertion. [`fork_scaling_probe`] measures one fork at a
+/// chosen size.
 #[tokio::test]
-#[ignore = "2,001 durable invocations, each copying the O(N) fork snapshot (39 GB RSS, a 1.66 GB log), and the second fork's results are not offloaded; run by hand"]
 async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
     let text = r#"digraph T {
         start [shape=Mdiamond]
@@ -374,7 +369,7 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
         .expect("the second fork's results");
     assert!(
         holds_ref(&stored),
-        "1,000 envelopes are above the offload threshold: {stored}"
+        "1,000 envelopes are above the fan-out offload threshold: {stored}"
     );
     let store = fabro_steps::LocalBlobStore::new(dir.join(fabro_steps::BLOBS_DIR));
     let results = hydrate(stored, &store).await;

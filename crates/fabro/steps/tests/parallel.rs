@@ -4,6 +4,7 @@
 //! branch lifecycle across failure, duplicates, empty and labelled
 //! `for_each` lists, repeated forks, nested forks, cancellation and resume.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,9 +12,10 @@ use std::{fs, thread};
 
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run;
+use fabro_steps::blobs::{holds_ref, hydrate};
 use fabro_steps::{
-    AGENT_KIND, BranchStep, CommandStep, FanInStep, ForkStep, HUMAN_KIND, STAGE_KIND, StubStep,
-    WAIT_KIND, WORKFLOW_KIND,
+    AGENT_KIND, BLOBS_DIR, BranchStep, CommandStep, FanInStep, ForkStep, HUMAN_KIND,
+    LocalBlobStore, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend::{CompileInputs, Lowered, NoFiles};
 use runtime::driver::ExecutionReport;
@@ -59,7 +61,8 @@ fn runtime_retaining(dir: &Path, retention: Retention) -> Runtime {
     registry.register(ForkStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
-    runtime.steps(registry).options(options)
+    // The run services: the output store the fork and the fan-in offload to.
+    fabro_steps::services(runtime.steps(registry).options(options))
 }
 
 async fn run(rt: &Runtime, lowered: Lowered) -> ExecutionReport {
@@ -638,4 +641,275 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
         results[1]["context_updates"]["command.output"],
         json!("b\n")
     );
+}
+
+/// A `for_each` over `n` items a command produces (each item a name and a
+/// 100-character brief, so 50 items are about 6.5 KB), a stub template, a
+/// fan-in, and a command that reads the joined results on stdin.
+fn fan_out_over(n: usize) -> String {
+    dot(&format!(
+        r#"
+        plan [shape=parallelogram, output_schema="routing", script="python3 -c 'import json; print(json.dumps({{\"context_updates\": {{\"jobs\": [{{\"name\": \"job-\" + str(i), \"brief\": \"x\" * 100}} for i in range({n})]}}}}))'"]
+        fan [shape=component, for_each="context.jobs", max_parallel=8]
+        job [prompt="Do the job"]
+        join [shape=tripleoctagon]
+        report [shape=parallelogram, script="cat", stdin_source="context.parallel.results"]
+        start -> plan -> fan -> job -> join -> report -> exit
+    "#
+    ))
+}
+
+/// The branch children of `fork`, in declaration order.
+fn children_of<'a>(
+    inspection: &'a execution::inspect::RunInspection,
+    fork: &str,
+) -> Vec<&'a execution::inspect::InvocationInspection> {
+    let prefix = format!("branch:{fork}:");
+    inspection
+        .invocations
+        .iter()
+        .filter(|i| {
+            i.parent
+                .as_ref()
+                .is_some_and(|p| p.slot.starts_with(&prefix))
+        })
+        .collect()
+}
+
+fn coordinator_len(dir: &Path) -> u64 {
+    fs::metadata(dir.join("coordinator.jsonl"))
+        .expect("coordinator.jsonl")
+        .len()
+}
+
+/// Fifty items: every child is declared from references (the list, the plan
+/// command's output and the stage records each one blob, shared by all), the
+/// joined results are published as a reference that the downstream command
+/// reads back whole, and the inspect document shows the same references the
+/// run context holds, resolvable under `<run_dir>/blobs`.
+#[tokio::test]
+async fn a_fifty_item_fork_declares_its_children_from_references() {
+    let dir = RunDir::new("parallel-fifty");
+    let rt = runtime(dir.path());
+    let report = run(&rt, lower(&fan_out_over(50))).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let inspection = inspect_run(dir.path()).expect("inspects");
+    let children = children_of(&inspection, "fan");
+    assert_eq!(children.len(), 50);
+    let mut list_refs: BTreeSet<String> = BTreeSet::new();
+    for child in &children {
+        let declared = serde_json::to_string(&child.context).expect("json");
+        assert!(
+            declared.len() < 2 * 1024,
+            "a child's declared context is small: {declared}"
+        );
+        assert_eq!(
+            declared.matches("job-").count(),
+            1,
+            "the only item name in a child's context is its own: {declared}"
+        );
+        let jobs = child
+            .context
+            .get("jobs")
+            .and_then(Value::as_str)
+            .expect("the source list is a reference string");
+        assert!(jobs.starts_with("blob://sha256/"), "{jobs}");
+        list_refs.insert(jobs.to_owned());
+        let output = child
+            .context
+            .get("command.output")
+            .expect("the plan's output");
+        assert!(holds_ref(output), "{output}");
+    }
+    assert_eq!(
+        list_refs.len(),
+        1,
+        "one blob for the list, shared by every child: {list_refs:?}"
+    );
+    let coordinator = coordinator_len(dir.path());
+    assert!(
+        coordinator < 300 * 1024,
+        "coordinator.jsonl is {coordinator} bytes for 50 children"
+    );
+    let blobs = fs::read_dir(dir.path().join(BLOBS_DIR))
+        .expect("blobs")
+        .count();
+    assert!(
+        blobs <= 6,
+        "one blob per offloaded value, not per child: {blobs}"
+    );
+    // The join published a reference; its logical value is the envelopes.
+    let stored = report
+        .state
+        .run_context()
+        .get("parallel.results")
+        .cloned()
+        .expect("published");
+    assert!(holds_ref(&stored), "{stored}");
+    let root = inspection
+        .invocations
+        .iter()
+        .find(|i| i.parent.is_none())
+        .expect("the root");
+    let shown = root
+        .result
+        .as_ref()
+        .expect("finished")
+        .context
+        .get("parallel.results")
+        .cloned()
+        .expect("shown");
+    assert_eq!(
+        shown, stored,
+        "inspect shows the reference the run context holds"
+    );
+    let store = LocalBlobStore::new(dir.path().join(BLOBS_DIR));
+    let results = hydrate(stored, &store).await;
+    let results = results.as_array().expect("hydrates to the list");
+    assert_eq!(results.len(), 50);
+    assert_eq!(results[49]["item_label"], json!("job-49"));
+    assert_eq!(results[49]["index"], json!(49));
+    // The downstream command read the whole list on stdin.
+    let stdout = output_of(&report, "report")["stdout"]
+        .as_str()
+        .expect("stdout")
+        .to_owned();
+    let read: Value = serde_json::from_str(&stdout).expect("the report read JSON");
+    assert_eq!(read, Value::Array(results.clone()));
+}
+
+/// Drop the last `n` lines of a log.
+fn drop_last_lines(path: &Path, n: usize) {
+    let text = fs::read_to_string(path).expect("the log");
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let keep = lines.len().saturating_sub(n);
+    fs::write(path, lines[..keep].concat()).expect("write the cut log");
+}
+
+/// A crash after the fork joined: the resumed run's downstream command reads
+/// the offloaded results back through a store reopened over the run
+/// directory, and no branch is declared again.
+#[tokio::test]
+async fn a_resumed_run_reads_the_offloaded_results_after_the_fork() {
+    let dir = RunDir::new("parallel-resume-offloaded");
+    let rt = runtime_retaining(dir.path(), Retention::Always);
+    let report = run(&rt, lower(&fan_out_over(60))).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let stored = report
+        .state
+        .run_context()
+        .get("parallel.results")
+        .cloned()
+        .expect("published");
+    assert!(
+        holds_ref(&stored),
+        "60 envelopes are above the fan-out threshold: {stored}"
+    );
+    // The crash: the coordinator log ends with the last branch child's
+    // result (the root's exit, result and the run's finish are gone); the
+    // root log ends before the report finished.
+    drop_last_lines(&dir.path().join("coordinator.jsonl"), 3);
+    let root_log = dir
+        .path()
+        .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl");
+    truncate_before(&root_log, |line| {
+        line.contains("StepFinished") && line.contains("\"stdout\":\"[{")
+    });
+    let rt = runtime_retaining(dir.path(), Retention::Always);
+    let resumed = host::resume(&rt).await.expect("resumes");
+    assert_eq!(
+        resumed.status,
+        RunStatus::Success,
+        "{:?}",
+        resumed.state.errors()
+    );
+    assert_eq!(
+        invocation_count(dir.path()),
+        61,
+        "no branch was declared again"
+    );
+    let stdout = output_of(&resumed, "report")["stdout"]
+        .as_str()
+        .expect("stdout")
+        .to_owned();
+    let read: Value = serde_json::from_str(&stdout).expect("the resumed report read JSON");
+    let read = read.as_array().expect("the whole list");
+    assert_eq!(read.len(), 60);
+    assert_eq!(read[59]["item_label"], json!("job-59"));
+}
+
+/// Two forks in sequence: the second fork's children carry the first fork's
+/// results as a reference, so the bytes per child do not grow with the
+/// earlier fork.
+#[tokio::test]
+async fn two_forks_in_sequence_keep_every_child_small() {
+    let dir = RunDir::new("parallel-two-forks");
+    let rt = runtime(dir.path());
+    let text = dot(&format!(
+        r#"
+        plan [shape=parallelogram, output_schema="routing", script="python3 -c 'import json; print(json.dumps({{\"context_updates\": {{\"jobs\": [{{\"name\": \"job-\" + str(i), \"brief\": \"x\" * 100}} for i in range({n})]}}}}))'"]
+        first [shape=component, for_each="context.jobs", max_parallel=8]
+        job [prompt="Do the job"]
+        first_join [shape=tripleoctagon]
+        second [shape=component, for_each="context.jobs", max_parallel=8]
+        again [prompt="Do the job again"]
+        second_join [shape=tripleoctagon]
+        start -> plan -> first -> job -> first_join -> second -> again -> second_join -> exit
+    "#,
+        n = 60
+    ));
+    let report = run(&rt, lower(&text)).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let inspection = inspect_run(dir.path()).expect("inspects");
+    assert_eq!(inspection.invocations.len(), 121);
+    let second = children_of(&inspection, "second");
+    assert_eq!(second.len(), 60);
+    for child in &second {
+        let declared = serde_json::to_string(&child.context).expect("json");
+        assert!(
+            declared.len() < 2 * 1024,
+            "a second-fork child's declared context is small: {declared}"
+        );
+        let results = child
+            .context
+            .get("parallel.results")
+            .expect("the first fork's results are in the snapshot");
+        assert!(
+            holds_ref(results),
+            "the first fork's envelopes are one reference, not 60 copies: {results}"
+        );
+    }
+    let coordinator = coordinator_len(dir.path());
+    assert!(
+        coordinator < 121 * 4 * 1024,
+        "coordinator.jsonl is {coordinator} bytes for 120 children"
+    );
+    let stored = report
+        .state
+        .run_context()
+        .get("parallel.results")
+        .cloned()
+        .expect("published");
+    assert!(holds_ref(&stored), "{stored}");
+    let store = LocalBlobStore::new(dir.path().join(BLOBS_DIR));
+    let results = hydrate(stored, &store).await;
+    let results = results.as_array().expect("hydrates to the list");
+    assert_eq!(results.len(), 60);
+    assert_eq!(results[59]["id"], json!("again"));
+    assert_eq!(results[59]["item_label"], json!("job-59"));
 }
