@@ -25,6 +25,7 @@ answer. ``MCP_TEST_LOG`` names a file every lifecycle step is appended to:
 import argparse
 import json
 import os
+import socketserver
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -259,8 +260,20 @@ def serve_http(server, port):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
+    class Server(HTTPServer):
+        def server_bind(self):
+            # The stock server_bind resolves the bound address to a fully
+            # qualified name with a reverse DNS lookup. On a GitHub macOS
+            # runner that lookup for 127.0.0.1 can outlast the test's
+            # startup window, so the server never answers. The name is only
+            # used in error pages; a loopback test server does not need it.
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = host
+            self.server_port = port
+
     trace(f"binding 127.0.0.1:{port} under {sys.executable} {sys.version.split()[0]}")
-    httpd = HTTPServer(("127.0.0.1", port), Handler)
+    httpd = Server(("127.0.0.1", port), Handler)
     trace(f"bound {httpd.server_address}")
     log("started")
     try:
