@@ -681,10 +681,12 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
         ScriptedCall::response(text_response("Reached both.")),
     ]);
     let log = dir.path().join("mcp.log");
+    let trace = dir.path().join("mcp.trace");
     let toml = format!(
-        "[run.agent.mcps.remote]\ntype = \"http\"\nurl = \"http://127.0.0.1:{http_port}\"\nheaders = {{ X-Case = \"mcp-http\" }}\n\n[run.agent.mcps.scoped]\ntype = \"sandbox\"\ncommand = [\"python3\", {:?}, \"--http\", \"{sandbox_port}\"]\nport = {sandbox_port}\nenv = {{ MCP_TEST_LOG = {:?} }}\nstartup_timeout = \"15s\"\n",
+        "[run.agent.mcps.remote]\ntype = \"http\"\nurl = \"http://127.0.0.1:{http_port}\"\nheaders = {{ X-Case = \"mcp-http\" }}\n\n[run.agent.mcps.scoped]\ntype = \"sandbox\"\ncommand = [\"python3\", {:?}, \"--http\", \"{sandbox_port}\"]\nport = {sandbox_port}\nenv = {{ MCP_TEST_LOG = {:?}, MCP_TEST_TRACE = {:?} }}\nstartup_timeout = \"15s\"\n",
         server_script().display().to_string(),
-        log.display().to_string()
+        log.display().to_string(),
+        trace.display().to_string()
     );
     let graph = lower(&agent_dot(""), &toml);
     let (report, customs) = run(&dir, graph, client).await;
@@ -696,9 +698,23 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let requests = requests_text(&provider);
     assert!(requests[1].contains("over http"), "{}", requests[1]);
+    // Before reading the pid: a scoped call that failed leaves no pid in the
+    // request, and the server events and the tool statuses say why.
+    assert_eq!(
+        customs.tool_statuses(),
+        ["ok", "ok"],
+        "scoped server events: {:?}; tool events: {:?}; server log: {:?}; server trace: {:?}; python3 on PATH: {:?}",
+        customs.server_events("scoped", "failed"),
+        customs.tool_events(),
+        read(&log),
+        read(&trace),
+        env::var_os("PATH").map(|path| env::split_paths(&path)
+            .map(|dir| dir.join("python3"))
+            .filter(|candidate| candidate.is_file())
+            .collect::<Vec<_>>())
+    );
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
-    assert_eq!(customs.tool_statuses(), ["ok", "ok"]);
     let remote_ready = &customs.server_events("remote", "ready")[0];
     assert_eq!(remote_ready["placement"], "remote");
     assert_eq!(remote_ready["transport"], "http");

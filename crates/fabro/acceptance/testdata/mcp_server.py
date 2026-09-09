@@ -12,7 +12,9 @@ server marks as an error, a slow call, and a server that exits mid-session:
 - ``echo(message)``: answers the message; ``__cwd__`` answers the working
   directory, ``__env:NAME__`` the variable's value, ``__pid__`` the pid.
 - ``fail(message)``: answers the message with ``isError`` set.
-- ``sleep(ms)``: waits, then answers ``slept MS ms``.
+- ``sleep(ms, marker=None)``: waits, then answers ``slept MS ms``; with
+  ``marker``, touches that file first, so a test can act once the call is
+  in flight rather than guess when it is.
 - ``crash()``: exits the process at once without answering.
 
 ``--tag TEXT`` is ignored; a test passes a per-case path so a leaked server
@@ -25,6 +27,7 @@ answer. ``MCP_TEST_LOG`` names a file every lifecycle step is appended to:
 import argparse
 import json
 import os
+import socketserver
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -77,7 +80,7 @@ TOOLS = [
         "description": "Wait for a number of milliseconds",
         "inputSchema": {
             "type": "object",
-            "properties": {"ms": {"type": "integer"}},
+            "properties": {"ms": {"type": "integer"}, "marker": {"type": "string"}},
             "required": ["ms"],
         },
     },
@@ -95,6 +98,17 @@ def log(line):
         return
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def trace(line):
+    """A start-up trace for the test harness, written before ``started``:
+    which interpreter runs, and each step up to the bound socket. Only when
+    ``MCP_TEST_TRACE`` names a file."""
+    path = os.environ.get("MCP_TEST_TRACE")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"{time.time():.3f} pid={os.getpid()} {line}\n")
 
 
 def text_result(text, is_error=False):
@@ -131,6 +145,10 @@ def call_tool(name, arguments):
         return text_result(arguments.get("message", "failed"), is_error=True)
     if name == "sleep":
         ms = int(arguments.get("ms", 0))
+        marker = arguments.get("marker")
+        if marker:
+            with open(marker, "w", encoding="utf-8"):
+                pass
         time.sleep(ms / 1000)
         return text_result(f"slept {ms} ms")
     if name == "crash":
@@ -248,7 +266,21 @@ def serve_http(server, port):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-    httpd = HTTPServer(("127.0.0.1", port), Handler)
+    class Server(HTTPServer):
+        def server_bind(self):
+            # The stock server_bind resolves the bound address to a fully
+            # qualified name with a reverse DNS lookup. On a GitHub macOS
+            # runner that lookup for 127.0.0.1 can outlast the test's
+            # startup window, so the server never answers. The name is only
+            # used in error pages; a loopback test server does not need it.
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = host
+            self.server_port = port
+
+    trace(f"binding 127.0.0.1:{port} under {sys.executable} {sys.version.split()[0]}")
+    httpd = Server(("127.0.0.1", port), Handler)
+    trace(f"bound {httpd.server_address}")
     log("started")
     try:
         httpd.serve_forever()
@@ -263,6 +295,7 @@ def main():
     parser.add_argument("--fail-init", action="store_true")
     parser.add_argument("--slow-init", type=int, default=0)
     options = parser.parse_args()
+    trace(f"main argv={sys.argv[1:]} cwd={os.getcwd()}")
     if options.fail_init:
         sys.stderr.write("refusing to start: --fail-init\n")
         sys.stderr.flush()
