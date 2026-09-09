@@ -248,6 +248,14 @@ on the other runners), and runs the full test suite in release mode. You can sta
 Actions. Nightly includes Linux arm64 coverage. Keep arm64 in Nightly until its
 Docker and corpus runs are reliable enough for the routine gate.
 
+The code-review bundle's host scenario cells resolve `python3` from `PATH` and
+need PyYAML, which its rule loader imports. Locally, any `python3` on `PATH`
+that imports `yaml` satisfies the scenario runner; without one those cells
+fail with a message naming the module. CI installs the bundle's own pinned
+requirements (`requirements-rules.txt`, with hash checking) into a virtual
+environment placed first on `PATH`. A Docker scope needs nothing: the pinned
+runner image carries the same modules.
+
 ## Releases
 
 A `v*` tag builds native `petri` archives for macOS arm64, Linux x86_64, and
