@@ -256,6 +256,15 @@ requirements (`requirements-rules.txt`, with hash checking) into a virtual
 environment placed first on `PATH`. A Docker scope needs nothing: the pinned
 runner image carries the same modules.
 
+A test that starts a Python `http.server.HTTPServer` must override
+`server_bind` so it does not call `socket.getfqdn`. On the macOS runner that
+reverse DNS lookup of the bound address can take longer than a test's startup
+window, so the server never answers and the failure looks like a slow server
+rather than a stalled bind. `crates/fabro/acceptance/testdata/mcp_server.py`
+shows the override; a `ThreadingHTTPServer` inherits the same `server_bind`
+and needs the same override. The security-review fixture servers are written
+into a workspace to be scanned and are never run, so they are exempt.
+
 ## Releases
 
 A `v*` tag builds native `petri` archives for macOS arm64, Linux x86_64, and
