@@ -89,7 +89,7 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 | `graphs` | Every registered graph digest, sorted. |
 | `invocations` | Every invocation, in id order. The root is first. |
 | `executions` | Every execution, in id order, which is declaration order across the run. |
-| `interviews` | The interview receipt (`version`, `questions`, `errors`, `script`) as the host wrote it, or `null` when the run had no interviewer. `questions` are in the receipt order the dispatcher defines: by invocation, execution, firing, occurrence, then ask (the root invocation's questions first, then each nested invocation's by id; within an invocation, the order the run asked them), whatever order the answers arrived in. `inspect` passes the receipt through and never re-sorts it. Sensitive answers appear only as `$secret` references. |
+| `interviews` | The interview receipt (`version`, `questions`, `errors`, `script`) as the host wrote it, or `null` when the run had no interviewer. `questions` are in the receipt order the dispatcher defines: by invocation path, then invocation, execution, firing, occurrence, and ask (the root invocation's questions first, then each nested invocation's in path order; within an invocation, the order the run asked them), whatever order the answers arrived in. `inspect` passes the receipt through and never re-sorts it. Sensitive answers appear only as `$secret` references. |
 
 ### Invocation
 

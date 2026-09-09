@@ -76,15 +76,19 @@
 //!
 //! Reply tasks finish in whatever order the interviewer answers, so the
 //! dispatcher orders the receipt's `questions` itself when it produces the
-//! receipt: by invocation, execution, firing, occurrence, then ask. The root
-//! invocation's questions come first and each nested invocation's follow,
-//! by invocation id; within one invocation that is the order the run asked
-//! them. A parallel branch is its own invocation, so its questions never
-//! interleave with the root's. Every record has its own key (a re-ask keeps
-//! the occurrence and takes the next ask), so the order is total: two runs
-//! that ask the same questions write the same receipt order whatever the
-//! answer timing. `petri inspect` passes the receipt through as the host
-//! wrote it.
+//! receipt: by invocation path, then invocation, execution, firing,
+//! occurrence, and ask. The root invocation's questions (`/`) come first
+//! and each nested invocation's follow in path order (`/branch:fan:0:a`
+//! before `/branch:fan:1:b`); the path leads because invocation ids are
+//! allocated in declaration order, which two parallel branches decide by
+//! timing, while the path is the same on every run. The id then orders
+//! re-invocations of one slot, and within one invocation the key is the
+//! order the run asked. A parallel branch is its own invocation, so its
+//! questions never interleave with the root's. Every record has its own
+//! key (a re-ask keeps the occurrence and takes the next ask), so the order
+//! is total: two runs that ask the same questions write the same receipt
+//! order whatever the answer timing. `petri inspect` passes the receipt
+//! through as the host wrote it.
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
@@ -294,8 +298,9 @@ pub struct InterviewRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InterviewReceipt {
     pub version:   u32,
-    /// Every question the run asked, in the receipt order: by invocation,
-    /// execution, firing, occurrence, then ask ([`Self::sort_questions`]).
+    /// Every question the run asked, in the receipt order: by invocation
+    /// path, then invocation, execution, firing, occurrence, and ask
+    /// ([`Self::sort_questions`]).
     pub questions: Vec<InterviewRecord>,
     /// Interviewer failures, late replies, withheld plaintext, pending tasks
     /// at shutdown, and whatever `finish` reported. Non-empty means the run's
@@ -312,21 +317,27 @@ impl InterviewReceipt {
         self.errors.is_empty()
     }
 
-    /// Put `questions` in the receipt order: by invocation, execution,
-    /// firing, occurrence, then ask (the module docs define it). The
-    /// dispatcher applies it when it produces the receipt; a host that
-    /// assembles a receipt from its own records applies it before writing.
+    /// Put `questions` in the receipt order: by invocation path, then
+    /// invocation, execution, firing, occurrence, and ask (the module docs
+    /// define it). The dispatcher applies it when it produces the receipt;
+    /// a host that assembles a receipt from its own records applies it
+    /// before writing.
     pub fn sort_questions(&mut self) {
-        self.questions.sort_by_key(|record| {
-            (
-                record.invocation,
-                record.execution,
-                record.firing,
-                record.occurrence,
-                record.ask,
-            )
-        });
+        self.questions
+            .sort_by(|left, right| receipt_key(left).cmp(&receipt_key(right)));
     }
+}
+
+/// The receipt order's key for one record (see the module docs).
+fn receipt_key(record: &InterviewRecord) -> (&str, InvocationId, ExecutionId, FiringId, u32, u32) {
+    (
+        record.invocation_path.as_str(),
+        record.invocation,
+        record.execution,
+        record.firing,
+        record.occurrence,
+        record.ask,
+    )
 }
 
 struct Wiring {
@@ -774,9 +785,20 @@ mod tests {
         occurrence: u32,
         ask: u32,
     ) -> InterviewRecord {
+        record_at("/", invocation, execution, firing, occurrence, ask)
+    }
+
+    fn record_at(
+        path: &str,
+        invocation: u64,
+        execution: u64,
+        firing: u64,
+        occurrence: u32,
+        ask: u32,
+    ) -> InterviewRecord {
         InterviewRecord {
             invocation: InvocationId::new(invocation),
-            invocation_path: "/".to_owned(),
+            invocation_path: path.to_owned(),
             execution: ExecutionId::new(execution),
             firing: FiringId::new(firing),
             attempt: Attempt::FIRST,
@@ -821,7 +843,7 @@ mod tests {
                 // The re-ask of a gate, answered before the original ask.
                 record(0, 0, 3, 1, 2),
                 // A nested invocation's gate, answered first of all.
-                record(1, 1, 1, 1, 1),
+                record_at("/m", 1, 1, 1, 1, 1),
                 // The same node's next firing in a loop.
                 record(0, 0, 5, 2, 1),
                 // The original ask.
@@ -843,6 +865,30 @@ mod tests {
             (0, 2, 1, 1, 1),
             (1, 1, 1, 1, 1),
         ]);
+    }
+
+    /// Two parallel branches take their invocation ids in declaration
+    /// order, which timing decides; the path orders them the same way on
+    /// every run. The root's later question still precedes both.
+    #[test]
+    fn parallel_branches_follow_their_paths_not_their_ids() {
+        let mut receipt = InterviewReceipt {
+            version:   RECEIPT_VERSION,
+            questions: vec![
+                record_at("/branch:fan:1:b", 1, 1, 1, 1, 1),
+                record_at("/branch:fan:0:a", 2, 2, 1, 1, 1),
+                record(0, 0, 7, 2, 1),
+            ],
+            errors:    Vec::new(),
+            script:    None,
+        };
+        receipt.sort_questions();
+        let paths: Vec<&str> = receipt
+            .questions
+            .iter()
+            .map(|record| record.invocation_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["/", "/branch:fan:0:a", "/branch:fan:1:b"]);
     }
 
     /// Sorting an ordered receipt changes nothing.

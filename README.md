@@ -1134,10 +1134,10 @@ occurrence, ask, question id, kind, text, offered option keys, the review
 how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
 `errors` list; and under `script`, a scripted interviewer's per-entry
 `consumed`/`remaining` counts. The records are in the receipt order: by
-invocation, execution, firing, occurrence, then ask (the root's questions
-first, then each nested invocation's by id; within an invocation, the order
-the run asked them), whatever order the answers arrived in, so a re-asked
-question follows its original ask. A sensitive answer appears only as its
+invocation path, then invocation, execution, firing, occurrence, and ask
+(the root's questions first, then each nested invocation's in path order;
+within an invocation, the order the run asked them), whatever order the
+answers arrived in, so a re-asked question follows its original ask. A sensitive answer appears only as its
 `{"$secret": "answer:<id>"}` reference. A non-empty `errors` list is exit
 code 4, whatever the engine status; the persisted run is not rewritten.
 
