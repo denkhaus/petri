@@ -21,6 +21,7 @@ petri = "what Petri does"
 user_visible_effect = "what a workflow author or operator notices"
 reason = "why the difference is intentional, or why it is tracked"
 acceptance = "what the comparison may accept, and when to retire the record"
+known_defects = ["assertion name"]   # optional: independent expectations the pinned Fabro fails
 
 [migration]                            # only when a bundle file changed
 old_bundle = "file and sha256 in bundles.lock.json"
@@ -44,8 +45,14 @@ Rules:
 - A migration names the old and new bundle file digests; the staged
   bundle's other files stay byte-identical to `bundles.lock.json`.
 - A baseline defect of the pinned Fabro is never accepted as Petri
-  behaviour. The cell lists it under `known_defects`; a record may only let
-  the comparison name the resulting artifact or request difference
-  (example: `fallback-repeated-tool-effect`).
+  behaviour. The record lists the failed assertion's exact name under
+  `known_defects` and names the scenario in `scenarios` (no glob); the
+  differential cell reads that list, reports the failure as a known
+  baseline defect, and still requires Petri to pass the assertion; the
+  coverage report (`scripts/fabro-coverage-report.py`) treats the Fabro
+  record's failed assertion as expected and names the record in its note.
+  A failed Fabro assertion no record lists fails the cell. A record may
+  also let the comparison name the resulting artifact or request
+  difference (example: `fallback-repeated-tool-effect`).
 - Neither test execution nor a baseline refresh changes a record. A new
   difference needs a new record in the same change that introduces it.

@@ -115,8 +115,15 @@ Rules, as the plan states them:
 Order of checks in a cell: Petri's independent expectation, Fabro's
 independent expectation, the committed reference, then the comparison. A
 Fabro violation of the independent expectation is a baseline defect: it is
-recorded in the evidence and fails the cell unless the scenario lists it
-under `known_defects`, and it never relaxes Petri's expectation.
+recorded in the evidence and fails the cell unless a decision record for
+the scenario lists the assertion's exact name under `known_defects`
+(`decisions/README.md`). A listed defect is printed on the test's stderr and
+recorded under `baseline_defects.known` in the Fabro engine record, with
+the record's id; it never relaxes Petri's expectation. The coverage report
+(`scripts/fabro-coverage-report.py`) reads the same decision records: a
+Fabro engine record's failed assertion that a record lists is expected, and
+the cell passes with a note naming the record. A failed assertion no record
+lists fails the cell, and a Petri engine record never gets the allowance.
 
 ## Decisions
 
@@ -132,7 +139,10 @@ that every record is complete and accepts only kinds the comparison emits.
 
 ## Evidence
 
-Every cell writes, under `PETRI_EVIDENCE_DIR` (default
+Every cell is a required cell of `scenarios/matrix.json`
+(`<scenario>@host/<agent>`, `test` naming this suite's test), so the
+coverage report takes it from the engine records below and never lists it
+as unlisted. Every cell writes, under `PETRI_EVIDENCE_DIR` (default
 `target/fabro-differential/<scenario>/`), one record per engine
 (`petri.json`, `fabro.json`) with the pins of everything that produced it
 (Petri commit and dirty flag, Pebble, `lithos-llm`, sandbox-driver and twin
@@ -170,9 +180,13 @@ both engines run; the digest covers exactly these), the workflow file, the
 inputs (`{bundle}` is the staged path), the comparison rules (bookkeeping
 keys, artifacts), the shared interview script, the twins with their
 scripts per namespace, skill directories to seed under each engine's
-`$FABRO_HOME/skills`, the independent expectation, an optional
-engine-specific request probe over the raw request bodies, and any known
-baseline defects of the pinned Fabro.
+`$FABRO_HOME/skills`, the independent expectation, and an optional
+engine-specific request probe over the raw request bodies. A known
+baseline defect of the pinned Fabro goes into a decision record's
+`known_defects` (the assertion's exact name, the scenario named exactly),
+not into the cell. Add the cell to `scenarios/matrix.json` as
+`<scenario>@host/<agent>` with `test` set to
+`petri-cli::fabro_differential::<test>`, so the coverage report requires it.
 
 Fixture state must reach both engines the same way: Fabro's `local`
 environment runs inside the staged bundle, and Petri's workspace starts

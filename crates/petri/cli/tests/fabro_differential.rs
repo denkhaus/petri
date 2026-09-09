@@ -60,33 +60,30 @@ fn check(name: &str, passed: bool, detail: impl Into<Value>) -> Check {
 
 /// One cell of the matrix: a scenario as both engines run it.
 struct Cell {
-    scenario:      &'static str,
+    scenario:    &'static str,
     /// The workflow file inside the bundle.
-    workflow:      &'static str,
+    workflow:    &'static str,
     /// The bundle's files, relative to the scenario directory: what both
     /// engines run, and what the bundle digest covers.
-    bundle:        Vec<&'static str>,
+    bundle:      Vec<&'static str>,
     /// Concrete inputs; `{bundle}` is replaced by the staged bundle's path.
-    inputs:        Vec<(&'static str, String)>,
-    rules:         Rules,
+    inputs:      Vec<(&'static str, String)>,
+    rules:       Rules,
     /// The shared interview script, as `cli::answer` entries.
-    script:        Option<Vec<Value>>,
+    script:      Option<Vec<Value>>,
     /// Provider twins both engines need, with their scenario scripts built
     /// per namespace.
-    twins:         Vec<(Provider, Scripts)>,
+    twins:       Vec<(Provider, Scripts)>,
     /// Skill directories seeded under each engine's `$FABRO_HOME/skills`
     /// (a fixture path relative to the repository root).
-    home_skills:   Option<&'static str>,
+    home_skills: Option<&'static str>,
     /// The independent expectation, asserted on each engine's projection.
-    expect:        fn(&Projection) -> Vec<Check>,
+    expect:      fn(&Projection) -> Vec<Check>,
     /// An engine-specific request matcher over the raw request bodies the
     /// workflow sent (platform requests left out): the same item
     /// assignments, tool actions and call obligations asserted on each
     /// engine where prompt assembly differs.
-    probe:         Option<Probe>,
-    /// Baseline defects already recorded for the pinned Fabro: expectation
-    /// names Fabro is known to fail. They are reported, never accepted.
-    known_defects: Vec<&'static str>,
+    probe:       Option<Probe>,
 }
 
 /// A staged bundle for one engine.
@@ -142,13 +139,13 @@ fn twin_pins(twins: &[Twin]) -> Value {
 }
 
 /// Apply the expectation and the request probe, record every check, and
-/// return the failures.
+/// return the failures as (assertion name, detail).
 fn expect(
     record: &mut Record,
     projection: &Projection,
     bodies: &[Value],
     cell: &Cell,
-) -> Vec<String> {
+) -> Vec<(String, String)> {
     let mut failures = Vec::new();
     let mut checks = (cell.expect)(projection);
     if let Some(probe) = cell.probe {
@@ -157,10 +154,18 @@ fn expect(
     for (name, passed, detail) in checks {
         record.assert(&name, passed, detail.clone());
         if !passed {
-            failures.push(format!("{name}: {detail}"));
+            failures.push((name, detail.to_string()));
         }
     }
     failures
+}
+
+/// Render failures as `name: detail` lines.
+fn render_failures(failures: &[(String, String)]) -> Vec<String> {
+    failures
+        .iter()
+        .map(|(name, detail)| format!("{name}: {detail}"))
+        .collect()
 }
 
 /// Seed a fixture's skill directories under `home/.fabro/skills`.
@@ -278,7 +283,7 @@ async fn run_cell(cell: Cell) {
     assert!(
         petri_failures.is_empty(),
         "{scenario}: petri violates the independent expectation:\n{}",
-        petri_failures.join("\n")
+        render_failures(&petri_failures).join("\n")
     );
 
     // Fabro.
@@ -357,9 +362,19 @@ async fn run_cell(cell: Cell) {
         );
         let bodies = compare::request_bodies(&fabro_twin_refs, &namespace);
         let failures = expect(&mut record, &projection, &bodies, &cell);
-        let (known, unknown): (Vec<&String>, Vec<&String>) = failures
-            .iter()
-            .partition(|f| cell.known_defects.iter().any(|d| f.starts_with(d)));
+        // The decision records name the assertions the pinned Fabro is
+        // known to fail here; the coverage report reads the same list.
+        let known_defects = decisions.known_defects(scenario);
+        let mut known: Vec<String> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
+        for (name, detail) in &failures {
+            match known_defects.iter().find(|(defect, _)| defect == name) {
+                Some((_, decision)) => {
+                    known.push(format!("{name}: {detail} (known defect {decision})"));
+                }
+                None => unknown.push(format!("{name}: {detail}")),
+            }
+        }
         record.set(
             "baseline_defects",
             json!({ "known": known, "new": unknown }),
@@ -375,21 +390,14 @@ async fn run_cell(cell: Cell) {
         assert!(
             unknown.is_empty(),
             "{scenario}: the pinned Fabro violates the independent expectation (a baseline defect; \
-             record it in the scenario's `known_defects` with the evidence):\n{}",
-            unknown
-                .iter()
-                .map(|f| f.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
+             record its assertion name under `known_defects` in a decision record with the \
+             evidence):\n{}",
+            unknown.join("\n")
         );
         if !known.is_empty() {
             eprintln!(
                 "{scenario}: known baseline defects of the pinned Fabro:\n{}",
-                known
-                    .iter()
-                    .map(|f| f.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                known.join("\n")
             );
         }
         if let Err(message) = evidence::check_or_record_reference(
@@ -551,15 +559,15 @@ fn expect_parallel_results(p: &Projection) -> Vec<Check> {
 #[tokio::test]
 async fn parallel_results_matches_the_pinned_fabro() {
     run_cell(Cell {
-        scenario:      "parallel-results",
-        workflow:      "workflow.fabro",
-        bundle:        vec!["workflow.fabro", "helper/code_review.py"],
-        inputs:        vec![
+        scenario:    "parallel-results",
+        workflow:    "workflow.fabro",
+        bundle:      vec!["workflow.fabro", "helper/code_review.py"],
+        inputs:      vec![
             ("helper", "{bundle}/helper/code_review.py".to_owned()),
             ("level", "high".to_owned()),
             ("target", "review-fixture".to_owned()),
         ],
-        rules:         compare::rules(
+        rules:       compare::rules(
             // Named bookkeeping of each engine, kept beside the compared
             // context. Fabro: its engine-internal keys. Petri: its
             // format-internal keys. Both: the last command's output and the
@@ -585,12 +593,11 @@ async fn parallel_results_matches_the_pinned_fabro() {
             ],
             &[".fabro/workflows/code-review/runtime/report.md"],
         ),
-        script:        None,
-        twins:         Vec::new(),
-        expect:        expect_parallel_results,
-        home_skills:   None,
-        probe:         None,
-        known_defects: Vec::new(),
+        script:      None,
+        twins:       Vec::new(),
+        expect:      expect_parallel_results,
+        home_skills: None,
+        probe:       None,
     })
     .await;
 }
@@ -726,17 +733,17 @@ fn expect_interview(p: &Projection) -> Vec<Check> {
 #[tokio::test]
 async fn interview_scripted_choices_match_the_pinned_fabro() {
     run_cell(Cell {
-        scenario:      "interview",
-        workflow:      ".fabro/workflows/interview/workflow.fabro",
-        bundle:        vec![
+        scenario:    "interview",
+        workflow:    ".fabro/workflows/interview/workflow.fabro",
+        bundle:      vec![
             ".fabro/project.toml",
             ".fabro/Dockerfile",
             ".fabro/workflows/interview/workflow.fabro",
             ".fabro/workflows/interview/workflow.toml",
         ],
-        inputs:        Vec::new(),
-        rules:         compare::rules(COMMON_BOOKKEEPING, &[]),
-        script:        Some(vec![
+        inputs:      Vec::new(),
+        rules:       compare::rules(COMMON_BOOKKEEPING, &[]),
+        script:      Some(vec![
             interview_entry(
                 "easy",
                 "yes_no",
@@ -768,11 +775,10 @@ async fn interview_scripted_choices_match_the_pinned_fabro() {
                 &json!({ "kind": "text", "value": "ship on Friday" }),
             ),
         ]),
-        twins:         vec![(Provider::OpenAi, interview_scripts)],
-        expect:        expect_interview,
-        home_skills:   None,
-        probe:         None,
-        known_defects: Vec::new(),
+        twins:       vec![(Provider::OpenAi, interview_scripts)],
+        expect:      expect_interview,
+        home_skills: None,
+        probe:       None,
     })
     .await;
 }
@@ -876,22 +882,21 @@ fn expect_edit_and_verify(p: &Projection) -> Vec<Check> {
 #[tokio::test]
 async fn edit_and_verify_matches_the_pinned_fabro() {
     run_cell(Cell {
-        scenario:      "edit-and-verify",
-        workflow:      "workflow.fabro",
-        bundle:        vec!["workflow.fabro"],
-        inputs:        Vec::new(),
-        rules:         compare::rules(COMMON_BOOKKEEPING, &["notes.txt", "decision.txt"]),
-        script:        Some(vec![interview_entry(
+        scenario:    "edit-and-verify",
+        workflow:    "workflow.fabro",
+        bundle:      vec!["workflow.fabro"],
+        inputs:      Vec::new(),
+        rules:       compare::rules(COMMON_BOOKKEEPING, &["notes.txt", "decision.txt"]),
+        script:      Some(vec![interview_entry(
             "ship",
             "gate",
             "yes_no",
             &json!({ "kind": "choice", "value": "Y" }),
         )]),
-        twins:         vec![(Provider::OpenAi, edit_and_verify_scripts)],
-        expect:        expect_edit_and_verify,
-        home_skills:   None,
-        probe:         None,
-        known_defects: Vec::new(),
+        twins:       vec![(Provider::OpenAi, edit_and_verify_scripts)],
+        expect:      expect_edit_and_verify,
+        home_skills: None,
+        probe:       None,
     })
     .await;
 }
@@ -1048,23 +1053,22 @@ fn expect_fallback_failover(p: &Projection) -> Vec<Check> {
 #[tokio::test]
 async fn fallback_failover_matches_the_pinned_fabro() {
     run_cell(Cell {
-        scenario:      "fallback-failover",
-        workflow:      "workflow.fabro",
-        bundle:        vec!["workflow.fabro", "workflow.toml"],
-        inputs:        Vec::new(),
-        rules:         compare::rules(COMMON_BOOKKEEPING, &["notes.txt"]),
-        script:        None,
-        twins:         vec![
+        scenario:    "fallback-failover",
+        workflow:    "workflow.fabro",
+        bundle:      vec!["workflow.fabro", "workflow.toml"],
+        inputs:      Vec::new(),
+        rules:       compare::rules(COMMON_BOOKKEEPING, &["notes.txt"]),
+        script:      None,
+        twins:       vec![
             (Provider::OpenAi, fallback_openai_scripts),
             (Provider::Anthropic, fallback_anthropic_scripts),
         ],
-        expect:        expect_fallback_failover,
-        home_skills:   None,
-        probe:         None,
+        expect:      expect_fallback_failover,
+        home_skills: None,
+        probe:       None,
         // The pinned Fabro re-runs the prompt from scratch on the fallback
         // route and repeats the append (decision
         // `fallback-repeated-tool-effect`); Petri must not.
-        known_defects: vec!["the append ran exactly once across the failover"],
     })
     .await;
 }
@@ -1170,9 +1174,9 @@ fn probe_skills(bodies: &[Value]) -> Vec<Check> {
 #[tokio::test]
 async fn skills_precedence_matches_the_pinned_fabro() {
     run_cell(Cell {
-        scenario:      "skills-precedence",
-        workflow:      "workflow.fabro",
-        bundle:        vec![
+        scenario:    "skills-precedence",
+        workflow:    "workflow.fabro",
+        bundle:      vec![
             "workflow.fabro",
             ".fabro/skills/greet/SKILL.md",
             ".fabro/skills/project-only/SKILL.md",
@@ -1183,14 +1187,13 @@ async fn skills_precedence_matches_the_pinned_fabro() {
             "skills/no-name/SKILL.md",
             "skills/unterminated/SKILL.md",
         ],
-        inputs:        vec![("fixture", "{bundle}".to_owned())],
-        rules:         compare::rules(COMMON_BOOKKEEPING, &[]),
-        script:        None,
-        twins:         vec![(Provider::OpenAi, skills_scripts)],
-        home_skills:   Some("crates/fabro/acceptance/testdata/skills/home/skills"),
-        expect:        expect_skills,
-        probe:         Some(probe_skills),
-        known_defects: Vec::new(),
+        inputs:      vec![("fixture", "{bundle}".to_owned())],
+        rules:       compare::rules(COMMON_BOOKKEEPING, &[]),
+        script:      None,
+        twins:       vec![(Provider::OpenAi, skills_scripts)],
+        home_skills: Some("crates/fabro/acceptance/testdata/skills/home/skills"),
+        expect:      expect_skills,
+        probe:       Some(probe_skills),
     })
     .await;
 }

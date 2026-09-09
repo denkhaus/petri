@@ -351,9 +351,11 @@ fn every_scenario_file_loads_and_the_matrix_is_consistent() {
         // A planned cell whose scenario file does not exist yet is not an
         // error here: the coverage report lists it as `missing`, which
         // counts as failed, so the gap stays visible without hiding the
-        // rest of the matrix.
+        // rest of the matrix. A cell another suite satisfies (`test` names
+        // `<package>::<binary>::<test>`, the differential matrix's cells)
+        // names the scenario that suite defines, not a `family/name` file.
         assert!(
-            id.split('/').count() == 2,
+            external_suite(cell) || id.split('/').count() == 2,
             "cell `{}` names a malformed scenario id `{id}`",
             cell.name
         );
@@ -390,12 +392,21 @@ fn every_scenario_file_loads_and_the_matrix_is_consistent() {
         let Some(id) = &cell.scenario else {
             continue;
         };
+        if external_suite(cell) {
+            continue;
+        }
         assert!(
             scenarios.iter().any(|(_, scenario)| &scenario.id == id),
             "planned cell `{}` names no scenario file",
             cell.name
         );
     }
+}
+
+/// A cell whose test lives in another suite: `test` is
+/// `<package>::<binary>::<test>`, and the scenario is that suite's.
+fn external_suite(cell: &support::fabro::scenario::Cell) -> bool {
+    cell.test.as_deref().is_some_and(|test| test.contains("::"))
 }
 
 /// The matchers `SCHEMA.md` documents behave as documented.

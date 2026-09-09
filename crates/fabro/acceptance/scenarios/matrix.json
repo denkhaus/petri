@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Every required (scenario, backend, agent) cell of black box phase 4. `status` is `planned` (a test runs it), `blocked` (a required feature or fixture is missing; `reason` says which), or `excluded` (not required; `reason` says why). The coverage report lists every cell here, so a filtered or skipped case stays visible: a planned cell no test reported counts as missing, and missing counts as failed.",
+  "description": "Every required (scenario, backend, agent) cell of black box phase 4. `status` is `planned` (a test runs it), `blocked` (a required feature or fixture is missing; `reason` says which), or `excluded` (not required; `reason` says why). The coverage report lists every cell here, so a filtered or skipped case stays visible: a planned cell no test reported counts as missing, and missing counts as failed. A cell whose `test` is `<package>::<binary>::<test>` is satisfied by that suite: the readiness suite's cells write per-cell results, and the differential matrix's cells (`fabro_differential`) are taken from the engine records both engines leave.",
   "cells": [
     {
       "cell": "backend/dynamic-parallelism@docker/openai",
@@ -131,6 +131,26 @@
       "status": "planned",
       "reason": null,
       "test": "code_review_reverse_branch_completion"
+    },
+    {
+      "cell": "edit-and-verify@host/openai",
+      "scenario": "edit-and-verify",
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "differential matrix cell (black box phase 5): the shipped petri binary and the pinned Fabro binary run the scenario and the test writes one engine record each; the coverage report takes the cell from those records",
+      "test": "petri-cli::fabro_differential::edit_and_verify_matches_the_pinned_fabro"
+    },
+    {
+      "cell": "fallback-failover@host/openai",
+      "scenario": "fallback-failover",
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "differential matrix cell (black box phase 5): the shipped petri binary and the pinned Fabro binary run the scenario and the test writes one engine record each; the coverage report takes the cell from those records",
+      "test": "petri-cli::fabro_differential::fallback_failover_matches_the_pinned_fabro"
     },
     {
       "cell": "fix-ci/cancellation@docker/openai",
@@ -373,6 +393,26 @@
       "test": "interview_unused_answer"
     },
     {
+      "cell": "interview@host/openai",
+      "scenario": "interview",
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "differential matrix cell (black box phase 5): the shipped petri binary and the pinned Fabro binary run the scenario and the test writes one engine record each; the coverage report takes the cell from those records",
+      "test": "petri-cli::fabro_differential::interview_scripted_choices_match_the_pinned_fabro"
+    },
+    {
+      "cell": "parallel-results@host/none",
+      "scenario": "parallel-results",
+      "backend": "host",
+      "agent": "none",
+      "required": true,
+      "status": "planned",
+      "reason": "differential matrix cell (black box phase 5): the shipped petri binary and the pinned Fabro binary run the scenario and the test writes one engine record each; the coverage report takes the cell from those records",
+      "test": "petri-cli::fabro_differential::parallel_results_matches_the_pinned_fabro"
+    },
+    {
       "cell": "provider-faults/auth-failure@host/anthropic",
       "scenario": "provider-faults/auth-failure",
       "backend": "host",
@@ -571,6 +611,16 @@
       "status": "planned",
       "reason": null,
       "test": "security_review_timeout_cancel"
+    },
+    {
+      "cell": "skills-precedence@host/openai",
+      "scenario": "skills-precedence",
+      "backend": "host",
+      "agent": "api:openai",
+      "required": true,
+      "status": "planned",
+      "reason": "differential matrix cell (black box phase 5): the shipped petri binary and the pinned Fabro binary run the scenario and the test writes one engine record each; the coverage report takes the cell from those records",
+      "test": "petri-cli::fabro_differential::skills_precedence_matches_the_pinned_fabro"
     }
   ]
 }

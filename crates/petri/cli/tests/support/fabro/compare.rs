@@ -983,6 +983,12 @@ pub(crate) struct Decision {
     pub(crate) migration:           Option<Migration>,
     #[serde(default)]
     pub(crate) accepts:             Vec<Accepts>,
+    /// Independent expectations (assertion names) the pinned Fabro is known
+    /// to fail in the record's scenarios: baseline defects, reported by the
+    /// cell and excused by the coverage report, never accepted as Petri
+    /// behaviour.
+    #[serde(default)]
+    pub(crate) known_defects:       Vec<String>,
 }
 
 fn all() -> Vec<String> {
@@ -1083,6 +1089,26 @@ impl Decisions {
                     })
             })
             .map(|decision| decision.id.clone())
+    }
+
+    /// The assertion names the pinned Fabro is known to fail in `scenario`,
+    /// each with the id of the record that lists it.
+    pub(crate) fn known_defects(&self, scenario: &str) -> Vec<(String, String)> {
+        self.records
+            .iter()
+            .filter(|decision| {
+                decision
+                    .scenarios
+                    .iter()
+                    .any(|pattern| glob_matches(pattern, scenario))
+            })
+            .flat_map(|decision| {
+                decision
+                    .known_defects
+                    .iter()
+                    .map(move |name| (name.clone(), decision.id.clone()))
+            })
+            .collect()
     }
 }
 

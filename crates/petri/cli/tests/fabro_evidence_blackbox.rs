@@ -468,6 +468,164 @@ fn the_coverage_report_counts_only_passed_cells() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A pinned-Fabro assertion that a decision record lists under
+/// `known_defects` is expected: the cell passes with a note naming the
+/// record. A failed assertion no record lists still fails the cell, Petri's
+/// records never get the allowance, and without the record the same
+/// failure is an ordinary failure.
+#[test]
+fn a_known_fabro_defect_is_expected_and_an_unexpected_one_still_fails() {
+    const KNOWN: &str = "the append ran once";
+    const OTHER: &str = "the last request went to the fallback";
+    let root = env::temp_dir().join(format!(
+        "petri-evidence-defects-{}-{}",
+        process::id(),
+        testkit::unique_id()
+    ));
+    let evidence = root.join("evidence");
+    let scenario_dir = evidence.join("theta");
+    fs::create_dir_all(&scenario_dir).expect("engine dir");
+    let write = |path: &Path, value: &Value| {
+        fs::write(path, serde_json::to_vec_pretty(value).expect("json")).expect("write");
+    };
+    let engine_record = |engine: &str, assertions: Value| {
+        json!({
+            "schema_version": 1, "scenario": "theta", "engine": engine,
+            "pins": { "pebble": "a" }, "assertions": assertions,
+        })
+    };
+    let passed = |name: &str| json!({ "name": name, "passed": true, "detail": null });
+    let failed = |name: &str| json!({ "name": name, "passed": false, "detail": { "appends": 2 } });
+    write(
+        &scenario_dir.join("petri.json"),
+        &engine_record("petri", json!([passed(KNOWN), passed(OTHER)])),
+    );
+    write(
+        &scenario_dir.join("fabro.json"),
+        &engine_record("fabro", json!([failed(KNOWN), passed(OTHER)])),
+    );
+    let decisions = root.join("decisions");
+    fs::create_dir_all(&decisions).expect("decisions dir");
+    fs::write(
+        decisions.join("theta-repeats-the-append.toml"),
+        r#"id = "theta-repeats-the-append"
+title = "The pinned Fabro repeats the append"
+scenarios = ["theta"]
+bundles = ["*"]
+fabro = "runs the append twice"
+petri = "runs it once"
+user_visible_effect = "a duplicated line"
+reason = "a baseline defect of the pinned Fabro"
+acceptance = "never; retire when the pin no longer repeats it"
+known_defects = ["the append ran once"]
+"#,
+    )
+    .expect("decision");
+    let matrix = root.join("matrix.json");
+    write(
+        &matrix,
+        &json!({
+            "schema_version": 1,
+            "cells": [
+                { "cell": "theta@host/openai", "scenario": "theta", "backend": "host", "agent": "api:openai", "required": true, "status": "planned", "reason": null, "test": "petri-cli::fabro_differential::theta_matches_the_pinned_fabro" },
+            ]
+        }),
+    );
+    let run = |decisions: &Path| -> Output {
+        script("fabro-coverage-report.py", &[
+            "--evidence",
+            evidence.to_str().expect("utf-8"),
+            "--matrix",
+            matrix.to_str().expect("utf-8"),
+            "--decisions",
+            decisions.to_str().expect("utf-8"),
+            "--strict",
+        ])
+    };
+
+    // The known defect is expected: the strict report passes and says why.
+    let output = run(&decisions);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = read_json(&evidence.join("coverage.json"));
+    assert_eq!(
+        report["totals"]["required"],
+        json!(1),
+        "{}",
+        report["totals"]
+    );
+    assert_eq!(report["totals"]["passed"], json!(1));
+    assert_eq!(report["totals"]["failed"], json!(0));
+    assert_eq!(report["ok"], json!(true));
+    assert_eq!(report["ci_ok"], json!(true));
+    assert_eq!(
+        report["known_defects"],
+        json!([{ "scenario": "theta", "assertion": KNOWN, "decision": "theta-repeats-the-append" }])
+    );
+    let entry = &report["entries"][0];
+    assert_eq!(entry["result"], json!("passed"));
+    let detail = entry["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("theta-repeats-the-append") && detail.contains(KNOWN),
+        "{detail}"
+    );
+    let markdown = fs::read_to_string(evidence.join("coverage.md")).expect("coverage.md");
+    assert!(
+        markdown.contains("Known defects of the pinned Fabro applied")
+            && markdown.contains("Gate: passed."),
+        "{markdown}"
+    );
+
+    // A Fabro failure no record lists still fails, beside the known one.
+    write(
+        &scenario_dir.join("fabro.json"),
+        &engine_record("fabro", json!([failed(KNOWN), failed(OTHER)])),
+    );
+    let output = run(&decisions);
+    assert_eq!(output.status.code(), Some(1));
+    let report = read_json(&evidence.join("coverage.json"));
+    assert_eq!(report["totals"]["failed"], json!(1), "{}", report["totals"]);
+    let detail = report["entries"][0]["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains(&format!("fabro failed ['{OTHER}']")),
+        "{detail}"
+    );
+
+    // Petri never gets the allowance.
+    write(
+        &scenario_dir.join("fabro.json"),
+        &engine_record("fabro", json!([failed(KNOWN), passed(OTHER)])),
+    );
+    write(
+        &scenario_dir.join("petri.json"),
+        &engine_record("petri", json!([failed(KNOWN), passed(OTHER)])),
+    );
+    let output = run(&decisions);
+    assert_eq!(output.status.code(), Some(1));
+    let report = read_json(&evidence.join("coverage.json"));
+    assert_eq!(report["totals"]["failed"], json!(1), "{}", report["totals"]);
+    let detail = report["entries"][0]["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains(&format!("petri failed ['{KNOWN}']")),
+        "{detail}"
+    );
+
+    // Without the decision record the Fabro failure is an ordinary failure.
+    write(
+        &scenario_dir.join("petri.json"),
+        &engine_record("petri", json!([passed(KNOWN), passed(OTHER)])),
+    );
+    let output = run(&root.join("no-decisions"));
+    assert_eq!(output.status.code(), Some(1));
+    let report = read_json(&evidence.join("coverage.json"));
+    assert_eq!(report["totals"]["failed"], json!(1), "{}", report["totals"]);
+    assert_eq!(report["known_defects"], json!([]));
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn an_empty_evidence_run_is_not_a_passing_gate() {
     let evidence = env::temp_dir().join(format!(

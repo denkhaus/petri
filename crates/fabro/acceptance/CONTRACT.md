@@ -97,7 +97,13 @@ completed tool effect and the fall back to Anthropic), `skills-precedence`
 (task 14's capture: the three skill directories, the reference prompt
 section and `use_skill` tool, the repository's copy winning). Baseline defects of
 the pinned Fabro found by the matrix: it repeats a completed tool effect
-on failover (`fallback-repeated-tool-effect`).
+on failover (`fallback-repeated-tool-effect`). That record lists the failed
+assertion under `known_defects`: the cell reports it as a baseline defect,
+the coverage report counts the Fabro engine record as passed with a note
+naming the record, and Petri must still pass the assertion. The five cells
+are required cells of `scenarios/matrix.json` (backend `host`, the engine's
+agent, `test` naming the `fabro_differential` test), satisfied by the engine
+records the tests write.
 
 ## Required bundles
 
@@ -595,7 +601,7 @@ it.
 | The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)`: cached pinned build, `test:fabro:differential` (five live cells, zero unresolved differences) | met locally; hosted run pending |
 | A machine-readable record per scenario | `tests/support/fabro/record.rs`, one record per scenario cell, `compatibility.differential` from the engine records | met |
 | Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met (pending the first hosted run) |
-| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, strict in CI; with bundles fetched and every gate required: required 51 (the three readiness cells included), blocked 1 (`implement/child-runs-successfully@docker/openrouter`), excluded 6 (`fix-ci`) | met |
+| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, strict in CI; with bundles fetched and every gate required: required 56 (the three readiness cells and the five differential cells included), blocked 1 (`implement/child-runs-successfully@docker/openrouter`), excluded 6 (`fix-ci`). A pinned-Fabro assertion a decision record lists under `known_defects` counts as passed with a note naming the record; any other failed assertion fails the cell | met |
 | Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | met; `implement-issue` stays `required-blocked` for its Docker cell only |
 | Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the strict coverage report plus each record's `services[].unmatched_requests` and interview receipt | met, one blocked cell with its reason |
 | Final context, files, side effects meet independent expectations | each scenario's assertions, recorded per record; the readiness suites assert files, Git state and the public stream | met |

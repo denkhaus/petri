@@ -235,6 +235,32 @@ fn every_decision_record_is_complete() {
                 path.display()
             );
         }
+        // A known defect of the pinned Fabro is an exact assertion name in
+        // exactly named scenarios: the differential cell and the coverage
+        // report both read it, so a loose entry could excuse too much.
+        if let Some(defects) = record.get("known_defects") {
+            let defects = defects
+                .as_array()
+                .unwrap_or_else(|| panic!("{}: `known_defects` must be a list", path.display()));
+            for defect in defects {
+                assert!(
+                    defect.as_str().is_some_and(|name| !name.trim().is_empty()),
+                    "{}: a known defect is an assertion name",
+                    path.display()
+                );
+            }
+            if !defects.is_empty() {
+                let scenarios = record["scenarios"].as_array().cloned().unwrap_or_default();
+                assert!(
+                    !scenarios.is_empty()
+                        && scenarios
+                            .iter()
+                            .all(|s| s.as_str().is_some_and(|s| !s.contains('*'))),
+                    "{}: a record with known defects names its scenarios exactly (no glob)",
+                    path.display()
+                );
+            }
+        }
     }
     assert!(
         !ids.is_empty(),

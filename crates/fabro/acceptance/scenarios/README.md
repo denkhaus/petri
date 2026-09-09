@@ -64,7 +64,12 @@ rewrites it as a pass only when every expectation held, so a panic or a
 killed process leaves a failure on record. `scripts/fabro-coverage-report.py`
 merges those results with `matrix.json` into `coverage.json` and prints the
 table; its exit code is nonzero when a planned cell is not accounted for. CI
-publishes that file.
+publishes that file. The report also reads the differential matrix's
+per-engine records (`<evidence>/<scenario>/petri.json` and `fabro.json`) for
+the `fabro_differential` cells, and the decision records under
+`../decisions/`: a pinned-Fabro assertion a record lists under
+`known_defects` counts as passed with a note naming the record; any other
+failed assertion, on either engine, fails the cell.
 
 ## Writing a scenario
 

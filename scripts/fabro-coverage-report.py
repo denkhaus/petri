@@ -2,8 +2,8 @@
 """Write the Fabro black box coverage report for one evidence run.
 
     scripts/fabro-coverage-report.py --evidence DIR [--matrix FILE] [--cells DIR]
-                                     [--junit FILE] [--backends host,docker]
-                                     [--out DIR] [--strict]
+                                     [--decisions DIR] [--junit FILE]
+                                     [--backends host,docker] [--out DIR] [--strict]
 
 Inputs:
 
@@ -21,6 +21,15 @@ Inputs:
   --cells DIR          the per-cell results the scenario tests write
                        (`$PETRI_FABRO_COVERAGE_DIR`, `CellRecord` in
                        tests/support/fabro/scenario.rs): `{cell, status, note}`
+  --decisions DIR      crates/fabro/acceptance/decisions: the decision records.
+                       A record's `known_defects` names the independent
+                       assertions the pinned Fabro is known to fail in the
+                       scenarios the record covers. A `fabro` engine record's
+                       failed assertion listed there is expected: the cell
+                       passes with a note naming the record. A `petri` record
+                       never gets that allowance, and a failed assertion no
+                       record lists still fails the cell. Default: the
+                       repository's decisions directory.
   --junit FILE         Nextest's JUnit output for the run. A test the runner
                        reports as failed or skipped never counts as passed,
                        whatever its record says.
@@ -31,7 +40,9 @@ Inputs:
 Outputs (in --out, default DIR): coverage.json and coverage.md.
 
 Each required cell gets exactly one result:
-  passed   every source that reported the cell says passed
+  passed   every source that reported the cell says passed (a pinned-Fabro
+           assertion a decision record lists as a known defect counts as
+           passed, and the note names the record)
   failed   a record, a cell result, an engine record, or the runner says failed
   skipped  a record or cell result says the scenario skipped (an absent asset
            or backend)
@@ -50,10 +61,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fnmatch
 import json
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 and older
+    tomllib = None
 
 RESULT_ORDER = ["passed", "failed", "skipped", "missing", "blocked", "excluded"]
 
@@ -108,8 +125,49 @@ def load_cells(directory: Path | None) -> dict[str, dict]:
     return cells
 
 
+# One decision record's known defects: (record id, scenario patterns, assertion names).
+KnownDefects = list[tuple[str, list[str], list[str]]]
+
+
+def load_known_defects(directory: Path | None) -> KnownDefects:
+    """The `known_defects` of every decision record: the independent assertions
+    the pinned Fabro is known to fail in the scenarios the record covers. A
+    record that does not parse ends the report: a malformed decision must not
+    silently excuse nothing or everything."""
+    found: KnownDefects = []
+    if directory is None or not directory.is_dir():
+        return found
+    if tomllib is None:
+        sys.exit("fabro-coverage-report.py: reading decision records needs Python 3.11 or newer (tomllib)")
+    for path in sorted(directory.glob("*.toml")):
+        try:
+            record = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            sys.exit(f"{path}: not a decision record: {error}")
+        names = record.get("known_defects", [])
+        if not isinstance(names, list) or not all(isinstance(n, str) and n.strip() for n in names):
+            sys.exit(f"{path}: `known_defects` must be a list of assertion names")
+        if not names:
+            continue
+        scenarios = record.get("scenarios", ["*"])
+        if not isinstance(scenarios, list) or not scenarios:
+            sys.exit(f"{path}: `scenarios` must be a non-empty list")
+        found.append((str(record.get("id", path.stem)), [str(s) for s in scenarios], names))
+    return found
+
+
+def known_defect(defects: KnownDefects, scenario: str, assertion: str) -> str | None:
+    """The id of the decision record that lists `assertion` as a known defect
+    of the pinned Fabro in `scenario`, if one does."""
+    for decision, patterns, names in defects:
+        if assertion in names and any(fnmatch.fnmatchcase(scenario, pattern) for pattern in patterns):
+            return decision
+    return None
+
+
 def load_junit(path: Path) -> dict[str, str]:
-    """Map `binary::test` and bare test names to passed, failed, or skipped."""
+    """Map `package::binary::test`, `binary::test`, and bare test names to
+    passed, failed, or skipped."""
     results: dict[str, str] = {}
     tree = ET.parse(path)
     for case in tree.iter("testcase"):
@@ -122,6 +180,8 @@ def load_junit(path: Path) -> dict[str, str]:
             result = "skipped"
         else:
             result = "passed"
+        if classname:
+            results[f"{classname}::{name}"] = result
         results[f"{binary}::{name}"] = result
         results.setdefault(name, result)
     return results
@@ -132,7 +192,7 @@ def combine(sources: list[tuple[str, str, str]]) -> tuple[str, str]:
     if not sources:
         return "missing", "nothing reported this cell"
     results = {result for _, result, _ in sources}
-    details = "; ".join(f"{source}: {detail}" for source, result, detail in sources if detail and result != "passed")
+    details = "; ".join(f"{source}: {detail}" for source, result, detail in sources if detail)
     if "failed" in results:
         return "failed", details or "a source reports a failure"
     if "blocked" in results:
@@ -140,7 +200,8 @@ def combine(sources: list[tuple[str, str, str]]) -> tuple[str, str]:
     if "skipped" in results:
         return "skipped", details or "skipped"
     if results == {"passed"}:
-        return "passed", ""
+        # A passed source may still carry a note (a known defect applied).
+        return "passed", details
     return "failed", f"unrecognized results {sorted(results)}"
 
 
@@ -156,11 +217,46 @@ def record_result(record: dict) -> tuple[str, str]:
     return "failed", f"failed assertions {failed}" if failed else outcome
 
 
-def engine_result(record: dict) -> tuple[str, str]:
-    failed = [a.get("name") for a in record.get("assertions", []) if not a.get("passed", False)]
+def engine_result(record: dict, defects: KnownDefects) -> tuple[str, str]:
+    """One engine record's result. A `fabro` record's failed assertion that a
+    decision record lists as a known defect of the pinned Fabro in this
+    scenario is expected and does not fail the cell; the note names the
+    record. Every other failed assertion, on either engine, fails."""
+    engine = str(record.get("engine"))
+    scenario = str(record.get("scenario"))
+    failed: list[str] = []
+    expected: list[str] = []
+    for assertion in record.get("assertions", []):
+        if assertion.get("passed", False):
+            continue
+        name = str(assertion.get("name"))
+        decision = known_defect(defects, scenario, name) if engine == "fabro" else None
+        if decision is None:
+            failed.append(name)
+        else:
+            expected.append(f"`{name}` is the known defect {decision}")
     if failed:
-        return "failed", f"{record.get('engine')} failed {failed}"
+        return "failed", f"{engine} failed {failed}"
+    if expected:
+        return "passed", "; ".join(expected)
     return "passed", ""
+
+
+def applied_known_defects(engines: list[dict], defects: KnownDefects) -> list[dict]:
+    """Every failed pinned-Fabro assertion a decision record excused, for the report."""
+    applied = []
+    for record in engines:
+        if str(record.get("engine")) != "fabro":
+            continue
+        scenario = str(record.get("scenario"))
+        for assertion in record.get("assertions", []):
+            if assertion.get("passed", False):
+                continue
+            name = str(assertion.get("name"))
+            decision = known_defect(defects, scenario, name)
+            if decision is not None:
+                applied.append({"scenario": scenario, "assertion": name, "decision": decision})
+    return applied
 
 
 def cell_key(scenario: str, backend: str, agent: str | None) -> str:
@@ -173,6 +269,7 @@ def build_entries(
     engines: list[dict],
     cells: dict[str, dict],
     junit: dict[str, str],
+    defects: KnownDefects,
 ) -> list[dict]:
     # Sources by (scenario, backend) for records, and by scenario for engines.
     by_scenario_backend: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
@@ -186,7 +283,7 @@ def build_entries(
             tests_by_scenario_backend.setdefault(key, set()).add(str(meta["test"]))
     by_scenario: dict[str, list[tuple[str, str, str]]] = {}
     for record in engines:
-        result, detail = engine_result(record)
+        result, detail = engine_result(record, defects)
         by_scenario.setdefault(str(record["scenario"]), []).append((f"engine {record.get('engine')}", result, detail))
 
     def sources_for(scenario: str, backend: str, cell: str | None, tests: list[str]) -> tuple[list[tuple[str, str, str]], list[str]]:
@@ -262,6 +359,12 @@ def main() -> int:
     parser.add_argument("--matrix", type=Path, help="the scenario matrix (matrix.json)")
     parser.add_argument("--manifest", type=Path, help=argparse.SUPPRESS)  # older name for --matrix
     parser.add_argument("--cells", type=Path, help="the per-cell results directory")
+    parser.add_argument(
+        "--decisions",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "crates" / "fabro" / "acceptance" / "decisions",
+        help="the decision records directory (known defects of the pinned Fabro)",
+    )
     parser.add_argument("--junit", type=Path)
     parser.add_argument("--backends", help="comma-separated backends required on this runner")
     parser.add_argument("--out", type=Path)
@@ -278,7 +381,9 @@ def main() -> int:
     records = load_records(evidence)
     engines = load_engine_records(evidence)
     cells = load_cells(cells_dir)
-    entries = build_entries(matrix, records, engines, cells, junit)
+    defects = load_known_defects(args.decisions)
+    known = applied_known_defects(engines, defects)
+    entries = build_entries(matrix, records, engines, cells, junit, defects)
     if args.backends:
         here = {b.strip() for b in args.backends.split(",") if b.strip()}
         for entry in entries:
@@ -317,6 +422,7 @@ def main() -> int:
         "evidence_dir": str(evidence),
         "matrix": str(matrix_path) if matrix_path else None,
         "cells_dir": str(cells_dir) if cells else None,
+        "decisions": str(args.decisions) if defects else None,
         "junit": str(args.junit) if junit else None,
         "records": len(records),
         "engine_records": len(engines),
@@ -326,6 +432,7 @@ def main() -> int:
         "ci_ok": ci_ok,
         "backends": args.backends,
         "mixed_pins": mixed_pins,
+        "known_defects": known,
         "entries": entries,
     }
     (out / "coverage.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -352,6 +459,9 @@ def main() -> int:
         lines.append(
             f"| {entry['cell']} | {entry['status']} | {entry['result']} | {entry['detail'].replace('|', '/')} |"
         )
+    if known:
+        lines += ["", "Known defects of the pinned Fabro applied (recorded, never accepted as Petri behaviour):", ""]
+        lines += [f"- `{k['scenario']}`: `{k['assertion']}` ({k['decision']})" for k in known]
     if mixed_pins:
         lines += ["", "Records cite more than one revision for: " + ", ".join(sorted(mixed_pins)) + "."]
     blocked = sum(1 for e in required if e["result"] == "blocked")

@@ -242,10 +242,13 @@ compatibility decisions; the cleanup result; and links to the owning
 library's contract tests. A failed record keeps the whole case directory; a
 test that panics before finishing still leaves a failed record.
 `scripts/fabro-coverage-report.py` folds the records, the scenario matrix (`matrix.json`), the per-cell results,
-and Nextest's JUnit output into `coverage.json` and `coverage.md` with
-required, passed, failed, skipped, missing, blocked, and excluded cells. Only
-`passed` counts; a skip, an exclusion, or an empty run never does, and a runner
-failure overrides a passed record. CI writes the report into the job summary
+the differential matrix's engine records, and Nextest's JUnit output into
+`coverage.json` and `coverage.md` with required, passed, failed, skipped,
+missing, blocked, and excluded cells. Only `passed` counts; a skip, an
+exclusion, or an empty run never does, and a runner failure overrides a passed
+record. A pinned-Fabro assertion that a decision record lists under
+`known_defects` is expected and counts as passed with a note naming the
+record; any other failed assertion fails the cell. CI writes the report into the job summary
 and keeps the full bundles of a failed run and the compact records of a passed
 run as job artifacts. `mise run check:pins` (`scripts/check-pins.py`) fails
 when the manifests, the "Pinned revisions" table in
