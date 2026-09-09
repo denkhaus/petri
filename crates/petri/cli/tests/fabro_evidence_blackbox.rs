@@ -705,3 +705,21 @@ fn the_vendored_bundles_are_found_or_skipped_visibly() {
         );
     }
 }
+
+/// A cell a test skips for want of a resource stays `skipped` after the record
+/// is dropped; the report then reads it as skipped, never as a failed pass.
+#[test]
+fn a_skipped_cell_record_stays_skipped_when_dropped() {
+    let dir = testkit::RunDir::new("evidence-skipped-cell");
+    support::fabro::scenario::CellRecord::skip_in(
+        dir.path(),
+        "probe/skipped@docker/none",
+        "no Docker daemon",
+    );
+    let record: serde_json::Value = serde_json::from_slice(
+        &fs::read(dir.path().join("probe__skipped__docker__none.json")).expect("record"),
+    )
+    .expect("json");
+    assert_eq!(record["status"], "skipped", "{record}");
+    assert_eq!(record["note"], "no Docker daemon", "{record}");
+}

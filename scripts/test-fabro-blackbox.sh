@@ -21,6 +21,9 @@
 #   PETRI_BLACKBOX_REPEAT  run the set this many times in fresh processes,
 #                          each under a different test schedule (nightly); default 1
 #   PETRI_REQUIRE_*        turn a skipped asset into a failure (see README.md)
+#   PETRI_REQUIRED_BACKENDS the backends this runner must cover in the strict
+#                          report (default: host, plus docker when a daemon
+#                          answers or PETRI_REQUIRE_DOCKER is set)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -64,7 +67,17 @@ for ((i = 1; i <= repeat; i++)); do
   fi
 done
 
-report=(python3 scripts/fabro-coverage-report.py --evidence "$PETRI_EVIDENCE_DIR" --strict)
+# The strict report holds this runner to the backends it can run. A required
+# Docker cell that skipped for want of a daemon is a failure only where Docker
+# is required (`PETRI_REQUIRE_DOCKER`); elsewhere the report covers host cells.
+if [ -n "${PETRI_REQUIRED_BACKENDS:-}" ]; then
+  backends=$PETRI_REQUIRED_BACKENDS
+elif [ -n "${PETRI_REQUIRE_DOCKER:-}" ] || docker info >/dev/null 2>&1; then
+  backends=host,docker
+else
+  backends=host
+fi
+report=(python3 scripts/fabro-coverage-report.py --evidence "$PETRI_EVIDENCE_DIR" --strict --backends "$backends")
 [ -f "$matrix" ] && report+=(--matrix "$matrix")
 [ -f "$PETRI_EVIDENCE_DIR/junit.xml" ] && report+=(--junit "$PETRI_EVIDENCE_DIR/junit.xml")
 "${report[@]}" || status=1

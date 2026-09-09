@@ -922,32 +922,44 @@ pub(crate) fn coverage_dir() -> PathBuf {
 /// One cell's result file. Created when the test starts as `failed`, so a
 /// panic or a killed process leaves a failure on record; `pass` rewrites it.
 pub(crate) struct CellRecord {
-    path:   PathBuf,
-    cell:   String,
-    passed: bool,
+    path:    PathBuf,
+    cell:    String,
+    /// Set once the record has its final state (`passed` or `skipped`), so
+    /// dropping it writes nothing more.
+    settled: bool,
 }
 
 impl CellRecord {
     pub(crate) fn start(cell: &str) -> Self {
-        let dir = coverage_dir();
-        let _ = fs::create_dir_all(&dir);
+        Self::start_in(&coverage_dir(), cell)
+    }
+
+    /// [`start`](Self::start) with an explicit results directory.
+    pub(crate) fn start_in(dir: &Path, cell: &str) -> Self {
+        let _ = fs::create_dir_all(dir);
         let path = dir.join(format!("{}.json", cell.replace(['/', '@'], "__")));
         let record = Self {
             path,
             cell: cell.to_owned(),
-            passed: false,
+            settled: false,
         };
         record.write("failed", Some("the test did not report a pass"));
         record
     }
 
     pub(crate) fn skip(cell: &str, reason: &str) {
-        let record = Self::start(cell);
+        Self::skip_in(&coverage_dir(), cell, reason);
+    }
+
+    /// [`skip`](Self::skip) with an explicit results directory.
+    pub(crate) fn skip_in(dir: &Path, cell: &str, reason: &str) {
+        let mut record = Self::start_in(dir, cell);
+        record.settled = true;
         record.write("skipped", Some(reason));
     }
 
     pub(crate) fn pass(mut self) {
-        self.passed = true;
+        self.settled = true;
         self.write("passed", None);
     }
 
@@ -970,7 +982,7 @@ impl CellRecord {
 
 impl Drop for CellRecord {
     fn drop(&mut self) {
-        if !self.passed {
+        if !self.settled {
             self.write("failed", Some("the test ended without reporting a pass"));
         }
     }
