@@ -1130,7 +1130,10 @@ occurrence, ask, question id, kind, text, offered option keys, the review
 (`answered` with `choice`/`choices`/`text`, `cancelled`, or `failed`), and
 how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
 `errors` list; and under `script`, a scripted interviewer's per-entry
-`consumed`/`remaining` counts. A sensitive answer appears only as its
+`consumed`/`remaining` counts. The records are in the order the run asked
+the questions (by invocation, execution, firing, occurrence, then ask),
+whatever order the answers arrived in, so a re-asked question follows its
+original ask. A sensitive answer appears only as its
 `{"$secret": "answer:<id>"}` reference. A non-empty `errors` list is exit
 code 4, whatever the engine status; the persisted run is not rewritten.
 

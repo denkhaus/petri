@@ -71,6 +71,17 @@
 //! the host surfaces the receipt's errors. [`InterviewReply::Cancelled`]
 //! delivers the same. Refusing is not an error: it is an ordinary
 //! [`InterviewReply::Answered`] naming the negative choice.
+//!
+//! # Receipt order
+//!
+//! Reply tasks finish in whatever order the interviewer answers, so the
+//! dispatcher orders the receipt's `questions` itself when it produces the
+//! receipt: by invocation, execution, firing, occurrence, then ask. That is
+//! the order the run asked the questions. Every record has its own key (a
+//! re-ask keeps the occurrence and takes the next ask), so the order is
+//! total: two runs that ask the same questions write the same receipt order
+//! whatever the answer timing. `petri inspect` passes the receipt through
+//! as the host wrote it.
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
@@ -280,6 +291,8 @@ pub struct InterviewRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InterviewReceipt {
     pub version:   u32,
+    /// Every question the run asked, in the receipt order: by invocation,
+    /// execution, firing, occurrence, then ask ([`Self::sort_questions`]).
     pub questions: Vec<InterviewRecord>,
     /// Interviewer failures, late replies, withheld plaintext, pending tasks
     /// at shutdown, and whatever `finish` reported. Non-empty means the run's
@@ -294,6 +307,22 @@ pub struct InterviewReceipt {
 impl InterviewReceipt {
     pub fn is_clean(&self) -> bool {
         self.errors.is_empty()
+    }
+
+    /// Put `questions` in the receipt order: by invocation, execution,
+    /// firing, occurrence, then ask, which is the order the run asked them.
+    /// The dispatcher applies it when it produces the receipt; a host that
+    /// assembles a receipt from its own records applies it before writing.
+    pub fn sort_questions(&mut self) {
+        self.questions.sort_by_key(|record| {
+            (
+                record.invocation,
+                record.execution,
+                record.firing,
+                record.occurrence,
+                record.ask,
+            )
+        });
     }
 }
 
@@ -394,13 +423,18 @@ impl InterviewDispatcher {
                 error.report().cloned()
             }
         };
-        let mut state = inner.state();
-        InterviewReceipt {
-            version: RECEIPT_VERSION,
-            questions: mem::take(&mut state.records),
-            errors: mem::take(&mut state.errors),
-            script,
-        }
+        let mut receipt = {
+            let mut state = inner.state();
+            InterviewReceipt {
+                version: RECEIPT_VERSION,
+                questions: mem::take(&mut state.records),
+                errors: mem::take(&mut state.errors),
+                script,
+            }
+        };
+        // The records arrived in reply order; the receipt is in ask order.
+        receipt.sort_questions();
+        receipt
     }
 }
 
@@ -723,5 +757,102 @@ impl ExecutionObserver for InterviewDispatcher {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(
+        invocation: u64,
+        execution: u64,
+        firing: u64,
+        occurrence: u32,
+        ask: u32,
+    ) -> InterviewRecord {
+        InterviewRecord {
+            invocation: InvocationId::new(invocation),
+            invocation_path: "/".to_owned(),
+            execution: ExecutionId::new(execution),
+            firing: FiringId::new(firing),
+            attempt: Attempt::FIRST,
+            node: SmolStr::new("gate"),
+            occurrence,
+            ask,
+            question: format!("gate#{firing}"),
+            kind: None,
+            text: String::new(),
+            options: Vec::new(),
+            sensitive: false,
+            reference: None,
+            timeout_ms: None,
+            reply: ReplyRecord::Cancelled,
+            delivery: Delivery::Delivered,
+        }
+    }
+
+    fn keys(receipt: &InterviewReceipt) -> Vec<(u64, u64, u64, u32, u32)> {
+        receipt
+            .questions
+            .iter()
+            .map(|record| {
+                (
+                    record.invocation.raw(),
+                    record.execution.raw(),
+                    record.firing.raw(),
+                    record.occurrence,
+                    record.ask,
+                )
+            })
+            .collect()
+    }
+
+    /// Records land in reply order; the receipt is in ask order, whatever
+    /// the interviewer's timing was.
+    #[test]
+    fn the_receipt_orders_questions_as_the_run_asked_them() {
+        let mut receipt = InterviewReceipt {
+            version:   RECEIPT_VERSION,
+            questions: vec![
+                // The re-ask of a gate, answered before the original ask.
+                record(0, 0, 3, 1, 2),
+                // A nested invocation's gate, answered first of all.
+                record(1, 1, 1, 1, 1),
+                // The same node's next firing in a loop.
+                record(0, 0, 5, 2, 1),
+                // The original ask.
+                record(0, 0, 3, 1, 1),
+                // A second question in the same firing.
+                record(0, 0, 3, 3, 1),
+                // The root's second execution after a restart.
+                record(0, 2, 1, 1, 1),
+            ],
+            errors:    Vec::new(),
+            script:    None,
+        };
+        receipt.sort_questions();
+        assert_eq!(keys(&receipt), vec![
+            (0, 0, 3, 1, 1),
+            (0, 0, 3, 1, 2),
+            (0, 0, 3, 3, 1),
+            (0, 0, 5, 2, 1),
+            (0, 2, 1, 1, 1),
+            (1, 1, 1, 1, 1),
+        ]);
+    }
+
+    /// Sorting an ordered receipt changes nothing.
+    #[test]
+    fn an_ordered_receipt_stays_as_it_is() {
+        let questions = vec![record(0, 0, 2, 1, 1), record(0, 0, 2, 1, 2)];
+        let mut receipt = InterviewReceipt {
+            version:   RECEIPT_VERSION,
+            questions: questions.clone(),
+            errors:    Vec::new(),
+            script:    None,
+        };
+        receipt.sort_questions();
+        assert_eq!(receipt.questions, questions);
     }
 }
