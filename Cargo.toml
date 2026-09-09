@@ -68,9 +68,9 @@ absolute_paths = "warn"
 
 [workspace.dependencies]
 # Native agent runtime, pinned with the prompt-report and session-scope APIs.
-pebble-coding-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "a7a1302a896436aec5475ca1ba574488604d4fe3" }
+pebble-coding-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "408638fe982ace5b570e04ba808be3a32d4001f7" }
 # The tool middleware trait Petri implements for Fabro tool hooks; the coding agent does not re-export it.
-pebble-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "a7a1302a896436aec5475ca1ba574488604d4fe3" }
+pebble-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "408638fe982ace5b570e04ba808be3a32d4001f7" }
 lithos-llm = { git = "https://github.com/lithoscomputer/lithos-llm", rev = "4aab27d7d42e7f762a8b6a3871c3db86816b0721", default-features = false }
 globset = "0.4"
 ir = { package = "petri-ir", path = "crates/core/ir" }
@@ -168,9 +168,3 @@ thiserror = "2"
 tracing = "0.1"
 # `env-filter` is not a default feature. Only `petri-cli` may depend on this.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Pebble's manifest names lithos-llm over SSH at the same revision. Redirect
-# that source to the public HTTPS URL, so the graph holds one lithos-llm and
-# no fetch needs an SSH key.
-[patch."ssh://git@github.com/lithoscomputer/lithos-llm"]
-lithos-llm = { git = "https://github.com/lithoscomputer/lithos-llm", rev = "4aab27d7d42e7f762a8b6a3871c3db86816b0721" }
