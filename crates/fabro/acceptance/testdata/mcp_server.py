@@ -97,6 +97,17 @@ def log(line):
         handle.write(line + "\n")
 
 
+def trace(line):
+    """A start-up trace for the test harness, written before ``started``:
+    which interpreter runs, and each step up to the bound socket. Only when
+    ``MCP_TEST_TRACE`` names a file."""
+    path = os.environ.get("MCP_TEST_TRACE")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"{time.time():.3f} pid={os.getpid()} {line}\n")
+
+
 def text_result(text, is_error=False):
     result = {"content": [{"type": "text", "text": text}]}
     if is_error:
@@ -248,7 +259,9 @@ def serve_http(server, port):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
+    trace(f"binding 127.0.0.1:{port} under {sys.executable} {sys.version.split()[0]}")
     httpd = HTTPServer(("127.0.0.1", port), Handler)
+    trace(f"bound {httpd.server_address}")
     log("started")
     try:
         httpd.serve_forever()
@@ -263,6 +276,7 @@ def main():
     parser.add_argument("--fail-init", action="store_true")
     parser.add_argument("--slow-init", type=int, default=0)
     options = parser.parse_args()
+    trace(f"main argv={sys.argv[1:]} cwd={os.getcwd()}")
     if options.fail_init:
         sys.stderr.write("refusing to start: --fail-init\n")
         sys.stderr.flush()
