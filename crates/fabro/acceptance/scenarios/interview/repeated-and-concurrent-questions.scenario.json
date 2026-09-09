@@ -150,12 +150,6 @@
     "interviews": {
       "questions": [
         {
-          "$any": true
-        },
-        {
-          "$any": true
-        },
-        {
           "node": "again",
           "delivery": "delivered",
           "reply": {
@@ -174,6 +168,16 @@
             }
           },
           "occurrence": 2
+        },
+        {
+          "node": "a",
+          "invocation_path": "/branch:fan:0:a",
+          "delivery": "delivered"
+        },
+        {
+          "node": "b",
+          "invocation_path": "/branch:fan:1:b",
+          "delivery": "delivered"
         }
       ],
       "errors": [],

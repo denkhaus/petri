@@ -76,12 +76,15 @@
 //!
 //! Reply tasks finish in whatever order the interviewer answers, so the
 //! dispatcher orders the receipt's `questions` itself when it produces the
-//! receipt: by invocation, execution, firing, occurrence, then ask. That is
-//! the order the run asked the questions. Every record has its own key (a
-//! re-ask keeps the occurrence and takes the next ask), so the order is
-//! total: two runs that ask the same questions write the same receipt order
-//! whatever the answer timing. `petri inspect` passes the receipt through
-//! as the host wrote it.
+//! receipt: by invocation, execution, firing, occurrence, then ask. The root
+//! invocation's questions come first and each nested invocation's follow,
+//! by invocation id; within one invocation that is the order the run asked
+//! them. A parallel branch is its own invocation, so its questions never
+//! interleave with the root's. Every record has its own key (a re-ask keeps
+//! the occurrence and takes the next ask), so the order is total: two runs
+//! that ask the same questions write the same receipt order whatever the
+//! answer timing. `petri inspect` passes the receipt through as the host
+//! wrote it.
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
@@ -310,8 +313,8 @@ impl InterviewReceipt {
     }
 
     /// Put `questions` in the receipt order: by invocation, execution,
-    /// firing, occurrence, then ask, which is the order the run asked them.
-    /// The dispatcher applies it when it produces the receipt; a host that
+    /// firing, occurrence, then ask (the module docs define it). The
+    /// dispatcher applies it when it produces the receipt; a host that
     /// assembles a receipt from its own records applies it before writing.
     pub fn sort_questions(&mut self) {
         self.questions.sort_by_key(|record| {
