@@ -696,9 +696,18 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let requests = requests_text(&provider);
     assert!(requests[1].contains("over http"), "{}", requests[1]);
+    // Before reading the pid: a scoped call that failed leaves no pid in the
+    // request, and the server events and the tool statuses say why.
+    assert_eq!(
+        customs.tool_statuses(),
+        ["ok", "ok"],
+        "scoped server events: {:?}; tool events: {:?}; request: {}",
+        customs.server_events("scoped", "failed"),
+        customs.tool_events(),
+        requests[2]
+    );
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
-    assert_eq!(customs.tool_statuses(), ["ok", "ok"]);
     let remote_ready = &customs.server_events("remote", "ready")[0];
     assert_eq!(remote_ready["placement"], "remote");
     assert_eq!(remote_ready["transport"], "http");
