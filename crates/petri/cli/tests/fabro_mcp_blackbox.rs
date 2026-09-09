@@ -390,7 +390,15 @@ async fn cancellation_stops_a_slow_mcp_call_and_its_server() {
             "slow",
             model(provider),
             "wrote 2 bytes to started.txt",
-            tool_call("slow", "mcp__notes__sleep", json!({ "ms": 60000 })),
+            // The server touches `sleeping.txt` as the call arrives, and
+            // the interrupt waits for that: `started.txt` exists before the
+            // model has even asked for the slow call, so an interrupt on it
+            // could close the server before the call reached it.
+            tool_call(
+                "slow",
+                "mcp__notes__sleep",
+                json!({ "ms": 60000, "marker": "sleeping.txt" }),
+            ),
         ),
     ];
     let twin = Twin::start(provider, &case.root.join("twins"), scripts).await;
@@ -401,7 +409,7 @@ async fn cancellation_stops_a_slow_mcp_call_and_its_server() {
     );
     let finished = case
         .run_with(&workflow, &[], Launch {
-            interrupt_when: Some(case.workspace().join("started.txt")),
+            interrupt_when: Some(case.workspace().join("sleeping.txt")),
             ..Launch::default()
         })
         .await;

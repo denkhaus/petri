@@ -12,7 +12,9 @@ server marks as an error, a slow call, and a server that exits mid-session:
 - ``echo(message)``: answers the message; ``__cwd__`` answers the working
   directory, ``__env:NAME__`` the variable's value, ``__pid__`` the pid.
 - ``fail(message)``: answers the message with ``isError`` set.
-- ``sleep(ms)``: waits, then answers ``slept MS ms``.
+- ``sleep(ms, marker=None)``: waits, then answers ``slept MS ms``; with
+  ``marker``, touches that file first, so a test can act once the call is
+  in flight rather than guess when it is.
 - ``crash()``: exits the process at once without answering.
 
 ``--tag TEXT`` is ignored; a test passes a per-case path so a leaked server
@@ -78,7 +80,7 @@ TOOLS = [
         "description": "Wait for a number of milliseconds",
         "inputSchema": {
             "type": "object",
-            "properties": {"ms": {"type": "integer"}},
+            "properties": {"ms": {"type": "integer"}, "marker": {"type": "string"}},
             "required": ["ms"],
         },
     },
@@ -143,6 +145,10 @@ def call_tool(name, arguments):
         return text_result(arguments.get("message", "failed"), is_error=True)
     if name == "sleep":
         ms = int(arguments.get("ms", 0))
+        marker = arguments.get("marker")
+        if marker:
+            with open(marker, "w", encoding="utf-8"):
+                pass
         time.sleep(ms / 1000)
         return text_result(f"slept {ms} ms")
     if name == "crash":
