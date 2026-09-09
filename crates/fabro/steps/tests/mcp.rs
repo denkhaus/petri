@@ -701,10 +701,14 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     assert_eq!(
         customs.tool_statuses(),
         ["ok", "ok"],
-        "scoped server events: {:?}; tool events: {:?}; request: {}",
+        "scoped server events: {:?}; tool events: {:?}; server log: {:?}; python3 on PATH: {:?}",
         customs.server_events("scoped", "failed"),
         customs.tool_events(),
-        requests[2]
+        read(&log),
+        env::var_os("PATH").map(|path| env::split_paths(&path)
+            .map(|dir| dir.join("python3"))
+            .filter(|candidate| candidate.is_file())
+            .collect::<Vec<_>>())
     );
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
