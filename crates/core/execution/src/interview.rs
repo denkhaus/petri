@@ -944,8 +944,8 @@ mod tests {
         let mut receipt = InterviewReceipt {
             version:   RECEIPT_VERSION,
             questions: vec![
-                record_at("/branch:fan:1:b", 1, 1, 1, 1, 1),
-                record_at("/branch:fan:0:a", 2, 2, 1, 1, 1),
+                record_at("/branch:fan@2:1:b", 1, 1, 1, 1, 1),
+                record_at("/branch:fan@2:0:a", 2, 2, 1, 1, 1),
                 record(0, 0, 7, 2, 1),
             ],
             errors:    Vec::new(),
@@ -957,7 +957,7 @@ mod tests {
             .iter()
             .map(|record| record.invocation_path.as_str())
             .collect();
-        assert_eq!(paths, vec!["/", "/branch:fan:0:a", "/branch:fan:1:b"]);
+        assert_eq!(paths, vec!["/", "/branch:fan@2:0:a", "/branch:fan@2:1:b"]);
     }
 
     /// Sorting an ordered receipt changes nothing.

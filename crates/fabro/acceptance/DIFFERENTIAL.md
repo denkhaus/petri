@@ -73,7 +73,7 @@ cancels a run through `POST /api/v1/runs/{id}/cancel`.
 |---|---|---|
 | `status` | `petri inspect --json` `status` | `run.completed` / `run.failed` (or the validator's rejection, the deadline's `timed_out`) |
 | `path` | the root execution's `history` records in order, node and outcome | `stage.completed` / final `stage.failed` events outside any branch |
-| `forks[].branches[]` | child invocations by slot `branch:<fork>:<index>:<node>`, envelopes from the join's `parallel.results`, stages from the child's history | `parallel.branch.*` events by `parallel_branch_id`, envelopes from the dump (else `parallel.completed`) |
+| `forks[].branches[]` | child invocations by slot `branch:<fork>@<firing>:<index>:<node>`, envelopes from the join's `parallel.results`, stages from the child's history | `parallel.branch.*` events by `parallel_branch_id`, envelopes from the dump (else `parallel.completed`) |
 | `context` and `bookkeeping` | the root invocation's final `context` | the last `context_values` plus updates (or the last checkpoint) |
 | `artifacts` | files the scenario names, read from the workspace | the same, from the run directory |
 | `interviews` | the interview receipt | the adapter's receipt |

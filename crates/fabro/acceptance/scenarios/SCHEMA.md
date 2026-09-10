@@ -233,6 +233,10 @@ now be ahead of by `commits` (default 1), `message` the tip's subject.
 `kind`, `reply`, `delivery`, `invocation_path`, and `ask`, every field a
 matcher; `errors`; `consumed` per script entry id; `no_plaintext` lists
 values that may appear nowhere in the receipt, stderr, or final context.
+An `invocation_path` is `/` for the root and `/<slot>` per nested call; a
+parallel branch's slot is `branch:<fork>@<firing>:<index>:<target>`, the
+firing being the fork occurrence that opened the group (`crates/fabro/FORMAT.md`,
+"Parallel"), and the same form matches a question in an interview script entry.
 
 `lifecycle`: `no_leaked_processes`, `retained_workspace`,
 `no_requests_after_cancel` (no twin request logged after the interrupt),
