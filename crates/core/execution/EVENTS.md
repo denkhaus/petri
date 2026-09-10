@@ -181,11 +181,23 @@ cancellation, and this contract does not claim it does.
   the streams together. The coordinator log's records are delivered as they
   are appended; a fresh run's `run_started` is delivered to an observer when
   it attaches.
-- `EventProjector` is lossless: the observer callback derives and queues, a
-  pump task awaits the host's `RunEventSink::deliver` per event, so a slow
-  sink delays and never drops. A sink error stops the pump; later events are
-  counted as undelivered and the `ProjectionReceipt` says so. Recovery is
-  `replay_run`.
+- `EventProjector` is bounded: the observer callback derives each record's
+  events and queues them without waiting; a pump task awaits the host's
+  `RunEventSink::deliver` per event, in order. The queue holds
+  `ProjectorOptions::capacity` events (1024 by default), which is the most
+  the projector keeps in memory: a slow sink delays delivery and the run
+  keeps its pace. An event projected while the queue is full is not queued:
+  the `ProjectionReceipt` counts it as `overflowed` (and `undelivered`),
+  live delivery goes on with the next event that finds room, so the sink
+  sees each source in record order with gaps, and the durable log keeps the
+  event. A sink error stops the pump; later events are counted as
+  undelivered. A `deliver` or `finish` that does not return within
+  `ProjectorOptions::stall_timeout` (30 seconds by default) is dropped, the
+  sink counts as failed from then on, and the receipt's `failure` names the
+  event it stalled on; `EventProjector::shutdown` therefore completes within
+  about one stall budget plus the drain of the queue. A sink that overflows,
+  fails or stalls never fails the run. Recovery from each is `replay_run`,
+  deduplicated by `EventId`.
 - Across a resume, the driver delivers the regenerated suffix (the records a
   crash kept off disk) before dispatching pending work, with the same
   identities; delivery is at-least-once, deduplicated by `EventId`. A

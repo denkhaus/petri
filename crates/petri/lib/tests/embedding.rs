@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::future::pending;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,8 @@ use petri::driver::{BranchRole, FiringView};
 use petri::engine::{Admission, Intervention, RouteDecision};
 use petri::execution::events::{
     AppliedRoute, CollectingSink, DeliveredControl, EventBody, EventId, EventProjector,
-    ProjectionReceipt, RunEvent, RunEventSink, SinkError, WaitState, replay_run,
+    EventSource, ProjectionReceipt, ProjectorOptions, RunEvent, RunEventSink, SinkError, WaitState,
+    replay_run,
 };
 use petri::execution::hooks::{
     HOOK_NOTE_KIND, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
@@ -47,7 +49,7 @@ use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
 use testkit::RunDir;
 use tokio::sync::Notify;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 // ── The workflow ───────────────────────────────────────────────────────────
@@ -108,6 +110,15 @@ const LONG: &str = r#"digraph G {
     long [shape=parallelogram, script="echo go > running; sleep 30"]
     start -> long
     long -> exit
+}"#;
+
+/// One command that prints thousands of lines, for the backlog scenario.
+const CHATTY: &str = r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    chatty [shape=parallelogram, script="seq 1 2000"]
+    start -> chatty
+    chatty -> exit
 }"#;
 
 /// Real commands and human gates, simulated agents: the runtime the plan
@@ -533,13 +544,40 @@ impl RunEventSink for FailingSink {
     }
 }
 
+/// A sink that takes `accepted` events and then never returns: the stalled
+/// consumer.
+struct StallingSink {
+    inner:    CollectingSink,
+    accepted: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl RunEventSink for StallingSink {
+    async fn deliver(&self, event: RunEvent) -> Result<(), SinkError> {
+        if self.accepted.fetch_sub(1, Ordering::SeqCst) == 0 {
+            pending::<()>().await;
+        }
+        self.inner.deliver(event).await
+    }
+}
+
 async fn run_projected(
     rt: &Runtime,
     lowered: Lowered,
     sink: Arc<dyn RunEventSink>,
     observers: Vec<Arc<dyn ExecutionObserver>>,
 ) -> (driver::ExecutionReport, ProjectionReceipt) {
-    let projector = EventProjector::new(sink);
+    run_projected_with(rt, lowered, sink, observers, ProjectorOptions::default()).await
+}
+
+async fn run_projected_with(
+    rt: &Runtime,
+    lowered: Lowered,
+    sink: Arc<dyn RunEventSink>,
+    observers: Vec<Arc<dyn ExecutionObserver>>,
+    options: ProjectorOptions,
+) -> (driver::ExecutionReport, ProjectionReceipt) {
+    let projector = EventProjector::with_options(sink, options);
     let dispatcher = InterviewDispatcher::new(Arc::new(SayYes));
     let mut host_run = HostRun::new(lowered.graph.expect("lowers"))
         .with_children(lowered.children)
@@ -1736,8 +1774,9 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
     assert!(!workspace(&dir).join("shipped.txt").exists());
 }
 
-/// A slow consumer delays delivery and loses nothing; a failing consumer
-/// stops with an honest receipt, and the run dir still projects everything.
+/// A slow consumer whose backlog stays within the queue's capacity delays
+/// delivery and loses nothing; a failing consumer stops with an honest
+/// receipt, and the run dir still projects everything.
 #[tokio::test]
 async fn slow_and_failing_consumers_are_lossless_or_honest() {
     let dir = RunDir::new("embed-slow");
@@ -1793,6 +1832,117 @@ async fn slow_and_failing_consumers_are_lossless_or_honest() {
     let delivered = failing.inner.events();
     assert_eq!(delivered.len(), 10);
     assert!(delivered.iter().all(|e| replayed_ids.contains(&e.id)));
+}
+
+/// A sink that stops returning is abandoned after the stall budget: the run
+/// finishes, shutdown completes, the receipt names the stall and counts the
+/// events the sink never took, and the run dir still projects everything.
+#[tokio::test]
+async fn a_stalled_sink_is_abandoned_after_its_budget_and_the_run_dir_still_projects() {
+    let dir = RunDir::new("embed-stalled");
+    let rt = runtime(&dir, None);
+    let mut lowered = lower(&rt, &dir, WORKFLOW);
+    script_flaky(lowered.graph.as_mut().expect("lowers"));
+    let stalled = Arc::new(StallingSink {
+        inner:    CollectingSink::default(),
+        accepted: AtomicU32::new(10),
+    });
+    let options = ProjectorOptions {
+        stall_timeout: Duration::from_millis(300),
+        ..ProjectorOptions::default()
+    };
+    let (report, receipt) = timeout(
+        Duration::from_secs(60),
+        run_projected_with(&rt, lowered, stalled.clone(), Vec::new(), options),
+    )
+    .await
+    .expect("shutdown is bounded by the stall budget");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "a stalled sink never fails the run"
+    );
+    assert!(!receipt.is_clean());
+    assert_eq!(receipt.delivered, 10);
+    assert!(receipt.undelivered > 0, "{receipt:?}");
+    assert_eq!(receipt.projected, receipt.delivered + receipt.undelivered);
+    let failure = receipt.failure.as_deref().expect("the stall is reported");
+    assert!(
+        failure.contains("stalled") && failure.contains("300ms"),
+        "{failure}"
+    );
+    let replayed = replay_run(dir.path()).expect("projects");
+    assert_eq!(
+        replayed.len() as u64,
+        receipt.projected,
+        "recovery rebuilds the whole stream"
+    );
+    let replayed_ids: BTreeSet<EventId> = replayed.iter().map(|e| e.id).collect();
+    let delivered = stalled.inner.events();
+    assert_eq!(delivered.len(), 10);
+    assert!(delivered.iter().all(|e| replayed_ids.contains(&e.id)));
+}
+
+/// A sink that keeps returning but cannot keep up with a chatty run leaves
+/// the overflow to the durable log: the queue never holds more than its
+/// capacity, the run is not slowed, live delivery keeps each source's order
+/// with gaps, the receipt counts what was left behind, and `replay_run`
+/// completes the stream.
+#[tokio::test]
+async fn a_sink_that_falls_behind_leaves_the_overflow_to_the_durable_log() {
+    let dir = RunDir::new("embed-backlog");
+    let rt = runtime(&dir, None);
+    let lowered = lower(&rt, &dir, CHATTY);
+    let slow = Arc::new(SlowSink {
+        inner: CollectingSink::default(),
+        delay: Duration::from_millis(5),
+    });
+    let options = ProjectorOptions {
+        capacity: 16,
+        ..ProjectorOptions::default()
+    };
+    let (report, receipt) =
+        run_projected_with(&rt, lowered, slow.clone(), Vec::new(), options).await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(receipt.failure.is_none(), "{receipt:?}");
+    assert!(
+        receipt.overflowed > 0,
+        "the producer outran the sink without waiting for it: {receipt:?}"
+    );
+    assert_eq!(receipt.undelivered, receipt.overflowed);
+    assert_eq!(receipt.projected, receipt.delivered + receipt.undelivered);
+    let delivered = slow.inner.events();
+    assert_eq!(delivered.len() as u64, receipt.delivered);
+    assert!(
+        delivered.len() >= 16,
+        "the queue's worth was delivered at least: {}",
+        delivered.len()
+    );
+    // What the sink saw is a subsequence of each source's stream.
+    let mut last: BTreeMap<EventSource, EventId> = BTreeMap::new();
+    for event in &delivered {
+        if let Some(previous) = last.insert(event.id.source, event.id) {
+            assert!(
+                previous < event.id,
+                "delivery kept the source order: {previous:?} before {:?}",
+                event.id
+            );
+        }
+    }
+    let replayed = replay_run(dir.path()).expect("projects");
+    assert_eq!(
+        replayed.len() as u64,
+        receipt.projected,
+        "the log holds every event, delivered or not"
+    );
+    let replayed_ids: BTreeSet<EventId> = replayed.iter().map(|e| e.id).collect();
+    assert!(delivered.iter().all(|e| replayed_ids.contains(&e.id)));
+    // The chatty command's lines are the bulk of the overflow.
+    let lines = replayed
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::OutputLine { .. }))
+        .count();
+    assert!(lines >= 2000, "{lines} output lines");
 }
 
 /// Recovery: a resumed run re-delivers the regenerated suffix with the same

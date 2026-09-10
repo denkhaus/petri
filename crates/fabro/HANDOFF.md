@@ -129,9 +129,14 @@ acknowledgement gates the next step of the run:
   released; `scope_released` runs before each scope's own environment is
   released. Fabro's `run_complete`/`run_failed` (by final status, neither on a
   cancelled run) and `sandbox_cleanup` map onto them.
-- `RunEventSink::deliver` is awaited per event; a slow sink delays and never
-  drops, a failing sink stops the pump and the `ProjectionReceipt` counts the
-  undelivered events; recovery is `replay_run`.
+- `RunEventSink::deliver` is awaited per event behind a bounded queue
+  (`ProjectorOptions::capacity`, 1024 by default); a slow sink delays
+  delivery and never slows the run, an event that finds the queue full is
+  counted as `overflowed` and left to the log, a failing sink stops the pump,
+  and a `deliver` that outlasts `ProjectorOptions::stall_timeout` (30 seconds
+  by default) is dropped and named in the receipt's `failure`, so shutdown is
+  bounded. The `ProjectionReceipt` counts every undelivered event; recovery
+  is `replay_run`, deduplicated by `EventId`.
 - A step's progress is queued or acknowledged. `StepCtx::logs.send` orders
   the event ahead of the attempt's outcome (the driver's completion fence
   drains the queue before it records the outcome) without making it durable

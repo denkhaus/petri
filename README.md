@@ -1218,9 +1218,13 @@ no platform vocabulary in them:
 - **Events.** `execution::events` is the versioned public event contract
   (`crates/core/execution/EVENTS.md`). An `EventProjector` is an
   `ExecutionObserver` that derives `RunEvent`s from every record and hands
-  them to the host's `RunEventSink`, awaited per event so a slow store delays
-  and never drops; `replay_run` rebuilds the same events, with the same
-  identities, from a run dir after the fact, and `EventProjector::primed`
+  them to the host's `RunEventSink`, awaited per event through a bounded
+  queue (`ProjectorOptions`: 1024 events and a 30 second stall budget by
+  default), so a slow store delays delivery but never slows the run or
+  grows memory; what finds the queue full, or follows a failed or stalled
+  sink, is counted in the `ProjectionReceipt` and stays in the durable log.
+  `replay_run` rebuilds the same events, with the same identities, from a
+  run dir after the fact, and `EventProjector::primed`
   attaches at resume. Every event names its run, invocation, execution,
   node (with the frontend's `meta`), firing, visit, attempt and branch role.
 - **Awaited extension points.** `Runtime::hooks` installs

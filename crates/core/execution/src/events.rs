@@ -24,12 +24,22 @@
 //!
 //! # Delivery
 //!
-//! [`EventProjector`] is the lossless path: the observer callback projects
-//! synchronously and queues; a pump task hands each event to the host's
-//! [`RunEventSink`] and awaits it, so a slow sink delays delivery and never
-//! drops. A sink failure stops the pump; every later event is counted as
-//! undelivered and [`EventProjector::shutdown`] reports the failure. A host
-//! that needs completeness after such a failure calls [`replay_run`].
+//! [`EventProjector`] is the live path: the observer callback projects
+//! synchronously and queues without waiting; a pump task hands each event to
+//! the host's [`RunEventSink`] and awaits it, in order. The queue is bounded
+//! ([`ProjectorOptions::capacity`], 1024 events by default), which is the
+//! most the projector holds in memory: a slow sink delays delivery and never
+//! slows the driver, and an event projected while the queue is full is not
+//! queued. It is counted as `overflowed` in the [`ProjectionReceipt`], live
+//! delivery goes on with the next event that finds room (so the sink sees
+//! each source in order, with gaps), and the durable log keeps it. A sink
+//! error stops the pump; every later event is counted as undelivered. A
+//! `deliver` or `finish` that outlasts [`ProjectorOptions::stall_timeout`]
+//! (30 seconds by default) is dropped and counts as a failure that names the
+//! event, so [`EventProjector::shutdown`] completes within about one stall
+//! budget plus the drain of the queue. None of this fails the run. A host
+//! that needs completeness after an overflow, a failure or a stall calls
+//! [`replay_run`] and deduplicates by [`EventId`].
 //!
 //! Across a resume, the driver replays the regenerated suffix to observers
 //! before dispatching pending work, so events for records the crash kept off
@@ -80,6 +90,7 @@ use smol_str::SmolStr;
 use steps::{ANSWER_KEY, Question, QuestionExpired};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity, HookOperation};
 use crate::host::EVENTS_FILE;
@@ -1501,8 +1512,10 @@ fn hook_activity(payload: &Value) -> Option<(HookOperation, AgentActivity)> {
 // ── Live delivery ──────────────────────────────────────────────────────────
 
 /// Where projected events go. `deliver` is awaited per event, in order: a
-/// slow sink applies backpressure to the queue behind it, never to the
-/// driver. An error stops the pump.
+/// slow sink applies backpressure to the bounded queue behind it, never to
+/// the driver. An error stops the pump. A call that outlasts the projector's
+/// stall budget ([`ProjectorOptions::stall_timeout`]) is dropped and counts
+/// as a failure, so an implementation tolerates a cancelled `deliver`.
 #[async_trait::async_trait]
 pub trait RunEventSink: Send + Sync {
     async fn deliver(&self, event: RunEvent) -> Result<(), SinkError>;
@@ -1510,6 +1523,38 @@ pub trait RunEventSink: Send + Sync {
     /// Called once after the last event, before the receipt.
     async fn finish(&self) -> Result<(), SinkError> {
         Ok(())
+    }
+}
+
+/// The queue capacity of an [`EventProjector`] unless [`ProjectorOptions`]
+/// says otherwise.
+pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
+
+/// How long an [`EventProjector`] waits for one sink call unless
+/// [`ProjectorOptions`] says otherwise.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How an [`EventProjector`] bounds the memory and the time a host's sink can
+/// cost it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectorOptions {
+    /// Events the queue holds between the observer callback and the pump:
+    /// the most the projector keeps in memory. The callback never waits for
+    /// room; an event projected while the queue is full is left to the
+    /// durable log and counted as `overflowed` in the receipt.
+    pub capacity:      usize,
+    /// How long one `deliver` (or `finish`) may take. A call that outlasts it
+    /// is dropped, the sink counts as failed from then on, and the receipt
+    /// names the event it stalled on.
+    pub stall_timeout: Duration,
+}
+
+impl Default for ProjectorOptions {
+    fn default() -> Self {
+        Self {
+            capacity:      DEFAULT_QUEUE_CAPACITY,
+            stall_timeout: DEFAULT_STALL_TIMEOUT,
+        }
     }
 }
 
@@ -1528,14 +1573,24 @@ impl SinkError {
     }
 }
 
-/// What the projector did over a run.
+/// What the projector did over a run. `projected` is every event derived;
+/// `delivered + undelivered` equals it. A receipt that is not clean means
+/// the sink does not hold the whole stream and `replay_run` completes it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionReceipt {
     pub version:     u32,
     pub projected:   u64,
     pub delivered:   u64,
-    /// Events the sink never received because it had failed.
+    /// Events the sink never received: they found the queue full, or the
+    /// sink had failed or stalled before their turn.
     pub undelivered: u64,
+    /// Of `undelivered`, the events that found the queue full and were left
+    /// to the durable log. Live delivery went on with the next event that
+    /// found room, so the sink saw each source in order, with gaps.
+    #[serde(default)]
+    pub overflowed:  u64,
+    /// Why delivery stopped, when it did: the sink's error, or the stall the
+    /// pump gave up on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure:     Option<String>,
 }
@@ -1546,29 +1601,39 @@ impl ProjectionReceipt {
     }
 }
 
-enum PumpMessage {
-    Event(Box<RunEvent>),
-    Finish,
+/// The sender side of the pump's queue and what never got onto it.
+struct Queue {
+    /// `None` once `shutdown` closed the stream.
+    tx:          Option<mpsc::Sender<Box<RunEvent>>>,
+    /// Events that found the queue full.
+    overflowed:  u64,
+    /// Events projected after the stream was closed.
+    after_close: u64,
 }
 
-struct PumpState {
-    projected: u64,
-}
-
-/// The live, lossless consumption path: an [`ExecutionObserver`] that
-/// projects each record and queues the result for a pump task, which awaits
-/// the sink per event.
+/// The live consumption path: an [`ExecutionObserver`] that projects each
+/// record and queues the result, without waiting, for a pump task that
+/// awaits the sink per event. The queue is bounded ([`ProjectorOptions`]),
+/// so the projector holds at most `capacity` events in memory and the run
+/// keeps its pace whatever the sink does; an event that finds no room, and
+/// every event after the sink fails or stalls, stays in the durable log for
+/// [`replay_run`]. The receipt says exactly what the sink did not get.
 pub struct EventProjector {
     projection: Mutex<Projection>,
-    tx:         mpsc::UnboundedSender<PumpMessage>,
+    queue:      Mutex<Queue>,
     pump:       Mutex<Option<JoinHandle<ProjectionReceipt>>>,
-    counts:     Mutex<PumpState>,
 }
 
 impl EventProjector {
-    /// A projector for a fresh run.
+    /// A projector for a fresh run, with the default options.
     pub fn new(sink: Arc<dyn RunEventSink>) -> Arc<Self> {
-        Self::with_projection(sink, Projection::new())
+        Self::with_options(sink, ProjectorOptions::default())
+    }
+
+    /// A projector for a fresh run, with the given queue capacity and stall
+    /// budget.
+    pub fn with_options(sink: Arc<dyn RunEventSink>, options: ProjectorOptions) -> Arc<Self> {
+        Self::with_projection(sink, Projection::new(), options)
     }
 
     /// A projector for a run being resumed from `run_dir`: the records on
@@ -1581,49 +1646,39 @@ impl EventProjector {
     ///
     /// The run dir's logs do not decode or replay.
     pub fn primed(sink: Arc<dyn RunEventSink>, run_dir: &Path) -> Result<Arc<Self>, ReplayError> {
-        let mut projection = Projection::new();
-        project_run(run_dir, &mut projection)?;
-        Ok(Self::with_projection(sink, projection))
+        Self::primed_with_options(sink, run_dir, ProjectorOptions::default())
     }
 
-    fn with_projection(sink: Arc<dyn RunEventSink>, projection: Projection) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<PumpMessage>();
-        let pump = tokio::spawn(async move {
-            let mut receipt = ProjectionReceipt {
-                version: EVENT_CONTRACT_VERSION,
-                ..ProjectionReceipt::default()
-            };
-            while let Some(message) = rx.recv().await {
-                match message {
-                    PumpMessage::Event(event) => {
-                        receipt.projected += 1;
-                        if receipt.failure.is_some() {
-                            receipt.undelivered += 1;
-                            continue;
-                        }
-                        match sink.deliver(*event).await {
-                            Ok(()) => receipt.delivered += 1,
-                            Err(error) => {
-                                receipt.undelivered += 1;
-                                receipt.failure = Some(error.message);
-                            }
-                        }
-                    }
-                    PumpMessage::Finish => break,
-                }
-            }
-            if receipt.failure.is_none()
-                && let Err(error) = sink.finish().await
-            {
-                receipt.failure = Some(error.message);
-            }
-            receipt
-        });
+    /// [`Self::primed`] with the given queue capacity and stall budget.
+    ///
+    /// # Errors
+    ///
+    /// The run dir's logs do not decode or replay.
+    pub fn primed_with_options(
+        sink: Arc<dyn RunEventSink>,
+        run_dir: &Path,
+        options: ProjectorOptions,
+    ) -> Result<Arc<Self>, ReplayError> {
+        let mut projection = Projection::new();
+        project_run(run_dir, &mut projection)?;
+        Ok(Self::with_projection(sink, projection, options))
+    }
+
+    fn with_projection(
+        sink: Arc<dyn RunEventSink>,
+        projection: Projection,
+        options: ProjectorOptions,
+    ) -> Arc<Self> {
+        let (tx, rx) = mpsc::channel::<Box<RunEvent>>(options.capacity.max(1));
+        let pump = tokio::spawn(pump(sink, rx, options.stall_timeout));
         Arc::new(Self {
             projection: Mutex::new(projection),
-            tx,
-            pump: Mutex::new(Some(pump)),
-            counts: Mutex::new(PumpState { projected: 0 }),
+            queue:      Mutex::new(Queue {
+                tx:          Some(tx),
+                overflowed:  0,
+                after_close: 0,
+            }),
+            pump:       Mutex::new(Some(pump)),
         })
     }
 
@@ -1633,40 +1688,141 @@ impl EventProjector {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn queue(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queue what one record derived. Never waits: an event that finds the
+    /// queue full is left to the durable log and counted.
     fn push(&self, events: Vec<RunEvent>) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|d| u64::try_from(d.as_millis()).ok());
-        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut queue = self.queue();
         for mut event in events {
             event.observed_at = now;
-            counts.projected += 1;
-            let _ = self.tx.send(PumpMessage::Event(Box::new(event)));
+            let Some(tx) = queue.tx.as_ref() else {
+                queue.after_close += 1;
+                continue;
+            };
+            match tx.try_send(Box::new(event)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    queue.overflowed += 1;
+                    if queue.overflowed == 1 {
+                        tracing::warn!(
+                            event = %event_label(&event.id),
+                            "the event sink fell behind; events that find the queue full are left to the log for replay"
+                        );
+                    }
+                }
+                // The pump is gone (it panicked); the receipt says so.
+                Err(mpsc::error::TrySendError::Closed(_)) => queue.after_close += 1,
+            }
         }
     }
 
-    /// End the stream, await the sink's last delivery and `finish`, and
-    /// report. Call once, after the run.
+    /// End the stream, await the sink's remaining deliveries and `finish`,
+    /// and report. Call once, after the run. Bounded: the pump waits at most
+    /// one stall budget for any sink call, and delivers nothing more once a
+    /// call stalled or failed.
     pub async fn shutdown(&self) -> ProjectionReceipt {
-        let _ = self.tx.send(PumpMessage::Finish);
+        // Closing the stream: the pump drains what is queued, then finishes.
+        let tx = self.queue().tx.take();
+        drop(tx);
         let pump = self
             .pump
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        match pump {
+        let mut receipt = match pump {
             Some(pump) => pump.await.unwrap_or_else(|error| ProjectionReceipt {
                 version: EVENT_CONTRACT_VERSION,
                 failure: Some(format!("the event pump failed: {error}")),
                 ..ProjectionReceipt::default()
             }),
-            None => ProjectionReceipt {
-                version: EVENT_CONTRACT_VERSION,
-                failure: Some("shutdown was called twice".to_owned()),
-                ..ProjectionReceipt::default()
-            },
+            None => {
+                return ProjectionReceipt {
+                    version: EVENT_CONTRACT_VERSION,
+                    failure: Some("shutdown was called twice".to_owned()),
+                    ..ProjectionReceipt::default()
+                };
+            }
+        };
+        let (overflowed, after_close) = {
+            let queue = self.queue();
+            (queue.overflowed, queue.after_close)
+        };
+        receipt.projected += overflowed + after_close;
+        receipt.undelivered += overflowed + after_close;
+        receipt.overflowed = overflowed;
+        receipt
+    }
+}
+
+/// The pump: deliver each queued event to the sink, in order, each call
+/// bounded by `stall`; after a failure or a stall, count the rest as
+/// undelivered; once the queue closes, `finish` the sink.
+async fn pump(
+    sink: Arc<dyn RunEventSink>,
+    mut rx: mpsc::Receiver<Box<RunEvent>>,
+    stall: Duration,
+) -> ProjectionReceipt {
+    let mut receipt = ProjectionReceipt {
+        version: EVENT_CONTRACT_VERSION,
+        ..ProjectionReceipt::default()
+    };
+    while let Some(event) = rx.recv().await {
+        receipt.projected += 1;
+        if receipt.failure.is_some() {
+            receipt.undelivered += 1;
+            continue;
         }
+        let id = event.id;
+        match timeout(stall, sink.deliver(*event)).await {
+            Ok(Ok(())) => receipt.delivered += 1,
+            Ok(Err(error)) => {
+                receipt.undelivered += 1;
+                receipt.failure = Some(error.message);
+            }
+            Err(_) => {
+                receipt.undelivered += 1;
+                let message = format!(
+                    "the sink stalled: {} was not accepted within {}ms, and delivery stopped there",
+                    event_label(&id),
+                    stall.as_millis()
+                );
+                tracing::warn!("{message}");
+                receipt.failure = Some(message);
+            }
+        }
+    }
+    if receipt.failure.is_none() {
+        match timeout(stall, sink.finish()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => receipt.failure = Some(error.message),
+            Err(_) => {
+                receipt.failure = Some(format!(
+                    "the sink stalled: `finish` did not return within {}ms",
+                    stall.as_millis()
+                ));
+            }
+        }
+    }
+    receipt
+}
+
+/// An event identity as a receipt or a log line names it.
+fn event_label(id: &EventId) -> String {
+    match id.source {
+        EventSource::Coordinator => format!("coordinator record {} event {}", id.seq, id.index),
+        EventSource::Execution { execution } => format!(
+            "execution {} record {} event {}",
+            execution.raw(),
+            id.seq,
+            id.index
+        ),
     }
 }
 
