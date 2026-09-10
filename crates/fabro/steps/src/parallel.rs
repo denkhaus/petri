@@ -21,11 +21,15 @@
 //! snapshot from its input, starts the branch's child graph as an internal
 //! invocation that inherits the parent's sandbox and workspace, waits for
 //! it, and returns the branch envelope Fabro's parallel handler builds:
-//! `{ id, index, item_label?, status, context_updates }`. The envelope is
-//! the step's output and nothing else: a branch's context changes never
-//! reach the parent's `kv`. The child bounds its attempts through the
-//! coordinator's attempt admission under the fork's gate, so `max_parallel`
-//! counts running attempts and a backoff holds no slot.
+//! `{ id, index, item_label?, status, context_updates }`. The updates are
+//! built as Fabro's `branch_context_updates` builds them: the target's own
+//! outcome updates first (an unchanged write-back included), then the public
+//! diff of the child's context against the fork snapshot, the diff winning a
+//! duplicate key. The envelope is the step's output and nothing else: a
+//! branch's context changes never reach the parent's `kv`. The child bounds
+//! its attempts through the coordinator's attempt admission under the fork's
+//! gate, so `max_parallel` counts running attempts and a backoff holds no
+//! slot.
 //!
 //! The fan-in step is the barrier. Its inputs carry every envelope in branch
 //! order; it publishes `parallel.results` and `parallel.branch_count`, takes
@@ -357,20 +361,41 @@ fn is_engine_internal(key: &str) -> bool {
         || key.starts_with("current")
 }
 
-/// The branch's own context changes: every public key whose value differs
-/// from the fork snapshot, as Fabro's `context_diff_public` reports them.
-/// Petri's stages write `failure_class` as bookkeeping on every outcome;
-/// an empty class (no failure) is not a change the branch made.
-fn context_updates(
+/// Petri's stage bookkeeping: `Stage::into_outcome` writes `failure_class`
+/// into every stage's context updates, standing in for the key Fabro's
+/// executor sets when it records a stage. Fabro's parallel handler runs a
+/// branch target directly, outside that lifecycle, so its branch updates
+/// never carry the key; neither do Petri's.
+fn is_stage_bookkeeping(key: &str) -> bool {
+    key == "failure_class"
+}
+
+/// The branch's own context changes, as Fabro's `branch_context_updates`
+/// builds them: the target's own outcome updates first (`explicit`, so a key
+/// written back with the value it already had is reported), then every
+/// public key of the child's final context whose value differs from the fork
+/// snapshot (`context_diff_public`), the diff winning a duplicate key.
+fn branch_updates(
+    explicit: &BTreeMap<SmolStr, Value>,
     snapshot: &BTreeMap<SmolStr, Value>,
     after: &BTreeMap<SmolStr, Value>,
 ) -> Map<String, Value> {
-    after
+    let mut updates: Map<String, Value> = explicit
         .iter()
-        .filter(|(key, value)| !is_engine_internal(key) && snapshot.get(*key) != Some(*value))
-        .filter(|(key, value)| !(key.as_str() == "failure_class" && value.as_str() == Some("")))
+        .filter(|(key, _)| !is_stage_bookkeeping(key))
         .map(|(key, value)| (key.to_string(), value.clone()))
-        .collect()
+        .collect();
+    updates.extend(
+        after
+            .iter()
+            .filter(|(key, value)| {
+                !is_engine_internal(key)
+                    && !is_stage_bookkeeping(key)
+                    && snapshot.get(*key) != Some(*value)
+            })
+            .map(|(key, value)| (key.to_string(), value.clone())),
+    );
+    updates
 }
 
 /// The branch status in Fabro's vocabulary: what the target stage reported,
@@ -563,7 +588,7 @@ impl Step for BranchStep {
         let (status, updates) = match (&result, disposition) {
             (Some(result), BranchDisposition::Completed) => (
                 branch_status(result),
-                context_updates(&snapshot, &result.context),
+                branch_updates(&result.updates, &snapshot, &result.context),
             ),
             _ => (StageOutcome::Failed, Map::new()),
         };
@@ -819,30 +844,84 @@ mod tests {
         assert_eq!(aggregate(&[ok, partial]), StageOutcome::PartiallySucceeded);
     }
 
+    fn kv(pairs: &[(&str, Value)]) -> BTreeMap<SmolStr, Value> {
+        pairs
+            .iter()
+            .map(|(key, value)| (SmolStr::new(key), value.clone()))
+            .collect()
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        let Value::Object(map) = value else {
+            panic!("an object, not {value}");
+        };
+        map
+    }
+
+    /// The reference contract, section 5: outcome updates first, then the
+    /// public diff.
     #[test]
-    fn updates_are_the_public_diff_against_the_snapshot() {
-        let snapshot: BTreeMap<SmolStr, Value> = [
-            ("command.output".into(), json!("before")),
-            ("kept".into(), json!(1)),
-        ]
-        .into_iter()
-        .collect();
-        let after: BTreeMap<SmolStr, Value> = [
-            ("failure_class".into(), json!("")),
-            ("command.output".into(), json!("after")),
-            ("kept".into(), json!(1)),
-            ("output.finder".into(), json!({ "n": 1 })),
-            ("internal.parallel_item".into(), json!("x")),
-        ]
-        .into_iter()
-        .collect();
-        let updates = context_updates(&snapshot, &after);
+    fn updates_start_with_the_outcome_updates_then_the_public_diff() {
+        let snapshot = kv(&[("command.output", json!("before")), ("kept", json!(1))]);
+        let explicit = kv(&[("output.finder", json!({ "n": 1 }))]);
+        let after = kv(&[
+            ("command.output", json!("after")),
+            ("kept", json!(1)),
+            ("output.finder", json!({ "n": 1 })),
+            ("internal.parallel_item", json!("x")),
+        ]);
         assert_eq!(
-            updates,
-            json!({ "command.output": "after", "output.finder": { "n": 1 } })
-                .as_object()
-                .cloned()
-                .expect("object")
+            branch_updates(&explicit, &snapshot, &after),
+            object(json!({ "command.output": "after", "output.finder": { "n": 1 } }))
+        );
+    }
+
+    /// A key the target wrote back with the value the snapshot already had
+    /// is an outcome update, so it is reported although the diff is silent.
+    #[test]
+    fn an_unchanged_write_back_is_reported() {
+        let snapshot = kv(&[("x", json!("same"))]);
+        let explicit = kv(&[("x", json!("same"))]);
+        let after = snapshot.clone();
+        assert_eq!(
+            branch_updates(&explicit, &snapshot, &after),
+            object(json!({ "x": "same" }))
+        );
+    }
+
+    /// On a duplicate key the diff wins.
+    #[test]
+    fn the_diff_wins_a_duplicate_key() {
+        let snapshot = kv(&[("x", json!(0))]);
+        let explicit = kv(&[("x", json!(1))]);
+        let after = kv(&[("x", json!(2))]);
+        assert_eq!(
+            branch_updates(&explicit, &snapshot, &after),
+            object(json!({ "x": 2 }))
+        );
+    }
+
+    /// Petri's `failure_class` bookkeeping is neither an outcome update nor a
+    /// diff entry, whether the class is empty or names a failure: Fabro's
+    /// branch path never writes the key.
+    #[test]
+    fn stage_bookkeeping_is_not_a_branch_update() {
+        let snapshot = kv(&[("failure_class", json!(""))]);
+        let clean = kv(&[
+            ("failure_class", json!("")),
+            ("command.output", json!("ok\n")),
+        ]);
+        assert_eq!(
+            branch_updates(&clean, &snapshot, &clean),
+            object(json!({ "command.output": "ok\n" }))
+        );
+        let failed = kv(&[
+            ("failure_class", json!("exit_status:3")),
+            ("command.output", json!("boom\n")),
+        ]);
+        assert_eq!(
+            branch_updates(&failed, &snapshot, &failed),
+            object(json!({ "command.output": "boom\n" }))
         );
     }
 }

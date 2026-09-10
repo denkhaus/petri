@@ -102,7 +102,15 @@ pub struct InvocationResult {
     pub failure:         Option<FailureInfo>,
     pub final_execution: ExecutionId,
     pub output:          Value,
+    /// The final execution's whole run context.
     pub context:         BTreeMap<SmolStr, Value>,
+    /// The `context_updates` the result node's final outcome reported: what
+    /// that node wrote itself, unchanged values included, as distinct from
+    /// the diff a caller can take between `context` and the context it
+    /// passed in. Empty when the graph projects no result node. Additive to
+    /// coordinator format version 2: a record without it reads as empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub updates:         BTreeMap<SmolStr, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

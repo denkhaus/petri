@@ -1848,6 +1848,7 @@ fn project_result(
                 ToString::to_string,
             )));
     }
+    let mut updates = BTreeMap::new();
     let output = match graph.result {
         ResultProjection::None => Value::Null,
         ResultProjection::NodeOutput(node) => graph
@@ -1864,7 +1865,20 @@ fn project_result(
                     }
                     Value::Null
                 },
-                |record| record.output.clone(),
+                |record| {
+                    // The result node's own writes, from its final record:
+                    // the node record keeps the output, the history the
+                    // outcome.
+                    if let Some(final_record) = state
+                        .history()
+                        .iter()
+                        .rev()
+                        .find(|final_record| final_record.node == node)
+                    {
+                        updates = final_record.outcome.context_updates.clone();
+                    }
+                    record.output.clone()
+                },
             ),
     };
     InvocationResult {
@@ -1873,6 +1887,7 @@ fn project_result(
         final_execution: execution,
         output,
         context: (*state.run_context().kv).clone(),
+        updates,
     }
 }
 

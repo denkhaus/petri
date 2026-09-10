@@ -230,6 +230,7 @@ fn finished(status: RunStatus, context: &[(&str, Value)]) -> InvocationResult {
             .iter()
             .map(|(k, v)| (SmolStr::new(k), v.clone()))
             .collect(),
+        updates: BTreeMap::new(),
     }
 }
 

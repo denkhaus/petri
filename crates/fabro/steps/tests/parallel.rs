@@ -411,15 +411,13 @@ async fn mixed_failures_join_partially_and_all_failed_fails_the_fan_in() {
     assert_eq!(results[1]["id"], json!("bad"));
     assert_eq!(results[1]["status"], json!("failed"));
     assert_eq!(results[1]["index"], json!(1));
-    // A failed branch keeps its identity and reports what changed: the
-    // output it wrote and its failure class, never stale success data.
+    // A failed branch keeps its identity and reports what it wrote (the
+    // command's output), never stale success data, and never Petri's
+    // `failure_class` bookkeeping: Fabro's branch path applies no stage
+    // bookkeeping, so its branch updates carry no such key.
     assert_eq!(
-        results[1]["context_updates"]["command.output"],
-        json!("boom\n")
-    );
-    assert_eq!(
-        results[1]["context_updates"]["failure_class"],
-        json!("exit_status:3")
+        results[1]["context_updates"],
+        json!({ "command.output": "boom\n" })
     );
 
     let dir = RunDir::new("parallel-all-failed");
@@ -466,6 +464,55 @@ async fn mixed_failures_join_partially_and_all_failed_fails_the_fan_in() {
     );
     assert_eq!(status_of(&report, "recover").as_deref(), Some("success"));
     assert_eq!(published_results(&report).len(), 2);
+}
+
+/// The reference contract's `branch_context_updates`: a key the branch
+/// wrote back with the value the fork snapshot already had is reported,
+/// because it is an outcome update, while a branch that wrote nothing
+/// reports only the diff its command output made.
+#[tokio::test]
+async fn an_unchanged_write_back_is_reported_in_the_branch_updates() {
+    let dir = RunDir::new("parallel-unchanged");
+    let rt = runtime(dir.path());
+    let report = run(
+        &rt,
+        lower(&dot(r#"
+        seed [shape=parallelogram, output_schema="routing", script="printf '%s' '{\"context_updates\":{\"x\":\"same\"}}'"]
+        fork [shape=component]
+        a [shape=parallelogram, output_schema="routing", script="printf '%s' '{\"context_updates\":{\"x\":\"same\"}}'"]
+        b [shape=parallelogram, script="true"]
+        merge [shape=tripleoctagon]
+        start -> seed -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        b -> merge
+        merge -> exit
+    "#)),
+    )
+    .await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let results = published_results(&report);
+    assert_eq!(results.len(), 2, "{results:#?}");
+    assert_eq!(
+        results[0]["context_updates"],
+        json!({
+            "x": "same",
+            "command.output": "{\"context_updates\":{\"x\":\"same\"}}",
+        }),
+        "{results:#?}"
+    );
+    assert_eq!(
+        results[1]["context_updates"],
+        json!({ "command.output": "" }),
+        "{results:#?}"
+    );
+    assert_eq!(report.state.run_context().get("x"), Some(&json!("same")));
 }
 
 #[tokio::test]
