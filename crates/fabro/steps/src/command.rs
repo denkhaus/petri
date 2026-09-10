@@ -42,31 +42,33 @@ const TRUNCATED: &str = "\n… [output truncated]\n";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandConfig {
-    pub label:           String,
-    pub node:            String,
+    pub label:                String,
+    pub node:                 String,
     #[serde(default)]
-    pub goal:            String,
-    pub script:          String,
+    pub goal:                 String,
+    pub script:               String,
     #[serde(default = "default_language")]
-    pub language:        String,
+    pub language:             String,
     #[serde(default)]
-    pub stdin:           Value,
+    pub stdin:                Value,
     #[serde(default)]
-    pub output_schema:   Option<Value>,
+    pub output_schema:        Option<Value>,
     #[serde(default)]
-    pub on_failure:      Option<Policy>,
+    pub on_failure:           Option<Policy>,
+    #[serde(default)]
+    pub on_retries_exhausted: Option<Policy>,
     /// The node's explicit routes, for failure promotion.
     #[serde(default, rename = "routes")]
-    pub explicit_routes: Option<ExplicitRoutes>,
+    pub explicit_routes:      Option<ExplicitRoutes>,
     #[serde(default)]
-    pub timeout_ms:      Option<u64>,
+    pub timeout_ms:           Option<u64>,
     /// Environment for the process: `[run.prepare]` step env and the
     /// environment's secret values, resolved at spawn.
     #[serde(default)]
-    pub env:             BTreeMap<SmolStr, ValueOrSecretRef>,
+    pub env:                  BTreeMap<SmolStr, ValueOrSecretRef>,
     /// The run context at spawn, resolved by the engine.
     #[serde(default)]
-    pub kv:              Value,
+    pub kv:                   Value,
 }
 
 fn default_language() -> String {
@@ -169,6 +171,7 @@ impl OutputTail {
 }
 
 async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, StepFailure> {
+    let final_attempt = ctx.is_final_attempt();
     let (program, args) = match config.language.as_str() {
         "python" => ("python3", vec!["-c".to_string(), config.script.clone()]),
         _ => ("bash", vec![
@@ -331,6 +334,7 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
     stage.output.insert("stdout".into(), stdout);
     Ok(stage
         .with_routing(config.explicit_routes.clone(), config.kv.clone())
+        .with_retries(config.on_retries_exhausted, final_attempt)
         .into_outcome(&config.node))
 }
 

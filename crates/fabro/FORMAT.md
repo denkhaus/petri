@@ -137,9 +137,12 @@ is the failure circuit breaker's limit. Both lower to the graph's
 Retries: `max_retries` (default `default_max_retries`, default 0) or a
 `retry_policy` preset (`none`, `standard`, `aggressive`, `linear`, `patient`)
 becomes `RetryPolicy`. Only a failure the step classed `retry_requested` is
-retried: Fabro's retry intent is a flag on the outcome, never a status.
-`allow_partial=true` — Fabro's spelling of `on_retries_exhausted="partially_succeed"` —
-is `Exhaustion::AcceptPartial`.
+retried: Fabro's retry intent is a flag on the outcome, never a status. The
+engine's exhaustion stays `Fail` for every Fabro node: what the last retryable
+failure becomes is the step's decision under `on_retries_exhausted` (see
+"Failure policy"), made on the final attempt with the node's explicit routes
+in hand. `allow_partial=true` is Fabro's spelling of
+`on_retries_exhausted="partially_succeed"`.
 
 ## Routing
 
@@ -213,9 +216,20 @@ Petri's `partially_succeed` — and the specific one wins:
   `partially_succeed_policy_classifies_before_routing` records that
   rejection beside Petri's result, and `crates/fabro/acceptance/CONTRACT.md`
   lists the spelling under accepted differences.
-- A retryable failure is never promoted by the step: the engine retries it,
-  and `allow_partial` / `on_retries_exhausted="partially_succeed"` accept the
-  last failure as a partial success on exhaustion (`Exhaustion::AcceptPartial`).
+- A retryable failure with an attempt left is returned failed for the engine
+  to retry. On the final attempt (`StepCtx::is_final_attempt`) it is the
+  stage's outcome and `on_retries_exhausted` decides it, in Fabro's order
+  (`finalize_retries_exhausted`, then `apply_succeed_policy`):
+  `partially_succeed` (`allow_partial`) accepts it as a `PartialSuccess` with
+  no route check, reporting `partially_succeeded`; `succeed` checks the
+  explicit routes against the failed outcome first and promotes only an
+  unmatched failure, reporting `succeeded`, so an `outcome=failed` edge still
+  recovers from an exhausted gate and an `outcome=succeeded` edge matches a
+  promoted one; `route` and `exit` leave it failed. The step's config carries
+  both policies and the routes; the failure's `retry_requested` class stays on
+  the record, which is how the fallback tier knows which policy governs it
+  (acceptance `exhaustion.rs`, black box
+  `an_expired_gate_under_succeed_takes_its_explicit_failure_edge`).
 - A human gate never falls through on failure, whatever the policy.
 
 ### Goal gates and loops

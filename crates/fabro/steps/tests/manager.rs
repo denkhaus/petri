@@ -8,6 +8,7 @@
 //! context updates; a parent cancel cancels the child.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -194,6 +195,7 @@ async fn run(
     let ctx = StepCtx {
         firing: FiringId::new(4),
         attempt,
+        max_attempts: NonZeroU32::new(3).expect("non-zero"),
         scope: ScopeId::new(0),
         node: SmolStr::new("manager"),
         config: config.clone(),

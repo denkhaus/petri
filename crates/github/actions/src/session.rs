@@ -694,6 +694,7 @@ impl Session {
         let StepCtx {
             firing,
             attempt,
+            max_attempts,
             scope,
             node,
             config: _,
@@ -725,6 +726,7 @@ impl Session {
         let delegate = StepCtx {
             firing,
             attempt,
+            max_attempts,
             scope,
             node,
             config: Value::Null,

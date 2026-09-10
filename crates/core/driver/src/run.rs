@@ -2323,10 +2323,17 @@ impl Driver {
         };
         // One lookup for both: a firing whose node left the graph has no runner
         // either, and fails here rather than carrying a nameless step forward.
-        let Some((name, kind, runner)) = self.engine.graph().node(node).and_then(|n| {
-            let runner = self.runners.get(&n.step.kind)?;
-            Some((n.name.clone(), n.step.kind.clone(), runner))
-        }) else {
+        let Some((name, kind, max_attempts, runner)) =
+            self.engine.graph().node(node).and_then(|n| {
+                let runner = self.runners.get(&n.step.kind)?;
+                Some((
+                    n.name.clone(),
+                    n.step.kind.clone(),
+                    n.retry.max_attempts,
+                    runner,
+                ))
+            })
+        else {
             self.fail_now(firing, attempt, "no runner for this step kind", NO_RUNNER);
             return;
         };
@@ -2402,6 +2409,7 @@ impl Driver {
         let ctx = StepCtx {
             firing,
             attempt,
+            max_attempts,
             scope,
             node: name.clone(),
             config: resolved.config().clone(),

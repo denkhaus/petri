@@ -9,8 +9,10 @@
 //! a `timeout`, an unanswered question expires here. `human.default_choice`
 //! then routes to the named choice; without one the gate fails with Fabro's
 //! retry outcome (class `retry_requested`), so `max_retries` asks again and
-//! `on_retries_exhausted` decides after that. The driver arms no timer around
-//! a human gate, so its 30 day structural budget is not the answer deadline.
+//! `on_retries_exhausted` decides after the last attempt, with the explicit
+//! routes checked first as Fabro's executor checks them. The driver arms no
+//! timer around a human gate, so its 30 day structural budget is not the
+//! answer deadline.
 //!
 //! A `review_target=true` gate reads `review_target` from the run context
 //! (`{label, url, kind}`), validates it as Fabro does, and asks Fabro's review
@@ -31,7 +33,7 @@ use smol_str::SmolStr;
 use steps::{Answer, Question, QuestionOption, QuestionReference, Step, StepCtx};
 use tokio::time;
 
-use crate::outcome::Stage;
+use crate::outcome::{ExplicitRoutes, Stage};
 
 pub const KIND: StepKindId = HUMAN_KIND;
 
@@ -51,35 +53,36 @@ pub struct Choice {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HumanConfig {
-    pub label:           String,
-    pub node:            String,
+    pub label:                String,
+    pub node:                 String,
     #[serde(default)]
-    pub goal:            String,
+    pub goal:                 String,
     #[serde(default)]
-    pub choices:         Vec<Choice>,
+    pub choices:              Vec<Choice>,
     #[serde(default)]
-    pub freeform_target: Option<String>,
+    pub freeform_target:      Option<String>,
     #[serde(default)]
-    pub question_type:   Option<String>,
+    pub question_type:        Option<String>,
     #[serde(default)]
-    pub sensitive:       Option<bool>,
+    pub sensitive:            Option<bool>,
     /// Read `review_target` from the context and ask about it.
     #[serde(default)]
-    pub review_target:   Option<bool>,
+    pub review_target:        Option<bool>,
     /// The choice (by target, else by key) an expired question takes.
     #[serde(default)]
-    pub default_choice:  Option<String>,
+    pub default_choice:       Option<String>,
     #[serde(default)]
-    pub on_failure:      Option<Policy>,
-    /// The node's explicit routes, carried for uniformity; a human gate never
-    /// promotes a failure.
+    pub on_failure:           Option<Policy>,
+    #[serde(default)]
+    pub on_retries_exhausted: Option<Policy>,
+    /// The node's explicit routes, for failure promotion.
     #[serde(default, rename = "routes")]
-    pub explicit_routes: Option<Value>,
+    pub explicit_routes:      Option<ExplicitRoutes>,
     /// The answer deadline. Absent: wait until answered or cancelled.
     #[serde(default)]
-    pub timeout_ms:      Option<u64>,
+    pub timeout_ms:           Option<u64>,
     #[serde(default)]
-    pub kv:              Value,
+    pub kv:                   Value,
 }
 
 pub struct HumanStep;
@@ -280,18 +283,36 @@ impl HumanConfig {
             })
     }
 
-    fn interrupted(&self) -> Outcome {
-        Stage::failed(
-            "human interaction interrupted before an answer was provided",
-            "interrupted",
-            self.on_failure,
+    /// The stage's outcome under the node's failure policies, with the
+    /// explicit routes and the attempt's position among the node's attempts
+    /// in hand.
+    fn finish(&self, stage: Stage, ctx: &StepCtx) -> Outcome {
+        stage
+            .with_routing(self.explicit_routes.clone(), self.kv.clone())
+            .with_retries(self.on_retries_exhausted, ctx.is_final_attempt())
+            .into_outcome(&self.node)
+    }
+
+    fn interrupted(&self, ctx: &StepCtx) -> Outcome {
+        self.finish(
+            Stage::failed(
+                "human interaction interrupted before an answer was provided",
+                "interrupted",
+                self.on_failure,
+            ),
+            ctx,
         )
-        .into_outcome(&self.node)
     }
 
     /// The outcome for one or more selected choices: the first routes; every
     /// selected key and label is recorded, as Fabro records them.
-    fn selected(&self, selected: &[&Choice], question: &str, answer_text: &str) -> Outcome {
+    fn selected(
+        &self,
+        selected: &[&Choice],
+        question: &str,
+        answer_text: &str,
+        ctx: &StepCtx,
+    ) -> Outcome {
         let mut stage = Stage::new(StageOutcome::Succeeded, self.on_failure);
         let first = selected[0];
         let label = strip_accelerator(&first.label).to_string();
@@ -317,7 +338,7 @@ impl HumanConfig {
             .context_updates
             .insert(SmolStr::new("human.gate.label"), json!(labels));
         self.answer_context(&mut stage, question, answer_text, Some(&labels));
-        stage.into_outcome(&self.node)
+        self.finish(stage, ctx)
     }
 
     /// Fabro's per-gate record of what was asked and answered.
@@ -347,15 +368,17 @@ impl Step for HumanStep {
     async fn run(&self, config: HumanConfig, mut ctx: StepCtx) -> Outcome {
         let mut question = config.question(&ctx);
         if config.choices.is_empty() && config.freeform_target.is_none() {
-            return Stage::failed(
-                format!(
-                    "human gate `{}` has no outgoing edges to offer",
-                    config.node
+            return config.finish(
+                Stage::failed(
+                    format!(
+                        "human gate `{}` has no outgoing edges to offer",
+                        config.node
+                    ),
+                    "bad_config",
+                    config.on_failure,
                 ),
-                "bad_config",
-                config.on_failure,
-            )
-            .into_outcome(&config.node);
+                &ctx,
+            );
         }
         if config.review_target.unwrap_or(false) {
             match review_target(config.kv.get(REVIEW_TARGET_KEY)) {
@@ -368,12 +391,14 @@ impl Step for HumanStep {
                     question.reference = Some(reference);
                 }
                 Err(error) => {
-                    return Stage::failed(
-                        error.message(&config.node),
-                        "review_target",
-                        config.on_failure,
-                    )
-                    .into_outcome(&config.node);
+                    return config.finish(
+                        Stage::failed(
+                            error.message(&config.node),
+                            "review_target",
+                            config.on_failure,
+                        ),
+                        &ctx,
+                    );
                 }
             }
         }
@@ -404,7 +429,7 @@ impl Step for HumanStep {
                 control = ctx.control.recv() => match control {
                     Some(Control::Deliver(value)) => value,
                     // Fail closed: an interrupted gate never routes.
-                    Some(Control::Cancel | Control::Kill) | None => return config.interrupted(),
+                    Some(Control::Cancel | Control::Kill) | None => return config.interrupted(&ctx),
                     Some(_) => continue,
                 },
                 () = &mut deadline => {
@@ -420,14 +445,19 @@ impl Step for HumanStep {
                             format!("taking the default choice `{}`", choice.to),
                         )
                         .await;
-                        return config.selected(&[&choice], &question.text, "timeout");
+                        return config.selected(&[&choice], &question.text, "timeout", &ctx);
                     }
-                    return Stage::failed(
-                        "human gate timeout, no default",
-                        RETRY_REQUESTED_CLASS,
-                        config.on_failure,
-                    )
-                    .into_outcome(&config.node);
+                    // Fabro's retry outcome. With attempts left the engine
+                    // asks again; on the last one `on_retries_exhausted`
+                    // decides, explicit routes first.
+                    return config.finish(
+                        Stage::failed(
+                            "human gate timeout, no default",
+                            RETRY_REQUESTED_CLASS,
+                            config.on_failure,
+                        ),
+                        &ctx,
+                    );
                 }
             };
             let Some(answer) = Answer::from_value(&value) else {
@@ -447,7 +477,7 @@ impl Step for HumanStep {
             }
             if answer.cancelled {
                 // The host ended the interview: fail closed, as a cancel does.
-                return config.interrupted();
+                return config.interrupted(&ctx);
             }
             // A multi-select answer names several choices; as Fabro does, the
             // first routes and every selected key and label is recorded.
@@ -487,7 +517,7 @@ impl Step for HumanStep {
                 } else {
                     selected[0].key.clone()
                 };
-                return config.selected(&selected, &question.text, &answered);
+                return config.selected(&selected, &question.text, &answered, &ctx);
             }
             if let (Some(target), Some(text)) = (&config.freeform_target, &answer.text) {
                 // Free text: the value (or its `$secret` reference) as
@@ -512,7 +542,7 @@ impl Step for HumanStep {
                     other => other.to_string(),
                 };
                 config.answer_context(&mut stage, &question.text, &shown, None);
-                return stage.into_outcome(&config.node);
+                return config.finish(stage, &ctx);
             }
             ctx.log(
                 LogStream::Stderr,

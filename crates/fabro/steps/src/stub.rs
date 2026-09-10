@@ -57,23 +57,25 @@ pub struct Simulate {
 #[derive(Deserialize)]
 struct StubConfig {
     #[serde(default)]
-    node:            Option<String>,
+    node:                 Option<String>,
     #[serde(default)]
-    on_failure:      Option<Policy>,
+    on_failure:           Option<Policy>,
     #[serde(default)]
-    choices:         Vec<Choice>,
+    on_retries_exhausted: Option<Policy>,
     #[serde(default)]
-    freeform_target: Option<String>,
+    choices:              Vec<Choice>,
     #[serde(default)]
-    simulate:        Option<Simulate>,
+    freeform_target:      Option<String>,
+    #[serde(default)]
+    simulate:             Option<Simulate>,
     /// The node's explicit routes, so a simulated failure is promoted the
     /// way a real one is.
     #[serde(default)]
-    routes:          Option<ExplicitRoutes>,
+    routes:               Option<ExplicitRoutes>,
     #[serde(default)]
-    kv:              Value,
+    kv:                   Value,
     #[serde(flatten)]
-    _rest:           BTreeMap<String, Value>,
+    _rest:                BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +216,7 @@ impl StepRunner for StubStep {
         stage.context_updates = script.context_updates;
         stage
             .with_routing(config.routes.clone(), config.kv.clone())
+            .with_retries(config.on_retries_exhausted, ctx.is_final_attempt())
             .into_outcome(&node)
     }
 }

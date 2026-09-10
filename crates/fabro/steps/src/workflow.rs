@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 
 use crate::blobs::{self, OutputStore};
-use crate::outcome::Stage;
+use crate::outcome::{ExplicitRoutes, Stage};
 
 pub const KIND: StepKindId = WORKFLOW_KIND;
 
@@ -47,24 +47,39 @@ pub const DEFAULT_MAX_CYCLES: u64 = 1000;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowConfig {
-    pub label:            String,
-    pub node:             String,
+    pub label:                String,
+    pub node:                 String,
     #[serde(default)]
-    pub child_workflow:   Option<String>,
+    pub child_workflow:       Option<String>,
     #[serde(default)]
-    pub child_dot_source: Option<String>,
+    pub child_dot_source:     Option<String>,
     /// The registered child graph, by digest.
-    pub child_digest:     GraphDigest,
+    pub child_digest:         GraphDigest,
     #[serde(default = "default_max_cycles")]
-    pub max_cycles:       u64,
+    pub max_cycles:           u64,
     #[serde(default)]
-    pub poll_interval_ms: Option<u64>,
+    pub poll_interval_ms:     Option<u64>,
     #[serde(default)]
-    pub stop_condition:   Option<String>,
+    pub stop_condition:       Option<String>,
     #[serde(default)]
-    pub on_failure:       Option<Policy>,
+    pub on_failure:           Option<Policy>,
     #[serde(default)]
-    pub kv:               Value,
+    pub on_retries_exhausted: Option<Policy>,
+    /// The node's explicit routes, for failure promotion.
+    #[serde(default, rename = "routes")]
+    pub explicit_routes:      Option<ExplicitRoutes>,
+    #[serde(default)]
+    pub kv:                   Value,
+}
+
+impl WorkflowConfig {
+    /// The stage's outcome under the node's failure policies.
+    fn finish(&self, stage: Stage, final_attempt: bool) -> Outcome {
+        stage
+            .with_routing(self.explicit_routes.clone(), self.kv.clone())
+            .with_retries(self.on_retries_exhausted, final_attempt)
+            .into_outcome(&self.node)
+    }
 }
 
 fn default_max_cycles() -> u64 {
@@ -180,8 +195,12 @@ impl Step for WorkflowStep {
     type Config = WorkflowConfig;
 
     async fn run(&self, config: WorkflowConfig, mut ctx: StepCtx) -> Outcome {
+        let final_attempt = ctx.is_final_attempt();
         let fail = |reason: String, class: &str| {
-            Stage::failed(reason, class, config.on_failure).into_outcome(&config.node)
+            config.finish(
+                Stage::failed(reason, class, config.on_failure),
+                final_attempt,
+            )
         };
         let client: Arc<dyn InvocationClient> = match ctx.capability::<ChildInvoker>() {
             Some(invoker) => invoker.0.clone(),
@@ -240,7 +259,13 @@ impl Step for WorkflowStep {
             match poll(&mut handle, interval, &mut ctx.control).await {
                 Poll::Cancelled => return Outcome::cancelled(),
                 Poll::Finished(result) => {
-                    return child_completed(&config, &parent_context, result, cycles);
+                    return child_completed(
+                        &config,
+                        &parent_context,
+                        result,
+                        cycles,
+                        final_attempt,
+                    );
                 }
                 Poll::Elapsed => {
                     if let Some(condition) = &stop_condition
@@ -256,7 +281,7 @@ impl Step for WorkflowStep {
                         stage
                             .output
                             .insert("child".into(), json!(handle.id().raw()));
-                        return stage.into_outcome(&config.node);
+                        return config.finish(stage, final_attempt);
                     }
                 }
             }
@@ -274,7 +299,7 @@ impl Step for WorkflowStep {
         stage
             .output
             .insert("child".into(), json!(handle.id().raw()));
-        stage.into_outcome(&config.node)
+        config.finish(stage, final_attempt)
     }
 }
 
@@ -285,6 +310,7 @@ fn child_completed(
     before: &BTreeMap<SmolStr, Value>,
     result: execution::InvocationResult,
     cycles: u64,
+    final_attempt: bool,
 ) -> Outcome {
     let mut stage = match result.status {
         RunStatus::Success => Stage::new(StageOutcome::Succeeded, config.on_failure),
@@ -318,5 +344,5 @@ fn child_completed(
         }
         stage.context_updates.insert(key.clone(), value.clone());
     }
-    stage.into_outcome(&config.node)
+    config.finish(stage, final_attempt)
 }

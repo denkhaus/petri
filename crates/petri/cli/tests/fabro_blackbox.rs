@@ -1858,6 +1858,80 @@ async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
     finished.assert_no_leaked_processes().await;
 }
 
+/// The probe of review finding G05: a gate whose question expires with no
+/// default fails with Fabro's retry outcome; with `max_retries=0` that is
+/// the exhausted retry. Under `on_failure="succeed"` the explicit
+/// `outcome=failed` edge is checked first, as Fabro's executor checks it,
+/// so the run recovers instead of promoting the gate past that edge.
+#[tokio::test]
+async fn an_expired_gate_under_succeed_takes_its_explicit_failure_edge() {
+    let case = Case::new("expired-gate-succeed");
+    let workflow = case.workflow(
+        r#"digraph Probe {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Continue?", timeout="200ms", max_retries=0, on_failure="succeed"]
+    recover [shape=parallelogram, script="echo RECOVERY"]
+    fallthrough [shape=parallelogram, script="echo FALLTHROUGH"]
+    start -> gate
+    gate -> recover [condition="outcome=failed", label="[R] Recover"]
+    gate -> fallthrough [label="[Y] Continue"]
+    recover -> exit
+    fallthrough -> exit
+}"#,
+        None,
+    );
+    let script = interview::write(&case.root, "withhold", &[json!({
+        "id": "never",
+        "match": { "node": "gate" },
+        "action": { "kind": "withhold" }
+    })]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    let nodes: Vec<(String, String)> = finished.finished_nodes();
+    assert!(
+        nodes.contains(&("failure".to_owned(), "gate".to_owned())),
+        "the exhausted gate stays failed: {nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|(_, node)| node == "recover"),
+        "the explicit failure edge is taken: {nodes:?}"
+    );
+    assert!(
+        !nodes.iter().any(|(_, node)| node == "fallthrough"),
+        "the failure is not promoted past its explicit route: {nodes:?}"
+    );
+    assert!(
+        finished
+            .echoed()
+            .iter()
+            .any(|(node, line)| node == "recover" && line.contains("RECOVERY")),
+        "{}",
+        finished.stderr
+    );
+    let document = finished.inspect();
+    let gate = &document["executions"][0]["engine"]["context"]["nodes"]["gate"];
+    assert_eq!(
+        gate["failure"]["class"],
+        json!("retry_requested"),
+        "the original failure evidence is kept: {document}"
+    );
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    finished.assert_no_leaked_processes().await;
+}
+
 /// Two gates in parallel branches: each answer is bound to its own
 /// question by node, the late one lands after the early one, and neither
 /// branch consumes the other's entry.

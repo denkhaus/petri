@@ -121,6 +121,7 @@ crates/fabro/frontend/tests/fuzz.rs          Fabro plan §7 1: arbitrary text ne
 crates/fabro/acceptance/tests/harness.rs     Fabro plan §7 2: every corpus file lowers or is rejected specifically; REPORT.md
 crates/fabro/acceptance/tests/runs.rs        Fabro plan §7 5: every lowered corpus file runs under stubs; RUNS.md
 crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripted battery, checked against the Fabro oracle
+crates/fabro/acceptance/tests/exhaustion.rs  readiness item 4: the failure policy after retries in Fabro's order (explicit routes first under `succeed`, `allow_partial` before any route, an expired human gate), expectations from the pinned source
 crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator; one child per manager attempt
 crates/fabro/steps/tests/manager.rs          readiness item 4: the manager loop under a controlled clock (polls, stop condition, exhaustion, defaults, reattach, cancel)
 crates/fabro/steps/tests/parallel.rs         readiness item 3: branches as child invocations; static, mixed and all-failed forks, promotion, duplicate targets, empty `for_each`, item labels, repeated forks, nested forks, cancellation, resume; the fork snapshot offloaded (a 50-item fork's children, resume through the store, two forks in sequence)

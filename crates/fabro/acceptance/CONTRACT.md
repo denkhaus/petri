@@ -182,8 +182,9 @@ names the task in `.ai/plans/fabro-unified-task-list.md` that owns the fix.
 | agent node (`prompt`, `@prompts/*.j2`, `{% include %}`) | all but fix-ci commands | supported |
 | `output_schema="@schemas/*.json"`, `output_retries` | code-review, security-review | supported |
 | `on_failure="route"`, `"exit"` (node and graph) | code-review, security-review | supported |
-| `on_failure="succeed"` | code-review, security-review | supported with Fabro's promotion order: a failure an explicit route matches stays failed, an unmatched failure is promoted and reports `succeeded` (oracle cases `succeed_*`) |
+| `on_failure="succeed"` | code-review, security-review | supported with Fabro's promotion order: a failure an explicit route matches stays failed, an unmatched failure is promoted and reports `succeeded` (oracle cases `succeed_*`); the same order applies to the last retryable failure once `max_retries` is spent (acceptance `exhaustion.rs`) |
 | `max_retries`, `default_max_retries` | code-review, security-review, implement-plan | supported |
+| `allow_partial=true` | none of the bundles | supported: the exhausted retry is a partial success before any route is considered, as Fabro finalizes it (oracle cases `retries_exhausted_allow_partial`, `allow_partial_at_one_attempt`) |
 | `component` with `for_each`, `max_parallel`, `tripleoctagon` fan-in | code-review, security-review | supported: each branch is a child invocation from the fork snapshot, `max_parallel` is one slot per attempt (missing or invalid is 4, zero is 1, a branch in backoff holds none), static and `for_each` branches share the fan-in, empty lists join with no model call (`crates/fabro/steps/tests/parallel.rs`, `crates/core/execution/tests/admission.rs`) |
 | `class` with `model_stylesheet` (including `{% set %}`, `{% if %}`, `inputs.*`) | code-review, security-review, implement-issue | supported |
 | `default_fidelity`, `fidelity="truncate"`, `fidelity="summary:high"`, `thread_id`, `default_thread` | code-review, security-review, implement-issue, interview | supported: Fabro's preambles for every mode, resolution edge, node, graph, `compact`; threads resolved edge, node, graph, class, previous node, retained on the native backend at `full` (`crates/fabro/FORMAT.md`, "Fidelity and threads") |
@@ -303,6 +304,17 @@ reports `succeeded`. Oracle cases `succeed_keeps_a_failure_an_explicit_edge_matc
 `succeed_promotes_a_failure_no_explicit_edge_matches` match the pinned
 Fabro with no departure. The `partially_succeed` spelling stays as an
 accepted difference (below).
+
+Retired with review finding G05: **promotion after retries**. The last
+retryable failure was converted by the engine's exhaustion policy before any
+explicit route was considered, so an `outcome=failed` edge did not recover
+from an exhausted gate under `on_failure="succeed"`. The Fabro steps now
+finalize the exhausted retry themselves, in Fabro's order: `allow_partial`
+accepts it with no route check; `succeed` checks the explicit routes first
+and promotes only an unmatched failure, which then reports `succeeded`.
+Acceptance `exhaustion.rs` states the expectations from the pinned source;
+they have no captured fixture because the pinned binary was not available
+when they were written, and `scripts/oracle-regenerate.sh` can add one.
 
 ## Accepted differences
 

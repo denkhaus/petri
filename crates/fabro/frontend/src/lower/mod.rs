@@ -1039,7 +1039,7 @@ impl Ctx<'_> {
                 (Some(StepRef::new(WAIT_KIND, config)), timeout)
             }
             Kind::ManagerLoop => {
-                let config = self.workflow_config(node, policy);
+                let config = self.workflow_config(node, workflow, policy);
                 (
                     Some(StepRef::new(WORKFLOW_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),
@@ -1051,7 +1051,7 @@ impl Ctx<'_> {
         }
         self.b.node_mut(id).budget = Budget::new(1, timeout)
             .with_timeout_policy(policy::timeout_policy(kind, node, workflow));
-        self.b.node_mut(id).retry = routing::retry_policy(node, workflow, policy, &mut self.diags);
+        self.b.node_mut(id).retry = routing::retry_policy(node, workflow, &mut self.diags);
         Resolved { kind, id, policy }
     }
 
@@ -1092,25 +1092,36 @@ impl Ctx<'_> {
         config.insert("goal".into(), Value::String(self.goal.clone()));
         let kv = self.b.exprs().var("kv");
         config.insert("kv".into(), placeholder(kv));
+        Self::policy_config(&mut config, node, workflow, policy);
+        if let Some(ms) = timeout.map(duration_ms) {
+            config.insert("timeout_ms".into(), ms);
+        }
+        config
+    }
+
+    /// The node's failure policies, and the explicit routes when either can
+    /// promote a failure: Fabro promotes only when no explicit route matches,
+    /// and the step decides that with the node's routes in hand.
+    fn policy_config(
+        config: &mut Map<String, Value>,
+        node: &NodeDecl,
+        workflow: &Workflow,
+        policy: FailurePolicy,
+    ) {
         config.insert(
             "on_failure".into(),
             Value::String(policy.on_failure.name().into()),
         );
-        if let Some(ms) = timeout.map(duration_ms) {
-            config.insert("timeout_ms".into(), ms);
-        }
-        if matches!(
-            policy.on_failure,
-            Policy::Succeed | Policy::PartiallySucceed
-        ) {
-            // Fabro promotes a failure only when no explicit route matches
-            // it; the step decides that with the node's routes in hand.
+        config.insert(
+            "on_retries_exhausted".into(),
+            Value::String(policy.on_retries_exhausted.name().into()),
+        );
+        if policy.promotes() {
             config.insert(
                 ROUTES_KEY.into(),
                 promotion::explicit_routes(node, workflow),
             );
         }
-        config
     }
 
     fn agent_config(
@@ -1547,17 +1558,19 @@ impl Ctx<'_> {
         Value::Object(config)
     }
 
-    fn workflow_config(&mut self, node: &NodeDecl, policy: FailurePolicy) -> Value {
+    fn workflow_config(
+        &mut self,
+        node: &NodeDecl,
+        workflow: &Workflow,
+        policy: FailurePolicy,
+    ) -> Value {
         let mut config = Map::new();
         config.insert(
             "label".into(),
             Value::String(node.attrs.text("label").unwrap_or_else(|| node.id.clone())),
         );
         config.insert("node".into(), Value::String(node.id.clone()));
-        config.insert(
-            "on_failure".into(),
-            Value::String(policy.on_failure.name().into()),
-        );
+        Self::policy_config(&mut config, node, workflow, policy);
         let kv = self.b.exprs().var("kv");
         config.insert("kv".into(), placeholder(kv));
         // Fabro's normalization: missing, non-integer or negative is 1000;
