@@ -258,7 +258,7 @@ struct Answerer {
 }
 
 impl EventObserver for Answerer {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
         let Event::StepProgress { firing, ev } = &record.event else {
             return;
         };
@@ -496,7 +496,7 @@ async fn a_command_deadline_is_enforced_by_the_sandbox() {
 struct CountQuestions(Arc<Mutex<Vec<Question>>>);
 
 impl EventObserver for CountQuestions {
-    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
         if let Event::StepProgress { ev, .. } = &record.event
             && let Some(question) = Question::from_event(ev)
         {
@@ -511,7 +511,7 @@ struct SteerThenAnswer {
 }
 
 impl EventObserver for SteerThenAnswer {
-    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
         let Event::StepProgress { firing, ev } = &record.event else {
             return;
         };

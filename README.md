@@ -56,7 +56,7 @@ let (state, commands) = apply(state, Event::ExecutionStarted(EngineStart::defaul
 | §4 firing rule | `engine::apply::try_fire` |
 | §4 quiescence | `EngineState::is_quiescent`, `apply::finish_if_quiescent` |
 | §5 engine interface | `engine::event` — `Event`, `Command`; `engine::apply::apply` |
-| §5 event log | `engine::log` — v7, with durable admission and routing decisions |
+| §5 event log | `engine::log` — v9, with durable admission and routing decisions and a recording time beside every persisted record |
 | §5 replay | `engine::replay` — `verify_replay` is the determinism canary |
 | §4 retries | `ir::RetryPolicy`, `engine::apply::on_retry_elapsed` |
 | §4 run context | `ir::RunContext`, `engine::state::EngineState::record_outcome` |

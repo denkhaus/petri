@@ -155,7 +155,7 @@ impl Step for AskingStep {
 struct Asked(mpsc::UnboundedSender<(FiringId, String)>);
 
 impl EventObserver for Asked {
-    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
         if let Event::StepProgress { firing, ev } = &record.event
             && let Some(question) = Question::from_event(ev)
         {

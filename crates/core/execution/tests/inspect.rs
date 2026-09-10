@@ -563,7 +563,7 @@ async fn an_unsupported_format_is_an_error() {
     assert!(
         matches!(error, InspectError::UnsupportedFormat {
             found:    1,
-            expected: 2,
+            expected: 3,
         }),
         "{error}"
     );
@@ -596,7 +596,7 @@ async fn the_document_serializes_with_its_version_first_class() {
     let inspection: RunInspection = inspect_run(dir.path()).expect("inspects");
     let json = serde_json::to_value(&inspection).expect("encodes");
     assert_eq!(json["inspect_format_version"], json!(1));
-    assert_eq!(json["coordinator_format_version"], json!(2));
+    assert_eq!(json["coordinator_format_version"], json!(3));
     assert_eq!(json["complete"], json!(true));
     assert_eq!(json["status"], json!("success"));
     assert_eq!(json["root"]["final_execution"], json!(0));

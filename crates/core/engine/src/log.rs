@@ -34,7 +34,15 @@ use crate::event::Event;
 ///
 /// v7 → v8: nodes can declare independent cancellation groups, and
 /// `CancelGroupRequested` records targeted cancellation. No migrator.
-pub const LOG_VERSION: u32 = 8;
+///
+/// v8 → v9: every persisted record carries `recorded_at`, the wall-clock time
+/// (milliseconds since the Unix epoch) at which the driver appended it. The
+/// driver reads that clock once per apply, outside the core, and the host's
+/// framing keeps it beside the record; [`EventRecord`] itself is unchanged and
+/// the core still reads no clock, so replay stays byte-identical. A v8 log has
+/// no times to recover and the standing policy holds: no migrator, a v8 log is
+/// rejected cleanly.
+pub const LOG_VERSION: u32 = 9;
 
 /// Where an event came from.
 ///

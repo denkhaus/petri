@@ -316,7 +316,7 @@ fn backend_selection_inherits_and_accepts_stylesheets() {
 
 struct NativeStarted(mpsc::Sender<ir::FiringId>);
 impl EventObserver for NativeStarted {
-    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
         if let Event::StepProgress {
             firing,
             ev: ir::StepEvent::Custom(value),
@@ -409,7 +409,7 @@ struct RefusingStore;
 
 #[async_trait::async_trait]
 impl EventObserver for RefusingStore {
-    fn on_record(&self, _: &EventRecord, _: &EngineState) {}
+    fn on_record(&self, _: &EventRecord, _recorded_at: u64, _: &EngineState) {}
 
     async fn durable(&self, _seq: u64) -> Result<(), ObserveError> {
         Err(ObserveError::new("refusing-store", "the write failed"))
@@ -593,7 +593,7 @@ struct GateAnswerer {
 }
 
 impl EventObserver for GateAnswerer {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
         let Event::StepProgress { firing, ev } = &record.event else {
             return;
         };

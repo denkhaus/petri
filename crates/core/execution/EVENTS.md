@@ -10,7 +10,12 @@ detail; this file states the guarantees.
 Every `RunEvent` is derived from one durable record: a coordinator record
 (`coordinator.jsonl`) or an engine record (one execution's `events.jsonl`) with
 the post-apply engine state beside it. The derivation is the same live (the
-`EventProjector` observer) and over a finished run dir (`replay_run`).
+`EventProjector` observer) and over a finished run dir (`replay_run`). Every
+record carries the time it was appended (`recorded_at`, milliseconds since the
+Unix epoch), read at the recording boundary — the driver's append for an
+engine record, the coordinator store's for a coordinator record, never inside
+the state machine — and persisted beside the record, so a replayed event
+carries the same time the live one did.
 
 `EventId { source, seq, index }` is the stable identity: the log the record came
 from (`coordinator`, or `execution: <id>`), the record's `seq` in that log, and
@@ -58,7 +63,7 @@ Run controls (coordinator log): `run_paused`, `run_unpaused`, derived from
 the `RunPaused` and `RunUnpaused` records the control service appends through
 the coordinator. Replay carries them, and a resume whose last recorded control
 is a pause starts with admission held. The records are additive to coordinator
-format version 2.
+format version 2 (version 3 added `recorded_at` to every coordinator record).
 
 Run-level notes (coordinator log): a `host_note` with no subject, derived from
 a `RunNote` record: the report of a hook point that belongs to no firing
@@ -99,6 +104,21 @@ kind did not report one. The native agent backend reports `pebble.usage`,
 `pebble.subagents` (the node's agent tree: children spawned, completed,
 failed and closed, and their summed usage by session) under `custom`.
 
+Times: every event carries `recorded_at`, when its record was appended to its
+log, the same live and on replay. A host reconstructs start and completion
+times from the events that mark them — `run_started`/`run_finished`,
+`invocation_declared`/`invocation_finished`, `execution_declared`/
+`execution_finished`, `visit_started`/`visit_completed`,
+`attempt_started`/`attempt_finished` (a command's boundaries),
+`question_asked`/`control_delivered` (an interview's) — and durations from
+their differences, beside the step-reported `duration_ms`. `observed_at` is
+when the projector saw the record live; it is absent on replay and is never a
+substitute for `recorded_at`: replay time is not execution time. A record
+replay regenerates that never reached a log (a crash's lost tail, before any
+resume re-recorded it) has no `recorded_at`; once a resume re-records it, it
+carries the resume's recording time, and a host that saw the original live
+keeps whichever copy it deduplicated first.
+
 ## Ordering and delivery
 
 - Per execution, events are delivered in record order, and within one record
@@ -136,11 +156,12 @@ failed and closed, and their summed usage by session) under `custom`.
   re-dispatched on resume and emits its events again, so an acknowledged
   record can appear twice; a consumer deduplicates delivery by `EventId` and
   agent activity by Pebble's `(stream_id, seq)`.
-- Every event is derived from a durable record, output lines included. The
-  one live-only field on a derived event is `observed_at` (milliseconds since
-  the epoch when the projector saw the record), absent on replay. A backend's
-  live stream chunks that never reached the step's progress channel are not
-  in the contract.
+- Every event is derived from a durable record, output lines included, and
+  carries the record's `recorded_at`, identical live and on replay. The one
+  live-only field on a derived event is `observed_at` (milliseconds since the
+  epoch when the projector saw the record), absent on replay. A backend's live
+  stream chunks that never reached the step's progress channel are not in the
+  contract.
 
 ## Secrets
 
@@ -161,7 +182,9 @@ The final event contract for readiness item 7, completed at milestone D
 source that carries it, the identities a host keys on, whether the fact is a
 durable record (in the log, delivered live and on replay) or live-only, and
 the projection test that proves it from `RunEvent`s alone. The Fabro names
-describe the consumer's need, not Petri event names. A `step_custom` row
+describe the consumer's need, not Petri event names. Every row's events carry
+`recorded_at`, so the timestamps and durations Fabro's projection needs come
+from the same events. A `step_custom` row
 names the `kind` of the `StepEvent::Custom` payload; every such payload
 also carries `node`, `firing` and `attempt` beside the event's `subject`.
 

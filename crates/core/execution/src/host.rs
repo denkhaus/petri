@@ -77,9 +77,10 @@ pub fn decode_events(bytes: &[u8]) -> Result<DecodedEvents, EventsDecodeError> {
     crate::decode_engine_log(bytes)
 }
 
-/// Render a log in the `events.jsonl` framing, produced in one piece.
-pub fn encode_events(log: &engine::EventLog) -> Vec<u8> {
-    crate::encode_engine_log(log)
+/// Render a log in the `events.jsonl` framing, produced in one piece, with
+/// each record's recording time.
+pub fn encode_events(log: &engine::EventLog, recorded_at: &[u64]) -> Vec<u8> {
+    crate::encode_engine_log(log, recorded_at)
 }
 
 /// Read and decode an execution's `events.jsonl`.

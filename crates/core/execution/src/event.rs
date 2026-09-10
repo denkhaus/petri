@@ -8,8 +8,11 @@ use smol_str::SmolStr;
 use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseId};
 
 /// Version 2 records stable dynamic scope identities and their runtime and
-/// execution provenance in the resource ledger.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 2;
+/// execution provenance in the resource ledger. Version 3 stamps every record
+/// with `recorded_at`, the wall-clock time the store appended it, so replay
+/// recovers the original run, invocation and execution times; a version 2 run
+/// has none and is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 3;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +175,10 @@ pub enum CoordinatorEvent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoordinatorRecord {
-    pub seq:   u64,
-    pub event: CoordinatorEvent,
+    pub seq:         u64,
+    pub event:       CoordinatorEvent,
+    /// Milliseconds since the Unix epoch when the store appended the record:
+    /// the recording time, read at the append and persisted with it, so a
+    /// replay recovers the time the event happened, not the time it was read.
+    pub recorded_at: u64,
 }

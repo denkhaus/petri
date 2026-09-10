@@ -300,6 +300,7 @@ impl ExecutionObserver for WorkflowEvents {
         &self,
         execution: ExecutionId,
         record: &engine::EventRecord,
+        _recorded_at: u64,
         _state: &engine::EngineState,
     ) {
         if !self

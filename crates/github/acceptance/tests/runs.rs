@@ -490,7 +490,13 @@ struct SweepFailures {
 
 #[async_trait::async_trait]
 impl ExecutionObserver for SweepFailures {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         if matches!(&record.event, Event::StepFinished { firing, outcome, .. } if outcome.status.is_failure() && state.history().last().is_some_and(|finished| finished.firing == *firing))
         {
             self.pending

@@ -202,7 +202,13 @@ async fn monitor(inner: Arc<Inner>, stop: CancellationToken, cancel: impl Fn(Sta
 }
 
 impl ExecutionObserver for StallWatchdog {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, _: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        _: &EngineState,
+    ) {
         self.touch();
         match &record.event {
             Event::StepProgress { ev, .. } => {

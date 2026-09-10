@@ -39,7 +39,7 @@ use crate::lifecycle::{
     RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote, RunFinished, ScopeReleased,
     TRANSITION_KIND, Transition, TransitionNote, apply_transition,
 };
-use crate::observe::{EventObserver, ObserveError};
+use crate::observe::{EventObserver, ObserveError, recorded_now};
 use crate::sink::LogSink;
 use crate::view::{BranchMap, live_view, routing_view};
 use crate::{
@@ -1663,14 +1663,17 @@ impl Driver {
         commands
     }
 
-    /// Hand every record appended since `from` to each observer.
+    /// Hand every record appended since `from` to each observer, stamped
+    /// with one reading of the recording clock: the append is the recording
+    /// boundary, and the clock is read here, outside the state machine.
     fn notify_observers(&self, from: usize) {
         if self.observers.is_empty() {
             return;
         }
+        let recorded_at = recorded_now();
         for record in &self.engine.log.records()[from..] {
             for observer in &self.observers {
-                observer.on_record(record, &self.engine);
+                observer.on_record(record, recorded_at, &self.engine);
             }
         }
     }

@@ -35,7 +35,7 @@ use testkit::{RunDir, output_of, status_of};
 struct Customs(Mutex<Vec<(String, Value)>>);
 
 impl EventObserver for Customs {
-    fn on_record(&self, record: &EventRecord, state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, state: &EngineState) {
         if let Event::StepProgress {
             firing,
             ev: StepEvent::Custom(value),

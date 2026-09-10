@@ -713,7 +713,13 @@ fn chain(error: &dyn StdError) -> String {
 }
 
 impl ExecutionObserver for InterviewDispatcher {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         match &record.event {
             Event::StepProgress { firing, ev } => {
                 if let Some(question) = Question::from_event(ev) {

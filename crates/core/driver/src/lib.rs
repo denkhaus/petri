@@ -22,7 +22,7 @@ pub use decision::{
     RoutingRequest, RoutingResolution, default_group_decision,
 };
 pub use lifecycle::ExecutionHooks;
-pub use observe::{EventObserver, ObserveError};
+pub use observe::{EventObserver, ObserveError, recorded_now};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,
     DeliverDisposition, Driver, ExecutionReport, ExecutionSlot, KILLED_BEFORE_RESUME, ResumeError,

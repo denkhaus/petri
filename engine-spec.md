@@ -487,9 +487,16 @@ state, live and from a finished run dir alike (`replay_run`), with stable
 identities `(source log, seq, index)`, parent links across nested executions,
 and subjects that carry the node's `meta` and its branch role. Every event is
 derived from a durable record; the projector's `observed_at` is the one
-live-only field. The pure state machine reads no clock: observed times come
-from the driver (the attempt duration it fills into `metrics.duration_ms` when
-a step kind reported none) and from the projector. A record read back from the log is the record that was written, floats included (`serde_json` with `float_roundtrip`), so a replayed stream equals the live one event for event.
+live-only field. The pure state machine reads no clock: the recording time
+comes from the driver, which reads the wall clock once per apply after the
+append and hands it to observers (`recorded_at`; the coordinator store stamps
+its own records the same way), and the stock run-dir writer persists it in
+the `events.jsonl` framing beside the record — never in the core's
+`EventRecord`, so replay stays byte-identical — so every `RunEvent` carries
+the time its record was appended, live and on replay alike. The other
+observed times are the attempt duration the driver fills into
+`metrics.duration_ms` when a step kind reported none, and the projector's
+`observed_at`. A record read back from the log is the record that was written, floats included (`serde_json` with `float_roundtrip`), so a replayed stream equals the live one event for event.
 
 **Awaited extension points.** A host that must finish work before execution
 continues installs `driver::lifecycle::ExecutionHooks`
@@ -518,8 +525,9 @@ serde plus `EventLog::try_from_records(version, records)` (version checked
 under the standing no-migrator policy; seqs contiguous from 0). How records
 are framed and stored is the host's business; the stock run-dir file
 convention is one `coordinator.jsonl`, content-addressed `graphs/`, durable
-`resources/`, and one `events.jsonl` per execution. It is the standalone petri
-host's own and is documented with it, not here.
+`resources/`, and one `events.jsonl` per execution (a `LOG_VERSION` header,
+then one line per record: the record plus its `recorded_at`). It is the
+standalone petri host's own and is documented with it, not here.
 
 **Resume.** `engine::resume(graph, &log)` rebuilds a crashed run by replay and
 reconciles what is still owed. The loaded log must be a **byte-prefix** of the

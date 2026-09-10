@@ -125,7 +125,7 @@ impl GatedStore {
 
 #[async_trait::async_trait]
 impl EventObserver for GatedStore {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
         if self.open.load(Ordering::SeqCst) {
             let mut persisted = self.persisted.lock().expect("not poisoned");
             persisted.push(record.clone());

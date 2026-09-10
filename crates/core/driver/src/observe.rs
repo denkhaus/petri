@@ -12,8 +12,21 @@
 //! is the observer's job — hand slow work to a channel and return fast.
 
 use std::error::Error;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine::{EngineState, EventRecord};
+
+/// The recording clock: milliseconds since the Unix epoch, read where a record
+/// is appended to a durable log — the driver's append for an engine record, the
+/// coordinator store's for a coordinator record — and never inside the state
+/// machine. A clock before the epoch reads as zero.
+pub fn recorded_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
 
 /// A sink for a run's record stream, registered on the driver before `run()`.
 #[async_trait::async_trait]
@@ -24,13 +37,20 @@ pub trait EventObserver: Send + Sync {
     /// log's identity is host-named (a run dir, a store key), stable across
     /// resume, fresh per fork.
     ///
+    /// `recorded_at` is when the driver appended the record
+    /// ([`recorded_now`], read once per apply, so every record one apply
+    /// appended carries the same time; a resume stamps the regenerated suffix
+    /// with the resume's time, since the originals never reached a log). A
+    /// store persists it beside the record so replay recovers the original
+    /// time; the core never sees it.
+    ///
     /// `state` is the post-apply engine state: resolve a firing to its node,
     /// name and `meta` here; borrow, don't keep. Called on the driver task —
     /// return fast, hand slow work to a channel. Infallible by design: the
     /// driver loop cannot meaningfully handle a sink error mid-apply, so an
     /// observer records its own failure and reports it from
     /// [`EventObserver::finish`].
-    fn on_record(&self, record: &EventRecord, state: &EngineState);
+    fn on_record(&self, record: &EventRecord, recorded_at: u64, state: &EngineState);
 
     /// Resolve once every record this observer has been handed through `seq`
     /// is in its durable storage — past the point where a process crash can

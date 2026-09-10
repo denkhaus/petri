@@ -6,9 +6,11 @@
 //! runs live (as an [`ExecutionObserver`]) and over a finished run dir
 //! ([`replay_run`]), so a host that lost its live subscription rebuilds the
 //! same events, in the same order, with the same identities, from the files
-//! alone. Nothing here reads a clock inside the state machine: `observed_at`
-//! is stamped by the projector when it sees a record live and is absent on
-//! replay.
+//! alone. Nothing here reads a clock inside the state machine: `recorded_at`
+//! is the time the record was appended to its log, read at that boundary and
+//! persisted beside the record, so it is the same live and on replay;
+//! `observed_at` is stamped by the projector when it sees a record live and is
+//! absent on replay.
 //!
 //! # Identity and ordering
 //!
@@ -41,10 +43,13 @@
 //! # Durability
 //!
 //! Every event here is derived from a durable record, log lines included:
-//! the engine log persists `StepProgress`. `observed_at` is the one live-only
-//! field. Agent activity ([`EventBody::AgentActivity`]) carries the backend's
-//! own envelope as recorded; a backend's live stream chunks that never
-//! reached the step's progress channel are not in the contract.
+//! the engine log persists `StepProgress`, and every record carries the time
+//! it was recorded, so run, invocation, visit, attempt, interview and command
+//! start and completion times are recovered from the logs as `recorded_at`.
+//! `observed_at` is the one live-only field. Agent activity
+//! ([`EventBody::AgentActivity`]) carries the backend's own envelope as
+//! recorded; a backend's live stream chunks that never reached the step's
+//! progress channel are not in the contract.
 //!
 //! # Secrets
 //!
@@ -173,9 +178,19 @@ pub struct RunEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject:     Option<Subject>,
     /// Milliseconds since the Unix epoch when the projector saw the record
-    /// live. Absent on replay: the logs carry no clock.
+    /// live. Absent on replay: a replayed event is not observed again, and
+    /// replay time is never passed off as execution time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<u64>,
+    /// Milliseconds since the Unix epoch when the record this event derives
+    /// from was appended to its log: the driver's clock for an engine record,
+    /// the coordinator store's for a coordinator record, read at the append
+    /// and persisted beside the record. The same live and on replay; the
+    /// time an event happened, as opposed to when it was seen. Absent only
+    /// for a record replay regenerated that never reached a log (a crash's
+    /// lost tail, projected before any resume rewrote it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<u64>,
     pub body:        EventBody,
 }
 
@@ -586,6 +601,7 @@ impl Projection {
                     parent: self.invocations.get(invocation).cloned().flatten(),
                     subject: None,
                     observed_at: None,
+                    recorded_at: Some(record.recorded_at),
                     body: EventBody::InvocationCancelRequested {
                         invocation: *invocation,
                         reason:     reason.clone(),
@@ -603,6 +619,7 @@ impl Projection {
                         parent:      None,
                         subject:     None,
                         observed_at: None,
+                        recorded_at: Some(record.recorded_at),
                         body:        EventBody::StallTimeout {
                             stall_timeout_ms: *stall_timeout_ms,
                             idle_ms:          *idle_ms,
@@ -637,15 +654,19 @@ impl Projection {
             parent,
             subject: None,
             observed_at: None,
+            recorded_at: Some(record.recorded_at),
             body,
         }]
     }
 
-    /// Derive the events of one engine record, given the post-apply state.
+    /// Derive the events of one engine record, given its recording time (when
+    /// the record reached a log; `None` for a regenerated record that never
+    /// did) and the post-apply state.
     pub fn engine(
         &mut self,
         execution: ExecutionId,
         record: &EventRecord,
+        recorded_at: Option<u64>,
         state: &EngineState,
     ) -> Vec<RunEvent> {
         let track = self.executions.entry(execution).or_default();
@@ -1016,6 +1037,7 @@ impl Projection {
                 parent: parent.clone(),
                 subject,
                 observed_at: None,
+                recorded_at,
                 body,
             })
             .collect()
@@ -1350,8 +1372,16 @@ impl EventProjector {
 }
 
 impl ExecutionObserver for EventProjector {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
-        let events = self.projection().engine(execution, record, state);
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        recorded_at: u64,
+        state: &EngineState,
+    ) {
+        let events = self
+            .projection()
+            .engine(execution, record, Some(recorded_at), state);
         self.push(events);
     }
 
@@ -1484,19 +1514,27 @@ fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEve
         if !log_path.exists() {
             continue;
         }
-        let log = read_engine_log(&log_path)?.log;
-        events.extend(replay_execution(projection, *execution, graph, &log));
+        let decoded = read_engine_log(&log_path)?;
+        events.extend(replay_execution(
+            projection,
+            *execution,
+            graph,
+            &decoded.log,
+            &decoded.recorded_at,
+        ));
     }
     Ok(events)
 }
 
 /// Project one execution's log through `projection`, external event by
-/// external event.
+/// external event. `recorded_at` is the log's recording time per seq; a
+/// regenerated record past its end (a lost tail) carries none.
 pub fn replay_execution(
     projection: &mut Projection,
     execution: ExecutionId,
     graph: Graph,
     log: &engine::EventLog,
+    recorded_at: &[u64],
 ) -> Vec<RunEvent> {
     let mut state = EngineState::new(graph);
     let mut events = Vec::new();
@@ -1505,7 +1543,10 @@ pub fn replay_execution(
         let (next, _) = engine::apply(state, event.clone());
         state = next;
         for record in &state.log.records()[before..] {
-            events.extend(projection.engine(execution, record, &state));
+            let at = usize::try_from(record.seq)
+                .ok()
+                .and_then(|seq| recorded_at.get(seq).copied());
+            events.extend(projection.engine(execution, record, at, &state));
         }
     }
     events

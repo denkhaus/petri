@@ -56,7 +56,7 @@ fn dot(body: &str) -> String {
 struct CustomEvents(Mutex<Vec<Value>>);
 
 impl EventObserver for CustomEvents {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
         if let Event::StepProgress {
             ev: StepEvent::Custom(value),
             ..

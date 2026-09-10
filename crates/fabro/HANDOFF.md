@@ -90,9 +90,12 @@ annotate). Across executions the `parent` link and
 the last `EventId` it has applied per source; on resume the driver
 redelivers the regenerated suffix with the same identities, at least once,
 and the host deduplicates by `EventId`. `replay_run` over the run directory
-yields the same stream, event for event, floats included; `observed_at` is
-the one live-only field. `run_paused` and `run_unpaused` are the two
-live-only notices.
+yields the same stream, event for event, floats included; `recorded_at` —
+when each record was appended, read at the recording boundary and persisted
+with it — is the same live and on replay, so run, stage, attempt and
+interview times come from the logs, never from the time of a replay.
+`observed_at` is the one live-only field. `run_paused` and `run_unpaused`
+are the two live-only notices.
 
 ## Lifecycle acknowledgements
 
@@ -136,8 +139,8 @@ acknowledgement gates the next step of the run:
 |---|---|---|
 | `EVENT_CONTRACT_VERSION` (1) | `execution::events` | additive within a version; a host checks it before projecting |
 | `INSPECT_FORMAT_VERSION` (1) | `execution::inspect` | the `petri inspect` document's field contract |
-| the run-directory format (`run.json`) and the coordinator record version | `execution::store` | a run written by a newer or older format is refused, never migrated |
-| the engine log version (`Log` records, v8) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
+| the run-directory format (`run.json`) and the coordinator record version (3, with `recorded_at` on every record) | `execution::store` | a run written by a newer or older format is refused, never migrated |
+| the engine log version (`Log` records, v9, with `recorded_at` beside every persisted record) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
 | Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `CONTRACT.md` "Pinned revisions", `scripts/check-pins.py` | moved together with the manifests and the evidence records |
 

@@ -6,7 +6,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use driver::{EventObserver, ObserveError};
-use engine::{EngineState, EventLog, EventRecord, InvalidRecords, LOG_VERSION};
+use engine::{
+    EngineState, Event, EventLog, EventRecord, EventSource, InvalidRecords, LOG_VERSION,
+    UnsupportedLogVersion,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -15,7 +18,16 @@ use crate::{CoordinatorRecord, CoordinatorState, ExecutionId};
 
 #[async_trait::async_trait]
 pub trait ExecutionObserver: Send + Sync {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState);
+    /// One execution's appended record, with the driver's recording time
+    /// (`recorded_at`, milliseconds since the Unix epoch) and the post-apply
+    /// state; see `driver::EventObserver::on_record`.
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        recorded_at: u64,
+        state: &EngineState,
+    );
 
     fn on_lifecycle(&self, record: &CoordinatorRecord);
 
@@ -45,17 +57,20 @@ impl AddressedObserver {
 
 #[async_trait::async_trait]
 impl EventObserver for AddressedObserver {
-    fn on_record(&self, record: &EventRecord, state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, recorded_at: u64, state: &EngineState) {
         self.observer
-            .on_engine_record(self.execution, record, state);
+            .on_engine_record(self.execution, record, recorded_at, state);
     }
 }
 
 #[derive(Debug)]
 pub struct DecodedEngineLog {
-    pub log:       EventLog,
-    pub clean_len: usize,
-    pub torn:      bool,
+    pub log:         EventLog,
+    /// Each record's recording time, by seq: when the driver appended it,
+    /// milliseconds since the Unix epoch.
+    pub recorded_at: Vec<u64>,
+    pub clean_len:   usize,
+    pub torn:        bool,
 }
 
 /// Why engine-log bytes could not become an [`EventLog`], with no file
@@ -106,40 +121,106 @@ struct Header {
     version: u32,
 }
 
-/// Decode `events.jsonl` bytes: header, records, strict torn-line rule.
+/// One `events.jsonl` line: the core's record, field for field, with the
+/// driver's recording time beside it. Spelled out rather than flattened: a
+/// flattened record loses the integer map keys some events carry.
+#[derive(Deserialize)]
+struct StoredRecord {
+    seq:         u64,
+    source:      EventSource,
+    event:       Event,
+    recorded_at: u64,
+}
+
+impl StoredRecord {
+    fn into_parts(self) -> (EventRecord, u64) {
+        (
+            EventRecord {
+                seq:    self.seq,
+                source: self.source,
+                event:  self.event,
+            },
+            self.recorded_at,
+        )
+    }
+}
+
+/// [`StoredRecord`] for writing, over a borrowed record.
+#[derive(Serialize)]
+struct StoredRecordRef<'a> {
+    seq:         u64,
+    source:      EventSource,
+    event:       &'a Event,
+    recorded_at: u64,
+}
+
+fn encode_record(record: &EventRecord, recorded_at: u64) -> Result<Vec<u8>, serde_json::Error> {
+    let mut line = serde_json::to_vec(&StoredRecordRef {
+        seq: record.seq,
+        source: record.source,
+        event: &record.event,
+        recorded_at,
+    })?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+/// Decode `events.jsonl` bytes: header, records with their recording times,
+/// strict torn-line rule. The header's version is checked before any record
+/// is read, so an old log is refused as an old log, not as a bad record.
 pub fn decode_engine_log(bytes: &[u8]) -> Result<DecodedEngineLog, EngineLogDecodeError> {
     let mut lines = clean_lines(bytes);
     let (clean_len, torn) = (lines.clean_len, lines.torn);
     let header = lines.next().ok_or(EngineLogDecodeError::MissingHeader)?;
     let header: Header = serde_json::from_slice(header).map_err(EngineLogDecodeError::BadHeader)?;
+    if header.version != LOG_VERSION {
+        return Err(InvalidRecords::from(UnsupportedLogVersion {
+            found:    header.version,
+            expected: LOG_VERSION,
+        })
+        .into());
+    }
     let mut records = Vec::new();
+    let mut recorded_at = Vec::new();
     for (index, line) in lines.enumerate() {
-        records.push(serde_json::from_slice(line).map_err(|source| {
-            EngineLogDecodeError::BadRecord {
+        let stored: StoredRecord =
+            serde_json::from_slice(line).map_err(|source| EngineLogDecodeError::BadRecord {
                 line: index + 2,
                 source,
-            }
-        })?);
+            })?;
+        let (record, at) = stored.into_parts();
+        records.push(record);
+        recorded_at.push(at);
     }
     let log = EventLog::try_from_records(header.version, records)?;
     Ok(DecodedEngineLog {
         log,
+        recorded_at,
         clean_len,
         torn,
     })
 }
 
 /// Render a log in the `events.jsonl` framing: what [`JsonlEngineLog`] writes
-/// incrementally, produced in one piece.
-pub fn encode_engine_log(log: &EventLog) -> Vec<u8> {
+/// incrementally, produced in one piece. `recorded_at` is each record's
+/// recording time, by seq.
+///
+/// # Panics
+///
+/// When `recorded_at` does not have one time per record.
+pub fn encode_engine_log(log: &EventLog, recorded_at: &[u64]) -> Vec<u8> {
+    assert_eq!(
+        recorded_at.len(),
+        log.len(),
+        "one recording time per record"
+    );
     let mut out = serde_json::to_vec(&Header {
         version: log.version(),
     })
     .expect("a header always encodes");
     out.push(b'\n');
-    for record in log.records() {
-        out.extend(serde_json::to_vec(record).expect("a record always encodes"));
-        out.push(b'\n');
+    for (record, recorded_at) in log.records().iter().zip(recorded_at) {
+        out.extend(encode_record(record, *recorded_at).expect("a record always encodes"));
     }
     out
 }
@@ -154,7 +235,7 @@ pub fn read_engine_log(path: &Path) -> Result<DecodedEngineLog, EngineLogError> 
 }
 
 enum WriterMessage {
-    Record(Box<EventRecord>),
+    Record(Box<EventRecord>, u64),
     /// Answer once every record queued before this message is written: the
     /// writer is one thread over one FIFO queue, so reaching the marker means
     /// the earlier records reached the file or a write failed.
@@ -219,14 +300,13 @@ fn write_engine_records(mut file: File, path: &Path, rx: &Receiver<WriterMessage
     let mut failure: Option<String> = None;
     while let Ok(message) = rx.recv() {
         match message {
-            WriterMessage::Record(record) => {
+            WriterMessage::Record(record, recorded_at) => {
                 if failure.is_some() {
                     continue;
                 }
-                let result = serde_json::to_vec(&record)
+                let result = encode_record(&record, recorded_at)
                     .map_err(|error| error.to_string())
-                    .and_then(|mut line| {
-                        line.push(b'\n');
+                    .and_then(|line| {
                         file.write_all(&line)
                             .and_then(|()| file.flush())
                             .map_err(|error| error.to_string())
@@ -264,13 +344,13 @@ fn write_engine_records(mut file: File, path: &Path, rx: &Receiver<WriterMessage
 
 #[async_trait::async_trait]
 impl EventObserver for JsonlEngineLog {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, recorded_at: u64, _state: &EngineState) {
         if record.seq < self.high_water {
             return;
         }
         let _ = self
             .tx
-            .send(WriterMessage::Record(Box::new(record.clone())));
+            .send(WriterMessage::Record(Box::new(record.clone()), recorded_at));
     }
 
     async fn durable(&self, _seq: u64) -> Result<(), ObserveError> {
@@ -312,7 +392,6 @@ fn log_io(action: &'static str, path: &Path, source: io::Error) -> EngineLogErro
 
 #[cfg(test)]
 mod tests {
-    use engine::{Event, EventSource};
     use ir::{CancelScopeId, Graph};
     use testkit::RunDir;
 
@@ -336,14 +415,58 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         let log = JsonlEngineLog::create(&path).expect("created");
         let state = EngineState::new(Graph::new());
-        log.on_record(&record(0), &state);
-        log.on_record(&record(1), &state);
+        log.on_record(&record(0), 1_000, &state);
+        log.on_record(&record(1), 1_250, &state);
         log.durable(1).await.expect("both records written");
 
         let decoded = decode_engine_log(&fs::read(&path).expect("read")).expect("decodes");
         assert_eq!(decoded.log.records(), &[record(0), record(1)]);
+        assert_eq!(
+            decoded.recorded_at,
+            vec![1_000, 1_250],
+            "each record's recording time is read back beside it"
+        );
         assert!(!decoded.torn);
         log.finish().await.expect("synced");
+    }
+
+    /// The whole-log encoder writes the same framing the incremental writer
+    /// does, times included.
+    #[test]
+    fn encoding_a_log_round_trips_its_recording_times() {
+        let log = EventLog::try_from_records(LOG_VERSION, vec![record(0), record(1)])
+            .expect("a valid log");
+        let bytes = encode_engine_log(&log, &[7, 9]);
+        let decoded = decode_engine_log(&bytes).expect("decodes");
+        assert_eq!(decoded.log, log);
+        assert_eq!(decoded.recorded_at, vec![7, 9]);
+    }
+
+    /// A log written before recording times existed has none to recover: it
+    /// is refused by version, before any of its records is read.
+    #[test]
+    fn a_log_of_the_previous_version_is_refused_by_version() {
+        let log = EventLog::try_from_records(LOG_VERSION, vec![record(0)]).expect("a valid log");
+        let current = encode_engine_log(&log, &[1]);
+        let previous = String::from_utf8(current)
+            .expect("utf-8")
+            .replacen(
+                &format!("\"version\":{LOG_VERSION}"),
+                &format!("\"version\":{}", LOG_VERSION - 1),
+                1,
+            )
+            .replace(",\"recorded_at\":1", "");
+        let error = decode_engine_log(previous.as_bytes()).expect_err("refused");
+        assert!(
+            matches!(
+                error,
+                EngineLogDecodeError::Invalid(InvalidRecords::Version(UnsupportedLogVersion {
+                    found,
+                    expected: LOG_VERSION,
+                })) if found == LOG_VERSION - 1
+            ),
+            "{error}"
+        );
     }
 
     /// A write that fails is the acknowledgement's error — the step hears it
@@ -356,7 +479,7 @@ mod tests {
         drop(JsonlEngineLog::create(&path).expect("created"));
         let file = File::open(&path).expect("opened read-only");
         let log = JsonlEngineLog::over(path.clone(), file, 0);
-        log.on_record(&record(0), &EngineState::new(Graph::new()));
+        log.on_record(&record(0), 1_000, &EngineState::new(Graph::new()));
 
         let error = log.durable(0).await.expect_err("the write failed");
         assert_eq!(error.observer, "execution events");

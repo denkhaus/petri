@@ -496,7 +496,13 @@ async fn a_pending_question_parks_the_watchdog() {
 struct Starts(Mutex<Vec<String>>);
 
 impl ExecutionObserver for Starts {
-    fn on_engine_record(&self, _: ExecutionId, record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        _: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         if let Event::StepStarted { firing, .. } = &record.event
             && let Some(name) = state
                 .firing_node(*firing)
@@ -729,7 +735,13 @@ struct PauseOnStart {
 }
 
 impl ExecutionObserver for PauseOnStart {
-    fn on_engine_record(&self, _: ExecutionId, record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        _: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         let named = |firing: &FiringId| {
             state
                 .firing_node(*firing)

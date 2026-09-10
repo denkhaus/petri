@@ -316,8 +316,9 @@ fn an_old_log_version_is_rejected() {
     // Each bump changed the record shape or its replay semantics (v3: cancelled
     // outcomes route; v4: `Node.meta` inside splices; v5: `ControlRequested`;
     // v6: `Outcome.splices` and `Node.splice_policy`; v7: durable admission and
-    // routing decisions), so an old log is rejected
-    // cleanly rather than replayed under rules it was not written for.
+    // routing decisions; v8: cancellation groups; v9: a recording time beside
+    // every persisted record), so an old log is rejected cleanly rather than
+    // replayed under rules it was not written for.
     for old in 1..LOG_VERSION {
         let downgraded = encoded.replacen(&current, &format!("\"version\":{old}"), 1);
         let error = serde_json::from_str::<engine::EventLog>(&downgraded)

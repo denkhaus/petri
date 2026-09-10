@@ -483,8 +483,18 @@ async fn run_workflow_with(
     }
 }
 
+/// An event without its recording time, for the one comparison where a
+/// re-recorded record legitimately carries a later time than its original.
+fn timeless(event: &RunEvent) -> RunEvent {
+    RunEvent {
+        recorded_at: None,
+        ..event.clone()
+    }
+}
+
 /// Live events with the live-only timestamp removed, in identity order, so a
 /// stream compares with its replay (which lists the coordinator log first).
+/// The recording time stays: it is the same live and on replay.
 fn normalized(events: &[RunEvent]) -> Vec<RunEvent> {
     let mut events: Vec<RunEvent> = events
         .iter()
@@ -1378,15 +1388,28 @@ async fn recovery_redelivers_with_stable_identities() {
         !redelivered.is_empty(),
         "the regenerated suffix was re-delivered"
     );
+    // A re-delivered record was re-recorded by the resume: the same identity
+    // and body, and a recording time of its own, since the original never
+    // reached disk.
     let complete = normalized(&complete);
     for event in normalized(&redelivered) {
         let original = complete
             .iter()
             .find(|e| e.id == event.id)
             .unwrap_or_else(|| panic!("a re-delivered event has a known identity: {:?}", event.id));
-        assert_eq!(&event, original, "a re-delivered event equals the original");
+        assert!(
+            event.recorded_at >= original.recorded_at,
+            "re-recorded no earlier than first recorded: {event:?}"
+        );
+        assert_eq!(
+            timeless(&event),
+            timeless(original),
+            "a re-delivered event equals the original"
+        );
     }
-    // Deduplication by id over both deliveries yields the complete stream.
+    // Deduplication by id over both deliveries yields the complete stream; the
+    // run dir carries the resume's recording time for the re-recorded suffix,
+    // so the comparison is over everything but that time.
     let mut merged: BTreeMap<EventId, RunEvent> = BTreeMap::new();
     for event in complete.iter().chain(normalized(&redelivered).iter()) {
         merged.entry(event.id).or_insert_with(|| event.clone());
@@ -1394,8 +1417,8 @@ async fn recovery_redelivers_with_stable_identities() {
     let mut replayed = replay_run(dir.path()).expect("projects");
     replayed.sort_by_key(|e| e.id);
     assert_eq!(
-        merged.into_values().collect::<Vec<_>>(),
-        replayed,
+        merged.values().map(timeless).collect::<Vec<_>>(),
+        replayed.iter().map(timeless).collect::<Vec<_>>(),
         "the recovered run projects the same stream"
     );
 }
