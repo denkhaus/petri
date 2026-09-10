@@ -191,6 +191,8 @@ against.
    retention policy requires.
 6. **Roll out new runs.** Start new runs on the Petri runner with the
    readiness suites as the acceptance gate (`mise run test:fabro:blackbox`,
-   `mise run test:fabro:differential`), then widen. ACP clients, Daytona and
-   crash-resume across runner versions have their own gates and are not part
-   of the initial readiness claim.
+   `mise run test:fabro:differential`), then widen. The ACP backend is
+   covered by the `acp` scenario family through a scripted agent on the host
+   and in a container; real ACP client products (Claude Code, Gemini CLI),
+   Daytona and crash-resume across runner versions have their own gates and
+   are not part of the initial readiness claim.
