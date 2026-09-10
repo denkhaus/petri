@@ -325,10 +325,12 @@ The item reaches the model after the prompt as fenced untrusted data: a
 notice, then the item's JSON inside `<untrusted-<16 hex>>` tags whose tag is
 derived from the item and never appears in it. `item_label` is the item's
 `name`, else `label`, else its index, sanitized to 80 characters. An empty
-list fires the template once with the placeholder item
-`petri.parallel.empty`; the fan-in strips placeholders and joins zero
-results, so no model call happens. `for_each` inside a `for_each` branch is
-`fabro.for_each.nested`.
+list fires the template once with the IR's placeholder item
+(`{"$placeholder": true}`, `ir::placeholder::PLACEHOLDER_ITEM_KEY`); the
+fan-in strips placeholders and joins zero results, so no model call happens,
+and the placeholder clone is no branch in the public event stream (the fork
+starts and closes with zero branches). `for_each` inside a `for_each` branch
+is `fabro.for_each.nested`.
 
 `max_parallel` bounds the fork's live children per fork occurrence: a
 missing, non-integer or negative value is 4 (`fabro.max_parallel.normalized`),

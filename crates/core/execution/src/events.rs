@@ -69,6 +69,7 @@ use engine::{
     Admission, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventRecord, GroupDecision,
     Intervention, RouteApplied, RouteDecision,
 };
+use ir::placeholder::is_placeholder_item;
 use ir::{
     Attempt, CancelScopeId, Control, EdgeId, EdgeTransition, FiringId, Generation, Graph,
     LogStream, Metrics, NodeId, Outcome, RunStatus, Status, StepEvent, Token, Value,
@@ -953,9 +954,12 @@ impl Projection {
                     let subject = firing
                         .and_then(|firing| subject_of(state, track, firing))
                         .or_else(|| node_subject(state, track, fork));
+                    // The placeholder clone an empty list expands to is no
+                    // branch: the fork starts and closes with none.
                     let mut branches: Vec<BranchRef> = splice
                         .clones
                         .iter()
+                        .filter(|clone| !is_placeholder_item(&clone.item))
                         .map(|clone| BranchRef {
                             fork,
                             index: clone.index,

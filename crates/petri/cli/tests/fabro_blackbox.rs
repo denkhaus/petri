@@ -2341,6 +2341,7 @@ fn finding_for(namespace: &str, item: &str, delay_ms: u64) -> Value {
 /// public event stream: one `fork_started` on the parallel node `fan` with
 /// one branch per item, one `branch_completed` per clone in item order, and
 /// one `fork_completed` at the fan-in with the results in the same order.
+/// Zero items is a fork with zero branches and no `branch_completed`.
 fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
     let events = replay_run(run_dir).expect("the run replays");
     let mut forks = Vec::new();
@@ -2607,6 +2608,10 @@ async fn an_empty_for_each_list_joins_without_calling_the_model() {
         "{}",
         finished.stderr
     );
+    // The fork starts and closes with zero branches: the placeholder clone
+    // the lowering fires to reach the fan-in is no branch in the public
+    // stream.
+    assert_for_each_fork_events(&finished.run_dir, 0);
     assert_eq!(results_file(&case), Vec::<Value>::new());
     let context = finished.final_context();
     assert_eq!(context["parallel.branch_count"], json!(0));

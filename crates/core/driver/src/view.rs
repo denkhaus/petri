@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use engine::{EngineState, SpliceOrigin};
+use ir::placeholder::is_placeholder_item;
 use ir::{Attempt, FiringId, Generation, Graph, Node, NodeId, RunContext, ScopeId, Token, Value};
 
 /// One firing at one decision point, read-only.
@@ -201,7 +202,11 @@ impl BranchMap {
     /// Each clone's nodes are members of the branch its item index names,
     /// in item order, and the nodes outside the clones that a clone's
     /// forward edges reach are the join. A node that already has a role
-    /// keeps it, as with nested static forks.
+    /// keeps it, as with nested static forks. A clone of the placeholder
+    /// item an empty list expands to
+    /// ([`ir::placeholder::PLACEHOLDER_ITEM_KEY`]) still names the join but
+    /// is no branch: its nodes get no role and the fork counts zero
+    /// branches.
     #[must_use]
     pub fn with_expansions(mut self, state: &EngineState) -> Self {
         let graph = state.graph();
@@ -211,9 +216,13 @@ impl BranchMap {
             }
             let template = batch.owner;
             let mut clones: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
+            let mut placeholders: BTreeSet<u32> = BTreeSet::new();
             for node in &batch.nodes {
                 if let Some(index) = state.clone_index(*node) {
                     clones.entry(index).or_default().push(*node);
+                    if state.clone_item(*node).is_some_and(is_placeholder_item) {
+                        placeholders.insert(index);
+                    }
                 }
             }
             let mut predecessors = graph
@@ -235,12 +244,14 @@ impl BranchMap {
             let mut joins: BTreeSet<NodeId> = BTreeSet::new();
             for (index, nodes) in &clones {
                 for node in nodes {
-                    self.roles
-                        .entry(*node)
-                        .or_insert(BranchRole::Member(BranchRef {
-                            fork,
-                            index: *index,
-                        }));
+                    if !placeholders.contains(index) {
+                        self.roles
+                            .entry(*node)
+                            .or_insert(BranchRole::Member(BranchRef {
+                                fork,
+                                index: *index,
+                            }));
+                    }
                     if let Some(node) = graph.node(*node) {
                         joins.extend(
                             node.routing
@@ -256,7 +267,7 @@ impl BranchMap {
                 }
             }
             self.roles.entry(fork).or_insert(BranchRole::Fork {
-                branches: u32::try_from(clones.len()).unwrap_or(u32::MAX),
+                branches: u32::try_from(clones.len() - placeholders.len()).unwrap_or(u32::MAX),
             });
             for join in joins {
                 self.roles.entry(join).or_insert(BranchRole::Join { fork });

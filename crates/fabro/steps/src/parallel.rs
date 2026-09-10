@@ -44,9 +44,10 @@ use execution::{
 };
 use frontend_fabro::hooks::HookEvent;
 use frontend_fabro::kinds::{
-    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND, FORK_KIND,
-    FORK_NODES_FIELD, FORK_SNAPSHOT_FIELD, StageOutcome,
+    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND, FORK_NODES_FIELD,
+    FORK_SNAPSHOT_FIELD, StageOutcome,
 };
+use ir::placeholder::{is_placeholder_item, placeholder_item};
 use ir::{
     Control, FailureClass, FailureInfo, Metrics, Outcome, RunStatus, Status, StepEvent, StepKindId,
     Value,
@@ -251,17 +252,12 @@ async fn settle_after_stop(
     }
 }
 
-/// Whether a `for_each` item is the placeholder an empty list expands to.
-fn is_placeholder(value: &Value) -> bool {
-    value
-        .as_object()
-        .is_some_and(|map| map.get(EMPTY_BRANCH_MARKER) == Some(&Value::Bool(true)))
-}
-
-/// Drop the placeholder envelope an empty `for_each` list produces.
+/// Drop the placeholder envelope an empty `for_each` list produces: the
+/// branch step returns the placeholder item itself for the placeholder
+/// clone, and the fan-in leaves it out of the results.
 pub fn strip_placeholders(results: &mut Value) {
     if let Value::Array(items) = results {
-        items.retain(|item| !is_placeholder(item));
+        items.retain(|item| !is_placeholder_item(item));
     }
 }
 
@@ -423,10 +419,10 @@ impl Step for BranchStep {
         let label = config
             .for_each
             .then(|| item_label(config.item.as_ref().unwrap_or(&Value::Null), config.index));
-        if config.item.as_ref().is_some_and(is_placeholder) {
+        if config.item.as_ref().is_some_and(is_placeholder_item) {
             // The one item an empty list expands to: no branch, no child. The
             // fan-in drops this envelope.
-            return Outcome::success(json!({ EMPTY_BRANCH_MARKER: true }));
+            return Outcome::success(placeholder_item());
         }
         let failed = |reason: String, class: FailureClass| {
             let output = envelope(

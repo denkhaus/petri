@@ -14,8 +14,9 @@
 //! its own branch node (a duplicate target gets a synthetic node so each
 //! branch has its own index). A `for_each` fan-out expands the one template
 //! node over the runtime items with the same branch step; an empty list
-//! expands to one placeholder item so the fan-in still fires and reports
-//! zero branches.
+//! expands to the IR's one placeholder item (`ir::placeholder`) so the
+//! fan-in still fires, while branch maps and the event stream count no
+//! branch for the clone.
 //!
 //! The parallel node itself is the `fabro/fork` step. It runs once per
 //! visit, before any branch, and takes the fork snapshot of `kv` and, for
@@ -43,7 +44,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use frontend::Span;
-use ir::placeholder::{BRANCH_ROLE_META, EXPR_PLACEHOLDER_KEY};
+use ir::placeholder::{BRANCH_ROLE_META, EXPR_PLACEHOLDER_KEY, placeholder_item};
 use ir::{
     BinOp, Budget, Edge, ExpandTarget, Expr, ExprId, ExprOrValue, ExprTable, GraphBuilder,
     JoinPolicy, NodeId, ResultProjection, RetryPolicy, Routing, RoutingGroup, StepRef,
@@ -53,8 +54,8 @@ use smol_str::SmolStr;
 
 use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, placeholder};
 use crate::kinds::{
-    AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND,
-    FORK_KIND, FORK_NODES_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
+    AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND,
+    FORK_NODES_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
 };
 use crate::model::{AttrValue, EdgeDecl, NodeDecl, Workflow};
 
@@ -597,9 +598,10 @@ impl Ctx<'_> {
 
         // The expansion reads the item array from the context itself, so
         // the fork's output (the snapshot every clone receives as its input
-        // token) never carries the list. An empty array becomes one
+        // token) never carries the list. An empty array becomes the IR's one
         // placeholder item, so the template still fires once (starting no
-        // child) and the fan-in still joins.
+        // child) and the fan-in still joins; the clone is no branch to a
+        // host.
         let items = {
             let exprs = self.b.exprs();
             let kv = exprs.var("kv");
@@ -611,7 +613,7 @@ impl Ctx<'_> {
             let zero = exprs.lit(0);
             let empty = exprs.binary(BinOp::Eq, len, zero);
             let both = exprs.binary(BinOp::And, present, empty);
-            let marker = exprs.lit(json!({ EMPTY_BRANCH_MARKER: true }));
+            let marker = exprs.lit(placeholder_item());
             let placeholder_list = exprs.array(vec![marker]);
             exprs.cond(both, placeholder_list, items)
         };

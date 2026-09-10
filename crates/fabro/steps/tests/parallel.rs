@@ -22,7 +22,7 @@ use fabro_steps::{
     LocalBlobStore, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend::{CompileInputs, Lowered, NoFiles};
-use runtime::driver::ExecutionReport;
+use runtime::driver::{BranchRole, ExecutionReport};
 use runtime::executor::Retention;
 use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime};
@@ -476,11 +476,16 @@ const FOR_EACH: &str = r#"
     start -> plan -> fan -> job -> join -> report -> exit
 "#;
 
+/// An empty list: the fan-in joins zero results, no child runs, and the
+/// public stream shows a fork with zero branches, live and on replay. The
+/// placeholder clone the lowering fires to reach the fan-in is a synthetic
+/// node with no branch role, never a branch.
 #[tokio::test]
 async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
     let dir = RunDir::new("parallel-empty");
     let rt = runtime(dir.path());
-    let report = run(&rt, lower(&dot(&FOR_EACH.replace("JOBS", "[]")))).await;
+    let (report, events) =
+        run_projected(&rt, lower(&dot(&FOR_EACH.replace("JOBS", "[]"))), |_| {}).await;
     assert_eq!(
         report.status,
         RunStatus::Success,
@@ -498,6 +503,63 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
     // not write.
     assert_eq!(output_of(&report, "report")["stdout"], json!("[]"));
     assert_eq!(invocation_count(dir.path()), 1, "no child ran");
+
+    let forks: Vec<(String, Vec<u32>)> = events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::ForkStarted { branches } => Some((
+                event
+                    .subject
+                    .as_ref()
+                    .map(|subject| subject.node.name.to_string())
+                    .unwrap_or_default(),
+                branches.iter().map(|branch| branch.index).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(forks, vec![("fan".to_owned(), Vec::new())]);
+    assert_eq!(branch_closes(&events), Vec::new(), "no branch completed");
+    assert_eq!(fork_closes(&events), vec![(
+        ForkDisposition::Joined,
+        Vec::new()
+    )]);
+    let completed = customs(&events, "fabro.parallel.completed");
+    assert_eq!(completed.len(), 1, "{completed:#?}");
+    assert_eq!(completed[0]["branch_count"], json!(0));
+    assert!(
+        customs(&events, "fabro.parallel.branch.started").is_empty()
+            && customs(&events, "fabro.parallel.branch.completed").is_empty(),
+        "the placeholder clone reports no branch lifecycle"
+    );
+    // The roles as the expansion left them: the fork's first events precede
+    // the expansion, so the last subject of each node is the one to read.
+    let role_of = |name: &str| {
+        events
+            .iter()
+            .filter_map(|event| event.subject.as_ref())
+            .rev()
+            .find(|subject| subject.node.name == name)
+            .map_or_else(
+                || panic!("events of `{name}`"),
+                |subject| subject.branch.clone(),
+            )
+    };
+    assert_eq!(role_of("fan"), BranchRole::Fork { branches: 0 });
+    assert_eq!(role_of("join"), BranchRole::Join {
+        fork: events
+            .iter()
+            .filter_map(|event| event.subject.as_ref())
+            .find(|subject| subject.node.name == "fan")
+            .map(|subject| subject.node.id)
+            .expect("the fork node"),
+    });
+    assert_eq!(
+        role_of("job#0"),
+        BranchRole::None,
+        "the placeholder clone is no member of any branch"
+    );
+    assert_replay_matches(dir.path(), &events);
 }
 
 #[tokio::test]
