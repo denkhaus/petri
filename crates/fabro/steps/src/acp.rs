@@ -79,11 +79,6 @@ impl AcpHooks {
         }
     }
 
-    /// Whether any tool hook is configured.
-    pub fn has_tool_hooks(&self) -> bool {
-        !self.pre.is_empty() || !self.post.is_empty()
-    }
-
     /// The warnings to emit before the agent starts: what this backend
     /// cannot enforce for each configured tool hook.
     pub fn known_gaps(&self) -> Vec<StepEvent> {

@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use execution::hooks::{
+    HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService,
+    HookServiceHandle,
+};
 use execution::host::{self, HostRun};
 use fabro_steps::agent::THREAD_EVENT;
 use fabro_steps::hooks::{REPORT_EVENT, WARNING_EVENT};
@@ -235,6 +239,96 @@ fn simulate(graph: &mut Graph, node: &str, calls: &Value) {
     config.insert("simulate".into(), json!({ "calls": calls }));
 }
 
+/// Run under a host that replaced the hook service before `register`: the
+/// service behind the adapter and behind the `HookServiceHandle` the steps
+/// ask. The local service is then not installed at all.
+async fn run_hosted(
+    dir: &RunDir,
+    graph: Graph,
+    client: Option<lithos_llm::Client>,
+    service: Arc<dyn HookService>,
+) -> (ExecutionReport, Arc<Customs>) {
+    let mut options = RunOptions::new(dir.path());
+    options.grace = Duration::from_millis(200);
+    options.retention = Retention::Always;
+    options.echo = false;
+    let customs = Arc::new(Customs::default());
+    let rt = Runtime::standard()
+        .observe(customs.clone())
+        .options(options)
+        .hooks(Arc::new(HookAdapter::new(service.clone())))
+        .capability(HookServiceHandle(service));
+    let rt = match client {
+        Some(client) => rt.capability(PebbleClient(client)),
+        None => rt,
+    };
+    let report = register(rt)
+        .run(graph)
+        .await
+        .expect("replay is byte-identical");
+    (report, customs)
+}
+
+/// A host's replacement service: it counts every request by point and node,
+/// blocks tool calls when told, and names the tool hooks it claims to have
+/// configured, so the ACP backend can warn about the boundaries it lacks.
+struct HostService {
+    calls:       Mutex<Vec<(HookPoint, String)>>,
+    block_tools: bool,
+    configured:  BTreeMap<HookPoint, Vec<String>>,
+}
+
+impl HostService {
+    fn new(block_tools: bool, configured: BTreeMap<HookPoint, Vec<String>>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            block_tools,
+            configured,
+        })
+    }
+
+    fn count(&self, point: HookPoint, node: &str) -> usize {
+        self.calls
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .filter(|(p, n)| *p == point && n == node)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl HookService for HostService {
+    async fn run(&self, request: HookRequest) -> HookReport {
+        let node = request
+            .view
+            .as_deref()
+            .map(|view| view.node_name().to_owned())
+            .unwrap_or_default();
+        self.calls
+            .lock()
+            .expect("not poisoned")
+            .push((request.point, node));
+        let mut report = HookReport::proceed(request.point);
+        if request.point == HookPoint::BeforeToolUse && self.block_tools {
+            report.decision = HookDecision::Block {
+                reason: "the host says no".into(),
+            };
+            report.hooks.push(HookRun {
+                name:        "host-guard".into(),
+                state:       "executed".into(),
+                duration_ms: Some(1),
+                message:     None,
+            });
+        }
+        report
+    }
+
+    fn configured_hooks(&self, point: HookPoint) -> Vec<String> {
+        self.configured.get(&point).cloned().unwrap_or_default()
+    }
+}
+
 fn workspace(dir: &RunDir) -> PathBuf {
     dir.path().join("scopes/scope-0/work")
 }
@@ -338,6 +432,8 @@ script = "echo never >> hooks.log"
         "{log}"
     );
     assert_eq!(lines[1], "run_start:run_start:W", "{log}");
+    // The start stage's own `stage_start` follows, with the sandbox in place.
+    assert_eq!(lines[2], "stage_start:start:1", "{log}");
     assert!(lines.contains(&"stage_start:prepare:1"), "{log}");
     assert!(lines.contains(&"stage_complete:prepare"), "{log}");
     // The retrying command: attempt 1 fails, the retry hook runs, attempt 2
@@ -1048,6 +1144,176 @@ script = "echo failure >> tool-hooks.log"
     assert!(
         events.iter().filter(|e| **e == "pre_tool_use").count() >= 3,
         "{events:?}"
+    );
+}
+
+/// A host that replaced the hook service, with nothing of the local one
+/// installed, receives every phase a step asks itself: the start stage's
+/// `sandbox_ready`, `run_start` and admission with the sandbox in place, the
+/// native tool boundary before each call, the run's end and the scope's
+/// release, once each. Its block at the tool boundary is enforced: the tool
+/// never runs, the model sees the reason, and the report reaches the public
+/// stream.
+#[tokio::test]
+async fn a_replacement_service_receives_every_step_driven_phase_once() {
+    let dir = RunDir::new("hooks-host-native");
+    let (client, provider) = scripted(
+        vec![
+            ScriptedCall::response(tool_call_response(
+                "shell",
+                "danger",
+                json!({"command": "echo pwned > pwned.txt"}),
+            )),
+            ScriptedCall::response(text_response("Done.")),
+        ],
+        vec![],
+    );
+    let graph = lower(
+        r#"digraph W {
+        graph [backend="api", default_model="test/model"]
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        agent [prompt="Do the work."]
+        start -> agent -> exit
+    }"#,
+        "",
+    );
+    let service = HostService::new(true, BTreeMap::new());
+    let (report, customs) = run_hosted(&dir, graph, Some(client), service.clone()).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(
+        !workspace(&dir).join("pwned.txt").exists(),
+        "the host's block kept the tool from running"
+    );
+    for (point, node) in [
+        (HookPoint::ScopeReady, "start"),
+        (HookPoint::RunStarted, "start"),
+        (HookPoint::BeforeVisit, "start"),
+        (HookPoint::BeforeAttempt, "start"),
+        (HookPoint::BeforeToolUse, "agent"),
+        (HookPoint::RunFinished, ""),
+        (HookPoint::ScopeReleased, ""),
+    ] {
+        assert_eq!(
+            service.count(point, node),
+            1,
+            "{point:?} on `{node}`: {:?}",
+            service.calls.lock().expect("not poisoned")
+        );
+    }
+    assert_eq!(
+        service.count(HookPoint::AfterToolUse, "agent"),
+        0,
+        "a blocked call has no result"
+    );
+    let calls = service.calls.lock().expect("not poisoned").clone();
+    let start: Vec<HookPoint> = calls
+        .iter()
+        .filter(|(_, node)| node == "start")
+        .map(|(point, _)| *point)
+        .take(4)
+        .collect();
+    assert_eq!(
+        start,
+        [
+            HookPoint::ScopeReady,
+            HookPoint::RunStarted,
+            HookPoint::BeforeVisit,
+            HookPoint::BeforeAttempt
+        ],
+        "Fabro's order at the start stage"
+    );
+    let denial = serde_json::to_string(&provider.requests()[1]).expect("request");
+    assert!(
+        denial.contains("the host says no"),
+        "the model saw the block: {denial}"
+    );
+    let pre = customs
+        .reports()
+        .into_iter()
+        .find(|(_, e)| e["event"] == "pre_tool_use")
+        .expect("the tool-boundary report")
+        .1;
+    assert_eq!(pre["node"], "agent");
+    assert_eq!(pre["report"]["decision"]["decision"], "block");
+    assert_eq!(pre["report"]["hooks"][0]["name"], "host-guard");
+}
+
+/// The ACP backend asks the same replaced service at its one boundary, the
+/// permission request, and warns about the boundaries it lacks for each tool
+/// hook the service says it has configured, with nothing of the local
+/// service installed. A block still answers with the rejecting option.
+#[tokio::test]
+async fn a_replacement_service_serves_acp_permission_requests_best_effort() {
+    let dir = RunDir::new("hooks-host-acp");
+    let agent = fake_agent(&dir);
+    let permission = dir.path().join("permission.json");
+    let graph = lower(
+        &format!(
+            r#"digraph W {{
+        graph [goal="G", backend="acp", acp.command="python3 {}"]
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [prompt="Say hello"]
+        start -> a -> exit
+    }}"#,
+            agent.display()
+        ),
+        "",
+    );
+    let graph = with_env(graph, &[
+        ("ACP_MODE", "permission"),
+        ("ACP_PERMISSION", permission.to_str().expect("utf-8")),
+    ]);
+    let service = HostService::new(
+        true,
+        BTreeMap::from([
+            (HookPoint::BeforeToolUse, vec!["deny-all".to_owned()]),
+            (HookPoint::AfterToolUse, vec!["after".to_owned()]),
+        ]),
+    );
+    let (report, customs) = run_hosted(&dir, graph, None, service.clone()).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let answered: Value = serde_json::from_str(&read(&permission)).expect("permission answer");
+    assert_eq!(answered["outcome"]["optionId"], "reject", "{answered}");
+    assert_eq!(service.count(HookPoint::BeforeToolUse, "a"), 1);
+    assert_eq!(
+        service.count(HookPoint::AfterToolUse, "a"),
+        0,
+        "ACP has no post-tool boundary"
+    );
+    let pre = customs
+        .reports()
+        .into_iter()
+        .find(|(_, e)| e["event"] == "pre_tool_use")
+        .expect("the permission report")
+        .1;
+    assert_eq!(pre["report"]["decision"]["decision"], "block");
+    assert_eq!(pre["report"]["hooks"][0]["name"], "host-guard");
+    let warnings = customs.warnings();
+    assert!(
+        warnings.iter().any(|w| w["backend"] == "acp"
+            && w["hook"] == "deny-all"
+            && w["event"] == "pre_tool_use"
+            && w["boundary"] == "session/request_permission"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w["backend"] == "acp"
+            && w["hook"] == "after"
+            && w["event"] == "post_tool_use"
+            && w["boundary"] == "none"),
+        "{warnings:?}"
     );
 }
 

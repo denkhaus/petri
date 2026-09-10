@@ -13,7 +13,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use execution::hooks::{HookDecision, HookPoint, HookServiceHandle};
+use execution::hooks::{
+    HookDecision, HookPoint, HookRequest, HookService, HookServiceHandle, ScopeReadyPayload,
+};
 use executor::ExecEnv;
 use frontend_fabro::hooks::HookEvent;
 use frontend_fabro::kinds::{STAGE_KIND, StageOutcome};
@@ -21,9 +23,9 @@ use ir::{Outcome, ScopeId, StepKindId, Value};
 use serde::Deserialize;
 use steps::{Step, StepCtx};
 
-use crate::hooks::{BLOCKED_CLASS, Decision, report_event};
+use crate::checkout;
+use crate::hooks::{BLOCKED_CLASS, report_event, view_of};
 use crate::outcome::Stage;
-use crate::{LocalHooksHandle, checkout};
 
 pub const KIND: StepKindId = STAGE_KIND;
 
@@ -36,11 +38,12 @@ pub struct RunInfo {
 }
 
 /// The environments of the scopes that have run a Fabro step, by scope id.
-/// Registered as a capability by [`crate::register`]; the local hook service
-/// runs sandbox-placed hooks through it.
-#[derive(Default)]
+/// Registered as a capability by [`crate::register`], where every Fabro step
+/// records its environment through [`record`]; the local hook service holds
+/// a clone and runs sandbox-placed hooks through it. Clones share one map.
+#[derive(Clone, Default)]
 pub struct ScopeEnvironments {
-    envs: Mutex<HashMap<ScopeId, Arc<dyn ExecEnv>>>,
+    envs: Arc<Mutex<HashMap<ScopeId, Arc<dyn ExecEnv>>>>,
 }
 
 impl ScopeEnvironments {
@@ -89,8 +92,8 @@ impl ScopeEnvironments {
 
 /// Record the step's environment for hooks that run in its scope.
 pub fn record(ctx: &StepCtx) {
-    if let Some(local) = ctx.capability::<LocalHooksHandle>() {
-        local.0.environments().record(ctx.scope, ctx.env.clone());
+    if let Some(envs) = ctx.capability::<ScopeEnvironments>() {
+        envs.record(ctx.scope, ctx.env.clone());
     }
 }
 
@@ -130,18 +133,18 @@ impl Default for StageConfig {
 
 pub struct StageStep;
 
-/// The run-level hooks a stage fires, in Fabro's order. `start` runs
-/// `sandbox_ready` (the sandbox exists once the first step runs in it) then
-/// `run_start`; both block. `run_complete`, `run_failed` and
-/// `sandbox_cleanup` are not a stage's: the local hook service runs them
-/// from the driver's run-end and scope-release points, by the run's final
-/// status, with the sandbox still in place.
+/// The hooks a stage asks for, in Fabro's order. `start` asks `sandbox_ready`
+/// (the sandbox exists once the first step runs in it) then `run_start`, then
+/// its own `stage_start`; all block. `run_complete`, `run_failed` and
+/// `sandbox_cleanup` are not a stage's: the hook service runs them from the
+/// driver's run-end and scope-release points, by the run's final status,
+/// with the sandbox still in place.
 #[async_trait::async_trait]
 impl Step for StageStep {
     const NAME: &'static str = "fabro/stage";
     type Config = StageConfig;
 
-    async fn run(&self, config: StageConfig, mut ctx: StepCtx) -> Outcome {
+    async fn run(&self, config: StageConfig, ctx: StepCtx) -> Outcome {
         record(&ctx);
         // The checkout comes first: the sandbox is "ready" once the
         // repository is in it, as Fabro's clone precedes `sandbox_ready`.
@@ -155,84 +158,11 @@ impl Step for StageStep {
             )
             .into_outcome(&config.node);
         }
-        let Some(handle) = ctx.capability::<HookServiceHandle>() else {
-            return Outcome::success(Value::Object(config.rest));
-        };
-        let Some(local) = ctx.capability::<LocalHooksHandle>() else {
-            return Outcome::success(Value::Object(config.rest));
-        };
-        let local = &local.0;
-        if !config.hooks.is_null() {
-            local.configure_from(&serde_json::json!({
-                "hooks": config.hooks,
-                "workflow": config.workflow,
-            }));
-        }
-        let events: &[(HookEvent, HookPoint)] = match config.kind.as_str() {
-            "start" => &[
-                (HookEvent::SandboxReady, HookPoint::BeforeVisit),
-                (HookEvent::RunStart, HookPoint::BeforeVisit),
-                (HookEvent::StageStart, HookPoint::BeforeAttempt),
-            ],
-            _ => &[],
-        };
-        let _ = &handle;
-        for (event, point) in events {
-            let (decision, mut report) = if *event == HookEvent::StageStart {
-                local.start_stage(&ctx, &config.label).await
-            } else {
-                let context = local.context(*event);
-                local
-                    .dispatch(*point, &context, Some(ctx.env.clone()))
-                    .await
-            };
-            if *event == HookEvent::StageStart
-                && let Decision::Skip { .. } = &decision
-            {
-                report.decision = HookDecision::Skip {
-                    status: ir::Status::Skipped,
-                };
-                let _ = ctx
-                    .logs
-                    .send(report_event(
-                        &ctx.node,
-                        ctx.firing,
-                        ctx.attempt,
-                        *event,
-                        &report,
-                    ))
-                    .await;
-                return Stage::new(StageOutcome::Skipped, None).into_outcome(&config.node);
-            }
-            if let Decision::Block { reason } = &decision {
-                report.decision = HookDecision::Block {
-                    reason: reason
-                        .clone()
-                        .unwrap_or_else(|| format!("blocked by {} hook", event_title(*event))),
-                };
-            }
-            let silent = report.is_silent();
-            if !silent {
-                let _ = ctx
-                    .logs
-                    .send(report_event(
-                        &ctx.node,
-                        ctx.firing,
-                        ctx.attempt,
-                        *event,
-                        &report,
-                    ))
-                    .await;
-            }
-            if let HookDecision::Block { reason } = report.decision {
-                let _ = &mut ctx;
-                return Stage::failed(
-                    format!("blocked: {reason}"),
-                    BLOCKED_CLASS,
-                    Some(frontend_fabro::Policy::Exit),
-                )
-                .into_outcome(&config.node);
-            }
+        if config.kind == "start"
+            && let Some(handle) = ctx.capability::<HookServiceHandle>()
+            && let Some(stopped) = start_hooks(&handle.0, &config, &ctx).await
+        {
+            return stopped.into_outcome(&config.node);
         }
         let mut stage = Stage::new(StageOutcome::Succeeded, None);
         for (key, value) in config.rest {
@@ -254,11 +184,82 @@ impl Step for StageStep {
     }
 }
 
-fn event_title(event: HookEvent) -> &'static str {
-    match event {
-        HookEvent::RunStart => "RunStart",
-        HookEvent::SandboxReady => "SandboxReady",
-        HookEvent::RunComplete => "RunComplete",
-        other => other.as_str(),
+/// The points `start` asks the hook service itself, with the sandbox in
+/// place, in Fabro's order: `sandbox_ready` (`ScopeReady`), `run_start`
+/// (`RunStarted`), then its own admission (`BeforeVisit` and
+/// `BeforeAttempt`, Fabro's `stage_start`). The driver admits `start` before
+/// its scope's environment exists, so the frontend marks the node
+/// `admission_hooks = "step"` and the adapter stays away from its admission
+/// points: each is asked once, here. The two run-level points are the root
+/// workflow's alone (its `start` carries the run's hook list); a nested
+/// workflow's `start` asks only its own admission. Every report that says
+/// something is recorded as a `fabro.hook` event on this firing. Returns
+/// the stage a stopping decision ends the run with.
+async fn start_hooks(
+    service: &Arc<dyn HookService>,
+    config: &StageConfig,
+    ctx: &StepCtx,
+) -> Option<Stage> {
+    let view = view_of(
+        ctx,
+        "start",
+        &config.label,
+        &config.kv,
+        Some(ctx.config.clone()),
+    );
+    let mut points: Vec<(HookPoint, HookEvent, Value)> = Vec::new();
+    if !config.hooks.is_null() {
+        let ready = ScopeReadyPayload {
+            scope:     ctx.scope,
+            workspace: ctx.env.workspace_path().to_owned(),
+        };
+        points.push((
+            HookPoint::ScopeReady,
+            HookEvent::SandboxReady,
+            serde_json::to_value(ready).unwrap_or(Value::Null),
+        ));
+        points.push((HookPoint::RunStarted, HookEvent::RunStart, Value::Null));
     }
+    points.push((HookPoint::BeforeVisit, HookEvent::StageStart, Value::Null));
+    points.push((HookPoint::BeforeAttempt, HookEvent::StageStart, Value::Null));
+    for (point, event, payload) in points {
+        let report = service
+            .run(HookRequest {
+                point,
+                view: Some(view.clone()),
+                outcome: None,
+                routes: Vec::new(),
+                payload,
+            })
+            .await;
+        if !report.is_silent() {
+            let _ = ctx
+                .logs
+                .send(report_event(
+                    &ctx.node,
+                    ctx.firing,
+                    ctx.attempt,
+                    event,
+                    &report,
+                ))
+                .await;
+        }
+        let admission = matches!(point, HookPoint::BeforeVisit | HookPoint::BeforeAttempt);
+        match report.decision {
+            HookDecision::Skip { .. } if admission => {
+                return Some(Stage::new(StageOutcome::Skipped, None));
+            }
+            HookDecision::Block { reason } => {
+                return Some(Stage::failed(
+                    format!("blocked: {reason}"),
+                    BLOCKED_CLASS,
+                    Some(frontend_fabro::Policy::Exit),
+                ));
+            }
+            // A decision the point does not consume is recorded and ignored,
+            // as the adapter ignores it.
+            _ => {}
+        }
+    }
+    None
 }

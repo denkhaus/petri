@@ -28,7 +28,7 @@ use petri::execution::events::{
 };
 use petri::execution::hooks::{
     HOOK_NOTE_KIND, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
-    HookService,
+    HookService, HookServiceHandle,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
@@ -595,6 +595,23 @@ fn timeless(event: &RunEvent) -> RunEvent {
     RunEvent {
         recorded_at: None,
         ..event.clone()
+    }
+}
+
+/// Run the baseline workflow under a host that replaced the hook service:
+/// the service behind the adapter and behind the `HookServiceHandle` the
+/// steps ask, and nothing of the local service.
+async fn run_workflow_hosting(dir: &RunDir, service: Arc<dyn HookService>) -> RunOutcome {
+    let adapter: Arc<dyn ExecutionHooks> = Arc::new(HookAdapter::new(service.clone()));
+    let rt = runtime(dir, Some(adapter)).capability(HookServiceHandle(service));
+    let mut lowered = lower(&rt, dir, WORKFLOW);
+    script_flaky(lowered.graph.as_mut().expect("lowers"));
+    let sink = Arc::new(CollectingSink::default());
+    let (report, receipt) = run_projected(&rt, lowered, sink.clone(), Vec::new()).await;
+    RunOutcome {
+        report,
+        events: sink.events(),
+        receipt,
     }
 }
 
@@ -1619,7 +1636,12 @@ async fn transitions_override_block_or_continue() {
 
 /// The hook service is asked once per point per attempt, at the plan's
 /// points, and its decision takes effect through the same adapter that a
-/// platform host's service would use.
+/// platform host's service would use. The points the steps ask themselves
+/// reach the same service, once each, with nothing of the local service
+/// installed: `start` asks for the environment, the run start and its own
+/// admission with the sandbox in place, in that order; the fork and the
+/// fan-in announce the branches; the run's end and the scope's release
+/// arrive with no firing.
 #[tokio::test]
 async fn a_hook_service_runs_each_hook_once_at_its_point() {
     let dir = RunDir::new("embed-hooks");
@@ -1627,8 +1649,7 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
         skip:  "ship",
         calls: Mutex::new(Vec::new()),
     });
-    let adapter: Arc<dyn ExecutionHooks> = Arc::new(HookAdapter::new(service.clone()));
-    let outcome = run_workflow(&dir, Some(adapter)).await;
+    let outcome = run_workflow_hosting(&dir, service.clone()).await;
     assert_eq!(
         outcome.report.status,
         RunStatus::Success,
@@ -1643,12 +1664,42 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
             .map(|(p, _, a)| (*p, *a))
             .collect()
     };
+    assert_eq!(of("start"), vec![
+        (HookPoint::ScopeReady, 1),
+        (HookPoint::RunStarted, 1),
+        (HookPoint::BeforeVisit, 1),
+        (HookPoint::BeforeAttempt, 1),
+        (HookPoint::AfterAttempt, 1),
+        (HookPoint::AfterVisit, 1),
+        (HookPoint::RouteSelected, 1),
+    ]);
     assert_eq!(of("prepare"), vec![
         (HookPoint::BeforeVisit, 1),
         (HookPoint::BeforeAttempt, 1),
         (HookPoint::AfterAttempt, 1),
         (HookPoint::AfterVisit, 1),
         (HookPoint::RouteSelected, 1),
+    ]);
+    assert_eq!(of("fan"), vec![
+        (HookPoint::BeforeVisit, 1),
+        (HookPoint::BeforeAttempt, 1),
+        (HookPoint::ForkStarted, 1),
+        (HookPoint::AfterAttempt, 1),
+        (HookPoint::AfterVisit, 1),
+        (HookPoint::RouteSelected, 1),
+    ]);
+    assert_eq!(of("join"), vec![
+        (HookPoint::BeforeVisit, 1),
+        (HookPoint::BeforeAttempt, 1),
+        (HookPoint::ForkCompleted, 1),
+        (HookPoint::AfterAttempt, 1),
+        (HookPoint::AfterVisit, 1),
+        (HookPoint::RouteSelected, 1),
+    ]);
+    // The run-level points carry no firing.
+    assert_eq!(of(""), vec![
+        (HookPoint::RunFinished, 0),
+        (HookPoint::ScopeReleased, 0)
     ]);
     assert_eq!(of("flaky"), vec![
         (HookPoint::BeforeVisit, 1),

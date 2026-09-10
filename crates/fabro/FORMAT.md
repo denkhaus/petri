@@ -570,12 +570,17 @@ as Fabro does. ACP never reuses a session. Each resolution is a
 `[[run.hooks]]` entries run in the standalone runner through
 `fabro_steps::hooks::LocalHooks`, the `execution::hooks::HookService` the
 Fabro component installs (`crates/core/execution/HOOKS.md`). One service
-serves every point, so a hook runs once whoever drives it: the engine's
-`HookAdapter` at the per-firing points, the native agent's Pebble
-`ToolMiddleware` at the tool boundary, the ACP client's permission requests,
-and the `fabro/stage` step for the run-level events. A host that installs its
-own service before `fabro_steps::register` runs keeps it; the local one is
-then not installed.
+serves every point, and every caller reaches it as the `HookServiceHandle`
+capability, so a hook runs once whoever drives it and a replacement service
+receives every point: the engine's `HookAdapter` at the per-firing points,
+the `fabro/stage` step at the root `start` for `sandbox_ready`, `run_start`
+and the start stage's own `stage_start` (the driver admits `start` before
+its sandbox exists, so the step asks once the sandbox is there), the fork
+and fan-in steps for `parallel_start` and `parallel_complete`, the native
+agent's Pebble `ToolMiddleware` at the tool boundary, and the ACP client's
+permission requests. A host that installs its own `Runtime::hooks` and
+`HookServiceHandle` before `fabro_steps::register` runs keeps them; the local
+service is then not installed.
 
 Fields: `id` (merge identity), `name`, `event`, `matcher`, `blocking`,
 `timeout` (`60s` default; `30s` for prompt hooks), `sandbox` (default
@@ -589,9 +594,9 @@ Fabro names them: `run_start`, `run_complete`, `run_failed`, `stage_start`,
 `checkpoint_saved`, `pre_tool_use`, `post_tool_use`,
 `post_tool_use_failure`. Every event is validated, merged and dispatched at
 its reference phase: `parallel_start` fires once per fork visit before the
-branches (the parallel node's own kind says so, so a `for_each` fork counts),
-`parallel_complete` once every branch is in, from the fan-in itself, both
-naming the parallel node; `run_complete`/`run_failed` at the run's end by its
+branches, from the fork step (the parallel node itself, so a `for_each` fork
+counts), `parallel_complete` once every branch is in, from the fan-in itself,
+both naming the parallel node; `run_complete`/`run_failed` at the run's end by its
 status and `sandbox_cleanup` at the scope's release, both with the sandbox
 still there. `checkpoint_saved` warns `fabro.hooks.checkpoint_saved` at
 load and never runs (the standalone runner makes no checkpoints). Fabro's rules apply: `matcher` is

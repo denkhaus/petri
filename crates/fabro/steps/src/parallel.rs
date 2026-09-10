@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use execution::hooks::{ForkCompletedPayload, HookPoint, HookRequest, HookServiceHandle};
 use execution::{
     AttemptAdmission, CallSite, ChildStart, CoordinatorInvocationClient, GraphDigest,
     InvocationClient, InvocationHandle, InvocationRequest, InvocationResult, SandboxMode,
@@ -63,9 +64,8 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
-use crate::LocalHooksHandle;
 use crate::blobs::{self, OutputStore};
-use crate::hooks::report_event;
+use crate::hooks::{report_event, step_view};
 use crate::stage::record;
 use crate::workflow::ChildInvoker;
 
@@ -142,6 +142,7 @@ impl Step for ForkStep {
     type Config = ForkConfig;
 
     async fn run(&self, config: ForkConfig, ctx: StepCtx) -> Outcome {
+        parallel_start(&ctx, &config).await;
         let mut snapshot = config.kv;
         let mut nodes = config.nodes;
         if let Some(store) = ctx.capability::<OutputStore>() {
@@ -649,14 +650,60 @@ pub struct FanInConfig {
     pub occurrences: Vec<Value>,
 }
 
-/// Fabro's `parallel_complete`: every branch of `fork` is in, before the
-/// fan-in publishes. Driven by the join step itself, so a synthetic fan-in
-/// and a prompted one report it the same way.
-pub async fn parallel_complete(ctx: &StepCtx, fork: &str) {
-    let Some(local) = ctx.capability::<LocalHooksHandle>() else {
+/// Fabro's `parallel_start`: the parallel node is about to start its
+/// branches. Asked of the hook service by the fork step, the one thing that
+/// runs exactly once per fork visit before any branch (a `for_each` fork has
+/// one routing group, so the driver cannot see the fork at admission). The
+/// view is the parallel node's own.
+async fn parallel_start(ctx: &StepCtx, config: &ForkConfig) {
+    let Some(handle) = ctx.capability::<HookServiceHandle>() else {
         return;
     };
-    let report = local.0.parallel_complete(ctx, fork).await;
+    let report = handle
+        .0
+        .run(HookRequest {
+            point:   HookPoint::ForkStarted,
+            view:    Some(step_view(ctx, "parallel", &config.label, &config.kv)),
+            outcome: None,
+            routes:  Vec::new(),
+            payload: Value::Null,
+        })
+        .await;
+    if !report.is_silent() {
+        let _ = ctx
+            .logs
+            .send(report_event(
+                &ctx.node,
+                ctx.firing,
+                ctx.attempt,
+                HookEvent::ParallelStart,
+                &report,
+            ))
+            .await;
+    }
+}
+
+/// Fabro's `parallel_complete`: every branch of `fork` is in, before the
+/// fan-in publishes. Asked of the hook service by the join step itself, so a
+/// synthetic fan-in and a prompted one report it the same way; the payload
+/// names the parallel node the join collects for.
+pub async fn parallel_complete(ctx: &StepCtx, fork: &str, label: &str) {
+    let Some(handle) = ctx.capability::<HookServiceHandle>() else {
+        return;
+    };
+    let payload = ForkCompletedPayload {
+        fork: SmolStr::new(fork),
+    };
+    let report = handle
+        .0
+        .run(HookRequest {
+            point:   HookPoint::ForkCompleted,
+            view:    Some(step_view(ctx, "fan_in", label, &Value::Null)),
+            outcome: None,
+            routes:  Vec::new(),
+            payload: serde_json::to_value(payload).unwrap_or(Value::Null),
+        })
+        .await;
     if !report.is_silent() {
         let _ = ctx
             .logs
@@ -709,7 +756,7 @@ impl Step for FanInStep {
 
     async fn run(&self, config: FanInConfig, ctx: StepCtx) -> Outcome {
         record(&ctx);
-        parallel_complete(&ctx, &config.fork).await;
+        parallel_complete(&ctx, &config.fork, &config.label).await;
         let mut results = config.results;
         strip_placeholders(&mut results);
         let items = match &results {

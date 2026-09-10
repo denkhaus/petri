@@ -316,7 +316,7 @@ impl Step for PromptStep {
         let started = Instant::now();
         stage::record(&ctx);
         if let Some(fork) = &config.fork {
-            parallel_complete(&ctx, fork).await;
+            parallel_complete(&ctx, fork, &config.label).await;
         }
         let run_id = ctx
             .capability::<RunInfo>()

@@ -30,7 +30,7 @@ use std::time::Duration;
 pub use compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
 pub use imports::IMPORT_ERROR;
-use ir::placeholder::EXPR_PLACEHOLDER_KEY;
+use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META, EXPR_PLACEHOLDER_KEY};
 use ir::validate::loop_reachable;
 use ir::{
     Budget, Completion, Edge, EdgeId, ExprId, GraphBuilder, JoinPolicy, NodeId, Routing, Scope,
@@ -944,6 +944,12 @@ impl Ctx<'_> {
             if let Some(value) = node.attrs.text(key) {
                 meta[key] = Value::String(value);
             }
+        }
+        if kind == Kind::Start {
+            // The stage step drives `start`'s admission hooks itself, after
+            // `sandbox_ready` and `run_start`, with the sandbox in place: the
+            // driver admits `start` before the scope's environment exists.
+            meta[ADMISSION_HOOKS_META] = Value::String(ADMISSION_HOOKS_BY_STEP.into());
         }
         self.b.set_meta(id, meta);
 

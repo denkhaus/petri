@@ -1,11 +1,15 @@
 //! The local Fabro hook system: `[[run.hooks]]` executed in standalone Petri.
 //!
 //! [`LocalHooks`] is the `execution::hooks::HookService` the Fabro component
-//! installs. The `HookAdapter` (task 10's one caller) asks it at every
-//! workflow point; the native agent's tool middleware ([`tools`]) and the
-//! ACP client ask it at the tool boundary through the `HookServiceHandle`
-//! capability; the `fabro/stage` step asks it for the run-level events. One
-//! service, so a configured hook runs once whoever drives the point.
+//! installs. Every caller reaches it as a `HookService`: the `HookAdapter`
+//! asks it at the driver's points; the `fabro/stage` step asks it at `start`
+//! for `sandbox_ready`, `run_start` and the start stage's own admission; the
+//! fork and fan-in steps ask it for `parallel_start` and `parallel_complete`;
+//! the native agent's tool middleware ([`tools`]) and the ACP client ask it
+//! at the tool boundary. Each of them goes through the `HookServiceHandle`
+//! capability, the handle a host's replacement service would be behind, so a
+//! configured hook runs once whoever serves the point, and a replacement
+//! receives every point.
 //!
 //! The service configures itself from the first firing it sees whose step
 //! config carries the run's `hooks` list: the lowering puts the merged
@@ -31,8 +35,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use execution::hooks::{
-    HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService, RunFinishedPayload,
-    ScopeReleasedPayload,
+    ForkCompletedPayload, HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService,
+    RunFinishedPayload, ScopeReleasedPayload,
 };
 use executor::ExecEnv;
 use frontend_fabro::hooks::{HookDefinition, HookEvent};
@@ -47,8 +51,9 @@ use crate::outcome::reported_outcome;
 use crate::pebble::PebbleClient;
 use crate::stage::{RunInfo, ScopeEnvironments};
 
-/// The `kind` of the `StepEvent::Custom` payload a tool-boundary or run-level
-/// hook report rides on: `{ kind, node, firing, attempt, event, report }`.
+/// The `kind` of the `StepEvent::Custom` payload a report a step asked for
+/// itself rides on (the start stage's points, a fork's, the tool boundary's):
+/// `{ kind, node, firing, attempt, event, report }`.
 pub const REPORT_EVENT: &str = "fabro.hook";
 
 /// The `kind` of the `StepEvent::Custom` payload an enforcement warning rides
@@ -193,7 +198,7 @@ pub struct LocalHooks {
     config: Mutex<Option<Arc<Config>>>,
     run:    Mutex<Option<RunInfo>>,
     client: Mutex<Option<PebbleClient>>,
-    envs:   Arc<ScopeEnvironments>,
+    envs:   ScopeEnvironments,
     http:   executors::HttpClients,
 }
 
@@ -211,12 +216,12 @@ fn in_hook() -> bool {
 
 impl Default for LocalHooks {
     fn default() -> Self {
-        Self::new(Arc::new(ScopeEnvironments::new()))
+        Self::new(ScopeEnvironments::new())
     }
 }
 
 impl LocalHooks {
-    pub fn new(envs: Arc<ScopeEnvironments>) -> Self {
+    pub fn new(envs: ScopeEnvironments) -> Self {
         Self {
             config: Mutex::new(None),
             run: Mutex::new(None),
@@ -226,8 +231,10 @@ impl LocalHooks {
         }
     }
 
-    /// The scope environments the service runs sandbox-placed hooks in.
-    pub fn environments(&self) -> Arc<ScopeEnvironments> {
+    /// The scope environments the service runs sandbox-placed hooks in: the
+    /// capability steps record into (`stage::record`). A clone shares the
+    /// map.
+    pub fn environments(&self) -> ScopeEnvironments {
         self.envs.clone()
     }
 
@@ -290,7 +297,7 @@ impl LocalHooks {
     }
 
     /// The configured hooks for `event`, whatever their matcher.
-    pub fn hooks_for(&self, event: HookEvent) -> Vec<HookDefinition> {
+    fn hooks_for(&self, event: HookEvent) -> Vec<HookDefinition> {
         self.config().map_or_else(Vec::new, |config| {
             config
                 .hooks
@@ -324,7 +331,7 @@ impl LocalHooks {
     /// Run every configured hook matching `context.event`, in order, with
     /// Fabro's blocking rules. The report names the point; the decision is
     /// Fabro's raw decision, mapped by the caller to what its point consumes.
-    pub async fn dispatch(
+    async fn dispatch(
         &self,
         point: HookPoint,
         context: &Context,
@@ -533,22 +540,18 @@ impl LocalHooks {
         self.envs.get(view.scope)
     }
 
+    /// Fabro's `stage_start`: before every attempt. The `start` stage's
+    /// arrives from the stage step with the sandbox in place, after
+    /// `sandbox_ready` and `run_start`; every other node's from the adapter.
     async fn before_attempt(&self, view: &FiringView) -> HookReport {
-        // `start` is admitted before its scope's environment exists, so the
-        // stage step drives its `stage_start` once the sandbox is ready, in
-        // Fabro's order (`sandbox_ready`, `run_start`, `stage_start`).
-        if handler_type(view).as_deref() == Some("start") && self.env_for(view).is_none() {
-            return HookReport::proceed(HookPoint::BeforeAttempt);
-        }
         let mut context = self.stage_context(HookEvent::StageStart, view);
         context.cwd = self
             .env_for(view)
             .map(|env| env.workspace_path().to_owned());
         context.attempt = Some(view.attempt.raw());
         context.max_attempts = Some(view.node.retry.max_attempts.get());
-        let env = self.env_for(view);
         let (decision, mut report) = self
-            .dispatch(HookPoint::BeforeAttempt, &context, env.clone())
+            .dispatch(HookPoint::BeforeAttempt, &context, self.env_for(view))
             .await;
         report.decision = match decision {
             Decision::Skip { .. } => HookDecision::Skip {
@@ -559,28 +562,55 @@ impl LocalHooks {
             },
             Decision::Proceed | Decision::Override { .. } => HookDecision::Proceed,
         };
-        // Fabro's `parallel_start`: once per fork visit, before its branches.
-        // The node's Fabro kind says so (a `for_each` fork has one routing
-        // group, so the graph shape alone does not).
-        if handler_type(view).as_deref() == Some("parallel") && view.attempt == ir::Attempt::FIRST {
-            let parallel = self.stage_context(HookEvent::ParallelStart, view);
-            let (_, extra) = self.dispatch(HookPoint::ForkStarted, &parallel, env).await;
-            merge_report(&mut report, extra);
-        }
         report
     }
 
-    /// Fabro's `parallel_complete`, driven by the fan-in step once every
-    /// branch of `fork` is in. The context names the parallel node, as
-    /// Fabro's does.
-    pub async fn parallel_complete(&self, ctx: &steps::StepCtx, fork: &str) -> HookReport {
-        let mut context = self.context(HookEvent::ParallelComplete);
-        context.node_id = Some(fork.to_owned());
-        context.handler_type = Some("parallel".into());
-        context.cwd = Some(ctx.env.workspace_path().to_owned());
+    /// Fabro's `parallel_start`: once per fork visit, before its branches,
+    /// asked by the fork step. The view is the parallel node's.
+    async fn fork_started(&self, view: &FiringView) -> HookReport {
+        let mut context = self.stage_context(HookEvent::ParallelStart, view);
+        context.cwd = self
+            .env_for(view)
+            .map(|env| env.workspace_path().to_owned());
         let (_, report) = self
-            .dispatch(HookPoint::ForkCompleted, &context, Some(ctx.env.clone()))
+            .dispatch(HookPoint::ForkStarted, &context, self.env_for(view))
             .await;
+        report
+    }
+
+    /// Fabro's `parallel_complete`, asked by the fan-in step once every
+    /// branch of the fork is in. The context names the parallel node, as
+    /// Fabro's does; the payload says which.
+    async fn fork_completed(&self, view: &FiringView, payload: &Value) -> HookReport {
+        let point = HookPoint::ForkCompleted;
+        let Ok(completed) = serde_json::from_value::<ForkCompletedPayload>(payload.clone()) else {
+            return HookReport::proceed(point);
+        };
+        let mut context = self.context(HookEvent::ParallelComplete);
+        context.node_id = Some(completed.fork.to_string());
+        context.handler_type = Some("parallel".into());
+        context.cwd = self
+            .env_for(view)
+            .map(|env| env.workspace_path().to_owned());
+        let (_, report) = self.dispatch(point, &context, self.env_for(view)).await;
+        report
+    }
+
+    /// Fabro's `sandbox_ready` and `run_start`, asked by the `start` stage
+    /// with the sandbox in place. Both block: a block stops the run before
+    /// any work.
+    async fn run_level_start(&self, point: HookPoint, view: &FiringView) -> HookReport {
+        let (event, title) = match point {
+            HookPoint::ScopeReady => (HookEvent::SandboxReady, "SandboxReady"),
+            _ => (HookEvent::RunStart, "RunStart"),
+        };
+        let context = self.context(event);
+        let (decision, mut report) = self.dispatch(point, &context, self.env_for(view)).await;
+        if let Decision::Block { reason } = decision {
+            report.decision = HookDecision::Block {
+                reason: reason.unwrap_or_else(|| format!("blocked by {title} hook")),
+            };
+        }
         report
     }
 
@@ -711,20 +741,6 @@ impl LocalHooks {
         report
     }
 
-    /// The `start` stage's own `stage_start`, driven by the stage step with
-    /// the sandbox in place. Returns the raw decision with the report.
-    pub async fn start_stage(&self, ctx: &steps::StepCtx, label: &str) -> (Decision, HookReport) {
-        let mut context = self.context(HookEvent::StageStart);
-        context.node_id = Some(ctx.node.to_string());
-        context.node_label = Some(label.to_owned());
-        context.handler_type = Some("start".into());
-        context.cwd = Some(ctx.env.workspace_path().to_owned());
-        context.attempt = Some(ctx.attempt.raw());
-        context.max_attempts = Some(1);
-        self.dispatch(HookPoint::BeforeAttempt, &context, Some(ctx.env.clone()))
-            .await
-    }
-
     /// A tool-boundary point, asked by the agent backend.
     async fn tool_point(&self, point: HookPoint, view: &FiringView, payload: &Value) -> HookReport {
         let event = match point {
@@ -787,18 +803,51 @@ impl HookService for LocalHooks {
         match request.point {
             HookPoint::BeforeVisit
             | HookPoint::AfterAttempt
-            | HookPoint::ForkStarted
-            | HookPoint::ForkCompleted
             | HookPoint::RunFinished
             | HookPoint::ScopeReleased => HookReport::proceed(request.point),
             HookPoint::BeforeAttempt => self.before_attempt(view).await,
             HookPoint::Retrying => self.retrying(view).await,
             HookPoint::AfterVisit => self.after_visit(view, request.outcome.as_ref()).await,
             HookPoint::RouteSelected => self.route_selected(view, &request.routes).await,
+            HookPoint::ForkStarted => self.fork_started(view).await,
+            HookPoint::ForkCompleted => self.fork_completed(view, &request.payload).await,
+            HookPoint::ScopeReady | HookPoint::RunStarted => {
+                self.run_level_start(request.point, view).await
+            }
             HookPoint::BeforeToolUse | HookPoint::AfterToolUse | HookPoint::AfterToolFailure => {
                 self.tool_point(request.point, view, &request.payload).await
             }
         }
+    }
+
+    fn configured_hooks(&self, point: HookPoint) -> Vec<String> {
+        events_of(point)
+            .iter()
+            .flat_map(|event| self.hooks_for(*event))
+            .map(|hook| hook.name)
+            .collect()
+    }
+}
+
+/// The Fabro events a point serves, for [`HookService::configured_hooks`].
+/// `BeforeVisit` and `AfterAttempt` serve none: Fabro's `stage_start` is the
+/// per-attempt point, and Fabro has no result-adjusting hook.
+fn events_of(point: HookPoint) -> &'static [HookEvent] {
+    match point {
+        HookPoint::BeforeVisit | HookPoint::AfterAttempt => &[],
+        HookPoint::BeforeAttempt => &[HookEvent::StageStart],
+        HookPoint::Retrying => &[HookEvent::StageRetrying],
+        HookPoint::AfterVisit => &[HookEvent::StageComplete, HookEvent::StageFailed],
+        HookPoint::RouteSelected => &[HookEvent::EdgeSelected],
+        HookPoint::ForkStarted => &[HookEvent::ParallelStart],
+        HookPoint::ForkCompleted => &[HookEvent::ParallelComplete],
+        HookPoint::ScopeReady => &[HookEvent::SandboxReady],
+        HookPoint::RunStarted => &[HookEvent::RunStart],
+        HookPoint::RunFinished => &[HookEvent::RunComplete, HookEvent::RunFailed],
+        HookPoint::ScopeReleased => &[HookEvent::SandboxCleanup],
+        HookPoint::BeforeToolUse => &[HookEvent::PreToolUse],
+        HookPoint::AfterToolUse => &[HookEvent::PostToolUse],
+        HookPoint::AfterToolFailure => &[HookEvent::PostToolUseFailure],
     }
 }
 
@@ -844,10 +893,23 @@ pub fn warning_event(
     }))
 }
 
-/// A `FiringView` for a step that drives a point itself (the tool boundary,
-/// the run-level events): what the service reads from a view, built from the
-/// step's context. `kind` is the Fabro handler type.
+/// A `FiringView` for a step that asks a point itself (the tool boundary,
+/// the start stage's points, a fork's): what the service reads from a view,
+/// built from the step's context. `kind` is the Fabro handler type.
 pub fn step_view(ctx: &steps::StepCtx, kind: &str, label: &str, kv: &Value) -> Arc<FiringView> {
+    view_of(ctx, kind, label, kv, None)
+}
+
+/// [`step_view`] with the step's resolved config on the view, for a step
+/// whose config the service reads (the `start` stage carries the run's hook
+/// list).
+pub fn view_of(
+    ctx: &steps::StepCtx,
+    kind: &str,
+    label: &str,
+    kv: &Value,
+    config: Option<Value>,
+) -> Arc<FiringView> {
     let node = ir::Node::new(
         ir::NodeId::new(0),
         &ctx.node,
@@ -871,7 +933,7 @@ pub fn step_view(ctx: &steps::StepCtx, kind: &str, label: &str, kv: &Value) -> A
         visit: 0,
         scope: ctx.scope,
         inputs: Vec::new(),
-        config: None,
+        config,
         context,
         branch: BranchRole::None,
     })

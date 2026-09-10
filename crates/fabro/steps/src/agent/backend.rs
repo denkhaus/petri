@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use execution::hooks::HookServiceHandle;
-use frontend_fabro::hooks::HookEvent;
+use execution::hooks::{HookPoint, HookServiceHandle};
 use frontend_fabro::kinds::RETRY_REQUESTED_CLASS;
 use ir::{Control, Value};
 use pebble_coding_agent::state::SessionRecord;
@@ -17,7 +16,6 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::AgentConfig;
-use crate::LocalHooksHandle;
 use crate::acp::{AcpError, AcpHooks, Client};
 use crate::fallback::ModelFailure;
 use crate::hooks::step_view;
@@ -106,31 +104,24 @@ impl Session {
                 let mut client = Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone())
                     .await
                     .map_err(|e| AgentError::failed("spawn_failed", e.to_string()))?;
-                if let Some(handle) = ctx.capability::<HookServiceHandle>()
-                    && let Some(local) = ctx.capability::<LocalHooksHandle>()
-                {
-                    let names = |event: HookEvent| {
-                        local
-                            .0
-                            .hooks_for(event)
-                            .into_iter()
-                            .map(|hook| hook.name)
-                            .collect::<Vec<_>>()
-                    };
-                    let mut post = names(HookEvent::PostToolUse);
-                    post.extend(names(HookEvent::PostToolUseFailure));
+                // The hook service is asked at the one boundary ACP has (a
+                // permission request), whoever serves it. The service also
+                // says which tool hooks are configured, so the node can warn
+                // about the boundaries this backend lacks for each of them.
+                if let Some(handle) = ctx.capability::<HookServiceHandle>() {
+                    let service = &handle.0;
+                    let mut post = service.configured_hooks(HookPoint::AfterToolUse);
+                    post.extend(service.configured_hooks(HookPoint::AfterToolFailure));
                     let hooks = AcpHooks::new(
-                        handle.0.clone(),
+                        service.clone(),
                         step_view(ctx, "agent", &config.label, &config.kv),
                         ctx.node.clone(),
                         ctx.firing,
                         ctx.attempt,
-                        names(HookEvent::PreToolUse),
+                        service.configured_hooks(HookPoint::BeforeToolUse),
                         post,
                     );
-                    if hooks.has_tool_hooks() {
-                        client.with_hooks(Arc::new(hooks)).await;
-                    }
+                    client.with_hooks(Arc::new(hooks)).await;
                 }
                 if let Err(error) = client.open_session(ctx.env.workspace_path()).await {
                     client.terminate(ctx.env.grace()).await;

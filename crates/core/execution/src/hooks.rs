@@ -15,11 +15,19 @@
 //! calls a hook service for a workflow point, so installing one service
 //! means each hook executes once.
 //!
-//! Tool-boundary points (`BeforeToolUse`, `AfterToolUse`, `AfterToolFailure`)
-//! are not driven by the adapter: the agent backend's tool middleware reaches
-//! the same service through the [`HookServiceHandle`] capability and asks at
-//! the actual tool boundary. The service stays the single owner of the
-//! decision either way.
+//! A few points are not driven by the adapter, because the driver is not
+//! where they happen: the tool-boundary points (`BeforeToolUse`,
+//! `AfterToolUse`, `AfterToolFailure`) are asked by the agent backend's tool
+//! middleware at the actual tool boundary; `ScopeReady` and `RunStarted`, and
+//! the admission points of a node whose frontend marked it
+//! [`ADMISSION_HOOKS_META`]` = "step"`, are asked by the step that runs first
+//! in the scope's environment (the sandbox has to exist before a hook can be
+//! placed in it); `ForkStarted` and `ForkCompleted` are asked by the fork
+//! step and the fan-in step, the two places that run exactly once per fork
+//! visit (a `for_each` fork has one routing group, so the driver cannot see
+//! it at admission). Every one of them reaches the same service through the
+//! [`HookServiceHandle`] capability, so a host that replaces the service
+//! receives every point, and each point is asked exactly once.
 
 use std::sync::Arc;
 
@@ -30,6 +38,7 @@ use driver::lifecycle::{
     TransitionReport,
 };
 use engine::{Admission, RouteDecision};
+pub use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META};
 use ir::{EdgeId, Outcome, Status, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -42,9 +51,12 @@ pub const HOOK_NOTE_KIND: &str = "hook";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookPoint {
-    /// Before the first attempt of a visit is dispatched.
+    /// Before the first attempt of a visit is dispatched. Driven by the
+    /// adapter at admission, or, for a node whose meta says
+    /// [`ADMISSION_HOOKS_META`]` = "step"`, by the node's own step once its
+    /// environment is in place.
     BeforeVisit,
-    /// Before every attempt, retries included.
+    /// Before every attempt, retries included. Driven like `BeforeVisit`.
     BeforeAttempt,
     /// After an attempt returned, before its record; the decision may adjust
     /// the effective result.
@@ -56,10 +68,22 @@ pub enum HookPoint {
     RouteSelected,
     /// Before a retry attempt is scheduled.
     Retrying,
-    /// A fork's branches are about to start.
+    /// A fork's branches are about to start. Asked by the fork node's step,
+    /// once per fork visit; the request carries the fork node's view.
     ForkStarted,
-    /// A fork's branches have all completed.
+    /// A fork's branches have all completed. Asked by the fan-in step, once
+    /// every branch is in and before the results are published; the request
+    /// carries the fan-in's view and a [`ForkCompletedPayload`] naming the
+    /// fork.
     ForkCompleted,
+    /// A scope's environment is in place and seeded (checked out), before
+    /// the first stage runs in it. Asked by that first step, once per run;
+    /// the request carries the step's view and a [`ScopeReadyPayload`].
+    ScopeReady,
+    /// The run's work is about to start: the environment is ready and no
+    /// stage has run. Asked once per run by the same step, after
+    /// `ScopeReady`; the request carries the step's view and no payload.
+    RunStarted,
     /// The run ended: its status is final, no environment is released yet.
     /// A run-level point: the request carries no firing view; its payload is
     /// [`RunFinishedPayload`].
@@ -159,11 +183,29 @@ pub struct ScopeReleasedPayload {
     pub outcome: SmolStr,
 }
 
+/// The payload of a [`HookPoint::ScopeReady`] request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeReadyPayload {
+    pub scope:     ir::ScopeId,
+    /// The workspace path inside the environment.
+    pub workspace: String,
+}
+
+/// The payload of a [`HookPoint::ForkCompleted`] request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkCompletedPayload {
+    /// The fork node's instance name: the node whose branches joined.
+    pub fork: SmolStr,
+}
+
 /// What a service is asked about.
 pub struct HookRequest {
     pub point:   HookPoint,
     /// The firing the point belongs to. `None` for the run-level points
-    /// (`RunFinished`, `ScopeReleased`), which have no firing.
+    /// (`RunFinished`, `ScopeReleased`), which have no firing. A point a
+    /// step asks itself carries the view the step built from its context:
+    /// the node, its `meta`, the firing, attempt and scope, and the step's
+    /// resolved config.
     pub view:    Option<Arc<FiringView>>,
     /// The attempt's outcome (`AfterAttempt`, `AfterVisit`, `RouteSelected`).
     pub outcome: Option<Outcome>,
@@ -185,6 +227,16 @@ pub struct HookRequest {
 #[async_trait::async_trait]
 pub trait HookService: Send + Sync {
     async fn run(&self, request: HookRequest) -> HookReport;
+
+    /// The names of the hooks configured for `point`, whatever their
+    /// matcher, for a caller that must warn about a boundary it cannot
+    /// serve (an external agent that exposes no tool boundary for them).
+    /// The default is none: such a caller then warns about nothing, and
+    /// still asks the service at every boundary it does have.
+    fn configured_hooks(&self, point: HookPoint) -> Vec<String> {
+        let _ = point;
+        Vec::new()
+    }
 }
 
 /// The capability type steps and tool middleware look the service up by.
@@ -229,10 +281,24 @@ fn is_synthetic(view: &FiringView) -> bool {
     view.meta().get("synthetic") == Some(&Value::Bool(true))
 }
 
+/// Whether the node's own step drives its admission points: the frontend
+/// marked it [`ADMISSION_HOOKS_META`]` = "step"`. The driver admits the
+/// first firing of a scope before the scope's environment exists, so a
+/// node that must run its admission hooks with the environment in place (a
+/// hook placed in the sandbox) asks the service from its step instead, in
+/// its own order. The adapter then stays away from those two points, so
+/// each is asked once.
+fn step_admits(view: &FiringView) -> bool {
+    view.meta()
+        .get(ADMISSION_HOOKS_META)
+        .and_then(Value::as_str)
+        == Some(ADMISSION_HOOKS_BY_STEP)
+}
+
 #[async_trait::async_trait]
 impl ExecutionHooks for HookAdapter {
     async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
-        if is_synthetic(&request.view) {
+        if is_synthetic(&request.view) || step_admits(&request.view) {
             return AttemptDecision::admit();
         }
         let mut notes = Vec::new();

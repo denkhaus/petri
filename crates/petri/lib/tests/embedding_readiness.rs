@@ -2,10 +2,11 @@
 //! workflow of `crates/petri/cli/tests/fabro_readiness_blackbox.rs` (the
 //! same workflow text, `workflow.toml`, twin scripts and hooks), run
 //! in-process by a host that replaces the terminal and the services. The
-//! host installs its own `ExecutionHooks` (which wraps the local hook
-//! service, pauses the fan-out's admission once and records a marker note at
-//! every point), its own interviewer, and its own event sink, and rebuilds
-//! the run from the public events alone. The workflow's semantics are the
+//! host installs its own `ExecutionHooks` (which wraps the hooks `register`
+//! installed, the local hook service behind its adapter, pauses the fan-out's
+//! admission once and records a marker note at every point), its own
+//! interviewer, and its own event sink, and rebuilds the run from the public
+//! events alone. The workflow's semantics are the
 //! ones the binary showed: the same files, the same twin scripts spent in the
 //! same order, the same status, every item 9 family on the stream, and a
 //! replay identical to the live stream.
@@ -29,16 +30,14 @@ use petri::driver::lifecycle::{
 use petri::execution::events::{
     CollectingSink, DeliveredControl, EventBody, EventProjector, RunEvent, replay_run,
 };
-use petri::execution::hooks::{HookAdapter, HookService, HookServiceHandle};
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
     ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::hooks::LocalHooks;
 use petri::fabro::pebble::PebbleClient;
+use petri::fabro::register;
 use petri::fabro::skills::FabroHome;
-use petri::fabro::{LocalHooksHandle, register};
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::RunStatus;
@@ -563,7 +562,7 @@ impl Interviewer for SayYes {
 /// released, and records a marker note at every point so the order of its
 /// callbacks is in the durable record and on the public stream.
 struct EmbeddingHost {
-    inner:   HookAdapter,
+    inner:   Arc<dyn ExecutionHooks>,
     pause:   &'static str,
     paused:  AtomicU32,
     release: Notify,
@@ -768,8 +767,9 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
 
     // The host's services: the model client pointed at the twins with fixed
     // credentials and no client retries (the binary ran with
-    // `PETRI_LLM_RETRY_ATTEMPTS=1`), the Fabro home, the local hook service
-    // wrapped by the host's own hooks, the host's interviewer and sink.
+    // `PETRI_LLM_RETRY_ATTEMPTS=1`), the Fabro home, the hooks `register`
+    // installs (the local hook service behind its adapter) wrapped by the
+    // host's own hooks, the host's interviewer and sink.
     let credentials = StaticCredentials::new()
         .with(
             "openai",
@@ -795,28 +795,27 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     .expect("the model client builds");
     let home = dir.path().join("home").join(".fabro");
     fs::create_dir_all(&home).expect("home");
-    let local = Arc::new(LocalHooks::default());
-    let service: Arc<dyn HookService> = local.clone();
-    let host_hooks = Arc::new(EmbeddingHost {
-        inner:   HookAdapter::new(service.clone()),
-        pause:   "fan",
-        paused:  AtomicU32::new(0),
-        release: Notify::new(),
-    });
     let mut options = RunOptions::new(dir.path());
     options.grace = Duration::from_secs(2);
     options.retention = Retention::Always;
     options.echo = false;
-    let rt = register(
-        Runtime::standard()
-            .frontend(Fabro::new())
-            .hooks(host_hooks.clone())
-            .capability(HookServiceHandle(service))
-            .capability(LocalHooksHandle(local)),
-    )
-    .capability(PebbleClient(client))
-    .capability(FabroHome(home))
-    .options(options);
+    // `register` installs the local hook service as the driver's hooks and
+    // as the `HookServiceHandle` the steps ask; the host wraps the former
+    // and touches nothing else of it.
+    let rt = register(Runtime::standard().frontend(Fabro::new()));
+    let host_hooks = Arc::new(EmbeddingHost {
+        inner:   rt
+            .installed_hooks()
+            .expect("register installs the local hook service"),
+        pause:   "fan",
+        paused:  AtomicU32::new(0),
+        release: Notify::new(),
+    });
+    let rt = rt
+        .hooks(host_hooks.clone())
+        .capability(PebbleClient(client))
+        .capability(FabroHome(home))
+        .options(options);
 
     let remote = dir.path().join("remote.git");
     let mcp_log = dir.path().join("mcp.log");
