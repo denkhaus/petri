@@ -623,11 +623,16 @@ HTTP hook posts the context and reads the same JSON from a `2xx` body. A
 prompt hook asks the model for `{"ok", "reason"}` and blocks on `false`; an
 agent hook does the same with tools in the sandbox. HTTP, prompt and agent
 hooks fail open on errors and timeouts; a command that times out is killed
-and, when blocking, blocks. A hook whose placement is unavailable (a sandbox
+and, when blocking, blocks. An agent hook that runs out of time while a tool
+is running stops that tool (TERM, the scope's grace, then KILL) and joins its
+agent before it fails open, so the stage it guarded starts with nothing of
+the hook still running. A hook whose placement is unavailable (a sandbox
 hook before any scope exists, a model hook with no client) is recorded as
-`unsupported` and proceeds. Cancelling the firing cancels the hook. Hook
-output reaches the run log through the same event pipeline as every other
-step output, so Petri's secret masking applies to it.
+`unsupported` and proceeds. Cancelling the firing cancels the hook; an agent
+hook's tool and agent are stopped and joined the same way, even though the
+cancelled firing no longer waits for them. Hook output reaches the run log
+through the same event pipeline as every other step output, so Petri's
+secret masking applies to it.
 
 What a decision does: `stage_start` `skip` skips the node, `block` fails it
 with class `hook_blocked`; `edge_selected` `override` routes to `edge_to`

@@ -39,6 +39,7 @@ use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
+use tokio::time::sleep;
 
 /// Every `StepEvent::Custom` the run emitted, with the node it came from.
 #[derive(Default)]
@@ -1043,6 +1044,194 @@ script = "echo tool-guard-ran >> tool-hooks.log"
         .expect("b");
     assert_eq!(b["decision"]["reason"], "marker says stop");
     assert_eq!(b["hooks"][0]["name"], "verify");
+}
+
+/// A `pgrep -f` pattern for the tool process [`ticking_tool`] starts: the
+/// `bash -c` the environment spawns, anchored at its start so the sandbox
+/// plugin's sentinel wrapper, which carries the same command in its own
+/// argument list and lives until the scope is released, does not match. The
+/// first character of the id goes into a bracket class so the command line
+/// carrying the pattern itself does not match either.
+fn tool_process_pattern(marker: &str) -> String {
+    let (prefix, rest) = marker.split_at("hooks-leak-".len());
+    let mut chars = rest.chars();
+    let first = chars.next().expect("a marker has an id");
+    format!("^bash -c echo {prefix}[{first}]{}", chars.as_str())
+}
+
+/// Whether the tool process for `marker` is running.
+fn process_running(marker: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-f", &tool_process_pattern(marker)])
+        .output()
+        .expect("pgrep runs")
+        .status
+        .success()
+}
+
+fn line_count(path: &Path) -> usize {
+    read(path).lines().count()
+}
+
+/// The shell tool an agent hook is scripted to call: a loop that writes a
+/// tick every 100 ms for thirty seconds, with `marker` on its command line so
+/// the process can be found.
+fn ticking_tool(marker: &str) -> Value {
+    json!({
+        "command": format!(
+            "echo {marker} >/dev/null; for i in $(seq 1 300); do echo tick >> ticks.log; sleep 0.1; done"
+        )
+    })
+}
+
+/// An agent hook that runs out of time while its tool is still running stops
+/// that tool and joins the agent before it fails open: the stage the hook
+/// guarded starts with the tool's process gone and its file no longer
+/// growing. The stage itself takes that reading, right after the hook
+/// settled and before anything else could clean up.
+#[tokio::test]
+async fn an_agent_hook_timeout_stops_its_tool_before_failing_open() {
+    let dir = RunDir::new("hooks-agent-timeout");
+    let marker = format!("hooks-leak-{}", testkit::unique_id());
+    let (client, _provider) = scripted(
+        vec![
+            ScriptedCall::response(tool_call_response("shell", "slow", ticking_tool(&marker))),
+            ScriptedCall::response(text_response(r#"{"ok": false, "reason": "never reached"}"#)),
+        ],
+        vec![],
+    );
+    let probe = format!(
+        "pgrep -f '{}' | xargs ps -o pid=,ppid=,stat=,command= -p > leak.txt 2>/dev/null || true; wc -l < ticks.log | tr -d ' ' > count1.txt; sleep 0.6; \
+         wc -l < ticks.log | tr -d ' ' > count2.txt; echo b > b.txt",
+        tool_process_pattern(&marker)
+    );
+    let graph = lower(
+        &format!(
+            r#"digraph W {{
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [shape=parallelogram, script="echo a > a.txt"]
+        b [shape=parallelogram, script="{probe}"]
+        start -> a -> b -> exit
+    }}"#
+        ),
+        r#"
+[[run.hooks]]
+name = "slow"
+event = "stage_start"
+matcher = "^b$"
+agent = "enabled"
+prompt = "Look around, then decide."
+model = "test/model"
+timeout = "1500ms"
+"#,
+    );
+    let (report, customs) = run(&dir, graph, Some(client)).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let ws = workspace(&dir);
+    assert!(ws.join("b.txt").exists(), "the hook failed open");
+    let b = customs
+        .hook_notes()
+        .into_iter()
+        .find(|(n, r)| n == "b" && r["point"] == "before_attempt")
+        .map(|(_, r)| r)
+        .expect("b's admission report");
+    assert_eq!(b["hooks"][0]["state"], "failed_open", "{b}");
+    assert!(
+        b["hooks"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("timed out")),
+        "{b}"
+    );
+    assert!(
+        line_count(&ws.join("ticks.log")) > 0,
+        "the tool ran before the hook timed out"
+    );
+    assert_eq!(
+        read(&ws.join("leak.txt")).trim(),
+        "",
+        "the tool's process was still running when the guarded stage started"
+    );
+    let (first, second) = (read(&ws.join("count1.txt")), read(&ws.join("count2.txt")));
+    assert!(
+        !first.trim().is_empty() && first == second,
+        "the tool kept writing after the hook settled: {first} then {second}"
+    );
+}
+
+/// A run cancelled while an agent hook's tool is running leaves no process
+/// behind and no further writes: the hook's owner stops the tool and joins
+/// the agent even though the driver dropped the callback that was awaiting
+/// it.
+#[tokio::test]
+async fn a_cancelled_run_stops_an_agent_hooks_running_tool() {
+    let dir = RunDir::new("hooks-agent-cancel");
+    let marker = format!("hooks-leak-{}", testkit::unique_id());
+    let (client, _provider) = scripted(
+        vec![
+            ScriptedCall::response(tool_call_response("shell", "slow", ticking_tool(&marker))),
+            ScriptedCall::response(text_response(r#"{"ok": true}"#)),
+        ],
+        vec![],
+    );
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [shape=parallelogram, script="echo a > a.txt"]
+        b [shape=parallelogram, script="echo b > b.txt"]
+        start -> a -> b -> exit
+    }"#,
+        r#"
+[[run.hooks]]
+name = "slow"
+event = "stage_start"
+matcher = "^b$"
+agent = "enabled"
+prompt = "Look around, then decide."
+model = "test/model"
+"#,
+    );
+    let (rt, _customs) = runtime(&dir, Some(client));
+    let ws = dir.path().join("scopes/invocation-0-scope-0/work");
+    let ticks = ws.join("ticks.log");
+    let report = host::run_configured(&rt, HostRun::new(graph), |handle, _| {
+        // Cancel once the tool has started writing.
+        tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !ticks.exists() && Instant::now() < deadline {
+                sleep(Duration::from_millis(20)).await;
+            }
+            handle.cancel_root();
+        });
+    })
+    .await
+    .expect("the run completes");
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert!(!ws.join("b.txt").exists(), "the guarded stage never ran");
+    // The hook's owner finishes on its own after the callback was dropped:
+    // the tool is stopped within the sandbox's grace, then the agent joined.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_running(&marker) && Instant::now() < deadline {
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !process_running(&marker),
+        "the tool's process outlived the cancelled run"
+    );
+    let before = line_count(&ws.join("ticks.log"));
+    assert!(before > 0, "the tool ran before the cancellation");
+    sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        line_count(&ws.join("ticks.log")),
+        before,
+        "the tool kept writing after the run was cancelled"
+    );
 }
 
 // ── Tool hooks at the native boundary ──────────────────────────────────────

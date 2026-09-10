@@ -6,12 +6,19 @@
 //! sandbox hook with no environment, a model hook with no client). Command
 //! hooks never fail open: Fabro turns their exit code into a decision, and a
 //! timeout is exit code -1, a block.
+//!
+//! An agent hook owns work that outlives a dropped future: a tool process in
+//! the sandbox and the agent's own tasks. That work runs on a task of its
+//! own ([`AgentWork`]), so a timeout or a cancellation stops the tool and
+//! joins the agent before the hook's result is returned, and a hook future
+//! the driver dropped (a root kill aborts the awaiting callback) still leaves
+//! an owner to finish that cleanup.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use executor::{ExecEnv, OutputMode, ProcessSpec, Sig, StdinMode};
 use frontend_fabro::hooks::{
@@ -24,16 +31,23 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
-use super::{Context, Decision};
+use super::{Context, Decision, IN_HOOK};
 use crate::pebble::PebbleClient;
 use crate::pebble::environment::PebbleEnvironment;
 
 /// Fabro's prompt for its hook evaluator.
 const EVALUATOR_SYSTEM: &str = "You are a hook evaluator for a workflow engine. Given context \
                                 about a workflow event, evaluate the condition.";
+
+/// How long an agent hook's cleanup may take beyond the sandbox's grace once
+/// the hook is out of time or cancelled. The environment gives a stopped tool
+/// a TERM, the grace, then a KILL it waits five seconds for; the agent's loop
+/// then commits the tool's result and its tasks join. The same bound covers
+/// the agent's shutdown after a completed prompt.
+const CLEANUP_MARGIN: Duration = Duration::from_secs(6);
 
 /// The response a prompt or agent hook returns: `{"ok": bool, "reason"}`.
 #[derive(Debug, Deserialize)]
@@ -436,46 +450,149 @@ async fn agent_hook(
                 .into(),
         );
     };
-    let model = model.unwrap_or(DEFAULT_MODEL);
-    let cancel = CancellationToken::new();
-    let kill = CancellationToken::new();
-    let work = async {
-        let environment = PebbleEnvironment::prepare(env.clone(), cancel.clone(), kill.clone())
-            .await
-            .map_err(|e| format!("agent hook environment: {e}"))?;
-        let mut agent = CodingAgent::builder(client.0.clone(), Arc::new(environment))
-            .model(model)
-            .permission_level(PermissionLevel::Full)
-            .build()
-            .await
-            .map_err(|e| format!("agent hook could not start: {e}"))?;
-        let instructions = format!(
+    let work = AgentWork {
+        client:       client.clone(),
+        env:          env.clone(),
+        model:        model.unwrap_or(DEFAULT_MODEL).to_owned(),
+        instructions: format!(
             "{EVALUATOR_SYSTEM}\n\n{}\n\nWhen you have decided, reply with only a JSON object: \
              {{\"ok\": true}} or {{\"ok\": false, \"reason\": \"...\"}}. You may use at most \
              {max_tool_rounds} tool calls.",
             evaluator_message(prompt, context)
-        );
-        let report = agent.prompt_with_cancellation(&instructions, &cancel).await;
-        let text = report
-            .result
-            .map(|output| output.text.unwrap_or_default())
-            .map_err(|e| format!("agent hook failed: {e}"));
-        let _ = agent.shutdown(ShutdownReason::Completed).await;
-        text
+        ),
+        budget:       hook.timeout(),
     };
-    match timeout(hook.timeout(), work).await {
-        Ok(Ok(text)) => match verdict(&text) {
-            Some(decision) => Executed::Decided(decision),
-            None => Executed::FailedOpen("the agent did not return a hook verdict".into()),
-        },
-        Ok(Err(message)) => Executed::FailedOpen(message),
-        Err(_) => {
-            cancel.cancel();
+    // The agent and its tool belong to a task of their own, not to this
+    // future: the driver drops the awaiting callback on a root kill, and a
+    // dropped future can await nothing. The guard turns that drop into
+    // cancellation, and the task then stops the tool, joins the agent, and
+    // ends on its own. While this future lives it awaits the same task, so a
+    // timeout returns fail-open only once that cleanup finished. The
+    // recursion guard rides along: hooks fire no hooks.
+    let cancel = CancellationToken::new();
+    let guard = cancel.clone().drop_guard();
+    let task = tokio::spawn(IN_HOOK.scope(true, work.run(cancel)));
+    let outcome = task.await;
+    drop(guard);
+    match outcome {
+        Ok(executed) => executed,
+        Err(error) => Executed::FailedOpen(format!("agent hook task failed: {error}")),
+    }
+}
+
+/// One agent hook's work, owned by the task that runs it.
+struct AgentWork {
+    client:       PebbleClient,
+    env:          Arc<dyn ExecEnv>,
+    model:        String,
+    instructions: String,
+    /// The hook's timeout: the whole of environment, agent start and prompt.
+    budget:       Duration,
+}
+
+/// Why a prompt did not run to its end.
+enum Interrupted {
+    Cancelled,
+    TimedOut,
+}
+
+impl AgentWork {
+    /// Run the agent to a verdict within the budget, unless `cancel` fires
+    /// first. Whichever way it ends, the tool the agent may be running is
+    /// stopped and the agent's tasks are joined before this returns.
+    async fn run(self, cancel: CancellationToken) -> Executed {
+        let kill = CancellationToken::new();
+        let grace = self.env.grace();
+        let cleanup = grace + CLEANUP_MARGIN;
+        let timed_out = || {
             Executed::FailedOpen(format!(
                 "agent hook timed out after {} ms",
-                hook.timeout().as_millis()
+                self.budget.as_millis()
             ))
+        };
+        let deadline = sleep(self.budget);
+        tokio::pin!(deadline);
+        let mut agent = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Executed::FailedOpen("agent hook cancelled before it started".into());
+            }
+            () = &mut deadline => return timed_out(),
+            started = self.start(&cancel, &kill) => match started {
+                Ok(agent) => agent,
+                Err(message) => return Executed::FailedOpen(message),
+            },
+        };
+        let (text, reason) = {
+            let prompt = agent.prompt_with_cancellation(&self.instructions, &cancel);
+            tokio::pin!(prompt);
+            let ended = tokio::select! {
+                biased;
+                report = &mut prompt => Ok(report),
+                () = cancel.cancelled() => Err(Interrupted::Cancelled),
+                () = &mut deadline => Err(Interrupted::TimedOut),
+            };
+            match ended {
+                Ok(report) => {
+                    let reason = if report.result.is_ok() {
+                        ShutdownReason::Completed
+                    } else {
+                        ShutdownReason::Error
+                    };
+                    let text = report
+                        .result
+                        .map(|output| output.text.unwrap_or_default())
+                        .map_err(|e| format!("agent hook failed: {e}"));
+                    (text, reason)
+                }
+                Err(why) => {
+                    // Cancel the prompt and let its loop unwind: the running
+                    // tool gets a TERM, the grace, then a KILL, and its result
+                    // is committed. The kill token is the last resort should
+                    // even that outlive the bound; the prompt is then dropped
+                    // and `shutdown` finishes what it can.
+                    cancel.cancel();
+                    if timeout(cleanup, &mut prompt).await.is_err() {
+                        kill.cancel();
+                    }
+                    let message = match why {
+                        Interrupted::Cancelled => Err("agent hook cancelled".to_owned()),
+                        Interrupted::TimedOut => Err(format!(
+                            "agent hook timed out after {} ms",
+                            self.budget.as_millis()
+                        )),
+                    };
+                    (message, ShutdownReason::Cancelled)
+                }
+            }
+        };
+        // Join the agent's tasks before the verdict is returned.
+        let _ = timeout(cleanup, agent.shutdown(reason)).await;
+        match text {
+            Ok(text) => match verdict(&text) {
+                Some(decision) => Executed::Decided(decision),
+                None => Executed::FailedOpen("the agent did not return a hook verdict".into()),
+            },
+            Err(message) => Executed::FailedOpen(message),
         }
+    }
+
+    /// Probe the environment and start the agent with the coding tools.
+    async fn start(
+        &self,
+        cancel: &CancellationToken,
+        kill: &CancellationToken,
+    ) -> Result<CodingAgent, String> {
+        let environment =
+            PebbleEnvironment::prepare(self.env.clone(), cancel.clone(), kill.clone())
+                .await
+                .map_err(|e| format!("agent hook environment: {e}"))?;
+        CodingAgent::builder(self.client.0.clone(), Arc::new(environment))
+            .model(&self.model)
+            .permission_level(PermissionLevel::Full)
+            .build()
+            .await
+            .map_err(|e| format!("agent hook could not start: {e}"))
     }
 }
 

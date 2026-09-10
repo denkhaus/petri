@@ -138,3 +138,14 @@ The service applies its own timeout and fail-open policy and returns a report;
 it never returns an error. Dropping the future is the cancellation signal: a
 root kill aborts the awaiting callback, and the driver then records the
 original result. A service must not call back into the run.
+
+A service that owns work a dropped future cannot finish — the local agent
+hook's tool process in the sandbox and its agent's tasks — keeps that work on
+a task of its own, so the drop still leaves an owner. The local agent hook
+does this: a timeout cancels the prompt, waits for the running tool to stop
+(the environment's TERM, the scope's grace, then a KILL) and for the agent's
+tasks to join, and only then returns its fail-open report; a dropped hook
+future cancels the same way through a guard, and the owner finishes the same
+cleanup on its own, bounded by the grace plus a fixed margin
+(`petri-fabro-steps::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
+`a_cancelled_run_stops_an_agent_hooks_running_tool`).
