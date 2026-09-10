@@ -1761,8 +1761,8 @@ const TIMED_GATE: &str = r#"digraph Gate {
 }"#;
 
 /// A withheld reply lets the gate's answer deadline expire; the gate takes
-/// `human.default_choice`, and the receipt records the withheld question as
-/// cancelled and not delivered.
+/// `human.default_choice`, and the receipt records the question as timed
+/// out with the default the gate took, nothing delivered.
 #[tokio::test]
 async fn a_withheld_reply_expires_into_the_default_choice() {
     let case = Case::new("withheld-default");
@@ -1794,8 +1794,12 @@ async fn a_withheld_reply_expires_into_the_default_choice() {
     assert!(!nodes.contains(&"ship".to_owned()), "{nodes:?}");
     let receipt = finished.receipt();
     assert_eq!(receipt["errors"], json!([]), "{receipt}");
-    assert_eq!(receipt["questions"][0]["reply"]["kind"], json!("cancelled"));
-    assert_ne!(receipt["questions"][0]["delivery"], json!("delivered"));
+    assert_eq!(
+        receipt["questions"][0]["reply"],
+        json!({ "kind": "timed_out", "default": "N" }),
+        "{receipt}"
+    );
+    assert_eq!(receipt["questions"][0]["delivery"], json!("expired"));
     assert_eq!(receipt["questions"][0]["timeout_ms"], json!(1000));
     let context = finished.final_context();
     assert_eq!(context["human.gate.selected"], json!("N"));
@@ -1812,7 +1816,8 @@ async fn a_withheld_reply_expires_into_the_default_choice() {
 }
 
 /// Without a default, an expired gate fails with Fabro's retry outcome and
-/// the run ends failed; the withheld reply is not an interview error.
+/// the run ends failed; the receipt records the question as timed out with
+/// no default, and the withheld reply is not an interview error.
 #[tokio::test]
 async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
     let case = Case::new("withheld-retry");
@@ -1848,6 +1853,12 @@ async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
     );
     let receipt = finished.receipt();
     assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    assert_eq!(
+        receipt["questions"][0]["reply"],
+        json!({ "kind": "timed_out" }),
+        "{receipt}"
+    );
+    assert_eq!(receipt["questions"][0]["delivery"], json!("expired"));
     let document = finished.inspect();
     let gate = &document["executions"][0]["engine"]["context"]["nodes"]["gate"];
     assert_eq!(

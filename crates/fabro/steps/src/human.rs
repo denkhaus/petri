@@ -6,13 +6,16 @@
 //! lowering guards the fallback tier for human gates.
 //!
 //! The gate owns its answer deadline (`TimeoutPolicy::HandlerManaged`): with
-//! a `timeout`, an unanswered question expires here. `human.default_choice`
-//! then routes to the named choice; without one the gate fails with Fabro's
-//! retry outcome (class `retry_requested`), so `max_retries` asks again and
-//! `on_retries_exhausted` decides after the last attempt, with the explicit
-//! routes checked first as Fabro's executor checks them. The driver arms no
-//! timer around a human gate, so its 30 day structural budget is not the
-//! answer deadline.
+//! a `timeout`, an unanswered question expires here. The gate reports the
+//! expiry on its progress channel first (`QuestionExpired`, naming the
+//! question and the default it takes), so the interview record and the
+//! public event stream carry the timeout as the gate's own fact.
+//! `human.default_choice` then routes to the named choice; without one the
+//! gate fails with Fabro's retry outcome (class `retry_requested`), so
+//! `max_retries` asks again and `on_retries_exhausted` decides after the last
+//! attempt, with the explicit routes checked first as Fabro's executor checks
+//! them. The driver arms no timer around a human gate, so its 30 day
+//! structural budget is not the answer deadline.
 //!
 //! A `review_target=true` gate reads `review_target` from the run context
 //! (`{label, url, kind}`), validates it as Fabro does, and asks Fabro's review
@@ -30,7 +33,7 @@ use ir::{Control, LogStream, Outcome, StepKindId, Value};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Answer, Question, QuestionOption, QuestionReference, Step, StepCtx};
+use steps::{Answer, Question, QuestionExpired, QuestionOption, QuestionReference, Step, StepCtx};
 use tokio::time;
 
 use crate::outcome::{ExplicitRoutes, Stage};
@@ -439,7 +442,18 @@ impl Step for HumanStep {
                         format!("no answer within {waited}ms; the question expired"),
                     )
                     .await;
-                    if let Some(choice) = config.default_choice() {
+                    // The expiry is the gate's own fact: reported before the
+                    // gate acts on it, with the default it takes, so the
+                    // host's interview record and the public stream never
+                    // infer a timeout from how the firing ended.
+                    let choice = config.default_choice();
+                    let expired = QuestionExpired {
+                        question:  question.id.clone(),
+                        waited_ms: waited,
+                        default:   choice.as_ref().map(|c| c.key.clone()),
+                    };
+                    let _ = ctx.logs.send(expired.to_event()).await;
+                    if let Some(choice) = choice {
                         ctx.log(
                             LogStream::Stdout,
                             format!("taking the default choice `{}`", choice.to),

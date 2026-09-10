@@ -1080,8 +1080,9 @@ in order), `default`, `freeform`, `sensitive`, `reference_url_contains` (a
 (`values`, for `multi_select`; Fabro's `multi_selected` `option_keys`), `text`
 (`value`), `negative` (the `N`/`no` option), `invalid` (`value`, sent as a
 choice the step must reject; the re-ask matches `"ask": 2`), `cancel`,
-`withhold` (no reply until the question is cancelled, so a gate with a
-`timeout` expires into its `human.default_choice` or Fabro's retry outcome).
+`withhold` (no reply until the question expires or is cancelled, so a gate
+with a `timeout` expires into its `human.default_choice` or Fabro's retry
+outcome and the receipt records the question as `timed_out`).
 `delay_ms` waits before acting; `required: false` lets an entry go unused.
 
 The terminal shows a `review_target` gate's reference as `review: <label>
@@ -1137,8 +1138,11 @@ edge taken by anything but a transient failure. See `crates/fabro/FORMAT.md`,
 record per question with its invocation, execution, firing, attempt, node,
 occurrence, ask, question id, kind, text, offered option keys, the review
 `reference` and `timeout_ms` when the question had them, the reply
-(`answered` with `choice`/`choices`/`text`, `cancelled`, or `failed`), and
-how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
+(`answered` with `choice`/`choices`/`text`, `cancelled`, `failed`, or
+`timed_out` with the `default` the gate took on its own when it had one: the
+gate's own report of its expiry, never inferred from how the firing ended),
+and how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`,
+`expired`); the
 `errors` list; and under `script`, a scripted interviewer's per-entry
 `consumed`/`remaining` counts. The records are in the receipt order: by
 invocation path, then invocation, execution, firing, occurrence, and ask

@@ -67,9 +67,11 @@ subset; the unconfigured path stays the standalone runner.
   branch fact on the occurrence, never on the fork it saw last.
 - **Interactions.** A question's identity is the node, the firing, its
   occurrence within the run, and the invocation path; `InterviewRequest` and
-  `question_asked` carry it, `control_delivered {Answer}` closes it, and the
-  interview receipt (`<run_dir>/interviews.json`) keeps every question and
-  reply.
+  `question_asked` carry it, `control_delivered {Answer}` closes it with an
+  answer, `question_expired` closes it when the gate's own deadline passes
+  (with the default the gate took, when it had one), and the interview
+  receipt (`<run_dir>/interviews.json`) keeps every question and its
+  disposition (`answered`, `cancelled`, `failed`, `timed_out`).
 - **Agent sessions.** Pebble's session id, parent session id, stream id and
   sequence, and tool call id are read out of every `agent_activity` envelope
   and never rewritten. A retained thread keeps one session across the nodes

@@ -1153,6 +1153,7 @@ impl Driver {
                 self.note_question(firing, &event);
                 // The External record `feed` appends takes the next seq.
                 let seq = self.engine.log.len() as u64;
+                self.note_expiry(firing, &event);
                 self.feed(Event::StepProgress { firing, ev: event });
                 if let Some(ack) = ack {
                     self.acknowledge_durable(seq, ack);
@@ -2597,6 +2598,22 @@ impl Driver {
         let Some(id) = answer.question.as_deref() else {
             return;
         };
+        self.end_wait(firing, id);
+    }
+
+    /// A step reported that one of its questions expired: the wait ends as
+    /// an answer would end it. The step owns the deadline; the driver only
+    /// stops counting the question as pending.
+    fn note_expiry(&mut self, firing: FiringId, event: &StepEvent) {
+        let Some(expired) = steps::QuestionExpired::from_event(event) else {
+            return;
+        };
+        self.end_wait(firing, &expired.question);
+    }
+
+    /// End the interaction wait for question `id` of `firing`, whether an
+    /// answer or the step's own expiry ended it.
+    fn end_wait(&mut self, firing: FiringId, id: &str) {
         let Some(task) = self.tasks.get_mut(&firing) else {
             return;
         };

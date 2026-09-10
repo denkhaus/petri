@@ -767,25 +767,28 @@ details live with that host, not here.
 per-attempt timeout. `ExecutorEnforced` (the default): the driver arms the
 timer at dispatch and it counts **active work only**. A `Question` on the
 firing's progress channel starts an interaction wait for that firing and
-attempt and pauses the timer; the delivered `Answer` naming that question ends
-the wait, and the timer resumes with the remaining time once no question of
-the attempt is pending. Overlapping questions from one attempt are one pause;
-an answer to a question the attempt never asked, or asked and already had
-answered, is stale and changes nothing. Each arming has its own id, so an
+attempt and pauses the timer; the delivered `Answer` naming that question, or
+the step's own `QuestionExpired` report of it, ends the wait, and the timer
+resumes with the remaining time once no question of the attempt is pending.
+Overlapping questions from one attempt are one pause; an answer to a question
+the attempt never asked, or asked and already had answered, is stale and
+changes nothing. Each arming has its own id, so an
 expiry queued by a timer that was paused or re-armed since is ignored. A
 sibling firing's wait never touches another firing's timer. `HandlerManaged`:
 the driver arms no timer; the step consumes `timeout` itself (a process
 deadline the executor enforces through `ProcessSpec.timeout`, reported as
 `ExitStatus.timed_out`; an agent's own turn deadline; a human gate's answer
-deadline). Both kinds keep cancellation, kill and the hard deadline. Resume
+deadline, which the gate reports as a `QuestionExpired` progress event before
+it acts on it). Both kinds keep cancellation, kill and the hard deadline. Resume
 re-dispatches an attempt with a fresh budget, and the redispatched attempt's
 own question pauses that budget before any of it is charged, exactly as a
 live attempt's does. Wait starts and ends are reported through `tracing`
 (`interaction wait started` / `ended`, by firing, attempt and question id);
-the durable record is the `StepProgress` question and the `ControlRequested`
-answer in the log. The run-wide stall watchdog and the failure circuit
-breaker (`Graph.policy`) are host policies over the observer stream and the
-routing middleware; neither is a timer of the driver's.
+the durable record is the `StepProgress` question and, ending it, the
+`ControlRequested` answer or the `StepProgress` expiry in the log. The
+run-wide stall watchdog and the failure circuit breaker (`Graph.policy`) are
+host policies over the observer stream and the routing middleware; neither is
+a timer of the driver's.
 
 **Delivery.** A `DeliverControl{Deliver}` only forwards to the firing's control
 channel — no deadline, no reason: a delivered value never starts the

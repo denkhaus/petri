@@ -77,7 +77,7 @@ use ir::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ANSWER_KEY, Question};
+use steps::{ANSWER_KEY, Question, QuestionExpired};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -449,6 +449,17 @@ pub enum EventBody {
     QuestionAsked {
         question: Question,
     },
+    /// A firing's question expired: the step's own answer deadline passed
+    /// with no answer, as the step reported it (`steps::QuestionExpired`).
+    /// `default` is the option the step took on its own, by key, when it had
+    /// one. The attempt's outcome follows as `attempt_finished`; expiry is
+    /// never inferred from that outcome.
+    QuestionExpired {
+        question:  String,
+        waited_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default:   Option<String>,
+    },
     /// The host delivered a control into a firing. `deliverable` is whether
     /// the firing could receive it; a late answer is recorded but not
     /// deliverable.
@@ -808,6 +819,20 @@ impl Projection {
                             emit(subject, EventBody::WaitStateChanged {
                                 state: WaitState::AwaitingAnswer,
                             });
+                        } else if let Some(expired) = QuestionExpired::from_event(ev) {
+                            // The step ended its own wait: the question is
+                            // no longer out, as after an answer.
+                            let was_asking = track.asking.remove(firing);
+                            emit(subject.clone(), EventBody::QuestionExpired {
+                                question:  expired.question,
+                                waited_ms: expired.waited_ms,
+                                default:   expired.default,
+                            });
+                            if was_asking {
+                                emit(subject, EventBody::WaitStateChanged {
+                                    state: WaitState::Running,
+                                });
+                            }
                         } else if let Some(note) = Note::from_step_event(ev) {
                             emit(subject, note_body(note));
                         } else if let Some(activity) = agent_activity(value) {

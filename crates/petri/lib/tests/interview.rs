@@ -1,20 +1,23 @@
 //! The interview dispatcher against real Fabro human gates on the standalone
 //! host: correlation, out-of-order answers from parallel gates, sensitive
-//! masking, a failing interviewer, cancellation, and the receipt.
+//! masking, a failing interviewer, cancellation, expiry, and the receipt.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use petri::execution::events::{
+    CollectingSink, DeliveredControl, EventBody, EventProjector, RunEvent, WaitState, replay_run,
+};
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
-    Delivery, InterviewDispatcher, InterviewError, InterviewReceipt, InterviewReply,
-    InterviewRequest, Interviewer, ReplyRecord,
+    Delivery, ExecutionObserver, InterviewDispatcher, InterviewError, InterviewReceipt,
+    InterviewReply, InterviewRequest, Interviewer, ReplyRecord,
 };
 use petri::executor::Retention;
 use petri::frontend::{CompileInputs, Lowered};
-use petri::ir::RunStatus;
+use petri::ir::{FailureClass, RunStatus, Status};
 use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
@@ -91,17 +94,63 @@ async fn run(
     lowered: Lowered,
     interviewer: Arc<dyn Interviewer>,
 ) -> (driver::ExecutionReport, InterviewReceipt) {
+    let (report, receipt, _) = run_projected(rt, lowered, interviewer).await;
+    (report, receipt)
+}
+
+/// Run with the public event stream collected beside the receipt.
+async fn run_projected(
+    rt: &Runtime,
+    lowered: Lowered,
+    interviewer: Arc<dyn Interviewer>,
+) -> (driver::ExecutionReport, InterviewReceipt, Vec<RunEvent>) {
     let dispatcher = InterviewDispatcher::new(interviewer);
+    let sink = Arc::new(CollectingSink::default());
+    let projector = EventProjector::new(sink.clone());
     let host_run = HostRun::new(lowered.graph.expect("lowers"))
         .with_children(lowered.children)
-        .observe(Arc::new(dispatcher.clone()));
+        .observe(Arc::new(dispatcher.clone()))
+        .observe(projector.clone() as Arc<dyn ExecutionObserver>);
     let report = host::run_configured(rt, host_run, |handle, secrets| {
         dispatcher.wire(handle, secrets);
     })
     .await
     .expect("the run completes");
     let receipt = dispatcher.shutdown().await;
-    (report, receipt)
+    let projection = projector.shutdown().await;
+    assert!(projection.is_clean(), "{projection:?}");
+    (report, receipt, sink.events())
+}
+
+/// The failure class of `node`'s final attempt, when it failed.
+fn failure_class(report: &driver::ExecutionReport, node: &str) -> Option<FailureClass> {
+    report
+        .state
+        .history()
+        .iter()
+        .find(|record| record.name == node)
+        .and_then(|record| match &record.outcome.status {
+            Status::Failure(info) => Some(info.class.clone()),
+            _ => None,
+        })
+}
+
+/// The names of the nodes that ran, in completion order.
+fn ran(report: &driver::ExecutionReport) -> Vec<&str> {
+    report
+        .state
+        .history()
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect()
+}
+
+/// The `question_expired` events of a stream.
+fn expiries(events: &[RunEvent]) -> Vec<&RunEvent> {
+    events
+        .iter()
+        .filter(|event| matches!(event.body, EventBody::QuestionExpired { .. }))
+        .collect()
 }
 
 /// Two human gates as the branches of one parallel node. A branch runs its
@@ -533,40 +582,77 @@ async fn an_invalid_answer_is_re_asked_with_the_next_ask_count() {
     assert!(ran.contains(&"no"), "{ran:?}");
 }
 
-/// The gate's answer deadline ends the interviewer's wait: the question
-/// expires in the step, the dispatcher records the reply as cancelled and
-/// not delivered, and the gate takes its default choice.
+/// A gate with a 300 ms answer deadline and a default choice.
+const TIMED: &str = r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Go?", timeout="300ms", human.default_choice="no"]
+    yes [shape=parallelogram, script="echo yes"]
+    no [shape=parallelogram, script="echo no"]
+    start -> gate
+    gate -> yes [label="[Y] Yes"]
+    gate -> no [label="[N] No"]
+    yes -> exit
+    no -> exit
+}"#;
+
+/// The same gate with no default: an expiry is Fabro's retry outcome.
+const TIMED_NO_DEFAULT: &str = r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Go?", timeout="300ms"]
+    yes [shape=parallelogram, script="echo yes"]
+    start -> gate
+    gate -> yes [label="[Y] Yes"]
+    yes -> exit
+}"#;
+
+/// The one expiry of a run: the public event, its subject, and the same
+/// event derived again from the run dir.
+fn the_expiry(dir: &RunDir, events: &[RunEvent]) -> RunEvent {
+    let expired = expiries(events);
+    assert_eq!(expired.len(), 1, "one expiry: {expired:?}");
+    let event = expired[0];
+    let subject = event.subject.as_ref().expect("a firing's event");
+    assert_eq!(subject.node.name, "gate");
+    // The question was out until the step ended its own wait.
+    let position = events
+        .iter()
+        .position(|e| e.id == event.id)
+        .expect("in the stream");
+    assert_eq!(events[position + 1].body, EventBody::WaitStateChanged {
+        state: WaitState::Running,
+    });
+    let replayed = replay_run(dir.path()).expect("projects");
+    let from_log = replayed
+        .iter()
+        .find(|e| e.id == event.id)
+        .expect("the expiry is derived from the log");
+    let mut live = event.clone();
+    live.observed_at = None;
+    assert_eq!(*from_log, live, "replay derives the same expiry");
+    live
+}
+
+/// The gate's answer deadline ends the interviewer's wait, and the record
+/// carries the gate's own disposition: timed out, with the default it took,
+/// nothing delivered. The public stream says the same, live and on replay,
+/// on the gate's firing and attempt.
 #[tokio::test]
-async fn an_expired_question_ends_the_interviewers_wait() {
-    const TIMED: &str = r#"digraph G {
-        start [shape=Mdiamond]
-        exit [shape=Msquare]
-        gate [shape=hexagon, label="Go?", timeout="300ms", human.default_choice="no"]
-        yes [shape=parallelogram, script="echo yes"]
-        no [shape=parallelogram, script="echo no"]
-        start -> gate
-        gate -> yes [label="[Y] Yes"]
-        gate -> no [label="[N] No"]
-        yes -> exit
-        no -> exit
-    }"#;
+async fn an_expired_question_is_recorded_as_timed_out_with_the_default_it_took() {
     let dir = RunDir::new("interview-expiry");
     let rt = runtime(&dir);
     let lowered = lower(&rt, &dir, TIMED);
     let token: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
-    let (report, receipt) = run(&rt, lowered, Arc::new(Silent(token.clone()))).await;
+    let (report, receipt, events) =
+        run_projected(&rt, lowered, Arc::new(Silent(token.clone()))).await;
     assert_eq!(
         report.status,
         RunStatus::Success,
         "{:?}",
         report.state.errors()
     );
-    let ran: Vec<_> = report
-        .state
-        .history()
-        .iter()
-        .map(|record| record.name.as_str())
-        .collect();
+    let ran = ran(&report);
     assert!(ran.contains(&"no") && !ran.contains(&"yes"), "{ran:?}");
     assert!(
         token
@@ -582,10 +668,143 @@ async fn an_expired_question_ends_the_interviewers_wait() {
         receipt.errors
     );
     assert_eq!(receipt.questions.len(), 1);
-    assert_eq!(receipt.questions[0].timeout_ms, Some(300));
-    assert!(matches!(receipt.questions[0].reply, ReplyRecord::Cancelled));
-    assert!(matches!(
-        receipt.questions[0].delivery,
-        Delivery::Late | Delivery::Shutdown
-    ));
+    let record = &receipt.questions[0];
+    assert_eq!(record.timeout_ms, Some(300));
+    assert_eq!(record.reply, ReplyRecord::TimedOut {
+        default: Some("N".to_owned()),
+    });
+    assert_eq!(record.delivery, Delivery::Expired);
+    let expiry = the_expiry(&dir, &events);
+    assert_eq!(expiry.body, EventBody::QuestionExpired {
+        question:  record.question.clone(),
+        waited_ms: 300,
+        default:   Some("N".to_owned()),
+    });
+    let subject = expiry.subject.expect("a firing's event");
+    assert_eq!(subject.firing, Some(record.firing));
+    assert_eq!(subject.attempt, Some(record.attempt));
+}
+
+/// Without a default the expired gate fails with Fabro's retry outcome. The
+/// record still says timed out, with no default, and the receipt is clean:
+/// the expiry is the gate's disposition, not an interviewer error.
+#[tokio::test]
+async fn an_expired_question_without_a_default_is_timed_out_and_the_gate_asks_for_a_retry() {
+    let dir = RunDir::new("interview-expiry-retry");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, TIMED_NO_DEFAULT);
+    let token: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+    let (report, receipt, events) = run_projected(&rt, lowered, Arc::new(Silent(token))).await;
+    assert_eq!(report.status, RunStatus::Failed);
+    assert_eq!(
+        failure_class(&report, "gate"),
+        Some(FailureClass::new("retry_requested"))
+    );
+    assert!(!ran(&report).contains(&"yes"));
+    assert!(receipt.is_clean(), "{:?}", receipt.errors);
+    assert_eq!(receipt.questions.len(), 1);
+    let record = &receipt.questions[0];
+    assert_eq!(record.reply, ReplyRecord::TimedOut { default: None });
+    assert_eq!(record.delivery, Delivery::Expired);
+    let expiry = the_expiry(&dir, &events);
+    assert_eq!(expiry.body, EventBody::QuestionExpired {
+        question:  record.question.clone(),
+        waited_ms: 300,
+        default:   None,
+    });
+}
+
+/// An interviewer that says to cancel is recorded as cancelled and
+/// delivered, apart from a timeout: the gate fails closed with class
+/// `interrupted`, and nothing expired.
+#[tokio::test]
+async fn a_cancelled_reply_is_delivered_and_recorded_apart_from_a_timeout() {
+    let dir = RunDir::new("interview-cancelled-reply");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, ONE_GATE);
+    let mut answers: BTreeMap<&'static str, Reply> = BTreeMap::new();
+    answers.insert("gate", Box::new(|_| InterviewReply::Cancelled));
+    let interviewer = Arc::new(ByNode {
+        answers,
+        seen: Mutex::new(Vec::new()),
+        after: None,
+    });
+    let (report, receipt, events) = run_projected(&rt, lowered, interviewer).await;
+    assert_eq!(report.status, RunStatus::Failed);
+    assert_eq!(
+        failure_class(&report, "gate"),
+        Some(FailureClass::new("interrupted"))
+    );
+    let ran = ran(&report);
+    assert!(!ran.contains(&"yes") && !ran.contains(&"no"), "{ran:?}");
+    assert!(receipt.is_clean(), "{:?}", receipt.errors);
+    assert_eq!(receipt.questions.len(), 1);
+    assert_eq!(receipt.questions[0].reply, ReplyRecord::Cancelled);
+    assert_eq!(receipt.questions[0].delivery, Delivery::Delivered);
+    assert!(expiries(&events).is_empty(), "nothing expired");
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.body,
+            EventBody::ControlDelivered {
+                control: DeliveredControl::Answer { answer },
+                deliverable: true,
+            } if answer.cancelled
+        )),
+        "the cancellation was delivered as an answer"
+    );
+}
+
+/// Ignores the cancel token and answers `Y` long after any deadline.
+struct LateYes;
+
+#[async_trait::async_trait]
+impl Interviewer for LateYes {
+    async fn reply(
+        &self,
+        _request: InterviewRequest,
+        _cancel: CancellationToken,
+    ) -> InterviewReply {
+        sleep(Duration::from_secs(5)).await;
+        InterviewReply::Answered(Answer::choice("Y"))
+    }
+}
+
+/// An answer that would arrive after the deadline never lands: the gate
+/// took its default when the question expired, the run did not wait for
+/// the interviewer, and the record keeps the timeout.
+#[tokio::test]
+async fn a_reply_after_the_deadline_never_lands_and_the_record_keeps_the_timeout() {
+    let dir = RunDir::new("interview-late-reply");
+    let rt = runtime(&dir);
+    let lowered = lower(&rt, &dir, TIMED);
+    let started = Instant::now();
+    let (report, receipt, events) = run_projected(&rt, lowered, Arc::new(LateYes)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the run did not wait for the late reply"
+    );
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let ran = ran(&report);
+    assert!(ran.contains(&"no") && !ran.contains(&"yes"), "{ran:?}");
+    assert!(receipt.is_clean(), "{:?}", receipt.errors);
+    assert_eq!(receipt.questions.len(), 1);
+    assert_eq!(receipt.questions[0].reply, ReplyRecord::TimedOut {
+        default: Some("N".to_owned()),
+    });
+    assert_eq!(receipt.questions[0].delivery, Delivery::Expired);
+    assert_eq!(expiries(&events).len(), 1);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.body, EventBody::ControlDelivered {
+                control: DeliveredControl::Answer { .. },
+                ..
+            })),
+        "no answer reached the gate"
+    );
 }

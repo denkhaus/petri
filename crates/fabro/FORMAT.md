@@ -467,10 +467,13 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   delivered steer (`{"$steer": ...}`) is not an answer: the gate ignores it
   and keeps its question open.
   - `timeout` is the answer deadline. An unanswered question expires in the
-    step: with `human.default_choice="<target or key>"` the gate takes that
-    choice and records `timeout` as the answer; without one it fails with
-    Fabro's retry outcome (class `retry_requested`), so `max_retries` asks
-    again and `on_retries_exhausted` decides after that. The question carries
+    step, which reports the expiry on its progress channel first
+    (`question_expired` in the public stream, `timed_out` with the default
+    taken in the interview receipt, as Fabro emits `InterviewTimeout`): with
+    `human.default_choice="<target or key>"` the gate takes that choice and
+    records `timeout` as the answer; without one it fails with Fabro's retry
+    outcome (class `retry_requested`), so `max_retries` asks again and
+    `on_retries_exhausted` decides after that. The question carries
     `timeout_ms` so a host can show the deadline.
   - `review_target=true` reads `review_target` from the run context
     (`{"label", "url", "kind"}`, as an earlier stage's `context_updates`
