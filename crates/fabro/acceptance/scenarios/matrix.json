@@ -278,9 +278,9 @@
       "backend": "docker",
       "agent": "api:openrouter",
       "required": true,
-      "status": "blocked",
-      "reason": "the pinned implement-plan child's verify script needs the Fabro repository's own toolchain (cargo, nightly clippy, bun); the inline migration covers the manager loop on the host, and a container adds no manager-loop behavior",
-      "test": null
+      "status": "planned",
+      "reason": null,
+      "test": "implement_child_runs_successfully_docker"
     },
     {
       "cell": "implement/child-runs-successfully@host/openrouter",

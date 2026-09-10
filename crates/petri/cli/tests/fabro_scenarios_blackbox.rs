@@ -266,6 +266,12 @@ cell!(
     openrouter
 );
 cell!(
+    implement_child_runs_successfully_docker,
+    "implement/child-runs-successfully",
+    docker,
+    openrouter
+);
+cell!(
     implement_input_model_inheritance,
     "implement/input-model-inheritance",
     host,
