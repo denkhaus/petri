@@ -1338,6 +1338,8 @@ impl Driver {
 
     /// Hand a finished attempt to the host before its record, when hooks are
     /// installed. `true` when the finish is now the hook task's to complete.
+    /// The outcome is the one [`Self::finish`] finalized, so on the final
+    /// attempt the host prepares the effective result the engine records.
     fn hook_result(
         &mut self,
         firing: FiringId,
@@ -2984,6 +2986,20 @@ impl Driver {
                 );
             }
         }
+
+        // The node's exhaustion policy applies here, once, to every returned
+        // attempt (`RetryPolicy::finalize`): before the host prepares the
+        // result and before the record, so what a host is handed on the final
+        // attempt is what the engine records, and a host's change is never
+        // converted again. The engine records what it is given.
+        let mut outcome = match self
+            .engine
+            .firing(firing)
+            .and_then(|live| self.engine.graph().node(live.node))
+        {
+            Some(node) => node.retry.finalize(attempt, outcome),
+            None => outcome,
+        };
 
         // Masking happens before the append, so the persisted log is post-mask.
         outcome.output = self.sink.mask_value(&outcome.output);

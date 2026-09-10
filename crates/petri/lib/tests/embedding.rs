@@ -41,7 +41,7 @@ use petri::fabro::{
 };
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
-use petri::ir::{Attempt, EdgeId, Graph, Outcome, RunStatus, Status, Value};
+use petri::ir::{Attempt, EdgeId, Exhaustion, Graph, Outcome, RunStatus, Status, Value};
 use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
@@ -80,6 +80,26 @@ const WORKFLOW: &str = r#"digraph G {
     ship -> exit
     hold -> exit
 }"#;
+
+/// A node with an explicit recovery edge, for the completion preparation
+/// scenarios: `work` is declared by the caller, and what the host is handed
+/// as its final result decides between `recover` and `done`.
+fn recovery_workflow(work: &str) -> String {
+    format!(
+        r#"digraph G {{
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [{work}]
+    recover [shape=parallelogram, script="echo recovered"]
+    done [shape=parallelogram, script="echo done"]
+    start -> work
+    work -> recover [condition="outcome=failed"]
+    work -> done
+    recover -> exit
+    done -> exit
+}}"#
+    )
+}
 
 /// One long command, for the stop and recovery scenarios.
 const LONG: &str = r#"digraph G {
@@ -131,6 +151,26 @@ fn lower(rt: &Runtime, dir: &RunDir, text: &str) -> Lowered {
         lowered.diagnostics
     );
     lowered
+}
+
+/// Script the agent stub `work` to ask for a retry on every attempt, with a
+/// short backoff so the retry does not slow the scenario.
+fn script_work_retrying(graph: &mut Graph) {
+    let node = graph
+        .body
+        .nodes
+        .iter_mut()
+        .find(|n| n.name == "work")
+        .expect("the work node");
+    node.retry.backoff.initial = Duration::from_millis(10);
+    node.retry.backoff.max = Duration::from_millis(10);
+    let Value::Object(config) = &mut node.step.config else {
+        panic!("an object config");
+    };
+    config.insert(
+        "simulate".into(),
+        json!({ "outcome": "failed", "failure_class": "retry_requested" }),
+    );
 }
 
 /// Script the agent stub: the first attempt asks for a retry, the second
@@ -199,8 +239,10 @@ struct Script {
     pause:             Option<&'static str>,
     skip:              Option<&'static str>,
     block:             Option<&'static str>,
-    /// Make this node's failure a partial success.
+    /// Make this node's final failure a partial success.
     accept_failure_of: Option<&'static str>,
+    /// Make this node's final partial success a failure again.
+    fail_final_of:     Option<&'static str>,
     /// Replace this node's selected route with this edge.
     override_route:    Option<(&'static str, EdgeId)>,
     /// Sleep this long in this node's transition.
@@ -236,6 +278,18 @@ fn wants_checkpoint(view: &FiringView) -> bool {
     !matches!(view.branch, BranchRole::Member(_))
 }
 
+/// What the host was handed to prepare, for one attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Handed {
+    node:       String,
+    attempt:    u32,
+    status:     String,
+    /// The stage's reported `output.outcome`, when the step set one.
+    reported:   Option<String>,
+    will_retry: bool,
+    exhausted:  bool,
+}
+
 struct FakeHost {
     script:      Script,
     release:     Notify,
@@ -244,6 +298,8 @@ struct FakeHost {
     checkpoints: Mutex<Vec<(String, bool)>>,
     /// Every callback, in the order the host ran them.
     calls:       Mutex<Vec<String>>,
+    /// Every result the host was asked to prepare, in order.
+    handed:      Mutex<Vec<Handed>>,
 }
 
 impl FakeHost {
@@ -254,6 +310,7 @@ impl FakeHost {
             paused: AtomicU32::new(0),
             checkpoints: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
+            handed: Mutex::new(Vec::new()),
         })
     }
 
@@ -263,6 +320,17 @@ impl FakeHost {
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("not poisoned").clone()
+    }
+
+    /// What the host was handed for `node`, attempt by attempt.
+    fn handed(&self, node: &str) -> Vec<Handed> {
+        self.handed
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .filter(|h| h.node == node)
+            .cloned()
+            .collect()
     }
 }
 
@@ -297,8 +365,26 @@ impl ExecutionHooks for FakeHost {
         let view = &request.view;
         let name = view.node_name();
         self.call(format!("prepare_result {name} {}", view.attempt.raw()));
+        self.handed.lock().expect("not poisoned").push(Handed {
+            node:       name.to_owned(),
+            attempt:    view.attempt.raw(),
+            status:     request.outcome.status.tag().to_owned(),
+            reported:   request
+                .outcome
+                .output
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            will_retry: request.will_retry,
+            exhausted:  request.exhausted,
+        });
         let mut prepared = Prepared::unchanged();
         prepared.notes.push(marker("prepare_result", view));
+        // An attempt the engine will retry is not the one to prepare: the
+        // host waits for the final result.
+        if request.will_retry {
+            return Ok(prepared);
+        }
         if self.script.accept_failure_of == Some(name)
             && let Status::Failure(info) = &request.outcome.status
         {
@@ -307,6 +393,17 @@ impl ExecutionHooks for FakeHost {
                     underlying: Some(info.clone()),
                 }),
                 reason: Some("the host accepts this failure".into()),
+                ..ResultAdjustment::default()
+            };
+        }
+        if self.script.fail_final_of == Some(name)
+            && let Status::PartialSuccess {
+                underlying: Some(info),
+            } = &request.outcome.status
+        {
+            prepared.adjustment = ResultAdjustment {
+                status: Some(Status::Failure(info.clone())),
+                reason: Some("the host rejects this partial success".into()),
                 ..ResultAdjustment::default()
             };
         }
@@ -471,8 +568,17 @@ async fn run_workflow_with(
     hooks: Option<Arc<dyn ExecutionHooks>>,
     edit: impl FnOnce(&mut Graph),
 ) -> RunOutcome {
+    run_text_with(dir, WORKFLOW, hooks, edit).await
+}
+
+async fn run_text_with(
+    dir: &RunDir,
+    text: &str,
+    hooks: Option<Arc<dyn ExecutionHooks>>,
+    edit: impl FnOnce(&mut Graph),
+) -> RunOutcome {
     let rt = runtime(dir, hooks);
-    let mut lowered = lower(&rt, dir, WORKFLOW);
+    let mut lowered = lower(&rt, dir, text);
     edit(lowered.graph.as_mut().expect("lowers"));
     let sink = Arc::new(CollectingSink::default());
     let (report, receipt) = run_projected(&rt, lowered, sink.clone(), Vec::new()).await;
@@ -1114,6 +1220,304 @@ async fn a_prepared_result_keeps_the_original_attempt_evidence() {
         &recorded.outcome.status,
         Status::PartialSuccess { underlying: Some(info) } if info.class == "exit_status:3"
     ));
+}
+
+/// The `result_prepared` note recorded for `node`, when the host changed a
+/// result.
+fn result_prepared_note(events: &[RunEvent], node: &str) -> Value {
+    bodies_of(events, node)
+        .into_iter()
+        .find_map(|b| match b {
+            EventBody::HostNote { kind, payload } if kind == RESULT_PREPARED_KIND => {
+                Some(payload.clone())
+            }
+            _ => None,
+        })
+        .expect("the original evidence is recorded")
+}
+
+/// The position of the first event of `node` that `pred` accepts.
+fn position_of(events: &[RunEvent], node: &str, pred: &dyn Fn(&EventBody) -> bool) -> usize {
+    bodies_of(events, node)
+        .iter()
+        .position(|b| pred(b))
+        .expect("the event is present")
+}
+
+/// Exhausted retries under the engine's own exhaustion policy: the host is
+/// handed each attempt, and on the final one the effective result the engine
+/// will record (the `PartialSuccess` that `AcceptPartial` makes), not the
+/// step's intermediate failure. It may change that result, and the routes
+/// follow the change.
+#[tokio::test]
+async fn an_exhausted_retry_is_prepared_as_the_final_effective_result() {
+    let accept_partial = |graph: &mut Graph| {
+        script_work_retrying(graph);
+        let node = graph
+            .body
+            .nodes
+            .iter_mut()
+            .find(|n| n.name == "work")
+            .expect("the work node");
+        // Another dialect's exhaustion policy, set on the node directly: the
+        // Fabro lowering keeps the engine's exhaustion at `Fail`.
+        node.retry.on_exhaustion = Exhaustion::AcceptPartial;
+    };
+    let workflow = recovery_workflow(r#"shape=box, prompt="try", max_retries=1"#);
+
+    // Left alone, the final attempt is handed over already finalized, and the
+    // record is what the host saw.
+    let dir = RunDir::new("embed-exhausted-seen");
+    let host = FakeHost::new(Script::default());
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), accept_partial).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work"), vec![
+        Handed {
+            node:       "work".into(),
+            attempt:    1,
+            status:     "failure".into(),
+            reported:   Some("failed".into()),
+            will_retry: true,
+            exhausted:  false,
+        },
+        Handed {
+            node:       "work".into(),
+            attempt:    2,
+            status:     "partial_success".into(),
+            reported:   Some("failed".into()),
+            will_retry: false,
+            exhausted:  true,
+        },
+    ]);
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![
+        (1, "failure".to_owned()),
+        (2, "partial_success".to_owned())
+    ]);
+    assert_eq!(work.final_status.as_deref(), Some("partial_success"));
+    assert_eq!(work.routes, vec!["done".to_owned()]);
+
+    // Changed by the host, the final result is recorded as changed, the
+    // original evidence beside it, and routing takes the failure edge the
+    // effective result matches.
+    let dir = RunDir::new("embed-exhausted-changed");
+    let host = FakeHost::new(Script {
+        fail_final_of: Some("work"),
+        ..Script::default()
+    });
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), accept_partial).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work").len(), 2);
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![
+        (1, "failure".to_owned()),
+        (2, "failure".to_owned())
+    ]);
+    assert_eq!(work.final_status.as_deref(), Some("failure"));
+    assert_eq!(work.routes, vec!["recover".to_owned()]);
+    let evidence = result_prepared_note(&outcome.events, "work");
+    assert_eq!(evidence["attempt"], json!(2));
+    assert_eq!(
+        evidence["original"]["PartialSuccess"]["underlying"]["class"],
+        json!("retry_requested")
+    );
+    assert_eq!(
+        evidence["effective"]["Failure"]["class"],
+        json!("retry_requested")
+    );
+    assert_eq!(
+        evidence["reason"],
+        json!("the host rejects this partial success")
+    );
+    // The preparation precedes the final attempt's record.
+    let final_note = position_of(
+        &outcome.events,
+        "work",
+        &|b| matches!(b, EventBody::HostNote { kind, .. } if kind == RESULT_PREPARED_KIND),
+    );
+    let records: Vec<usize> = bodies_of(&outcome.events, "work")
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b, EventBody::AttemptFinished { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert!(
+        final_note > records[0],
+        "the note follows the first attempt's record"
+    );
+    assert!(
+        final_note < records[1],
+        "the note precedes the final attempt's record"
+    );
+    let recorded = outcome
+        .report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "work")
+        .expect("recorded");
+    assert!(matches!(
+        &recorded.outcome.status,
+        Status::Failure(info) if info.class == "retry_requested"
+    ));
+}
+
+/// Exhausted retries under Fabro's own policy: the stage finalizes the
+/// exhausted retry inside the step, so the host is handed that decision (here
+/// the failure kept for its explicit `outcome=failed` edge under
+/// `on_failure="succeed"`), and a host that accepts it moves the run onto
+/// the success edge.
+#[tokio::test]
+async fn a_fabro_exhaustion_decision_is_prepared_before_its_record() {
+    let workflow =
+        recovery_workflow(r#"shape=box, prompt="try", max_retries=1, on_failure="succeed""#);
+
+    let dir = RunDir::new("embed-fabro-exhausted-seen");
+    let host = FakeHost::new(Script::default());
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), script_work_retrying).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work"), vec![
+        Handed {
+            node:       "work".into(),
+            attempt:    1,
+            status:     "failure".into(),
+            reported:   Some("failed".into()),
+            will_retry: true,
+            exhausted:  false,
+        },
+        Handed {
+            node:       "work".into(),
+            attempt:    2,
+            status:     "failure".into(),
+            reported:   Some("failed".into()),
+            will_retry: false,
+            exhausted:  true,
+        },
+    ]);
+    let timeline = Timeline::from_events(&outcome.events);
+    assert_eq!(
+        timeline.node("work").final_status.as_deref(),
+        Some("failure")
+    );
+    assert_eq!(timeline.node("work").routes, vec!["recover".to_owned()]);
+
+    let dir = RunDir::new("embed-fabro-exhausted-changed");
+    let host = FakeHost::new(Script {
+        accept_failure_of: Some("work"),
+        ..Script::default()
+    });
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), script_work_retrying).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(
+        host.handed("work").len(),
+        2,
+        "both attempts are handed over"
+    );
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![
+        (1, "failure".to_owned()),
+        (2, "partial_success".to_owned())
+    ]);
+    assert_eq!(work.final_status.as_deref(), Some("partial_success"));
+    assert_eq!(work.routes, vec!["done".to_owned()]);
+    let evidence = result_prepared_note(&outcome.events, "work");
+    assert_eq!(evidence["attempt"], json!(2));
+    assert_eq!(
+        evidence["original"]["Failure"]["class"],
+        json!("retry_requested")
+    );
+}
+
+/// An ordinary, non-retryable failure: one attempt, handed over as final and
+/// exhausted, and a host that accepts it moves the run onto the success edge
+/// instead of the explicit failure edge.
+#[tokio::test]
+async fn an_ordinary_failure_is_prepared_before_its_record_and_routes_on_the_effective_result() {
+    let workflow = recovery_workflow(r#"shape=parallelogram, script="echo boom >&2; exit 3""#);
+
+    let dir = RunDir::new("embed-failure-seen");
+    let host = FakeHost::new(Script::default());
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), |_| {}).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work"), vec![Handed {
+        node:       "work".into(),
+        attempt:    1,
+        status:     "failure".into(),
+        reported:   Some("failed".into()),
+        will_retry: false,
+        exhausted:  true,
+    }]);
+    let timeline = Timeline::from_events(&outcome.events);
+    assert_eq!(
+        timeline.node("work").final_status.as_deref(),
+        Some("failure")
+    );
+    assert_eq!(timeline.node("work").routes, vec!["recover".to_owned()]);
+
+    let dir = RunDir::new("embed-failure-changed");
+    let host = FakeHost::new(Script {
+        accept_failure_of: Some("work"),
+        ..Script::default()
+    });
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), |_| {}).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![(1, "partial_success".to_owned())]);
+    assert_eq!(work.final_status.as_deref(), Some("partial_success"));
+    assert_eq!(work.routes, vec!["done".to_owned()]);
+    let evidence = result_prepared_note(&outcome.events, "work");
+    assert_eq!(
+        evidence["original"]["Failure"]["class"],
+        json!("exit_status:3")
+    );
+    assert_eq!(
+        evidence["effective"]["PartialSuccess"]["underlying"]["class"],
+        json!("exit_status:3")
+    );
+    let note = position_of(
+        &outcome.events,
+        "work",
+        &|b| matches!(b, EventBody::HostNote { kind, .. } if kind == RESULT_PREPARED_KIND),
+    );
+    let record = position_of(&outcome.events, "work", &|b| {
+        matches!(b, EventBody::AttemptFinished { .. })
+    });
+    assert!(note < record, "the preparation precedes the record");
 }
 
 /// A route override changes where the run goes; a fatal transition blocks

@@ -487,7 +487,10 @@ with a working execution path.
 12. **`Exhaustion::AcceptPartial` fires whenever a retryable status has no attempts
     left**, including `max_attempts: 1` where no retry was ever possible. Reading it
     the other way would make `allow_partial` silently inert unless retries were also
-    configured.
+    configured. The driver applies it (`RetryPolicy::finalize`) to every returned
+    attempt before a host prepares the result, so the engine records the finish it
+    is given and a host's prepared result is never converted again; the engine
+    applies it only to the `invalid_splice` failure it makes itself.
 
 13. **`base_delay` uses repeated multiplication, not `powi`.** `powi` is not
     guaranteed bit-identical across platforms, and the delay goes into the log.

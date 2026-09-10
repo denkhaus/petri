@@ -107,8 +107,11 @@ acknowledgement gates the next step of the run:
   starts. Holding it pauses admission (the control service's pause is built
   on it).
 - `prepare_result` runs after an attempt returned and before its record is
-  appended; an adjustment keeps the original evidence beside the effective
-  record (`host_note {kind: result_prepared}`).
+  appended, once per attempt. It is handed the effective outcome: the
+  stage's failure policy, exhaustion included, has already run, so the
+  final attempt (`will_retry == false`) is the completion to prepare, and
+  routing follows the record it produces. An adjustment keeps the original
+  evidence beside the effective record (`host_note {kind: result_prepared}`).
 - `after_record` runs after the final outcome is recorded and before routing
   is resolved; its notes precede the routing record.
 - `transition` runs after routes are selected and before they are recorded

@@ -146,7 +146,10 @@ Rules (violations are review-blockers):
 3. **Log truth** — converting a failure to `PartialSuccess` must preserve the
    real failure in `underlying`. All conversion paths: process `soft_fail`
    config; `Exhaustion::AcceptPartial` (fires whenever a retryable status hits
-   exhaustion, including `max_attempts: 1`); direct StepKind return.
+   exhaustion, including `max_attempts: 1`; `RetryPolicy::finalize`, applied
+   by the driver to every returned attempt before a host prepares the result,
+   and by the engine only to the `invalid_splice` failure it makes itself);
+   direct StepKind return.
 4. `StatusKind` is the payload-free discriminant for `retry_on` matching only —
    derived via one `From<&Status>` impl; not a second classification point
    (an explicit `PartialSuccess` entry in `retry_on` cannot defeat rule 2).
@@ -170,8 +173,9 @@ back `RetryElapsed`). **Retries are invisible everywhere except the event log:**
 routing, run-context recording, cancel-scope propagation, and `kv` merges key
 off the final attempt only. Non-final attempts' full outcomes (including their
 `context_updates`) live in their finish records for tooling. `AcceptPartial`'s
-converted outcome *is* final and merges normally. Success-like statuses are
-never retried. `Budget.max_firings` counts firings, not attempts;
+converted outcome *is* final and merges normally; the engine records the
+finish it is given and does not convert again, so a host's prepared result
+stands. Success-like statuses are never retried. `Budget.max_firings` counts firings, not attempts;
 `Budget.timeout` is per attempt.
 
 **Run context.** Core-maintained, derived state (never checkpointed
@@ -503,9 +507,15 @@ continues installs `driver::lifecycle::ExecutionHooks`
 (`Runtime::hooks`). The order for a completed node is: node admission
 (`before_attempt`, once per attempt, so a retry-sensitive hook runs per
 attempt; a paused firing keeps its identity, starts no attempt, and a cancel
-settles it) → the attempt → the step's own result policy → result preparation
-(`prepare_result`, before the `StepFinished` record; an adjustment keeps the
-original status and output in a recorded `result_prepared` note) → the
+settles it) → the attempt → the step's own result policy (a Fabro stage
+finalizes an exhausted retry inside the step, explicit routes first) → the
+node's exhaustion policy (`RetryPolicy::finalize`, applied once by the driver
+before the hand-off; the engine records the finish it is given) → result
+preparation (`prepare_result`, once per attempt, before the `StepFinished`
+record; on the final attempt the host is handed the effective outcome the
+engine will record and may change it, and the routes resolved below see the
+change; an adjustment keeps the original status and output in a recorded
+`result_prepared` note) → the
 canonical record → `after_record` → route selection by the decision resolver
 → `transition` (once per completed firing, no-route completions included; an
 override is traced as an intervention, a fatal error blocks every group, a

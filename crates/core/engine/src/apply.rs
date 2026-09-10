@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 
 use ir::{
-    Attempt, CancelScopeId, Control, EdgeTransition, EvalEnv, Exhaustion, ExpandTarget, Expansion,
+    Attempt, CancelScopeId, Control, EdgeTransition, EvalEnv, ExpandTarget, Expansion,
     FailureClass, FailureInfo, FiringId, Generation, Guard, JoinPolicy, Node, NodeId, Outcome,
     PickPolicy, SelectionPolicy, Status, Token, Value, eval, eval_bool,
 };
@@ -676,21 +676,27 @@ fn on_step_finished(
                 Ok(prepared) => plan = Some(prepared),
                 Err(error) => {
                     outcome = reject_splices(outcome, error.to_string());
-                    // The converted failure gets the ordinary retry decision.
+                    // The converted failure gets the ordinary retry decision,
+                    // and the node's exhaustion policy when none is left: the
+                    // engine made this failure after the driver's hand-off,
+                    // so the engine finalizes it.
                     if node.retry.should_retry(&outcome.status)
                         && node.retry.has_attempt_after(attempt)
                     {
                         schedule_retry(state, cmds, firing_id, &node, attempt);
                         return;
                     }
+                    outcome = node.retry.finalize(attempt, outcome);
                 }
             }
         }
     }
 
-    // This attempt is final.
+    // This attempt is final, and its outcome is recorded as it arrived: the
+    // driver applied the node's exhaustion policy (`RetryPolicy::finalize`)
+    // before any host prepared the result, so the record a host prepared is
+    // the record kept.
     state.remove_firing(firing_id);
-    let outcome = accept_partial_on_exhaustion(&node, attempt, outcome);
 
     state.record_outcome(FiringRecord {
         firing: firing_id,
@@ -762,22 +768,6 @@ fn schedule_retry(
         next_attempt: attempt.next(),
         base_delay:   node.retry.base_delay(attempt),
     });
-}
-
-/// Turn an exhausted retry's failure into a `PartialSuccess`, keeping the real
-/// failure in `underlying` so the log never records a clean success for
-/// something that failed.
-fn accept_partial_on_exhaustion(node: &Node, attempt: Attempt, outcome: Outcome) -> Outcome {
-    let exhausted =
-        node.retry.should_retry(&outcome.status) && !node.retry.has_attempt_after(attempt);
-    if node.retry.on_exhaustion != Exhaustion::AcceptPartial || !exhausted {
-        return outcome;
-    }
-    let underlying = outcome.status.failure_info().cloned();
-    Outcome {
-        status: Status::PartialSuccess { underlying },
-        ..outcome
-    }
 }
 
 /// The backoff elapsed: start the next attempt.
