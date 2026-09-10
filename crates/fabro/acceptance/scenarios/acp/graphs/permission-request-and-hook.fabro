@@ -1,0 +1,13 @@
+digraph AcpPermissionRequestAndHook {
+    graph [
+        goal="An ACP agent asks permission for a shell call; the configured pre_tool_use hook decides",
+        backend="acp",
+        acp.command="python3 .fabro/scripted_acp_agent.py"
+    ]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    agent [label="Clean the build directory", prompt="Remove the build directory, asking before you run the shell. [acp:permission]", on_failure="exit"]
+    verify [shape=parallelogram, script="cat permission.json && test ! -e build-removed.txt && echo BLOCKED"]
+    start -> agent -> verify -> exit
+}

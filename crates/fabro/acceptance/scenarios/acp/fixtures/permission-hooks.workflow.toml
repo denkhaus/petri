@@ -1,0 +1,10 @@
+[[run.hooks]]
+name = "deny-shell"
+event = "pre_tool_use"
+matcher = "shell"
+script = "echo '{\"decision\":\"block\",\"reason\":\"shell is not allowed here\"}'; exit 2"
+
+[[run.hooks]]
+name = "log-tools"
+event = "post_tool_use"
+script = "echo ran:$FABRO_NODE_ID >> tool-hooks.log"

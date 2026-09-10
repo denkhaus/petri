@@ -19,7 +19,7 @@ of silently disabling an assertion. Task 18's differential adapter and task
 | --- | --- | --- |
 | `schema_version` | yes | `1` |
 | `id` | yes | `<family>/<name>`, equal to the file's path without `.scenario.json` |
-| `family` | yes | one of `code-review`, `security-review`, `implement`, `interview`, `provider-faults`, `routing`, `backend` (the backend-matrix cases: what a container scope must do that a host scope already does) |
+| `family` | yes | one of `code-review`, `security-review`, `implement`, `interview`, `provider-faults`, `routing`, `backend` (the backend-matrix cases: what a container scope must do that a host scope already does), `acp` (the ACP agent backend through a scripted agent the fixture commits) |
 | `title` | yes | one sentence |
 | `obligation` | no | the `scenario_obligations` entry of `bundles.lock.json` this scenario satisfies |
 | `bundle` | yes | see "Bundle" |
@@ -110,7 +110,11 @@ file names every required cell of `(scenario, backend, agent)`; a scenario
 file declares the mode it is written for, and a second cell reuses the file
 with `modes` overridden by the matrix entry. `api:openrouter` is answered by
 the OpenAI twin on its chat completions endpoint, as the pinned catalog
-routes it.
+routes it. `acp` starts no twin and binds no `{model}`: the fixture commits
+a scripted Agent Client Protocol agent (`acp/fixtures/scripted_acp_agent.py`,
+driven by a JSON script committed beside it, its header says how) and the
+graph names it through `acp.command`, which resolves in the run workspace
+on the host and in the container alike.
 
 ## Services
 
@@ -198,7 +202,14 @@ Values compare exactly unless the value is a matcher object:
 status as `petri inspect` reports it. `visits` are per node, from the node
 records. `required_nodes` and `forbidden_nodes` are node names as the run
 finished them (branch instances are `job#0`, ...); a node a cancel reached
-before it ran has a `cancelled` record and counts for neither list.
+before it ran has a `cancelled` record and counts for neither list. Two
+optional keys of `process` default to empty: `attempts` is per node, how
+many attempts the node's final firing took (`engine.context.nodes.<node>.attempts`
+of the root's final execution), which is how a retry inside one firing is
+observed while `visits` still counts one; `stderr_contains` lists texts
+the run's terminal output must contain, the echoed step lines
+(`[node#firing] …`) and the run's own notices, which is where a hook
+warning or a block reason is public.
 
 `context` compares the root invocation's final context: `exact` per key,
 `absent` per key, and with `complete: true` every other key must be listed

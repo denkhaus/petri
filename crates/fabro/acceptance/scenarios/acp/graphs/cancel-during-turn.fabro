@@ -1,0 +1,14 @@
+digraph AcpCancelDuringTurn {
+    graph [
+        goal="An ACP turn that waits is cancelled from the terminal",
+        backend="acp",
+        acp.command="python3 .fabro/scripted_acp_agent.py"
+    ]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prepare [shape=parallelogram, script="printf 'draft\n' > notes.txt && echo prepared"]
+    agent [label="Wait for instructions", prompt="Wait for further instructions. [acp:wait]", on_failure="exit"]
+    verify [shape=parallelogram, script="cat notes.txt"]
+    start -> prepare -> agent -> verify -> exit
+}

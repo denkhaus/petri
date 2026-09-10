@@ -1,0 +1,15 @@
+{
+  "[acp:permission]": [
+    {
+      "permission": {
+        "tool": "shell",
+        "kind": "execute",
+        "input": { "command": "rm -rf build" },
+        "record": "permission.json",
+        "effect": { "path": "build-removed.txt", "text": "removed\n" }
+      },
+      "text": "Asked before running the shell.",
+      "directive": { "outcome": "succeeded", "context_updates": { "asked": true } }
+    }
+  ]
+}

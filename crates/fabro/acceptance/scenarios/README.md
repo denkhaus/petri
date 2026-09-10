@@ -21,7 +21,14 @@ scenarios/
 ```
 
 Families: `code-review`, `security-review`, `implement`, `interview`,
-`provider-faults`, `routing`, and `backend` (the backend-matrix cases). The
+`provider-faults`, `routing`, `backend` (the backend-matrix cases), and
+`acp` (the ACP agent backend). The `acp` family runs inline graphs whose
+`acp.command` starts `acp/fixtures/scripted_acp_agent.py`, a standard-library
+Python agent the fixture commits into the repository together with a JSON
+script that says what each prompt does (text chunks, a routing directive, a
+file written, an exit before answering, a permission request, a wait for
+`session/cancel`); the agent reads nothing from the environment, so the same
+fixture runs on the host and in a container. The
 `fix-ci` bundle is excluded by an owner decision of 2026-09-07; `../CONTRACT.md`
 records the reason and where its behavior is covered instead. The family's minimum scenarios
 and critical outcomes are the phase 4 table of

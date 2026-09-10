@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "id": "acp/cancel-during-turn",
+  "family": "acp",
+  "title": "A scripted ACP agent waits inside its turn and the run is cancelled from the terminal once the agent says it is waiting: the client sends session/cancel, the agent records it and exits, the run ends cancelled with the interrupt reason, the node behind the agent never runs, nothing leaks, and the retained workspace holds what the command wrote.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/cancel-during-turn.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          },
+          ".fabro/scripted_acp_agent.py": {
+            "file": "fixtures/scripted_acp_agent.py",
+            "mode": "0755"
+          },
+          ".fabro/acp-script.json": {
+            "file": "fixtures/cancel-during-turn-script.json"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "acp"
+  },
+  "services": {},
+  "interviews": [],
+  "controls": {
+    "interrupt_when": {
+      "file": "waiting.txt"
+    }
+  },
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 1,
+      "status": "cancelled",
+      "required_nodes": [
+        "prepare"
+      ],
+      "forbidden_nodes": [
+        "verify"
+      ],
+      "visits": {
+        "prepare": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "command.output": "prepared\n"
+      },
+      "absent": [
+        "response.agent"
+      ],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\n"
+      },
+      {
+        "path": "waiting.txt",
+        "text": ""
+      },
+      {
+        "path": "cancelled.txt",
+        "text": "session/cancel\n"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true,
+      "cancel_reason": "interrupt"
+    }
+  }
+}

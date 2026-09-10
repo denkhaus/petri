@@ -1,0 +1,19 @@
+digraph AcpTurnAndDirective {
+    graph [
+        goal="One ACP turn reads the notes, records a verdict, and routes by its directive",
+        backend="acp",
+        acp.command="python3 .fabro/scripted_acp_agent.py"
+    ]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    prepare [shape=parallelogram, script="printf 'draft\n' > notes.txt && echo prepared"]
+    agent [label="Review the notes", prompt="Review notes.txt and record your verdict in verdict.txt. [acp:review]", on_failure="exit"]
+    revise [shape=parallelogram, label="Revise", script="echo revise > wrong-route.txt && echo REVISED"]
+    approve [shape=parallelogram, label="Approve", script="cat notes.txt verdict.txt && echo APPROVED"]
+    start -> prepare -> agent
+    agent -> revise [label="Revise"]
+    agent -> approve [label="Approve"]
+    revise -> exit
+    approve -> exit
+}

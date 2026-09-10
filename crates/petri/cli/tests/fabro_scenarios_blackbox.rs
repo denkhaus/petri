@@ -34,12 +34,37 @@ macro_rules! cell {
     (@agent openai) => { Agent::OpenAi };
     (@agent anthropic) => { Agent::Anthropic };
     (@agent openrouter) => { Agent::OpenRouter };
+    (@agent acp) => { Agent::Acp };
     (@agent none) => { Agent::None };
     (@agent_name openai) => { "openai" };
     (@agent_name anthropic) => { "anthropic" };
     (@agent_name openrouter) => { "openrouter" };
+    (@agent_name acp) => { "acp" };
     (@agent_name none) => { "none" };
 }
+
+// ── ACP agent backend ───────────────────────────────────────────────────────
+
+cell!(acp_turn_and_directive, "acp/turn-and-directive", host, acp);
+cell!(
+    acp_turn_and_directive_docker,
+    "acp/turn-and-directive",
+    docker,
+    acp
+);
+cell!(
+    acp_exit_before_answer_is_retried,
+    "acp/exit-before-answer-is-retried",
+    host,
+    acp
+);
+cell!(
+    acp_permission_request_and_hook,
+    "acp/permission-request-and-hook",
+    host,
+    acp
+);
+cell!(acp_cancel_during_turn, "acp/cancel-during-turn", host, acp);
 
 // ── Code review ─────────────────────────────────────────────────────────────
 
